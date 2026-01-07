@@ -1,0 +1,34 @@
+# IDE
+.idea/
+*.iml
+
+# Claude
+.claude/
+CLAUDE.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Build
+target/
+dist/
+build/
+node_modules/
+out/
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+
+# Runtime data
+uploads/
+
+# OS
+.DS_Store
