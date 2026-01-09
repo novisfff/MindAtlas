@@ -1,0 +1,208 @@
+{
+  "navigation": {
+    "dashboard": "Dashboard",
+    "entries": "Entries",
+    "graph": "Graph",
+    "timeline": "Timeline",
+    "settings": "Settings"
+  },
+  "actions": {
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "create": "Create",
+    "search": "Search",
+    "edit": "Edit",
+    "back": "Back",
+    "backToEntries": "Back to entries",
+    "confirm": "Confirm",
+    "close": "Close",
+    "add": "Add",
+    "remove": "Remove",
+    "upload": "Upload",
+    "download": "Download",
+    "refresh": "Refresh",
+    "reset": "Reset",
+    "submit": "Submit",
+    "newEntry": "New Entry",
+    "viewAll": "View All",
+    "collapse": "Collapse",
+    "expand": "Expand"
+  },
+  "greetings": {
+    "morning": "Good morning",
+    "afternoon": "Good afternoon",
+    "evening": "Good evening",
+    "welcome": "{{greeting}}, User"
+  },
+  "messages": {
+    "loading": "Loading...",
+    "noData": "No data",
+    "error": "An error occurred",
+    "success": "Success",
+    "confirmDelete": "Are you sure you want to delete?",
+    "deleteEntryConfirm": "Are you sure you want to delete \"{{title}}\"? This action cannot be undone.",
+    "saved": "Saved successfully",
+    "deleted": "Deleted successfully",
+    "failedToLoad": "Failed to load",
+    "failedToLoadEntry": "Failed to load entry",
+    "noContent": "No content"
+  },
+  "labels": {
+    "title": "Title",
+    "content": "Content",
+    "type": "Type",
+    "tags": "Tags",
+    "date": "Date",
+    "description": "Description",
+    "name": "Name",
+    "color": "Color",
+    "icon": "Icon",
+    "status": "Status",
+    "createdAt": "Created At",
+    "updatedAt": "Updated At",
+    "allTypes": "All Types",
+    "selectTags": "Select Tags",
+    "from": "From",
+    "to": "To",
+    "summary": "Summary",
+    "relations": "Relations",
+    "attachments": "Attachments",
+    "created": "Created",
+    "unknown": "Unknown"
+  },
+  "pages": {
+    "dashboard": {
+      "title": "Dashboard",
+      "subtitle": "Here's what's happening in your digital mind today.",
+      "totalEntries": "Total Entries",
+      "tagsUsed": "Tags Used",
+      "activeRelations": "Active Relations",
+      "allTimeEntries": "All time entries",
+      "categoriesDefined": "Categories defined",
+      "connectionsMade": "Connections made",
+      "recentEntries": "Recent Entries",
+      "typeDistribution": "Type Distribution",
+      "quickActions": "Quick Actions",
+      "viewGraph": "View Graph"
+    },
+    "entries": {
+      "title": "Entries",
+      "subtitle": "Manage and view your knowledge entries.",
+      "searchPlaceholder": "Search entries...",
+      "noEntries": "No entries found",
+      "createFirst": "Create your first entry"
+    },
+    "entryNew": {
+      "title": "New Entry"
+    },
+    "settings": {
+      "title": "Settings",
+      "subtitle": "Manage your application preferences",
+      "entryTypes": "Entry Types",
+      "entryTypesDesc": "Manage content types, icons, and properties",
+      "tags": "Tags",
+      "tagsDesc": "Manage tags for organizing your content",
+      "aiProviders": "AI Providers",
+      "aiProvidersDesc": "Configure AI models and API connections"
+    },
+    "graph": {
+      "title": "Knowledge Graph",
+      "subtitle": "Visualize connections between your entries",
+      "noData": "No entries yet. Create some entries to see the graph.",
+      "failedToLoad": "Failed to load graph data"
+    },
+    "timeline": {
+      "title": "Timeline",
+      "subtitle": "View your entries chronologically"
+    },
+    "aiProviders": {
+      "title": "AI Providers",
+      "description": "Manage AI service providers and API keys"
+    }
+  },
+  "settings": {
+    "entryTypes": {
+      "title": "Entry Types",
+      "subtitle": "Manage your content types and their properties",
+      "add": "Add Type",
+      "deleteTitle": "Delete Entry Type",
+      "deleteConfirm": "Are you sure you want to delete this entry type? This action cannot be undone.",
+      "code": "Code",
+      "name": "Name"
+    },
+    "tags": {
+      "title": "Tags",
+      "subtitle": "Manage tags for organizing content",
+      "add": "Add Tag",
+      "deleteTitle": "Delete Tag",
+      "deleteConfirm": "Are you sure you want to delete this tag? This action cannot be undone.",
+      "placeholder": "Tag name"
+    }
+  },
+  "aiProvider": {
+    "fetchModels": "Fetch Models",
+    "enterUrlAndKey": "Please enter Base URL and API Key first",
+    "selectModel": "Select a model",
+    "modelsFetched": "Models fetched successfully"
+  },
+  "form": {
+    "required": "Required",
+    "optional": "Optional",
+    "placeholder": {
+      "title": "Enter title...",
+      "content": "Enter content...",
+      "search": "Search..."
+    },
+    "validation": {
+      "required": "This field is required",
+      "minLength": "Minimum {{count}} characters",
+      "maxLength": "Maximum {{count}} characters"
+    }
+  },
+  "time": {
+    "mode": {
+      "none": "No time",
+      "point": "Point in time",
+      "range": "Time range"
+    },
+    "present": "Present",
+    "justNow": "just now",
+    "ago": {
+      "m": "m ago",
+      "h": "h ago",
+      "d": "d ago",
+      "mo": "mo ago",
+      "y": "y ago"
+    }
+  },
+  "dashboard": {
+    "quickActions": {
+      "title": "Quick Actions",
+      "newEntry": "New Entry",
+      "viewGraph": "View Graph",
+      "search": "Search"
+    },
+    "recentEntries": {
+      "title": "Recent Entries",
+      "viewAll": "View all",
+      "noEntries": "No entries yet",
+      "startJourney": "Start your journey by creating your first entry in MindAtlas.",
+      "createEntry": "Create Entry"
+    },
+    "distribution": {
+      "title": "Entries by Type",
+      "noData": "No distribution data",
+      "description": "Create entries to see how your content is distributed."
+    }
+  },
+  "timeline": {
+    "filter": {
+      "all": "All"
+    },
+    "description": "Your journey over time",
+    "noEntries": "No timeline entries yet",
+    "createPrompt": "Create entries with time information to see them here",
+    "createAction": "Create Entry"
+  }
+}

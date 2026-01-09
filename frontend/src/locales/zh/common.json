@@ -1,0 +1,208 @@
+{
+  "navigation": {
+    "dashboard": "仪表盘",
+    "entries": "记录",
+    "graph": "图谱",
+    "timeline": "时间轴",
+    "settings": "设置"
+  },
+  "actions": {
+    "save": "保存",
+    "cancel": "取消",
+    "delete": "删除",
+    "create": "创建",
+    "search": "搜索",
+    "edit": "编辑",
+    "back": "返回",
+    "backToEntries": "返回列表",
+    "confirm": "确认",
+    "close": "关闭",
+    "add": "添加",
+    "remove": "移除",
+    "upload": "上传",
+    "download": "下载",
+    "refresh": "刷新",
+    "reset": "重置",
+    "submit": "提交",
+    "newEntry": "新建记录",
+    "viewAll": "查看全部",
+    "collapse": "收起",
+    "expand": "展开"
+  },
+  "greetings": {
+    "morning": "早上好",
+    "afternoon": "下午好",
+    "evening": "晚上好",
+    "welcome": "{{greeting}}，用户"
+  },
+  "messages": {
+    "loading": "加载中...",
+    "noData": "暂无数据",
+    "error": "发生错误",
+    "success": "操作成功",
+    "confirmDelete": "确定要删除吗？",
+    "deleteEntryConfirm": "确定要删除 \"{{title}}\" 吗？此操作无法撤销。",
+    "saved": "保存成功",
+    "deleted": "删除成功",
+    "failedToLoad": "加载失败",
+    "failedToLoadEntry": "加载记录失败",
+    "noContent": "暂无内容"
+  },
+  "labels": {
+    "title": "标题",
+    "content": "内容",
+    "type": "类型",
+    "tags": "标签",
+    "date": "日期",
+    "description": "描述",
+    "name": "名称",
+    "color": "颜色",
+    "icon": "图标",
+    "status": "状态",
+    "createdAt": "创建时间",
+    "updatedAt": "更新时间",
+    "allTypes": "所有类型",
+    "selectTags": "选择标签",
+    "from": "从",
+    "to": "至",
+    "summary": "摘要",
+    "relations": "关联",
+    "attachments": "附件",
+    "created": "创建于",
+    "unknown": "未知"
+  },
+  "pages": {
+    "dashboard": {
+      "title": "仪表盘",
+      "subtitle": "这是你MindAtlas的今日动态。",
+      "totalEntries": "记录总数",
+      "tagsUsed": "标签数量",
+      "activeRelations": "关联数量",
+      "allTimeEntries": "累计记录",
+      "categoriesDefined": "已定义分类",
+      "connectionsMade": "已建立连接",
+      "recentEntries": "最近记录",
+      "typeDistribution": "类型分布",
+      "quickActions": "快捷操作",
+      "viewGraph": "查看图谱"
+    },
+    "entries": {
+      "title": "记录",
+      "subtitle": "管理和查看你的知识记录。",
+      "searchPlaceholder": "搜索记录...",
+      "noEntries": "暂无记录",
+      "createFirst": "创建你的第一条记录"
+    },
+    "entryNew": {
+      "title": "新建记录"
+    },
+    "settings": {
+      "title": "设置",
+      "subtitle": "管理应用偏好设置",
+      "entryTypes": "记录类型",
+      "entryTypesDesc": "管理内容类型、图标和属性",
+      "tags": "标签",
+      "tagsDesc": "管理用于组织内容的标签",
+      "aiProviders": "AI 服务",
+      "aiProvidersDesc": "配置 AI 模型和 API 连接"
+    },
+    "graph": {
+      "title": "知识图谱",
+      "subtitle": "可视化记录之间的关联",
+      "noData": "暂无记录。创建一些记录以查看图谱。",
+      "failedToLoad": "加载图谱数据失败"
+    },
+    "timeline": {
+      "title": "时间轴",
+      "subtitle": "按时间顺序查看记录"
+    },
+    "aiProviders": {
+      "title": "AI 服务",
+      "description": "管理 AI 服务提供商和 API 密钥"
+    }
+  },
+  "settings": {
+    "entryTypes": {
+      "title": "记录类型",
+      "subtitle": "管理内容类型及其属性",
+      "add": "添加类型",
+      "deleteTitle": "删除记录类型",
+      "deleteConfirm": "确定要删除此记录类型吗？此操作无法撤销。",
+      "code": "编码",
+      "name": "名称"
+    },
+    "tags": {
+      "title": "标签",
+      "subtitle": "管理用于组织内容的标签",
+      "add": "添加标签",
+      "deleteTitle": "删除标签",
+      "deleteConfirm": "确定要删除此标签吗？此操作无法撤销。",
+      "placeholder": "标签名称"
+    }
+  },
+  "aiProvider": {
+    "fetchModels": "获取模型",
+    "enterUrlAndKey": "请先输入 Base URL 和 API Key",
+    "selectModel": "选择模型",
+    "modelsFetched": "模型获取成功"
+  },
+  "form": {
+    "required": "必填",
+    "optional": "选填",
+    "placeholder": {
+      "title": "请输入标题...",
+      "content": "请输入内容...",
+      "search": "搜索..."
+    },
+    "validation": {
+      "required": "此字段为必填项",
+      "minLength": "最少 {{count}} 个字符",
+      "maxLength": "最多 {{count}} 个字符"
+    }
+  },
+  "time": {
+    "mode": {
+      "none": "无时间",
+      "point": "时间点",
+      "range": "时间段"
+    },
+    "present": "至今",
+    "justNow": "刚刚",
+    "ago": {
+      "m": "分钟前",
+      "h": "小时前",
+      "d": "天前",
+      "mo": "个月前",
+      "y": "年前"
+    }
+  },
+  "dashboard": {
+    "quickActions": {
+      "title": "快捷操作",
+      "newEntry": "新建记录",
+      "viewGraph": "查看图谱",
+      "search": "搜索"
+    },
+    "recentEntries": {
+      "title": "最近记录",
+      "viewAll": "查看全部",
+      "noEntries": "暂无记录",
+      "startJourney": "创建你的第一条记录，开始你的 MindAtlas 之旅。",
+      "createEntry": "创建记录"
+    },
+    "distribution": {
+      "title": "类型分布",
+      "noData": "暂无分布数据",
+      "description": "创建记录以查看内容分布情况。"
+    }
+  },
+  "timeline": {
+    "filter": {
+      "all": "全部"
+    },
+    "description": "你的时间之旅",
+    "noEntries": "暂无时间轴记录",
+    "createPrompt": "创建包含时间信息的记录以在此显示",
+    "createAction": "创建记录"
+  }
+}

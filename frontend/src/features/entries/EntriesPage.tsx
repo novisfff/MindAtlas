@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 import { EntriesList } from './components/EntriesList'
 import { EntriesToolbar } from './components/EntriesToolbar'
 import { EntriesPagination } from './components/EntriesPagination'
@@ -11,6 +12,7 @@ import { Entry } from '@/types'
 const PAGE_SIZE = 10
 
 export default function EntriesPage() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
 
@@ -98,9 +100,9 @@ export default function EntriesPage() {
     return (
       <div className="container mx-auto py-8 px-4 max-w-7xl">
         <div className="text-center py-16">
-          <h2 className="text-xl font-semibold text-destructive mb-2">Failed to load entries</h2>
+          <h2 className="text-xl font-semibold text-destructive mb-2">{t('messages.failedToLoad')}</h2>
           <p className="text-muted-foreground">
-            {error instanceof Error ? error.message : 'An unexpected error occurred'}
+            {error instanceof Error ? error.message : t('messages.error')}
           </p>
         </div>
       </div>
@@ -110,8 +112,8 @@ export default function EntriesPage() {
   return (
     <div className="container mx-auto py-8 px-4 max-w-7xl">
       <div className="mb-8">
-        <h1 className="text-3xl font-bold tracking-tight mb-2">Entries</h1>
-        <p className="text-muted-foreground">Manage and view your knowledge entries.</p>
+        <h1 className="text-3xl font-bold tracking-tight mb-2">{t('pages.entries.title')}</h1>
+        <p className="text-muted-foreground">{t('pages.entries.subtitle')}</p>
       </div>
 
       <EntriesToolbar

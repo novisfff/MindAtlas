@@ -1,14 +1,16 @@
 import { useNavigate } from 'react-router-dom'
-import { FileType, Tags, ChevronRight } from 'lucide-react'
+import { FileType, Tags, ChevronRight, Bot } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 
 export function SettingsPage() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
 
   const categories = [
     {
       id: 'entry-types',
-      title: 'Entry Types',
-      description: 'Manage content types, icons, and properties',
+      titleKey: 'pages.settings.entryTypes',
+      descKey: 'pages.settings.entryTypesDesc',
       icon: FileType,
       path: '/settings/entry-types',
       color: 'text-blue-500',
@@ -16,20 +18,29 @@ export function SettingsPage() {
     },
     {
       id: 'tags',
-      title: 'Tags',
-      description: 'Manage tags for organizing your content',
+      titleKey: 'pages.settings.tags',
+      descKey: 'pages.settings.tagsDesc',
       icon: Tags,
       path: '/settings/tags',
       color: 'text-green-500',
       bgColor: 'bg-green-500/10'
+    },
+    {
+      id: 'ai-providers',
+      titleKey: 'pages.settings.aiProviders',
+      descKey: 'pages.settings.aiProvidersDesc',
+      icon: Bot,
+      path: '/settings/ai-providers',
+      color: 'text-purple-500',
+      bgColor: 'bg-purple-500/10'
     }
   ]
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold">Settings</h1>
-        <p className="text-muted-foreground">Manage your application preferences</p>
+        <h1 className="text-2xl font-bold">{t('pages.settings.title')}</h1>
+        <p className="text-muted-foreground">{t('pages.settings.subtitle')}</p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -45,11 +56,11 @@ export function SettingsPage() {
 
             <div className="flex-1">
               <div className="flex items-center justify-between">
-                <h3 className="font-semibold text-lg">{category.title}</h3>
+                <h3 className="font-semibold text-lg">{t(category.titleKey)}</h3>
                 <ChevronRight className="w-5 h-5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
               </div>
               <p className="text-sm text-muted-foreground mt-1">
-                {category.description}
+                {t(category.descKey)}
               </p>
             </div>
           </button>

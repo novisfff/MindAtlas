@@ -1,6 +1,7 @@
 import { Menu, Moon, Sun, Monitor } from 'lucide-react'
 import { useAppStore } from '@/stores/app-store'
 import { cn } from '@/lib/utils'
+import { LanguageSwitcher } from './LanguageSwitcher'
 
 export function Header() {
   const toggleSidebar = useAppStore((s) => s.toggleSidebar)
@@ -19,7 +20,9 @@ export function Header() {
 
       <div className="flex-1" />
 
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-2">
+        <LanguageSwitcher />
+        <div className="h-4 w-px bg-border" />
         {(['light', 'dark', 'system'] as const).map((t) => (
           <button
             key={t}

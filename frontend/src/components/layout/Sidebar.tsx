@@ -8,18 +8,20 @@ import {
   ChevronLeft,
   Brain
 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { useAppStore } from '@/stores/app-store'
 
 const navItems = [
-  { icon: LayoutDashboard, label: 'Dashboard', href: '/dashboard' },
-  { icon: FileText, label: 'Entries', href: '/entries' },
-  { icon: Network, label: 'Graph', href: '/graph' },
-  { icon: Clock, label: 'Timeline', href: '/timeline' },
-  { icon: Settings, label: 'Settings', href: '/settings' },
+  { icon: LayoutDashboard, labelKey: 'navigation.dashboard', href: '/dashboard' },
+  { icon: FileText, labelKey: 'navigation.entries', href: '/entries' },
+  { icon: Network, labelKey: 'navigation.graph', href: '/graph' },
+  { icon: Clock, labelKey: 'navigation.timeline', href: '/timeline' },
+  { icon: Settings, labelKey: 'navigation.settings', href: '/settings' },
 ]
 
 export function Sidebar() {
+  const { t } = useTranslation()
   const sidebarOpen = useAppStore((s) => s.sidebarOpen)
   const toggleSidebar = useAppStore((s) => s.toggleSidebar)
 
@@ -50,21 +52,21 @@ export function Sidebar() {
           <NavLink
             key={item.href}
             to={item.href}
-            aria-label={item.label}
+            aria-label={t(item.labelKey)}
             className={({ isActive }) => cn(
               "flex items-center rounded-lg px-3 py-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
               "text-muted-foreground hover:bg-muted hover:text-foreground",
               isActive && "bg-primary/10 text-primary",
               !sidebarOpen && "md:justify-center md:px-2"
             )}
-            title={!sidebarOpen ? item.label : undefined}
+            title={!sidebarOpen ? t(item.labelKey) : undefined}
           >
             <item.icon className="h-5 w-5 shrink-0" />
             <span className={cn(
               "ml-3 whitespace-nowrap",
               !sidebarOpen && "md:hidden"
             )}>
-              {item.label}
+              {t(item.labelKey)}
             </span>
           </NavLink>
         ))}
@@ -74,7 +76,7 @@ export function Sidebar() {
       <div className="border-t p-2">
         <button
           onClick={toggleSidebar}
-          aria-label={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
+          aria-label={sidebarOpen ? t('actions.collapse') : t('actions.expand')}
           className={cn(
             "flex w-full items-center rounded-lg px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
             "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -86,7 +88,7 @@ export function Sidebar() {
             !sidebarOpen && "md:rotate-180"
           )} />
           <span className={cn("ml-3", !sidebarOpen && "md:hidden")}>
-            Collapse
+            {t('actions.collapse')}
           </span>
         </button>
       </div>
