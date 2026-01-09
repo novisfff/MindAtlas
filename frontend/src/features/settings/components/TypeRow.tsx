@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Check, X, Pencil, Trash2 } from 'lucide-react'
 import type { EntryType } from '@/types'
 import { cn } from '@/lib/utils'
+import { useTranslation } from 'react-i18next'
 
 interface TypeRowProps {
   type?: EntryType
@@ -18,6 +19,7 @@ export function TypeRow({ type, isEditing, isNew, onEdit, onCancel, onSave, onDe
   const [code, setCode] = useState(type?.code || '')
   const [name, setName] = useState(type?.name || '')
   const [color, setColor] = useState(type?.color || '#6B7280')
+  const { t } = useTranslation()
 
   if (isEditing || isNew) {
     return (
@@ -32,7 +34,7 @@ export function TypeRow({ type, isEditing, isNew, onEdit, onCancel, onSave, onDe
           type="text"
           value={code}
           onChange={(e) => setCode(e.target.value)}
-          placeholder="Code"
+          placeholder={t('settings.entryTypes.code')}
           disabled={!isNew}
           className="w-32 px-2 py-1 rounded border bg-background font-mono text-sm"
         />
@@ -40,7 +42,7 @@ export function TypeRow({ type, isEditing, isNew, onEdit, onCancel, onSave, onDe
           type="text"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder="Name"
+          placeholder={t('settings.entryTypes.name')}
           className="flex-1 px-2 py-1 rounded border bg-background"
         />
         <button

@@ -6,8 +6,12 @@ from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+from sqlalchemy.orm import Session
+
 from app.ai.schemas import AiGenerateRequest, AiGenerateResponse
-from app.config import get_settings
+from app.ai_provider.crypto import decrypt_api_key
+from app.ai_provider.models import AiProvider
+from app.tag.models import Tag
 
 
 @dataclass(frozen=True)
@@ -18,38 +22,66 @@ class _OpenAiConfig:
 
 
 class AiService:
+    def __init__(self, db: Session):
+        self.db = db
+
     def generate(self, request: AiGenerateRequest) -> AiGenerateResponse:
-        settings = get_settings()
-        if settings.ai_provider.lower() != "openai":
+        provider = self._get_active_provider()
+        if not provider:
             return AiGenerateResponse(summary=None, suggested_tags=[])
 
-        if not settings.ai_api_key or not settings.ai_api_key.strip():
+        try:
+            api_key = decrypt_api_key(provider.api_key_encrypted)
+        except Exception:
             return AiGenerateResponse(summary=None, suggested_tags=[])
+
+        # Custom tag fetching
+        tags = self.db.query(Tag).all()
+        tag_names = [t.name for t in tags]
 
         cfg = _OpenAiConfig(
-            api_key=settings.ai_api_key.strip(),
-            base_url=settings.ai_base_url,
-            model=settings.ai_model,
+            api_key=api_key,
+            base_url=provider.base_url,
+            model=provider.model,
         )
-        prompt = self._build_prompt(request)
+        prompt = self._build_prompt(request, tag_names)
         raw = self._call_openai(cfg, prompt)
         return self._parse_openai_response(raw)
 
-    def _build_prompt(self, request: AiGenerateRequest) -> str:
-        return (
-            "分析以下内容，生成摘要和标签建议。\n\n"
-            f"标题: {request.title}\n"
-            f"类型: {request.type_name}\n"
-            "内容:\n"
-            f"{request.content}\n\n"
-            "请以JSON格式返回，包含:\n"
-            "1. summary: 一句话摘要（50字以内）\n"
-            "2. tags: 3-5个相关标签（数组格式）\n\n"
-            "只返回JSON，不要其他内容。"
-        )
+    def _get_active_provider(self) -> AiProvider | None:
+        return self.db.query(AiProvider).filter(AiProvider.is_active.is_(True)).first()
+
+    def _build_prompt(self, request: AiGenerateRequest, existing_tags: list[str]) -> str:
+        return f"""
+    Based on the following journal entry, provide a concise summary (max 1 sentence) and suggest 3-5 relevant tags.
+    
+    Entry Type: {request.type_name}
+    Title: {request.title}
+    Content: {request.content}
+    
+    Existing Tags: {", ".join(existing_tags)}
+    
+    Guidelines for Tags:
+    1. PRIORITIZE using existing tags from the list above if they are relevant.
+    2. Only create new tags if no existing tags are suitable.
+    3. Return tags as a list of strings.
+    
+    请以JSON格式返回，包含:
+    1. summary: 一句话摘要（50字以内）
+    2. tags: 3-5个相关标签（数组格式）
+    
+    只返回JSON，不要其他内容。
+    """
+
+    def _build_api_url(self, base_url: str, endpoint: str) -> str:
+        """构建 API URL，自动添加 /v1 前缀（如果需要）"""
+        base = base_url.rstrip("/")
+        if not base.endswith("/v1"):
+            base += "/v1"
+        return base + endpoint
 
     def _call_openai(self, cfg: _OpenAiConfig, prompt: str) -> str | None:
-        url = cfg.base_url.rstrip("/") + "/chat/completions"
+        url = self._build_api_url(cfg.base_url, "/chat/completions")
         body = {
             "model": cfg.model,
             "messages": [{"role": "user", "content": prompt}],

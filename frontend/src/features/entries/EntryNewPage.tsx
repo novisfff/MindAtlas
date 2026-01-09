@@ -2,10 +2,12 @@ import { useNavigate } from 'react-router-dom'
 import { useCreateEntryMutation } from './queries'
 import { EntryForm } from './components/EntryForm'
 import type { EntryUpsertRequest } from './api/entries'
+import { useTranslation } from 'react-i18next'
 
 export function EntryNewPage() {
   const navigate = useNavigate()
   const createMutation = useCreateEntryMutation()
+  const { t } = useTranslation()
 
   const handleSubmit = async (data: EntryUpsertRequest) => {
     const entry = await createMutation.mutateAsync(data)
@@ -14,7 +16,7 @@ export function EntryNewPage() {
 
   return (
     <div className="max-w-4xl mx-auto">
-      <h1 className="text-2xl font-bold mb-6">New Entry</h1>
+      <h1 className="text-2xl font-bold mb-6">{t('pages.entryNew.title')}</h1>
       <EntryForm onSubmit={handleSubmit} isSubmitting={createMutation.isPending} />
     </div>
   )

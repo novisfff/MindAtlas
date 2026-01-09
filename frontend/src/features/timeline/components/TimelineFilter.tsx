@@ -1,4 +1,5 @@
 import { cn } from '@/lib/utils'
+import { useTranslation } from 'react-i18next'
 
 interface TimelineFilterProps {
   year: number | null
@@ -7,6 +8,7 @@ interface TimelineFilterProps {
 }
 
 export function TimelineFilter({ year, onYearChange, availableYears }: TimelineFilterProps) {
+  const { t } = useTranslation()
   return (
     <div className="flex items-center gap-2 flex-wrap">
       <button
@@ -18,7 +20,7 @@ export function TimelineFilter({ year, onYearChange, availableYears }: TimelineF
             : 'bg-muted hover:bg-muted/80'
         )}
       >
-        All
+        {t('timeline.filter.all')}
       </button>
       {availableYears.map((y) => (
         <button

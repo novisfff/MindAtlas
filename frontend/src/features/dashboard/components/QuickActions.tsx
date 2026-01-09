@@ -1,32 +1,35 @@
 import { Link } from 'react-router-dom'
 import { Plus, Network, Search } from 'lucide-react'
 import { cn } from '@/lib/utils'
-
-const actions = [
-  {
-    label: 'New Entry',
-    href: '/entries/new',
-    icon: Plus,
-    color: '#3B82F6',
-  },
-  {
-    label: 'View Graph',
-    href: '/graph',
-    icon: Network,
-    color: '#10B981',
-  },
-  {
-    label: 'Search',
-    href: '/entries',
-    icon: Search,
-    color: '#8B5CF6',
-  },
-]
+import { useTranslation } from 'react-i18next'
 
 export function QuickActions() {
+  const { t } = useTranslation()
+
+  const actions = [
+    {
+      label: t('dashboard.quickActions.newEntry'),
+      href: '/entries/new',
+      icon: Plus,
+      color: '#3B82F6',
+    },
+    {
+      label: t('dashboard.quickActions.viewGraph'),
+      href: '/graph',
+      icon: Network,
+      color: '#10B981',
+    },
+    {
+      label: t('dashboard.quickActions.search'),
+      href: '/entries',
+      icon: Search,
+      color: '#8B5CF6',
+    },
+  ]
+
   return (
     <div className="rounded-xl border bg-card p-6 shadow-sm">
-      <h3 className="font-semibold mb-4">Quick Actions</h3>
+      <h3 className="font-semibold mb-4">{t('dashboard.quickActions.title')}</h3>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         {actions.map((action) => (
           <Link

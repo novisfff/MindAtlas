@@ -4,10 +4,12 @@ import { Link } from 'react-router-dom'
 import { useEntriesQuery } from '@/features/entries/queries'
 import { TimelineItem } from './components/TimelineItem'
 import { TimelineFilter } from './components/TimelineFilter'
+import { useTranslation } from 'react-i18next'
 
 export function TimelinePage() {
   const [selectedYear, setSelectedYear] = useState<number | null>(null)
   const { data, isLoading } = useEntriesQuery({ size: 100 })
+  const { t } = useTranslation()
 
   // Filter entries with time info
   const timelineEntries = useMemo(() => {
@@ -52,23 +54,23 @@ export function TimelinePage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Timeline</h1>
-          <p className="text-muted-foreground">Your journey over time</p>
+          <h1 className="text-2xl font-bold">{t('pages.timeline.title')}</h1>
+          <p className="text-muted-foreground">{t('timeline.description')}</p>
         </div>
       </div>
 
       {timelineEntries.length === 0 ? (
         <div className="text-center py-16 border rounded-lg bg-card">
           <Clock className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
-          <h3 className="font-semibold mb-2">No timeline entries yet</h3>
+          <h3 className="font-semibold mb-2">{t('timeline.noEntries')}</h3>
           <p className="text-sm text-muted-foreground mb-4">
-            Create entries with time information to see them here
+            {t('timeline.createPrompt')}
           </p>
           <Link
             to="/entries/new"
             className="inline-flex items-center px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm"
           >
-            Create Entry
+            {t('timeline.createAction')}
           </Link>
         </div>
       ) : (

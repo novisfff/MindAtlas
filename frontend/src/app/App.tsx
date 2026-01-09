@@ -6,6 +6,7 @@ import { GraphPage } from '@/features/graph'
 import { DashboardPage } from '@/features/dashboard'
 import { TimelinePage } from '@/features/timeline'
 import { SettingsPage, EntryTypeSettings, TagSettings } from '@/features/settings'
+import { AiProviderSettings } from '@/features/ai-providers'
 
 export default function App() {
   return (
@@ -24,6 +25,7 @@ export default function App() {
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/settings/entry-types" element={<EntryTypeSettings />} />
             <Route path="/settings/tags" element={<TagSettings />} />
+            <Route path="/settings/ai-providers" element={<AiProviderSettings />} />
           </Route>
         </Routes>
       </BrowserRouter>

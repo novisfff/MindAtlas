@@ -11,6 +11,7 @@ from app.tag.router import router as tag_router
 from app.entry.router import router as entry_router
 from app.relation.router import router as relation_router, type_router as relation_type_router
 from app.attachment.router import router as attachment_router
+from app.ai_provider.router import router as ai_provider_router
 from app.ai.router import router as ai_router
 from app.stats.router import router as stats_router
 from app.graph.router import router as graph_router
@@ -41,6 +42,7 @@ app.include_router(entry_router)
 app.include_router(relation_type_router)
 app.include_router(relation_router)
 app.include_router(attachment_router)
+app.include_router(ai_provider_router)
 app.include_router(ai_router)
 app.include_router(stats_router)
 app.include_router(graph_router)

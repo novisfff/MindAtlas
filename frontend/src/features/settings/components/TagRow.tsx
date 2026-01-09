@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Check, X, Pencil, Trash2 } from 'lucide-react'
 import type { Tag } from '@/types'
+import { useTranslation } from 'react-i18next'
 
 interface TagRowProps {
   tag?: Tag
@@ -16,6 +17,7 @@ interface TagRowProps {
 export function TagRow({ tag, isNew, isEditing, onEdit, onCancel, onSave, onDelete, isSaving }: TagRowProps) {
   const [name, setName] = useState(tag?.name || '')
   const [color, setColor] = useState(tag?.color || '#6B7280')
+  const { t } = useTranslation()
 
   if (isNew || isEditing) {
     return (
@@ -30,7 +32,7 @@ export function TagRow({ tag, isNew, isEditing, onEdit, onCancel, onSave, onDele
           type="text"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder="Tag name"
+          placeholder={t('settings.tags.placeholder')}
           className="flex-1 px-2 py-1 rounded border bg-background"
           autoFocus
         />

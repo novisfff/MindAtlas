@@ -2,15 +2,17 @@ import { Link } from 'react-router-dom'
 import { Calendar, CalendarRange } from 'lucide-react'
 import type { Entry } from '@/types'
 import { cn } from '@/lib/utils'
+import { useTranslation } from 'react-i18next'
 
 interface TimelineItemProps {
   entry: Entry
   isLast?: boolean
 }
 
-function formatDate(dateString: string): string {
+
+function formatDateI18n(dateString: string, locale: string): string {
   const date = new Date(dateString)
-  return date.toLocaleDateString('en-US', {
+  return date.toLocaleDateString(locale, {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
@@ -18,10 +20,11 @@ function formatDate(dateString: string): string {
 }
 
 export function TimelineItem({ entry, isLast }: TimelineItemProps) {
+  const { t, i18n } = useTranslation()
   const timeDisplay = entry.timeMode === 'POINT' && entry.timeAt
-    ? formatDate(entry.timeAt)
+    ? formatDateI18n(entry.timeAt, i18n.language)
     : entry.timeMode === 'RANGE' && entry.timeFrom
-      ? `${formatDate(entry.timeFrom)} - ${entry.timeTo ? formatDate(entry.timeTo) : 'Present'}`
+      ? `${formatDateI18n(entry.timeFrom, i18n.language)} - ${entry.timeTo ? formatDateI18n(entry.timeTo, i18n.language) : t('time.present')}`
       : null
 
   return (

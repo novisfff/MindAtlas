@@ -2,8 +2,11 @@ import { useNavigate } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { TypeManager } from '../components/TypeManager'
 
+import { useTranslation } from 'react-i18next'
+
 export function EntryTypeSettings() {
   const navigate = useNavigate()
+  const { t } = useTranslation()
 
   return (
     <div className="space-y-6">
@@ -15,8 +18,8 @@ export function EntryTypeSettings() {
           <ArrowLeft className="w-5 h-5 text-muted-foreground" />
         </button>
         <div>
-          <h1 className="text-2xl font-bold">Entry Types</h1>
-          <p className="text-muted-foreground">Manage your content types and their properties</p>
+          <h1 className="text-2xl font-bold">{t('settings.entryTypes.title')}</h1>
+          <p className="text-muted-foreground">{t('settings.entryTypes.subtitle')}</p>
         </div>
       </div>
 

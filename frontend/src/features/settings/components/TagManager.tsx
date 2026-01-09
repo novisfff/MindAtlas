@@ -3,6 +3,7 @@ import { Loader2, Plus } from 'lucide-react'
 import { useTagsQuery, useCreateTagMutation, useUpdateTagMutation, useDeleteTagMutation } from '@/features/tags/queries'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { TagRow } from './TagRow'
+import { useTranslation } from 'react-i18next'
 
 export function TagManager() {
   const { data: tags = [], isLoading } = useTagsQuery()
@@ -12,6 +13,7 @@ export function TagManager() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [isAdding, setIsAdding] = useState(false)
   const [deleteId, setDeleteId] = useState<string | null>(null)
+  const { t } = useTranslation()
 
   if (isLoading) {
     return (
@@ -24,13 +26,13 @@ export function TagManager() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h3 className="font-semibold">Tags</h3>
+        <h3 className="font-semibold">{t('settings.tags.title')}</h3>
         <button
           onClick={() => setIsAdding(true)}
           disabled={isAdding}
           className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
         >
-          <Plus className="w-4 h-4" /> Add Tag
+          <Plus className="w-4 h-4" /> {t('settings.tags.add')}
         </button>
       </div>
 
@@ -63,9 +65,9 @@ export function TagManager() {
 
       <ConfirmDialog
         isOpen={!!deleteId}
-        title="Delete Tag"
-        description="Are you sure you want to delete this tag? This action cannot be undone."
-        confirmText="Delete"
+        title={t('settings.tags.deleteTitle')}
+        description={t('settings.tags.deleteConfirm')}
+        confirmText={t('actions.delete')}
         variant="destructive"
         onConfirm={() => {
           if (deleteId) {

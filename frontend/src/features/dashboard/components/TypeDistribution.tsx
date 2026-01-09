@@ -1,10 +1,12 @@
 import type { TypeCount } from '../api/stats'
+import { useTranslation } from 'react-i18next'
 
 interface TypeDistributionProps {
   data: TypeCount[]
 }
 
 export function TypeDistribution({ data }: TypeDistributionProps) {
+  const { t } = useTranslation()
   const total = data.reduce((sum, item) => sum + item.count, 0)
 
   if (total === 0) {
@@ -13,9 +15,9 @@ export function TypeDistribution({ data }: TypeDistributionProps) {
         <div className="h-12 w-12 rounded-full bg-muted/20 flex items-center justify-center mb-4">
           <div className="w-6 h-6 rounded-full border-2 border-muted-foreground/30" />
         </div>
-        <h3 className="font-semibold mb-2">No distribution data</h3>
+        <h3 className="font-semibold mb-2">{t('dashboard.distribution.noData')}</h3>
         <p className="text-sm text-muted-foreground">
-          Create entries to see how your content is distributed.
+          {t('dashboard.distribution.description')}
         </p>
       </div>
     )
@@ -26,7 +28,7 @@ export function TypeDistribution({ data }: TypeDistributionProps) {
 
   return (
     <div className="rounded-xl border bg-card p-6 shadow-sm h-full">
-      <h3 className="font-semibold mb-6">Entries by Type</h3>
+      <h3 className="font-semibold mb-6">{t('dashboard.distribution.title')}</h3>
       <div className="space-y-4">
         {sortedData.map((item) => {
           const percentage = total > 0 ? (item.count / total) * 100 : 0

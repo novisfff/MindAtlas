@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     ai_api_key: str | None = Field(default=None, alias="AI_API_KEY")
     ai_base_url: str = Field(default="https://api.openai.com/v1", alias="AI_BASE_URL")
     ai_model: str = Field(default="gpt-3.5-turbo", alias="AI_MODEL")
+    ai_provider_fernet_key: str = Field(default="", alias="AI_PROVIDER_FERNET_KEY")
 
     # Server
     host: str = Field(default="0.0.0.0", alias="HOST")

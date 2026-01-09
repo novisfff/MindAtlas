@@ -1,6 +1,6 @@
 import { FormEvent, useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowLeft, Save, Loader2, Check, X } from 'lucide-react'
+import { ArrowLeft, Save, Loader2, Undo, Plus } from 'lucide-react'
 import type { Entry, EntryType } from '@/types'
 import type { EntryUpsertRequest, EntryTimeMode } from '../api/entries'
 import { useEntryTypesQuery } from '@/features/entry-types/queries'
@@ -8,7 +8,7 @@ import { TagSelector } from '@/features/tags/components/TagSelector'
 import { MarkdownEditor } from './MarkdownEditor'
 import { cn } from '@/lib/utils'
 import { AiAssistButton, useAiGenerateMutation } from '@/features/ai'
-import { useTagsQuery } from '@/features/tags/queries'
+import { useTagsQuery, useCreateTagMutation } from '@/features/tags/queries'
 
 interface EntryFormProps {
   entry?: Entry
@@ -20,6 +20,7 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
   const navigate = useNavigate()
   const { data: entryTypes = [], isLoading: typesLoading } = useEntryTypesQuery()
   const { data: allTags = [] } = useTagsQuery()
+  const createTagMutation = useCreateTagMutation()
   const aiMutation = useAiGenerateMutation()
 
   const [title, setTitle] = useState(entry?.title ?? '')
@@ -31,11 +32,11 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
   const [timeTo, setTimeTo] = useState(entry?.timeTo?.split('T')[0] ?? '')
   const [tagIds, setTagIds] = useState<string[]>(entry?.tags?.map(t => t.id) ?? [])
 
-  // AI suggestions state
-  const [aiSuggestions, setAiSuggestions] = useState<{
-    summary?: string
-    suggestedTags: string[]
-  } | null>(null)
+  // AI state
+  const [prevContent, setPrevContent] = useState<string | null>(null)
+  const [suggestedTags, setSuggestedTags] = useState<string[]>([])
+
+
 
   useEffect(() => {
     if (!typeId && entryTypes.length > 0) {
@@ -74,32 +75,55 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
       },
       {
         onSuccess: (data) => {
-          setAiSuggestions(data)
+          if (data.summary) {
+            setPrevContent(content)
+            setContent(data.summary)
+          }
+
+          if (data.suggestedTags.length > 0) {
+            const newSuggestions = data.suggestedTags.filter(
+              (tagName) => !allTags.find((t) => t.id === tagName && tagIds.includes(t.id)) && !tagIds.includes(allTags.find(t => t.name === tagName)?.id ?? '')
+            )
+            // Filter out tags that are already selected by name
+            const filteredSuggestions = data.suggestedTags.filter(tagName => {
+              const tag = allTags.find(t => t.name === tagName)
+              return !tag || !tagIds.includes(tag.id)
+            })
+            setSuggestedTags(filteredSuggestions)
+          }
         },
       }
     )
   }
 
-  const applySummary = () => {
-    if (aiSuggestions?.summary) {
-      setContent(aiSuggestions.summary)
-      setAiSuggestions((prev) => prev ? { ...prev, summary: undefined } : null)
+  const handleUndoContent = () => {
+    if (prevContent !== null) {
+      setContent(prevContent)
+      setPrevContent(null)
     }
   }
 
-  const applyTags = () => {
-    if (aiSuggestions?.suggestedTags.length) {
-      const matchedTagIds = allTags
-        .filter((t) => aiSuggestions.suggestedTags.includes(t.name))
-        .map((t) => t.id)
-      setTagIds((prev) => [...new Set([...prev, ...matchedTagIds])])
-      setAiSuggestions((prev) => prev ? { ...prev, suggestedTags: [] } : null)
+  const handleAddSuggestedTag = async (tagName: string) => {
+    // 1. Try to find existing tag (case-insensitive)
+    const existingTag = allTags.find((t) => t.name.toLowerCase() === tagName.toLowerCase())
+
+    if (existingTag) {
+      setTagIds((prev) => [...prev, existingTag.id])
+    } else {
+      // 2. Create new tag if it doesn't exist
+      try {
+        const newTag = await createTagMutation.mutateAsync({ name: tagName })
+        setTagIds((prev) => [...prev, newTag.id])
+      } catch (error) {
+        console.error('Failed to create tag:', error)
+        // Optionally show a toast error here
+      }
     }
+    // Always remove from suggestions to give feedback
+    setSuggestedTags((prev) => prev.filter((t) => t !== tagName))
   }
 
-  const dismissSuggestions = () => {
-    setAiSuggestions(null)
-  }
+
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
@@ -265,80 +289,55 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
         <div>
           <label className="block text-sm font-medium mb-1.5">Tags</label>
           <TagSelector value={tagIds} onChange={setTagIds} disabled={isSubmitting} />
+          {suggestedTags.length > 0 && (
+            <div className="mt-2 text-sm animate-in fade-in slide-in-from-top-1">
+              <span className="text-muted-foreground mr-2">AI Suggestions:</span>
+              <div className="inline-flex flex-wrap gap-1.5">
+                {suggestedTags.map((tagName) => (
+                  <button
+                    key={tagName}
+                    type="button"
+                    onClick={() => handleAddSuggestedTag(tagName)}
+                    className={cn(
+                      "inline-flex items-center px-2 py-0.5 rounded-full text-xs transition-colors",
+                      "bg-purple-100 text-purple-700 hover:bg-purple-200",
+                      "dark:bg-purple-900/30 dark:text-purple-300 dark:hover:bg-purple-900/50"
+                    )}
+                  >
+                    <Plus className="w-3 h-3 mr-1" />
+                    {tagName}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         <div>
           <div className="flex items-center justify-between mb-1.5">
             <label className="block text-sm font-medium">Content</label>
-            <AiAssistButton
-              onClick={handleAiGenerate}
-              isLoading={aiMutation.isPending}
-              disabled={isSubmitting || (!title.trim() && !content.trim())}
-            />
+            <div className="flex items-center gap-3">
+              {prevContent !== null && (
+                <button
+                  type="button"
+                  onClick={handleUndoContent}
+                  className="text-xs flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  <Undo className="w-3 h-3" />
+                  Undo Change
+                </button>
+              )}
+              <AiAssistButton
+                onClick={handleAiGenerate}
+                isLoading={aiMutation.isPending}
+                disabled={isSubmitting || (!title.trim() && !content.trim())}
+              />
+            </div>
           </div>
           <MarkdownEditor value={content} onChange={setContent} disabled={isSubmitting} />
 
           {/* AI Suggestions Panel */}
-          {aiSuggestions && (aiSuggestions.summary || aiSuggestions.suggestedTags.length > 0) && (
-            <div className="mt-3 p-4 rounded-lg border border-purple-200 bg-purple-50 dark:border-purple-800 dark:bg-purple-950/50">
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-sm font-medium text-purple-700 dark:text-purple-300">
-                  AI Suggestions
-                </span>
-                <button
-                  type="button"
-                  onClick={dismissSuggestions}
-                  className="text-purple-500 hover:text-purple-700 dark:hover:text-purple-300"
-                  aria-label="Dismiss suggestions"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
 
-              {aiSuggestions.summary && (
-                <div className="mb-3">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs text-purple-600 dark:text-purple-400">Summary</span>
-                    <button
-                      type="button"
-                      onClick={applySummary}
-                      className="inline-flex items-center gap-1 text-xs text-purple-600 hover:text-purple-800 dark:text-purple-400"
-                    >
-                      <Check className="w-3 h-3" /> Apply
-                    </button>
-                  </div>
-                  <p className="text-sm text-muted-foreground bg-background/50 p-2 rounded">
-                    {aiSuggestions.summary}
-                  </p>
-                </div>
-              )}
-
-              {aiSuggestions.suggestedTags.length > 0 && (
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs text-purple-600 dark:text-purple-400">Suggested Tags</span>
-                    <button
-                      type="button"
-                      onClick={applyTags}
-                      className="inline-flex items-center gap-1 text-xs text-purple-600 hover:text-purple-800 dark:text-purple-400"
-                    >
-                      <Check className="w-3 h-3" /> Apply All
-                    </button>
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {aiSuggestions.suggestedTags.map((tag) => (
-                      <span
-                        key={tag}
-                        className="px-2 py-0.5 text-xs rounded-full bg-purple-200 text-purple-800 dark:bg-purple-800 dark:text-purple-200"
-                      >
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
         </div>
       </div>
     </form>

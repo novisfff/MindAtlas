@@ -2,8 +2,11 @@ import { useNavigate } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { TagManager } from '../components/TagManager'
 
+import { useTranslation } from 'react-i18next'
+
 export function TagSettings() {
     const navigate = useNavigate()
+    const { t } = useTranslation()
 
     return (
         <div className="space-y-6">
@@ -15,8 +18,8 @@ export function TagSettings() {
                     <ArrowLeft className="w-5 h-5 text-muted-foreground" />
                 </button>
                 <div>
-                    <h1 className="text-2xl font-bold">Tags</h1>
-                    <p className="text-muted-foreground">Manage tags for organizing content</p>
+                    <h1 className="text-2xl font-bold">{t('settings.tags.title')}</h1>
+                    <p className="text-muted-foreground">{t('settings.tags.subtitle')}</p>
                 </div>
             </div>
 
