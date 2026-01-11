@@ -7,6 +7,7 @@ import { DashboardPage } from '@/features/dashboard'
 import { TimelinePage } from '@/features/timeline'
 import { SettingsPage, EntryTypeSettings, TagSettings } from '@/features/settings'
 import { AiProviderSettings } from '@/features/ai-providers'
+import { AssistantPage } from '@/features/assistant'
 
 export default function App() {
   return (
@@ -26,6 +27,7 @@ export default function App() {
             <Route path="/settings/entry-types" element={<EntryTypeSettings />} />
             <Route path="/settings/tags" element={<TagSettings />} />
             <Route path="/settings/ai-providers" element={<AiProviderSettings />} />
+            <Route path="/assistant" element={<AssistantPage />} />
           </Route>
         </Routes>
       </BrowserRouter>

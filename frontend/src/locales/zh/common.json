@@ -1,6 +1,7 @@
 {
   "navigation": {
     "dashboard": "仪表盘",
+    "assistant": "AI 助手",
     "entries": "记录",
     "graph": "图谱",
     "timeline": "时间轴",
@@ -27,7 +28,10 @@
     "newEntry": "新建记录",
     "viewAll": "查看全部",
     "collapse": "收起",
-    "expand": "展开"
+    "expand": "展开",
+    "openFullPage": "全屏查看",
+    "closeChat": "关闭对话",
+    "openChat": "打开对话"
   },
   "greetings": {
     "morning": "早上好",
@@ -119,6 +123,35 @@
     "aiProviders": {
       "title": "AI 服务",
       "description": "管理 AI 服务提供商和 API 密钥"
+    },
+    "assistant": {
+      "title": "AI 助手",
+      "subtitle": "询问关于你知识库的任何问题",
+      "newChat": "新对话",
+      "noConversations": "暂无对话",
+      "inputPlaceholder": "询问关于你的记录...",
+      "you": "你",
+      "assistant": "助手",
+      "tools": {
+        "searchEntries": "搜索记录",
+        "getEntryDetail": "获取详情",
+        "createEntry": "创建记录",
+        "getStatistics": "获取统计",
+        "getEntriesByTimeRange": "时间范围查询",
+        "analyzeActivity": "活动分析",
+        "listEntryTypes": "列出类型",
+        "listTags": "列出标签"
+      },
+      "toolStatus": {
+        "pending": "等待中",
+        "running": "执行中",
+        "completed": "已完成",
+        "error": "错误"
+      },
+      "params": "参数",
+      "result": "结果",
+      "noMessagesYet": "暂无消息",
+      "startConversation": "开始与 AI 助手对话"
     }
   },
   "settings": {

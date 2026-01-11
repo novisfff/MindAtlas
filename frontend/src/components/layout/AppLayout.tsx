@@ -1,11 +1,13 @@
-import { Outlet } from 'react-router-dom'
+import { Outlet, useLocation } from 'react-router-dom'
 import { Sidebar } from './Sidebar'
 import { Header } from './Header'
 import { ThemeProvider } from './ThemeProvider'
 import { useAppStore } from '@/stores/app-store'
+import { FloatingWidget } from '@/features/assistant'
 import { cn } from '@/lib/utils'
 
 export function AppLayout() {
+  const location = useLocation()
   const sidebarOpen = useAppStore((s) => s.sidebarOpen)
   const toggleSidebar = useAppStore((s) => s.toggleSidebar)
 
@@ -30,6 +32,7 @@ export function AppLayout() {
             <Outlet />
           </main>
         </div>
+        {!location.pathname.startsWith('/assistant') && <FloatingWidget />}
       </div>
     </ThemeProvider>
   )

@@ -32,3 +32,4 @@ uploads/
 
 # OS
 .DS_Store
+.ace-tool/

@@ -1,6 +1,7 @@
 {
   "navigation": {
     "dashboard": "Dashboard",
+    "assistant": "AI Assistant",
     "entries": "Entries",
     "graph": "Graph",
     "timeline": "Timeline",
@@ -27,7 +28,10 @@
     "newEntry": "New Entry",
     "viewAll": "View All",
     "collapse": "Collapse",
-    "expand": "Expand"
+    "expand": "Expand",
+    "openFullPage": "Open full page",
+    "closeChat": "Close chat",
+    "openChat": "Open chat"
   },
   "greetings": {
     "morning": "Good morning",
@@ -119,6 +123,35 @@
     "aiProviders": {
       "title": "AI Providers",
       "description": "Manage AI service providers and API keys"
+    },
+    "assistant": {
+      "title": "AI Assistant",
+      "subtitle": "Ask me anything about your knowledge base",
+      "newChat": "New Chat",
+      "noConversations": "No conversations yet",
+      "inputPlaceholder": "Ask about your entries...",
+      "you": "You",
+      "assistant": "Assistant",
+      "tools": {
+        "searchEntries": "Search Entries",
+        "getEntryDetail": "Get Entry Detail",
+        "createEntry": "Create Entry",
+        "getStatistics": "Get Statistics",
+        "getEntriesByTimeRange": "Query by Time Range",
+        "analyzeActivity": "Analyze Activity",
+        "listEntryTypes": "List Entry Types",
+        "listTags": "List Tags"
+      },
+      "toolStatus": {
+        "pending": "Pending",
+        "running": "Running",
+        "completed": "Completed",
+        "error": "Error"
+      },
+      "params": "Parameters",
+      "result": "Result",
+      "noMessagesYet": "No messages yet",
+      "startConversation": "Start a conversation with the AI assistant."
     }
   },
   "settings": {

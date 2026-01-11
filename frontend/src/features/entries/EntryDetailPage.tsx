@@ -1,3 +1,4 @@
+import ReactMarkdown from 'react-markdown'
 import { useNavigate, useParams } from 'react-router-dom'
 import { ArrowLeft, Edit, Trash2, Calendar, Clock, Loader2, Link2, Paperclip } from 'lucide-react'
 import { useEntryQuery, useDeleteEntryMutation } from './queries'
@@ -194,7 +195,7 @@ export function EntryDetailPage() {
 
           {entry.content ? (
             <div className="prose prose-sm dark:prose-invert max-w-none">
-              <div className="whitespace-pre-wrap">{entry.content}</div>
+              <ReactMarkdown>{entry.content}</ReactMarkdown>
             </div>
           ) : (
             <p className="text-muted-foreground italic">{t('messages.noContent')}</p>

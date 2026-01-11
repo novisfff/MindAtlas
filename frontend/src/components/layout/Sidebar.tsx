@@ -6,7 +6,8 @@ import {
   Clock,
   Settings,
   ChevronLeft,
-  Brain
+  Brain,
+  Sparkles
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
@@ -14,6 +15,7 @@ import { useAppStore } from '@/stores/app-store'
 
 const navItems = [
   { icon: LayoutDashboard, labelKey: 'navigation.dashboard', href: '/dashboard' },
+  { icon: Sparkles, labelKey: 'navigation.assistant', href: '/assistant' },
   { icon: FileText, labelKey: 'navigation.entries', href: '/entries' },
   { icon: Network, labelKey: 'navigation.graph', href: '/graph' },
   { icon: Clock, labelKey: 'navigation.timeline', href: '/timeline' },

@@ -1,3 +1,4 @@
+import ReactMarkdown from 'react-markdown'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
 
@@ -63,7 +64,7 @@ export function MarkdownEditor({
       ) : (
         <div className="min-h-[300px] p-4 prose prose-sm dark:prose-invert max-w-none">
           {value ? (
-            <div className="whitespace-pre-wrap">{value}</div>
+            <ReactMarkdown>{value}</ReactMarkdown>
           ) : (
             <p className="text-muted-foreground italic">Nothing to preview</p>
           )}

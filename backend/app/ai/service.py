@@ -53,24 +53,36 @@ class AiService:
 
     def _build_prompt(self, request: AiGenerateRequest, existing_tags: list[str]) -> str:
         return f"""
-    Based on the following journal entry, provide a concise summary (max 1 sentence) and suggest 3-5 relevant tags.
-    
-    Entry Type: {request.type_name}
-    Title: {request.title}
-    Content: {request.content}
-    
-    Existing Tags: {", ".join(existing_tags)}
-    
-    Guidelines for Tags:
-    1. PRIORITIZE using existing tags from the list above if they are relevant.
-    2. Only create new tags if no existing tags are suitable.
-    3. Return tags as a list of strings.
-    
-    请以JSON格式返回，包含:
-    1. summary: 一句话摘要（50字以内）
-    2. tags: 3-5个相关标签（数组格式）
-    
-    只返回JSON，不要其他内容。
+    Analyze the following journal entry to provide organized content and suggest relevant tags.
+
+    Input Data:
+    - Entry Type: {request.type_name}
+    - Title: {request.title}
+    - Content (Markdown): {request.content}
+    - Available Tags: {", ".join(existing_tags)}
+
+    Instructions:
+    1. **Language Detection**: Detect the primary language used in the 'Title' and 'Content'.
+    2. **AI Content (Refinement)**: 
+       - **Goal**: Structure the original content for clarity without expanding it.
+       - **Content Only**: Do NOT repeat the Title or Entry Type. Focus only on the body content.
+       - **Strict Constraint**: Do NOT add ANY new information, details, or explanations that are not explicitly in the source.
+       - **No Expansion**: If the source text is brief, the output MUST be brief. Do not elaborate or add filler text.
+       - **Refinement**: You may fix grammar, formatting, and structure (e.g., grouping related points).
+       - **Format**: Can use **Markdown** (headers, bullet points, bold text) to make the content easy to read.
+       - **Language**: Maintain the **SAME language** as the detected content.
+    3. **Tag Selection**:
+       - Suggest 3-5 relevant tags.
+       - **CRITICAL**: You MUST prioritize using tags from the 'Available Tags' list if they are relevant.
+       - Only create new tags if absolutely necessary and no existing tags are suitable.
+       - Tags should be in the same language as the content or the existing tags style.
+
+    Output Format:
+    Return ONLY a valid JSON object with no markdown formatting or other text.
+    {{
+      "ai_content": "The organized and refined content using markdown",
+      "tags": ["tag1", "tag2", "tag3"]
+    }}
     """
 
     def _build_api_url(self, base_url: str, endpoint: str) -> str:
@@ -129,7 +141,7 @@ class AiService:
         if not isinstance(result, dict):
             return AiGenerateResponse(summary=None, suggested_tags=[])
 
-        summary = result.get("summary")
+        summary = result.get("ai_content") or result.get("summary")
         tags = result.get("tags") or result.get("suggestedTags") or []
         if not isinstance(tags, list):
             tags = []
