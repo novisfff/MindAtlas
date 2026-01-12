@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from datetime import datetime, timedelta
 from typing import Optional
 
 from langchain_core.tools import tool
 from sqlalchemy import func
 
-from app.entry.models import Entry
+from app.common.time import utcnow
+from app.entry.models import Entry, entry_tag
 from app.entry_type.models import EntryType
 from app.tag.models import Tag
 
@@ -37,11 +39,23 @@ def get_statistics() -> str:
         func.count(Entry.id)
     ).outerjoin(Entry).group_by(EntryType.id).all()
 
+    # 按标签统计
+    tag_stats = (
+        db.query(
+            Tag.name,
+            func.count(entry_tag.c.entry_id),
+        )
+        .outerjoin(entry_tag, Tag.id == entry_tag.c.tag_id)
+        .group_by(Tag.id, Tag.name)
+        .all()
+    )
+
     result = {
         "total_entries": total_entries,
         "total_tags": total_tags,
         "total_types": total_types,
         "entries_by_type": {name: count for name, count in type_stats},
+        "entries_by_tag": {name: count for name, count in tag_stats},
     }
     return json.dumps(result, ensure_ascii=False, indent=2)
 
@@ -98,20 +112,86 @@ def analyze_activity(period: str = "month") -> str:
         period: 分析周期，可选 week/month/year
 
     Returns:
-        活动分析报告
+        活动分析报告（包含趋势数据）
     """
     db = _get_db()
 
     days = {"week": 7, "month": 30, "year": 365}.get(period, 30)
-    since = datetime.now() - timedelta(days=days)
+    now = utcnow()
+    since = now - timedelta(days=days - 1)
 
     count = db.query(func.count(Entry.id)).filter(
         Entry.created_at >= since
     ).scalar() or 0
 
+    # 获取时间范围内的记录创建时间
+    created_rows = (
+        db.query(Entry.created_at)
+        .filter(Entry.created_at >= since)
+        .all()
+    )
+    created_ats = [r[0] for r in created_rows if r and r[0]]
+
+    # 生成趋势数据
+    trend_unit = "day"
+    trend: list[dict] = []
+
+    if period == "year":
+        trend_unit = "month"
+        month_counts = Counter(dt.strftime("%Y-%m") for dt in created_ats)
+        for offset in range(-11, 1):
+            total = now.year * 12 + (now.month - 1) + offset
+            y, m = total // 12, total % 12 + 1
+            k = f"{y:04d}-{m:02d}"
+            trend.append({"date": k, "count": int(month_counts.get(k, 0))})
+    else:
+        day_counts = Counter(dt.date().isoformat() for dt in created_ats)
+        start_date = (now - timedelta(days=days - 1)).date()
+        for i in range(days):
+            d = (start_date + timedelta(days=i)).isoformat()
+            trend.append({"date": d, "count": int(day_counts.get(d, 0))})
+
     result = {
         "period": period,
         "entries_created": count,
         "avg_per_day": round(count / days, 2),
+        "trend_unit": trend_unit,
+        "trend": trend,
     }
     return json.dumps(result, ensure_ascii=False)
+
+
+@tool
+def get_tag_statistics() -> str:
+    """获取标签使用统计。
+
+    Returns:
+        标签使用统计（包含每个标签的记录数量，按使用次数降序排列）
+    """
+    db = _get_db()
+
+    tag_stats = (
+        db.query(
+            Tag.id,
+            Tag.name,
+            Tag.color,
+            func.count(entry_tag.c.entry_id),
+        )
+        .outerjoin(entry_tag, Tag.id == entry_tag.c.tag_id)
+        .group_by(Tag.id, Tag.name, Tag.color)
+        .order_by(func.count(entry_tag.c.entry_id).desc(), Tag.name.asc())
+        .all()
+    )
+
+    tags = [{
+        "id": str(tag_id),
+        "name": name,
+        "color": color,
+        "entry_count": int(count or 0),
+    } for tag_id, name, color, count in tag_stats]
+
+    result = {
+        "total_tags": db.query(func.count(Tag.id)).scalar() or 0,
+        "tags": tags,
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)

@@ -17,6 +17,7 @@ from app.assistant.tools import (
     get_statistics,
     get_entries_by_time_range,
     analyze_activity,
+    get_tag_statistics,
     list_entry_types,
     list_tags,
 )
@@ -30,37 +31,40 @@ SYSTEM_PROMPT = """你是 MindAtlas 的 AI 助手，专门帮助用户管理个�
 你可以通过工具直接操作用户的数据：
 
 ### 记录管理
-- **search_entries(keyword, type_code, limit)** - 搜索记录
+- **search_entries(keyword, type_code, tag_names, limit)** - 搜索记录（返回JSON数组）
   - 用户说"找一下..."、"有没有..."、"查查..." → 调用此工具
+  - 所有参数可选，支持跨类型搜索
 - **get_entry_detail(entry_id)** - 获取记录详情
   - 用户想看某条记录的完整内容 → 调用此工具
-- **create_entry(title, content, type_code)** - 创建新记录
+- **create_entry(raw_content)** - 智能创建新记录
   - 用户说"记录一下..."、"帮我添加..."、"创建..." → 调用此工具
+  - 只需提供原始内容，AI自动生成标题/内容/标签/类型
 
 ### 统计分析
-- **get_statistics()** - 获取整体统计
+- **get_statistics()** - 获取整体统计（含类型和标签维度）
   - 用户问"我有多少记录"、"统计一下" → 调用此工具
+- **get_tag_statistics()** - 标签使用统计
+  - 用户问"标签使用情况"、"哪些标签用得最多" → 调用此工具
 - **get_entries_by_time_range(start_date, end_date)** - 按时间查询
   - 用户问"上周..."、"这个月..."、"去年..." → 调用此工具
-- **analyze_activity(period)** - 活动分析
-  - 用户问"最近活跃度"、"记录频率" → 调用此工具
+- **analyze_activity(period)** - 活动分析（含趋势数据）
+  - 用户问"最近活跃度"、"记录频率"、"趋势" → 调用此工具
 
 ### 辅助查询
-- **list_entry_types()** - 列出可用类型
-- **list_tags()** - 列出所有标签
+- **list_entry_types()** - 列出可用类型（含id、code、type名称）
+- **list_tags()** - 列出所有标签（含使用次数）
 
 ## 行为准则
 
 1. **主动执行**: 用户表达意图后，直接调用工具完成，不要只是回复文字
-2. **信息补全**: 创建记录时如果缺少类型，先调用 list_entry_types 获取可用类型，然后选择最合适的
+2. **智能创建**: 用户只给了原始内容时，直接调用 create_entry(raw_content=...)，不要追问 title/type/tags
 3. **简洁回复**: 工具执行成功后，用一句话确认结果，不要重复工具返回的全部内容
 4. **友好语气**: 用自然、亲切的中文回复
 
 ## 示例
 
-用户: "帮我记录一下，今天学了 Python 装饰器"
-- 调用 list_entry_types()
-→ 调用 create_entry(title="学习 Python 装饰器", content="今天学习了 Python 装饰器的用法", type_code="knowledge")
+用户: "帮我记录一下，今天学了 Python 装饰器，理解了语法糖和 functools.wraps"
+→ 调用 create_entry(raw_content="今天学了 Python 装饰器，理解了语法糖和 functools.wraps")
 → 回复: "已为你创建记录「学习 Python 装饰器」✓"
 
 用户: "找找关于 React 的笔记"
@@ -78,6 +82,7 @@ def get_tools():
         get_entry_detail,
         create_entry,
         get_statistics,
+        get_tag_statistics,
         get_entries_by_time_range,
         analyze_activity,
         list_entry_types,
@@ -163,7 +168,6 @@ class AssistantAgent:
 
             # 收集工具调用信息
             if hasattr(chunk, "tool_call_chunks") and chunk.tool_call_chunks:
-                logger.debug("Received tool_call_chunks: %s", chunk.tool_call_chunks)
                 for tc_chunk in chunk.tool_call_chunks:
                     idx = tc_chunk.get("index", 0)
                     while len(collected_tool_calls) <= idx:
@@ -178,9 +182,9 @@ class AssistantAgent:
             # 保存最后的响应用于构建 AIMessage
             full_response = chunk
 
-        # 日志：检查是否收集到工具调用
-        logger.info("Stream finished. Collected %d tool calls: %s",
-                    len(collected_tool_calls), collected_tool_calls)
+        # 日志：只记录工具名称，不记录参数（避免敏感数据泄露）
+        tool_names = [tc.get("name", "") for tc in collected_tool_calls if tc.get("name")]
+        logger.info("Stream finished. Collected %d tool calls: %s", len(tool_names), tool_names)
 
         # 如果有工具调用，执行工具并继续对话
         if collected_tool_calls and any(tc.get("name") for tc in collected_tool_calls):
@@ -232,9 +236,15 @@ class AssistantAgent:
                         else:
                             result = tool.invoke(tool_args)
                     except Exception as e:
-                        logger.error("Tool %s failed: %s", tool_name, e, exc_info=True)
+                        logger.error("Tool %s failed", tool_name, exc_info=True)
                         status = "error"
-                        result = f"工具执行失败: {tool_name} - {e}"
+                        result = f"工具执行失败: {tool_name}"
+                        # 回滚事务
+                        if tool_db is not None:
+                            try:
+                                tool_db.rollback()
+                            except Exception:
+                                pass
                     finally:
                         if tool_db is not None:
                             try:

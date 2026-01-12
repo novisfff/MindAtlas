@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 
 from langchain_core.tools import tool
+from sqlalchemy import func
 
+from app.entry.models import entry_tag
 from app.entry_type.models import EntryType
 from app.tag.models import Tag
 
@@ -27,7 +29,9 @@ def list_entry_types() -> str:
     ).all()
 
     results = [{
+        "id": str(t.id),
         "code": t.code,
+        "type": t.name,
         "name": t.name,
         "color": t.color,
     } for t in types]
@@ -40,14 +44,27 @@ def list_tags() -> str:
     """列出所有标签。
 
     Returns:
-        标签列表，包含名称、颜色
+        标签列表，包含名称、颜色、使用次数
     """
     db = _get_db()
-    tags = db.query(Tag).all()
+    tag_stats = (
+        db.query(
+            Tag.id,
+            Tag.name,
+            Tag.color,
+            func.count(entry_tag.c.entry_id),
+        )
+        .outerjoin(entry_tag, Tag.id == entry_tag.c.tag_id)
+        .group_by(Tag.id, Tag.name, Tag.color)
+        .order_by(Tag.name.asc())
+        .all()
+    )
 
     results = [{
-        "name": t.name,
-        "color": t.color,
-    } for t in tags]
+        "id": str(tag_id),
+        "name": name,
+        "color": color,
+        "entry_count": int(count or 0),
+    } for tag_id, name, color, count in tag_stats]
 
     return json.dumps(results, ensure_ascii=False)

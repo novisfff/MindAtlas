@@ -7,6 +7,7 @@ from app.assistant.tools.stats_tools import (
     get_statistics,
     get_entries_by_time_range,
     analyze_activity,
+    get_tag_statistics,
 )
 from app.assistant.tools.helper_tools import (
     list_entry_types,
@@ -20,6 +21,7 @@ __all__ = [
     "get_statistics",
     "get_entries_by_time_range",
     "analyze_activity",
+    "get_tag_statistics",
     "list_entry_types",
     "list_tags",
 ]
