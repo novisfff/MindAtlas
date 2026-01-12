@@ -95,7 +95,7 @@ export default function AssistantPage() {
   }
 
   return (
-    <div className="flex h-[calc(100vh-4rem)]">
+    <div className="flex h-full">
       {/* 左侧对话列表 */}
       <div className="hidden w-64 shrink-0 border-r bg-muted/20 md:block">
         <ConversationList
