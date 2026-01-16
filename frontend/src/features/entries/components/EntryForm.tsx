@@ -24,10 +24,11 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
   const aiMutation = useAiGenerateMutation()
 
   const [title, setTitle] = useState(entry?.title ?? '')
+  const [summary, setSummary] = useState(entry?.summary ?? '')
   const [content, setContent] = useState(entry?.content ?? '')
   const [typeId, setTypeId] = useState(entry?.type?.id ?? '')
-  const [timeMode, setTimeMode] = useState<EntryTimeMode>(entry?.timeMode ?? 'NONE')
-  const [timeAt, setTimeAt] = useState(entry?.timeAt?.split('T')[0] ?? '')
+  const [timeMode, setTimeMode] = useState<EntryTimeMode>((entry?.timeMode && entry.timeMode !== 'NONE') ? entry.timeMode : 'POINT')
+  const [timeAt, setTimeAt] = useState(entry?.timeAt?.split('T')[0] ?? new Date().toISOString().split('T')[0])
   const [timeFrom, setTimeFrom] = useState(entry?.timeFrom?.split('T')[0] ?? '')
   const [timeTo, setTimeTo] = useState(entry?.timeTo?.split('T')[0] ?? '')
   const [tagIds, setTagIds] = useState<string[]>(entry?.tags?.map(t => t.id) ?? [])
@@ -50,6 +51,7 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
 
     const payload: EntryUpsertRequest = {
       title: title.trim(),
+      summary: summary.trim() || undefined,
       content: content.trim() || undefined,
       typeId,
       timeMode,
@@ -76,8 +78,11 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
       {
         onSuccess: (data) => {
           if (data.summary) {
+            setSummary(data.summary)
+          }
+          if (data.refinedContent) {
             setPrevContent(content)
-            setContent(data.summary)
+            setContent(data.refinedContent)
           }
 
           if (data.suggestedTags.length > 0) {
@@ -180,6 +185,23 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
           />
         </div>
 
+        <div>
+          <label htmlFor="entry-summary" className="block text-sm font-medium mb-1.5">
+            Summary
+          </label>
+          <textarea
+            id="entry-summary"
+            value={summary}
+            onChange={(e) => setSummary(e.target.value)}
+            placeholder="Enter a brief summary..."
+            className={cn(
+              'w-full px-3 py-2 rounded-lg border bg-background min-h-[80px]',
+              'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
+              'placeholder:text-muted-foreground resize-y'
+            )}
+          />
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <label htmlFor="entry-type" className="block text-sm font-medium mb-1.5">
@@ -226,7 +248,6 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
                 'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2'
               )}
             >
-              <option value="NONE">No time</option>
               <option value="POINT">Point in time</option>
               <option value="RANGE">Time range</option>
             </select>
@@ -243,6 +264,7 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
               type="date"
               value={timeAt}
               onChange={(e) => setTimeAt(e.target.value)}
+              required
               className={cn(
                 'w-full px-3 py-2 rounded-lg border bg-background',
                 'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2'
@@ -262,6 +284,7 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
                 type="date"
                 value={timeFrom}
                 onChange={(e) => setTimeFrom(e.target.value)}
+                required
                 className={cn(
                   'w-full px-3 py-2 rounded-lg border bg-background',
                   'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2'
@@ -277,6 +300,7 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
                 type="date"
                 value={timeTo}
                 onChange={(e) => setTimeTo(e.target.value)}
+                required
                 className={cn(
                   'w-full px-3 py-2 rounded-lg border bg-background',
                   'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2'

@@ -35,7 +35,6 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_entry_type_code'), 'entry_type', ['code'], unique=True)
-    op.create_index(op.f('ix_entry_type_id'), 'entry_type', ['id'], unique=False)
     op.create_table('relation_type',
     sa.Column('id', sa.UUID(), nullable=False),
     sa.Column('code', sa.String(length=64), nullable=False),
@@ -143,7 +142,6 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_relation_type_id'), table_name='relation_type')
     op.drop_index(op.f('ix_relation_type_code'), table_name='relation_type')
     op.drop_table('relation_type')
-    op.drop_index(op.f('ix_entry_type_id'), table_name='entry_type')
     op.drop_index(op.f('ix_entry_type_code'), table_name='entry_type')
     op.drop_table('entry_type')
     # ### end Alembic commands ###

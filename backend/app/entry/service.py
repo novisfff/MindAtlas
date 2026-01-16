@@ -3,14 +3,14 @@ from __future__ import annotations
 from typing import List
 from uuid import UUID
 
-from sqlalchemy import delete, or_
+from sqlalchemy import and_, delete, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.attachment.models import Attachment
 from app.common.exceptions import ApiException
 from app.common.storage import get_minio_client, remove_object_safe, StorageError
-from app.entry.models import Entry, entry_tag
+from app.entry.models import Entry, TimeMode, entry_tag
 from app.entry.schemas import EntryRequest, EntrySearchRequest
 from app.entry_type.service import EntryTypeService
 from app.relation.models import Relation
@@ -52,11 +52,27 @@ class EntryService:
         if request.tag_ids:
             query = query.filter(Entry.tags.any(Tag.id.in_(request.tag_ids)))
 
-        if request.time_from:
-            query = query.filter(Entry.time_at >= request.time_from)
+        # Time intersection query: match POINT entries within range, or RANGE entries overlapping
+        if request.time_from or request.time_to:
+            point_filters = [Entry.time_mode == TimeMode.POINT, Entry.time_at.isnot(None)]
+            if request.time_from:
+                point_filters.append(Entry.time_at >= request.time_from)
+            if request.time_to:
+                point_filters.append(Entry.time_at <= request.time_to)
+            point_clause = and_(*point_filters)
 
-        if request.time_to:
-            query = query.filter(Entry.time_at <= request.time_to)
+            range_filters = [
+                Entry.time_mode == TimeMode.RANGE,
+                Entry.time_from.isnot(None),
+                Entry.time_to.isnot(None),
+            ]
+            if request.time_to:
+                range_filters.append(Entry.time_from <= request.time_to)
+            if request.time_from:
+                range_filters.append(Entry.time_to >= request.time_from)
+            range_clause = and_(*range_filters)
+
+            query = query.filter(or_(point_clause, range_clause))
 
         # Count total
         total = query.count()
@@ -85,6 +101,7 @@ class EntryService:
 
         entry = Entry(
             title=request.title,
+            summary=request.summary,
             content=request.content,
             type_id=request.type_id,
             time_mode=request.time_mode,
@@ -113,6 +130,7 @@ class EntryService:
                 raise ApiException(status_code=400, code=40001, message="Some tag IDs are invalid")
 
         entry.title = request.title
+        entry.summary = request.summary
         entry.content = request.content
         entry.type_id = request.type_id
         entry.time_mode = request.time_mode

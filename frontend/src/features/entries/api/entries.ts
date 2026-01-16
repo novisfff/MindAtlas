@@ -15,6 +15,7 @@ export type EntryTimeMode = Entry['timeMode']
 
 export interface EntryUpsertRequest {
   title: string
+  summary?: string
   content?: string
   typeId: string
   timeMode: EntryTimeMode

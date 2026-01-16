@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from app.entry.models import TimeMode
 from app.entry_type.schemas import EntryTypeResponse
@@ -14,9 +14,10 @@ from app.tag.schemas import TagResponse
 
 class EntryBase(CamelModel):
     title: str = Field(..., min_length=1, max_length=255)
+    summary: Optional[str] = None
     content: Optional[str] = None
     type_id: UUID
-    time_mode: TimeMode = Field(default=TimeMode.NONE)
+    time_mode: TimeMode = Field(default=TimeMode.POINT)
     time_at: Optional[datetime] = Field(default=None)
     time_from: Optional[datetime] = Field(default=None)
     time_to: Optional[datetime] = Field(default=None)
@@ -25,10 +26,26 @@ class EntryBase(CamelModel):
 class EntryRequest(EntryBase):
     tag_ids: Optional[List[UUID]] = Field(default_factory=list, max_length=50)
 
+    @model_validator(mode="after")
+    def _validate_time_fields(self) -> "EntryRequest":
+        if self.time_mode == TimeMode.NONE:
+            raise ValueError("time_mode cannot be NONE")
+
+        if self.time_mode == TimeMode.POINT:
+            if self.time_at is None:
+                raise ValueError("time_at is required when time_mode=POINT")
+
+        if self.time_mode == TimeMode.RANGE:
+            if self.time_from is None or self.time_to is None:
+                raise ValueError("time_from and time_to are required when time_mode=RANGE")
+            if self.time_from > self.time_to:
+                raise ValueError("time_from must be <= time_to")
+
+        return self
+
 
 class EntryResponse(OrmModel, EntryBase):
     id: UUID
-    summary: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     type: EntryTypeResponse

@@ -7,6 +7,7 @@ export interface AiGenerateRequest {
 }
 
 export interface AiGenerateResponse {
+  refinedContent?: string
   summary?: string
   suggestedTags: string[]
 }
