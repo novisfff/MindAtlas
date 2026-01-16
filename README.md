@@ -1,119 +1,121 @@
 # MindAtlas
 
-个人知识与经历管理系统 - 记录、关联、搜索、分析、总结你的知识与经历。
+Personal knowledge and experience management system - Record, connect, search, analyze, and summarize your knowledge and experiences.
 
-## 功能特性
+[中文文档](README.zh-CN.md)
 
-- **Entry 管理** - 创建、编辑、搜索知识/经历记录，支持 Markdown 内容
-- **类型系统** - 自定义 Entry 类型（知识、项目、竞赛等），配置图标和颜色
-- **标签管理** - 灵活的标签分类系统
-- **关系网络** - 建立 Entry 之间的关联关系，支持多种关系类型
-- **附件存储** - 基于 MinIO 的文件附件管理
-- **知识图谱** - 可视化展示知识关联网络
-- **AI 助手** - 基于 LangChain 的智能助手，支持工具调用和技能执行
-- **国际化** - 支持中文和英文界面切换
+## Features
 
-## 技术栈
+- **Entry Management** - Create, edit, and search knowledge/experience records with Markdown support
+- **Type System** - Customize Entry types (Knowledge, Project, Competition, etc.) with icons and colors
+- **Tag Management** - Flexible tagging system for multi-dimensional categorization
+- **Relation Network** - Build connections between Entries with various relation types
+- **Attachment Storage** - File attachment management powered by MinIO
+- **Knowledge Graph** - Visualize knowledge connections in an interactive graph
+- **AI Assistant** - LangChain-based intelligent assistant with tool calling and skill execution
+- **Internationalization** - Support for Chinese and English interfaces
 
-### 后端
-- **框架**: FastAPI
-- **数据库**: PostgreSQL + SQLAlchemy
-- **迁移**: Alembic
-- **对象存储**: MinIO
-- **AI**: LangChain + OpenAI 兼容接口
+## Tech Stack
 
-### 前端
-- **框架**: React 18 + TypeScript
-- **构建**: Vite
-- **状态管理**: Zustand + TanStack Query
-- **样式**: Tailwind CSS
-- **国际化**: react-i18next
+### Backend
+- **Framework**: FastAPI
+- **Database**: PostgreSQL + SQLAlchemy
+- **Migration**: Alembic
+- **Object Storage**: MinIO
+- **AI**: LangChain + OpenAI-compatible API
 
-## 项目结构
+### Frontend
+- **Framework**: React 18 + TypeScript
+- **Build Tool**: Vite
+- **State Management**: Zustand + TanStack Query
+- **Styling**: Tailwind CSS
+- **i18n**: react-i18next
+
+## Project Structure
 
 ```
 MindAtlas/
-├── backend/                 # Python FastAPI 后端
+├── backend/                 # Python FastAPI backend
 │   ├── app/
-│   │   ├── entry/          # Entry 模块
-│   │   ├── entry_type/     # 类型配置
-│   │   ├── tag/            # 标签管理
-│   │   ├── relation/       # 关系管理
-│   │   ├── attachment/     # 附件管理
-│   │   ├── ai_provider/    # AI 服务商配置
-│   │   ├── ai/             # AI 功能接口
-│   │   ├── assistant/      # AI 助手
-│   │   ├── assistant_config/ # 助手工具/技能配置
-│   │   ├── graph/          # 图谱接口
-│   │   └── stats/          # 统计接口
-│   ├── alembic/            # 数据库迁移
+│   │   ├── entry/          # Entry module
+│   │   ├── entry_type/     # Type configuration
+│   │   ├── tag/            # Tag management
+│   │   ├── relation/       # Relation management
+│   │   ├── attachment/     # Attachment management
+│   │   ├── ai_provider/    # AI provider configuration
+│   │   ├── ai/             # AI features
+│   │   ├── assistant/      # AI assistant
+│   │   ├── assistant_config/ # Assistant tools/skills config
+│   │   ├── graph/          # Graph API
+│   │   └── stats/          # Statistics API
+│   ├── alembic/            # Database migrations
 │   └── requirements.txt
-├── frontend/               # React 前端
+├── frontend/               # React frontend
 │   ├── src/
-│   │   ├── features/       # 功能模块
-│   │   ├── components/     # 公共组件
-│   │   ├── stores/         # 状态管理
-│   │   └── locales/        # 国际化文件
+│   │   ├── features/       # Feature modules
+│   │   ├── components/     # Shared components
+│   │   ├── stores/         # State management
+│   │   └── locales/        # i18n files
 │   └── package.json
-└── deploy/                 # Docker 部署配置
+└── deploy/                 # Docker deployment config
 ```
 
-## 快速开始
+## Quick Start
 
-### 环境要求
+### Prerequisites
 
 - Python 3.11+
 - Node.js 18+
 - PostgreSQL 15+
-- MinIO (或兼容 S3 的对象存储)
+- MinIO (or S3-compatible object storage)
 
-### 1. 克隆项目
+### 1. Clone the Repository
 
 ```bash
 git clone <repository-url>
 cd MindAtlas
 ```
 
-### 2. 启动后端
+### 2. Start Backend
 
 ```bash
 cd backend
 
-# 创建虚拟环境
+# Create virtual environment
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
-# 安装依赖
+# Install dependencies
 pip install -r requirements.txt
 
-# 配置环境变量
+# Configure environment variables
 cp .env.example .env
-# 编辑 .env 配置数据库和 MinIO
+# Edit .env to configure database and MinIO
 
-# 数据库迁移
+# Run database migrations
 alembic upgrade head
 
-# 启动服务
+# Start the server
 uvicorn app.main:app --reload --port 8000
 ```
 
-### 3. 启动前端
+### 3. Start Frontend
 
 ```bash
 cd frontend
 
-# 安装依赖
+# Install dependencies
 npm install
 
-# 启动开发服务器
+# Start development server
 npm run dev
 ```
 
-访问 http://localhost:3000 使用应用。
+Visit http://localhost:3000 to use the application.
 
-## Docker 部署
+## Docker Deployment
 
-项目提供完整的 Docker Compose 配置，一键部署所有服务：
+The project provides a complete Docker Compose configuration for one-click deployment:
 
 ```bash
 cd deploy
@@ -121,28 +123,23 @@ cp .env.example .env
 docker compose up -d
 ```
 
-详细部署说明请参考 [deploy/README.md](deploy/README.md)。
+See [deploy/README.md](deploy/README.md) for detailed deployment instructions.
 
-## 环境变量
+## Environment Variables
 
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `DATABASE_URL` | PostgreSQL 连接串 | `postgresql://postgres:postgres@localhost:5432/mindatlas` |
-| `MINIO_ENDPOINT` | MinIO 地址 | `localhost:9000` |
-| `MINIO_ACCESS_KEY` | MinIO 访问密钥 | - |
-| `MINIO_SECRET_KEY` | MinIO 密钥 | - |
-| `MINIO_BUCKET` | MinIO 桶名 | `mindatlas` |
-| `AI_PROVIDER_FERNET_KEY` | API Key 加密密钥 | - |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql://postgres:postgres@localhost:5432/mindatlas` |
+| `MINIO_ENDPOINT` | MinIO address | `localhost:9000` |
+| `MINIO_ACCESS_KEY` | MinIO access key | - |
+| `MINIO_SECRET_KEY` | MinIO secret key | - |
+| `MINIO_BUCKET` | MinIO bucket name | `mindatlas` |
+| `AI_PROVIDER_FERNET_KEY` | API Key encryption key | - |
 
-## 开发指南
+## Documentation
 
-详细的开发指南请参考 [CLAUDE.md](CLAUDE.md)，包含：
+- [User Manual](docs/user-manual.md) - Comprehensive user guide
 
-- 后端模块结构规范
-- 前端 Feature-based 架构
-- API 响应格式
-- 核心领域概念
-
-## 许可证
+## License
 
 MIT License
