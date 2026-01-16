@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import date
@@ -11,6 +12,8 @@ from urllib.request import Request, urlopen
 from uuid import UUID
 
 from langchain_core.tools import tool
+
+logger = logging.getLogger(__name__)
 
 from app.ai_provider.crypto import decrypt_api_key
 from app.ai_provider.models import AiProvider
@@ -40,11 +43,14 @@ def _get_ai_config(db) -> _OpenAiConfig | None:
         .first()
     )
     if not provider:
+        logger.warning("create_entry: No active AI provider found")
         return None
     try:
         api_key = decrypt_api_key(provider.api_key_encrypted)
-    except Exception:
+    except Exception as e:
+        logger.error("create_entry: Failed to decrypt API key: %s", e)
         return None
+    logger.debug("create_entry: Using AI provider %s, model %s", provider.name, provider.model)
     return _OpenAiConfig(
         api_key=api_key,
         base_url=provider.base_url,
@@ -88,17 +94,18 @@ def _build_create_entry_prompt(
 
 【目标】
 1) 生成合适的标题 title（简洁、准确，不超过 30 个字）
-2) 生成正文 content（可用 Markdown，但禁止出现一级标题：禁止任何以"# "开头的行；如需标题请从"## "开始）
-3) 选择记录类型 type_code（必须且只能从下方"可用类型列表"的 code 中选择）
-4) 生成标签 tags（优先复用"可用标签列表"，大小写不敏感匹配；最多允许新增 5 个新标签）
-5) 识别时间信息并设置 time_mode 和对应的日期字段
+2) 生成摘要 summary（一段简洁的话概括核心内容，50-150 字，便于快速浏览）
+3) 生成正文 content（整理格式、提炼要点，可用 Markdown，禁止一级标题）
+4) 选择记录类型 type_code（必须且只能从下方"可用类型列表"的 code 中选择）
+5) 生成标签 tags（优先复用"可用标签列表"，大小写不敏感匹配；最多允许新增 5 个新标签）
+6) 识别时间信息并设置 time_mode 和对应的日期字段
 
 【时间模式规则】
 根据用户内容中的时间信息，设置以下字段：
 - time_mode: 时间模式，必须是以下之一：
-  - "NONE": 无时间信息（默认）
   - "POINT": 单一时间点（如"今天"、"2024-01-15"、"昨天下午"）
   - "RANGE": 时间范围（如"这周"、"上个月"、"1月1日到1月15日"）
+- 如果用户内容没有明确时间信息：默认使用 time_mode="POINT" 且 time_at="{current_date}"
 - time_at: 当 time_mode="POINT" 时，填写具体日期（格式：YYYY-MM-DD）
 - time_from / time_to: 当 time_mode="RANGE" 时，填写起止日期（格式：YYYY-MM-DD）
 
@@ -107,7 +114,7 @@ def _build_create_entry_prompt(
 - "昨天开会" → time_mode="POINT", time_at="昨天对应的日期"
 - "这周完成了项目" → time_mode="RANGE", time_from="本周一", time_to="本周日"
 - "上个月的总结" → time_mode="RANGE", time_from="上月1日", time_to="上月最后一天"
-- "学习笔记"（无时间信息）→ time_mode="NONE"
+- "学习笔记"（无时间信息）→ time_mode="POINT", time_at="{current_date}"
 
 【可用类型列表（仅允许从这些 code 中选择）】
 {types_text}
@@ -117,9 +124,9 @@ def _build_create_entry_prompt(
 
 【强约束】
 - 只输出一个 JSON 对象，不要输出任何 Markdown、解释文字、代码块围栏。
-- JSON schema: {{"title": string, "content": string, "type_code": string, "tags": string[], "time_mode": string, "time_at": string|null, "time_from": string|null, "time_to": string|null}}
+- JSON schema: {{"title": string, "summary": string, "content": string, "type_code": string, "tags": string[], "time_mode": string, "time_at": string|null, "time_from": string|null, "time_to": string|null}}
 - type_code 必须是以下之一：[{allowed_codes}]
-- time_mode 必须是以下之一：["NONE", "POINT", "RANGE"]
+- time_mode 必须是以下之一：["POINT", "RANGE"]
 - 日期格式统一使用 YYYY-MM-DD
 - 当无法判断类型时，使用默认类型："{(default_type_code or '').strip()}"
 - tags 中每个元素是纯标签名字符串（不要带 # 前缀），去重后输出。
@@ -133,6 +140,7 @@ def _build_create_entry_prompt(
 def _call_ai_for_entry_creation(cfg: _OpenAiConfig, prompt: str) -> str | None:
     """调用 AI 生成记录结构化数据"""
     url = _build_api_url(cfg.base_url, "/chat/completions")
+    logger.debug("create_entry: Calling AI at %s", url)
     body = {
         "model": cfg.model,
         "messages": [{"role": "user", "content": prompt}],
@@ -148,15 +156,19 @@ def _call_ai_for_entry_creation(cfg: _OpenAiConfig, prompt: str) -> str | None:
         method="POST",
     )
     try:
-        with urlopen(req, timeout=30) as resp:
+        with urlopen(req, timeout=60) as resp:
             data = resp.read()
-    except URLError:
+        logger.debug("create_entry: AI response received, %d bytes", len(data))
+    except URLError as e:
+        logger.error("create_entry: URLError calling AI: %s", e)
         return None
-    except Exception:
+    except Exception as e:
+        logger.error("create_entry: Exception calling AI: %s", e)
         return None
     try:
         return data.decode("utf-8")
-    except Exception:
+    except Exception as e:
+        logger.error("create_entry: Failed to decode AI response: %s", e)
         return None
 
 
@@ -182,6 +194,7 @@ def _parse_json_from_text(text: str) -> Any:
 def _parse_ai_response(raw: str | None) -> dict[str, Any] | None:
     """解析 AI 响应，提取结构化数据"""
     if not raw:
+        logger.warning("create_entry: AI response is empty")
         return None
     try:
         payload = json.loads(raw)
@@ -190,19 +203,25 @@ def _parse_ai_response(raw: str | None) -> dict[str, Any] | None:
             .get("message", {})
             .get("content", "")
         )
-    except Exception:
+        logger.debug("create_entry: AI content length: %d", len(content) if content else 0)
+    except Exception as e:
+        logger.error("create_entry: Failed to parse AI response JSON: %s", e)
         return None
 
     result = _parse_json_from_text(content)
     if not isinstance(result, dict):
+        logger.warning("create_entry: AI content is not valid JSON dict")
         return None
 
+    logger.debug("create_entry: AI parsed keys: %s", list(result.keys()))
     title = result.get("title")
+    summary = result.get("summary")
     content_value = result.get("content")
     type_code = result.get("type_code") or result.get("typeCode")
     tags = result.get("tags")
 
     title_out = str(title).strip() if isinstance(title, str) and title.strip() else None
+    summary_out = str(summary).strip() if isinstance(summary, str) and summary.strip() else None
     content_out = str(content_value).strip() if isinstance(content_value, str) and content_value.strip() else None
     type_code_out = str(type_code).strip() if isinstance(type_code, str) and type_code.strip() else None
 
@@ -225,9 +244,9 @@ def _parse_ai_response(raw: str | None) -> dict[str, Any] | None:
     time_from = result.get("time_from") or result.get("timeFrom")
     time_to = result.get("time_to") or result.get("timeTo")
 
-    time_mode_out = str(time_mode).strip().upper() if isinstance(time_mode, str) and time_mode.strip() else "NONE"
-    if time_mode_out not in ("NONE", "POINT", "RANGE"):
-        time_mode_out = "NONE"
+    time_mode_out = str(time_mode).strip().upper() if isinstance(time_mode, str) and time_mode.strip() else "POINT"
+    if time_mode_out not in ("POINT", "RANGE"):
+        time_mode_out = "POINT"
 
     time_at_out = str(time_at).strip() if isinstance(time_at, str) and time_at.strip() else None
     time_from_out = str(time_from).strip() if isinstance(time_from, str) and time_from.strip() else None
@@ -235,6 +254,7 @@ def _parse_ai_response(raw: str | None) -> dict[str, Any] | None:
 
     return {
         "title": title_out,
+        "summary": summary_out,
         "content": content_out,
         "type_code": type_code_out,
         "tags": tags_out,
@@ -250,6 +270,8 @@ def search_entries(
     keyword: Optional[str] = None,
     type_code: Optional[str] = None,
     tag_names: Optional[list[str]] = None,
+    time_from: Optional[str] = None,
+    time_to: Optional[str] = None,
     limit: int = 10
 ) -> str:
     """搜索用户的记录（Entry）。
@@ -258,6 +280,8 @@ def search_entries(
         keyword: 搜索关键词，匹配标题和内容
         type_code: 记录类型编码，如 knowledge, project, competition
         tag_names: 标签名称列表（匹配任意一个标签）
+        time_from: 查询起始日期 (YYYY-MM-DD)，与记录时间做交集判断
+        time_to: 查询结束日期 (YYYY-MM-DD)，与记录时间做交集判断
         limit: 返回结果数量限制，默认10条
 
     Returns:
@@ -286,6 +310,36 @@ def search_entries(
         if cleaned:
             query = query.join(Entry.tags).filter(Tag.name.in_(cleaned)).distinct()
 
+    # Time intersection filter
+    def _parse_date(value: Optional[str]):
+        if not value or not isinstance(value, str):
+            return None
+        v = value.strip()
+        if not v:
+            return None
+        from datetime import datetime
+        try:
+            return datetime.strptime(v, "%Y-%m-%d")
+        except ValueError:
+            return None
+
+    q_from = _parse_date(time_from)
+    q_to = _parse_date(time_to)
+    if q_from or q_to:
+        point_clause = (Entry.time_mode == TimeMode.POINT) & Entry.time_at.isnot(None)
+        if q_from:
+            point_clause = point_clause & (Entry.time_at >= q_from)
+        if q_to:
+            point_clause = point_clause & (Entry.time_at <= q_to)
+
+        range_clause = (Entry.time_mode == TimeMode.RANGE) & Entry.time_from.isnot(None) & Entry.time_to.isnot(None)
+        if q_to:
+            range_clause = range_clause & (Entry.time_from <= q_to)
+        if q_from:
+            range_clause = range_clause & (Entry.time_to >= q_from)
+
+        query = query.filter(point_clause | range_clause)
+
     entries = query.order_by(Entry.updated_at.desc()).limit(limit).all()
 
     if not entries:
@@ -297,7 +351,7 @@ def search_entries(
             "id": str(e.id),
             "title": e.title,
             "type": e.type.name if e.type else "未知",
-            "summary": (e.summary or e.content or "")[:100],
+            "summary": e.summary or "",
             "tags": [t.name for t in e.tags],
         })
 
@@ -491,13 +545,20 @@ def create_entry(
         )
         raw_ai = _call_ai_for_entry_creation(cfg, prompt)
         ai_payload = _parse_ai_response(raw_ai)
+        if ai_payload:
+            logger.debug("create_entry: AI generation succeeded")
+        else:
+            logger.warning("create_entry: AI generation failed, using fallback")
+    else:
+        logger.warning("create_entry: No AI config, using fallback")
 
     # 提取 AI 结果
     ai_title = (ai_payload or {}).get("title") if isinstance(ai_payload, dict) else None
     ai_content = (ai_payload or {}).get("content") if isinstance(ai_payload, dict) else None
+    ai_summary = (ai_payload or {}).get("summary") if isinstance(ai_payload, dict) else None
     ai_type_code = (ai_payload or {}).get("type_code") if isinstance(ai_payload, dict) else None
     ai_tags = (ai_payload or {}).get("tags") if isinstance(ai_payload, dict) else None
-    ai_time_mode = (ai_payload or {}).get("time_mode") if isinstance(ai_payload, dict) else "NONE"
+    ai_time_mode = (ai_payload or {}).get("time_mode") if isinstance(ai_payload, dict) else "POINT"
     ai_time_at = (ai_payload or {}).get("time_at") if isinstance(ai_payload, dict) else None
     ai_time_from = (ai_payload or {}).get("time_from") if isinstance(ai_payload, dict) else None
     ai_time_to = (ai_payload or {}).get("time_to") if isinstance(ai_payload, dict) else None
@@ -545,29 +606,34 @@ def create_entry(
         except ValueError:
             return None
 
-    final_time_mode = TimeMode.NONE
-    final_time_at = None
+    today_parsed = _parse_date(date.today().isoformat())
+    final_time_mode = TimeMode.POINT
+    final_time_at = today_parsed
     final_time_from = None
     final_time_to = None
 
-    if ai_time_mode == "POINT" and ai_time_at:
+    if ai_time_mode == "POINT":
         parsed = _parse_date(ai_time_at)
         if parsed:
-            final_time_mode = TimeMode.POINT
             final_time_at = parsed
-    elif ai_time_mode == "RANGE" and (ai_time_from or ai_time_to):
+    elif ai_time_mode == "RANGE":
         from_parsed = _parse_date(ai_time_from)
         to_parsed = _parse_date(ai_time_to)
-        if from_parsed or to_parsed:
+        if from_parsed and to_parsed:
             final_time_mode = TimeMode.RANGE
+            final_time_at = None
             final_time_from = from_parsed
             final_time_to = to_parsed
+
+    # 确定最终摘要
+    summary_candidate = (ai_summary or "").strip() if isinstance(ai_summary, str) else ""
+    final_summary = summary_candidate or (final_content or "")[:200] or None
 
     # 创建记录
     entry = Entry(
         title=final_title,
         content=final_content,
-        summary=(final_content or "")[:200] or None,
+        summary=final_summary,
         type_id=chosen_type.id,
         time_mode=final_time_mode,
         time_at=final_time_at,

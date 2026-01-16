@@ -18,11 +18,13 @@ export function useConversationsQuery() {
   })
 }
 
-export function useConversationQuery(id: string | null) {
+export function useConversationQuery(id: string | null, options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: [...assistantKeys.conversations(), id],
     queryFn: () => getConversation(id!),
-    enabled: !!id,
+    enabled: !!id && (options?.enabled !== false),
+    staleTime: 30000, // 30秒内不重新获取，避免流式输出期间重复加载
+    refetchOnWindowFocus: false, // 禁用窗口聚焦时重新获取
   })
 }
 

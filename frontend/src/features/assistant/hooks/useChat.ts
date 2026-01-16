@@ -2,7 +2,8 @@ import { useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useChatStore } from '../stores/chat-store'
 import { createConversation } from '../api'
-import { ToolCall } from '../types'
+import { assistantKeys } from '../queries'
+import { ToolCall, SkillCall } from '../types'
 
 interface SSEEvent {
   event: string
@@ -68,6 +69,11 @@ export function useChat() {
     updateLastMessage,
     addToolCall,
     updateToolCall,
+    addSkillCall,
+    updateSkillCall,
+    startAnalysis,
+    updateAnalysis,
+    endAnalysis,
     setLoading,
     setConversationId,
   } = useChatStore()
@@ -85,6 +91,8 @@ export function useChat() {
         const conv = await createConversation()
         convId = conv.id
         setConversationId(convId)
+        // Refresh conversation list immediately when a new conversation is created
+        queryClient.invalidateQueries({ queryKey: assistantKeys.conversations() })
       } catch (err) {
         console.error('Failed to create conversation:', err)
         // 显示错误消息给用户
@@ -170,9 +178,27 @@ export function useChat() {
               status: (evt.data.status as string) === 'completed' ? 'completed' : 'error',
               result: evt.data.result as string,
             })
+          } else if (evt.event === 'skill_start') {
+            const skillCall: SkillCall = {
+              id: evt.data.id as string,
+              name: evt.data.name as string,
+              status: 'running',
+              hidden: Boolean(evt.data.hidden),
+            }
+            addSkillCall(skillCall)
+          } else if (evt.event === 'skill_end') {
+            updateSkillCall(evt.data.id as string, {
+              status: (evt.data.status as string) === 'completed' ? 'completed' : 'error',
+            })
           } else if (evt.event === 'title_updated') {
             // 刷新对话列表以显示新标题
-            queryClient.invalidateQueries({ queryKey: ['conversations'] })
+            queryClient.invalidateQueries({ queryKey: assistantKeys.conversations() })
+          } else if (evt.event === 'analysis_start') {
+            startAnalysis(evt.data.id as string)
+          } else if (evt.event === 'analysis_delta') {
+            updateAnalysis(evt.data.id as string, evt.data.delta as string)
+          } else if (evt.event === 'analysis_end') {
+            endAnalysis(evt.data.id as string)
           }
         }
       }
@@ -191,6 +217,11 @@ export function useChat() {
     updateLastMessage,
     addToolCall,
     updateToolCall,
+    addSkillCall,
+    updateSkillCall,
+    startAnalysis,
+    updateAnalysis,
+    endAnalysis,
     setLoading,
     setConversationId,
   ])

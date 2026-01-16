@@ -41,5 +41,7 @@ class Message(UuidPrimaryKeyMixin, TimestampMixin, Base):
     content = Column(Text, nullable=False, default="")
     tool_calls = Column(JSON, nullable=True)
     tool_results = Column(JSON, nullable=True)
+    skill_calls = Column(JSON, nullable=True)  # Skill 调用记录
+    analysis = Column(JSON, nullable=True)  # 分析过程记录
 
     conversation = relationship("Conversation", back_populates="messages")

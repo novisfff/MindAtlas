@@ -13,4 +13,5 @@ class AiGenerateRequest(CamelModel):
 
 class AiGenerateResponse(CamelModel):
     summary: str | None = None
+    refined_content: str | None = None
     suggested_tags: list[str] = Field(default_factory=list)

@@ -1,0 +1,70 @@
+import { useState, useEffect } from 'react'
+import { Brain, ChevronDown, ChevronRight, Loader2 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
+import { cn } from '@/lib/utils'
+import { Analysis } from '../types'
+import ReactMarkdown from 'react-markdown'
+
+interface AnalysisDisplayProps {
+  analysis: Analysis
+}
+
+export function AnalysisDisplay({ analysis }: AnalysisDisplayProps) {
+  const { t } = useTranslation()
+  const [isExpanded, setIsExpanded] = useState(false)
+  const isRunning = analysis.status === 'running'
+
+  useEffect(() => {
+    if (isRunning) {
+      setIsExpanded(true)
+    } else {
+      setIsExpanded(false)
+    }
+  }, [isRunning])
+
+  const toggleExpand = () => setIsExpanded(!isExpanded)
+
+  return (
+    <div className="mb-2 w-full max-w-full overflow-hidden rounded-lg border border-border/50 bg-background/50 text-sm">
+      <div
+        className={cn(
+          "flex cursor-pointer items-center justify-between px-3 py-2 transition-colors hover:bg-muted/50",
+          isExpanded && "border-b border-border/50 bg-muted/30"
+        )}
+        onClick={toggleExpand}
+      >
+        <div className="flex items-center gap-2 text-muted-foreground">
+          {isRunning ? (
+            <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
+          ) : (
+            <Brain className="h-4 w-4 text-purple-500" />
+          )}
+          <span className="font-medium">
+            {isRunning ? t('pages.assistant.analyzing') : t('pages.assistant.analysis_completed')}
+          </span>
+        </div>
+        <div className="text-muted-foreground/50">
+          {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+        </div>
+      </div>
+
+      {
+        isExpanded && (
+          <div className="bg-muted/10 px-3 py-3 text-muted-foreground prose prose-sm dark:prose-invert max-w-none prose-p:leading-relaxed prose-pre:p-0 prose-pre:bg-transparent">
+            <ReactMarkdown
+              components={{
+                code: ({ node, inline, className, children, ...props }: any) => (
+                  <code className="bg-black/5 dark:bg-white/10 px-1 py-0.5 rounded font-mono text-xs" {...props}>
+                    {children}
+                  </code>
+                )
+              }}
+            >
+              {analysis.content}
+            </ReactMarkdown>
+          </div>
+        )
+      }
+    </div >
+  )
+}

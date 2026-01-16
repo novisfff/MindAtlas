@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { FileType, Tags, ChevronRight, Bot } from 'lucide-react'
+import { FileType, Tags, ChevronRight, Bot, Wrench, BrainCircuit } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 export function SettingsPage() {
@@ -31,6 +31,24 @@ export function SettingsPage() {
       descKey: 'pages.settings.aiProvidersDesc',
       icon: Bot,
       path: '/settings/ai-providers',
+      color: 'text-violet-600',
+      bgColor: 'bg-violet-600/10'
+    },
+    {
+      id: 'assistant-tools',
+      titleKey: 'pages.settings.assistantTools',
+      descKey: 'pages.settings.assistantToolsDesc',
+      icon: Wrench,
+      path: '/settings/assistant-tools',
+      color: 'text-blue-500',
+      bgColor: 'bg-blue-500/10'
+    },
+    {
+      id: 'assistant-skills',
+      titleKey: 'pages.settings.assistantSkills',
+      descKey: 'pages.settings.assistantSkillsDesc',
+      icon: BrainCircuit,
+      path: '/settings/assistant-skills',
       color: 'text-purple-500',
       bgColor: 'bg-purple-500/10'
     }

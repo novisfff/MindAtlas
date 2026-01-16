@@ -52,38 +52,46 @@ class AiService:
         return self.db.query(AiProvider).filter(AiProvider.is_active.is_(True)).first()
 
     def _build_prompt(self, request: AiGenerateRequest, existing_tags: list[str]) -> str:
-        return f"""
-    Analyze the following journal entry to provide organized content and suggest relevant tags.
+        tags_text = ", ".join(existing_tags[:100]) if existing_tags else "暂无"
+        return f"""你是 MindAtlas 的内容整理助手。请帮助用户整理和优化他们的记录内容。
 
-    Input Data:
-    - Entry Type: {request.type_name}
-    - Title: {request.title}
-    - Content (Markdown): {request.content}
-    - Available Tags: {", ".join(existing_tags)}
+【输入信息】
+- 记录类型：{request.type_name}
+- 标题：{request.title}
+- 原始内容：
+{request.content}
 
-    Instructions:
-    1. **Language Detection**: Detect the primary language used in the 'Title' and 'Content'.
-    2. **AI Content (Refinement)**: 
-       - **Goal**: Structure the original content for clarity without expanding it.
-       - **Content Only**: Do NOT repeat the Title or Entry Type. Focus only on the body content.
-       - **Strict Constraint**: Do NOT add ANY new information, details, or explanations that are not explicitly in the source.
-       - **No Expansion**: If the source text is brief, the output MUST be brief. Do not elaborate or add filler text.
-       - **Refinement**: You may fix grammar, formatting, and structure (e.g., grouping related points).
-       - **Format**: Can use **Markdown** (headers, bullet points, bold text) to make the content easy to read.
-       - **Language**: Maintain the **SAME language** as the detected content.
-    3. **Tag Selection**:
-       - Suggest 3-5 relevant tags.
-       - **CRITICAL**: You MUST prioritize using tags from the 'Available Tags' list if they are relevant.
-       - Only create new tags if absolutely necessary and no existing tags are suitable.
-       - Tags should be in the same language as the content or the existing tags style.
+【已有标签库】
+{tags_text}
 
-    Output Format:
-    Return ONLY a valid JSON object with no markdown formatting or other text.
-    {{
-      "ai_content": "The organized and refined content using markdown",
-      "tags": ["tag1", "tag2", "tag3"]
-    }}
-    """
+【你的任务】
+
+1. **生成摘要 (summary)**
+   - 用一段简洁的话概括这条记录的核心内容
+   - 长度控制在 50-150 字
+   - 便于用户快速了解记录主旨
+   - 使用与原文相同的语言
+
+2. **整理内容 (refined_content)**
+   - 对原始内容进行格式化和结构优化
+   - 可以使用 Markdown 格式（二级标题、列表、加粗等）
+   - 禁止使用一级标题（# 开头的行）
+   - 修正明显的错别字和语法问题
+   - 提炼要点，去除冗余信息
+   - 保留原文的核心信息，不要编造新内容
+   - 如果原文很简短，整理后也应保持简短
+   - 使用与原文相同的语言
+
+3. **推荐标签 (tags)**
+   - 推荐 3-5 个相关标签
+   - 优先从【已有标签库】中选择匹配的标签
+   - 只有在没有合适的已有标签时才创建新标签
+   - 标签语言与内容保持一致
+
+【输出格式】
+只输出一个 JSON 对象，不要包含任何其他文字或 Markdown 代码块：
+{{"summary": "摘要内容", "refined_content": "整理后的内容", "tags": ["标签1", "标签2"]}}
+"""
 
     def _build_api_url(self, base_url: str, endpoint: str) -> str:
         """构建 API URL，自动添加 /v1 前缀（如果需要）"""
@@ -139,14 +147,19 @@ class AiService:
 
         result = self._parse_json_from_text(content)
         if not isinstance(result, dict):
-            return AiGenerateResponse(summary=None, suggested_tags=[])
+            return AiGenerateResponse(summary=None, refined_content=None, suggested_tags=[])
 
-        summary = result.get("ai_content") or result.get("summary")
+        summary = result.get("summary")
+        refined_content = result.get("refined_content") or result.get("ai_content")
         tags = result.get("tags") or result.get("suggestedTags") or []
         if not isinstance(tags, list):
             tags = []
         tags_out: list[str] = [str(t).strip() for t in tags if str(t).strip()]
-        return AiGenerateResponse(summary=str(summary) if summary else None, suggested_tags=tags_out)
+        return AiGenerateResponse(
+            summary=str(summary) if summary else None,
+            refined_content=str(refined_content) if refined_content else None,
+            suggested_tags=tags_out
+        )
 
     def _parse_json_from_text(self, text: str) -> Any:
         text = text.strip()

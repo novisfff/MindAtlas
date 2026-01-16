@@ -8,6 +8,7 @@ import { TimelinePage } from '@/features/timeline'
 import { SettingsPage, EntryTypeSettings, TagSettings } from '@/features/settings'
 import { AiProviderSettings } from '@/features/ai-providers'
 import { AssistantPage } from '@/features/assistant'
+import { ToolSettings, SkillSettings } from '@/features/assistant-config'
 
 export default function App() {
   return (
@@ -27,6 +28,8 @@ export default function App() {
             <Route path="/settings/entry-types" element={<EntryTypeSettings />} />
             <Route path="/settings/tags" element={<TagSettings />} />
             <Route path="/settings/ai-providers" element={<AiProviderSettings />} />
+            <Route path="/settings/assistant-tools" element={<ToolSettings />} />
+            <Route path="/settings/assistant-skills" element={<SkillSettings />} />
             <Route path="/assistant" element={<AssistantPage />} />
           </Route>
         </Routes>

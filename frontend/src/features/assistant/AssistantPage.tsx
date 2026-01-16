@@ -3,13 +3,26 @@ import { useTranslation } from 'react-i18next'
 import { Menu } from 'lucide-react'
 import { ChatWindow } from './components/ChatWindow'
 import { ConversationList } from './components/ConversationList'
+import { ChatStoreProvider } from './components/ChatStoreProvider'
 import { useConversationsQuery, useConversationQuery, useDeleteConversationMutation } from './queries'
 import { useChatStore } from './stores/chat-store'
+import { useSearchParams } from 'react-router-dom'
 
-export default function AssistantPage() {
+function AssistantPageContent() {
   const { t } = useTranslation()
-  const { currentConversationId, setConversationId, clearMessages, isLoading } = useChatStore()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const { currentConversationId, setConversationId, clearMessages, isLoading, setMessages } = useChatStore()
   const [isSheetOpen, setSheetOpen] = useState(false)
+
+  // Handle URL query parameter for conversation ID
+  useEffect(() => {
+    const idFromUrl = searchParams.get('id')
+    if (idFromUrl && idFromUrl !== currentConversationId) {
+      setConversationId(idFromUrl)
+      // Clean up URL after processing
+      setSearchParams({})
+    }
+  }, [searchParams, currentConversationId, setConversationId, setSearchParams])
   const loadedIdRef = useRef<string | null>(null)
 
   const { data: conversationsData } = useConversationsQuery()
@@ -17,15 +30,11 @@ export default function AssistantPage() {
 
   const conversations = conversationsData?.items || []
 
-  const { data: conversation } = useConversationQuery(currentConversationId)
+  const { data: conversation } = useConversationQuery(currentConversationId, { enabled: !isLoading })
 
   useEffect(() => {
     if (conversation?.messages) {
-      // Prevent overwriting local state if we are generating a response (isLoading)
-      // or if we have already loaded this conversation (to avoid race conditions with background refetches)
       if (isLoading) {
-        // If we heavily rely on local state during loading, we mark this ID as "handled"
-        // so that a subsequent non-loading update doesn't clobber it with stale data.
         if (conversation.id === currentConversationId) {
           loadedIdRef.current = conversation.id
         }
@@ -33,41 +42,61 @@ export default function AssistantPage() {
       }
 
       if (conversation.id !== loadedIdRef.current) {
-        useChatStore.setState({
-          messages: conversation.messages.map((msg) => {
-            // 将后端的 toolCalls + toolResults 合并为前端的 ToolCall 格式
-            let toolCalls: { id: string; name: string; args: Record<string, unknown>; result?: string; status: 'completed' | 'error' }[] | undefined
-            if (msg.toolCalls && Array.isArray(msg.toolCalls)) {
-              const resultsMap = new Map<string, { status: string; result: string }>()
-              if (msg.toolResults && Array.isArray(msg.toolResults)) {
-                for (const r of msg.toolResults) {
-                  resultsMap.set(r.id, { status: r.status, result: r.result })
-                }
+        const mappedMessages = conversation.messages.map((msg) => {
+          let toolCalls: { id: string; name: string; args: Record<string, unknown>; result?: string; status: 'completed' | 'error' }[] | undefined
+          if (msg.toolCalls && Array.isArray(msg.toolCalls)) {
+            const resultsMap = new Map<string, { status: string; result: string }>()
+            if (msg.toolResults && Array.isArray(msg.toolResults)) {
+              for (const r of msg.toolResults) {
+                resultsMap.set(r.id, { status: r.status, result: r.result })
               }
-              toolCalls = msg.toolCalls.map((tc: { id: string; name: string; args: Record<string, unknown> }) => {
-                const result = resultsMap.get(tc.id)
-                return {
-                  id: tc.id,
-                  name: tc.name,
-                  args: tc.args || {},
-                  result: result?.result,
-                  status: (result?.status === 'completed' ? 'completed' : 'error') as 'completed' | 'error',
-                }
-              })
             }
-            return {
-              id: msg.id,
-              role: (msg.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
-              content: msg.content,
-              toolCalls,
-              createdAt: new Date(msg.createdAt).getTime(),
+            toolCalls = msg.toolCalls.map((tc: { id: string; name: string; args: Record<string, unknown> }) => {
+              const result = resultsMap.get(tc.id)
+              return {
+                id: tc.id,
+                name: tc.name,
+                args: tc.args || {},
+                result: result?.result,
+                status: (result?.status === 'completed' ? 'completed' : 'error') as 'completed' | 'error',
+              }
+            })
+          }
+          // Map skillCalls from history
+          let skillCalls: { id: string; name: string; status: 'running' | 'completed' | 'error' }[] | undefined
+          if (msg.skillCalls && Array.isArray(msg.skillCalls)) {
+            skillCalls = msg.skillCalls.map((sc: { id: string; name: string; status: string }) => ({
+              id: sc.id,
+              name: sc.name,
+              status: (sc.status === 'completed' ? 'completed' : sc.status === 'error' ? 'error' : 'running') as 'running' | 'completed' | 'error',
+            }))
+          }
+          // Map analysis from history
+          let analysis: { id: string; content: string; status: 'running' | 'completed' } | undefined
+          if (msg.analysis && typeof msg.analysis === 'object') {
+            const a = msg.analysis as { id: string; content: string; status: string }
+            analysis = {
+              id: a.id,
+              content: a.content || '',
+              status: (a.status === 'completed' ? 'completed' : 'running') as 'running' | 'completed',
             }
-          }),
+          }
+          return {
+            id: msg.id,
+            role: (msg.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+            content: msg.content,
+            toolCalls,
+            skillCalls,
+            analysis,
+            createdAt: new Date(msg.createdAt).getTime(),
+          }
         })
+
+        setMessages(mappedMessages)
         loadedIdRef.current = conversation.id
       }
     }
-  }, [conversation, isLoading, currentConversationId])
+  }, [conversation, isLoading, currentConversationId, setMessages])
 
   const handleNewConversation = async () => {
     clearMessages()
@@ -154,6 +183,14 @@ export default function AssistantPage() {
         <ChatWindow className="flex-1" />
       </div>
     </div>
+  )
+}
+
+export default function AssistantPage() {
+  return (
+    <ChatStoreProvider>
+      <AssistantPageContent />
+    </ChatStoreProvider>
   )
 }
 

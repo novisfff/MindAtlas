@@ -10,7 +10,7 @@ from langchain_core.tools import tool
 from sqlalchemy import func
 
 from app.common.time import utcnow
-from app.entry.models import Entry, entry_tag
+from app.entry.models import Entry, TimeMode, entry_tag
 from app.entry_type.models import EntryType
 from app.tag.models import Tag
 
@@ -66,7 +66,7 @@ def get_entries_by_time_range(
     end_date: str,
     type_code: Optional[str] = None
 ) -> str:
-    """获取指定时间范围内的记录。
+    """获取指定时间范围内的记录（按业务时间，非创建时间）。
 
     Args:
         start_date: 开始日期 (YYYY-MM-DD)
@@ -84,21 +84,43 @@ def get_entries_by_time_range(
     except ValueError:
         raise ValueError("日期格式错误，请使用 YYYY-MM-DD")
 
-    query = db.query(Entry).filter(
-        Entry.created_at >= start,
-        Entry.created_at <= end
+    # 让 end_date 覆盖到当日 23:59:59
+    end = end + timedelta(days=1) - timedelta(microseconds=1)
+
+    # 时间交集查询：POINT 在范围内，或 RANGE 与查询范围有交集
+    point_clause = (
+        (Entry.time_mode == TimeMode.POINT)
+        & Entry.time_at.isnot(None)
+        & (Entry.time_at >= start)
+        & (Entry.time_at <= end)
     )
+    range_clause = (
+        (Entry.time_mode == TimeMode.RANGE)
+        & Entry.time_from.isnot(None)
+        & Entry.time_to.isnot(None)
+        & (Entry.time_from <= end)
+        & (Entry.time_to >= start)
+    )
+
+    query = db.query(Entry).filter(point_clause | range_clause)
 
     if type_code:
         query = query.join(EntryType).filter(EntryType.code == type_code)
 
-    entries = query.order_by(Entry.created_at.desc()).all()
+    entries = query.order_by(
+        func.coalesce(Entry.time_at, Entry.time_from).desc(),
+        Entry.created_at.desc(),
+    ).all()
 
     results = [{
         "id": str(e.id),
         "title": e.title,
         "type": e.type.name if e.type else "",
-        "created_at": e.created_at.strftime("%Y-%m-%d"),
+        "summary": e.summary or "",
+        "time_mode": e.time_mode.value if e.time_mode else "",
+        "time_at": e.time_at.strftime("%Y-%m-%d") if e.time_at else None,
+        "time_from": e.time_from.strftime("%Y-%m-%d") if e.time_from else None,
+        "time_to": e.time_to.strftime("%Y-%m-%d") if e.time_to else None,
     } for e in entries]
 
     return json.dumps(results, ensure_ascii=False, indent=2)

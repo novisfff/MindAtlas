@@ -6,11 +6,26 @@ export interface ToolCall {
   status: 'pending' | 'running' | 'completed' | 'error'
 }
 
+export interface SkillCall {
+  id: string
+  name: string
+  status: 'running' | 'completed' | 'error'
+  hidden?: boolean
+}
+
+export interface Analysis {
+  id: string
+  content: string
+  status: 'running' | 'completed'
+}
+
 export interface Message {
   id: string
   role: 'user' | 'assistant' | 'system' | 'tool'
   content: string
   toolCalls?: ToolCall[]
+  skillCalls?: SkillCall[]
+  analysis?: Analysis
   toolResults?: { id: string; status: string; result: string }[]
   createdAt: string
   updatedAt: string

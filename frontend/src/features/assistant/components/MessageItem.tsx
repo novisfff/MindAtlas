@@ -2,8 +2,10 @@ import ReactMarkdown from 'react-markdown'
 import { Bot, User } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
-import { ToolCall } from '../types'
+import { ToolCall, SkillCall, Analysis } from '../types'
 import { ToolCallDisplay } from './ToolCallDisplay'
+import { SkillCallDisplay } from './SkillCallDisplay'
+import { AnalysisDisplay } from './AnalysisDisplay'
 
 interface MessageItemProps {
   message: {
@@ -11,6 +13,8 @@ interface MessageItemProps {
     role: 'user' | 'assistant'
     content: string
     toolCalls?: ToolCall[]
+    skillCalls?: SkillCall[]
+    analysis?: Analysis
     createdAt: number
   }
   variant?: 'default' | 'compact'
@@ -55,8 +59,14 @@ export function MessageItem({ message, variant = 'default' }: MessageItemProps) 
             ? "bg-primary text-primary-foreground rounded-tr-sm"
             : "bg-muted/50 border border-border/50 rounded-tl-sm hover:bg-muted/80 hover:shadow-md"
         )}>
+          {message.skillCalls && message.skillCalls.length > 0 && (
+            <SkillCallDisplay skillCalls={message.skillCalls} variant={variant} />
+          )}
           {message.toolCalls && message.toolCalls.length > 0 && (
-            <ToolCallDisplay toolCalls={message.toolCalls!} />
+            <ToolCallDisplay toolCalls={message.toolCalls!} variant={variant} />
+          )}
+          {message.analysis && (
+            <AnalysisDisplay analysis={message.analysis} />
           )}
           <ReactMarkdown
             components={{

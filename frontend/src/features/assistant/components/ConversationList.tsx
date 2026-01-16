@@ -1,8 +1,9 @@
-import { Plus, MessageSquare, Trash2, MoreHorizontal } from 'lucide-react'
+import { Plus, MessageSquare, Trash2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { Conversation } from '../types'
 import { useState } from 'react'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 
 interface ConversationListProps {
   conversations: Conversation[]
@@ -21,11 +22,21 @@ export function ConversationList({
 }: ConversationListProps) {
   const { t } = useTranslation()
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [deleteConfirmation, setDeleteConfirmation] = useState<{ isOpen: boolean, id: string | null }>({
+    isOpen: false,
+    id: null
+  })
 
-  const handleDelete = async (e: React.MouseEvent, id: string) => {
+  const handleDeleteClick = (e: React.MouseEvent, id: string) => {
     e.stopPropagation()
-    if (confirm(t('pages.assistant.confirmDelete', 'Delete this conversation?'))) {
+    setDeleteConfirmation({ isOpen: true, id })
+  }
+
+  const handleConfirmDelete = async () => {
+    if (deleteConfirmation.id) {
+      const id = deleteConfirmation.id
       setDeletingId(id)
+      setDeleteConfirmation({ isOpen: false, id: null })
       await onDelete(id)
       setDeletingId(null)
     }
@@ -83,14 +94,14 @@ export function ConversationList({
               </div>
 
               <button
-                onClick={(e) => handleDelete(e, conv.id)}
+                onClick={(e) => handleDeleteClick(e, conv.id)}
                 disabled={deletingId === conv.id}
                 className={cn(
                   "opacity-0 group-hover:opacity-100 transition-opacity",
                   "p-1.5 hover:bg-destructive/10 hover:text-destructive rounded-md",
                   "focus:opacity-100 focus:outline-none"
                 )}
-                title={t('common.delete', 'Delete')}
+                title={t('actions.delete', 'Delete')}
               >
                 <Trash2 className="h-4 w-4" />
               </button>
@@ -98,6 +109,17 @@ export function ConversationList({
           ))
         )}
       </div>
+
+      <ConfirmDialog
+        isOpen={deleteConfirmation.isOpen}
+        title={t('pages.assistant.deleteTitle', 'Delete Conversation')}
+        description={t('pages.assistant.deleteConfirm', 'Are you sure you want to delete this conversation? This action cannot be undone.')}
+        confirmText={t('actions.delete', 'Delete')}
+        cancelText={t('actions.cancel', 'Cancel')}
+        variant="destructive"
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setDeleteConfirmation({ isOpen: false, id: null })}
+      />
     </div>
   )
 }

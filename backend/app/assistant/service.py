@@ -112,6 +112,8 @@ class AssistantService:
         # 收集工具调用信息用于保存到数据库
         tool_calls_data: list[dict] = []
         tool_results_data: list[dict] = []
+        skill_calls_data: list[dict] = []
+        analysis_data: dict | None = None
 
         def on_tool_call_start(tool_call_id: str, name: str, args: dict) -> None:
             tool_calls_data.append({
@@ -137,6 +139,51 @@ class AssistantService:
                 "result": result,
             }))
 
+        def on_skill_start(skill_id: str, name: str, hidden: bool) -> None:
+            skill_calls_data.append({
+                "id": skill_id,
+                "name": name,
+                "status": "running",
+                "hidden": hidden,
+            })
+            tool_events.append(self._sse("skill_start", {
+                "id": skill_id,
+                "name": name,
+                "hidden": hidden,
+            }))
+
+        def on_skill_end(skill_id: str, status: str) -> None:
+            # 更新 skill 状态
+            for sc in skill_calls_data:
+                if sc["id"] == skill_id:
+                    sc["status"] = status
+                    break
+            tool_events.append(self._sse("skill_end", {
+                "id": skill_id,
+                "status": status,
+            }))
+
+        def on_analysis_start(analysis_id: str) -> None:
+            nonlocal analysis_data
+            analysis_data = {
+                "id": analysis_id,
+                "content": "",
+                "status": "running",
+            }
+            tool_events.append(self._sse("analysis_start", {"id": analysis_id}))
+
+        def on_analysis_delta(analysis_id: str, delta: str) -> None:
+            nonlocal analysis_data
+            if analysis_data and analysis_data.get("id") == analysis_id:
+                analysis_data["content"] += delta
+            tool_events.append(self._sse("analysis_delta", {"id": analysis_id, "delta": delta}))
+
+        def on_analysis_end(analysis_id: str) -> None:
+            nonlocal analysis_data
+            if analysis_data and analysis_data.get("id") == analysis_id:
+                analysis_data["status"] = "completed"
+            tool_events.append(self._sse("analysis_end", {"id": analysis_id}))
+
         try:
             # 发送开始事件
             yield self._sse("message_start", {
@@ -150,6 +197,11 @@ class AssistantService:
                 conversation.id,
                 on_tool_call_start=on_tool_call_start,
                 on_tool_call_end=on_tool_call_end,
+                on_skill_start=on_skill_start,
+                on_skill_end=on_skill_end,
+                on_analysis_start=on_analysis_start,
+                on_analysis_delta=on_analysis_delta,
+                on_analysis_end=on_analysis_end,
             ):
                 while tool_events:
                     yield tool_events.popleft()
@@ -166,6 +218,10 @@ class AssistantService:
                 assistant_msg.tool_calls = tool_calls_data
             if tool_results_data:
                 assistant_msg.tool_results = tool_results_data
+            if skill_calls_data:
+                assistant_msg.skill_calls = skill_calls_data
+            if analysis_data:
+                assistant_msg.analysis = analysis_data
             conversation.last_message_at = utcnow()
             self.db.commit()
 
@@ -194,15 +250,23 @@ class AssistantService:
         conversation_id: UUID,
         on_tool_call_start: Callable[[str, str, dict], None] | None = None,
         on_tool_call_end: Callable[[str, str, str], None] | None = None,
+        on_skill_start: Callable[[str, str, bool], None] | None = None,
+        on_skill_end: Callable[[str, str], None] | None = None,
+        on_analysis_start: Callable[[str], None] | None = None,
+        on_analysis_delta: Callable[[str, str], None] | None = None,
+        on_analysis_end: Callable[[str], None] | None = None,
     ) -> Iterator[str]:
         """生成 AI 回复，优先使用 LangChain Agent"""
+        logger.debug("assistant._generate_response start conversation_id=%s", conversation_id)
         cfg = self._get_openai_config()
         if not cfg:
+            logger.debug("assistant: no active AI provider config, using fallback response")
             yield from self._fallback_response()
             return
 
         # 尝试使用 LangChain Agent
         try:
+            logger.debug("assistant: creating AssistantAgent")
             from app.assistant.agent import AssistantAgent
             agent = AssistantAgent(
                 api_key=cfg.api_key,
@@ -212,32 +276,43 @@ class AssistantService:
             )
             history = self._build_llm_messages(conversation_id)
             user_input = history[-1]["content"] if history else ""
+            logger.debug("assistant: calling agent.stream (user_input_len=%d)", len(user_input))
 
             for delta in agent.stream(
                 history[:-1],
                 user_input,
                 on_tool_call_start=on_tool_call_start,
                 on_tool_call_end=on_tool_call_end,
+                on_skill_start=on_skill_start,
+                on_skill_end=on_skill_end,
+                on_analysis_start=on_analysis_start,
+                on_analysis_delta=on_analysis_delta,
+                on_analysis_end=on_analysis_end,
             ):
                 yield delta
+            logger.debug("assistant._generate_response end (agent completed)")
             return
         except Exception as e:
             error_msg = str(e)
             logger.error("LangChain Agent failed: %s", error_msg, exc_info=True)
             # 如果是内容审核拒绝，直接返回错误，不要 fallback
-            if "blocked" in error_msg.lower() or "content" in error_msg.lower():
+            lowered = error_msg.lower()
+            if any(k in lowered for k in ("blocked", "content_filter", "content filter", "policy", "safety")):
                 yield "抱歉，您的请求被 AI 服务拒绝，请尝试换一种表达方式。"
                 return
 
         # 降级到原始 OpenAI 调用
+        logger.debug("assistant: falling back to OpenAI stream")
         messages = self._build_llm_messages(conversation_id)
         try:
             for delta in self._openai_stream(cfg, messages):
                 yield delta
+            logger.debug("assistant._generate_response end (openai fallback)")
             return
         except Exception as e:
             logger.warning("OpenAI stream failed: %s", e)
 
+        logger.debug("assistant._generate_response end (error fallback)")
         yield from self._fallback_response(error=True)
 
     def _fallback_response(self, error: bool = False) -> Iterator[str]:
@@ -258,7 +333,9 @@ class AssistantService:
 
     def _sse(self, event: str, data: dict) -> bytes:
         """构造 SSE 事件"""
-        payload = json.dumps(data, ensure_ascii=False)
+        # 注意：tool/result 等字段可能包含非 JSON-serializable 对象（例如 datetime/UUID/异常对象）
+        # 这里统一用 default=str，避免 SSE 流因为序列化失败而中断。
+        payload = json.dumps(data, ensure_ascii=False, default=str)
         return f"event: {event}\ndata: {payload}\n\n".encode("utf-8")
 
     # ==================== Title Generation ====================

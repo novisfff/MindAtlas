@@ -23,6 +23,8 @@ class MessageResponse(OrmModel):
     content: str
     tool_calls: Optional[Any] = None
     tool_results: Optional[Any] = None
+    skill_calls: Optional[Any] = None
+    analysis: Optional[Any] = None
     created_at: datetime
     updated_at: datetime
 
