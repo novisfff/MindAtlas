@@ -344,7 +344,12 @@ export function SkillManager() {
         variant="default"
         onConfirm={() =>
           resetId &&
-          resetMutation.mutate(resetId, { onSuccess: () => setResetId(null) })
+          resetMutation.mutate(resetId, {
+            onSuccess: () => {
+              setResetId(null)
+              if (editingId === resetId) setEditingId(null)
+            },
+          })
         }
         onCancel={() => setResetId(null)}
       />

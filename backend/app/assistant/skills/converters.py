@@ -44,6 +44,22 @@ def db_skill_to_definition(skill: AssistantSkill) -> SkillDefinition:
     for s in (skill.steps or []):
         step_type = s.type if s.type in ("analysis", "tool", "summary") else "analysis"
         args_from = s.args_from if s.args_from in ("context", "previous", "custom", "json") else None
+        output_mode = getattr(s, "output_mode", None)
+        if output_mode not in ("text", "json"):
+            output_mode = None
+
+        output_fields_raw = getattr(s, "output_fields", None)
+        output_fields: list[str] | None = None
+        if isinstance(output_fields_raw, list):
+            cleaned: list[str] = []
+            for v in output_fields_raw:
+                if isinstance(v, str) and v.strip():
+                    cleaned.append(v.strip())
+            output_fields = cleaned or None
+
+        include_in_summary = getattr(s, "include_in_summary", None)
+        if include_in_summary is None:
+            include_in_summary = True
         steps.append(
             SkillStep(
                 type=step_type,
@@ -51,6 +67,9 @@ def db_skill_to_definition(skill: AssistantSkill) -> SkillDefinition:
                 tool_name=s.tool_name,
                 args_from=args_from,
                 args_template=getattr(s, "args_template", None),
+                output_mode=output_mode,
+                output_fields=output_fields,
+                include_in_summary=bool(include_in_summary),
             )
         )
 

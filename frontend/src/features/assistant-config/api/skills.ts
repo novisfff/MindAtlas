@@ -8,6 +8,9 @@ export interface SkillStep {
   toolName: string | null
   argsFrom: 'context' | 'previous' | 'custom' | 'json' | null
   argsTemplate: string | null
+  outputMode: 'text' | 'json' | null
+  outputFields: string[] | null
+  includeInSummary: boolean | null
   createdAt: string
   updatedAt: string
 }
@@ -35,6 +38,9 @@ export interface SkillStepInput {
   toolName?: string
   argsFrom?: 'context' | 'previous' | 'custom' | 'json'
   argsTemplate?: string
+  outputMode?: 'text' | 'json'
+  outputFields?: string[]
+  includeInSummary?: boolean
 }
 
 export interface CreateSkillRequest {

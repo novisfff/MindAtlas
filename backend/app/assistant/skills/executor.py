@@ -120,8 +120,26 @@ class SkillExecutor:
                 value = history_text
             elif var_name == "last_step_result":
                 value = context.get("last_step_result", "")
+            elif var_name == "last_step_result_raw":
+                value = context.get("last_step_result_raw", "")
             elif re.fullmatch(r"step_\d+_result", var_name):
                 value = context.get(var_name, "")
+            elif re.fullmatch(r"step_\d+_result_raw", var_name):
+                value = context.get(var_name, "")
+            elif re.fullmatch(r"step_\d+_[a-zA-Z0-9_]+", var_name):
+                m = re.fullmatch(r"step_(\d+)_([a-zA-Z0-9_]+)", var_name)
+                if not m:
+                    value = ""
+                else:
+                    step_no = int(m.group(1))
+                    field = m.group(2)
+                    allowed = context.get(f"step_{step_no}_allowed_fields")
+                    if isinstance(allowed, list) and allowed:
+                        if field not in allowed:
+                            raise ValueError(f"Disallowed template variable: {var_name}")
+                    else:
+                        raise ValueError(f"Template variable not available (step not in jsonmode): {var_name}")
+                    value = context.get(var_name, "")
             else:
                 if var_name not in warned_unknown:
                     warned_unknown.add(var_name)
@@ -163,8 +181,26 @@ class SkillExecutor:
                 value = history
             elif var_name == "last_step_result":
                 value = context.get("last_step_result", "")
+            elif var_name == "last_step_result_raw":
+                value = context.get("last_step_result_raw", "")
             elif re.fullmatch(r"step_\d+_result", var_name):
                 value = context.get(var_name, "")
+            elif re.fullmatch(r"step_\d+_result_raw", var_name):
+                value = context.get(var_name, "")
+            elif re.fullmatch(r"step_\d+_[a-zA-Z0-9_]+", var_name):
+                m = re.fullmatch(r"step_(\d+)_([a-zA-Z0-9_]+)", var_name)
+                if not m:
+                    value = ""
+                else:
+                    step_no = int(m.group(1))
+                    field = m.group(2)
+                    allowed = context.get(f"step_{step_no}_allowed_fields")
+                    if isinstance(allowed, list) and allowed:
+                        if field not in allowed:
+                            raise ValueError(f"Disallowed template variable: {var_name}")
+                    else:
+                        raise ValueError(f"Template variable not available (step not in jsonmode): {var_name}")
+                    value = context.get(var_name, "")
             else:
                 if var_name not in warned_unknown:
                     warned_unknown.add(var_name)
@@ -193,6 +229,53 @@ class SkillExecutor:
             args = {k: v for k, v in args.items() if k in allowed_keys}
 
         return args
+
+    def _render_instruction_template(
+        self,
+        template: str,
+        *,
+        context: dict[str, Any],
+        step_index: int,
+    ) -> str:
+        """渲染 analysis instruction 模板（支持 {{step_n_xxx}} 等变量；禁止 user_input/history）。"""
+        tpl = (template or "").strip()
+        if not tpl:
+            return ""
+
+        disallowed = {"user_input", "history"}
+
+        def repl(match: re.Match) -> str:
+            var_name = match.group(1)
+            if var_name in disallowed:
+                raise ValueError(f"analysis instruction cannot reference: {var_name}")
+            if var_name == "last_step_result":
+                value = context.get("last_step_result", "")
+                return self._truncate_text(value, self._MAX_ARGS_TEXT_LEN)
+            if var_name == "last_step_result_raw":
+                value = context.get("last_step_result_raw", "")
+                return self._truncate_text(value, self._MAX_ARGS_TEXT_LEN)
+            if re.fullmatch(r"step_\d+_result", var_name) or re.fullmatch(r"step_\d+_result_raw", var_name):
+                value = context.get(var_name, "")
+                return self._truncate_text(value, self._MAX_ARGS_TEXT_LEN)
+            if re.fullmatch(r"step_\d+_[a-zA-Z0-9_]+", var_name):
+                m = re.fullmatch(r"step_(\d+)_([a-zA-Z0-9_]+)", var_name)
+                if not m:
+                    return ""
+                ref_step_no = int(m.group(1))
+                field = m.group(2)
+                if ref_step_no >= step_index:
+                    raise ValueError(f"analysis instruction references future step: {var_name}")
+                allowed = context.get(f"step_{ref_step_no}_allowed_fields")
+                if isinstance(allowed, list) and allowed:
+                    if field not in allowed:
+                        raise ValueError(f"analysis instruction references disallowed field: {var_name}")
+                else:
+                    raise ValueError(f"analysis instruction template variable not available (step not in jsonmode): {var_name}")
+                value = context.get(var_name, "")
+                return self._truncate_text(value, self._MAX_ARGS_TEXT_LEN)
+            return ""
+
+        return self._truncate_text(self._TEMPLATE_VAR_RE.sub(repl, tpl), self._MAX_ARGS_TEXT_LEN)
 
     def _build_tool_args_source_text(
         self,
@@ -418,6 +501,7 @@ class SkillExecutor:
         context: dict[str, Any] = {
             "user_input": user_input,
             "history": history,
+            "summary_trace": [],
         }
 
         # 根据模式分发执行
@@ -460,7 +544,7 @@ class SkillExecutor:
             )
         elif step.type == "analysis":
             yield from self._execute_analysis_step(
-                skill, step, context,
+                skill, step, context, step_index,
                 on_analysis_start, on_analysis_delta, on_analysis_end
             )
         elif step.type == "summary":
@@ -481,6 +565,7 @@ class SkillExecutor:
 
         tool_name = step.tool_name or ""
         tool_call_id = f"tool_{uuid.uuid4().hex[:8]}"
+        include_in_summary = getattr(step, "include_in_summary", True) is not False
 
         if not tool_name:
             msg = "No tool_name specified in step"
@@ -515,18 +600,43 @@ class SkillExecutor:
         previous_output = self._truncate_text(
             context.get("last_step_result", ""), self._MAX_ARGS_TEXT_LEN
         )
-        source_text = self._build_tool_args_source_text(
-            step=step,
-            context=context,
-            raw_user_input=raw_user_input,
-            previous_output=previous_output,
-        )
-        args = self._prepare_tool_args(
-            skill, step, context,
-            tool=tool,
-            user_input=source_text,
-            previous_output=previous_output,
-        )
+        try:
+            source_text = self._build_tool_args_source_text(
+                step=step,
+                context=context,
+                raw_user_input=raw_user_input,
+                previous_output=previous_output,
+            )
+            args = self._prepare_tool_args(
+                skill, step, context,
+                tool=tool,
+                user_input=source_text,
+                previous_output=previous_output,
+            )
+        except Exception as e:
+            msg = f"Failed to prepare tool args: {e}"
+            logger.warning(msg)
+            if on_tool_call_start:
+                on_tool_call_start(tool_call_id, tool_name, {})
+                yield ""
+            if on_tool_call_end:
+                on_tool_call_end(tool_call_id, "error", msg)
+                yield ""
+            context["last_step_result"] = msg
+            context[f"step_{step_index}_result"] = msg
+            return
+
+        trace_entry: dict[str, Any] | None = None
+        if include_in_summary and isinstance(context.get("summary_trace"), list):
+            trace_entry = {
+                "index": step_index,
+                "type": "tool",
+                "tool": {
+                    "name": tool_name,
+                    "args": self._sanitize_for_summary(args),
+                },
+            }
+            context["summary_trace"].append(trace_entry)
 
         if on_tool_call_start:
             on_tool_call_start(tool_call_id, tool_name, args)
@@ -565,7 +675,25 @@ class SkillExecutor:
 
         result_str = self._stringify_result(result)
         context["last_step_result"] = result_str
+        # 额外存 raw：若工具返回 JSON 字符串，尽量解析为 dict/list，便于后续步骤复用
+        result_raw: Any = result
+        if isinstance(result, str):
+            s = result.strip()
+            if s.startswith("{") or s.startswith("["):
+                try:
+                    parsed = json.loads(s)
+                    if isinstance(parsed, (dict, list)):
+                        result_raw = parsed
+                except Exception:
+                    result_raw = result
+        context["last_step_result_raw"] = result_raw
         context[f"step_{step_index}_result"] = result_str
+        context[f"step_{step_index}_result_raw"] = result_raw
+
+        if trace_entry is not None:
+            trace_entry["tool"]["status"] = status
+            trace_entry["tool"]["result"] = self._sanitize_for_summary(result_raw)
+            trace_entry["tool"]["result_text"] = self._truncate_text(result_str, 800)
 
         if on_tool_call_end:
             on_tool_call_end(tool_call_id, status, result_str)
@@ -685,41 +813,85 @@ class SkillExecutor:
         skill: SkillDefinition,
         step: SkillStep,
         context: dict[str, Any],
+        step_index: int,
         on_analysis_start: Callable | None = None,
         on_analysis_delta: Callable | None = None,
         on_analysis_end: Callable | None = None,
     ) -> Iterator[str]:
-        """执行分析步骤（流式输出思考过程，不负责生成工具参数）"""
+        """执行分析步骤（流式输出；会把输出写入 context 供后续步骤使用）"""
         if not step.instruction:
             return
 
         today = date.today()
         analysis_id = f"analysis_{uuid.uuid4().hex[:8]}"
+        try:
+            instruction = self._render_instruction_template(
+                step.instruction or "",
+                context=context,
+                step_index=step_index,
+            ).strip()
+        except Exception as e:
+            # 配置错误时不调用模型，直接把错误写入上下文
+            msg = f"Invalid analysis instruction template: {e}"
+            logger.warning(msg)
+            context["last_step_result"] = msg
+            context[f"step_{step_index}_result"] = msg
+            if on_analysis_start:
+                on_analysis_start(analysis_id)
+                yield ""
+            if on_analysis_delta:
+                on_analysis_delta(analysis_id, msg)
+                yield ""
+            if on_analysis_end:
+                on_analysis_end(analysis_id)
+                yield ""
+            return
+        json_mode = getattr(step, "output_mode", None) == "json" or "json" in instruction.lower()
+        allowed_fields = getattr(step, "output_fields", None) if getattr(step, "output_mode", None) == "json" else None
+        include_in_summary = getattr(step, "include_in_summary", True) is not False
 
-        # 构建分析 Prompt - 只输出“思考过程/计划”，不输出参数 JSON
-        analysis_prompt = f"""你是 MindAtlas AI 助手的分析模块。请根据用户输入给出你的思考过程与执行计划。
+        context_snapshot = json.dumps(context, ensure_ascii=False, default=str)[:4000]
+
+        output_requirements = "1. 按任务要求输出\n2. 避免输出与任务无关的解释文字\n"
+        if not json_mode:
+            output_requirements = (
+                "1. 用 3-6 句话说明你的理解、关键假设、准备采取的步骤\n"
+                "2. 禁止输出任何 JSON、代码块围栏或工具参数\n"
+            )
+        elif isinstance(allowed_fields, list) and allowed_fields:
+            keys = ", ".join([f'"{k}"' for k in allowed_fields])
+            output_requirements = (
+                "1. 只输出一个 JSON 对象（不要 Markdown/解释/代码块围栏）\n"
+                f"2. 只允许输出以下字段：[{keys}]，不要输出任何额外字段\n"
+            )
+
+        analysis_prompt = f"""你是 MindAtlas AI 助手的分析模块。
 
 ## 当前日期
 今天是 {today.isoformat()}（{today.strftime('%A')}）
 
 ## 任务
-{step.instruction}
+{instruction}
+
+## 已知上下文（包含已执行步骤的结果）
+{context_snapshot}
 
 ## 用户输入
 {context.get("user_input", "")}
 
 ## 输出要求
-1. 用 3-6 句话说明你的理解、关键假设、准备采取的步骤
-2. 禁止输出任何 JSON、代码块围栏或工具参数
+{output_requirements}
 """
         # 通知分析开始
         if on_analysis_start:
             on_analysis_start(analysis_id)
             yield ""
 
+        chunks: list[str] = []
         try:
             for chunk in self.llm.stream([{"role": "user", "content": analysis_prompt}]):
                 if chunk.content:
+                    chunks.append(chunk.content)
                     if on_analysis_delta:
                         on_analysis_delta(analysis_id, chunk.content)
                         yield ""
@@ -727,9 +899,93 @@ class SkillExecutor:
         except Exception as e:
             logger.warning("Analysis step failed: %s", e)
         finally:
+            analysis_text = "".join(chunks).strip()
+            if analysis_text:
+                context["last_step_result"] = analysis_text
+                context[f"step_{step_index}_result"] = analysis_text
+
+                if getattr(step, "output_mode", None) == "json":
+                    parsed_obj = self._extract_json_object(analysis_text)
+                    if parsed_obj:
+                        whitelist = getattr(step, "output_fields", None) or []
+                        filtered = {k: parsed_obj.get(k) for k in whitelist if isinstance(k, str) and k.strip()}
+                        context[f"step_{step_index}_allowed_fields"] = list(filtered.keys())
+                        context["last_step_result_raw"] = filtered
+                        context[f"step_{step_index}_result_raw"] = filtered
+                        for key, value in filtered.items():
+                            context[f"step_{step_index}_{key}"] = value
+
+                if include_in_summary and isinstance(context.get("summary_trace"), list):
+                    out: Any = analysis_text
+                    if getattr(step, "output_mode", None) == "json":
+                        out = context.get(f"step_{step_index}_result_raw") or {}
+                    context["summary_trace"].append({
+                        "index": step_index,
+                        "type": "analysis",
+                        "instruction": self._truncate_text(instruction, 800),
+                        "output_mode": getattr(step, "output_mode", None) or "text",
+                        "output_fields": getattr(step, "output_fields", None),
+                        "output": self._sanitize_for_summary(out),
+                    })
+
             if on_analysis_end:
                 on_analysis_end(analysis_id)
                 yield ""
+
+    @staticmethod
+    def _sanitize_for_summary(value: Any) -> Any:
+        """用于 summary payload：脱敏 + 控量裁剪，避免泄漏/爆 token。"""
+        sensitive_markers = (
+            "authorization",
+            "token",
+            "api_key",
+            "apikey",
+            "secret",
+            "password",
+            "passwd",
+            "bearer",
+        )
+
+        def is_sensitive_key(key: Any) -> bool:
+            if not isinstance(key, str):
+                return False
+            k = key.lower()
+            return any(m in k for m in sensitive_markers)
+
+        def prune(obj: Any, depth: int) -> Any:
+            if depth <= 0:
+                return "…"
+            if isinstance(obj, dict):
+                out: dict[str, Any] = {}
+                for i, (k, v) in enumerate(obj.items()):
+                    if i >= 30:
+                        out["…"] = f"+{max(0, len(obj) - 30)} more keys"
+                        break
+                    key = str(k)
+                    if is_sensitive_key(key):
+                        out[key] = "***"
+                    else:
+                        out[key] = prune(v, depth - 1)
+                return out
+            if isinstance(obj, list):
+                items = obj[:20]
+                out_list = [prune(v, depth - 1) for v in items]
+                if len(obj) > 20:
+                    out_list.append(f"…(+{len(obj) - 20} more)")
+                return out_list
+            if isinstance(obj, str):
+                s = obj.strip()
+                if len(s) > 800:
+                    return s[:800] + "…"
+                return s
+            if isinstance(obj, (int, float, bool)) or obj is None:
+                return obj
+            try:
+                return str(obj)
+            except Exception:
+                return "<unserializable>"
+
+        return prune(value, 3)
 
     def _execute_summary_step(
         self,
@@ -739,21 +995,44 @@ class SkillExecutor:
     ) -> Iterator[str]:
         """执行总结步骤（流式输出）"""
         logger.debug("executor summary step start")
-        prompt = EXECUTOR_PROMPT.format(
-            skill_name=skill.name,
-            skill_description=skill.description,
-            current_step="summary",
-            context_data=json.dumps(context, ensure_ascii=False, default=str)[:2000],
-            task_instruction=step.instruction or "生成友好的回复",
-            current_date=date.today().isoformat(),
+        trace = context.get("summary_trace", [])
+        if not isinstance(trace, list):
+            trace = []
+
+        payload = {
+            "skill": {"name": skill.name, "description": skill.description},
+            "user_request": context.get("user_input", ""),
+            "steps": trace,
+        }
+
+        system_prompt = (
+            "你是 MindAtlas 的 Skill 执行回执生成器。\n"
+            "你将收到一个 JSON 对象（用户消息）描述本轮技能执行信息，请基于这些信息给用户生成回执。\n"
+            "\n"
+            "字段说明（用户消息 JSON）：\n"
+            "- user_request: 用户本轮指令原文（仅本轮，不含历史）\n"
+            "- steps: 按顺序记录的步骤信息（可能包含 analysis 输出、tool 调用参数/结果），均来自本轮执行\n"
+            "  - steps[].type: analysis 或 tool\n"
+            "  - steps[].instruction: analysis 的指令（可能已渲染变量）\n"
+            "  - steps[].output/output_mode/output_fields: analysis 的输出\n"
+            "  - steps[].tool: 工具调用信息（name/args/status/result/result_text）\n"
+            "\n"
+            "写作要求：\n"
+            "1) 语气礼貌、简洁，明确说明是否成功\n"
+            "2) 优先列出标题/类型/时间等关键信息（如果 JSON 中存在）\n"
+            "3) 禁止编造不存在的字段/结果；缺失则省略或明确“未知”\n"
+            "4) 结尾给出可继续补充或修改的引导\n"
+            "\n"
+            "## 回执指令（来自 Skill 配置）\n"
+            f"{(step.instruction or '').strip() or '生成友好的回执'}\n"
         )
 
         messages = [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": context.get("user_input", "")},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
         ]
 
-        logger.debug("executor: calling LLM stream for summary")
+        logger.debug("executor: calling LLM stream for summary (filtered payload)")
         for chunk in self.llm.stream(messages):
             if chunk.content:
                 yield chunk.content

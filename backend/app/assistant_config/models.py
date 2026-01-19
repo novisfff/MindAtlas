@@ -88,6 +88,12 @@ class AssistantSkillStep(UuidPrimaryKeyMixin, TimestampMixin, Base):
     tool_name = Column(String(128), nullable=True)
     args_from = Column(String(32), nullable=True)  # context | previous | custom
     args_template = Column(Text, nullable=True)  # custom 模式的模板
+    # analysis 输出配置：text | json
+    output_mode = Column(String(16), nullable=True)
+    # analysis 输出字段白名单（仅 output_mode=json 时生效）
+    output_fields = Column(JSON, nullable=True)
+    # 是否将该步骤信息提供给 summary（默认 True）
+    include_in_summary = Column(Boolean, nullable=False, default=True)
 
     skill = relationship("AssistantSkill", back_populates="steps")
 

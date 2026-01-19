@@ -1,9 +1,11 @@
 import { useState, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Loader2, Check, X, Plus, Trash2, RotateCcw, MessageSquare, Wrench, Bot, ListChecks } from 'lucide-react'
+import { Loader2, Check, X, Plus, Trash2, RotateCcw, MessageSquare, Wrench, Bot, ListChecks, FileText } from 'lucide-react'
 import type { AssistantSkill, CreateSkillRequest, UpdateSkillRequest, SkillStepInput, SkillMode } from '../api/skills'
 import type { AssistantTool, InputParam } from '../api/tools'
 import { RichMentionInput } from './RichMentionInput'
+import { Tooltip } from '@/components/ui/Tooltip'
+import { SummaryIcon } from '@/components/icons/SummaryIcon'
 
 interface SkillRowProps {
   skill?: AssistantSkill
@@ -46,6 +48,9 @@ export function SkillRow({
       toolName: s.toolName || undefined,
       argsFrom: s.argsFrom || undefined,
       argsTemplate: s.argsTemplate || undefined,
+      outputMode: s.outputMode || undefined,
+      outputFields: s.outputFields || undefined,
+      includeInSummary: s.includeInSummary ?? false,
     })) || [{ type: 'analysis', instruction: '' }]
   )
 
@@ -96,7 +101,7 @@ export function SkillRow({
   }
 
   const addStep = () => {
-    setSteps([...steps, { type: 'tool', toolName: '' }])
+    setSteps([...steps, { type: 'tool', toolName: '', includeInSummary: false }])
   }
 
   const removeStep = (index: number) => {
@@ -310,6 +315,7 @@ export function SkillRow({
                 key={i}
                 index={i}
                 step={step}
+                allSteps={steps}
                 availableTools={availableTools}
                 onChange={(updates) => updateStep(i, updates)}
                 onRemove={() => removeStep(i)}
@@ -387,14 +393,61 @@ export function SkillRow({
 interface StepEditorProps {
   index: number
   step: SkillStepInput
+  allSteps: SkillStepInput[]
   availableTools: AssistantTool[]
   onChange: (updates: Partial<SkillStepInput>) => void
   onRemove: () => void
   canRemove: boolean
 }
 
-function StepEditor({ index, step, availableTools, onChange, onRemove, canRemove }: StepEditorProps) {
+function StepEditor({ index, step, allSteps, availableTools, onChange, onRemove, canRemove }: StepEditorProps) {
   const { t } = useTranslation()
+
+  const inputParams = useMemo((): InputParam[] => {
+    const base: InputParam[] = [
+      { name: 'user_input', description: 'User message content', paramType: 'string', required: true },
+      { name: 'history', description: 'Conversation history', paramType: 'string', required: true },
+      { name: 'last_step_result', description: 'Result of the previous step', paramType: 'string', required: true },
+      { name: 'last_step_result_raw', description: 'Parsed JSON result of the previous step (if any)', paramType: 'object', required: false },
+    ]
+
+    const prev: InputParam[] = []
+    for (let i = 0; i < index; i++) {
+      prev.push({
+        name: `step_${i + 1}_result`,
+        description: `Result of step ${i + 1}`,
+        paramType: 'string',
+        required: false,
+      })
+      prev.push({
+        name: `step_${i + 1}_result_raw`,
+        description: `Parsed JSON result of step ${i + 1} (if any)`,
+        paramType: 'object',
+        required: false,
+      })
+
+      const s = allSteps[i]
+      if (s?.type === 'analysis' && (s.outputMode || 'text') === 'json' && Array.isArray(s.outputFields) && s.outputFields.length > 0) {
+        s.outputFields.forEach((field) => {
+          const f = (field || '').trim()
+          if (!f) return
+          prev.push({
+            name: `step_${i + 1}_${f}`,
+            description: `JSON field "${f}" from step ${i + 1}`,
+            paramType: 'object',
+            required: false,
+          })
+        })
+      }
+    }
+
+    return [...base, ...prev]
+  }, [allSteps, index])
+
+  const analysisInstructionParams = useMemo((): InputParam[] => {
+    // analysis instruction 支持变量引用，但不允许 user_input/history 这类“用户输入变量”
+    return inputParams.filter((p) => p.name !== 'user_input' && p.name !== 'history')
+  }, [inputParams])
 
   return (
     <div className="group relative pl-10 pr-12 py-4 rounded-xl border bg-background/50 hover:bg-background hover:shadow-sm transition-all">
@@ -415,6 +468,23 @@ function StepEditor({ index, step, availableTools, onChange, onRemove, canRemove
             <option value="tool">{t('settings.skills.stepTool')}</option>
             <option value="summary">{t('settings.skills.stepSummary')}</option>
           </select>
+
+          {/* Include in Summary Switch */}
+          {/* Include in Summary Switch - Hide for Summary step */}
+          {step.type !== 'summary' && (
+            <Tooltip content={t('settings.skills.includeInSummary')}>
+              <button
+                type="button"
+                onClick={() => onChange({ includeInSummary: !(step.includeInSummary ?? false) })}
+                className={`p-2 rounded-md transition-all ${step.includeInSummary
+                  ? 'bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm'
+                  : 'bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground'
+                  }`}
+              >
+                <SummaryIcon className="w-4 h-4" />
+              </button>
+            </Tooltip>
+          )}
 
           {step.type === 'tool' && (
             <>
@@ -454,17 +524,7 @@ function StepEditor({ index, step, availableTools, onChange, onRemove, canRemove
             <RichMentionInput
               value={step.argsTemplate || ''}
               onChange={(val) => onChange({ argsTemplate: val })}
-              inputParams={[
-                { name: 'user_input', description: 'User message content', paramType: 'string', required: true },
-                { name: 'history', description: 'Conversation history', paramType: 'string', required: true },
-                { name: 'last_step_result', description: 'Result of the previous step', paramType: 'string', required: true },
-                ...Array.from({ length: index }).map((_, i) => ({
-                  name: `step_${i + 1}_result`,
-                  description: `Result of step ${i + 1}`,
-                  paramType: 'string' as const,
-                  required: true
-                }))
-              ]}
+              inputParams={inputParams}
               placeholder={step.argsFrom === 'json' ? '{"keyword": {{user_input}}, "limit": 10}' : t('settings.skills.argsTemplatePlaceholder')}
               className="font-mono text-sm"
               multiline
@@ -477,13 +537,125 @@ function StepEditor({ index, step, availableTools, onChange, onRemove, canRemove
         )}
 
         {(step.type === 'analysis' || step.type === 'summary') && (
-          <textarea
-            value={step.instruction || ''}
-            onChange={(e) => onChange({ instruction: e.target.value })}
-            className="w-full px-3 py-2 text-sm rounded-lg border bg-background resize-none focus:ring-2 focus:ring-primary/20"
-            rows={2}
-            placeholder={t('settings.skills.instructionPlaceholder')}
-          />
+          <>
+            {step.type === 'analysis' && (
+              <div className="flex flex-col gap-2">
+                <div className="flex items-start gap-4 p-3 rounded-lg border bg-muted/30">
+                  {/* Output Mode Selection */}
+                  <div className="flex flex-col gap-1.5 shrink-0">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      {t('settings.skills.outputMode')}
+                    </label>
+                    <div className="flex bg-background border rounded-lg p-1 w-fit">
+                      {(['text', 'json'] as const).map((mode) => (
+                        <button
+                          key={mode}
+                          type="button"
+                          onClick={() =>
+                            onChange({
+                              outputMode: mode,
+                              outputFields: mode === 'json' ? step.outputFields || [] : undefined,
+                            })
+                          }
+                          className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${(step.outputMode || 'text') === mode
+                            ? 'bg-primary text-primary-foreground shadow-sm'
+                            : 'text-muted-foreground hover:bg-muted'
+                            }`}
+                        >
+                          {mode === 'text'
+                            ? t('settings.skills.outputModeText')
+                            : t('settings.skills.outputModeJson')}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* JSON Fields Configuration */}
+                  {(step.outputMode || 'text') === 'json' && (
+                    <div className="flex flex-col gap-1.5 flex-1 min-w-0 border-l pl-4">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-medium text-muted-foreground">
+                          {t('settings.skills.jsonFields')}
+                        </label>
+                        <span className="text-[10px] text-muted-foreground">
+                          {t('settings.skills.jsonFieldsHint').replace(
+                            '{{step_N_<field>}}',
+                            `{{step_${index + 1}_<field>}}`
+                          )}
+                        </span>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2 items-center min-h-[32px]">
+                        {(step.outputFields || []).map((field, i) => (
+                          <div
+                            key={i}
+                            className="flex items-center gap-1 pl-2 pr-1 py-1 rounded bg-background border text-xs font-mono text-primary group"
+                          >
+                            <span>{field}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const newFields = (step.outputFields || []).filter(
+                                  (_, idx) => idx !== i
+                                )
+                                onChange({ outputFields: newFields })
+                              }}
+                              className="p-0.5 rounded-sm opacity-50 text-muted-foreground hover:opacity-100 hover:bg-red-50 hover:text-red-500 transition-all"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ))}
+
+                        <div className="relative group">
+                          <div className="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none">
+                            <Plus className="w-3 h-3 text-muted-foreground group-focus-within:text-primary transition-colors" />
+                          </div>
+                          <input
+                            type="text"
+                            className="w-[100px] py-1 pl-6 pr-2 text-xs rounded border bg-transparent hover:bg-background focus:bg-background focus:w-[140px] transition-all outline-none focus:ring-2 focus:ring-primary/20 placeholder:text-muted-foreground/50"
+                            placeholder={t('common.add')}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault()
+                                const val = e.currentTarget.value.trim()
+                                if (val && !(step.outputFields || []).includes(val)) {
+                                  onChange({
+                                    outputFields: [...(step.outputFields || []), val],
+                                  })
+                                  e.currentTarget.value = ''
+                                }
+                              }
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {step.type === 'analysis' ? (
+              <RichMentionInput
+                value={step.instruction || ''}
+                onChange={(val) => onChange({ instruction: val })}
+                inputParams={analysisInstructionParams}
+                placeholder="Type / to insert variables (user_input/history not allowed)"
+                className="font-mono text-sm"
+                multiline
+                rows={3}
+              />
+            ) : (
+              <textarea
+                value={step.instruction || ''}
+                onChange={(e) => onChange({ instruction: e.target.value })}
+                className="w-full px-3 py-2 text-sm rounded-lg border bg-background resize-none focus:ring-2 focus:ring-primary/20"
+                rows={2}
+                placeholder={t('settings.skills.instructionPlaceholder')}
+              />
+            )}
+          </>
         )}
       </div>
 

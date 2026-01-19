@@ -88,6 +88,9 @@ class AssistantConfigService:
                         tool_name=step.tool_name,
                         args_from=step.args_from,
                         args_template=getattr(step, "args_template", None),
+                        output_mode=getattr(step, "output_mode", None),
+                        output_fields=getattr(step, "output_fields", None),
+                        include_in_summary=getattr(step, "include_in_summary", True),
                     )
                     for i, step in enumerate(s.steps)
                 ]
@@ -276,6 +279,9 @@ class AssistantConfigService:
                 tool_name=step.tool_name,
                 args_from=step.args_from,
                 args_template=step.args_template,
+                output_mode=getattr(step, "output_mode", None),
+                output_fields=getattr(step, "output_fields", None),
+                include_in_summary=step.include_in_summary if step.include_in_summary is not None else True,
             )
             for i, step in enumerate(request.steps)
         ]
@@ -318,6 +324,9 @@ class AssistantConfigService:
                         tool_name=step.tool_name,
                         args_from=step.args_from,
                         args_template=step.args_template,
+                        output_mode=getattr(step, "output_mode", None),
+                        output_fields=getattr(step, "output_fields", None),
+                        include_in_summary=step.include_in_summary if step.include_in_summary is not None else True,
                     )
                     for i, step in enumerate(request.steps)
                 ]
@@ -351,6 +360,9 @@ class AssistantConfigService:
                         tool_name=step.tool_name,
                         args_from=step.args_from,
                         args_template=step.args_template,
+                        output_mode=getattr(step, "output_mode", None),
+                        output_fields=getattr(step, "output_fields", None),
+                        include_in_summary=step.include_in_summary if step.include_in_summary is not None else True,
                     )
                     for i, step in enumerate(request.steps)
                 ]
@@ -397,6 +409,9 @@ class AssistantConfigService:
                 tool_name=step.tool_name,
                 args_from=step.args_from,
                 args_template=getattr(step, "args_template", None),
+                output_mode=getattr(step, "output_mode", None),
+                output_fields=getattr(step, "output_fields", None),
+                include_in_summary=getattr(step, "include_in_summary", True),
             )
             for i, step in enumerate(default.steps)
         ]

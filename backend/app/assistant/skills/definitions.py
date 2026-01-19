@@ -155,20 +155,111 @@ SMART_CAPTURE = SkillDefinition(
         "记笔记：React 19 的新特性包括...",
         "添加一条关于健身的记录",
     ],
-    tools=["create_entry"],
+    tools=["list_entry_types", "list_tags", "create_entry"],
     steps=[
         SkillStep(
+            type="tool",
+            tool_name="list_entry_types",
+            args_from="json",
+            args_template="{}",
+        ),
+        SkillStep(
+            type="tool",
+            tool_name="list_tags",
+            args_from="json",
+            args_template="{}",
+        ),
+        SkillStep(
             type="analysis",
-            instruction="分析用户输入并说明计划：确认这是创建记录的需求，接下来会调用创建工具保存为一条记录。",
+            instruction=(
+                "你是 MindAtlas 的“智能创建记录”技能，正在做结构化入库前的字段生成。\n"
+                "当前任务：基于用户原始内容生成 title（标题），用于最终写入数据库。\n"
+                "可用类型列表在 step_1_result_raw（JSON 数组，字段含 code/name），可用标签列表在 step_2_result_raw（JSON 数组，字段含 name）。\n"
+                "输出要求：只输出一个 JSON 对象：{\"title\": string}；title 简洁准确，不超过 30 个字；禁止输出额外描述、Markdown、代码块围栏。"
+            ),
+            output_mode="json",
+            output_fields=["title"],
+        ),
+        SkillStep(
+            type="analysis",
+            instruction=(
+                "你是 MindAtlas 的“智能创建记录”技能，正在做结构化入库前的字段生成。\n"
+                "当前任务：基于用户原始内容生成 summary（摘要），用于最终写入数据库。\n"
+                "输出要求：只输出一个 JSON 对象：{\"summary\": string}；summary 为 50-150 字的一段话概括核心内容；禁止输出额外描述、Markdown、代码块围栏。"
+            ),
+            output_mode="json",
+            output_fields=["summary"],
+        ),
+        SkillStep(
+            type="analysis",
+            instruction=(
+                "你是 MindAtlas 的“智能创建记录”技能，正在做结构化入库前的字段生成。\n"
+                "当前任务：基于用户原始内容生成 content（正文），用于最终写入数据库。\n"
+                "输出要求：只输出一个 JSON 对象：{\"content\": string}；content 可用 Markdown；禁止一级标题（#）；不扩写/不编造用户未提供的事实细节；禁止输出额外描述、代码块围栏。"
+            ),
+            output_mode="json",
+            output_fields=["content"],
+        ),
+        SkillStep(
+            type="analysis",
+            instruction=(
+                "你是 MindAtlas 的“智能创建记录”技能，正在为入库选择类型。\n"
+                "当前任务：选择 type_code（类型编码），用于最终写入数据库。\n"
+                "约束：type_code 必须且只能从 step_1_result_raw 的 code 中选择（JSON 数组，字段含 code/name）。无法判断时选择第一个可用 code。\n"
+                "输出要求：只输出一个 JSON 对象：{\"type_code\": string}；禁止输出额外描述、Markdown、代码块围栏。"
+            ),
+            output_mode="json",
+            output_fields=["type_code"],
+        ),
+        SkillStep(
+            type="analysis",
+            instruction=(
+                "你是 MindAtlas 的“智能创建记录”技能，正在为入库生成标签。\n"
+                "当前任务：生成 tags（标签名数组），用于最终写入数据库。\n"
+                "约束：优先复用 step_2_result_raw 中的 name（大小写不敏感匹配；输出尽量返回列表中的原始写法）；最多新增 5 个新标签；tags 元素为纯标签名字符串（不要带 # 前缀），去重。\n"
+                "输出要求：只输出一个 JSON 对象：{\"tags\": string[]}；禁止输出额外描述、Markdown、代码块围栏。"
+            ),
+            output_mode="json",
+            output_fields=["tags"],
+        ),
+        SkillStep(
+            type="analysis",
+            instruction=(
+                "你是 MindAtlas 的“智能创建记录”技能，正在为入库识别时间字段。\n"
+                "当前任务：识别时间信息并输出 time_mode + 对应日期字段，用于最终写入数据库。\n"
+                "输出要求：只输出一个 JSON 对象："
+                "{\"time_mode\": \"POINT\"|\"RANGE\", \"time_at\": string|null, \"time_from\": string|null, \"time_to\": string|null}。\n"
+                "规则：\n"
+                '- time_mode 必须是 \"POINT\" 或 \"RANGE\"。\n'
+                "- 无明确时间信息：默认 time_mode=\"POINT\" 且 time_at=今天（YYYY-MM-DD）。\n"
+                "- POINT：填写 time_at（YYYY-MM-DD），time_from/time_to 为 null。\n"
+                "- RANGE：填写 time_from/time_to（YYYY-MM-DD，且起止都不为空，且 time_from<=time_to），time_at 为 null。\n"
+                "禁止输出额外描述、Markdown、代码块围栏。"
+            ),
+            output_mode="json",
+            output_fields=["time_mode", "time_at", "time_from", "time_to"],
         ),
         SkillStep(
             type="tool",
             tool_name="create_entry",
-            args_from="context",
+            args_from="json",
+            args_template=(
+                "{"
+                "\"title\": {{step_3_title}}, "
+                "\"summary\": {{step_4_summary}}, "
+                "\"content\": {{step_5_content}}, "
+                "\"type_code\": {{step_6_type_code}}, "
+                "\"tags\": {{step_7_tags}}, "
+                "\"time_mode\": {{step_8_time_mode}}, "
+                "\"time_at\": {{step_8_time_at}}, "
+                "\"time_from\": {{step_8_time_from}}, "
+                "\"time_to\": {{step_8_time_to}}"
+                "}"
+            ),
         ),
         SkillStep(
             type="summary",
-            instruction="告知用户记录已创建，并展示生成的标题和类型。",
+            instruction="告知用户记录已创建，展示标题、类型与时间信息，并给出需要的话可继续补充/修改的提示。",
         ),
     ],
 )
