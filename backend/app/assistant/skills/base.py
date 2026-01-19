@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 # 默认 Skill 名称常量
 DEFAULT_SKILL_NAME = "general_chat"
 
+AnalysisOutputMode = Literal["text", "json"]
+
 
 class SkillStep(BaseModel):
     """Skill 执行步骤"""
@@ -16,6 +18,9 @@ class SkillStep(BaseModel):
     tool_name: Optional[str] = None
     args_from: Optional[Literal["context", "previous", "custom", "json"]] = None
     args_template: Optional[str] = None
+    output_mode: Optional[AnalysisOutputMode] = None
+    output_fields: Optional[list[str]] = None
+    include_in_summary: Optional[bool] = True
 
 
 class SkillDefinition(BaseModel):

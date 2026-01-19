@@ -15,6 +15,7 @@ from app.common.schemas import CamelModel, OrmModel
 ToolKind = Literal["local", "remote"]
 StepType = Literal["analysis", "tool", "summary"]
 ArgsFrom = Literal["context", "previous", "custom", "json"]
+AnalysisOutputMode = Literal["text", "json"]
 AuthType = Literal["none", "bearer", "basic", "api-key"]
 BodyType = Literal["none", "form-data", "x-www-form-urlencoded", "json", "xml", "raw"]
 SkillMode = Literal["steps", "agent"]
@@ -162,12 +163,99 @@ class AssistantToolResponse(OrmModel):
 
 # ==================== Skill Schemas ====================
 
+_TEMPLATE_VAR_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
+
+
+def _validate_step_template_refs(steps: list["AssistantSkillStepInput"]) -> None:
+    """校验模板变量引用：analysis jsonmode 仅允许引用其 output_fields 白名单。"""
+    allowed_fields_by_step: dict[int, set[str]] = {}
+    for idx, step in enumerate(steps):
+        step_no = idx + 1
+        if step.type == "analysis" and step.output_mode == "json":
+            fields = step.output_fields or []
+            allowed_fields_by_step[step_no] = set([f for f in fields if isinstance(f, str) and f.strip()])
+
+    base_vars = {"user_input", "history", "last_step_result", "last_step_result_raw"}
+
+    for idx, step in enumerate(steps):
+        current_step_no = idx + 1
+        template = (step.args_template or "").strip()
+        if step.type != "tool":
+            template = ""
+        if step.type == "tool" and step.args_from not in ("custom", "json"):
+            continue
+        if not template:
+            continue
+
+        for m in _TEMPLATE_VAR_RE.finditer(template):
+            var_name = m.group(1)
+            if var_name in base_vars:
+                continue
+            if re.fullmatch(r"step_\d+_result", var_name):
+                continue
+            if re.fullmatch(r"step_\d+_result_raw", var_name):
+                continue
+
+            m2 = re.fullmatch(r"step_(\d+)_([a-zA-Z0-9_]+)", var_name)
+            if not m2:
+                continue
+
+            ref_step_no = int(m2.group(1))
+            field = m2.group(2)
+
+            if ref_step_no >= current_step_no:
+                raise ValueError(f"args_template references future step: {var_name}")
+
+            allowed = allowed_fields_by_step.get(ref_step_no)
+            if not allowed or field not in allowed:
+                raise ValueError(
+                    f"args_template references disallowed field: {var_name}; "
+                    f"step_{ref_step_no} must be analysis jsonmode and include '{field}' in output_fields"
+                )
+
+    # analysis instruction 的变量引用校验（禁止 user_input/history 等用户输入类变量）
+    disallowed_in_instruction = {"user_input", "history"}
+    for idx, step in enumerate(steps):
+        current_step_no = idx + 1
+        if step.type != "analysis":
+            continue
+        instruction = (step.instruction or "").strip()
+        if not instruction:
+            continue
+        for m in _TEMPLATE_VAR_RE.finditer(instruction):
+            var_name = m.group(1)
+            if var_name in disallowed_in_instruction:
+                raise ValueError(f"analysis instruction cannot reference: {var_name}")
+            if var_name in ("last_step_result", "last_step_result_raw"):
+                continue
+            if re.fullmatch(r"step_\d+_result", var_name):
+                continue
+            if re.fullmatch(r"step_\d+_result_raw", var_name):
+                continue
+            m2 = re.fullmatch(r"step_(\d+)_([a-zA-Z0-9_]+)", var_name)
+            if not m2:
+                continue
+            ref_step_no = int(m2.group(1))
+            field = m2.group(2)
+            if ref_step_no >= current_step_no:
+                raise ValueError(f"analysis instruction references future step: {var_name}")
+            allowed = allowed_fields_by_step.get(ref_step_no)
+            if not allowed or field not in allowed:
+                raise ValueError(
+                    f"analysis instruction references disallowed field: {var_name}; "
+                    f"step_{ref_step_no} must be analysis jsonmode and include '{field}' in output_fields"
+                )
+
+
 class AssistantSkillStepInput(CamelModel):
     type: StepType
     instruction: str | None = None
     tool_name: str | None = None
     args_from: ArgsFrom | None = None
     args_template: str | None = Field(default=None, max_length=8000)
+    output_mode: AnalysisOutputMode | None = None
+    output_fields: list[str] | None = None
+    include_in_summary: bool | None = True
 
     @model_validator(mode="after")
     def _validate(self) -> "AssistantSkillStepInput":
@@ -181,10 +269,17 @@ class AssistantSkillStepInput(CamelModel):
             if not template:
                 raise ValueError("args_template is required when args_from=json")
             # 校验变量名
-            allowed_vars = {"user_input", "history", "last_step_result"}
+            allowed_vars = {"user_input", "history", "last_step_result", "last_step_result_raw"}
             for m in re.finditer(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}", template):
                 var_name = m.group(1)
-                if var_name in allowed_vars or re.fullmatch(r"step_\d+_result", var_name):
+                if var_name in allowed_vars:
+                    continue
+                if re.fullmatch(r"step_\d+_result", var_name):
+                    continue
+                if re.fullmatch(r"step_\d+_result_raw", var_name):
+                    continue
+                # step_N_<field> 由 Skill 级校验（结合 analysis jsonmode 输出字段白名单）进一步限制
+                if re.fullmatch(r"step_\d+_[a-zA-Z0-9_]+", var_name):
                     continue
                 raise ValueError(f"Unknown variable in args_template: {var_name}")
             # 校验 JSON 格式（用占位符替换变量后解析）
@@ -195,6 +290,27 @@ class AssistantSkillStepInput(CamelModel):
                 raise ValueError("args_template must be valid JSON when args_from=json")
             if not isinstance(obj, dict):
                 raise ValueError("args_template must be a JSON object when args_from=json")
+
+        # analysis 输出 JSON 模式校验
+        if self.type == "analysis" and self.output_mode == "json":
+            fields = self.output_fields or []
+            if not isinstance(fields, list) or len(fields) == 0:
+                raise ValueError("output_fields is required when output_mode=json for analysis step")
+            cleaned: list[str] = []
+            seen: set[str] = set()
+            for f in fields:
+                name = (f or "").strip() if isinstance(f, str) else ""
+                if not name:
+                    continue
+                if not re.fullmatch(r"[a-zA-Z0-9_]+", name):
+                    raise ValueError(f"Invalid output field name: {name}")
+                if name in seen:
+                    continue
+                seen.add(name)
+                cleaned.append(name)
+            if not cleaned:
+                raise ValueError("output_fields is required when output_mode=json for analysis step")
+            self.output_fields = cleaned
         return self
 
 
@@ -214,6 +330,8 @@ class AssistantSkillCreateRequest(CamelModel):
             raise ValueError("steps mode requires at least one step")
         if self.mode == "agent" and not (self.system_prompt or "").strip():
             raise ValueError("agent mode requires system_prompt")
+        if self.mode == "steps":
+            _validate_step_template_refs(self.steps or [])
         return self
 
 
@@ -226,6 +344,12 @@ class AssistantSkillUpdateRequest(CamelModel):
     system_prompt: str | None = Field(default=None, max_length=4096)
     steps: list[AssistantSkillStepInput] | None = None
     enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "AssistantSkillUpdateRequest":
+        if self.steps is not None:
+            _validate_step_template_refs(self.steps or [])
+        return self
 
 
 class ResetSkillRequest(CamelModel):
@@ -240,6 +364,9 @@ class AssistantSkillStepResponse(OrmModel):
     tool_name: str | None
     args_from: str | None
     args_template: str | None
+    output_mode: str | None
+    output_fields: list[str] | None
+    include_in_summary: bool | None
     created_at: datetime
     updated_at: datetime
 
