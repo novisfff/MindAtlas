@@ -2,6 +2,7 @@ import { useState, useEffect, ReactNode } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '@/stores/app-store'
+import { Toaster } from 'sonner'
 
 function LanguageSync() {
   const { i18n } = useTranslation()
@@ -29,6 +30,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
   return (
     <QueryClientProvider client={queryClient}>
       <LanguageSync />
+      <Toaster />
       {children}
     </QueryClientProvider>
   )

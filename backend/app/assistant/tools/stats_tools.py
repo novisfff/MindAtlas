@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from langchain_core.tools import tool
@@ -127,29 +127,55 @@ def get_entries_by_time_range(
 
 
 @tool
-def analyze_activity(period: str = "month") -> str:
-    """分析用户的活动情况。
+def analyze_activity(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    period: str = "month",
+) -> str:
+    """分析用户在指定时间范围内的记录创建活动（按 created_at）。
 
     Args:
-        period: 分析周期，可选 week/month/year
+        start_date: 开始日期 (YYYY-MM-DD)。若为空则按 period 自动取最近一段时间。
+        end_date: 结束日期 (YYYY-MM-DD)。若为空则按 period 自动取最近一段时间。
+        period: 兼容字段，start_date/end_date 为空时用于决定默认范围（week/month/year）。
 
     Returns:
         活动分析报告（包含趋势数据）
     """
     db = _get_db()
 
-    days = {"week": 7, "month": 30, "year": 365}.get(period, 30)
     now = utcnow()
-    since = now - timedelta(days=days - 1)
+
+    # 解析时间范围
+    if start_date and end_date:
+        try:
+            start_d = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_d = datetime.strptime(end_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise ValueError("日期格式错误，请使用 YYYY-MM-DD")
+        if start_d > end_d:
+            raise ValueError("start_date 必须小于等于 end_date")
+    else:
+        days = {"week": 7, "month": 30, "year": 365}.get(period, 30)
+        end_d = now.date()
+        start_d = end_d - timedelta(days=days - 1)
+
+    start_dt = datetime.combine(start_d, datetime.min.time(), tzinfo=timezone.utc)
+    # 让 end_date 覆盖到当日 23:59:59.999999
+    end_dt = datetime.combine(end_d, datetime.min.time(), tzinfo=timezone.utc) + timedelta(days=1) - timedelta(
+        microseconds=1
+    )
+    days = (end_d - start_d).days + 1
 
     count = db.query(func.count(Entry.id)).filter(
-        Entry.created_at >= since
+        Entry.created_at >= start_dt,
+        Entry.created_at <= end_dt,
     ).scalar() or 0
 
     # 获取时间范围内的记录创建时间
     created_rows = (
         db.query(Entry.created_at)
-        .filter(Entry.created_at >= since)
+        .filter(Entry.created_at >= start_dt, Entry.created_at <= end_dt)
         .all()
     )
     created_ats = [r[0] for r in created_rows if r and r[0]]
@@ -158,22 +184,28 @@ def analyze_activity(period: str = "month") -> str:
     trend_unit = "day"
     trend: list[dict] = []
 
-    if period == "year":
+    if days > 120:
         trend_unit = "month"
         month_counts = Counter(dt.strftime("%Y-%m") for dt in created_ats)
-        for offset in range(-11, 1):
-            total = now.year * 12 + (now.month - 1) + offset
-            y, m = total // 12, total % 12 + 1
-            k = f"{y:04d}-{m:02d}"
+        cursor = date(start_d.year, start_d.month, 1)
+        end_month = date(end_d.year, end_d.month, 1)
+        while cursor <= end_month:
+            k = f"{cursor.year:04d}-{cursor.month:02d}"
             trend.append({"date": k, "count": int(month_counts.get(k, 0))})
+            if cursor.month == 12:
+                cursor = date(cursor.year + 1, 1, 1)
+            else:
+                cursor = date(cursor.year, cursor.month + 1, 1)
     else:
         day_counts = Counter(dt.date().isoformat() for dt in created_ats)
-        start_date = (now - timedelta(days=days - 1)).date()
         for i in range(days):
-            d = (start_date + timedelta(days=i)).isoformat()
+            d = (start_d + timedelta(days=i)).isoformat()
             trend.append({"date": d, "count": int(day_counts.get(d, 0))})
 
     result = {
+        "start_date": start_d.isoformat(),
+        "end_date": end_d.isoformat(),
+        "days": days,
         "period": period,
         "entries_created": count,
         "avg_per_day": round(count / days, 2),

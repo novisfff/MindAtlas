@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from uuid import UUID
+from app.assistant.skills.base import DEFAULT_SKILL_NAME
+from app.assistant.skills.converters import db_skill_to_definition_light
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -98,6 +99,10 @@ class AssistantConfigService:
             else:
                 # 不覆盖已存在记录的配置，只确保 is_system 标记正确
                 existing.is_system = True
+
+                # 强制启用默认 Skill
+                if existing.name == DEFAULT_SKILL_NAME and not existing.enabled:
+                    existing.enabled = True
 
                 # 温和回填：仅当 existing.mode=="steps" 且系统定义是 agent 且 existing.system_prompt 为空时修复
                 if (
@@ -331,6 +336,9 @@ class AssistantConfigService:
                     for i, step in enumerate(request.steps)
                 ]
             if request.enabled is not None:
+                # 阻止禁用默认 Skill
+                if skill.name == DEFAULT_SKILL_NAME and request.enabled is False:
+                    raise ApiException(status_code=400, code=40025, message="General chat skill cannot be disabled")
                 skill.enabled = request.enabled
         else:
             if request.name is not None:

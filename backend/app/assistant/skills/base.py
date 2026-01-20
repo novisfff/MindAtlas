@@ -8,6 +8,12 @@ from pydantic import BaseModel, Field
 # 默认 Skill 名称常量
 DEFAULT_SKILL_NAME = "general_chat"
 
+
+def is_default_skill(name: str) -> bool:
+    """判断是否为默认技能 (不可禁用的兜底技能)"""
+    return name == DEFAULT_SKILL_NAME
+
+
 AnalysisOutputMode = Literal["text", "json"]
 
 
