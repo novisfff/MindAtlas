@@ -21,6 +21,10 @@ class AiProvider(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "uq_ai_provider_active_true",
             "is_active",
             unique=True,
+            # Partial unique index: allow many inactive providers, but at most one active provider.
+            # SQLite needs its own dialect flag; otherwise it would create a global UNIQUE(is_active),
+            # which breaks updates/tests.
+            sqlite_where=text("is_active = 1"),
             postgresql_where=text("is_active"),
         ),
     )

@@ -157,3 +157,11 @@ alembic upgrade head
 # 回滚
 alembic downgrade -1
 ```
+
+## 单元测试
+
+在 `backend/` 目录下运行：
+
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+```
