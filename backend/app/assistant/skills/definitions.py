@@ -27,18 +27,20 @@ GENERAL_CHAT = SkillDefinition(
 
 SEARCH_ENTRIES = SkillDefinition(
     name="search_entries",
-    description="搜索记录",
+    description="搜索记录（支持关键词/类型/标签/时间范围）",
     intent_examples=[
         "找一下关于 React 的笔记",
         "有没有记录过 Docker 配置",
         "查询最近的会议记录",
         "搜索包含'架构'的文档",
+        "列出上周的记录",
+        "找一下 2024-01-01 到 2024-01-31 的记录",
     ],
     tools=["search_entries"],
     steps=[
         SkillStep(
             type="analysis",
-            instruction="理解用户的搜索意图（主题/范围/过滤条件），给出你的执行计划：随后会调用搜索工具获取结果。",
+            instruction="理解用户的搜索意图（关键词/类型/标签/时间范围等过滤条件）；随后会调用搜索工具获取结果。",
         ),
         SkillStep(
             type="tool",
@@ -100,49 +102,6 @@ QUICK_STATS = SkillDefinition(
         ),
     ],
 )
-
-LIST_TYPES = SkillDefinition(
-    name="list_types",
-    description="列出所有记录类型",
-    intent_examples=[
-        "有哪些记录类型",
-        "系统支持哪些分类",
-        "查看所有类型",
-    ],
-    tools=["list_entry_types"],
-    steps=[
-        SkillStep(
-            type="tool",
-            tool_name="list_entry_types",
-        ),
-        SkillStep(
-            type="summary",
-            instruction="列出所有可用的记录类型及其说明。",
-        ),
-    ],
-)
-
-LIST_TAGS = SkillDefinition(
-    name="list_tags",
-    description="列出所有标签",
-    intent_examples=[
-        "查看所有标签",
-        "列出最常用的标签",
-        "有哪些 tag",
-    ],
-    tools=["list_tags"],
-    steps=[
-        SkillStep(
-            type="tool",
-            tool_name="list_tags",
-        ),
-        SkillStep(
-            type="summary",
-            instruction="列出系统中的标签列表，可以按使用频率展示。",
-        ),
-    ],
-)
-
 
 # ==================== 复合 Skills ====================
 
@@ -277,17 +236,31 @@ PERIODIC_REVIEW = SkillDefinition(
     steps=[
         SkillStep(
             type="analysis",
-            instruction="理解用户希望回顾的时间范围与目标，并说明计划：先查询该时间范围内的记录，再做统计/洞察分析。",
+            instruction=(
+                "理解用户希望回顾/分析的时间范围，输出结构化检索参数。\n"
+                "输出要求：只输出一个 JSON 对象：{\"start_date\": string, \"end_date\": string}。\n"
+                "规则：\n"
+                "- start_date/end_date 格式为 YYYY-MM-DD，且 start_date<=end_date。\n"
+                "- 用户未明确给出具体日期时，结合用户说法（如上周/本月/今年等）推断。\n"
+                "禁止输出额外描述、Markdown、代码块围栏。"
+            ),
+            output_mode="json",
+            output_fields=["start_date", "end_date"],
         ),
         SkillStep(
             type="tool",
             tool_name="get_entries_by_time_range",
-            args_from="context",
+            args_from="json",
+            args_template="{\"start_date\": {{step_1_start_date}}, \"end_date\": {{step_1_end_date}}}",
         ),
         SkillStep(
             type="tool",
             tool_name="analyze_activity",
-            args_from="context",
+            args_from="json",
+            args_template=(
+                "{\"start_date\": {{step_1_start_date}}, "
+                "\"end_date\": {{step_1_end_date}}}"
+            ),
         ),
         SkillStep(
             type="summary",
@@ -329,8 +302,6 @@ SKILLS: list[SkillDefinition] = [
     SEARCH_ENTRIES,
     GET_ENTRY_DETAIL,
     QUICK_STATS,
-    LIST_TYPES,
-    LIST_TAGS,
     SMART_CAPTURE,
     PERIODIC_REVIEW,
     KNOWLEDGE_SYNTHESIS,

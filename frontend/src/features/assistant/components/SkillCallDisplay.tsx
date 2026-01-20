@@ -24,7 +24,7 @@ export function SkillCallDisplay({ skillCalls, variant = 'default' }: SkillCallD
   const { t } = useTranslation()
 
   // 过滤掉 hidden 的 skillCalls（默认 skill 不显示）
-  const visibleSkillCalls = (skillCalls || []).filter((sc) => !sc.hidden)
+  const visibleSkillCalls = (skillCalls || []).filter((sc) => !sc.hidden && sc.name !== 'general_chat')
   if (visibleSkillCalls.length === 0) return null
 
   const getSkillLabel = (name: string) => {

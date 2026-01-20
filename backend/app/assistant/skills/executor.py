@@ -11,7 +11,7 @@ from typing import Any, Callable, Iterator
 from langchain_openai import ChatOpenAI
 from sqlalchemy.orm import Session
 
-from app.assistant.skills.base import SkillDefinition, SkillStep
+from app.assistant.skills.base import SkillDefinition, SkillStep, is_default_skill
 from app.assistant.skills.converters import db_skill_to_definition
 from app.assistant.skills.definitions import get_skill_by_name
 from app.assistant_config.models import AssistantSkill
@@ -461,7 +461,8 @@ class SkillExecutor:
 
         逻辑（与 Router 保持一致）:
         1. 数据库中存在该 Skill：
-           - enabled=False：视为禁用，不回退到系统 Skill
+           - enabled=False 且非默认技能：视为禁用，不回退到系统 Skill
+           - enabled=False 且是默认技能：忽略禁用，回退到系统 Skill
            - enabled=True：转换为 SkillDefinition 并返回
         2. 数据库中不存在该 Skill：回退到系统 Skill
         """
@@ -474,9 +475,11 @@ class SkillExecutor:
                 .first()
             )
             if record is not None:
-                if not record.enabled:
+                # 默认技能即使被禁用也回退到系统 Skill
+                if not record.enabled and not is_default_skill(record.name):
                     return None
-                return db_skill_to_definition(record)
+                if record.enabled:
+                    return db_skill_to_definition(record)
 
         return get_skill_by_name(skill_name)
 
@@ -762,7 +765,8 @@ class SkillExecutor:
                 self._parse_date_range(user_input)
             ),
             "analyze_activity": lambda: {
-                "period": self._parse_period(user_input)
+                **self._parse_date_range(user_input),
+                "period": self._parse_period(user_input),
             },
         }
 

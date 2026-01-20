@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Loader2, Plus, Power, Pencil, Trash2, ChevronDown, ChevronRight, RotateCcw } from 'lucide-react'
+import { toast } from 'sonner'
 import {
   useSkillsQuery,
   useToolsQuery,
@@ -46,12 +47,18 @@ function SkillItem({ skill, onEdit, onDelete, onToggle, isToggling }: SkillItemP
 
         <button
           onClick={onToggle}
-          disabled={isToggling}
-          title={skill.enabled ? t('settings.skills.disable') : t('settings.skills.enable')}
+          disabled={isToggling || skill.name === 'general_chat'}
+          title={
+            skill.name === 'general_chat'
+              ? t('settings.skills.cannotDisable', { defaultValue: 'This skill cannot be disabled' })
+              : skill.enabled
+                ? t('settings.skills.disable')
+                : t('settings.skills.enable')
+          }
           className={`p-2 rounded-lg transition-colors ${skill.enabled
             ? 'bg-purple-100 text-purple-600 dark:bg-purple-900 dark:text-purple-400'
             : 'bg-muted text-muted-foreground hover:bg-primary/10 hover:text-primary'
-            }`}
+            } ${skill.name === 'general_chat' ? 'opacity-50 cursor-not-allowed' : ''}`}
         >
           <Power className={`w-5 h-5 ${isToggling ? 'animate-pulse' : ''}`} />
         </button>
@@ -341,14 +348,20 @@ export function SkillManager() {
         title={t('settings.skills.resetTitle')}
         description={t('settings.skills.resetDescription')}
         confirmText={t('settings.skills.reset')}
+        cancelText={t('common.cancel')}
         variant="default"
+        isLoading={resetMutation.isPending}
         onConfirm={() =>
           resetId &&
           resetMutation.mutate(resetId, {
             onSuccess: () => {
               setResetId(null)
               if (editingId === resetId) setEditingId(null)
+              toast.success(t('settings.skills.resetSuccess', { defaultValue: 'Skill reset successfully' }))
             },
+            onError: () => {
+              toast.error(t('settings.skills.resetError', { defaultValue: 'Failed to reset skill' }))
+            }
           })
         }
         onCancel={() => setResetId(null)}
