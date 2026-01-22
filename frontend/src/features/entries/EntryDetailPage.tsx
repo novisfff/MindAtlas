@@ -1,13 +1,15 @@
 import ReactMarkdown from 'react-markdown'
 import { useNavigate, useParams } from 'react-router-dom'
 import { ArrowLeft, Edit, Trash2, Calendar, Clock, Loader2, Link2, Paperclip } from 'lucide-react'
-import { useEntryQuery, useDeleteEntryMutation } from './queries'
+import { useEntryQuery, useDeleteEntryMutation, useEntryIndexStatusQuery } from './queries'
+import { IndexStatusBadge } from './components/IndexStatusBadge'
 import { cn } from '@/lib/utils'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   RelationList,
   RelationSelector,
+  SuggestedRelationList,
   useEntryRelationsQuery,
   useCreateRelationMutation,
   useDeleteRelationMutation,
@@ -24,6 +26,7 @@ export function EntryDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const { data: entry, isLoading, error } = useEntryQuery(id)
+  const { data: indexStatus } = useEntryIndexStatusQuery(id)
   const deleteMutation = useDeleteEntryMutation()
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const { t } = useTranslation()
@@ -162,6 +165,7 @@ export function EntryDetailPage() {
               <span>{t('labels.created')} {formatDate(entry.createdAt)}</span>
             </div>
             {renderTimeInfo()}
+            {indexStatus && <IndexStatusBadge status={indexStatus.status} />}
           </div>
 
           {entry.tags && entry.tags.length > 0 && (
@@ -216,6 +220,9 @@ export function EntryDetailPage() {
           onDelete={(relationId) => deleteRelationMutation.mutate(relationId)}
           isDeleting={deleteRelationMutation.isPending}
         />
+
+        {/* AI Suggestions */}
+        <SuggestedRelationList entryId={id || ''} />
 
         <div className="mt-4">
           <RelationSelector

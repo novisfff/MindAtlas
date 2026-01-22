@@ -4,9 +4,11 @@ import {
   createEntry,
   deleteEntry,
   getEntry,
+  getEntryIndexStatus,
   listEntries,
   updateEntry,
   type EntryUpsertRequest,
+  type IndexStatus,
   type ListEntriesParams,
 } from './api/entries'
 
@@ -14,6 +16,7 @@ export const entriesKeys = {
   all: ['entries'] as const,
   list: (params?: ListEntriesParams) => [...entriesKeys.all, 'list', params] as const,
   detail: (id: string) => [...entriesKeys.all, 'detail', id] as const,
+  indexStatus: (id: string) => [...entriesKeys.all, 'indexStatus', id] as const,
 }
 
 export function useEntriesQuery(params: ListEntriesParams = {}) {
@@ -68,6 +71,18 @@ export function useDeleteEntryMutation() {
     mutationFn: (id: string) => deleteEntry(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: entriesKeys.list() })
+    },
+  })
+}
+
+export function useEntryIndexStatusQuery(id?: string) {
+  return useQuery({
+    queryKey: id ? entriesKeys.indexStatus(id) : entriesKeys.indexStatus('__missing__'),
+    queryFn: () => getEntryIndexStatus(id as string),
+    enabled: Boolean(id),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      return status === 'pending' || status === 'processing' ? 3000 : false
     },
   })
 }
