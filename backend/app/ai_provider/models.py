@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Column, Index, String, Text, text
+from sqlalchemy import Column, String, Text
 
 from app.common.models import TimestampMixin, UuidPrimaryKeyMixin
 from app.database import Base
@@ -14,17 +14,3 @@ class AiProvider(UuidPrimaryKeyMixin, TimestampMixin, Base):
     model = Column(String(255), nullable=False)
     api_key_encrypted = Column(Text, nullable=False)
     api_key_hint = Column(String(64), nullable=False)
-    is_active = Column(Boolean, nullable=False, default=False)
-
-    __table_args__ = (
-        Index(
-            "uq_ai_provider_active_true",
-            "is_active",
-            unique=True,
-            # Partial unique index: allow many inactive providers, but at most one active provider.
-            # SQLite needs its own dialect flag; otherwise it would create a global UNIQUE(is_active),
-            # which breaks updates/tests.
-            sqlite_where=text("is_active = 1"),
-            postgresql_where=text("is_active"),
-        ),
-    )

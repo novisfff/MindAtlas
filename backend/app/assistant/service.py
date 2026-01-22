@@ -11,8 +11,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session, selectinload
 
-from app.ai_provider.crypto import decrypt_api_key
-from app.ai_provider.models import AiProvider
+from app.ai_registry.runtime import resolve_openai_compat_config
 from app.assistant.models import Conversation, Message
 from app.common.exceptions import ApiException
 from app.common.time import utcnow
@@ -369,21 +368,16 @@ class AssistantService:
     # ==================== OpenAI API ====================
 
     def _get_openai_config(self) -> _OpenAiConfig | None:
-        provider = (
-            self.db.query(AiProvider)
-            .filter(AiProvider.is_active.is_(True))
-            .first()
-        )
-        if not provider:
-            return None
         try:
-            api_key = decrypt_api_key(provider.api_key_encrypted)
+            cfg = resolve_openai_compat_config(self.db, component="assistant", model_type="llm")
         except Exception:
             return None
+        if not cfg:
+            return None
         return _OpenAiConfig(
-            api_key=api_key,
-            base_url=provider.base_url,
-            model=provider.model
+            api_key=cfg.api_key,
+            base_url=cfg.base_url,
+            model=cfg.model
         )
 
     def _build_api_url(self, base_url: str, endpoint: str) -> str:

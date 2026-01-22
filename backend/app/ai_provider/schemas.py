@@ -31,7 +31,6 @@ class AiProviderResponse(OrmModel):
     base_url: str
     model: str
     api_key_hint: str
-    is_active: bool
     created_at: datetime
     updated_at: datetime
 

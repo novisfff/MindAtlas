@@ -68,6 +68,14 @@ def get_entry(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
     return ApiResponse.ok(EntryResponse.model_validate(entry).model_dump(by_alias=True))
 
 
+@router.get("/{id}/index-status", response_model=ApiResponse)
+def get_entry_index_status(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
+    service = EntryService(db)
+    service.find_by_id(id)  # Ensure entry exists
+    status = service.get_index_status(id)
+    return ApiResponse.ok(status)
+
+
 @router.post("", response_model=ApiResponse)
 def create_entry(request: EntryRequest, db: Session = Depends(get_db)) -> ApiResponse:
     service = EntryService(db)

@@ -8,6 +8,8 @@ from sqlalchemy.orm import relationship
 
 from app.common.models import TimestampMixin, UuidPrimaryKeyMixin
 from app.database import Base
+from app.entry_type.models import EntryType
+from app.tag.models import Tag
 
 
 class TimeMode(str, enum.Enum):
@@ -38,5 +40,5 @@ class Entry(UuidPrimaryKeyMixin, TimestampMixin, Base):
     summary = Column(Text, nullable=True)
 
     # Relationships
-    type = relationship("EntryType", lazy="joined")
-    tags = relationship("Tag", secondary=entry_tag, lazy="joined")
+    type = relationship(EntryType, lazy="joined")
+    tags = relationship(Tag, secondary=entry_tag, lazy="joined")

@@ -34,3 +34,17 @@ def reset_caches() -> None:
     except Exception:
         pass
 
+    try:
+        from app.lightrag.manager import reset_lightrag_singletons_for_tests
+
+        reset_lightrag_singletons_for_tests()
+    except Exception:
+        pass
+
+    try:
+        from app.lightrag.service import reset_lightrag_query_state_for_tests
+
+        reset_lightrag_query_state_for_tests()
+    except Exception:
+        pass
+

@@ -184,6 +184,34 @@
     }
   },
   "settings": {
+    "ai": {
+      "sections": {
+        "assignments": "模型分配",
+        "assignmentsDesc": "配置不同功能使用的模型",
+        "credentials": "服务商凭据",
+        "models": "模型管理",
+        "modelsDesc": "管理 AI 模型及其类型",
+        "defaultBindings": "默认模型绑定",
+        "defaultBindingsDesc": "配置不同功能的默认模型"
+      },
+      "roles": {
+        "system": "系统助手",
+        "lightrag": "LightRAG 知识图谱"
+      },
+      "modelTypes": {
+        "llm": "语言模型",
+        "embedding": "Embedding (向量)"
+      },
+      "selectModel": "选择模型...",
+      "addModel": "添加模型",
+      "editModel": "编辑模型",
+      "selectType": "选择类型",
+      "modelName": "模型名称",
+      "hints": {
+        "assignSystem": "用于通用对话助手的模型",
+        "assignLightrag": "用于 RAG 索引和检索的模型"
+      }
+    },
     "entryTypes": {
       "title": "记录类型",
       "subtitle": "管理内容类型及其属性",
@@ -307,7 +335,26 @@
     "fetchModels": "获取模型",
     "enterUrlAndKey": "请先输入 Base URL 和 API Key",
     "selectModel": "选择模型",
-    "modelsFetched": "模型获取成功"
+    "modelsFetched": "模型获取成功",
+    "addProvider": "添加服务商",
+    "addProviderDesc": "配置新的 AI 服务提供商",
+    "noProviders": "暂无服务商",
+    "selectProvider": "请从左侧选择一个服务商进行配置",
+    "providerConfig": "服务商配置",
+    "providerConfigDesc": "管理此服务商的连接详情",
+    "testConnection": "测试连接",
+    "testing": "测试中...",
+    "connected": "已连接",
+    "failed": "连接失败",
+    "saveBeforeTest": "测试前请先保存更改",
+    "confirmDelete": "确定要删除此服务商吗？此操作无法撤销。",
+    "availableModels": "此服务商的可用模型",
+    "noModels": "暂无模型。点击“添加模型”进行配置。",
+    "fetchList": "获取列表",
+    "fetching": "获取中...",
+    "selectFromFetched": "从获取的模型中选择：",
+    "textGeneration": "文本生成",
+    "vectorSearch": "向量检索"
   },
   "form": {
     "required": "必填",
@@ -367,5 +414,24 @@
     "noEntries": "暂无时间轴记录",
     "createPrompt": "创建包含时间信息的记录以在此显示",
     "createAction": "创建记录"
+  },
+  "relations": {
+    "suggestions": {
+      "title": "AI 推荐关联",
+      "acceptTooltip": "添加关联",
+      "ignoreTooltip": "忽略建议",
+      "matchScore": "{{score}}% 匹配",
+      "loadingSlow": "AI 正在分析内容...",
+      "loadingVerySlow": "深度搜索中，请稍候...",
+      "error": "暂时无法生成推荐",
+      "retry": "重试"
+    }
+  },
+  "indexStatus": {
+    "pending": "排队中",
+    "processing": "处理中",
+    "succeeded": "已完成",
+    "dead": "失败",
+    "unknown": "未知"
   }
 }

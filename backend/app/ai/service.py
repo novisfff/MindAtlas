@@ -9,8 +9,7 @@ from urllib.request import Request, urlopen
 from sqlalchemy.orm import Session
 
 from app.ai.schemas import AiGenerateRequest, AiGenerateResponse
-from app.ai_provider.crypto import decrypt_api_key
-from app.ai_provider.models import AiProvider
+from app.ai_registry.runtime import resolve_openai_compat_config
 from app.tag.models import Tag
 
 
@@ -26,30 +25,26 @@ class AiService:
         self.db = db
 
     def generate(self, request: AiGenerateRequest) -> AiGenerateResponse:
-        provider = self._get_active_provider()
-        if not provider:
+        try:
+            cfg = resolve_openai_compat_config(self.db, component="assistant", model_type="llm")
+        except Exception:
             return AiGenerateResponse(summary=None, suggested_tags=[])
 
-        try:
-            api_key = decrypt_api_key(provider.api_key_encrypted)
-        except Exception:
+        if not cfg:
             return AiGenerateResponse(summary=None, suggested_tags=[])
 
         # Custom tag fetching
         tags = self.db.query(Tag).all()
         tag_names = [t.name for t in tags]
 
-        cfg = _OpenAiConfig(
-            api_key=api_key,
-            base_url=provider.base_url,
-            model=provider.model,
+        openai_cfg = _OpenAiConfig(
+            api_key=cfg.api_key,
+            base_url=cfg.base_url,
+            model=cfg.model,
         )
         prompt = self._build_prompt(request, tag_names)
-        raw = self._call_openai(cfg, prompt)
+        raw = self._call_openai(openai_cfg, prompt)
         return self._parse_openai_response(raw)
-
-    def _get_active_provider(self) -> AiProvider | None:
-        return self.db.query(AiProvider).filter(AiProvider.is_active.is_(True)).first()
 
     def _build_prompt(self, request: AiGenerateRequest, existing_tags: list[str]) -> str:
         tags_text = ", ".join(existing_tags[:100]) if existing_tags else "暂无"

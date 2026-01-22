@@ -54,3 +54,14 @@ export async function updateEntry(id: string, payload: EntryUpsertRequest): Prom
 export async function deleteEntry(id: string): Promise<void> {
   await apiClient.delete<void>(`/api/entries/${encodeURIComponent(id)}`)
 }
+
+export interface IndexStatus {
+  status: 'pending' | 'processing' | 'succeeded' | 'dead' | 'unknown'
+  attempts: number
+  lastError: string | null
+  updatedAt: string | null
+}
+
+export async function getEntryIndexStatus(id: string): Promise<IndexStatus> {
+  return apiClient.get<IndexStatus>(`/api/entries/${encodeURIComponent(id)}/index-status`)
+}

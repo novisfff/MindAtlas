@@ -4,12 +4,14 @@ import {
   getEntryRelations,
   createRelation,
   deleteRelation,
+  getRelationRecommendations,
   type RelationCreateRequest,
 } from './api/relations'
 
 export const relationKeys = {
   types: ['relation-types'] as const,
   byEntry: (entryId: string) => ['relations', 'entry', entryId] as const,
+  recommendations: (entryId: string) => ['relations', 'recommendations', entryId] as const,
 }
 
 export function useRelationTypesQuery() {
@@ -45,5 +47,14 @@ export function useDeleteRelationMutation() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['relations'] })
     },
+  })
+}
+
+export function useRelationRecommendationsQuery(entryId: string) {
+  return useQuery({
+    queryKey: relationKeys.recommendations(entryId),
+    queryFn: () => getRelationRecommendations(entryId),
+    staleTime: 1000 * 60 * 5, // 5 minutes cache
+    enabled: !!entryId,
   })
 }

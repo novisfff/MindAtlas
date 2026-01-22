@@ -68,15 +68,6 @@ def delete_ai_provider(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
     return ApiResponse.ok(None)
 
 
-@router.post("/{id}/activate", response_model=ApiResponse)
-def activate_ai_provider(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
-    service = AiProviderService(db)
-    provider = service.activate(id)
-    return ApiResponse.ok(
-        AiProviderResponse.model_validate(provider).model_dump(by_alias=True)
-    )
-
-
 @router.post("/{id}/test-connection", response_model=ApiResponse)
 def test_ai_provider_connection(
     id: UUID, db: Session = Depends(get_db)
