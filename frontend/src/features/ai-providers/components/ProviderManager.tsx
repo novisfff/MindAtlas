@@ -5,7 +5,6 @@ import {
   useCreateAiProviderMutation,
   useUpdateAiProviderMutation,
   useDeleteAiProviderMutation,
-  useActivateAiProviderMutation,
   useTestAiProviderMutation,
 } from '../queries'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -35,25 +34,8 @@ function ProviderItem({
   testResult,
 }: ProviderItemProps) {
   return (
-    <div
-      className={`flex items-center gap-4 p-4 rounded-lg border transition-colors ${
-        provider.isActive
-          ? 'border-green-500 bg-green-50 dark:bg-green-950/20'
-          : 'hover:bg-muted/50'
-      }`}
-    >
-      <button
-        onClick={onActivate}
-        disabled={isActivating || provider.isActive}
-        title={provider.isActive ? 'Active' : 'Click to activate'}
-        className={`p-2 rounded-lg transition-colors ${
-          provider.isActive
-            ? 'bg-green-100 text-green-600 dark:bg-green-900 dark:text-green-400'
-            : 'bg-muted text-muted-foreground hover:bg-primary/10 hover:text-primary'
-        }`}
-      >
-        <Power className={`w-5 h-5 ${isActivating ? 'animate-pulse' : ''}`} />
-      </button>
+    <div className="flex items-center gap-4 p-4 rounded-lg border transition-colors hover:bg-muted/50">
+      {/* Activate button removed - use Model Bindings instead */}
 
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
@@ -61,11 +43,6 @@ function ProviderItem({
           <span className="text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
             {provider.model}
           </span>
-          {provider.isActive && (
-            <span className="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300">
-              Active
-            </span>
-          )}
         </div>
         <p className="text-sm text-muted-foreground truncate">{provider.baseUrl}</p>
         <p className="text-xs text-muted-foreground font-mono">{provider.apiKeyHint}</p>
@@ -120,7 +97,6 @@ export function ProviderManager() {
   const createMutation = useCreateAiProviderMutation()
   const updateMutation = useUpdateAiProviderMutation()
   const deleteMutation = useDeleteAiProviderMutation()
-  const activateMutation = useActivateAiProviderMutation()
   const testMutation = useTestAiProviderMutation()
 
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -198,9 +174,9 @@ export function ProviderManager() {
                 provider={provider}
                 onEdit={() => setEditingId(provider.id)}
                 onDelete={() => setDeleteId(provider.id)}
-                onActivate={() => activateMutation.mutate(provider.id)}
+                onActivate={() => {}}
                 onTest={() => handleTest(provider)}
-                isActivating={activateMutation.isPending}
+                isActivating={false}
                 isTesting={testMutation.isPending && testMutation.variables === provider.id}
                 testResult={testResult?.id === provider.id ? testResult : null}
               />

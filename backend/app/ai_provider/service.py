@@ -32,9 +32,6 @@ class AiProviderService:
             raise ApiException(status_code=404, code=40400, message=f"AiProvider not found: {id}")
         return provider
 
-    def find_active(self) -> AiProvider | None:
-        return self.db.query(AiProvider).filter(AiProvider.is_active.is_(True)).first()
-
     def create(self, request: AiProviderCreateRequest) -> AiProvider:
         existing = self.db.query(AiProvider).filter(AiProvider.name.ilike(request.name)).first()
         if existing:
@@ -55,7 +52,6 @@ class AiProviderService:
             model=request.model,
             api_key_encrypted=encrypted,
             api_key_hint=api_key_hint(request.api_key),
-            is_active=False,
         )
         self.db.add(provider)
         self.db.commit()
@@ -103,28 +99,6 @@ class AiProviderService:
         provider = self.find_by_id(id)
         self.db.delete(provider)
         self.db.commit()
-
-    def activate(self, id: UUID) -> AiProvider:
-        provider = self.find_by_id(id)
-
-        # Deactivate all other providers first
-        self.db.query(AiProvider).filter(
-            AiProvider.is_active.is_(True),
-            AiProvider.id != provider.id,
-        ).update({AiProvider.is_active: False}, synchronize_session=False)
-
-        provider.is_active = True
-
-        try:
-            self.db.commit()
-        except IntegrityError as exc:
-            self.db.rollback()
-            raise ApiException(
-                status_code=409, code=40901, message="Another provider is already active"
-            ) from exc
-
-        self.db.refresh(provider)
-        return provider
 
     def test_connection(self, id: UUID) -> AiProviderTestConnectionResponse:
         provider = self.find_by_id(id)

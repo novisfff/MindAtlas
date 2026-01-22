@@ -6,7 +6,6 @@ export interface AiProvider {
   baseUrl: string
   model: string
   apiKeyHint: string
-  isActive: boolean
   createdAt: string
   updatedAt: string
 }
@@ -60,10 +59,6 @@ export async function updateAiProvider(id: string, payload: AiProviderUpdateRequ
 
 export async function deleteAiProvider(id: string): Promise<void> {
   return apiClient.delete<void>(`/api/ai-providers/${id}`)
-}
-
-export async function activateAiProvider(id: string): Promise<AiProvider> {
-  return apiClient.post<AiProvider>(`/api/ai-providers/${id}/activate`)
 }
 
 export async function testAiProviderConnection(id: string): Promise<AiProviderTestResult> {
