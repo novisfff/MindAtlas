@@ -71,6 +71,13 @@ uvicorn app.main:app --reload --port 8000
 
 访问 http://localhost:8000/docs 查看 API 文档。
 
+### 5. 启动 LightRAG Worker（可选）
+
+```bash
+# 需要先配置 LIGHTRAG_ENABLED / LIGHTRAG_WORKER_ENABLED / NEO4J_* / AI_* 等环境变量
+python -m app.lightrag.worker
+```
+
 ## 环境变量
 
 | 变量 | 说明 | 默认值 |
@@ -83,6 +90,20 @@ uvicorn app.main:app --reload --port 8000
 | MINIO_BUCKET | MinIO 桶名 | mindatlas |
 | MINIO_SECURE | 是否使用 HTTPS | false |
 | AI_API_KEY | AI 服务密钥（可选） | - |
+| AI_BASE_URL | AI Base URL（OpenAI 兼容） | https://api.openai.com/v1 |
+| AI_MODEL | LLM 模型名（OpenAI 兼容） | gpt-3.5-turbo |
+| LIGHTRAG_ENABLED | LightRAG 总开关 | false |
+| LIGHTRAG_WORKER_ENABLED | Outbox Worker 开关 | false |
+| LIGHTRAG_WORKING_DIR | LightRAG 本地工作目录 | ./lightrag_storage |
+| LIGHTRAG_WORKSPACE | LightRAG workspace（隔离数据） | - |
+| LIGHTRAG_GRAPH_STORAGE | KG 存储实现 | Neo4JStorage |
+| LIGHTRAG_LLM_MODEL | LightRAG 用的 LLM 模型名 | AI_MODEL |
+| LIGHTRAG_EMBEDDING_MODEL | Embedding 模型名 | text-embedding-3-small |
+| LIGHTRAG_EMBEDDING_DIM | Embedding 维度 | 1536 |
+| NEO4J_URI | Neo4j 连接 | bolt://localhost:7687 |
+| NEO4J_USER | Neo4j 用户名 | neo4j |
+| NEO4J_PASSWORD | Neo4j 密码 | - |
+| NEO4J_DATABASE | Neo4j 数据库 | neo4j |
 
 ## API 端点
 

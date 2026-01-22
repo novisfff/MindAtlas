@@ -11,3 +11,5 @@ cryptography
 langchain>=0.3.0
 langchain-openai>=0.2.0
 langchain_core
+lightrag-hku==1.4.9.11
+neo4j>=5,<6

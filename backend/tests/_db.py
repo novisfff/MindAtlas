@@ -25,6 +25,7 @@ def make_session() -> Session:
     import app.entry_type.models  # noqa: F401,E402
     import app.relation.models  # noqa: F401,E402
     import app.tag.models  # noqa: F401,E402
+    import app.lightrag.models  # noqa: F401,E402
 
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",

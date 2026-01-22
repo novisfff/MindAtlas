@@ -16,6 +16,7 @@ from app.entry_type.service import EntryTypeService
 from app.relation.models import Relation
 from app.tag.models import Tag
 from app.tag.service import TagService
+from app.lightrag.models import EntryIndexOutbox
 
 
 class EntryService:
@@ -112,6 +113,16 @@ class EntryService:
         entry.tags = tags
 
         self.db.add(entry)
+        self.db.flush()  # Ensure entry.id / timestamps are available in the same transaction.
+
+        self.db.add(
+            EntryIndexOutbox(
+                entry_id=entry.id,
+                op="upsert",
+                entry_updated_at=entry.updated_at,
+                status="pending",
+            )
+        )
         self.db.commit()
         self.db.refresh(entry)
         return entry
@@ -139,12 +150,46 @@ class EntryService:
         entry.time_to = request.time_to
         entry.tags = tags
 
+        self.db.flush()  # Ensure updated_at is bumped before enqueuing outbox event.
+        self.db.add(
+            EntryIndexOutbox(
+                entry_id=entry.id,
+                op="upsert",
+                entry_updated_at=entry.updated_at,
+                status="pending",
+            )
+        )
         self.db.commit()
         self.db.refresh(entry)
         return entry
 
+    def get_index_status(self, entry_id: UUID) -> dict:
+        """Get the latest LightRAG index status for an entry."""
+        outbox = (
+            self.db.query(EntryIndexOutbox)
+            .filter(EntryIndexOutbox.entry_id == entry_id)
+            .order_by(EntryIndexOutbox.created_at.desc())
+            .first()
+        )
+        if not outbox:
+            return {"status": "unknown", "attempts": 0, "lastError": None, "updatedAt": None}
+        return {
+            "status": outbox.status,
+            "attempts": outbox.attempts,
+            "lastError": outbox.last_error,
+            "updatedAt": outbox.updated_at.isoformat() if outbox.updated_at else None,
+        }
+
     def delete(self, id: UUID) -> None:
         entry = self.find_by_id(id)
+        self.db.add(
+            EntryIndexOutbox(
+                entry_id=entry.id,
+                op="delete",
+                entry_updated_at=None,
+                status="pending",
+            )
+        )
 
         attachments = self.db.query(Attachment).filter(Attachment.entry_id == id).all()
         if attachments:
