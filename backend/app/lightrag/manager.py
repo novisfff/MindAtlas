@@ -90,6 +90,16 @@ def _normalize_neo4j_uri(uri: str) -> str:
     return u
 
 
+def _normalize_rerank_url(raw: str | None) -> str:
+    url = (raw or "").strip().rstrip("/")
+    if not url:
+        return ""
+    # Common OpenAI-compatible base url endswith /v1; rerank endpoint is /v1/rerank.
+    if url.endswith("/v1"):
+        return url + "/rerank"
+    return url
+
+
 def _try_resolve_db_model_binding(*, model_type: str) -> _OpenAICompatModelConfig | None:
     try:
         from app.ai_registry.runtime import resolve_openai_compat_config
@@ -259,6 +269,58 @@ def _create_and_init_rag():
         }
         if workspace:
             rag_kwargs["namespace"] = workspace
+
+        # Language for internal LightRAG prompts (summary/entity extraction).
+        # Upstream env var name is SUMMARY_LANGUAGE; we prefer per-instance addon_params.
+        summary_language = _first_non_empty(
+            getattr(settings, "lightrag_summary_language", None),
+            os.environ.get("SUMMARY_LANGUAGE"),
+        )
+        if summary_language:
+            rag_kwargs["addon_params"] = {"language": summary_language}
+
+        # Optional rerank model (standard rerank API; commonly provided by vLLM/LiteLLM proxies).
+        # If configured, we enable rerank by default; otherwise disable it explicitly.
+        rerank_model = _first_non_empty(
+            getattr(settings, "lightrag_rerank_model", None),
+            os.environ.get("RERANK_MODEL"),
+        )
+        rerank_host = _first_non_empty(
+            getattr(settings, "lightrag_rerank_host", None),
+            os.environ.get("RERANK_BINDING_HOST"),
+        )
+        rerank_key = _first_non_empty(
+            getattr(settings, "lightrag_rerank_key", None),
+            os.environ.get("RERANK_BINDING_API_KEY"),
+        )
+        rerank_url = _normalize_rerank_url(rerank_host)
+        rerank_enabled = bool(rerank_model and rerank_url)
+        os.environ["RERANK_BY_DEFAULT"] = "true" if rerank_enabled else "false"
+
+        if rerank_enabled:
+            from app.lightrag.rerank_client import RerankConfig, build_standard_rerank_model_func
+
+            rerank_timeout_sec = float(getattr(settings, "lightrag_rerank_timeout_sec", 15.0) or 15.0)
+            rerank_request_format = _first_non_empty(
+                getattr(settings, "lightrag_rerank_request_format", None),
+                os.environ.get("RERANK_BINDING"),
+            ).strip().lower() or "standard"
+            rerank_enable_chunking = bool(getattr(settings, "lightrag_rerank_enable_chunking", False) or False)
+            rerank_max_tokens_per_doc = int(getattr(settings, "lightrag_rerank_max_tokens_per_doc", 480) or 480)
+            min_rerank_score = float(getattr(settings, "lightrag_min_rerank_score", 0.0) or 0.0)
+
+            rag_kwargs["rerank_model_func"] = build_standard_rerank_model_func(
+                RerankConfig(
+                    model=rerank_model,
+                    base_url=rerank_url,
+                    api_key=rerank_key or None,
+                    timeout_sec=rerank_timeout_sec,
+                    request_format=rerank_request_format,
+                    enable_chunking=rerank_enable_chunking,
+                    max_tokens_per_doc=max(1, rerank_max_tokens_per_doc),
+                )
+            )
+            rag_kwargs["min_rerank_score"] = max(0.0, min_rerank_score)
 
         rag = LightRAG(**rag_kwargs)
 

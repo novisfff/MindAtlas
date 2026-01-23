@@ -73,6 +73,24 @@ class Settings(BaseSettings):
     lightrag_query_cache_ttl_sec: int = Field(default=0, alias="LIGHTRAG_QUERY_CACHE_TTL_SEC")
     lightrag_query_cache_maxsize: int = Field(default=128, alias="LIGHTRAG_QUERY_CACHE_MAXSIZE")
 
+    # LightRAG language (optional)
+    # Controls prompt language for summarization/entity extraction inside LightRAG.
+    # Example values: "English", "Chinese".
+    lightrag_summary_language: str = Field(default="", alias="LIGHTRAG_SUMMARY_LANGUAGE")
+
+    # LightRAG rerank (optional)
+    # If configured, graph/vector recall will enable rerank automatically.
+    lightrag_rerank_model: str = Field(default="", alias="LIGHTRAG_RERANK_MODEL")
+    lightrag_rerank_host: str = Field(default="", alias="LIGHTRAG_RERANK_HOST")
+    lightrag_rerank_key: str | None = Field(default=None, alias="LIGHTRAG_RERANK_KEY")
+    lightrag_rerank_timeout_sec: float = Field(default=15.0, alias="LIGHTRAG_RERANK_TIMEOUT_SEC")
+    # "standard" uses {"model","query","documents","top_n"}.
+    # "aliyun" uses DashScope format {"model","input":{"query","documents"},"parameters":{"top_n"}}.
+    lightrag_rerank_request_format: str = Field(default="standard", alias="LIGHTRAG_RERANK_REQUEST_FORMAT")
+    lightrag_rerank_enable_chunking: bool = Field(default=False, alias="LIGHTRAG_RERANK_ENABLE_CHUNKING")
+    lightrag_rerank_max_tokens_per_doc: int = Field(default=480, alias="LIGHTRAG_RERANK_MAX_TOKENS_PER_DOC")
+    lightrag_min_rerank_score: float = Field(default=0.0, alias="LIGHTRAG_MIN_RERANK_SCORE")
+
     # Assistant KB tools (LightRAG-powered retrieval only)
     assistant_kb_graph_recall_mode: str = Field(default="mix", alias="ASSISTANT_KB_GRAPH_RECALL_MODE")
     assistant_kb_graph_recall_top_k: int = Field(default=10, alias="ASSISTANT_KB_GRAPH_RECALL_TOP_K")

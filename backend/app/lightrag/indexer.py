@@ -71,18 +71,36 @@ class Indexer:
 
         try:
             entry_id = str(req.entry_id)
-            # Best-effort: ensure both doc_id and file_path are the Entry UUID, so query_llm chunks
-            # can be mapped back to Entries (some upstream responses only include file_path).
-            try:
-                track_id = rag.insert(req.payload.text, ids=[entry_id], file_paths=[entry_id])
-            except TypeError:
-                try:
-                    track_id = rag.insert(req.payload.text, ids=[entry_id], file_path=entry_id)
-                except TypeError:
-                    track_id = rag.insert(req.payload.text, ids=[entry_id])
+            track_id = self._upsert_by_entry_id(rag, entry_id=entry_id, text=req.payload.text)
             return IndexResult(ok=True, detail=f"indexed: track_id={track_id}")
         except Exception as e:
             return IndexResult(ok=False, retryable=True, error_kind="transient", detail=str(e))
+
+    def _upsert_by_entry_id(self, rag, *, entry_id: str, text: str) -> str:
+        """Upsert a document into LightRAG on the dedicated runtime loop.
+
+        LightRAG's sync `insert()` uses a thread-local event loop (via
+        `always_get_an_event_loop()`), which can mismatch the loop used to
+        initialize storages (notably Neo4j async driver). To avoid
+        \"got Future attached to a different loop\", run `ainsert()` on our
+        process-wide LightRAG runtime loop.
+        """
+        from app.lightrag.runtime import get_lightrag_runtime
+
+        runtime = get_lightrag_runtime()
+
+        # Best-effort: ensure both doc_id and file_path are the Entry UUID, so query_llm chunks
+        # can be mapped back to Entries (some upstream responses only include file_path).
+        def _do() -> str:
+            try:
+                return runtime.loop.run_until_complete(rag.ainsert(text, ids=[entry_id], file_paths=[entry_id]))
+            except TypeError:
+                try:
+                    return runtime.loop.run_until_complete(rag.ainsert(text, ids=[entry_id], file_path=entry_id))
+                except TypeError:
+                    return runtime.loop.run_until_complete(rag.ainsert(text, ids=[entry_id]))
+
+        return runtime.call(_do, timeout_sec=None)
 
     def _delete_by_entry_id(self, rag, *, entry_id: str) -> IndexResult:
         doc_id = entry_id

@@ -242,6 +242,7 @@ def _call_rag_query_sync(*, query: str, mode: LightRagQueryMode, top_k: int, tim
     def _do() -> Any:
         rag = get_rag()
         q = (query or "").strip()
+        enable_rerank = bool(getattr(rag, "rerank_model_func", None))
 
         # Try new QueryParam + query_llm API (lightrag-hku >= 1.4.x)
         # query_llm returns structured data with llm_response and chunks
@@ -250,13 +251,15 @@ def _call_rag_query_sync(*, query: str, mode: LightRagQueryMode, top_k: int, tim
             import asyncio
 
             try:
-                param = QueryParam(mode=mode, top_k=top_k, chunk_top_k=top_k, stream=False)
+                param = QueryParam(mode=mode, top_k=top_k, chunk_top_k=top_k, stream=False, enable_rerank=enable_rerank)
                 raw = rag.query_llm(q, param=param)
             except Exception:
                 if str(mode) != "mix":
                     raise
                 # Backward compat: some LightRAG versions don't accept "mix"; fall back to "hybrid".
-                param = QueryParam(mode="hybrid", top_k=top_k, chunk_top_k=top_k, stream=False)
+                param = QueryParam(
+                    mode="hybrid", top_k=top_k, chunk_top_k=top_k, stream=False, enable_rerank=enable_rerank
+                )
                 raw = rag.query_llm(q, param=param)
 
             # Extract answer from llm_response
@@ -518,6 +521,7 @@ def _call_rag_graph_recall_sync(
     def _do() -> Any:
         rag = get_rag()
         q = (query or "").strip()
+        enable_rerank = bool(getattr(rag, "rerank_model_func", None))
         empty_result = {"chunks": [], "entities": [], "relationships": []} if include_graph_context else []
         if not q or top_k <= 0 or chunk_top_k <= 0:
             return empty_result
@@ -533,8 +537,9 @@ def _call_rag_graph_recall_sync(
                     chunk_top_k=chunk_top_k,
                     stream=False,
                     only_need_context=True,
-                    enable_rerank=False,
+                    enable_rerank=enable_rerank,
                 )
+                print("param:", param)
                 try:
                     raw = rag.query_llm(q, param=param, max_tokens=max_tokens, temperature=0)
                 except TypeError:
@@ -549,7 +554,7 @@ def _call_rag_graph_recall_sync(
                     chunk_top_k=chunk_top_k,
                     stream=False,
                     only_need_context=True,
-                    enable_rerank=False,
+                    enable_rerank=enable_rerank,
                 )
                 try:
                     raw = rag.query_llm(q, param=param, max_tokens=max_tokens, temperature=0)
