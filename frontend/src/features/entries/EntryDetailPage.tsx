@@ -1,4 +1,5 @@
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useNavigate, useParams } from 'react-router-dom'
 import { ArrowLeft, Edit, Trash2, Calendar, Clock, Loader2, Link2, Paperclip } from 'lucide-react'
 import { useEntryQuery, useDeleteEntryMutation, useEntryIndexStatusQuery } from './queries'
@@ -6,6 +7,8 @@ import { IndexStatusBadge } from './components/IndexStatusBadge'
 import { cn } from '@/lib/utils'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { remarkCitation } from '@/features/assistant/components/remark-citation'
+import { CitationMarker } from '@/features/assistant/components/citation'
 import {
   RelationList,
   RelationSelector,
@@ -199,7 +202,18 @@ export function EntryDetailPage() {
 
           {entry.content ? (
             <div className="prose prose-sm dark:prose-invert max-w-none">
-              <ReactMarkdown>{entry.content}</ReactMarkdown>
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkCitation]}
+                components={
+                  {
+                    'citation-marker': ({ identifier }: { identifier: string }) => (
+                      <CitationMarker identifier={identifier} label={identifier} />
+                    ),
+                  } as any
+                }
+              >
+                {entry.content}
+              </ReactMarkdown>
             </div>
           ) : (
             <p className="text-muted-foreground italic">{t('messages.noContent')}</p>

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { FileText, Network, GitBranch, ChevronRight, ChevronDown, Layers } from 'lucide-react'
+import { FileText, ChevronRight, ChevronDown, Layers, Box, Share2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCitationContextSafe } from './CitationContext'
 import { CitationData } from './utils'
@@ -79,9 +79,9 @@ export function ReferenceList() {
                 citation={citation}
                 icon={
                   citation.type === 'entity' ? (
-                    <Network className="h-3.5 w-3.5" />
+                    <Box className="h-3.5 w-3.5" />
                   ) : (
-                    <GitBranch className="h-3.5 w-3.5" />
+                    <Share2 className="h-3.5 w-3.5" />
                   )
                 }
                 iconColor={

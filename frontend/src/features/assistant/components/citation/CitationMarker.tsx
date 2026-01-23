@@ -1,5 +1,6 @@
 import { useNavigate } from 'react-router-dom'
 import { cn } from '@/lib/utils'
+import { FileText, Box, Share2 } from 'lucide-react'
 import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card'
 import { useCitationContextSafe } from './CitationContext'
 import { CitationPreview } from './CitationHoverCard'
@@ -40,13 +41,13 @@ export function CitationMarker({ identifier, label }: CitationMarkerProps) {
 
     switch (citation.type) {
       case 'entry':
-        return 'text-primary hover:bg-primary/10'
+        return 'text-primary bg-primary/10 hover:bg-primary/20'
       case 'entity':
-        return 'text-violet-500 hover:bg-violet-500/10'
+        return 'text-violet-500 bg-violet-500/10 hover:bg-violet-500/20'
       case 'rel':
-        return 'text-amber-500 hover:bg-amber-500/10'
+        return 'text-amber-500 bg-amber-500/10 hover:bg-amber-500/20'
       default:
-        return 'text-muted-foreground'
+        return 'text-muted-foreground bg-muted/50 hover:bg-muted/70'
     }
   }
 
@@ -66,13 +67,14 @@ export function CitationMarker({ identifier, label }: CitationMarkerProps) {
           onClick={handleClick}
           className={cn(
             "inline-flex items-center justify-center",
-            "text-xs font-medium cursor-pointer",
-            "px-1 py-0.5 rounded transition-colors",
-            getTypeStyles(),
-            citation.type === 'entry' && "cursor-pointer"
+            "cursor-pointer",
+            "p-0.5 rounded transition-colors",
+            getTypeStyles()
           )}
         >
-          [{label || identifier}]
+          {citation.type === 'entry' && <FileText className="h-3 w-3" />}
+          {citation.type === 'entity' && <Box className="h-3 w-3" />}
+          {citation.type === 'rel' && <Share2 className="h-3 w-3" />}
         </sup>
       </HoverCardTrigger>
       <HoverCardContent className="w-72">

@@ -1,5 +1,6 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { remarkCitation } from './remark-citation'
 import { Bot, User } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
@@ -72,7 +73,7 @@ export function MessageItem({ message, variant = 'default' }: MessageItemProps) 
           )}
           <CitationProvider content={message.content || ''} toolCalls={message.toolCalls}>
             <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
+              remarkPlugins={[remarkGfm, remarkCitation]}
               components={{
                 p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
                 code: ({ node, inline, className, children, ...props }: any) => {
@@ -82,13 +83,13 @@ export function MessageItem({ message, variant = 'default' }: MessageItemProps) 
                     <code className="block bg-black/10 dark:bg-white/10 p-3 rounded-lg font-mono text-sm overflow-x-auto my-2" {...props}>{children}</code>
                   )
                 },
+                // Handle our custom citation-marker node
+                // @ts-ignore - Custom element type from remark-citation
+                'citation-marker': ({ identifier }: { identifier: string }) => {
+                  return <CitationMarker identifier={identifier} label={identifier} />
+                },
+                // Fallback for regular superscripts or if plugin fails
                 sup: ({ children, ...props }) => {
-                  // 检查是否是脚注引用格式 [n]
-                  const text = String(children)
-                  const match = text.match(/^\[(\d+)\]$/)
-                  if (match) {
-                    return <CitationMarker identifier={match[1]} label={match[1]} />
-                  }
                   return <sup {...props}>{children}</sup>
                 },
               }}

@@ -1,6 +1,9 @@
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
+import { remarkCitation } from '@/features/assistant/components/remark-citation'
+import { CitationMarker } from '@/features/assistant/components/citation'
 
 interface MarkdownEditorProps {
   value: string
@@ -64,7 +67,18 @@ export function MarkdownEditor({
       ) : (
         <div className="min-h-[300px] p-4 prose prose-sm dark:prose-invert max-w-none">
           {value ? (
-            <ReactMarkdown>{value}</ReactMarkdown>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm, remarkCitation]}
+              components={
+                {
+                  'citation-marker': ({ identifier }: { identifier: string }) => (
+                    <CitationMarker identifier={identifier} label={identifier} />
+                  ),
+                } as any
+              }
+            >
+              {value}
+            </ReactMarkdown>
           ) : (
             <p className="text-muted-foreground italic">Nothing to preview</p>
           )}
