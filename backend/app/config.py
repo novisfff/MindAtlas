@@ -72,6 +72,16 @@ class Settings(BaseSettings):
     lightrag_query_cache_ttl_sec: int = Field(default=0, alias="LIGHTRAG_QUERY_CACHE_TTL_SEC")
     lightrag_query_cache_maxsize: int = Field(default=128, alias="LIGHTRAG_QUERY_CACHE_MAXSIZE")
 
+    # Assistant KB tools (LightRAG-powered retrieval only)
+    assistant_kb_graph_recall_mode: str = Field(default="mix", alias="ASSISTANT_KB_GRAPH_RECALL_MODE")
+    assistant_kb_graph_recall_top_k: int = Field(default=10, alias="ASSISTANT_KB_GRAPH_RECALL_TOP_K")
+    assistant_kb_graph_recall_chunk_top_k: int = Field(default=20, alias="ASSISTANT_KB_GRAPH_RECALL_CHUNK_TOP_K")
+    assistant_kb_graph_recall_max_entries: int = Field(default=10, alias="ASSISTANT_KB_GRAPH_RECALL_MAX_ENTRIES")
+    assistant_kb_graph_recall_chunks_per_entry: int = Field(default=3, alias="ASSISTANT_KB_GRAPH_RECALL_CHUNKS_PER_ENTRY")
+    assistant_kb_graph_recall_max_chunk_chars: int = Field(default=600, alias="ASSISTANT_KB_GRAPH_RECALL_MAX_CHUNK_CHARS")
+    assistant_kb_graph_recall_min_score: float = Field(default=0.0, alias="ASSISTANT_KB_GRAPH_RECALL_MIN_SCORE")
+    assistant_kb_graph_recall_max_tokens: int = Field(default=8, alias="ASSISTANT_KB_GRAPH_RECALL_MAX_TOKENS")
+
     # Neo4j (required if lightrag_enabled=true)
     neo4j_uri: str = Field(default="bolt://localhost:7687", alias="NEO4J_URI")
     neo4j_user: str = Field(default="neo4j", alias="NEO4J_USER")

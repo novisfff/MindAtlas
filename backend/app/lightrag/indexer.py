@@ -70,10 +70,16 @@ class Indexer:
             )
 
         try:
-            track_id = rag.insert(
-                req.payload.text,
-                ids=[str(req.entry_id)],
-            )
+            entry_id = str(req.entry_id)
+            # Best-effort: ensure both doc_id and file_path are the Entry UUID, so query_llm chunks
+            # can be mapped back to Entries (some upstream responses only include file_path).
+            try:
+                track_id = rag.insert(req.payload.text, ids=[entry_id], file_paths=[entry_id])
+            except TypeError:
+                try:
+                    track_id = rag.insert(req.payload.text, ids=[entry_id], file_path=entry_id)
+                except TypeError:
+                    track_id = rag.insert(req.payload.text, ids=[entry_id])
             return IndexResult(ok=True, detail=f"indexed: track_id={track_id}")
         except Exception as e:
             return IndexResult(ok=False, retryable=True, error_kind="transient", detail=str(e))

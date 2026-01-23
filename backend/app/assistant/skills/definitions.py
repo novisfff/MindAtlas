@@ -17,6 +17,8 @@ GENERAL_CHAT = SkillDefinition(
         "get_statistics",
         "list_entry_types",
         "list_tags",
+        "kb_search",
+        "kb_relation_recommendations",
     ],
     mode="agent",
     system_prompt="你是 MindAtlas 的 AI 助手，友好地回复用户，可以按需调用工具。MindAtlas 是一款个人知识与经历管理系统，旨在帮助用户系统性地记录、关联、回顾和总结个人的知识积累与人生经历。",

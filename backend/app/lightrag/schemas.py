@@ -9,7 +9,7 @@ from pydantic import Field
 from app.common.schemas import CamelModel
 
 # Query modes supported by LightRAG
-LightRagQueryMode = Literal["naive", "local", "global", "hybrid"]
+LightRagQueryMode = Literal["naive", "local", "global", "hybrid", "mix"]
 
 
 class LightRagQueryRequest(CamelModel):
@@ -63,3 +63,29 @@ class LightRagEntryRelationRecommendationsResponse(CamelModel):
     """Response payload for Entry relation recommendations."""
 
     items: list[LightRagEntryRelationRecommendationItem] = Field(default_factory=list)
+
+
+class GraphEntity(CamelModel):
+    """Entity extracted from knowledge graph context."""
+
+    name: str = Field(..., description="Entity name")
+    type: str | None = Field(default=None, description="Entity type (concept, method, person, etc.)")
+    description: str | None = Field(default=None, description="Entity description")
+    entry_id: str | None = Field(default=None, description="Associated Entry UUID if available")
+
+
+class GraphRelationship(CamelModel):
+    """Relationship extracted from knowledge graph context."""
+
+    source: str = Field(..., description="Source entity name")
+    target: str = Field(..., description="Target entity name")
+    description: str | None = Field(default=None, description="Relationship description")
+    keywords: str | None = Field(default=None, description="Relationship keywords")
+    entry_id: str | None = Field(default=None, description="Associated Entry UUID if available")
+
+
+class GraphContext(CamelModel):
+    """Knowledge graph context for AI augmentation."""
+
+    entities: list[GraphEntity] = Field(default_factory=list)
+    relationships: list[GraphRelationship] = Field(default_factory=list)
