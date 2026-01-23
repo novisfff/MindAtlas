@@ -120,6 +120,7 @@ npm run dev
 ```bash
 cd deploy
 cp .env.example .env
+cp backend.env.example backend.env
 docker compose up -d
 ```
 

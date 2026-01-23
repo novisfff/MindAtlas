@@ -2,15 +2,11 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+import uuid
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
 
 if (os.environ.get("MINDATLAS_FAULTHANDLER") or "").strip().lower() in {"1", "true", "yes", "on"}:
     import faulthandler
@@ -23,6 +19,7 @@ if (os.environ.get("MINDATLAS_FAULTHANDLER") or "").strip().lower() in {"1", "tr
         pass
 
 from app.common.exceptions import register_exception_handlers
+from app.common.request_context import reset_request_id, set_request_id
 from app.common.responses import ApiResponse
 from app.config import get_settings
 from app.entry_type.router import router as entry_type_router
@@ -41,6 +38,11 @@ from app.lightrag.router import router as lightrag_router
 
 settings = get_settings()
 
+logging.basicConfig(
+    level=getattr(logging, settings.log_level, logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+
 app = FastAPI(
     title=settings.app_name,
     debug=settings.debug,
@@ -56,7 +58,47 @@ if cors_origins:
         allow_headers=["*"],
     )
 
-register_exception_handlers(app)
+register_exception_handlers(app, debug=settings.debug)
+
+
+@app.middleware("http")
+async def request_logging_middleware(request, call_next):
+    logger = logging.getLogger("app.request")
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+    request.state.request_id = request_id
+    token = set_request_id(request_id)
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = (time.perf_counter() - start) * 1000.0
+        logger.exception(
+            "request_failed request_id=%s method=%s path=%s duration_ms=%.2f",
+            request_id,
+            request.method,
+            request.url.path,
+            duration_ms,
+        )
+        raise
+    finally:
+        reset_request_id(token)
+
+    duration_ms = (time.perf_counter() - start) * 1000.0
+    response.headers["x-request-id"] = request_id
+    log_fn = logger.info
+    if response.status_code >= 500:
+        log_fn = logger.error
+    elif response.status_code >= 400:
+        log_fn = logger.warning
+    log_fn(
+        "request_completed request_id=%s method=%s path=%s status=%s duration_ms=%.2f",
+        request_id,
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+    )
+    return response
 
 # Register routers
 app.include_router(entry_type_router)

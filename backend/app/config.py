@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     app_env: str = Field(default="development", alias="APP_ENV")
     debug: bool = Field(default=False, alias="DEBUG")
 
+    # Logging
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    log_json: bool = Field(default=False, alias="LOG_JSON")
+
     # API
     api_prefix: str = Field(default="/api", alias="API_PREFIX")
 
@@ -116,6 +120,12 @@ class Settings(BaseSettings):
     # Server
     host: str = Field(default="0.0.0.0", alias="HOST")
     port: int = Field(default=8000, alias="PORT")
+
+    @field_validator("log_level")
+    @classmethod
+    def normalize_log_level(cls, v: str) -> str:
+        value = (v or "").strip().upper()
+        return value or "INFO"
 
     def cors_origins_list(self) -> list[str]:
         value = self.cors_origins

@@ -120,6 +120,7 @@ The project provides a complete Docker Compose configuration for one-click deplo
 ```bash
 cd deploy
 cp .env.example .env
+cp backend.env.example backend.env
 docker compose up -d
 ```
 

@@ -26,6 +26,7 @@ out/
 # Environment
 .env
 .env.local
+backend.env
 
 # Runtime data
 uploads/
