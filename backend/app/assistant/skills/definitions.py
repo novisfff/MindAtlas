@@ -17,7 +17,6 @@ GENERAL_CHAT = SkillDefinition(
         "get_statistics",
         "list_entry_types",
         "list_tags",
-        "kb_search",
         "kb_relation_recommendations",
     ],
     mode="agent",

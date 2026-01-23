@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass
 from functools import lru_cache, partial
 
@@ -205,59 +206,72 @@ def _create_and_init_rag():
     if not settings.lightrag_enabled:
         raise LightRagNotEnabledError("LightRAG is not enabled (LIGHTRAG_ENABLED=false)")
 
-    llm = _resolve_llm_config()
-    embedding = _resolve_embedding_config(llm=llm)
-    _apply_runtime_env(llm=llm, embedding=embedding)
+    from app.lightrag.runtime import get_lightrag_runtime
 
-    working_dir = (getattr(settings, "lightrag_working_dir", "") or "").strip() or "./lightrag_storage"
-    workspace = (getattr(settings, "lightrag_workspace", "") or "").strip()
-    graph_storage = (getattr(settings, "lightrag_graph_storage", "") or "").strip() or "Neo4JStorage"
-    embedding_dim = int(getattr(settings, "lightrag_embedding_dim", 1536) or 1536)
+    runtime = get_lightrag_runtime()
 
-    try:
-        from lightrag import LightRAG
-        from lightrag.llm.openai import openai_complete_if_cache, openai_embed
-        from lightrag.utils import EmbeddingFunc, always_get_an_event_loop
-    except ImportError as e:
-        raise LightRagDependencyError("lightrag-hku is not installed") from e
+    def _init_in_runtime():
+        llm = _resolve_llm_config()
+        embedding = _resolve_embedding_config(llm=llm)
+        _apply_runtime_env(llm=llm, embedding=embedding)
 
-    async def llm_model_func(prompt, system_prompt=None, history_messages=None, **kwargs) -> str:
-        return await openai_complete_if_cache(
-            llm.model,
-            prompt,
-            system_prompt=system_prompt,
-            history_messages=history_messages,
-            base_url=llm.base_url,
-            api_key=llm.api_key,
-            **kwargs,
+        working_dir = (getattr(settings, "lightrag_working_dir", "") or "").strip() or "./lightrag_storage"
+        workspace = (getattr(settings, "lightrag_workspace", "") or "").strip()
+        graph_storage = (getattr(settings, "lightrag_graph_storage", "") or "").strip() or "Neo4JStorage"
+        embedding_dim = int(getattr(settings, "lightrag_embedding_dim", 1536) or 1536)
+
+        try:
+            from lightrag import LightRAG
+            from lightrag.llm.openai import openai_complete_if_cache, openai_embed
+            from lightrag.utils import EmbeddingFunc
+        except ImportError as e:
+            raise LightRagDependencyError("lightrag-hku is not installed") from e
+
+        async def llm_model_func(prompt, system_prompt=None, history_messages=None, **kwargs) -> str:
+            return await openai_complete_if_cache(
+                llm.model,
+                prompt,
+                system_prompt=system_prompt,
+                history_messages=history_messages,
+                base_url=llm.base_url,
+                api_key=llm.api_key,
+                **kwargs,
+            )
+
+        embedding_func = EmbeddingFunc(
+            embedding_dim=embedding_dim,
+            model_name=embedding.model,
+            max_token_size=8192,
+            send_dimensions=True,
+            func=partial(
+                openai_embed.func,
+                model=embedding.model,
+                base_url=embedding.base_url,
+                api_key=embedding.api_key,
+            ),
         )
 
-    embedding_func = EmbeddingFunc(
-        embedding_dim=embedding_dim,
-        model_name=embedding.model,
-        max_token_size=8192,
-        send_dimensions=True,
-        func=partial(
-            openai_embed.func,
-            model=embedding.model,
-            base_url=embedding.base_url,
-            api_key=embedding.api_key,
-        ),
-    )
+        rag_kwargs = {
+            "working_dir": working_dir,
+            "graph_storage": graph_storage,
+            "embedding_func": embedding_func,
+            "llm_model_func": llm_model_func,
+        }
+        if workspace:
+            rag_kwargs["namespace"] = workspace
 
-    rag_kwargs = {
-        "working_dir": working_dir,
-        "graph_storage": graph_storage,
-        "embedding_func": embedding_func,
-        "llm_model_func": llm_model_func,
-    }
-    if workspace:
-        rag_kwargs["namespace"] = workspace
+        rag = LightRAG(**rag_kwargs)
 
-    rag = LightRAG(**rag_kwargs)
-    loop = always_get_an_event_loop()
-    loop.run_until_complete(rag.initialize_storages())
-    return rag
+        init_timeout_sec = float(getattr(settings, "lightrag_init_timeout_sec", 120.0) or 120.0)
+        started = time.perf_counter()
+        loop = runtime.loop
+        loop.run_until_complete(asyncio.wait_for(rag.initialize_storages(), timeout=init_timeout_sec))
+        logger.info("lightrag initialized", extra={"elapsed_ms": int((time.perf_counter() - started) * 1000)})
+        return rag
+
+    import asyncio
+
+    return runtime.call(_init_in_runtime, timeout_sec=float(getattr(settings, "lightrag_init_timeout_sec", 120.0) or 120.0) + 10.0)
 
 
 @lru_cache(maxsize=1)

@@ -273,6 +273,7 @@ class AssistantConfigService:
             tools=request.tools,
             mode=request.mode,
             system_prompt=request.system_prompt,
+            kb_config=request.kb_config,
             is_system=False,
             enabled=request.enabled,
         )
@@ -287,6 +288,7 @@ class AssistantConfigService:
                 output_mode=getattr(step, "output_mode", None),
                 output_fields=getattr(step, "output_fields", None),
                 include_in_summary=step.include_in_summary if step.include_in_summary is not None else True,
+                kb_config=getattr(step, "kb_config", None),
             )
             for i, step in enumerate(request.steps)
         ]
@@ -316,6 +318,8 @@ class AssistantConfigService:
                 skill.mode = request.mode
             if request.system_prompt is not None:
                 skill.system_prompt = request.system_prompt
+            if request.kb_config is not None:
+                skill.kb_config = request.kb_config
             if request.steps is not None:
                 # 先删除旧 steps，避免唯一约束冲突
                 for old_step in skill.steps:
@@ -332,6 +336,7 @@ class AssistantConfigService:
                         output_mode=getattr(step, "output_mode", None),
                         output_fields=getattr(step, "output_fields", None),
                         include_in_summary=step.include_in_summary if step.include_in_summary is not None else True,
+                        kb_config=getattr(step, "kb_config", None),
                     )
                     for i, step in enumerate(request.steps)
                 ]
@@ -353,6 +358,8 @@ class AssistantConfigService:
                 skill.mode = request.mode
             if request.system_prompt is not None:
                 skill.system_prompt = request.system_prompt
+            if request.kb_config is not None:
+                skill.kb_config = request.kb_config
             if request.enabled is not None:
                 skill.enabled = request.enabled
             if request.steps is not None:
@@ -371,6 +378,7 @@ class AssistantConfigService:
                         output_mode=getattr(step, "output_mode", None),
                         output_fields=getattr(step, "output_fields", None),
                         include_in_summary=step.include_in_summary if step.include_in_summary is not None else True,
+                        kb_config=getattr(step, "kb_config", None),
                     )
                     for i, step in enumerate(request.steps)
                 ]

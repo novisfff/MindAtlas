@@ -1,5 +1,9 @@
 import { apiClient } from '@/lib/api/client'
 
+export interface SkillKBConfig {
+  enabled?: boolean
+}
+
 export interface SkillStep {
   id: string
   stepOrder: number
@@ -27,6 +31,7 @@ export interface AssistantSkill {
   systemPrompt: string | null
   isSystem: boolean
   enabled: boolean
+  kbConfig: SkillKBConfig | null
   steps: SkillStep[]
   createdAt: string
   updatedAt: string
@@ -52,6 +57,7 @@ export interface CreateSkillRequest {
   systemPrompt?: string
   steps?: SkillStepInput[]
   enabled?: boolean
+  kbConfig?: SkillKBConfig
 }
 
 export interface UpdateSkillRequest {
@@ -63,6 +69,7 @@ export interface UpdateSkillRequest {
   systemPrompt?: string
   steps?: SkillStepInput[]
   enabled?: boolean
+  kbConfig?: SkillKBConfig
 }
 
 export const getSkills = () =>

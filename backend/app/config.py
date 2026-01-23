@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     lightrag_embedding_key: str | None = Field(default=None, alias="LIGHTRAG_EMBEDDING_KEY")
     lightrag_embedding_dim: int = Field(default=1536, alias="LIGHTRAG_EMBEDDING_DIM")
     lightrag_ai_key_source: str = Field(default="env_or_db", alias="LIGHTRAG_AI_KEY_SOURCE")
+    lightrag_init_timeout_sec: float = Field(default=120.0, alias="LIGHTRAG_INIT_TIMEOUT_SEC")
     lightrag_query_timeout_sec: float = Field(default=30.0, alias="LIGHTRAG_QUERY_TIMEOUT_SEC")
     lightrag_query_max_concurrency: int = Field(default=1, alias="LIGHTRAG_QUERY_MAX_CONCURRENCY")
     lightrag_query_cache_ttl_sec: int = Field(default=0, alias="LIGHTRAG_QUERY_CACHE_TTL_SEC")
@@ -81,6 +82,9 @@ class Settings(BaseSettings):
     assistant_kb_graph_recall_max_chunk_chars: int = Field(default=600, alias="ASSISTANT_KB_GRAPH_RECALL_MAX_CHUNK_CHARS")
     assistant_kb_graph_recall_min_score: float = Field(default=0.0, alias="ASSISTANT_KB_GRAPH_RECALL_MIN_SCORE")
     assistant_kb_graph_recall_max_tokens: int = Field(default=8, alias="ASSISTANT_KB_GRAPH_RECALL_MAX_TOKENS")
+
+    # KB prompt injection budget (executor formats kb_search result into prompt)
+    kb_context_max_chars: int = Field(default=16000, alias="KB_CONTEXT_MAX_CHARS")
 
     # Neo4j (required if lightrag_enabled=true)
     neo4j_uri: str = Field(default="bolt://localhost:7687", alias="NEO4J_URI")

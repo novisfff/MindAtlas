@@ -1,4 +1,5 @@
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { Bot, User } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
@@ -6,6 +7,7 @@ import { ToolCall, SkillCall, Analysis } from '../types'
 import { ToolCallDisplay } from './ToolCallDisplay'
 import { SkillCallDisplay } from './SkillCallDisplay'
 import { AnalysisDisplay } from './AnalysisDisplay'
+import { CitationProvider, CitationMarker, ReferenceList } from './citation'
 
 interface MessageItemProps {
   message: {
@@ -68,20 +70,33 @@ export function MessageItem({ message, variant = 'default' }: MessageItemProps) 
           {message.analysis && (
             <AnalysisDisplay analysis={message.analysis} />
           )}
-          <ReactMarkdown
-            components={{
-              p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
-              code: ({ node, inline, className, children, ...props }: any) => {
-                return inline ? (
-                  <code className="bg-black/10 dark:bg-white/10 px-1 py-0.5 rounded font-mono text-sm" {...props}>{children}</code>
-                ) : (
-                  <code className="block bg-black/10 dark:bg-white/10 p-3 rounded-lg font-mono text-sm overflow-x-auto my-2" {...props}>{children}</code>
-                )
-              }
-            }}
-          >
-            {message.content || '...'}
-          </ReactMarkdown>
+          <CitationProvider content={message.content || ''} toolCalls={message.toolCalls}>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
+                code: ({ node, inline, className, children, ...props }: any) => {
+                  return inline ? (
+                    <code className="bg-black/10 dark:bg-white/10 px-1 py-0.5 rounded font-mono text-sm" {...props}>{children}</code>
+                  ) : (
+                    <code className="block bg-black/10 dark:bg-white/10 p-3 rounded-lg font-mono text-sm overflow-x-auto my-2" {...props}>{children}</code>
+                  )
+                },
+                sup: ({ children, ...props }) => {
+                  // 检查是否是脚注引用格式 [n]
+                  const text = String(children)
+                  const match = text.match(/^\[(\d+)\]$/)
+                  if (match) {
+                    return <CitationMarker identifier={match[1]} label={match[1]} />
+                  }
+                  return <sup {...props}>{children}</sup>
+                },
+              }}
+            >
+              {message.content || '...'}
+            </ReactMarkdown>
+            <ReferenceList />
+          </CitationProvider>
         </div>
       </div>
     </div>

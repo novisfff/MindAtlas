@@ -1,8 +1,18 @@
 """Skill converters"""
 from __future__ import annotations
 
-from app.assistant.skills.base import SkillDefinition, SkillStep
-from app.assistant_config.models import AssistantSkill
+from typing import Any, TYPE_CHECKING
+
+from app.assistant.skills.base import SkillDefinition, SkillKBConfig, SkillStep
+
+if TYPE_CHECKING:
+    from app.assistant_config.models import AssistantSkill
+
+
+def _parse_skill_kb_config(raw: Any) -> SkillKBConfig | None:
+    if not raw or not isinstance(raw, dict):
+        return None
+    return SkillKBConfig(enabled=bool(raw.get("enabled", False)))
 
 
 def db_skill_to_definition_light(skill: AssistantSkill) -> SkillDefinition:
@@ -25,6 +35,7 @@ def db_skill_to_definition_light(skill: AssistantSkill) -> SkillDefinition:
         mode=skill.mode or "steps",
         system_prompt=skill.system_prompt,
         steps=[],  # 路由阶段不需要 steps
+        kb=_parse_skill_kb_config(getattr(skill, "kb_config", None)),
     )
 
 
@@ -81,4 +92,5 @@ def db_skill_to_definition(skill: AssistantSkill) -> SkillDefinition:
         mode=skill.mode or "steps",
         system_prompt=skill.system_prompt,
         steps=steps,
+        kb=_parse_skill_kb_config(getattr(skill, "kb_config", None)),
     )

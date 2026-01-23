@@ -59,6 +59,8 @@ class AssistantSkill(UuidPrimaryKeyMixin, TimestampMixin, Base):
     mode = Column(String(32), nullable=False, default="steps")
     # Agent 模式的系统提示词
     system_prompt = Column(Text, nullable=True)
+    # 知识库配置 (JSON)
+    kb_config = Column(JSON, nullable=True)
 
     is_system = Column(Boolean, nullable=False, default=False)
     enabled = Column(Boolean, nullable=False, default=True)
@@ -94,6 +96,8 @@ class AssistantSkillStep(UuidPrimaryKeyMixin, TimestampMixin, Base):
     output_fields = Column(JSON, nullable=True)
     # 是否将该步骤信息提供给 summary（默认 True）
     include_in_summary = Column(Boolean, nullable=False, default=True)
+    # Step 级别知识库配置 (JSON)
+    kb_config = Column(JSON, nullable=True)
 
     skill = relationship("AssistantSkill", back_populates="steps")
 

@@ -4,6 +4,7 @@ export interface ToolCall {
   args: Record<string, unknown>
   result?: string
   status: 'pending' | 'running' | 'completed' | 'error'
+  hidden?: boolean
 }
 
 export interface SkillCall {

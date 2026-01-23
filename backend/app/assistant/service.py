@@ -114,16 +114,18 @@ class AssistantService:
         skill_calls_data: list[dict] = []
         analysis_data: dict | None = None
 
-        def on_tool_call_start(tool_call_id: str, name: str, args: dict) -> None:
+        def on_tool_call_start(tool_call_id: str, name: str, args: dict, hidden: bool = False) -> None:
             tool_calls_data.append({
                 "id": tool_call_id,
                 "name": name,
                 "args": args,
+                "hidden": bool(hidden),
             })
             tool_events.append(self._sse("tool_call_start", {
                 "toolCallId": tool_call_id,
                 "name": name,
                 "args": args,
+                "hidden": bool(hidden),
             }))
 
         def on_tool_call_end(tool_call_id: str, status: str, result: str) -> None:

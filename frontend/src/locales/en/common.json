@@ -323,6 +323,9 @@
       "toolsHelpText": "Tools are automatically added based on the steps.",
       "noToolsSelected": "No tools used",
       "includeInSummary": "Include in summary",
+      "kbEnabled": "Knowledge Base",
+      "kbEnabledDesc": "Auto-recall relevant knowledge and inject into context",
+      "enableKB": "Enable Knowledge Base",
       "mode": "Execution Mode",
       "modeSteps": "Steps Mode",
       "modeStepsDesc": "Execute in predefined step order",
@@ -435,5 +438,15 @@
     "succeeded": "Completed",
     "dead": "Failed",
     "unknown": "Unknown"
+  },
+  "citation": {
+    "entry": "Entry",
+    "entity": "Entity",
+    "relationship": "Relationship",
+    "viewEntry": "View Entry",
+    "notFound": "Reference not found",
+    "keywords": "Keywords",
+    "references": "References",
+    "knowledgeGraph": "Knowledge Graph References"
   }
 }

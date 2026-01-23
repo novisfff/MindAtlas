@@ -1,7 +1,6 @@
 """Knowledge base (LightRAG) tools for the Assistant."""
 from __future__ import annotations
 
-import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Awaitable, Callable, TypeVar
@@ -20,16 +19,29 @@ _TITLE_PREFIX = "Title:"
 
 
 def _run_async(factory: Callable[[], Awaitable[T]]) -> T:
-    """Run an async coroutine from a sync tool function."""
+    """Run an async coroutine from a sync tool function with a hard timeout.
+
+    Note: We intentionally avoid trying to reuse/own the LightRAG runtime loop here.
+    LightRAG internals are executed via `app.lightrag.service` which routes loop-bound
+    operations into its dedicated runtime thread.
+    """
+    import asyncio
+    from app.config import get_settings
+
+    timeout_sec = float(getattr(get_settings(), "lightrag_query_timeout_sec", 30.0) or 30.0) + 10.0
+
+    async def _runner() -> T:
+        return await asyncio.wait_for(factory(), timeout=timeout_sec)
+
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(factory())
+        return asyncio.run(_runner())
 
     # If we're already in an event loop, run the coroutine in a separate thread.
     with ThreadPoolExecutor(max_workers=1) as ex:
-        fut = ex.submit(lambda: asyncio.run(factory()))
-        return fut.result()
+        fut = ex.submit(lambda: asyncio.run(_runner()))
+        return fut.result(timeout=timeout_sec + 5.0)
 
 
 def _normalize_mode(mode: str | None) -> str:
@@ -67,6 +79,54 @@ def _parse_entry_title_from_chunk(text: str | None) -> str | None:
         return None
     title = first_line[len(_TITLE_PREFIX) :].strip()
     return title or None
+
+
+def _build_references(
+    items: list[dict[str, Any]],
+    graph_context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Build numbered reference list for citation.
+
+    Order: entries (1..N) -> entities (N+1..) -> relationships (...)
+    """
+    references: list[dict[str, Any]] = []
+    idx = 1
+
+    # 1. Entries
+    for item in items:
+        references.append({
+            "index": idx,
+            "type": "entry",
+            "entryId": item.get("entryId"),
+            "title": item.get("title", ""),
+            "summary": item.get("summary", ""),
+        })
+        idx += 1
+
+    # 2. Entities
+    for ent in graph_context.get("entities") or []:
+        references.append({
+            "index": idx,
+            "type": "entity",
+            "name": ent.get("name", ""),
+            "entityType": ent.get("type"),
+            "description": ent.get("description"),
+        })
+        idx += 1
+
+    # 3. Relationships
+    for rel in graph_context.get("relationships") or []:
+        references.append({
+            "index": idx,
+            "type": "rel",
+            "source": rel.get("source", ""),
+            "target": rel.get("target", ""),
+            "description": rel.get("description"),
+            "keywords": rel.get("keywords"),
+        })
+        idx += 1
+
+    return references
 
 
 @tool
@@ -225,7 +285,7 @@ def kb_search(
         if not isinstance(ent, dict):
             continue
         graph_context["entities"].append({
-            "name": ent.get("name") or "",
+            "name": (ent.get("name") or "").strip(),
             "type": ent.get("type"),
             "description": ent.get("description"),
             "entryId": ent.get("entry_id"),
@@ -234,20 +294,23 @@ def kb_search(
         if not isinstance(rel, dict):
             continue
         graph_context["relationships"].append({
-            "source": rel.get("source") or "",
-            "target": rel.get("target") or "",
+            "source": (rel.get("source") or "").strip(),
+            "target": (rel.get("target") or "").strip(),
             "description": rel.get("description"),
             "keywords": rel.get("keywords"),
             "entryId": rel.get("entry_id"),
         })
 
     if not entry_ids:
+        # 即使没有 entry，也可能有 graphContext，生成 references
+        references = _build_references([], graph_context)
         return json.dumps(
             {
                 "mode": m,
                 "query": q,
                 "items": [],
                 "graphContext": graph_context,
+                "references": references,
             },
             ensure_ascii=False,
             indent=2,
@@ -265,12 +328,16 @@ def kb_search(
             "content": e.content or "",
         })
 
+    # Build numbered references for citation
+    references = _build_references(items, graph_context)
+
     return json.dumps(
         {
             "mode": m,
             "query": q,
             "items": items,
             "graphContext": graph_context,
+            "references": references,
         },
         ensure_ascii=False,
         indent=2,
@@ -329,5 +396,4 @@ def kb_relation_recommendations(
         if exc.code == 40410:
             raise ValueError("LightRAG is not enabled") from exc
         raise
-
     return json.dumps(resp.model_dump(by_alias=True, exclude_none=True), ensure_ascii=False, indent=2, default=str)

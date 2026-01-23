@@ -85,15 +85,16 @@ class Indexer:
             return IndexResult(ok=False, retryable=True, error_kind="transient", detail=str(e))
 
     def _delete_by_entry_id(self, rag, *, entry_id: str) -> IndexResult:
-        try:
-            from lightrag.utils import always_get_an_event_loop
-        except ImportError as e:
-            return IndexResult(ok=False, retryable=False, error_kind="dependency", detail=str(e))
-
         doc_id = entry_id
         try:
-            loop = always_get_an_event_loop()
-            loop.run_until_complete(rag.adelete_by_doc_id(doc_id))
+            from app.lightrag.runtime import get_lightrag_runtime
+
+            runtime = get_lightrag_runtime()
+
+            def _do() -> None:
+                runtime.loop.run_until_complete(rag.adelete_by_doc_id(doc_id))
+
+            runtime.call(_do, timeout_sec=60.0)
             return IndexResult(ok=True, detail=f"deleted: doc_id={doc_id}")
         except Exception as e:
             # Deletion should be idempotent; treat failures as retryable by default.

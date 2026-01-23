@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { MessageItem } from './MessageItem'
-import { ToolCall } from '../types'
+import { ToolCall, SkillCall, Analysis } from '../types'
 import { useTranslation } from 'react-i18next'
 
 interface Message {
@@ -9,6 +9,8 @@ interface Message {
   content: string
   createdAt: number
   toolCalls?: ToolCall[]
+  skillCalls?: SkillCall[]
+  analysis?: Analysis
 }
 
 interface MessageListProps {
