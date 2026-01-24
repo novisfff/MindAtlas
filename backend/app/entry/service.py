@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.attachment.models import Attachment
 from app.common.exceptions import ApiException
 from app.common.storage import get_minio_client, remove_object_safe, StorageError
-from app.entry.models import Entry, TimeMode, entry_tag
+from app.entry.models import Entry, TimeMode
 from app.entry.schemas import EntryRequest, EntrySearchRequest
 from app.entry_type.service import EntryTypeService
 from app.relation.models import Relation
@@ -206,7 +206,6 @@ class EntryService:
         self.db.execute(
             delete(Relation).where(or_(Relation.source_entry_id == id, Relation.target_entry_id == id))
         )
-        self.db.execute(delete(entry_tag).where(entry_tag.c.entry_id == id))
 
         self.db.delete(entry)
         try:

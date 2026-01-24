@@ -246,3 +246,28 @@ class EntryServiceTests(unittest.TestCase):
             .count(),
             0,
         )
+
+    def test_delete_clears_entry_tag_association(self) -> None:
+        from sqlalchemy import select  # noqa: E402
+
+        from app.entry.models import Entry, TimeMode, entry_tag  # noqa: E402
+        from app.entry.service import EntryService  # noqa: E402
+
+        entry = Entry(
+            title="t",
+            content="c",
+            type_id=self.et.id,
+            time_mode=TimeMode.POINT,
+            time_at=datetime.now(timezone.utc),
+        )
+        entry.tags.extend([self.tag1, self.tag2])
+        self.db.add(entry)
+        self.db.commit()
+
+        rows = self.db.execute(select(entry_tag).where(entry_tag.c.entry_id == entry.id)).all()
+        self.assertEqual(len(rows), 2)
+
+        EntryService(self.db).delete(entry.id)
+
+        rows_after = self.db.execute(select(entry_tag).where(entry_tag.c.entry_id == entry.id)).all()
+        self.assertEqual(len(rows_after), 0)

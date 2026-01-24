@@ -14,7 +14,8 @@ import {
 
 export const entriesKeys = {
   all: ['entries'] as const,
-  list: (params?: ListEntriesParams) => [...entriesKeys.all, 'list', params] as const,
+  lists: () => [...entriesKeys.all, 'list'] as const,
+  list: (params?: ListEntriesParams) => [...entriesKeys.lists(), params] as const,
   detail: (id: string) => [...entriesKeys.all, 'detail', id] as const,
   indexStatus: (id: string) => [...entriesKeys.all, 'indexStatus', id] as const,
 }
@@ -42,7 +43,7 @@ export function useCreateEntryMutation() {
     mutationFn: (payload: EntryUpsertRequest) => createEntry(payload),
     onSuccess: (entry) => {
       queryClient.setQueryData(entriesKeys.detail(entry.id), entry)
-      queryClient.invalidateQueries({ queryKey: entriesKeys.list() })
+      queryClient.invalidateQueries({ queryKey: entriesKeys.lists() })
     },
   })
 }
@@ -59,7 +60,7 @@ export function useUpdateEntryMutation() {
     mutationFn: ({ id, payload }: UpdateEntryVariables) => updateEntry(id, payload),
     onSuccess: (entry) => {
       queryClient.setQueryData(entriesKeys.detail(entry.id), entry)
-      queryClient.invalidateQueries({ queryKey: entriesKeys.list() })
+      queryClient.invalidateQueries({ queryKey: entriesKeys.lists() })
     },
   })
 }
@@ -69,8 +70,26 @@ export function useDeleteEntryMutation() {
 
   return useMutation({
     mutationFn: (id: string) => deleteEntry(id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: entriesKeys.list() })
+    onMutate: async (id: string) => {
+      await queryClient.cancelQueries({ queryKey: entriesKeys.lists() })
+      const previousLists = queryClient.getQueriesData<Page<Entry>>({ queryKey: entriesKeys.lists() })
+
+      queryClient.setQueriesData<Page<Entry>>({ queryKey: entriesKeys.lists() }, (old) => {
+        if (!old) return old
+        return { ...old, content: old.content.filter((e) => e.id !== id) }
+      })
+
+      return { previousLists }
+    },
+    onError: (_err, _id, context) => {
+      context?.previousLists.forEach(([key, data]) => {
+        queryClient.setQueryData(key, data)
+      })
+    },
+    onSuccess: (_data, id) => {
+      queryClient.removeQueries({ queryKey: entriesKeys.detail(id) })
+      queryClient.removeQueries({ queryKey: entriesKeys.indexStatus(id) })
+      queryClient.invalidateQueries({ queryKey: entriesKeys.lists() })
     },
   })
 }
