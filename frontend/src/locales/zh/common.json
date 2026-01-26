@@ -328,7 +328,10 @@
       "modeAgentDesc": "AI 自主决定工具调用",
       "systemPrompt": "系统提示词",
       "systemPromptPlaceholder": "定义 AI 助手的行为和能力...",
-      "systemPromptHelpText": "系统提示词用于指导 AI 如何使用工具完成任务"
+      "systemPromptHelpText": "系统提示词用于指导 AI 如何使用工具完成任务",
+      "kbEnabled": "知识库",
+      "kbEnabledDesc": "自动召回相关知识并注入上下文",
+      "enableKB": "开启知识库"
     }
   },
   "aiProvider": {
@@ -433,5 +436,15 @@
     "succeeded": "已完成",
     "dead": "失败",
     "unknown": "未知"
+  },
+  "citation": {
+    "entry": "记录",
+    "entity": "实体",
+    "relationship": "关系",
+    "viewEntry": "查看记录",
+    "notFound": "引用未找到",
+    "keywords": "关键词",
+    "references": "参考来源",
+    "knowledgeGraph": "知识图谱引用"
   }
 }

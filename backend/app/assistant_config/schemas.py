@@ -256,6 +256,7 @@ class AssistantSkillStepInput(CamelModel):
     output_mode: AnalysisOutputMode | None = None
     output_fields: list[str] | None = None
     include_in_summary: bool | None = True
+    kb_config: dict | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> "AssistantSkillStepInput":
@@ -323,6 +324,7 @@ class AssistantSkillCreateRequest(CamelModel):
     system_prompt: str | None = Field(default=None, max_length=4096)
     steps: list[AssistantSkillStepInput] = []
     enabled: bool = True
+    kb_config: dict | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> "AssistantSkillCreateRequest":
@@ -344,6 +346,7 @@ class AssistantSkillUpdateRequest(CamelModel):
     system_prompt: str | None = Field(default=None, max_length=4096)
     steps: list[AssistantSkillStepInput] | None = None
     enabled: bool | None = None
+    kb_config: dict | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> "AssistantSkillUpdateRequest":
@@ -367,6 +370,7 @@ class AssistantSkillStepResponse(OrmModel):
     output_mode: str | None
     output_fields: list[str] | None
     include_in_summary: bool | None
+    kb_config: dict | None
     created_at: datetime
     updated_at: datetime
 
@@ -381,6 +385,7 @@ class AssistantSkillResponse(OrmModel):
     system_prompt: str | None
     is_system: bool
     enabled: bool
+    kb_config: dict | None
     steps: list[AssistantSkillStepResponse]
     created_at: datetime
     updated_at: datetime

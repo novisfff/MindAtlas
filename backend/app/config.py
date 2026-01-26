@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     app_env: str = Field(default="development", alias="APP_ENV")
     debug: bool = Field(default=False, alias="DEBUG")
 
+    # Logging
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    log_json: bool = Field(default=False, alias="LOG_JSON")
+
     # API
     api_prefix: str = Field(default="/api", alias="API_PREFIX")
 
@@ -67,10 +71,42 @@ class Settings(BaseSettings):
     lightrag_embedding_key: str | None = Field(default=None, alias="LIGHTRAG_EMBEDDING_KEY")
     lightrag_embedding_dim: int = Field(default=1536, alias="LIGHTRAG_EMBEDDING_DIM")
     lightrag_ai_key_source: str = Field(default="env_or_db", alias="LIGHTRAG_AI_KEY_SOURCE")
+    lightrag_init_timeout_sec: float = Field(default=120.0, alias="LIGHTRAG_INIT_TIMEOUT_SEC")
     lightrag_query_timeout_sec: float = Field(default=30.0, alias="LIGHTRAG_QUERY_TIMEOUT_SEC")
     lightrag_query_max_concurrency: int = Field(default=1, alias="LIGHTRAG_QUERY_MAX_CONCURRENCY")
     lightrag_query_cache_ttl_sec: int = Field(default=0, alias="LIGHTRAG_QUERY_CACHE_TTL_SEC")
     lightrag_query_cache_maxsize: int = Field(default=128, alias="LIGHTRAG_QUERY_CACHE_MAXSIZE")
+
+    # LightRAG language (optional)
+    # Controls prompt language for summarization/entity extraction inside LightRAG.
+    # Example values: "English", "Chinese".
+    lightrag_summary_language: str = Field(default="", alias="LIGHTRAG_SUMMARY_LANGUAGE")
+
+    # LightRAG rerank (optional)
+    # If configured, graph/vector recall will enable rerank automatically.
+    lightrag_rerank_model: str = Field(default="", alias="LIGHTRAG_RERANK_MODEL")
+    lightrag_rerank_host: str = Field(default="", alias="LIGHTRAG_RERANK_HOST")
+    lightrag_rerank_key: str | None = Field(default=None, alias="LIGHTRAG_RERANK_KEY")
+    lightrag_rerank_timeout_sec: float = Field(default=15.0, alias="LIGHTRAG_RERANK_TIMEOUT_SEC")
+    # "standard" uses {"model","query","documents","top_n"}.
+    # "aliyun" uses DashScope format {"model","input":{"query","documents"},"parameters":{"top_n"}}.
+    lightrag_rerank_request_format: str = Field(default="standard", alias="LIGHTRAG_RERANK_REQUEST_FORMAT")
+    lightrag_rerank_enable_chunking: bool = Field(default=False, alias="LIGHTRAG_RERANK_ENABLE_CHUNKING")
+    lightrag_rerank_max_tokens_per_doc: int = Field(default=480, alias="LIGHTRAG_RERANK_MAX_TOKENS_PER_DOC")
+    lightrag_min_rerank_score: float = Field(default=0.0, alias="LIGHTRAG_MIN_RERANK_SCORE")
+
+    # Assistant KB tools (LightRAG-powered retrieval only)
+    assistant_kb_graph_recall_mode: str = Field(default="mix", alias="ASSISTANT_KB_GRAPH_RECALL_MODE")
+    assistant_kb_graph_recall_top_k: int = Field(default=10, alias="ASSISTANT_KB_GRAPH_RECALL_TOP_K")
+    assistant_kb_graph_recall_chunk_top_k: int = Field(default=20, alias="ASSISTANT_KB_GRAPH_RECALL_CHUNK_TOP_K")
+    assistant_kb_graph_recall_max_entries: int = Field(default=10, alias="ASSISTANT_KB_GRAPH_RECALL_MAX_ENTRIES")
+    assistant_kb_graph_recall_chunks_per_entry: int = Field(default=3, alias="ASSISTANT_KB_GRAPH_RECALL_CHUNKS_PER_ENTRY")
+    assistant_kb_graph_recall_max_chunk_chars: int = Field(default=600, alias="ASSISTANT_KB_GRAPH_RECALL_MAX_CHUNK_CHARS")
+    assistant_kb_graph_recall_min_score: float = Field(default=0.0, alias="ASSISTANT_KB_GRAPH_RECALL_MIN_SCORE")
+    assistant_kb_graph_recall_max_tokens: int = Field(default=8, alias="ASSISTANT_KB_GRAPH_RECALL_MAX_TOKENS")
+
+    # KB prompt injection budget (executor formats kb_search result into prompt)
+    kb_context_max_chars: int = Field(default=16000, alias="KB_CONTEXT_MAX_CHARS")
 
     # Neo4j (required if lightrag_enabled=true)
     neo4j_uri: str = Field(default="bolt://localhost:7687", alias="NEO4J_URI")
@@ -84,6 +120,12 @@ class Settings(BaseSettings):
     # Server
     host: str = Field(default="0.0.0.0", alias="HOST")
     port: int = Field(default=8000, alias="PORT")
+
+    @field_validator("log_level")
+    @classmethod
+    def normalize_log_level(cls, v: str) -> str:
+        value = (v or "").strip().upper()
+        return value or "INFO"
 
     def cors_origins_list(self) -> list[str]:
         value = self.cors_origins

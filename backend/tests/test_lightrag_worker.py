@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 from uuid import uuid4
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
@@ -327,9 +328,11 @@ class IndexerTests(unittest.TestCase):
     def setUp(self) -> None:
         # Ensure skip path is deterministic for unit tests.
         os.environ["LIGHTRAG_ENABLED"] = "false"
+        reset_caches()
 
     def tearDown(self) -> None:
         os.environ.pop("LIGHTRAG_ENABLED", None)
+        reset_caches()
 
     def test_handle_upsert_skips_when_disabled(self) -> None:
         """handle() should fast-skip when LIGHTRAG_ENABLED=false."""
@@ -388,6 +391,93 @@ class IndexerTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertFalse(bool(result.retryable))
         self.assertIn("invalid op", result.detail or "")
+
+    def test_handle_upsert_uses_runtime_loop(self) -> None:
+        """handle(upsert) should run ainsert on the LightRAG runtime loop."""
+        prev = os.environ.get("LIGHTRAG_ENABLED")
+        os.environ["LIGHTRAG_ENABLED"] = "true"
+        reset_caches()
+
+        def _restore() -> None:
+            if prev is None:
+                os.environ.pop("LIGHTRAG_ENABLED", None)
+            else:
+                os.environ["LIGHTRAG_ENABLED"] = prev
+            reset_caches()
+
+        self.addCleanup(_restore)
+
+        from app.lightrag.indexer import Indexer
+        from app.lightrag.types import DocumentPayload, IndexRequest
+
+        class _FakeLoop:
+            def __init__(self) -> None:
+                self.last_awaitable = None
+
+            def run_until_complete(self, awaitable):  # noqa: ANN001
+                self.last_awaitable = awaitable
+                return "track-123"
+
+        class _FakeRuntime:
+            def __init__(self) -> None:
+                self.loop = _FakeLoop()
+                self.called = False
+
+            def call(self, fn, *, timeout_sec=None):  # noqa: ANN001
+                self.called = True
+                return fn()
+
+        class _FakeRag:
+            def __init__(self) -> None:
+                self.ainsert_calls: list[dict] = []
+
+            def insert(self, *args, **kwargs):  # noqa: ANN001
+                raise AssertionError("sync insert() should not be used (loop mismatch risk)")
+
+            def ainsert(self, *args, **kwargs):  # noqa: ANN001
+                self.ainsert_calls.append({"args": args, "kwargs": kwargs})
+                return object()
+
+        fake_runtime = _FakeRuntime()
+        fake_rag = _FakeRag()
+
+        indexer = Indexer()
+        payload = DocumentPayload(
+            entry_id=uuid4(),
+            entry_updated_at=datetime.now(timezone.utc),
+            type_id=uuid4(),
+            type_code="t",
+            type_name="T",
+            type_enabled=True,
+            graph_enabled=True,
+            ai_enabled=True,
+            title="Hello",
+            summary=None,
+            content="World",
+            tags=[],
+            tag_ids=[],
+            text="Title: Hello\nContent: World\n",
+        )
+        req = IndexRequest(
+            outbox_id=uuid4(),
+            entry_id=payload.entry_id,
+            op="upsert",
+            entry_updated_at=payload.entry_updated_at,
+            attempts=1,
+            payload=payload,
+        )
+
+        with patch("app.lightrag.indexer.get_rag", return_value=fake_rag), patch(
+            "app.lightrag.runtime.get_lightrag_runtime", return_value=fake_runtime
+        ):
+            result = indexer.handle(req)
+
+        self.assertTrue(result.ok)
+        self.assertIn("track-123", result.detail or "")
+        self.assertTrue(fake_runtime.called)
+        self.assertEqual(len(fake_rag.ainsert_calls), 1)
+        self.assertEqual(fake_rag.ainsert_calls[0]["kwargs"]["ids"], [str(payload.entry_id)])
+        self.assertEqual(fake_rag.ainsert_calls[0]["kwargs"]["file_paths"], [str(payload.entry_id)])
 
 
 class WorkerPayloadTests(unittest.TestCase):

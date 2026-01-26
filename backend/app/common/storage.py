@@ -50,6 +50,9 @@ def get_minio_client() -> tuple[Minio, str]:
             client.make_bucket(bucket)
     except S3Error as exc:
         raise StorageError(f"Failed to initialize MinIO bucket: {exc.code}") from exc
+    except Exception as exc:
+        # Network issues (connection refused/timeouts) may raise non-S3 exceptions.
+        raise StorageError(f"Failed to initialize MinIO bucket: {exc}") from exc
 
     return client, bucket
 
@@ -66,4 +69,7 @@ def remove_object_safe(client: Minio, bucket: str, object_key: str) -> bool:
     except S3Error as exc:
         if getattr(exc, "code", "") in ("NoSuchKey", "NoSuchObject"):
             return True
+        return False
+    except Exception:
+        # Treat network/transport failures as non-fatal for best-effort cleanup.
         return False

@@ -24,6 +24,7 @@ async def query(request: LightRagQueryRequest) -> ApiResponse | StreamingRespons
     - local: Local knowledge graph query
     - global: Global knowledge graph query
     - hybrid: Combined vector + knowledge graph (default)
+    - mix: Alias of hybrid (upstream LightRAG mode)
 
     Set `stream=true` for SSE streaming response.
     """
@@ -55,7 +56,7 @@ async def query(request: LightRagQueryRequest) -> ApiResponse | StreamingRespons
 @router.get("/entries/{entry_id}/relation-recommendations", response_model=ApiResponse)
 async def relation_recommendations(
     entry_id: UUID,
-    mode: str = Query(default="hybrid", description="Query mode: naive/local/global/hybrid"),
+    mode: str = Query(default="hybrid", description="Query mode: naive/local/global/hybrid/mix"),
     limit: int = Query(default=20, ge=1, le=100, description="Max number of recommendations"),
     min_score: float = Query(default=0.1, ge=0.0, le=1.0, description="Minimum similarity score threshold"),
     exclude_existing_relations: bool = Query(default=False, description="Filter out entries with existing relations"),

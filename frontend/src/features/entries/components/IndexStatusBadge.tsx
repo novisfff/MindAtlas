@@ -28,7 +28,7 @@ export function IndexStatusBadge({ status }: IndexStatusBadgeProps) {
         config.color
       )}
     >
-      <Icon className={cn('w-3 h-3', config.spin && 'animate-spin')} />
+      <Icon className={cn('w-3 h-3', (config as any).spin && 'animate-spin')} />
       {t(`indexStatus.${status}`)}
     </span>
   )

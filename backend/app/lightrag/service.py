@@ -7,10 +7,11 @@ import logging
 import math
 import numbers
 import re
+import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from functools import lru_cache, partial
+from functools import partial
 from typing import Any, AsyncIterator
 from uuid import UUID
 
@@ -43,10 +44,10 @@ class _CacheEntry:
 class _TtlCache:
     def __init__(self) -> None:
         self._data: "OrderedDict[str, _CacheEntry]" = OrderedDict()
-        self._lock = anyio.Lock()
+        self._lock = threading.Lock()
 
-    async def get(self, key: str, *, now: float) -> LightRagQueryResponse | None:
-        async with self._lock:
+    def get(self, key: str, *, now: float) -> LightRagQueryResponse | None:
+        with self._lock:
             entry = self._data.get(key)
             if entry is None:
                 return None
@@ -56,36 +57,52 @@ class _TtlCache:
             self._data.move_to_end(key)
             return entry.value
 
-    async def set(self, key: str, value: LightRagQueryResponse, *, now: float, ttl_sec: int, maxsize: int) -> None:
+    def set(self, key: str, value: LightRagQueryResponse, *, now: float, ttl_sec: int, maxsize: int) -> None:
         if ttl_sec <= 0 or maxsize <= 0:
             return
-        async with self._lock:
+        with self._lock:
             self._data[key] = _CacheEntry(value=value, expires_at=now + float(ttl_sec))
             self._data.move_to_end(key)
             while len(self._data) > maxsize:
                 self._data.popitem(last=False)
 
-    async def clear(self) -> None:
-        async with self._lock:
+    def clear(self) -> None:
+        with self._lock:
             self._data.clear()
 
 
 _QUERY_CACHE = _TtlCache()
 
+_QUERY_SEMAPHORES: dict[int, threading.BoundedSemaphore] = {}
+_QUERY_SEMAPHORES_LOCK = threading.Lock()
 
-@lru_cache(maxsize=16)
-def _get_query_limiter(max_concurrency: int) -> anyio.CapacityLimiter:
-    return anyio.CapacityLimiter(max(1, int(max_concurrency or 1)))
+
+def _get_query_semaphore(max_concurrency: int) -> threading.BoundedSemaphore:
+    n = max(1, int(max_concurrency or 1))
+    with _QUERY_SEMAPHORES_LOCK:
+        sem = _QUERY_SEMAPHORES.get(n)
+        if sem is None:
+            sem = threading.BoundedSemaphore(n)
+            _QUERY_SEMAPHORES[n] = sem
+        return sem
+
+
+async def _acquire_query_semaphore(sem: threading.BoundedSemaphore, *, timeout_sec: float) -> bool:
+    t = float(timeout_sec or 0.0)
+    if t <= 0:
+        return await anyio.to_thread.run_sync(lambda: sem.acquire(blocking=False), abandon_on_cancel=True)
+    return await anyio.to_thread.run_sync(lambda: sem.acquire(timeout=t), abandon_on_cancel=True)
 
 
 def reset_lightrag_query_state_for_tests() -> None:
     """Best-effort test hook to clear in-process caches."""
     try:
-        _get_query_limiter.cache_clear()
+        with _QUERY_SEMAPHORES_LOCK:
+            _QUERY_SEMAPHORES.clear()
     except Exception:
         pass
     try:
-        _QUERY_CACHE._data.clear()  # noqa: SLF001
+        _QUERY_CACHE.clear()
     except Exception:
         pass
 
@@ -217,150 +234,399 @@ def _normalize_answer(raw: Any) -> tuple[str, list[LightRagSource]]:
     return str(raw), []
 
 
-def _call_rag_query_sync(*, query: str, mode: LightRagQueryMode, top_k: int) -> Any:
-    rag = get_rag()
-    q = (query or "").strip()
+def _call_rag_query_sync(*, query: str, mode: LightRagQueryMode, top_k: int, timeout_sec: float = 30.0) -> Any:
+    from app.lightrag.runtime import get_lightrag_runtime
 
-    # Try new QueryParam + query_llm API (lightrag-hku >= 1.4.x)
-    # query_llm returns structured data with llm_response and chunks
-    try:
-        from lightrag import QueryParam
-        import asyncio
+    runtime = get_lightrag_runtime()
 
-        param = QueryParam(mode=mode, top_k=top_k, chunk_top_k=top_k, stream=False)
-        raw = rag.query_llm(q, param=param)
+    def _do() -> Any:
+        rag = get_rag()
+        q = (query or "").strip()
+        enable_rerank = bool(getattr(rag, "rerank_model_func", None))
 
-        # Extract answer from llm_response
-        answer = ""
-        if isinstance(raw, dict):
-            llm_resp = raw.get("llm_response") or {}
-            answer = llm_resp.get("content") or ""
-
-        # Get sources with doc_id from chunks_vdb
-        sources = []
+        # Try new QueryParam + query_llm API (lightrag-hku >= 1.4.x)
+        # query_llm returns structured data with llm_response and chunks
         try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            from lightrag import QueryParam
+            import asyncio
 
-        try:
-            vector_hits = loop.run_until_complete(rag.chunks_vdb.query(q, top_k=top_k))
-            for hit in vector_hits or []:
-                if isinstance(hit, dict):
-                    score = hit.get("score")
-                    if score is None:
-                        score = hit.get("distance")
-                    sources.append({
-                        "doc_id": hit.get("full_doc_id") or hit.get("file_path") or "",
-                        "content": hit.get("content") or "",
-                        "score": score if score is not None else 0.0,
-                    })
-        except Exception:
-            # Fallback: try to get chunks from query_llm response
+            try:
+                param = QueryParam(mode=mode, top_k=top_k, chunk_top_k=top_k, stream=False, enable_rerank=enable_rerank)
+                raw = rag.query_llm(q, param=param)
+            except Exception:
+                if str(mode) != "mix":
+                    raise
+                # Backward compat: some LightRAG versions don't accept "mix"; fall back to "hybrid".
+                param = QueryParam(
+                    mode="hybrid", top_k=top_k, chunk_top_k=top_k, stream=False, enable_rerank=enable_rerank
+                )
+                raw = rag.query_llm(q, param=param)
+
+            # Extract answer from llm_response
+            answer = ""
             if isinstance(raw, dict):
-                data = raw.get("data") or {}
-                chunks = data.get("chunks") or []
-                for chunk in chunks:
-                    if isinstance(chunk, dict):
+                llm_resp = raw.get("llm_response") or {}
+                answer = llm_resp.get("content") or ""
+
+            # Get sources with doc_id from chunks_vdb
+            sources = []
+            try:
+                loop = runtime.loop
+                vector_hits = loop.run_until_complete(rag.chunks_vdb.query(q, top_k=top_k))
+                for hit in vector_hits or []:
+                    if isinstance(hit, dict):
+                        score = hit.get("score")
+                        if score is None:
+                            score = hit.get("distance")
                         sources.append({
-                            "doc_id": chunk.get("file_path") or "",
-                            "content": chunk.get("content") or "",
-                            "score": 0.5,  # Default score when not available
+                            "doc_id": hit.get("full_doc_id") or hit.get("file_path") or "",
+                            "content": hit.get("content") or "",
+                            "score": score if score is not None else 0.0,
                         })
+            except Exception:
+                # Fallback: try to get chunks from query_llm response
+                if isinstance(raw, dict):
+                    data = raw.get("data") or {}
+                    chunks = data.get("chunks") or []
+                    for chunk in chunks:
+                        if isinstance(chunk, dict):
+                            sources.append({
+                                "doc_id": chunk.get("file_path") or "",
+                                "content": chunk.get("content") or "",
+                                "score": 0.5,  # Default score when not available
+                            })
 
-        return {"answer": answer, "sources": sources}
-    except (ImportError, TypeError, AttributeError):
-        pass
+            return {"answer": answer, "sources": sources}
+        except (ImportError, TypeError, AttributeError):
+            pass
 
-    # Fallback to old API conventions
-    try:
-        return rag.query(q, mode=mode, top_k=top_k)
-    except TypeError:
-        pass
-    try:
-        return rag.query(q, query_mode=mode, top_k=top_k)
-    except TypeError:
-        pass
-    try:
-        return rag.query(q, mode=mode, top_k=top_k, topK=top_k)
-    except TypeError:
-        pass
-    return rag.query(q)
+        # Fallback to old API conventions
+        try:
+            return rag.query(q, mode=mode, top_k=top_k)
+        except TypeError:
+            pass
+        try:
+            return rag.query(q, query_mode=mode, top_k=top_k)
+        except TypeError:
+            pass
+        try:
+            return rag.query(q, mode=mode, top_k=top_k, topK=top_k)
+        except TypeError:
+            pass
+        return rag.query(q)
+
+    return runtime.call(_do, timeout_sec=float(timeout_sec or 0.0) + 5.0)
 
 
-def _call_rag_recall_sync(*, query: str, top_k: int) -> Any:
+def _call_rag_recall_sync(*, query: str, top_k: int, timeout_sec: float = 30.0) -> Any:
     """Lightweight recall path: vector retrieval only, no LLM call.
 
     Returns a payload compatible with _normalize_sources().
     """
-    rag = get_rag()
-    q = (query or "").strip()
-    if not q or top_k <= 0:
+    from app.lightrag.runtime import get_lightrag_runtime
+
+    runtime = get_lightrag_runtime()
+
+    def _do() -> Any:
+        rag = get_rag()
+        q = (query or "").strip()
+        if not q or top_k <= 0:
+            return []
+
+        vector_hits = runtime.loop.run_until_complete(rag.chunks_vdb.query(q, top_k=top_k))
+        sources: list[dict[str, Any]] = []
+        for hit in vector_hits or []:
+            if not isinstance(hit, dict):
+                continue
+            score = hit.get("score")
+            sources.append(
+                {
+                    "doc_id": hit.get("full_doc_id") or hit.get("file_path") or "",
+                    "content": hit.get("content") or "",
+                    "score": score if score is not None else 0.0,
+                }
+            )
+        return sources
+
+    return runtime.call(_do, timeout_sec=float(timeout_sec or 0.0) + 5.0)
+
+
+def _extract_query_llm_chunks(raw: Any) -> list[dict[str, Any]]:
+    """Best-effort extraction of chunks from LightRAG `query_llm` raw response."""
+    if raw is None:
         return []
 
-    import asyncio
+    # Sometimes upstream returns JSON text.
+    if isinstance(raw, str):
+        s = raw.strip()
+        if s.startswith("{") or s.startswith("["):
+            try:
+                raw = json.loads(s)
+            except Exception:
+                return []
+        else:
+            return []
 
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    if not isinstance(raw, dict):
+        return []
 
-    vector_hits = loop.run_until_complete(rag.chunks_vdb.query(q, top_k=top_k))
-    sources: list[dict[str, Any]] = []
-    for hit in vector_hits or []:
-        if not isinstance(hit, dict):
+    candidates: list[Any] = []
+
+    def pick(container: Any) -> None:
+        if not isinstance(container, dict):
+            return
+        for key in ("chunks", "chunk", "contexts", "context", "sources", "documents", "references"):
+            v = container.get(key)
+            if isinstance(v, list):
+                candidates.extend(v)
+            elif isinstance(v, dict):
+                candidates.append(v)
+
+    pick(raw)
+    pick(raw.get("data"))
+    pick(raw.get("result"))
+
+    out: list[dict[str, Any]] = []
+    for item in candidates:
+        if isinstance(item, str):
+            s = item.strip()
+            if s:
+                out.append({"doc_id": "", "content": s, "score": None})
             continue
-        score = hit.get("score")
-        sources.append(
+        if not isinstance(item, dict):
+            continue
+
+        doc_id = (
+            item.get("full_doc_id")
+            or item.get("fullDocId")
+            or item.get("doc_id")
+            or item.get("docId")
+            or item.get("file_path")
+            or item.get("filePath")
+            or item.get("id")
+            or ""
+        )
+        content = item.get("content") or item.get("text") or item.get("chunk") or ""
+        score = item.get("score")
+        if score is None:
+            score = item.get("distance")
+        if score is None:
+            score = item.get("similarity")
+
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else None
+        out.append(
             {
-                "doc_id": hit.get("full_doc_id") or hit.get("file_path") or "",
-                "content": hit.get("content") or "",
-                "score": score if score is not None else 0.0,
+                "doc_id": str(doc_id) if doc_id is not None else "",
+                "content": str(content) if content is not None else "",
+                "score": score,
+                "metadata": metadata,
             }
         )
-    return sources
+
+    return out
 
 
-def _call_rag_llm_only_sync(*, query: str, mode: LightRagQueryMode) -> Any:
+def _extract_graph_context(raw: Any) -> dict[str, Any]:
+    """Extract full graph context from LightRAG `query_llm` response with only_need_context=True.
+
+    Returns:
+        dict with keys: chunks, entities, relationships
+    """
+    result: dict[str, Any] = {"chunks": [], "entities": [], "relationships": []}
+
+    if raw is None:
+        return result
+
+    # Parse JSON string if needed
+    if isinstance(raw, str):
+        s = raw.strip()
+        if s.startswith("{") or s.startswith("["):
+            try:
+                raw = json.loads(s)
+            except Exception:
+                return result
+        else:
+            return result
+
+    if not isinstance(raw, dict):
+        return result
+
+    # Get data container
+    data = raw.get("data") or raw
+
+    # Extract chunks
+    result["chunks"] = _extract_query_llm_chunks(raw)
+
+    # Extract entities
+    entities_raw = data.get("entities") or []
+    for item in entities_raw:
+        if not isinstance(item, dict):
+            continue
+        name = (item.get("entity_name") or item.get("name") or "").strip()
+        if not name:
+            continue
+        entry_id = (item.get("file_path") or item.get("source_id") or "").strip()
+        # Normalize entry_id: skip if it's "unknown_source" or not a valid UUID pattern
+        if entry_id and entry_id.lower() == "unknown_source":
+            entry_id = None
+        result["entities"].append({
+            "name": name,
+            "type": (item.get("entity_type") or item.get("type") or "").strip() or None,
+            "description": (item.get("description") or "").strip() or None,
+            "entry_id": entry_id or None,
+        })
+
+    # Extract relationships
+    relationships_raw = data.get("relationships") or []
+    for item in relationships_raw:
+        if not isinstance(item, dict):
+            continue
+        source = (item.get("src_id") or item.get("source") or "").strip()
+        target = (item.get("tgt_id") or item.get("target") or "").strip()
+        if not source or not target:
+            continue
+        entry_id = (item.get("file_path") or item.get("source_id") or "").strip()
+        if entry_id and entry_id.lower() == "unknown_source":
+            entry_id = None
+        result["relationships"].append({
+            "source": source,
+            "target": target,
+            "description": (item.get("description") or "").strip() or None,
+            "keywords": (item.get("keywords") or "").strip() or None,
+            "entry_id": entry_id or None,
+        })
+
+    return result
+
+
+def _call_rag_graph_recall_sync(
+    *,
+    query: str,
+    mode: LightRagQueryMode,
+    top_k: int,
+    chunk_top_k: int,
+    max_tokens: int,
+    include_graph_context: bool = False,
+    timeout_sec: float = 30.0,
+) -> Any:
+    """Graph/hybrid recall path via query_llm chunks, with minimal answer generation.
+
+    Args:
+        include_graph_context: If True, return full graph context dict; otherwise return chunks list.
+    """
+    from app.lightrag.runtime import get_lightrag_runtime
+
+    runtime = get_lightrag_runtime()
+
+    def _do() -> Any:
+        rag = get_rag()
+        q = (query or "").strip()
+        enable_rerank = bool(getattr(rag, "rerank_model_func", None))
+        empty_result = {"chunks": [], "entities": [], "relationships": []} if include_graph_context else []
+        if not q or top_k <= 0 or chunk_top_k <= 0:
+            return empty_result
+
+        # Prefer QueryParam + query_llm API (lightrag-hku >= 1.4.x)
+        try:
+            from lightrag import QueryParam
+
+            try:
+                param = QueryParam(
+                    mode=mode,
+                    top_k=top_k,
+                    chunk_top_k=chunk_top_k,
+                    stream=False,
+                    only_need_context=True,
+                    enable_rerank=enable_rerank,
+                )
+                print("param:", param)
+                try:
+                    raw = rag.query_llm(q, param=param, max_tokens=max_tokens, temperature=0)
+                except TypeError:
+                    raw = rag.query_llm(q, param=param)
+            except Exception:
+                if str(mode) != "mix":
+                    raise
+                # Backward compat: some LightRAG versions don't accept "mix"; fall back to "hybrid".
+                param = QueryParam(
+                    mode="hybrid",
+                    top_k=top_k,
+                    chunk_top_k=chunk_top_k,
+                    stream=False,
+                    only_need_context=True,
+                    enable_rerank=enable_rerank,
+                )
+                try:
+                    raw = rag.query_llm(q, param=param, max_tokens=max_tokens, temperature=0)
+                except TypeError:
+                    raw = rag.query_llm(q, param=param)
+            if include_graph_context:
+                return _extract_graph_context(raw)
+            return _extract_query_llm_chunks(raw)
+        except (ImportError, TypeError, AttributeError):
+            pass
+
+        # Fallback: no query_llm available; degrade to vector recall.
+        fallback = _call_rag_recall_sync(query=q, top_k=chunk_top_k, timeout_sec=timeout_sec)
+        if include_graph_context:
+            return {"chunks": fallback, "entities": [], "relationships": []}
+        return fallback
+
+    return runtime.call(_do, timeout_sec=float(timeout_sec or 0.0) + 5.0)
+
+
+def _call_rag_llm_only_sync(*, query: str, mode: LightRagQueryMode, timeout_sec: float = 30.0) -> Any:
     """LLM-only path: generate an answer without fetching sources.
 
     Note: Depending on upstream LightRAG implementation, query_llm may still
     perform internal retrieval. This function avoids the extra chunks_vdb.query
     call that query() currently performs in this codebase.
     """
-    rag = get_rag()
-    q = (query or "").strip()
-    if not q:
-        return ""
+    from app.lightrag.runtime import get_lightrag_runtime
 
-    # Prefer QueryParam + query_llm API (lightrag-hku >= 1.4.x)
-    try:
-        from lightrag import QueryParam
+    runtime = get_lightrag_runtime()
 
-        # Try to disable retrieval by setting k to 0; fall back if rejected.
-        last_exc: Exception | None = None
-        for top_k, chunk_top_k in ((0, 0), (1, 0), (1, 1)):
-            try:
-                param = QueryParam(mode=mode, top_k=top_k, chunk_top_k=chunk_top_k, stream=False)
-                raw = rag.query_llm(q, param=param)
-                if isinstance(raw, dict):
-                    llm_resp = raw.get("llm_response") or {}
-                    return llm_resp.get("content") or ""
-                return raw
-            except Exception as e:
-                last_exc = e
-                continue
-        raise RuntimeError("LightRAG query_llm failed") from last_exc
-    except (ImportError, TypeError, AttributeError):
-        pass
+    def _do() -> Any:
+        rag = get_rag()
+        q = (query or "").strip()
+        if not q:
+            return ""
 
-    # Fallback: best-effort legacy query (may involve retrieval in upstream).
-    try:
-        return rag.query(q, mode=mode, top_k=1)
-    except TypeError:
-        return rag.query(q)
+        # Prefer QueryParam + query_llm API (lightrag-hku >= 1.4.x)
+        try:
+            from lightrag import QueryParam
+
+            # Try to disable retrieval by setting k to 0; fall back if rejected.
+            last_exc: Exception | None = None
+            for top_k, chunk_top_k in ((0, 0), (1, 0), (1, 1)):
+                try:
+                    try:
+                        param = QueryParam(mode=mode, top_k=top_k, chunk_top_k=chunk_top_k, stream=False)
+                        raw = rag.query_llm(q, param=param)
+                    except Exception:
+                        if str(mode) != "mix":
+                            raise
+                        # Backward compat: some LightRAG versions don't accept "mix"; fall back to "hybrid".
+                        param = QueryParam(mode="hybrid", top_k=top_k, chunk_top_k=chunk_top_k, stream=False)
+                        raw = rag.query_llm(q, param=param)
+                    if isinstance(raw, dict):
+                        llm_resp = raw.get("llm_response") or {}
+                        return llm_resp.get("content") or ""
+                    return raw
+                except Exception as e:
+                    last_exc = e
+                    continue
+            raise RuntimeError("LightRAG query_llm failed") from last_exc
+        except (ImportError, TypeError, AttributeError):
+            pass
+
+        # Fallback: best-effort legacy query (may involve retrieval in upstream).
+        try:
+            return rag.query(q, mode=mode, top_k=1)
+        except TypeError:
+            return rag.query(q)
+
+    return runtime.call(_do, timeout_sec=float(timeout_sec or 0.0) + 5.0)
 
 
 def _build_entry_recommendation_query_text(entry: Any) -> str:
@@ -626,7 +892,7 @@ class LightRagService:
 
         cache_hit = False
         if cache_ttl > 0 and cache_maxsize > 0:
-            cached = await _QUERY_CACHE.get(cache_key, now=now)
+            cached = _QUERY_CACHE.get(cache_key, now=now)
             if cached is not None:
                 cache_hit = True
                 return LightRagQueryResponse(
@@ -641,22 +907,26 @@ class LightRagService:
                 )
 
         max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
-        limiter = _get_query_limiter(max_concurrency)
+        sem = _get_query_semaphore(max_concurrency)
         timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 30.0) or 30.0)
 
         queue_start = time.perf_counter()
         queue_wait_ms = 0
         run_ms = 0
+        acquired = False
         try:
-            async with limiter:
-                acquired_at = time.perf_counter()
-                queue_wait_ms = int((acquired_at - queue_start) * 1000)
-                with anyio.fail_after(timeout_sec):
+            acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
+            acquired_at = time.perf_counter()
+            queue_wait_ms = int((acquired_at - queue_start) * 1000)
+            if not acquired:
+                raise TimeoutError("LightRAG query concurrency slot timeout")
+
+            with anyio.fail_after(timeout_sec):
                     raw = await anyio.to_thread.run_sync(
-                        partial(_call_rag_query_sync, query=query, mode=mode, top_k=top_k),
+                        partial(_call_rag_query_sync, query=query, mode=mode, top_k=top_k, timeout_sec=timeout_sec),
                         abandon_on_cancel=True,
                     )
-                run_ms = int((time.perf_counter() - acquired_at) * 1000)
+            run_ms = int((time.perf_counter() - acquired_at) * 1000)
         except TimeoutError as e:
             logger.warning(
                 "lightrag query timeout",
@@ -681,6 +951,12 @@ class LightRagService:
         except Exception as e:
             logger.exception("lightrag query failed", extra={"detail": str(e)})
             raise ApiException(status_code=500, code=50012, message="LightRAG query failed") from e
+        finally:
+            if acquired:
+                try:
+                    sem.release()
+                except Exception:
+                    pass
 
         latency_ms = int((time.perf_counter() - queue_start) * 1000)
         answer, sources = _normalize_answer(raw)
@@ -696,7 +972,7 @@ class LightRagService:
         )
 
         if cache_ttl > 0 and cache_maxsize > 0:
-            await _QUERY_CACHE.set(cache_key, result, now=time.monotonic(), ttl_sec=cache_ttl, maxsize=cache_maxsize)
+            _QUERY_CACHE.set(cache_key, result, now=time.monotonic(), ttl_sec=cache_ttl, maxsize=cache_maxsize)
 
         logger.info(
             "lightrag query done",
@@ -732,22 +1008,32 @@ class LightRagService:
         now = time.monotonic()
 
         if cache_ttl > 0 and cache_maxsize > 0:
-            cached = await _QUERY_CACHE.get(cache_key, now=now)
+            cached = _QUERY_CACHE.get(cache_key, now=now)
             if cached is not None:
                 return list(cached.sources or [])
 
         max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
-        limiter = _get_query_limiter(max_concurrency)
+        sem = _get_query_semaphore(max_concurrency)
         timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 30.0) or 30.0)
 
+        acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
+        if not acquired:
+            logger.warning(
+                "lightrag query concurrency timeout",
+                extra={"op": "recall_sources", "timeout_sec": timeout_sec, "max_concurrency": max_concurrency},
+            )
+            raise ApiException(status_code=504, code=50400, message="LightRAG query timeout")
         try:
-            async with limiter:
-                with anyio.fail_after(timeout_sec):
-                    raw_sources = await anyio.to_thread.run_sync(
-                        partial(_call_rag_recall_sync, query=q, top_k=top_k),
-                        abandon_on_cancel=True,
-                    )
+            with anyio.fail_after(timeout_sec):
+                raw_sources = await anyio.to_thread.run_sync(
+                    partial(_call_rag_recall_sync, query=q, top_k=top_k, timeout_sec=timeout_sec),
+                    abandon_on_cancel=True,
+                )
         except TimeoutError as e:
+            logger.warning(
+                "lightrag query timeout",
+                extra={"op": "recall_sources", "timeout_sec": timeout_sec, "max_concurrency": max_concurrency},
+            )
             raise ApiException(status_code=504, code=50400, message="LightRAG query timeout") from e
         except LightRagNotEnabledError as e:
             raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled") from e
@@ -757,10 +1043,15 @@ class LightRagService:
             raise ApiException(status_code=500, code=50011, message="LightRAG config error") from e
         except Exception as e:
             raise ApiException(status_code=500, code=50012, message="LightRAG query failed") from e
+        finally:
+            try:
+                sem.release()
+            except Exception:
+                pass
 
         sources = _normalize_sources(raw_sources)
         if cache_ttl > 0 and cache_maxsize > 0:
-            await _QUERY_CACHE.set(
+            _QUERY_CACHE.set(
                 cache_key,
                 LightRagQueryResponse(
                     answer="",
@@ -772,6 +1063,170 @@ class LightRagService:
                 maxsize=cache_maxsize,
             )
         return sources
+
+    async def graph_recall_sources(
+        self,
+        *,
+        query: str,
+        mode: LightRagQueryMode,
+        top_k: int,
+        chunk_top_k: int | None = None,
+        max_tokens: int = 8,
+    ) -> list[LightRagSource]:
+        """Recall sources via LightRAG query_llm chunks (graph/hybrid aware).
+
+        This is intended to be used as a knowledge-base retrieval layer only.
+        The assistant should generate the final answer.
+        """
+        settings = get_settings()
+        if not settings.lightrag_enabled:
+            raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled")
+
+        q = (query or "").strip()
+        k = max(1, min(50, int(top_k or 1)))
+        ck = max(1, min(50, int(chunk_top_k or k)))
+        mt = max(1, min(64, int(max_tokens or 1)))
+
+        cache_ttl = int(getattr(settings, "lightrag_query_cache_ttl_sec", 0) or 0)
+        cache_maxsize = int(getattr(settings, "lightrag_query_cache_maxsize", 0) or 0)
+        cache_key = f"graphrecall|m={mode}|k={k}|ck={ck}|mt={mt}|ql={len(q)}|qh={_hash_for_cache(q)}"
+        now = time.monotonic()
+
+        if cache_ttl > 0 and cache_maxsize > 0:
+            cached = _QUERY_CACHE.get(cache_key, now=now)
+            if cached is not None:
+                return list(cached.sources or [])
+
+        max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
+        sem = _get_query_semaphore(max_concurrency)
+        timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 30.0) or 30.0)
+
+        acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
+        if not acquired:
+            logger.warning(
+                "lightrag query concurrency timeout",
+                extra={"op": "graph_recall_sources", "timeout_sec": timeout_sec, "max_concurrency": max_concurrency},
+            )
+            raise ApiException(status_code=504, code=50400, message="LightRAG query timeout")
+        try:
+            with anyio.fail_after(timeout_sec):
+                    raw_sources = await anyio.to_thread.run_sync(
+                        partial(
+                            _call_rag_graph_recall_sync,
+                            query=q,
+                            mode=mode,
+                            top_k=k,
+                            chunk_top_k=ck,
+                            max_tokens=mt,
+                            timeout_sec=timeout_sec,
+                        ),
+                        abandon_on_cancel=True,
+                    )
+        except TimeoutError as e:
+            logger.warning(
+                "lightrag query timeout",
+                extra={"op": "graph_recall_sources", "timeout_sec": timeout_sec, "max_concurrency": max_concurrency},
+            )
+            raise ApiException(status_code=504, code=50400, message="LightRAG query timeout") from e
+        except LightRagNotEnabledError as e:
+            raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled") from e
+        except LightRagDependencyError as e:
+            raise ApiException(status_code=500, code=50010, message="LightRAG dependency missing") from e
+        except LightRagConfigError as e:
+            raise ApiException(status_code=500, code=50011, message="LightRAG config error") from e
+        except Exception as e:
+            raise ApiException(status_code=500, code=50012, message="LightRAG query failed") from e
+        finally:
+            try:
+                sem.release()
+            except Exception:
+                pass
+
+        sources = _normalize_sources(raw_sources)
+        if cache_ttl > 0 and cache_maxsize > 0:
+            _QUERY_CACHE.set(
+                cache_key,
+                LightRagQueryResponse(
+                    answer="",
+                    sources=sources,
+                    metadata=LightRagQueryMetadata(mode=mode, top_k=k, latency_ms=0, cache_hit=False),
+                ),
+                now=time.monotonic(),
+                ttl_sec=cache_ttl,
+                maxsize=cache_maxsize,
+            )
+        return sources
+
+    async def graph_recall_with_context(
+        self,
+        *,
+        query: str,
+        mode: LightRagQueryMode,
+        top_k: int,
+        chunk_top_k: int | None = None,
+        max_tokens: int = 8,
+    ) -> dict[str, Any]:
+        """Recall sources with full graph context (entities + relationships + chunks).
+
+        Returns:
+            dict with keys: chunks, entities, relationships
+        """
+        settings = get_settings()
+        if not settings.lightrag_enabled:
+            raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled")
+
+        q = (query or "").strip()
+        k = max(1, min(50, int(top_k or 1)))
+        ck = max(1, min(50, int(chunk_top_k or k)))
+        mt = max(1, min(64, int(max_tokens or 1)))
+
+        max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
+        sem = _get_query_semaphore(max_concurrency)
+        timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 30.0) or 30.0)
+
+        acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
+        if not acquired:
+            logger.warning(
+                "lightrag query concurrency timeout",
+                extra={"op": "graph_recall_with_context", "timeout_sec": timeout_sec, "max_concurrency": max_concurrency},
+            )
+            raise ApiException(status_code=504, code=50400, message="LightRAG query timeout")
+        try:
+            with anyio.fail_after(timeout_sec):
+                result = await anyio.to_thread.run_sync(
+                    partial(
+                        _call_rag_graph_recall_sync,
+                        query=q,
+                        mode=mode,
+                        top_k=k,
+                        chunk_top_k=ck,
+                        max_tokens=mt,
+                        include_graph_context=True,
+                        timeout_sec=timeout_sec,
+                    ),
+                    abandon_on_cancel=True,
+                )
+        except TimeoutError as e:
+            logger.warning(
+                "lightrag query timeout",
+                extra={"op": "graph_recall_with_context", "timeout_sec": timeout_sec, "max_concurrency": max_concurrency},
+            )
+            raise ApiException(status_code=504, code=50400, message="LightRAG query timeout") from e
+        except LightRagNotEnabledError as e:
+            raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled") from e
+        except LightRagDependencyError as e:
+            raise ApiException(status_code=500, code=50010, message="LightRAG dependency missing") from e
+        except LightRagConfigError as e:
+            raise ApiException(status_code=500, code=50011, message="LightRAG config error") from e
+        except Exception as e:
+            raise ApiException(status_code=500, code=50012, message="LightRAG query failed") from e
+        finally:
+            try:
+                sem.release()
+            except Exception:
+                pass
+
+        return result
 
     async def llm_only_answer(self, *, prompt: str, mode: LightRagQueryMode) -> str:
         """Run LLM generation only (no extra vector recall in this codepath)."""
@@ -786,22 +1241,32 @@ class LightRagService:
         now = time.monotonic()
 
         if cache_ttl > 0 and cache_maxsize > 0:
-            cached = await _QUERY_CACHE.get(cache_key, now=now)
+            cached = _QUERY_CACHE.get(cache_key, now=now)
             if cached is not None:
                 return cached.answer or ""
 
         max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
-        limiter = _get_query_limiter(max_concurrency)
+        sem = _get_query_semaphore(max_concurrency)
         timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 30.0) or 30.0)
 
+        acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
+        if not acquired:
+            logger.warning(
+                "lightrag query concurrency timeout",
+                extra={"op": "llm_only_answer", "timeout_sec": timeout_sec, "max_concurrency": max_concurrency},
+            )
+            raise ApiException(status_code=504, code=50400, message="LightRAG query timeout")
         try:
-            async with limiter:
-                with anyio.fail_after(timeout_sec):
-                    raw = await anyio.to_thread.run_sync(
-                        partial(_call_rag_llm_only_sync, query=q, mode=mode),
-                        abandon_on_cancel=True,
-                    )
+            with anyio.fail_after(timeout_sec):
+                raw = await anyio.to_thread.run_sync(
+                    partial(_call_rag_llm_only_sync, query=q, mode=mode, timeout_sec=timeout_sec),
+                    abandon_on_cancel=True,
+                )
         except TimeoutError as e:
+            logger.warning(
+                "lightrag query timeout",
+                extra={"op": "llm_only_answer", "timeout_sec": timeout_sec, "max_concurrency": max_concurrency},
+            )
             raise ApiException(status_code=504, code=50400, message="LightRAG query timeout") from e
         except LightRagNotEnabledError as e:
             raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled") from e
@@ -811,10 +1276,15 @@ class LightRagService:
             raise ApiException(status_code=500, code=50011, message="LightRAG config error") from e
         except Exception as e:
             raise ApiException(status_code=500, code=50012, message="LightRAG query failed") from e
+        finally:
+            try:
+                sem.release()
+            except Exception:
+                pass
 
         answer, _ = _normalize_answer(raw)
         if cache_ttl > 0 and cache_maxsize > 0:
-            await _QUERY_CACHE.set(
+            _QUERY_CACHE.set(
                 cache_key,
                 LightRagQueryResponse(
                     answer=answer,

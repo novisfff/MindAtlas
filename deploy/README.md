@@ -23,9 +23,15 @@ cd MindAtlas
 ```bash
 cd deploy
 cp .env.example .env
+cp backend.env.example backend.env
 ```
 
-根据需要编辑 `.env` 文件，修改数据库密码、MinIO 密钥等配置。
+根据需要编辑：
+- `.env`：基础设施配置（PostgreSQL / MinIO / Neo4j / 端口等）
+- `backend.env`：后端应用配置（Docker 部署下主要是 AI / LightRAG 等）
+
+说明：`DATABASE_URL`、`MINIO_ENDPOINT`、`NEO4J_URI` 等容器内地址由 `docker-compose.yml` 使用服务名（`db`/`minio`/`neo4j`）自动注入，通常不需要在 env 文件里手动配置。
+另外：Docker 部署下前端 Nginx 会反代 `/api/` 到后端（同源访问），一般不需要配置 CORS。
 
 ### 3. 启动服务
 
@@ -64,6 +70,8 @@ docker compose up -d
 
 ## 环境变量说明
 
+### `.env`（部署/基础设施）
+
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `POSTGRES_USER` | 数据库用户名 | postgres |
@@ -73,6 +81,17 @@ docker compose up -d
 | `MINIO_SECRET_KEY` | MinIO 密钥 | minioadmin |
 | `MINIO_BUCKET` | MinIO 桶名称 | mindatlas |
 | `FRONTEND_PORT` | 前端访问端口 | 3000 |
+
+### `backend.env`（后端应用）
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `CORS_ORIGINS` | 允许跨域的来源（逗号分隔） | `http://localhost:3000` |
+| `AI_API_KEY` | AI API Key（OpenAI 兼容） | - |
+| `AI_PROVIDER_FERNET_KEY` | 用于加密存储在 DB 的 API Key | - |
+| `LIGHTRAG_ENABLED` | 是否开启 LightRAG | false |
+| `LIGHTRAG_LLM_MODEL` | LightRAG LLM 模型 | `gpt-4o-mini` |
+| `LIGHTRAG_EMBEDDING_MODEL` | Embedding 模型 | `text-embedding-3-small` |
 
 ## 常用命令
 

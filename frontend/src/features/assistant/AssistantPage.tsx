@@ -42,30 +42,39 @@ function AssistantPageContent() {
       }
 
       if (conversation.id !== loadedIdRef.current) {
-        const mappedMessages = conversation.messages.map((msg) => {
+        const mappedMessages = conversation.messages.map((msg: any) => {
           let toolCalls: { id: string; name: string; args: Record<string, unknown>; result?: string; status: 'completed' | 'error' }[] | undefined
-          if (msg.toolCalls && Array.isArray(msg.toolCalls)) {
+          
+          const rawToolCalls = msg.toolCalls || msg.tool_calls
+          const rawToolResults = msg.toolResults || msg.tool_results
+          const rawSkillCalls = msg.skillCalls || msg.skill_calls
+
+          if (rawToolCalls && Array.isArray(rawToolCalls)) {
             const resultsMap = new Map<string, { status: string; result: string }>()
-            if (msg.toolResults && Array.isArray(msg.toolResults)) {
-              for (const r of msg.toolResults) {
-                resultsMap.set(r.id, { status: r.status, result: r.result })
+            if (rawToolResults && Array.isArray(rawToolResults)) {
+              for (const r of rawToolResults) {
+                // Handle potentially different naming in results too
+                const id = r.id || r.tool_call_id || r.toolCallId
+                resultsMap.set(id, { status: r.status, result: r.result })
               }
             }
-            toolCalls = msg.toolCalls.map((tc: { id: string; name: string; args: Record<string, unknown> }) => {
-              const result = resultsMap.get(tc.id)
+            toolCalls = rawToolCalls.map((tc: any) => {
+              const id = tc.id || tc.tool_call_id || tc.toolCallId
+              const result = resultsMap.get(id)
               return {
-                id: tc.id,
+                id: id,
                 name: tc.name,
                 args: tc.args || {},
                 result: result?.result,
                 status: (result?.status === 'completed' ? 'completed' : 'error') as 'completed' | 'error',
+                hidden: tc.hidden ?? false,
               }
             })
           }
           // Map skillCalls from history
           let skillCalls: { id: string; name: string; status: 'running' | 'completed' | 'error' }[] | undefined
-          if (msg.skillCalls && Array.isArray(msg.skillCalls)) {
-            skillCalls = msg.skillCalls.map((sc: { id: string; name: string; status: string }) => ({
+          if (rawSkillCalls && Array.isArray(rawSkillCalls)) {
+            skillCalls = rawSkillCalls.map((sc: any) => ({
               id: sc.id,
               name: sc.name,
               status: (sc.status === 'completed' ? 'completed' : sc.status === 'error' ? 'error' : 'running') as 'running' | 'completed' | 'error',
@@ -88,7 +97,7 @@ function AssistantPageContent() {
             toolCalls,
             skillCalls,
             analysis,
-            createdAt: new Date(msg.createdAt).getTime(),
+            createdAt: new Date(msg.createdAt || msg.created_at).getTime(),
           }
         })
 
@@ -193,4 +202,3 @@ export default function AssistantPage() {
     </ChatStoreProvider>
   )
 }
-

@@ -171,6 +171,7 @@ export function useChat() {
               name: evt.data.name as string,
               args: evt.data.args as Record<string, unknown>,
               status: 'running',
+              hidden: (evt.data.hidden as boolean) ?? false,
             }
             addToolCall(toolCall)
           } else if (evt.event === 'tool_call_end') {

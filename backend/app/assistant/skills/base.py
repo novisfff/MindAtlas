@@ -1,7 +1,7 @@
 """Skill 基础数据结构"""
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -15,6 +15,17 @@ def is_default_skill(name: str) -> bool:
 
 
 AnalysisOutputMode = Literal["text", "json"]
+
+
+# ==================== Knowledge Base 配置 ====================
+
+
+class SkillKBConfig(BaseModel):
+    """Skill 级别的知识库配置（仅 Agent 模式支持）"""
+    enabled: bool = False  # 是否启用知识库
+
+
+# ==================== Skill 数据结构 ====================
 
 
 class SkillStep(BaseModel):
@@ -38,6 +49,7 @@ class SkillDefinition(BaseModel):
     mode: Literal["steps", "agent"] = "steps"  # 执行模式
     system_prompt: Optional[str] = None  # Agent 模式的系统提示词
     steps: list[SkillStep] = Field(default_factory=list)  # Steps 模式的执行步骤
+    kb: Optional[SkillKBConfig] = None  # 知识库配置
 
     @property
     def hidden(self) -> bool:

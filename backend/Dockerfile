@@ -45,6 +45,15 @@ COPY --from=builder /opt/venv /opt/venv
 # Copy application code
 COPY --chown=app:app . .
 
+# Ensure writable runtime directories.
+# Note: when a named volume is mounted to an existing *non-empty* directory, Docker
+# will copy the directory content into the empty volume (including ownership).
+# We keep a placeholder file here so a fresh `lightrag_storage` volume inherits
+# correct permissions for the non-root `app` user.
+RUN mkdir -p /app/lightrag_storage && \
+    touch /app/lightrag_storage/.keep && \
+    chown -R app:app /app/lightrag_storage
+
 USER app
 
 # Stage 3: Migration target
@@ -55,3 +64,7 @@ CMD ["alembic", "upgrade", "head"]
 FROM base AS runtime
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# Stage 5: Worker target (LightRAG indexing worker)
+FROM base AS worker
+CMD ["python", "-m", "app.lightrag.worker"]

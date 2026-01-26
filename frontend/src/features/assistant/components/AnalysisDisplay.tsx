@@ -4,6 +4,9 @@ import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { Analysis } from '../types'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import { remarkCitation } from './remark-citation'
+import { CitationMarker } from './citation'
 
 interface AnalysisDisplayProps {
   analysis: Analysis
@@ -52,13 +55,19 @@ export function AnalysisDisplay({ analysis }: AnalysisDisplayProps) {
         isExpanded && (
           <div className="bg-muted/10 px-3 py-3 text-muted-foreground prose prose-sm dark:prose-invert max-w-none prose-p:leading-relaxed prose-pre:p-0 prose-pre:bg-transparent">
             <ReactMarkdown
-              components={{
-                code: ({ node, inline, className, children, ...props }: any) => (
-                  <code className="bg-black/5 dark:bg-white/10 px-1 py-0.5 rounded font-mono text-xs" {...props}>
-                    {children}
-                  </code>
-                )
-              }}
+              remarkPlugins={[remarkGfm, remarkCitation]}
+              components={
+                {
+                  code: ({ node, inline, className, children, ...props }: any) => (
+                    <code className="bg-black/5 dark:bg-white/10 px-1 py-0.5 rounded font-mono text-xs" {...props}>
+                      {children}
+                    </code>
+                  ),
+                  'citation-marker': ({ identifier }: { identifier: string }) => (
+                    <CitationMarker identifier={identifier} label={identifier} />
+                  ),
+                } as any
+              }
             >
               {analysis.content}
             </ReactMarkdown>

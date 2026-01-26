@@ -13,6 +13,10 @@ from app.assistant.tools.helper_tools import (
     list_entry_types,
     list_tags,
 )
+from app.assistant.tools.kb_tools import (
+    kb_search,
+    kb_relation_recommendations,
+)
 
 __all__ = [
     "search_entries",
@@ -24,4 +28,6 @@ __all__ = [
     "get_tag_statistics",
     "list_entry_types",
     "list_tags",
+    "kb_search",
+    "kb_relation_recommendations",
 ]

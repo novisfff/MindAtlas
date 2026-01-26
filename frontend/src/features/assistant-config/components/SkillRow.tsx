@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Loader2, Check, X, Plus, Trash2, RotateCcw, MessageSquare, Wrench, Bot, ListChecks, FileText } from 'lucide-react'
-import type { AssistantSkill, CreateSkillRequest, UpdateSkillRequest, SkillStepInput, SkillMode } from '../api/skills'
+import { Loader2, Check, X, Plus, Trash2, RotateCcw, MessageSquare, Wrench, Bot, ListChecks, FileText, BookOpen } from 'lucide-react'
+import type { AssistantSkill, CreateSkillRequest, UpdateSkillRequest, SkillStepInput, SkillMode, SkillKBConfig } from '../api/skills'
 import type { AssistantTool, InputParam } from '../api/tools'
 import { RichMentionInput } from './RichMentionInput'
 import { Tooltip } from '@/components/ui/Tooltip'
@@ -54,6 +54,11 @@ export function SkillRow({
     })) || [{ type: 'analysis', instruction: '' }]
   )
 
+  // KB 配置状态（仅 Agent 模式支持）
+  const [kbConfig, setKbConfig] = useState<SkillKBConfig>(
+    skill?.kbConfig || { enabled: false }
+  )
+
   const [newIntent, setNewIntent] = useState('')
 
   // Derive tools from steps automatically
@@ -78,11 +83,13 @@ export function SkillRow({
         ? {
           tools: agentTools.length > 0 ? agentTools : undefined,
           systemPrompt: systemPrompt || undefined,
+          kbConfig: kbConfig.enabled ? kbConfig : undefined,
           steps: undefined,
         }
         : {
           tools: derivedTools.length > 0 ? derivedTools : undefined,
           steps,
+          kbConfig: kbConfig.enabled ? kbConfig : undefined,
           systemPrompt: undefined,
         }),
     }
@@ -188,6 +195,34 @@ export function SkillRow({
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* Knowledge Base Configuration - Agent 模式专属 */}
+        {mode === 'agent' && (
+          <div className="space-y-3 p-4 rounded-lg bg-muted/30 border">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+                <BookOpen className="w-4 h-4" />
+                {t('settings.skills.kbEnabled')}
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={kbConfig.enabled}
+                onClick={() => setKbConfig({ ...kbConfig, enabled: !kbConfig.enabled })}
+                className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 ${
+                  kbConfig.enabled ? 'bg-primary' : 'bg-input/50'
+                }`}
+              >
+                <span
+                  className={`pointer-events-none block h-5 w-5 rounded-full bg-background shadow-lg ring-0 transition-transform ${
+                    kbConfig.enabled ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+            <p className="text-xs text-muted-foreground">{t('settings.skills.kbEnabledDesc')}</p>
+          </div>
+        )}
+
         {/* Intent Examples */}
         <div className="space-y-3 p-4 rounded-lg bg-muted/30 border">
           <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">

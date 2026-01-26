@@ -25,6 +25,8 @@ export function ToolCallDisplay({ toolCalls, variant = 'default' }: ToolCallDisp
   const { t } = useTranslation()
 
   if (!toolCalls || toolCalls.length === 0) return null
+  const visibleToolCalls = toolCalls.filter((tc) => !tc.hidden)
+  if (visibleToolCalls.length === 0) return null
 
   const toggleExpand = (id: string) => {
     setExpanded((prev) => ({ ...prev, [id]: !prev[id] }))
@@ -37,7 +39,7 @@ export function ToolCallDisplay({ toolCalls, variant = 'default' }: ToolCallDisp
 
   return (
     <div className={cn("flex flex-col w-full max-w-full", variant === 'compact' ? "my-1.5 gap-1.5" : "my-3 gap-2")}>
-      {toolCalls.map((tc) => (
+      {visibleToolCalls.map((tc) => (
         <ToolCallItem
           key={tc.id}
           toolCall={tc}
