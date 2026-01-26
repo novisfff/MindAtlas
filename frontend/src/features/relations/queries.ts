@@ -50,11 +50,11 @@ export function useDeleteRelationMutation() {
   })
 }
 
-export function useRelationRecommendationsQuery(entryId: string) {
+export function useRelationRecommendationsQuery(entryId: string, options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: relationKeys.recommendations(entryId),
     queryFn: () => getRelationRecommendations(entryId),
     staleTime: 1000 * 60 * 5, // 5 minutes cache
-    enabled: !!entryId,
+    enabled: !!entryId && (options?.enabled ?? true),
   })
 }

@@ -429,7 +429,18 @@
       "loadingSlow": "AI is analyzing content...",
       "loadingVerySlow": "Deep search in progress, please wait...",
       "error": "Unable to generate recommendations",
-      "retry": "Retry"
+      "retry": "Retry",
+      "getSuggestions": "Get Suggestions",
+      "intro": "Let AI analyze this entry and suggest relevant connections.",
+      "noSuggestions": "No suggestions found.",
+      "tryAgain": "Try again",
+      "levels": {
+        "strong": "Certain",
+        "high": "Explicit",
+        "medium": "Credible",
+        "weak": "Possible",
+        "low": "Low"
+      }
     }
   },
   "indexStatus": {
