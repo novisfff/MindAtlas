@@ -236,7 +236,7 @@ export function EntryDetailPage() {
         />
 
         {/* AI Suggestions */}
-        <SuggestedRelationList entryId={id || ''} />
+        <SuggestedRelationList entryId={id || ''} autoTrigger={relations.length === 0} />
 
         <div className="mt-4">
           <RelationSelector

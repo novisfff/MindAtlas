@@ -13,6 +13,22 @@ interface SuggestedRelationItemProps {
   onIgnore: (id: string) => void
 }
 
+// Helper to get match level config
+// 0.95-1.00 Strong (Almost Certain)
+// 0.80-0.94 High (Explicitly Related)
+// 0.65-0.79 Medium (Credibly Related)
+// 0.30-0.64 Weak (Cautious/Possible)
+// < 0.30 Ignore
+function getMatchLevel(score: number, t: any) {
+  if (score >= 0.95) return { label: t('relations.suggestions.levels.strong'), color: 'bg-green-100 text-green-700' }
+  if (score >= 0.80) return { label: t('relations.suggestions.levels.high'), color: 'bg-emerald-100 text-emerald-700' }
+  if (score >= 0.65) return { label: t('relations.suggestions.levels.medium'), color: 'bg-blue-100 text-blue-700' }
+  if (score >= 0.30) return { label: t('relations.suggestions.levels.weak'), color: 'bg-gray-100 text-gray-600' }
+
+  // Create a fallback for very low scores if they slip through
+  return { label: t('relations.suggestions.levels.low'), color: 'bg-gray-50 text-gray-400' }
+}
+
 export function SuggestedRelationItem({
   targetId,
   relationType,
@@ -24,6 +40,9 @@ export function SuggestedRelationItem({
   const { data: targetEntry, isLoading } = useEntryQuery(targetId)
   const { data: relationTypes = [] } = useRelationTypesQuery()
   const createRelationMutation = useCreateRelationMutation()
+
+  // If score is too low, don't show it at all (double safety)
+  if (score < 0.3) return null
 
   const handleAccept = () => {
     // Use AI-predicted relation type if available, otherwise use first enabled type
@@ -72,6 +91,8 @@ export function SuggestedRelationItem({
     ? relationTypes.find((t) => t.code === relationType)
     : null
 
+  const matchLevel = getMatchLevel(score, t)
+
   return (
     <div
       className={cn(
@@ -114,8 +135,14 @@ export function SuggestedRelationItem({
             {relationTypeInfo.name}
           </span>
         )}
-        <span className="text-xs font-medium text-purple-600 bg-purple-50 px-2 py-0.5 rounded-full">
-          {t('relations.suggestions.matchScore', { score: Math.round(score * 100) })}
+        <span
+          className={cn(
+            "text-xs font-medium px-2 py-0.5 rounded-full",
+            matchLevel.color
+          )}
+          title={`Score: ${Math.round(score * 100)}%`}
+        >
+          {matchLevel.label}
         </span>
       </div>
 

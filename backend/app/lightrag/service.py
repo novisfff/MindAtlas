@@ -248,7 +248,6 @@ def _call_rag_query_sync(*, query: str, mode: LightRagQueryMode, top_k: int, tim
         # query_llm returns structured data with llm_response and chunks
         try:
             from lightrag import QueryParam
-            import asyncio
 
             try:
                 param = QueryParam(mode=mode, top_k=top_k, chunk_top_k=top_k, stream=False, enable_rerank=enable_rerank)
@@ -499,6 +498,53 @@ def _extract_graph_context(raw: Any) -> dict[str, Any]:
     return result
 
 
+def _extract_candidate_entry_ids(graph_context: dict[str, Any]) -> set[UUID]:
+    """Extract candidate entry IDs from graph context (chunks/entities/relationships).
+
+    Args:
+        graph_context: dict with keys chunks, entities, relationships
+
+    Returns:
+        Set of valid UUIDs extracted from file_path/doc_id/entry_id fields
+    """
+    entry_ids: set[UUID] = set()
+
+    # From chunks: use doc_id or file_path
+    for chunk in graph_context.get("chunks") or []:
+        if not isinstance(chunk, dict):
+            continue
+        doc_id = (chunk.get("doc_id") or chunk.get("full_doc_id") or chunk.get("file_path") or "").strip()
+        if doc_id:
+            try:
+                entry_ids.add(UUID(doc_id))
+            except (ValueError, TypeError):
+                pass
+
+    # From entities: use entry_id
+    for ent in graph_context.get("entities") or []:
+        if not isinstance(ent, dict):
+            continue
+        entry_id = (ent.get("entry_id") or "").strip()
+        if entry_id:
+            try:
+                entry_ids.add(UUID(entry_id))
+            except (ValueError, TypeError):
+                pass
+
+    # From relationships: use entry_id
+    for rel in graph_context.get("relationships") or []:
+        if not isinstance(rel, dict):
+            continue
+        entry_id = (rel.get("entry_id") or "").strip()
+        if entry_id:
+            try:
+                entry_ids.add(UUID(entry_id))
+            except (ValueError, TypeError):
+                pass
+
+    return entry_ids
+
+
 def _call_rag_graph_recall_sync(
     *,
     query: str,
@@ -539,7 +585,6 @@ def _call_rag_graph_recall_sync(
                     only_need_context=True,
                     enable_rerank=enable_rerank,
                 )
-                print("param:", param)
                 try:
                     raw = rag.query_llm(q, param=param, max_tokens=max_tokens, temperature=0)
                 except TypeError:
@@ -571,6 +616,72 @@ def _call_rag_graph_recall_sync(
         if include_graph_context:
             return {"chunks": fallback, "entities": [], "relationships": []}
         return fallback
+
+    return runtime.call(_do, timeout_sec=float(timeout_sec or 0.0) + 5.0)
+
+
+def _call_rag_relation_recommend_sync(
+    *,
+    prompt: str,
+    mode: LightRagQueryMode,
+    top_k: int,
+    chunk_top_k: int,
+    timeout_sec: float = 30.0,
+) -> tuple[str, dict[str, Any]]:
+    """Single-stage relation recommendation: recall + LLM JSON response.
+
+    Returns:
+        (llm_answer, graph_context) - LLM JSON string and graph context with chunks/entities/relationships
+    """
+    from app.lightrag.runtime import get_lightrag_runtime
+
+    runtime = get_lightrag_runtime()
+    empty_context: dict[str, Any] = {"chunks": [], "entities": [], "relationships": []}
+
+    def _do() -> tuple[str, dict[str, Any]]:
+        rag = get_rag()
+        q = (prompt or "").strip()
+        enable_rerank = bool(getattr(rag, "rerank_model_func", None))
+        if not q or top_k <= 0 or chunk_top_k <= 0:
+            return "", empty_context
+
+        try:
+            from lightrag import QueryParam
+
+            try:
+                param = QueryParam(
+                    mode=mode,
+                    top_k=top_k,
+                    chunk_top_k=chunk_top_k,
+                    stream=False,
+                    enable_rerank=enable_rerank,
+                )
+                raw = rag.query_llm(q, param=param)
+            except Exception:
+                if str(mode) != "mix":
+                    raise
+                param = QueryParam(
+                    mode="hybrid",
+                    top_k=top_k,
+                    chunk_top_k=chunk_top_k,
+                    stream=False,
+                    enable_rerank=enable_rerank,
+                )
+                raw = rag.query_llm(q, param=param)
+
+            llm_answer = ""
+            if isinstance(raw, dict):
+                llm_resp = raw.get("llm_response") or {}
+                llm_answer = llm_resp.get("content") or ""
+            graph_context = _extract_graph_context(raw)
+            return llm_answer, graph_context
+        except (ImportError, TypeError, AttributeError):
+            pass
+
+        # Fallback: degrade to vector recall without LLM
+        fallback = _call_rag_recall_sync(query=q, top_k=chunk_top_k, timeout_sec=timeout_sec)
+        fallback_chunks = [{"doc_id": s.doc_id} for s in fallback if s.doc_id]
+        return "", {"chunks": fallback_chunks, "entities": [], "relationships": []}
 
     return runtime.call(_do, timeout_sec=float(timeout_sec or 0.0) + 5.0)
 
@@ -668,12 +779,25 @@ _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", flags=re.IGNORECASE |
 
 # Role definition for Entry relation recommendation prompts
 _ENTRY_RELATION_RECOMMENDATION_ROLE = (
-    "你是一个知识图谱关系抽取助手。"
-    "你的任务是：阅读用户提供的\"当前记录内容\"，并结合\"知识图谱中的现有实体和关系\"，智能推荐相关的关系。"
+    "你是一个高精度（宁缺毋滥）的知识图谱关系推荐助手。\n\n"
+    "你的任务是：\n"
+    "1) 阅读用户提供的「当前记录内容」\n"
+    "2) 分析系统检索到的三类数据：chunks（文档片段）、entities（实体）、relationships（关系）\n"
+    "3) 从这些数据的 file_path 字段中识别候选 Entry ID（UUID 格式）\n"
+    "4) 只推荐与「当前记录」在事件/内容层面真实相关的 Entry，并给出关系类型与 relevance 分数\n\n"
+    "什么叫“真实相关”（必须满足其一，才允许输出）：\n"
+    "- 同一具体项目/任务/客户需求/交付物/会议主题/工单等（能从文本中抽取到可唯一指代的对象，如项目名、客户名+项目代号、工单号、合同/里程碑名称等）\n"
+    "- 明确的依赖/包含/跟进/复盘/因果链路（文本中有直接指向，如“为…准备/针对…整改/跟进…需求/…导致…”）\n"
+    "- 跨类型但目的绑定（重点）：如出差/拜访/现场支持/培训/报销/采购等，必须能绑定到某个具体项目/任务/客户需求；若无法从文本中找到绑定对象，则不要推荐\n\n"
+    "明确禁止（命中任一条必须不输出）：\n"
+    "- 仅同类目/同标签/同领域词相似（例如同样是“比赛”、同样是“项目”、同样是“会议”）\n"
+    "- 仅时间接近、仅地点相同、仅参与人部分重叠，但主题/对象不同且无直接指向\n"
+    "- 需要靠常识猜测才能建立联系（不允许脑补）\n\n"
+    "重要约束：\n"
+    "- targetEntryId 必须是检索数据中 file_path 字段的值，不得编造\n"
+    "- 只能推荐在检索结果中出现的 Entry\n"
+    "- 允许返回空列表；不要为了凑满数量而输出"
 )
-
-# Max candidates for phase-2 relation type extraction
-_MAX_RELATION_TYPE_CANDIDATES = 20
 
 
 def _truncate(s: str, max_len: int) -> str:
@@ -682,15 +806,10 @@ def _truncate(s: str, max_len: int) -> str:
     return s[:max_len] if len(s) > max_len else s
 
 
-def _to_single_line(s: str) -> str:
-    """Convert multi-line string to single line."""
-    return " ".join((s or "").split())
-
-
 def _build_entry_relation_recommendation_prompt(
-    *, base_text: str, relation_type_codes: list[str], limit: int, target_entry_id_rule: str | None = None, max_chars: int = 4500
+    *, base_text: str, relation_type_codes: list[str], limit: int, max_chars: int = 5000
 ) -> str:
-    """Build a prompt that asks LightRAG to output structured relation JSON."""
+    """Build a prompt that asks LightRAG to output structured relation JSON with relevance."""
     base = (base_text or "").strip()
     if not base:
         return ""
@@ -706,71 +825,36 @@ def _build_entry_relation_recommendation_prompt(
         keep = max(0, max_chars - len(role) - 2)
         return f"{role}\n\n{_truncate(base, keep)}".strip()
 
-    rule = (target_entry_id_rule or "").strip() or "targetEntryId must be a UUID present in retrieved sources doc_id. If unsure, omit the item."
-    instructions = (
-        "Return ONLY valid JSON (no markdown, no prose).\n"
-        '{"relations":[{"targetEntryId":"<UUID>","relationType":"<CODE>"}]}.\n'
-        f"Constraints: max {int(limit)} items; relationType must be one of {json.dumps(codes, ensure_ascii=False)}; "
-        f"{rule}"
+    relevance_rubric = (
+        "relevance 评分标准（0.0-1.0，精确到小数点后两位）：\n"
+        "- 0.95-1.00 近乎确定：同一具体项目/任务/工单/合同/里程碑等存在唯一标识重合，或文本明确说明依赖/包含/跟进/因果\n"
+        "- 0.80-0.94 明确相关：存在多个强线索一致（例如同一客户+同一交付物/需求点+清晰时间链路+相互指向描述）\n"
+        "- 0.65-0.79 可信相关：至少一个可具体指代的实体重合，并且能解释两者为什么有关联（而不是“同类目”）\n"
+        "- 0.30-0.64 谨慎输出：只有在仍能找到“具体指代对象/目的绑定/依赖线索”时才可给到该区间；若只是标签/类别/泛主题相似，relevance 必须 ≤0.20 且不要输出\n"
+        "- 低于 0.30 不推荐，不要输出"
     )
-    sep = "\n\n---\n"
+
+    instructions = (
+        f"输出要求：\n"
+        f"- 返回纯 JSON，无 markdown 包裹，无解释文字\n"
+        f'- 格式: {{"relations":[{{"targetEntryId":"<UUID>","relationType":"<CODE>","relevance":<0.30-1.00>}}]}}\n'
+        f'- 如无满足条件的结果，返回: {{"relations":[]}}\n'
+        f"- relevance 必须是 0.0-1.0 的数字，保留两位小数；低于 0.30 的不要输出\n"
+        f"- 最多 {int(limit)} 条推荐，按 relevance 从高到低排序\n"
+        f"- relationType 必须是: {json.dumps(codes, ensure_ascii=False)}\n"
+        f"- targetEntryId 必须来自检索数据的 file_path 字段\n\n"
+        f"{relevance_rubric}"
+    )
+    sep = "\n\n---\n\n"
 
     body = f"{base}{sep}{instructions}".strip()
     prompt = f"{role}\n\n{body}".strip()
     if len(prompt) <= max_chars:
         return prompt
 
-    # Prefer keeping the beginning of base_text (caller should put critical info first).
     overhead = len(role) + 2 + len(sep) + len(instructions)
     keep = max(0, max_chars - overhead)
     return f"{role}\n\n{_truncate(base, keep)}{sep}{instructions}".strip()
-
-
-def _build_entry_relation_recommendation_stage2_prompt(
-    *,
-    source_text: str,
-    candidates: list[tuple[UUID, str, str | None]],
-    relation_type_codes: list[str],
-    limit: int,
-    max_candidates: int = _MAX_RELATION_TYPE_CANDIDATES,
-    max_chars: int = 4500,
-) -> str:
-    """Phase-2 prompt: provide an explicit candidate table so LLM outputs doc_id (Entry UUID)."""
-    base_source = (source_text or "").strip()
-    if not base_source:
-        return ""
-    if not relation_type_codes:
-        return ""
-    if not candidates:
-        return ""
-
-    candidates = candidates[: max(0, int(max_candidates))]
-    if not candidates:
-        return ""
-
-    lines: list[str] = []
-    for doc_id, title, summary in candidates:
-        t = _truncate(_to_single_line(title), 96)
-        s = _truncate(_to_single_line(summary or ""), 160)
-        if s:
-            lines.append(f"- doc_id: {doc_id} | title: {t} | summary: {s}")
-        else:
-            lines.append(f"- doc_id: {doc_id} | title: {t}")
-
-    base = (
-        "候选条目（仅可选择下列 doc_id 作为 targetEntryId）：\n"
-        f"{chr(10).join(lines)}\n\n"
-        "当前记录内容：\n"
-        f"{base_source}"
-    ).strip()
-
-    return _build_entry_relation_recommendation_prompt(
-        base_text=base,
-        relation_type_codes=relation_type_codes,
-        limit=limit,
-        target_entry_id_rule="targetEntryId must be one of the candidate doc_id values listed above. If unsure, omit the item.",
-        max_chars=max_chars,
-    )
 
 
 def _try_parse_json_from_answer(answer: str) -> Any | None:
@@ -822,60 +906,100 @@ def _extract_relation_items(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
-def _parse_relation_type_map(
+@dataclass
+class RelationRecommendation:
+    """Parsed relation recommendation from LLM output."""
+    target_id: UUID
+    relation_type: str | None
+    relevance: float
+
+
+def _parse_relation_recommendation_payload(
     answer: str,
     *,
     allowed_relation_type_codes: list[str],
     candidate_ids: set[UUID],
-) -> dict[UUID, str]:
-    """Parse LightRAG answer to extract targetEntryId -> relationType mapping."""
-    if not answer or not allowed_relation_type_codes or not candidate_ids:
-        return {}
+) -> list[RelationRecommendation]:
+    """Parse LLM answer to extract relation recommendations with relevance.
+
+    Args:
+        answer: LLM JSON output
+        allowed_relation_type_codes: Valid relation type codes
+        candidate_ids: Whitelist of valid target entry IDs
+
+    Returns:
+        List of RelationRecommendation, deduplicated by target_id (max relevance wins)
+    """
+    if not answer or not candidate_ids:
+        return []
 
     payload = _try_parse_json_from_answer(answer)
     if payload is None:
-        return {}
+        return []
 
     items = _extract_relation_items(payload)
     if not items:
-        return {}
+        return []
 
-    # Build case-insensitive lookup
-    allowed = {(c or "").strip().lower(): (c or "").strip() for c in allowed_relation_type_codes if (c or "").strip()}
-    out: dict[UUID, str] = {}
+    # Build case-insensitive lookup for relation types
+    allowed = {
+        (c or "").strip().lower(): (c or "").strip()
+        for c in allowed_relation_type_codes
+        if (c or "").strip()
+    }
+
+    # Collect recommendations, tracking max relevance per target_id
+    by_target: dict[UUID, RelationRecommendation] = {}
 
     for item in items:
+        # Extract targetEntryId
         target_raw = (
             item.get("targetEntryId")
             or item.get("target_entry_id")
             or item.get("targetId")
-            or item.get("target_id")
-            or item.get("targetDocId")
-            or item.get("target_doc_id")
-            or item.get("docId")
             or item.get("doc_id")
         )
-        relation_raw = (
-            item.get("relationType")
-            or item.get("relation_type")
-            or item.get("type")
-            or item.get("code")
-        )
-        if not target_raw or not relation_raw:
+        if not target_raw:
             continue
         try:
             target_id = UUID(str(target_raw))
-        except Exception:
+        except (ValueError, TypeError):
             continue
         if target_id not in candidate_ids:
             continue
 
-        rel_code = allowed.get(str(relation_raw).strip().lower())
-        if not rel_code:
+        # Extract relevance (explicit None check to handle relevance=0.0 correctly)
+        relevance_raw = item.get("relevance")
+        if relevance_raw is None:
+            relevance_raw = item.get("score")
+        if relevance_raw is None:
             continue
-        out[target_id] = rel_code
+        try:
+            relevance = float(relevance_raw)
+        except (ValueError, TypeError):
+            continue
+        if not math.isfinite(relevance):
+            continue
+        relevance = max(0.0, min(1.0, relevance))
 
-    return out
+        # Extract relationType (optional)
+        relation_raw = item.get("relationType") or item.get("relation_type")
+        relation_type: str | None = None
+        if relation_raw and allowed:
+            rel_code = allowed.get(str(relation_raw).strip().lower())
+            if rel_code:
+                relation_type = rel_code
+
+        # Keep max relevance per target_id
+        existing = by_target.get(target_id)
+        if existing is None or relevance > existing.relevance:
+            by_target[target_id] = RelationRecommendation(
+                target_id=target_id,
+                relation_type=relation_type or (existing.relation_type if existing else None),
+                relevance=relevance,
+            )
+
+    return list(by_target.values())
 
 
 class LightRagService:
@@ -1310,12 +1434,71 @@ class LightRagService:
             payload = ApiResponse.fail(code=50000, message="Internal Server Error").model_dump()
             yield _sse_frame(payload)
 
+    async def relation_recommend_with_llm(
+        self,
+        *,
+        prompt: str,
+        mode: LightRagQueryMode,
+        top_k: int,
+        chunk_top_k: int | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Single-stage relation recommendation with LLM JSON output.
+
+        Returns:
+            (llm_answer, graph_context) - graph_context has chunks/entities/relationships
+        """
+        settings = get_settings()
+        if not settings.lightrag_enabled:
+            raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled")
+
+        q = (prompt or "").strip()
+        k = max(1, min(50, int(top_k or 1)))
+        ck = max(1, min(50, int(chunk_top_k or k)))
+
+        max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
+        sem = _get_query_semaphore(max_concurrency)
+        timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 30.0) or 30.0)
+
+        acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
+        if not acquired:
+            raise ApiException(status_code=504, code=50400, message="LightRAG query timeout")
+        try:
+            with anyio.fail_after(timeout_sec):
+                result = await anyio.to_thread.run_sync(
+                    partial(
+                        _call_rag_relation_recommend_sync,
+                        prompt=q,
+                        mode=mode,
+                        top_k=k,
+                        chunk_top_k=ck,
+                        timeout_sec=timeout_sec,
+                    ),
+                    abandon_on_cancel=True,
+                )
+        except TimeoutError as e:
+            raise ApiException(status_code=504, code=50400, message="LightRAG query timeout") from e
+        except LightRagNotEnabledError as e:
+            raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled") from e
+        except LightRagDependencyError as e:
+            raise ApiException(status_code=500, code=50010, message="LightRAG dependency missing") from e
+        except LightRagConfigError as e:
+            raise ApiException(status_code=500, code=50011, message="LightRAG config error") from e
+        except Exception as e:
+            raise ApiException(status_code=500, code=50012, message="LightRAG query failed") from e
+        finally:
+            try:
+                sem.release()
+            except Exception:
+                pass
+
+        return result
+
     async def recommend_entry_relations(
         self,
         *,
         db: Session,
         entry_id: UUID,
-        mode: str = "local",
+        mode: str = "mix",
         limit: int = 20,
         min_score: float = 0.1,
         exclude_existing_relations: bool = False,
@@ -1326,7 +1509,7 @@ class LightRagService:
         Args:
             db: Database session
             entry_id: Source Entry ID
-            mode: Query mode (naive/local/global/hybrid)
+            mode: Query mode (naive/local/global/hybrid/mix)
             limit: Max number of recommendations (1-100)
             min_score: Minimum similarity score threshold (0.0-1.0)
             exclude_existing_relations: Filter out entries with existing Relation records
@@ -1345,8 +1528,11 @@ class LightRagService:
                 status_code=422, code=42200, message="Validation Error", details={"min_score": min_score}
             )
         # Validate mode
-        if mode not in ("naive", "local", "global", "hybrid"):
+        if mode not in ("naive", "local", "global", "hybrid", "mix"):
             raise ApiException(status_code=422, code=42200, message="Validation Error", details={"mode": mode})
+
+        # HC-3: Enforce minimum relevance threshold of 0.30 (spec constraint)
+        effective_min_score = max(min_score, 0.30)
 
         # Local imports to keep module imports light
         from app.entry.models import Entry
@@ -1374,53 +1560,56 @@ class LightRagService:
             ]
             relation_type_codes = [c for c in relation_type_codes if c]
 
-        # Phase 1: recall sources and compute candidate scores from sources[].doc_id.
-        # Use a lightweight recall path (no LLM) for speed.
-        query_text = _truncate(base_text, 4000)
-
-        # Recall with over-fetching (limit*2) to allow for filtering
+        # Single-stage: build prompt with relation recommendation instructions
         top_k = min(max(limit * 2, 1), 50)
-        sources = await self.recall_sources(query=query_text, mode=mode, top_k=top_k)
-        # Aggregate chunk-level sources into per-doc scores (take max score per doc)
-        raw_scores: dict[UUID, float] = {}
-        for src in sources or []:
-            doc_id = (src.doc_id or "").strip()
-            if not doc_id:
-                continue
-            # Try parse as UUID
-            try:
-                doc_uuid = UUID(doc_id)
-            except Exception:
-                continue
-            # Filter out self
-            if doc_uuid == entry_id:
-                continue
-            # Take max score per doc
-            s = float(src.score) if isinstance(src.score, (int, float)) else 0.0
-            if doc_uuid not in raw_scores or s > raw_scores[doc_uuid]:
-                raw_scores[doc_uuid] = s
-        if not raw_scores:
+        prompt = _build_entry_relation_recommendation_prompt(
+            base_text=base_text,
+            relation_type_codes=relation_type_codes,
+            limit=limit,
+        )
+
+        # Call LLM with retrieval - get graph_context with chunks/entities/relationships
+        llm_answer, graph_context = await self.relation_recommend_with_llm(
+            prompt=prompt,
+            mode=mode,
+            top_k=top_k,
+            chunk_top_k=top_k,
+        )
+
+        # Extract candidate entry IDs from all three data sources
+        all_candidate_ids = _extract_candidate_entry_ids(graph_context)
+        all_candidate_ids.discard(entry_id)  # Remove self-reference
+        if not all_candidate_ids:
             return LightRagEntryRelationRecommendationsResponse(items=[])
 
-        # Normalize scores to [0, 1]. If upstream already returns [0,1], keep it.
-        max_raw = max(raw_scores.values()) if raw_scores else 0.0
-        normalized: dict[UUID, float] = {}
-        for doc_uuid, s in raw_scores.items():
-            s = max(0.0, float(s))
-            if max_raw > 1.0 and max_raw > 0.0:
-                s = s / max_raw
-            s = min(1.0, max(0.0, s))
-            normalized[doc_uuid] = s
+        # Parse LLM output for relevance and relation types
+        recommendations: list[RelationRecommendation] = []
+        if llm_answer:
+            try:
+                recommendations = _parse_relation_recommendation_payload(
+                    llm_answer,
+                    allowed_relation_type_codes=relation_type_codes,
+                    candidate_ids=all_candidate_ids,
+                )
+            except Exception as e:
+                logger.warning("Failed to parse recommendations from LLM", extra={"error": str(e)})
+
+        # Build relevance map from LLM output
+        relevance_by_target: dict[UUID, float] = {r.target_id: r.relevance for r in recommendations}
+        relation_type_by_target: dict[UUID, str | None] = {r.target_id: r.relation_type for r in recommendations}
 
         # Optional: filter out entries with explicit relations to source entry
         excluded: set[UUID] = set()
         if exclude_existing_relations:
             for rel in RelationService(db).find_by_entry(entry_id):
-                # Filter bidirectional: source->target or target->source
                 other = rel.target_entry_id if rel.source_entry_id == entry_id else rel.source_entry_id
                 excluded.add(other)
-        # Apply min_score and exclusion filters
-        candidate_ids = [i for i in normalized.keys() if i not in excluded and normalized[i] >= min_score]
+
+        # Apply effective_min_score (HC-3 enforced) and exclusion filters using relevance from LLM
+        candidate_ids = [
+            i for i in relevance_by_target.keys()
+            if i not in excluded and relevance_by_target[i] >= effective_min_score
+        ]
         if not candidate_ids:
             return LightRagEntryRelationRecommendationsResponse(items=[])
 
@@ -1430,50 +1619,15 @@ class LightRagService:
         if not final_ids:
             return LightRagEntryRelationRecommendationsResponse(items=[])
 
-        # Sort by score desc, then UUID for stability
-        final_ids.sort(key=lambda i: (-normalized.get(i, 0.0), str(i)))
+        # Sort by relevance desc, then UUID for stability
+        final_ids.sort(key=lambda i: (-relevance_by_target.get(i, 0.0), str(i)))
         final_ids = final_ids[:limit]
-
-        # Phase 2: provide an explicit candidate table (doc_id + title/summary) so the model outputs correct doc_id.
-        relation_type_by_target: dict[UUID, str] = {}
-        if include_relation_type and relation_type_codes:
-            stage2_ids = final_ids[: min(len(final_ids), _MAX_RELATION_TYPE_CANDIDATES)]
-            if stage2_ids:
-                try:
-                    rows = (
-                        db.query(Entry.id, Entry.title, Entry.summary)
-                        .filter(Entry.id.in_(stage2_ids))
-                        .all()
-                    )
-                    info_by_id: dict[UUID, tuple[str, str | None]] = {
-                        row[0]: ((row[1] or "").strip(), (row[2] or "").strip() if row[2] is not None else None)
-                        for row in rows
-                        if row and row[0] is not None
-                    }
-                    candidates = []
-                    for i in stage2_ids:
-                        title, summary = info_by_id.get(i, ("", None))
-                        candidates.append((i, title, summary))
-                    stage2_prompt = _build_entry_relation_recommendation_stage2_prompt(
-                        source_text=base_text,
-                        candidates=candidates,
-                        relation_type_codes=relation_type_codes,
-                        limit=min(limit, len(stage2_ids)),
-                    )
-                    if stage2_prompt:
-                        relation_type_by_target = _parse_relation_type_map(
-                            await self.llm_only_answer(prompt=stage2_prompt, mode=mode),
-                            allowed_relation_type_codes=relation_type_codes,
-                            candidate_ids=set(stage2_ids),
-                        )
-                except Exception as e:
-                    logger.warning("Failed to get relation types from phase-2 answer", extra={"error": str(e)})
 
         items = [
             LightRagEntryRelationRecommendationItem(
                 target_entry_id=i,
                 relation_type=relation_type_by_target.get(i),
-                score=normalized.get(i, 0.0),
+                score=relevance_by_target.get(i, 0.0),
             )
             for i in final_ids
         ]

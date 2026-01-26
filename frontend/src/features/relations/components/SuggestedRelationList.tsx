@@ -7,24 +7,30 @@ import { SuggestionSkeleton } from './SuggestionSkeleton'
 
 interface SuggestedRelationListProps {
   entryId: string
+  autoTrigger?: boolean
 }
 
-export function SuggestedRelationList({ entryId }: SuggestedRelationListProps) {
+export function SuggestedRelationList({ entryId, autoTrigger = false }: SuggestedRelationListProps) {
   const { t } = useTranslation()
   const [ignoredIds, setIgnoredIds] = useState<Set<string>>(new Set())
   const [loadingMessage, setLoadingMessage] = useState<string | null>(null)
+  const [manualTrigger, setManualTrigger] = useState(false)
+
+  const shouldFetch = autoTrigger || manualTrigger
 
   const {
     data: recommendations,
     isLoading: loadingRecommendations,
     isError,
     refetch,
-  } = useRelationRecommendationsQuery(entryId)
+    isFetching,
+  } = useRelationRecommendationsQuery(entryId, { enabled: shouldFetch })
+
   const { data: existingRelations = [] } = useEntryRelationsQuery(entryId)
 
   // Progressive loading messages
   useEffect(() => {
-    if (!loadingRecommendations) {
+    if (!loadingRecommendations && !isFetching) {
       setLoadingMessage(null)
       return
     }
@@ -42,7 +48,7 @@ export function SuggestedRelationList({ entryId }: SuggestedRelationListProps) {
       clearTimeout(timer1)
       clearTimeout(timer2)
     }
-  }, [loadingRecommendations, t])
+  }, [loadingRecommendations, isFetching, t])
 
   // Filter out existing relations (bidirectional check)
   const existingRelationIds = new Set(
@@ -56,14 +62,38 @@ export function SuggestedRelationList({ entryId }: SuggestedRelationListProps) {
         !existingRelationIds.has(item.targetEntryId) && !ignoredIds.has(item.targetEntryId)
     ) || []
 
+  // Initial state: Not triggered yet
+  if (!shouldFetch) {
+    return (
+      <div className="mb-6 p-6 bg-gray-50/50 border-2 border-dashed border-gray-200 rounded-xl flex flex-col items-center justify-center text-center">
+        <div className="p-3 bg-purple-100 rounded-full mb-3">
+          <Sparkles className="w-5 h-5 text-purple-600" />
+        </div>
+        <h3 className="text-sm font-semibold text-gray-900 mb-1">
+          {t('relations.suggestions.title')}
+        </h3>
+        <p className="text-sm text-gray-500 mb-4 max-w-xs">
+          {t('relations.suggestions.intro')}
+        </p>
+        <button
+          onClick={() => setManualTrigger(true)}
+          className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 hover:text-gray-900 transition-colors shadow-sm"
+        >
+          <Sparkles className="w-4 h-4 text-purple-500" />
+          {t('relations.suggestions.getSuggestions')}
+        </button>
+      </div>
+    )
+  }
+
   // Loading state
-  if (loadingRecommendations) {
+  if (loadingRecommendations || isFetching) {
     return (
       <div className="mb-6 p-4 bg-gray-50/50 border-2 border-dashed border-gray-200 rounded-xl">
         <div className="flex items-center gap-2 mb-3">
           <Sparkles className="w-4 h-4 text-purple-500" />
           <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">
-            {t('labels.aiSuggestedRelations')}
+            {t('relations.suggestions.title')}
           </h3>
         </div>
         <SuggestionSkeleton />
@@ -84,7 +114,7 @@ export function SuggestedRelationList({ entryId }: SuggestedRelationListProps) {
         <div className="flex items-center gap-2 mb-3">
           <Sparkles className="w-4 h-4 text-purple-500" />
           <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">
-            {t('labels.aiSuggestedRelations')}
+            {t('relations.suggestions.title')}
           </h3>
         </div>
         <div className="flex items-center justify-between p-3 rounded-lg bg-white/50">
@@ -107,17 +137,37 @@ export function SuggestedRelationList({ entryId }: SuggestedRelationListProps) {
 
   // Empty state
   if (candidates.length === 0) {
-    return null
+    return (
+      <div className="mb-6 p-4 bg-gray-50/50 border-2 border-dashed border-gray-200 rounded-xl text-center">
+        <p className="text-sm text-gray-500">{t('relations.suggestions.noSuggestions')}</p>
+        <button
+          type="button"
+          onClick={() => refetch()}
+          className="mt-2 text-xs text-purple-600 hover:underline"
+        >
+          {t('relations.suggestions.tryAgain')}
+        </button>
+      </div>
+    )
   }
 
   return (
     <div className="mb-6 p-4 bg-gray-50/50 border-2 border-dashed border-gray-200 rounded-xl">
       {/* Header */}
-      <div className="flex items-center gap-2 mb-3">
-        <Sparkles className="w-4 h-4 text-purple-500" />
-        <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">
-          {t('labels.aiSuggestedRelations')}
-        </h3>
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <Sparkles className="w-4 h-4 text-purple-500" />
+          <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">
+            {t('relations.suggestions.title')}
+          </h3>
+        </div>
+        <button
+          onClick={() => refetch()}
+          className="p-1 rounded-full hover:bg-gray-200 text-gray-400 hover:text-gray-600 transition-colors"
+          title={t('relations.suggestions.retry')}
+        >
+          <RefreshCw className="w-3 h-3" />
+        </button>
       </div>
 
       {/* List */}

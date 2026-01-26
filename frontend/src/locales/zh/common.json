@@ -427,7 +427,18 @@
       "loadingSlow": "AI 正在分析内容...",
       "loadingVerySlow": "深度搜索中，请稍候...",
       "error": "暂时无法生成推荐",
-      "retry": "重试"
+      "retry": "重试",
+      "getSuggestions": "获取推荐",
+      "intro": "让 AI 分析此记录并推荐相关连接。",
+      "noSuggestions": "暂无推荐关联。",
+      "tryAgain": "重试",
+      "levels": {
+        "strong": "近乎确定",
+        "high": "明确相关",
+        "medium": "可信相关",
+        "weak": "潜在关联",
+        "low": "低相关"
+      }
     }
   },
   "indexStatus": {
