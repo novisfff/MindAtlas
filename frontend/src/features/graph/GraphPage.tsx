@@ -1,9 +1,14 @@
+import { useState } from 'react'
 import { Loader2 } from 'lucide-react'
 import { KnowledgeGraph, useGraphDataQuery } from '@/features/graph'
 import { useTranslation } from 'react-i18next'
 
 export function GraphPage() {
-  const { data, isLoading, error } = useGraphDataQuery()
+  const [dateRange, setDateRange] = useState<{ start: string; end: string }>({ start: '', end: '' })
+  const { data, isLoading, error } = useGraphDataQuery({
+    timeFrom: dateRange.start || undefined,
+    timeTo: dateRange.end || undefined,
+  })
   const { t } = useTranslation()
 
   if (isLoading) {
@@ -35,7 +40,13 @@ export function GraphPage() {
     <div>
       <h1 className="text-2xl font-bold mb-4">{t('pages.graph.title')}</h1>
       <div className="border rounded-lg bg-card overflow-hidden">
-        <KnowledgeGraph data={data} width={1000} height={600} />
+        <KnowledgeGraph
+          data={data}
+          width={1000}
+          height={600}
+          filterDateRange={dateRange}
+          onFilterDateRangeChange={setDateRange}
+        />
       </div>
     </div>
   )

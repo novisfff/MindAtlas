@@ -1,13 +1,13 @@
 import { useQuery } from '@tanstack/react-query'
-import { getGraphData } from './api/graph'
+import { getGraphData, GraphFilterParams } from './api/graph'
 
 export const graphKeys = {
-  data: ['graph'] as const,
+  data: (params?: GraphFilterParams) => ['graph', params] as const,
 }
 
-export function useGraphDataQuery() {
+export function useGraphDataQuery(params?: GraphFilterParams) {
   return useQuery({
-    queryKey: graphKeys.data,
-    queryFn: getGraphData,
+    queryKey: graphKeys.data(params),
+    queryFn: () => getGraphData(params),
   })
 }

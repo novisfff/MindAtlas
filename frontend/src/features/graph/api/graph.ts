@@ -6,6 +6,12 @@ export interface GraphNode {
   typeId: string
   typeName: string
   color?: string
+  createdAt?: string
+  summary?: string
+  timeMode?: 'NONE' | 'POINT' | 'RANGE'
+  timeAt?: string
+  timeFrom?: string
+  timeTo?: string
 }
 
 export interface GraphLink {
@@ -21,6 +27,15 @@ export interface GraphData {
   links: GraphLink[]
 }
 
-export async function getGraphData(): Promise<GraphData> {
-  return apiClient.get<GraphData>('/api/graph')
+export interface GraphFilterParams {
+  timeFrom?: string
+  timeTo?: string
+}
+
+export async function getGraphData(params?: GraphFilterParams): Promise<GraphData> {
+  const searchParams = new URLSearchParams()
+  if (params?.timeFrom) searchParams.append('timeFrom', params.timeFrom)
+  if (params?.timeTo) searchParams.append('timeTo', params.timeTo)
+  const query = searchParams.toString()
+  return apiClient.get<GraphData>(`/api/graph${query ? `?${query}` : ''}`)
 }

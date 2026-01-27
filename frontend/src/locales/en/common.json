@@ -138,7 +138,15 @@
       "title": "Knowledge Graph",
       "subtitle": "Visualize connections between your entries",
       "noData": "No entries yet. Create some entries to see the graph.",
-      "failedToLoad": "Failed to load graph data"
+      "failedToLoad": "Failed to load graph data",
+      "searchPlaceholder": "Search node...",
+      "filterLogic": "Filter Logic",
+      "filterTime": "Time Range",
+      "filterType": "Filter Types",
+      "zoomIn": "Zoom In",
+      "zoomOut": "Zoom Out",
+      "fitView": "Fit View",
+      "noSummary": "No summary available"
     },
     "timeline": {
       "title": "Timeline",
