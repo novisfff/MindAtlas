@@ -137,7 +137,15 @@
       "title": "知识图谱",
       "subtitle": "可视化记录之间的关联",
       "noData": "暂无记录。创建一些记录以查看图谱。",
-      "failedToLoad": "加载图谱数据失败"
+      "failedToLoad": "加载图谱数据失败",
+      "searchPlaceholder": "搜索节点...",
+      "filterLogic": "筛选逻辑",
+      "filterTime": "时间范围",
+      "filterType": "类型筛选",
+      "zoomIn": "放大",
+      "zoomOut": "缩小",
+      "fitView": "适应视图",
+      "noSummary": "暂无摘要"
     },
     "timeline": {
       "title": "时间轴",
