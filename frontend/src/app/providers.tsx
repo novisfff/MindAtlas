@@ -9,6 +9,7 @@ function LanguageSync() {
   const locale = useAppStore((s) => s.locale)
 
   useEffect(() => {
+    if (locale !== 'en' && locale !== 'zh') return
     if (i18n.language !== locale) {
       i18n.changeLanguage(locale)
     }

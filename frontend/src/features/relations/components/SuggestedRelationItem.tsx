@@ -1,5 +1,6 @@
 import { Check, X } from 'lucide-react'
 import { toast } from 'sonner'
+import { useState, useEffect } from 'react'
 import { useEntryQuery } from '@/features/entries/queries'
 import { useCreateRelationMutation, useRelationTypesQuery } from '../queries'
 import { cn } from '@/lib/utils'
@@ -41,16 +42,28 @@ export function SuggestedRelationItem({
   const { data: relationTypes = [] } = useRelationTypesQuery()
   const createRelationMutation = useCreateRelationMutation()
 
+  // Use code to track selection, as relationType prop is a code
+  const [selectedTypeCode, setSelectedTypeCode] = useState(relationType)
+
+  // Effect to sync prop change (though rare in this list context)
+  useEffect(() => {
+    setSelectedTypeCode(relationType)
+  }, [relationType])
+
   // If score is too low, don't show it at all (double safety)
   if (score < 0.3) return null
 
   const handleAccept = () => {
-    // Use AI-predicted relation type if available, otherwise use first enabled type
-    let selectedType = relationTypes.find((t) => t.code === relationType && t.enabled)
-    if (!selectedType) {
-      selectedType = relationTypes.find((t) => t.enabled)
+    // Find ID for the selected code
+    let selectedTypeObj = relationTypes.find((t) => t.code === selectedTypeCode && t.enabled)
+
+    // Fallback if specific code not found or not selected (shouldn't happen with default)
+    if (!selectedTypeObj) {
+      // Try to find by code even if disabled, or just pick first enabled
+      selectedTypeObj = relationTypes.find((t) => t.enabled)
     }
-    if (!selectedType) {
+
+    if (!selectedTypeObj) {
       toast.error(t('messages.error'), {
         description: 'No relation types available. Please configure relation types first.',
       })
@@ -61,7 +74,7 @@ export function SuggestedRelationItem({
       {
         sourceEntryId: sourceId,
         targetEntryId: targetId,
-        relationTypeId: selectedType.id,
+        relationTypeId: selectedTypeObj.id,
       },
       {
         onSuccess: () => {
@@ -86,9 +99,9 @@ export function SuggestedRelationItem({
     return null
   }
 
-  // Find relation type info for display
-  const relationTypeInfo = relationType
-    ? relationTypes.find((t) => t.code === relationType)
+  // Find info for currently selected type
+  const currentTypeInfo = selectedTypeCode
+    ? relationTypes.find((t) => t.code === selectedTypeCode)
     : null
 
   const matchLevel = getMatchLevel(score, t)
@@ -124,20 +137,40 @@ export function SuggestedRelationItem({
 
       {/* Middle: Relation type + Score */}
       <div className="flex items-center gap-2">
-        {relationTypeInfo && (
-          <span
-            className="text-xs px-2 py-0.5 rounded-full flex-shrink-0"
-            style={{
-              backgroundColor: relationTypeInfo.color ? `${relationTypeInfo.color}20` : '#8B5CF620',
-              color: relationTypeInfo.color || '#8B5CF6',
-            }}
+        <div className="relative">
+          <select
+            value={selectedTypeCode}
+            onChange={(e) => setSelectedTypeCode(e.target.value)}
+            className={cn(
+              "text-xs px-2 py-0.5 rounded-md appearance-none pr-6 cursor-pointer border transition-colors",
+              "focus:outline-none focus:ring-1 focus:ring-purple-500",
+              currentTypeInfo
+                ? "bg-purple-50 text-purple-700 border-purple-100 hover:bg-purple-100 hover:border-purple-200"
+                : "bg-gray-100 text-gray-700 border-gray-200 hover:bg-gray-200"
+            )}
+            style={currentTypeInfo?.color ? {
+              backgroundColor: `${currentTypeInfo.color}15`, // More subtle bg
+              color: currentTypeInfo.color,
+              borderColor: `${currentTypeInfo.color}30`
+            } : undefined}
           >
-            {relationTypeInfo.name}
-          </span>
-        )}
+            {relationTypes.map(type => (
+              <option key={type.code} value={type.code}>
+                {type.name}
+              </option>
+            ))}
+          </select>
+          {/* Custom arrow for better look */}
+          <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-1.5">
+            <svg className="h-3 w-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </div>
+        </div>
+
         <span
           className={cn(
-            "text-xs font-medium px-2 py-0.5 rounded-full",
+            "text-xs font-medium px-2 py-0.5 rounded-full cursor-help",
             matchLevel.color
           )}
           title={`Score: ${Math.round(score * 100)}%`}

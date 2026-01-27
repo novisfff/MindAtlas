@@ -1,4 +1,5 @@
 import { Link2, Trash2, ArrowRight } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import type { Relation } from '@/types'
 import { cn } from '@/lib/utils'
 
@@ -10,10 +11,12 @@ interface RelationListProps {
 }
 
 export function RelationList({ relations, currentEntryId, onDelete, isDeleting }: RelationListProps) {
+  const { t } = useTranslation()
+
   if (relations.length === 0) {
     return (
       <div className="text-sm text-muted-foreground py-4 text-center">
-        No relations yet
+        {t('entry.noRelations')}
       </div>
     )
   }

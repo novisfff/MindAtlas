@@ -1,4 +1,5 @@
 import { Sparkles, Loader2 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 
 interface AiAssistButtonProps {
@@ -8,12 +9,15 @@ interface AiAssistButtonProps {
 }
 
 export function AiAssistButton({ onClick, isLoading, disabled }: AiAssistButtonProps) {
+  const { t } = useTranslation()
+  const aiAssistLabel = t('entry.form.aiAssist')
+
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled || isLoading}
-      aria-label="Generate with AI"
+      aria-label={aiAssistLabel}
       className={cn(
         'inline-flex items-center gap-1.5 px-3 py-1.5 text-sm',
         'rounded-lg border border-purple-300 bg-purple-50',
@@ -27,7 +31,7 @@ export function AiAssistButton({ onClick, isLoading, disabled }: AiAssistButtonP
       ) : (
         <Sparkles className="w-4 h-4" />
       )}
-      {isLoading ? 'Generating...' : 'AI Assist'}
+      {isLoading ? t('entry.form.generating') : aiAssistLabel}
     </button>
   )
 }

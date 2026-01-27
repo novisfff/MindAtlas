@@ -94,20 +94,20 @@ export function ProviderRow({
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">
-              Name
+              {t('settings.ai.providers.form.name')}
             </label>
             <input
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="Provider Name (e.g. OpenAI)"
+              placeholder={t('settings.ai.providers.form.namePlaceholder')}
               className="w-full px-2 py-1.5 rounded border bg-background text-sm"
               autoFocus
             />
           </div>
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">
-              Model
+              {t('settings.ai.providers.form.model')}
             </label>
             <div className="relative">
               <div className="flex gap-2">
@@ -116,7 +116,7 @@ export function ProviderRow({
                     type="text"
                     value={model}
                     onChange={(e) => setModel(e.target.value)}
-                    placeholder="gpt-4o"
+                    placeholder={t('settings.ai.providers.form.modelPlaceholder')}
                     className="w-full px-2 py-1.5 rounded border bg-background text-sm pr-8"
                   />
                   {availableModels.length > 0 && (
@@ -166,27 +166,27 @@ export function ProviderRow({
 
         <div className="space-y-1">
           <label className="text-xs font-medium text-muted-foreground">
-            API Base URL
+            {t('settings.ai.providers.form.baseUrl')}
           </label>
           <input
             type="text"
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder="https://api.openai.com"
+            placeholder={t('settings.ai.providers.form.baseUrlPlaceholder')}
             className="w-full px-2 py-1.5 rounded border bg-background text-sm"
           />
         </div>
 
         <div className="space-y-1">
           <label className="text-xs font-medium text-muted-foreground">
-            API Key {isEditing && '(leave empty to keep unchanged)'}
+            {t('settings.ai.providers.form.apiKey')} {isEditing && t('settings.ai.providers.form.apiKeyHint')}
           </label>
           <div className="relative">
             <input
               type={showApiKey ? 'text' : 'password'}
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              placeholder={isEditing ? '••••••••' : 'sk-...'}
+              placeholder={isEditing ? '••••••••' : t('settings.ai.providers.form.apiKeyPlaceholder')}
               className="w-full px-2 py-1.5 rounded border bg-background text-sm pr-8"
             />
             <button

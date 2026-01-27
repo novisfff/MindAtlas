@@ -779,7 +779,7 @@ _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", flags=re.IGNORECASE |
 
 # Role definition for Entry relation recommendation prompts
 _ENTRY_RELATION_RECOMMENDATION_ROLE = (
-    "你是一个高精度（宁缺毋滥）的知识图谱关系推荐助手。\n\n"
+    "你是一个高精度的知识图谱关系推荐助手。\n\n"
     "你的任务是：\n"
     "1) 阅读用户提供的「当前记录内容」\n"
     "2) 分析系统检索到的三类数据：chunks（文档片段）、entities（实体）、relationships（关系）\n"

@@ -14,7 +14,8 @@
     "delete": "Delete",
     "edit": "Edit",
     "confirm": "Confirm",
-    "add": "Add"
+    "add": "Add",
+    "pageOf": "Page {{current}} of {{total}}"
   },
   "actions": {
     "save": "Save",
@@ -23,6 +24,7 @@
     "create": "Create",
     "search": "Search",
     "edit": "Edit",
+    "update": "Update",
     "back": "Back",
     "backToEntries": "Back to entries",
     "confirm": "Confirm",
@@ -40,7 +42,9 @@
     "expand": "Expand",
     "openFullPage": "Open full page",
     "closeChat": "Close chat",
-    "openChat": "Open chat"
+    "openChat": "Open chat",
+    "previousPage": "Previous page",
+    "nextPage": "Next page"
   },
   "greetings": {
     "morning": "Good morning",
@@ -50,6 +54,7 @@
   },
   "messages": {
     "loading": "Loading...",
+    "saving": "Saving...",
     "noData": "No data",
     "error": "An error occurred",
     "success": "Success",
@@ -59,7 +64,8 @@
     "deleted": "Deleted successfully",
     "failedToLoad": "Failed to load",
     "failedToLoadEntry": "Failed to load entry",
-    "noContent": "No content"
+    "noContent": "No content",
+    "noTags": "No tags available"
   },
   "labels": {
     "title": "Title",
@@ -105,10 +111,14 @@
       "subtitle": "Manage and view your knowledge entries.",
       "searchPlaceholder": "Search entries...",
       "noEntries": "No entries found",
-      "createFirst": "Create your first entry"
+      "createFirst": "Create your first entry",
+      "emptyStateDesc": "Try adjusting your search or filter, or create a new entry to get started."
     },
     "entryNew": {
       "title": "New Entry"
+    },
+    "entryEdit": {
+      "title": "Edit Entry"
     },
     "settings": {
       "title": "Settings",
@@ -211,6 +221,23 @@
       "hints": {
         "assignSystem": "Model for general chat assistance",
         "assignLightrag": "Models for RAG indexing and retrieval"
+      },
+      "providers": {
+        "title": "AI Providers",
+        "add": "Add Provider",
+        "deleteTitle": "Delete Provider",
+        "deleteConfirm": "Are you sure you want to delete this provider? This action cannot be undone.",
+        "form": {
+          "name": "Name",
+          "namePlaceholder": "Provider Name (e.g. OpenAI)",
+          "baseUrl": "API Base URL",
+          "baseUrlPlaceholder": "https://api.openai.com",
+          "apiKey": "API Key",
+          "apiKeyPlaceholder": "sk-...",
+          "apiKeyHint": "(leave empty to keep unchanged)",
+          "model": "Model",
+          "modelPlaceholder": "gpt-4o"
+        }
       }
     },
     "entryTypes": {
@@ -441,6 +468,13 @@
         "weak": "Possible",
         "low": "Low"
       }
+    },
+    "selector": {
+      "targetEntry": "Target Entry",
+      "removeSelectedEntry": "Remove selected entry",
+      "relationType": "Relation Type",
+      "selectType": "Select type...",
+      "adding": "Adding..."
     }
   },
   "indexStatus": {
@@ -459,5 +493,26 @@
     "keywords": "Keywords",
     "references": "References",
     "knowledgeGraph": "Knowledge Graph References"
+  },
+  "entry": {
+    "form": {
+      "timeMode": "Time Mode",
+      "pointInTime": "Point in time",
+      "write": "Write",
+      "preview": "Preview",
+      "contentPlaceholder": "Write your content here... (Markdown supported)",
+      "aiAssist": "AI Assist",
+      "generating": "Generating...",
+      "aiSuggestions": "AI Suggestions",
+      "undoChange": "Undo Change",
+      "nothingToPreview": "Nothing to preview"
+    },
+    "card": {
+      "viewEntryAria": "View entry: {{title}}"
+    },
+    "noRelations": "No relations yet",
+    "addRelation": "Add Relation",
+    "noAttachments": "No attachments yet",
+    "dropFile": "Drop file here or click to upload"
   }
 }
