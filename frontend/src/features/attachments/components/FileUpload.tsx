@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import { Upload, Loader2, X } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 
 interface FileUploadProps {
@@ -11,6 +12,7 @@ interface FileUploadProps {
 export function FileUpload({ onUpload, isUploading, accept }: FileUploadProps) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
+  const { t } = useTranslation()
 
   const handleFile = (file: File) => {
     onUpload(file)
@@ -54,7 +56,7 @@ export function FileUpload({ onUpload, isUploading, accept }: FileUploadProps) {
           <Upload className="w-8 h-8 text-muted-foreground" />
         )}
         <span className="text-sm text-muted-foreground">
-          {isUploading ? 'Uploading...' : 'Drop file here or click to upload'}
+          {isUploading ? t('messages.loading') : t('entry.dropFile')}
         </span>
       </label>
     </div>

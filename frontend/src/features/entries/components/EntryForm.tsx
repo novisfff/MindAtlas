@@ -1,6 +1,7 @@
 import { FormEvent, useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowLeft, Save, Loader2, Undo, Plus } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import type { Entry, EntryType } from '@/types'
 import type { EntryUpsertRequest, EntryTimeMode } from '../api/entries'
 import { useEntryTypesQuery } from '@/features/entry-types/queries'
@@ -18,6 +19,7 @@ interface EntryFormProps {
 
 export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
   const navigate = useNavigate()
+  const { t } = useTranslation()
   const { data: entryTypes = [], isLoading: typesLoading } = useEntryTypesQuery()
   const { data: allTags = [] } = useTagsQuery()
   const createTagMutation = useCreateTagMutation()
@@ -139,7 +141,7 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
           className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors"
         >
           <ArrowLeft className="w-4 h-4 mr-1" />
-          Back
+          {t('actions.back')}
         </button>
 
         <button
@@ -154,12 +156,12 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
           {isSubmitting ? (
             <>
               <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-              Saving...
+              {t('messages.saving')}
             </>
           ) : (
             <>
               <Save className="w-4 h-4 mr-2" />
-              {entry ? 'Update' : 'Create'}
+              {entry ? t('actions.update') : t('actions.create')}
             </>
           )}
         </button>
@@ -168,14 +170,14 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
       <div className="space-y-4">
         <div>
           <label htmlFor="entry-title" className="block text-sm font-medium mb-1.5">
-            Title <span className="text-destructive">*</span>
+            {t('labels.title')} <span className="text-destructive">*</span>
           </label>
           <input
             id="entry-title"
             type="text"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            placeholder="Enter a title..."
+            placeholder={t('form.placeholder.title')}
             className={cn(
               'w-full px-3 py-2 rounded-lg border bg-background',
               'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
@@ -187,13 +189,13 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
 
         <div>
           <label htmlFor="entry-summary" className="block text-sm font-medium mb-1.5">
-            Summary
+            {t('labels.summary')}
           </label>
           <textarea
             id="entry-summary"
             value={summary}
             onChange={(e) => setSummary(e.target.value)}
-            placeholder="Enter a brief summary..."
+            placeholder={t('labels.summary')}
             className={cn(
               'w-full px-3 py-2 rounded-lg border bg-background min-h-[80px]',
               'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
@@ -205,7 +207,7 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <label htmlFor="entry-type" className="block text-sm font-medium mb-1.5">
-              Type <span className="text-destructive">*</span>
+              {t('labels.type')} <span className="text-destructive">*</span>
             </label>
             <select
               id="entry-type"
@@ -218,7 +220,7 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
               )}
             >
               {typesLoading ? (
-                <option>Loading...</option>
+                <option>{t('messages.loading')}</option>
               ) : (
                 entryTypes.map((type) => (
                   <option key={type.id} value={type.id}>
@@ -237,7 +239,7 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
 
           <div>
             <label htmlFor="entry-time-mode" className="block text-sm font-medium mb-1.5">
-              Time Mode
+              {t('entry.form.timeMode')}
             </label>
             <select
               id="entry-time-mode"
@@ -248,8 +250,8 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
                 'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2'
               )}
             >
-              <option value="POINT">Point in time</option>
-              <option value="RANGE">Time range</option>
+              <option value="POINT">{t('time.mode.point')}</option>
+              <option value="RANGE">{t('time.mode.range')}</option>
             </select>
           </div>
         </div>
@@ -257,7 +259,7 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
         {timeMode === 'POINT' && (
           <div>
             <label htmlFor="entry-time-at" className="block text-sm font-medium mb-1.5">
-              Date
+              {t('labels.date')}
             </label>
             <input
               id="entry-time-at"
@@ -277,7 +279,7 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label htmlFor="entry-time-from" className="block text-sm font-medium mb-1.5">
-                From
+                {t('labels.from')}
               </label>
               <input
                 id="entry-time-from"
@@ -293,7 +295,7 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
             </div>
             <div>
               <label htmlFor="entry-time-to" className="block text-sm font-medium mb-1.5">
-                To
+                {t('labels.to')}
               </label>
               <input
                 id="entry-time-to"
@@ -311,11 +313,11 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
         )}
 
         <div>
-          <label className="block text-sm font-medium mb-1.5">Tags</label>
+          <label className="block text-sm font-medium mb-1.5">{t('labels.tags')}</label>
           <TagSelector value={tagIds} onChange={setTagIds} disabled={isSubmitting} />
           {suggestedTags.length > 0 && (
             <div className="mt-2 text-sm animate-in fade-in slide-in-from-top-1">
-              <span className="text-muted-foreground mr-2">AI Suggestions:</span>
+              <span className="text-muted-foreground mr-2">{t('entry.form.aiSuggestions')}:</span>
               <div className="inline-flex flex-wrap gap-1.5">
                 {suggestedTags.map((tagName) => (
                   <button
@@ -339,7 +341,7 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
 
         <div>
           <div className="flex items-center justify-between mb-1.5">
-            <label className="block text-sm font-medium">Content</label>
+            <label className="block text-sm font-medium">{t('labels.content')}</label>
             <div className="flex items-center gap-3">
               {prevContent !== null && (
                 <button
@@ -348,7 +350,7 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
                   className="text-xs flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors"
                 >
                   <Undo className="w-3 h-3" />
-                  Undo Change
+                  {t('entry.form.undoChange')}
                 </button>
               )}
               <AiAssistButton

@@ -1,5 +1,6 @@
 import { Calendar, Clock } from 'lucide-react'
 import { KeyboardEvent } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Entry } from '@/types'
 import { cn } from '@/lib/utils'
 
@@ -9,6 +10,9 @@ interface EntryCardProps {
 }
 
 export function EntryCard({ entry, onClick }: EntryCardProps) {
+  const { t } = useTranslation()
+  const ariaTitle = entry.title || t('labels.unknown')
+
   const formatDate = (dateString?: string) => {
     if (!dateString) return ''
     const date = new Date(dateString)
@@ -23,19 +27,20 @@ export function EntryCard({ entry, onClick }: EntryCardProps) {
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
-      onClick?.(entry)
     }
   }
 
   const renderTimeInfo = () => {
     if (entry.timeMode === 'NONE') return null
 
+    // ... (renderTimeInfo body unchanged until we get to return) ...
+
     let timeText = ''
     if (entry.timeMode === 'POINT' && entry.timeAt) {
       timeText = formatDate(entry.timeAt)
     } else if (entry.timeMode === 'RANGE') {
-      const from = entry.timeFrom ? formatDate(entry.timeFrom) : '?'
-      const to = entry.timeTo ? formatDate(entry.timeTo) : '?'
+      const from = entry.timeFrom ? formatDate(entry.timeFrom) : t('labels.unknown')
+      const to = entry.timeTo ? formatDate(entry.timeTo) : t('time.present')
       timeText = `${from} - ${to}`
     }
 
@@ -53,7 +58,7 @@ export function EntryCard({ entry, onClick }: EntryCardProps) {
     <div
       role="button"
       tabIndex={0}
-      aria-label={`View entry: ${entry.title}`}
+      aria-label={t('entry.card.viewEntryAria', { title: ariaTitle })}
       className={cn(
         'group relative flex flex-col justify-between rounded-lg border bg-card text-card-foreground shadow-sm hover:shadow-md transition-shadow cursor-pointer overflow-hidden h-[200px] focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2'
       )}
@@ -78,12 +83,12 @@ export function EntryCard({ entry, onClick }: EntryCardProps) {
               color: entry.type?.color || undefined,
             }}
           >
-            {entry.type?.name || 'Unknown'}
+            {entry.type?.name || t('labels.unknown')}
           </span>
         </div>
 
         <p className="text-sm text-muted-foreground line-clamp-3 mb-auto">
-          {entry.summary || entry.content || 'No content available.'}
+          {entry.summary || entry.content || t('messages.noContent')}
         </p>
 
         <div className="mt-4 pt-2 border-t flex items-center justify-between text-xs text-muted-foreground">

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Plus, Search, X, Loader2 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import type { Entry, RelationType } from '@/types'
 import { useRelationTypesQuery } from '../queries'
 import { useEntriesQuery } from '@/features/entries/queries'
@@ -13,6 +14,7 @@ interface RelationSelectorProps {
 }
 
 export function RelationSelector({ currentEntryId, onAdd, isAdding }: RelationSelectorProps) {
+  const { t } = useTranslation()
   const [isOpen, setIsOpen] = useState(false)
   const [search, setSearch] = useState('')
   const [selectedEntry, setSelectedEntry] = useState<Entry | null>(null)
@@ -46,7 +48,7 @@ export function RelationSelector({ currentEntryId, onAdd, isAdding }: RelationSe
         )}
       >
         <Plus className="w-4 h-4" />
-        Add Relation
+        {t('entry.addRelation')}
       </button>
     )
   }
@@ -54,11 +56,11 @@ export function RelationSelector({ currentEntryId, onAdd, isAdding }: RelationSe
   return (
     <div className="border rounded-lg p-4 space-y-4 bg-card">
       <div className="flex items-center justify-between">
-        <h4 className="text-sm font-medium">Add Relation</h4>
+        <h4 className="text-sm font-medium">{t('entry.addRelation')}</h4>
         <button
           type="button"
           onClick={() => setIsOpen(false)}
-          aria-label="Close"
+          aria-label={t('actions.close')}
           className="p-1 hover:bg-accent rounded"
         >
           <X className="w-4 h-4" />
@@ -67,14 +69,14 @@ export function RelationSelector({ currentEntryId, onAdd, isAdding }: RelationSe
 
       {/* Entry Search */}
       <div className="space-y-2">
-        <label className="text-sm text-muted-foreground">Target Entry</label>
+        <label className="text-sm text-muted-foreground">{t('relations.selector.targetEntry')}</label>
         {selectedEntry ? (
           <div className="flex items-center justify-between p-2 border rounded-lg bg-accent/50">
             <span className="text-sm">{selectedEntry.title}</span>
             <button
               type="button"
               onClick={() => setSelectedEntry(null)}
-              aria-label="Remove selected entry"
+              aria-label={t('relations.selector.removeSelectedEntry')}
               className="p-1 hover:bg-accent rounded"
             >
               <X className="w-3 h-3" />
@@ -87,7 +89,7 @@ export function RelationSelector({ currentEntryId, onAdd, isAdding }: RelationSe
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search entries..."
+              placeholder={t('pages.entries.searchPlaceholder')}
               className={cn(
                 'w-full pl-9 pr-3 py-2 text-sm border rounded-lg bg-background',
                 'focus:outline-none focus:ring-2 focus:ring-ring'
@@ -116,7 +118,7 @@ export function RelationSelector({ currentEntryId, onAdd, isAdding }: RelationSe
 
       {/* Relation Type Select */}
       <div className="space-y-2">
-        <label className="text-sm text-muted-foreground">Relation Type</label>
+        <label className="text-sm text-muted-foreground">{t('relations.selector.relationType')}</label>
         <select
           value={selectedTypeId}
           onChange={(e) => setSelectedTypeId(e.target.value)}
@@ -125,7 +127,7 @@ export function RelationSelector({ currentEntryId, onAdd, isAdding }: RelationSe
             'focus:outline-none focus:ring-2 focus:ring-ring'
           )}
         >
-          <option value="">Select type...</option>
+          <option value="">{t('relations.selector.selectType')}</option>
           {relationTypes.map((type) => (
             <option key={type.id} value={type.id}>
               {type.name}
@@ -149,10 +151,10 @@ export function RelationSelector({ currentEntryId, onAdd, isAdding }: RelationSe
         {isAdding ? (
           <span className="inline-flex items-center gap-2">
             <Loader2 className="w-4 h-4 animate-spin" />
-            Adding...
+            {t('relations.selector.adding')}
           </span>
         ) : (
-          'Add Relation'
+          t('entry.addRelation')
         )}
       </button>
     </div>

@@ -1,4 +1,5 @@
 import { Check } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { useTagsQuery } from '../queries'
 import { cn } from '@/lib/utils'
 
@@ -9,6 +10,7 @@ interface TagSelectorProps {
 }
 
 export function TagSelector({ value, onChange, disabled }: TagSelectorProps) {
+  const { t } = useTranslation()
   const { data: tags = [], isLoading } = useTagsQuery()
 
   const toggleTag = (tagId: string) => {
@@ -20,7 +22,7 @@ export function TagSelector({ value, onChange, disabled }: TagSelectorProps) {
   }
 
   if (isLoading) {
-    return <div className="text-sm text-muted-foreground">Loading tags...</div>
+    return <div className="text-sm text-muted-foreground">{t('messages.loading')}</div>
   }
 
   return (
@@ -53,7 +55,7 @@ export function TagSelector({ value, onChange, disabled }: TagSelectorProps) {
         )
       })}
       {tags.length === 0 && (
-        <span className="text-sm text-muted-foreground italic">No tags available</span>
+        <span className="text-sm text-muted-foreground italic">{t('messages.noTags')}</span>
       )}
     </div>
   )

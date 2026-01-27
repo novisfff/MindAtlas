@@ -1,6 +1,7 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { remarkCitation } from '@/features/assistant/components/remark-citation'
 import { CitationMarker } from '@/features/assistant/components/citation'
@@ -16,11 +17,15 @@ interface MarkdownEditorProps {
 export function MarkdownEditor({
   value,
   onChange,
-  placeholder = 'Write your content here... (Markdown supported)',
+  placeholder,
   className,
   disabled,
 }: MarkdownEditorProps) {
   const [tab, setTab] = useState<'write' | 'preview'>('write')
+  const { t } = useTranslation()
+
+  // Use prop placeholder if provided, otherwise default to translated
+  const displayPlaceholder = placeholder || t('entry.form.contentPlaceholder')
 
   return (
     <div className={cn('border rounded-lg overflow-hidden', className)}>
@@ -35,7 +40,7 @@ export function MarkdownEditor({
           )}
           onClick={() => setTab('write')}
         >
-          Write
+          {t('entry.form.write')}
         </button>
         <button
           type="button"
@@ -47,7 +52,7 @@ export function MarkdownEditor({
           )}
           onClick={() => setTab('preview')}
         >
-          Preview
+          {t('entry.form.preview')}
         </button>
       </div>
 
@@ -55,7 +60,7 @@ export function MarkdownEditor({
         <textarea
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          placeholder={placeholder}
+          placeholder={displayPlaceholder}
           disabled={disabled}
           className={cn(
             'w-full min-h-[300px] p-4 resize-y bg-background text-foreground',
@@ -80,7 +85,7 @@ export function MarkdownEditor({
               {value}
             </ReactMarkdown>
           ) : (
-            <p className="text-muted-foreground italic">Nothing to preview</p>
+            <p className="text-muted-foreground italic">{t('entry.form.nothingToPreview')}</p>
           )}
         </div>
       )}

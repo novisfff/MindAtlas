@@ -8,8 +8,10 @@ export function LanguageSwitcher() {
   const locale = useAppStore((s) => s.locale)
   const setLocale = useAppStore((s) => s.setLocale)
 
+  const currentLocale = locale === 'zh' ? 'zh' : 'en'
+
   const toggleLanguage = () => {
-    const newLocale = locale === 'en' ? 'zh' : 'en'
+    const newLocale = currentLocale === 'en' ? 'zh' : 'en'
     setLocale(newLocale)
     i18n.changeLanguage(newLocale)
   }
@@ -26,7 +28,7 @@ export function LanguageSwitcher() {
     >
       <Languages className="h-4 w-4" />
       <span className="text-sm font-medium">
-        {locale === 'en' ? 'EN' : '中文'}
+        {currentLocale === 'en' ? 'EN' : '中文'}
       </span>
     </button>
   )

@@ -14,7 +14,8 @@
     "delete": "删除",
     "edit": "编辑",
     "confirm": "确认",
-    "add": "添加"
+    "add": "添加",
+    "pageOf": "第 {{current}} 页，共 {{total}} 页"
   },
   "actions": {
     "save": "保存",
@@ -23,6 +24,7 @@
     "create": "创建",
     "search": "搜索",
     "edit": "编辑",
+    "update": "更新",
     "back": "返回",
     "backToEntries": "返回列表",
     "confirm": "确认",
@@ -40,7 +42,9 @@
     "expand": "展开",
     "openFullPage": "全屏查看",
     "closeChat": "关闭对话",
-    "openChat": "打开对话"
+    "openChat": "打开对话",
+    "previousPage": "上一页",
+    "nextPage": "下一页"
   },
   "greetings": {
     "morning": "早上好",
@@ -50,6 +54,7 @@
   },
   "messages": {
     "loading": "加载中...",
+    "saving": "保存中...",
     "noData": "暂无数据",
     "error": "发生错误",
     "success": "操作成功",
@@ -59,7 +64,8 @@
     "deleted": "删除成功",
     "failedToLoad": "加载失败",
     "failedToLoadEntry": "加载记录失败",
-    "noContent": "暂无内容"
+    "noContent": "暂无内容",
+    "noTags": "暂无可用标签"
   },
   "labels": {
     "title": "标题",
@@ -104,10 +110,14 @@
       "subtitle": "管理和查看你的知识记录。",
       "searchPlaceholder": "搜索记录...",
       "noEntries": "暂无记录",
-      "createFirst": "创建你的第一条记录"
+      "createFirst": "创建你的第一条记录",
+      "emptyStateDesc": "尝试调整搜索或筛选，或创建新记录。"
     },
     "entryNew": {
       "title": "新建记录"
+    },
+    "entryEdit": {
+      "title": "编辑记录"
     },
     "settings": {
       "title": "设置",
@@ -210,6 +220,23 @@
       "hints": {
         "assignSystem": "用于通用对话助手的模型",
         "assignLightrag": "用于 RAG 索引和检索的模型"
+      },
+      "providers": {
+        "title": "AI 服务商",
+        "add": "添加服务商",
+        "deleteTitle": "删除服务商",
+        "deleteConfirm": "确定要删除此服务商吗？此操作无法撤销。",
+        "form": {
+          "name": "名称",
+          "namePlaceholder": "服务商名称 (如 OpenAI)",
+          "baseUrl": "API Base URL",
+          "baseUrlPlaceholder": "https://api.openai.com",
+          "apiKey": "API Key",
+          "apiKeyPlaceholder": "sk-...",
+          "apiKeyHint": "(留空保持不变)",
+          "model": "模型",
+          "modelPlaceholder": "gpt-4o"
+        }
       }
     },
     "entryTypes": {
@@ -439,6 +466,13 @@
         "weak": "潜在关联",
         "low": "低相关"
       }
+    },
+    "selector": {
+      "targetEntry": "目标记录",
+      "removeSelectedEntry": "移除已选记录",
+      "relationType": "关联类型",
+      "selectType": "选择类型...",
+      "adding": "添加中..."
     }
   },
   "indexStatus": {
@@ -457,5 +491,26 @@
     "keywords": "关键词",
     "references": "参考来源",
     "knowledgeGraph": "知识图谱引用"
+  },
+  "entry": {
+    "form": {
+      "timeMode": "时间模式",
+      "pointInTime": "时间点",
+      "write": "编辑",
+      "preview": "预览",
+      "contentPlaceholder": "在此撰写内容... (支持 Markdown)",
+      "aiAssist": "AI 辅助",
+      "generating": "生成中...",
+      "aiSuggestions": "AI 建议",
+      "undoChange": "撤销修改",
+      "nothingToPreview": "暂无预览内容"
+    },
+    "card": {
+      "viewEntryAria": "查看记录：{{title}}"
+    },
+    "noRelations": "暂无关联",
+    "addRelation": "添加关联",
+    "noAttachments": "暂无附件",
+    "dropFile": "拖拽文件到此处或点击上传"
   }
 }

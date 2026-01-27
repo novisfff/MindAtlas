@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Loader2, Plus, Power, Plug, CheckCircle, XCircle } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import {
   useAiProvidersQuery,
   useCreateAiProviderMutation,
@@ -51,11 +52,10 @@ function ProviderItem({
       <div className="flex items-center gap-1">
         {testResult && (
           <span
-            className={`flex items-center gap-1 text-xs px-2 py-1 rounded ${
-              testResult.ok
+            className={`flex items-center gap-1 text-xs px-2 py-1 rounded ${testResult.ok
                 ? 'bg-green-100 text-green-700'
                 : 'bg-red-100 text-red-700'
-            }`}
+              }`}
           >
             {testResult.ok ? (
               <CheckCircle className="w-3 h-3" />
@@ -93,6 +93,7 @@ function ProviderItem({
 }
 
 export function ProviderManager() {
+  const { t } = useTranslation()
   const { data: providers = [], isLoading } = useAiProvidersQuery()
   const createMutation = useCreateAiProviderMutation()
   const updateMutation = useUpdateAiProviderMutation()
@@ -126,13 +127,13 @@ export function ProviderManager() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h3 className="font-semibold">AI Providers</h3>
+        <h3 className="font-semibold">{t('settings.ai.providers.title')}</h3>
         <button
           onClick={() => setIsAdding(true)}
           disabled={isAdding}
           className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
         >
-          <Plus className="w-4 h-4" /> Add Provider
+          <Plus className="w-4 h-4" /> {t('settings.ai.providers.add')}
         </button>
       </div>
 
@@ -174,7 +175,7 @@ export function ProviderManager() {
                 provider={provider}
                 onEdit={() => setEditingId(provider.id)}
                 onDelete={() => setDeleteId(provider.id)}
-                onActivate={() => {}}
+                onActivate={() => { }}
                 onTest={() => handleTest(provider)}
                 isActivating={false}
                 isTesting={testMutation.isPending && testMutation.variables === provider.id}
@@ -187,9 +188,9 @@ export function ProviderManager() {
 
       <ConfirmDialog
         isOpen={!!deleteId}
-        title="Delete Provider"
-        description="Are you sure you want to delete this provider? This action cannot be undone."
-        confirmText="Delete"
+        title={t('settings.ai.providers.deleteTitle')}
+        description={t('settings.ai.providers.deleteConfirm')}
+        confirmText={t('actions.delete')}
         variant="destructive"
         onConfirm={() =>
           deleteId && deleteMutation.mutate(deleteId, { onSuccess: () => setDeleteId(null) })

@@ -1,4 +1,5 @@
 import { File, Download, Trash2, Image, FileText } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import type { Attachment } from '@/types'
 import { getDownloadUrl } from '../api/attachments'
 import { cn } from '@/lib/utils'
@@ -22,10 +23,12 @@ function getFileIcon(contentType: string) {
 }
 
 export function AttachmentList({ attachments, onDelete, isDeleting }: AttachmentListProps) {
+  const { t } = useTranslation()
+
   if (attachments.length === 0) {
     return (
       <div className="text-sm text-muted-foreground py-4 text-center">
-        No attachments yet
+        {t('entry.noAttachments')}
       </div>
     )
   }
