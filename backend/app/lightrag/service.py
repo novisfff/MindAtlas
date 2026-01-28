@@ -545,6 +545,358 @@ def _extract_candidate_entry_ids(graph_context: dict[str, Any]) -> set[UUID]:
     return entry_ids
 
 
+def _call_rag_get_knowledge_graph_sync(
+    *,
+    node_label: str = "*",
+    max_depth: int = 3,
+    max_nodes: int = 1000,
+    timeout_sec: float = 30.0,
+) -> Any:
+    """Get full knowledge graph from LightRAG.
+
+    Returns:
+        KnowledgeGraph object with nodes and edges
+    """
+    import inspect
+    from app.lightrag.runtime import get_lightrag_runtime
+
+    runtime = get_lightrag_runtime()
+
+    def _do() -> Any:
+        rag = get_rag()
+        # Try async get_knowledge_graph method
+        try:
+            coro = rag.get_knowledge_graph(
+                node_label=node_label,
+                max_depth=max_depth,
+                max_nodes=max_nodes,
+            )
+            # If it returns a coroutine, run it in the runtime loop
+            if inspect.isawaitable(coro):
+                return runtime.loop.run_until_complete(coro)
+            return coro
+        except TypeError:
+            # Fallback: try without max_nodes
+            try:
+                coro = rag.get_knowledge_graph(
+                    node_label=node_label,
+                    max_depth=max_depth,
+                )
+                if inspect.isawaitable(coro):
+                    return runtime.loop.run_until_complete(coro)
+                return coro
+            except Exception as e:
+                logger.warning("lightrag get_knowledge_graph fallback failed", extra={"error": str(e)})
+        except AttributeError:
+            logger.debug("lightrag get_knowledge_graph method not available")
+        # Return empty graph if method not available
+        return {"nodes": [], "edges": []}
+
+    return runtime.call(_do, timeout_sec=float(timeout_sec or 0.0) + 5.0)
+
+
+def _knowledge_graph_to_graph_data(raw_kg: Any, *, db: "Session | None" = None):
+    """Convert LightRAG KnowledgeGraph to GraphData format.
+
+    Args:
+        raw_kg: KnowledgeGraph object or dict with nodes/edges
+        db: Optional SQLAlchemy Session for resolving entry_id -> entry_title
+
+    Returns:
+        GraphData compatible with frontend
+    """
+    from app.graph.schemas import GraphData, GraphNode, GraphLink
+
+    if raw_kg is None:
+        return GraphData(nodes=[], links=[])
+
+    # Handle both object and dict formats
+    if hasattr(raw_kg, "nodes"):
+        raw_nodes = raw_kg.nodes or []
+        raw_edges = raw_kg.edges or []
+    elif isinstance(raw_kg, dict):
+        raw_nodes = raw_kg.get("nodes") or []
+        raw_edges = raw_kg.get("edges") or []
+    else:
+        return GraphData(nodes=[], links=[])
+
+    # Collect all entry_ids for batch title lookup
+    node_items: list[dict[str, Any]] = []
+    link_items: list[dict[str, Any]] = []
+    entry_uuids: set[UUID] = set()
+
+    for n in raw_nodes:
+        node_id = _get_node_attr(n, "id", "")
+        if not node_id:
+            continue
+
+        # Extract properties
+        props = _get_node_attr(n, "properties", {}) or {}
+        if not isinstance(props, dict):
+            props = {}
+
+        # Extract LightRAG-specific fields
+        entity_id = _normalize_text(props.get("entity_id") or props.get("entityId"))
+        entity_type = _normalize_text(props.get("entity_type") or props.get("entityType"))
+        description = _normalize_text(props.get("description") or props.get("summary"))
+        entry_id = _normalize_text(
+            props.get("file_path")
+            or props.get("filePath")
+            or props.get("entry_id")
+            or props.get("entryId")
+        )
+        # Handle multiple entry IDs separated by <SEP>
+        if entry_id and "<SEP>" in entry_id:
+            entry_id = entry_id.split("<SEP>")[0].strip()
+        # Normalize entry_id and collect for batch lookup
+        if entry_id:
+            try:
+                u = UUID(entry_id)
+                entry_uuids.add(u)
+                entry_id = str(u)
+            except (ValueError, TypeError):
+                pass
+        created_at = _normalize_datetime(props.get("created_at") or props.get("createdAt"))
+
+        # Extract label: prefer entity_id for display
+        label = (
+            entity_id
+            or _normalize_text(props.get("name"))
+            or _normalize_text(props.get("title"))
+            or _normalize_text(props.get("entity"))
+            or str(node_id)
+        )
+
+        # Extract type from labels array, prefer entity_type
+        labels = _get_node_attr(n, "labels", []) or []
+        if not isinstance(labels, list):
+            labels = [str(labels)] if labels else []
+        type_name = entity_type or (labels[0] if labels else "LightRAG")
+        type_id = f"lightrag:{type_name}"
+
+        # Generate stable color from type_name
+        color = _hash_to_color(type_name)
+
+        node_items.append({
+            "id": str(node_id),
+            "label": str(label),
+            "type_id": type_id,
+            "type_name": type_name,
+            "color": color,
+            "created_at": created_at,
+            "summary": description,
+            "entity_id": entity_id,
+            "entity_type": entity_type,
+            "description": description,
+            "entry_id": entry_id,
+        })
+
+    links = []
+    for e in raw_edges:
+        source = _get_node_attr(e, "source", "")
+        target = _get_node_attr(e, "target", "")
+        if not source or not target:
+            continue
+
+        # Extract edge properties
+        edge_props = _get_node_attr(e, "properties", {}) or {}
+        if not isinstance(edge_props, dict):
+            edge_props = {}
+
+        edge_description = _normalize_text(edge_props.get("description"))
+        edge_keywords = _normalize_keywords(edge_props.get("keywords"))
+        edge_entry_id = _normalize_text(
+            edge_props.get("file_path")
+            or edge_props.get("filePath")
+            or edge_props.get("entry_id")
+            or edge_props.get("entryId")
+        )
+        # Handle multiple entry IDs separated by <SEP>
+        if edge_entry_id and "<SEP>" in edge_entry_id:
+            edge_entry_id = edge_entry_id.split("<SEP>")[0].strip()
+        # Normalize entry_id and collect for batch lookup
+        if edge_entry_id:
+            try:
+                u = UUID(edge_entry_id)
+                entry_uuids.add(u)
+                edge_entry_id = str(u)
+            except (ValueError, TypeError):
+                pass
+        edge_created_at = _normalize_datetime(edge_props.get("created_at") or edge_props.get("createdAt"))
+
+        edge_id = _get_node_attr(e, "id", "")
+        edge_type = _normalize_text(_get_node_attr(e, "type", None)) or "RELATED"
+        if not edge_id:
+            edge_id = f"{source}|{edge_type}|{target}"
+
+        link_items.append({
+            "id": str(edge_id),
+            "source": str(source),
+            "target": str(target),
+            "label": str(edge_type),
+            "description": edge_description,
+            "keywords": edge_keywords,
+            "entry_id": edge_entry_id,
+            "created_at": edge_created_at,
+        })
+
+    # Batch lookup entry titles
+    entry_title_by_id: dict[str, str] = {}
+    if db is not None and entry_uuids:
+        try:
+            from app.entry.models import Entry
+            rows = db.query(Entry.id, Entry.title).filter(Entry.id.in_(list(entry_uuids))).all()
+            entry_title_by_id = {str(eid): title for eid, title in rows if title}
+        except Exception as e:
+            logger.warning("lightrag graph entry title resolve failed", extra={"error": str(e)})
+
+    # Build final nodes with entry_title
+    nodes: list[GraphNode] = []
+    for item in node_items:
+        eid = item.get("entry_id")
+        nodes.append(GraphNode(
+            id=item["id"],
+            label=item["label"],
+            type_id=item["type_id"],
+            type_name=item["type_name"],
+            color=item.get("color"),
+            created_at=item.get("created_at"),
+            summary=item.get("summary"),
+            entity_id=item.get("entity_id"),
+            entity_type=item.get("entity_type"),
+            description=item.get("description"),
+            entry_id=eid,
+            entry_title=entry_title_by_id.get(eid) if eid else None,
+        ))
+
+    # Build final links with entry_title
+    links: list[GraphLink] = []
+    for item in link_items:
+        eid = item.get("entry_id")
+        links.append(GraphLink(
+            id=item["id"],
+            source=item["source"],
+            target=item["target"],
+            label=item["label"],
+            description=item.get("description"),
+            keywords=item.get("keywords"),
+            entry_id=eid,
+            entry_title=entry_title_by_id.get(eid) if eid else None,
+            created_at=item.get("created_at"),
+        ))
+
+    return GraphData(nodes=nodes, links=links)
+
+
+def _get_node_attr(obj: Any, attr: str, default: Any) -> Any:
+    """Get attribute from object or dict."""
+    if hasattr(obj, attr):
+        return getattr(obj, attr, default)
+    if isinstance(obj, dict):
+        return obj.get(attr, default)
+    return default
+
+
+def _normalize_text(value: Any) -> str | None:
+    """Normalize a value to a trimmed string or None."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        s = value.strip()
+        return s or None
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            s = value.decode("utf-8", errors="ignore").strip()
+            return s or None
+        except Exception:
+            return None
+    return str(value).strip() or None
+
+
+def _normalize_keywords(value: Any) -> str | None:
+    """Normalize keywords to a comma-separated string."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        s = value.strip()
+        return s or None
+    if isinstance(value, (list, tuple, set)):
+        parts = []
+        for item in value:
+            s = _normalize_text(item)
+            if s:
+                parts.append(s)
+        return ", ".join(parts) or None
+    return _normalize_text(value)
+
+
+def _normalize_datetime(value: Any):
+    """Normalize a value to a datetime object or None."""
+    from datetime import datetime, timezone
+
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        return value
+
+    # Unix timestamps (seconds or milliseconds)
+    if isinstance(value, (int, float)):
+        try:
+            ts = float(value)
+            # Heuristic: treat large values as milliseconds
+            if ts > 1e11:
+                ts = ts / 1000.0
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        # Numeric timestamps encoded as string
+        try:
+            ts = float(s)
+            return _normalize_datetime(ts)
+        except ValueError:
+            pass
+        # ISO 8601 format
+        try:
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            return datetime.fromisoformat(s)
+        except ValueError:
+            return None
+
+    return None
+
+
+# Tableau 10 color palette - professional, high-contrast colors for data visualization
+_TABLEAU10 = (
+    "#4E79A7",  # Blue
+    "#F28E2B",  # Orange
+    "#E15759",  # Red
+    "#76B7B2",  # Teal
+    "#59A14F",  # Green
+    "#EDC949",  # Yellow
+    "#AF7AA1",  # Purple
+    "#FF9DA7",  # Pink
+    "#9C755F",  # Brown
+    "#BAB0AC",  # Gray
+)
+
+
+def _hash_to_color(s: str) -> str:
+    """Map string to a stable color from the Tableau 10 palette."""
+    key = (s or "").strip()
+    if not key:
+        return _TABLEAU10[0]
+    digest = hashlib.sha256(key.encode("utf-8")).digest()
+    idx = int.from_bytes(digest[:4], "big") % len(_TABLEAU10)
+    return _TABLEAU10[idx]
+
+
 def _call_rag_graph_recall_sync(
     *,
     query: str,
@@ -1632,3 +1984,74 @@ class LightRagService:
             for i in final_ids
         ]
         return LightRagEntryRelationRecommendationsResponse(items=items)
+
+    async def get_graph_data(
+        self,
+        *,
+        node_label: str = "*",
+        max_depth: int = 3,
+        max_nodes: int = 1000,
+        db: "Session | None" = None,
+    ):
+        """Get LightRAG knowledge graph data converted to GraphData format.
+
+        Args:
+            node_label: Label filter for nodes, "*" means all nodes
+            max_depth: Maximum depth of graph traversal
+            max_nodes: Maximum number of nodes to return
+
+        Returns:
+            GraphData compatible with frontend KnowledgeGraph component
+        """
+        import re
+        from app.graph.schemas import GraphData
+
+        settings = get_settings()
+        if not settings.lightrag_enabled:
+            raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled")
+
+        # Input validation
+        node_label = (node_label or "*").strip()[:256]
+        if node_label != "*" and not re.match(r"^[A-Za-z0-9_:\-\s]+$", node_label):
+            raise ApiException(status_code=422, code=42200, message="Invalid node label format")
+        max_depth = max(1, min(10, max_depth))
+        max_nodes = max(1, min(5000, max_nodes))
+
+        timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 30.0) or 30.0)
+        max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
+        sem = _get_query_semaphore(max_concurrency)
+
+        acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
+        if not acquired:
+            raise ApiException(status_code=504, code=50400, message="LightRAG graph timeout (queue)")
+
+        try:
+            with anyio.fail_after(timeout_sec):
+                raw_kg = await anyio.to_thread.run_sync(
+                    partial(
+                        _call_rag_get_knowledge_graph_sync,
+                        node_label=node_label,
+                        max_depth=max_depth,
+                        max_nodes=max_nodes,
+                        timeout_sec=timeout_sec,
+                    ),
+                    abandon_on_cancel=True,
+                )
+        except TimeoutError as e:
+            logger.warning("lightrag graph timeout", extra={"timeout_sec": timeout_sec})
+            raise ApiException(status_code=504, code=50400, message="LightRAG graph timeout") from e
+        except LightRagNotEnabledError as e:
+            raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled") from e
+        except LightRagDependencyError as e:
+            logger.exception("lightrag dependency missing")
+            raise ApiException(status_code=500, code=50010, message="LightRAG dependency missing") from e
+        except Exception as e:
+            logger.exception("lightrag graph failed", extra={"detail": str(e)})
+            raise ApiException(status_code=500, code=50012, message="LightRAG graph failed") from e
+        finally:
+            try:
+                sem.release()
+            except Exception:
+                pass
+
+        return _knowledge_graph_to_graph_data(raw_kg, db=db)

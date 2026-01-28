@@ -101,5 +101,6 @@ class GraphService:
             source=str(relation.source_entry_id),
             target=str(relation.target_entry_id),
             label=relation.relation_type.name,
-            color=relation.relation_type.color
+            color=relation.relation_type.color,
+            created_at=relation.created_at,
         )

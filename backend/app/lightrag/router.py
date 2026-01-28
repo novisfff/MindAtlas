@@ -79,3 +79,24 @@ async def relation_recommendations(
         include_relation_type=include_relation_type,
     )
     return ApiResponse.ok(result.model_dump(by_alias=True, exclude_none=True))
+
+
+@router.get("/graph", response_model=ApiResponse)
+async def get_lightrag_graph(
+    node_label: str = Query(default="*", alias="nodeLabel", description="Node label filter, * for all"),
+    max_depth: int = Query(default=3, ge=1, le=10, alias="maxDepth", description="Maximum graph depth"),
+    max_nodes: int = Query(default=1000, ge=1, le=5000, alias="maxNodes", description="Maximum nodes to return"),
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    """Get LightRAG knowledge graph data.
+
+    Returns graph data in the same format as system graph for unified visualization.
+    """
+    service = LightRagService()
+    graph_data = await service.get_graph_data(
+        node_label=node_label,
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+        db=db,
+    )
+    return ApiResponse.ok(graph_data.model_dump(by_alias=True))
