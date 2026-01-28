@@ -89,7 +89,9 @@
     "attachments": "Attachments",
     "created": "Created",
     "unknown": "Unknown",
-    "aiSuggestedRelations": "AI Suggested Relations"
+    "aiSuggestedRelations": "AI Suggested Relations",
+    "sourceEntry": "Source Entry",
+    "keywords": "Keywords"
   },
   "pages": {
     "dashboard": {
@@ -138,6 +140,7 @@
       "title": "Knowledge Graph",
       "subtitle": "Visualize connections between your entries",
       "noData": "No entries yet. Create some entries to see the graph.",
+      "noLightRagData": "No AI graph data yet. Please index some entries first.",
       "failedToLoad": "Failed to load graph data",
       "searchPlaceholder": "Search node...",
       "filterLogic": "Filter Logic",
@@ -146,7 +149,11 @@
       "zoomIn": "Zoom In",
       "zoomOut": "Zoom Out",
       "fitView": "Fit View",
-      "noSummary": "No summary available"
+      "noSummary": "No summary available",
+      "modes": {
+        "system": "System",
+        "lightrag": "Graph View"
+      }
     },
     "timeline": {
       "title": "Timeline",

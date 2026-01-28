@@ -15,6 +15,13 @@ class GraphNode(CamelModel):
     color: Optional[str] = None
     created_at: Optional[datetime] = None
     summary: Optional[str] = None
+    # LightRAG-specific fields (optional)
+    entity_id: Optional[str] = None
+    entity_type: Optional[str] = None
+    description: Optional[str] = None
+    entry_id: Optional[str] = None
+    entry_title: Optional[str] = None
+    # System graph time fields
     time_mode: Optional[TimeMode] = None
     time_at: Optional[datetime] = None
     time_from: Optional[datetime] = None
@@ -27,6 +34,12 @@ class GraphLink(CamelModel):
     target: str
     label: str
     color: Optional[str] = None
+    # LightRAG-specific fields (optional)
+    description: Optional[str] = None
+    keywords: Optional[str] = None
+    entry_id: Optional[str] = None
+    entry_title: Optional[str] = None
+    created_at: Optional[datetime] = None
 
 
 class GraphData(CamelModel):

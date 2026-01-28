@@ -88,7 +88,9 @@
     "relations": "关联",
     "attachments": "附件",
     "created": "创建于",
-    "unknown": "未知"
+    "unknown": "未知",
+    "sourceEntry": "来源记录",
+    "keywords": "关键词"
   },
   "pages": {
     "dashboard": {
@@ -137,6 +139,7 @@
       "title": "知识图谱",
       "subtitle": "可视化记录之间的关联",
       "noData": "暂无记录。创建一些记录以查看图谱。",
+      "noLightRagData": "暂无 AI 图谱数据。请先索引一些记录。",
       "failedToLoad": "加载图谱数据失败",
       "searchPlaceholder": "搜索节点...",
       "filterLogic": "筛选逻辑",
@@ -145,7 +148,11 @@
       "zoomIn": "放大",
       "zoomOut": "缩小",
       "fitView": "适应视图",
-      "noSummary": "暂无摘要"
+      "noSummary": "暂无摘要",
+      "modes": {
+        "system": "系统视图",
+        "lightrag": "图谱视图"
+      }
     },
     "timeline": {
       "title": "时间轴",
