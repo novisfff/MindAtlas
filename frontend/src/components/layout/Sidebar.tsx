@@ -6,9 +6,10 @@ import {
   Clock,
   Settings,
   ChevronLeft,
-  Brain,
+
   Sparkles
 } from 'lucide-react'
+import { Logo } from '@/components/Logo'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { useAppStore } from '@/stores/app-store'
@@ -39,7 +40,7 @@ export function Sidebar() {
         "flex h-16 items-center border-b px-4",
         !sidebarOpen && "md:justify-center md:px-2"
       )}>
-        <Brain className="h-6 w-6 text-primary shrink-0" />
+        <Logo className="h-8 w-8 text-primary shrink-0" />
         <span className={cn(
           "ml-2 font-bold text-lg whitespace-nowrap overflow-hidden transition-all",
           !sidebarOpen && "md:hidden md:w-0"
