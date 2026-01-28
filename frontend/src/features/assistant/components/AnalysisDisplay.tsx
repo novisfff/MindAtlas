@@ -9,10 +9,22 @@ import { remarkCitation } from './remark-citation'
 import { CitationMarker } from './citation'
 
 interface AnalysisDisplayProps {
-  analysis: Analysis
+  steps: Analysis[]
 }
 
-export function AnalysisDisplay({ analysis }: AnalysisDisplayProps) {
+export function AnalysisDisplay({ steps }: AnalysisDisplayProps) {
+  if (!steps || steps.length === 0) return null
+
+  return (
+    <div className="flex flex-col gap-2 mb-2">
+      {steps.map((step) => (
+        <AnalysisStepItem key={step.id} analysis={step} />
+      ))}
+    </div>
+  )
+}
+
+function AnalysisStepItem({ analysis }: { analysis: Analysis }) {
   const { t } = useTranslation()
   const [isExpanded, setIsExpanded] = useState(false)
   const isRunning = analysis.status === 'running'
@@ -28,7 +40,7 @@ export function AnalysisDisplay({ analysis }: AnalysisDisplayProps) {
   const toggleExpand = () => setIsExpanded(!isExpanded)
 
   return (
-    <div className="mb-2 w-full max-w-full overflow-hidden rounded-lg border border-border/50 bg-background/50 text-sm">
+    <div className="w-full max-w-full overflow-hidden rounded-lg border border-border/50 bg-background/50 text-sm">
       <div
         className={cn(
           "flex cursor-pointer items-center justify-between px-3 py-2 transition-colors hover:bg-muted/50",

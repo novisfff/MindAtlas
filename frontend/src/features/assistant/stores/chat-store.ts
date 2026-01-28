@@ -8,7 +8,7 @@ interface ChatMessage {
   content: string
   toolCalls?: ToolCall[]
   skillCalls?: SkillCall[]
-  analysis?: Analysis
+  analysisSteps?: Analysis[]
   createdAt: number
 }
 
@@ -114,7 +114,10 @@ export const createChatLogic = (set: any): Omit<ChatState, 'no-op'> => ({
         const last = messages[messages.length - 1]
         messages[messages.length - 1] = {
           ...last,
-          analysis: { id, content: '', status: 'running' },
+          analysisSteps: [
+            ...(last.analysisSteps || []),
+            { id, content: '', status: 'running' },
+          ],
         }
       }
       return { messages }
@@ -125,13 +128,14 @@ export const createChatLogic = (set: any): Omit<ChatState, 'no-op'> => ({
       const messages = [...state.messages]
       if (messages.length > 0) {
         const last = messages[messages.length - 1]
-        if (last.analysis && last.analysis.id === id) {
+        if (last.analysisSteps) {
           messages[messages.length - 1] = {
             ...last,
-            analysis: {
-              ...last.analysis,
-              content: last.analysis.content + delta,
-            },
+            analysisSteps: last.analysisSteps.map((step) =>
+              step.id === id
+                ? { ...step, content: step.content + delta }
+                : step
+            ),
           }
         }
       }
@@ -143,10 +147,12 @@ export const createChatLogic = (set: any): Omit<ChatState, 'no-op'> => ({
       const messages = [...state.messages]
       if (messages.length > 0) {
         const last = messages[messages.length - 1]
-        if (last.analysis && last.analysis.id === id) {
+        if (last.analysisSteps) {
           messages[messages.length - 1] = {
             ...last,
-            analysis: { ...last.analysis, status: 'completed' },
+            analysisSteps: last.analysisSteps.map((step) =>
+              step.id === id ? { ...step, status: 'completed' } : step
+            ),
           }
         }
       }

@@ -206,7 +206,9 @@
       "noMessagesYet": "No messages yet",
       "startConversation": "Start a conversation with the AI assistant.",
       "deleteTitle": "Delete Conversation",
-      "deleteConfirm": "Are you sure you want to delete this conversation? This action cannot be undone."
+      "deleteConfirm": "Are you sure you want to delete this conversation? This action cannot be undone.",
+      "searchingKnowledgeBase": "Searching knowledge base...",
+      "generatingResponse": "Generating response..."
     }
   },
   "settings": {
@@ -298,6 +300,7 @@
       "timeout": "Timeout (s)",
       "basicInfo": "Basic Info",
       "inputParams": "Input Parameters",
+      "returns": "Returns",
       "paramName": "Parameter name",
       "paramDesc": "Description",
       "required": "Required",
@@ -375,7 +378,9 @@
       "modeAgentDesc": "AI decides tool calls autonomously",
       "systemPrompt": "System Prompt",
       "systemPromptPlaceholder": "Define the AI assistant's behavior and capabilities...",
-      "systemPromptHelpText": "System prompt guides how AI uses tools to complete tasks"
+      "systemPromptHelpText": "System prompt guides how AI uses tools to complete tasks",
+      "resetAllSuccess": "All system skills have been reset",
+      "resetAllError": "Failed to reset system skills"
     }
   },
   "aiProvider": {

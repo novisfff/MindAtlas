@@ -1,14 +1,16 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Loader2, Plus, Power, Pencil, Trash2, ChevronDown, ChevronRight, RotateCcw } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   useSkillsQuery,
   useToolsQuery,
+  useSystemToolDefinitionsQuery,
   useCreateSkillMutation,
   useUpdateSkillMutation,
   useDeleteSkillMutation,
   useResetSkillMutation,
+  useResetAllSkillsMutation,
 } from '../queries'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { SkillRow } from './SkillRow'
@@ -188,15 +190,64 @@ export function SkillManager() {
   const { t } = useTranslation()
   const { data: skills = [], isLoading } = useSkillsQuery()
   const { data: tools = [] } = useToolsQuery()
+  const { data: systemToolDefs = [] } = useSystemToolDefinitionsQuery()
   const createMutation = useCreateSkillMutation()
   const updateMutation = useUpdateSkillMutation()
   const deleteMutation = useDeleteSkillMutation()
   const resetMutation = useResetSkillMutation()
+  const resetAllMutation = useResetAllSkillsMutation()
 
   const [editingId, setEditingId] = useState<string | null>(null)
   const [isAdding, setIsAdding] = useState(false)
   const [deleteId, setDeleteId] = useState<string | null>(null)
   const [resetId, setResetId] = useState<string | null>(null)
+
+  const availableTools = useMemo(() => {
+    const systemAsTools = systemToolDefs.map((d) => ({
+      id: `system:${d.name}`,
+      name: d.name,
+      description: d.description,
+      kind: d.kind,
+      isSystem: true,
+      enabled: d.enabled,
+      inputParams: d.inputParams ?? null,
+      endpointUrl: null,
+      httpMethod: null,
+      headers: null,
+      queryParams: null,
+      bodyType: null,
+      bodyContent: null,
+      authType: null,
+      authHeaderName: null,
+      authScheme: null,
+      apiKeyHint: null,
+      timeoutSeconds: null,
+      payloadWrapper: null,
+      createdAt: '',
+      updatedAt: '',
+    }))
+
+    const merged = [...systemAsTools, ...tools]
+    const seen = new Set<string>()
+    return merged.filter((t) => {
+      if (!t?.name) return false
+      if (seen.has(t.name)) return false
+      seen.add(t.name)
+      return true
+    })
+  }, [systemToolDefs, tools])
+
+  const [showResetAllConfirm, setShowResetAllConfirm] = useState(false)
+
+  const handleResetAll = async () => {
+    try {
+      await resetAllMutation.mutateAsync()
+      toast.success(t('settings.skills.resetAllSuccess'))
+      setShowResetAllConfirm(false)
+    } catch (error) {
+      toast.error(t('settings.skills.resetAllError'))
+    }
+  }
 
   const handleToggle = (skill: AssistantSkill) => {
     updateMutation.mutate({
@@ -236,7 +287,7 @@ export function SkillManager() {
       {isAdding && (
         <SkillRow
           isNew
-          availableTools={tools}
+          availableTools={availableTools}
           onCancel={() => setIsAdding(false)}
           onSave={handleSave}
           isSaving={createMutation.isPending}
@@ -246,9 +297,18 @@ export function SkillManager() {
       {/* System Skills */}
       {systemSkills.length > 0 && (
         <div className="space-y-2">
-          <h4 className="text-sm font-medium text-muted-foreground">
-            {t('settings.skills.systemSkills')} ({systemSkills.length})
-          </h4>
+          <div className="flex items-center gap-2">
+            <h4 className="text-sm font-medium text-muted-foreground">
+              {t('settings.skills.systemSkills')} ({systemSkills.length})
+            </h4>
+            <button
+              onClick={() => setShowResetAllConfirm(true)}
+              className="p-1 hover:bg-muted rounded-md text-muted-foreground hover:text-foreground transition-colors"
+              title={t('settings.skills.reset')}
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+            </button>
+          </div>
           <div className="space-y-2">
             {systemSkills.map((skill) => (
               <div key={skill.id}>
@@ -256,7 +316,7 @@ export function SkillManager() {
                   <SkillRow
                     skill={skill}
                     isEditing
-                    availableTools={tools}
+                    availableTools={availableTools}
                     onCancel={() => setEditingId(null)}
                     onSave={(data) => {
                       updateMutation.mutate(
@@ -299,15 +359,15 @@ export function SkillManager() {
             {customSkills.map((skill) => (
               <div key={skill.id}>
                 {editingId === skill.id ? (
-                  <SkillRow
-                    skill={skill}
-                    isEditing
-                    availableTools={tools}
-                    onCancel={() => setEditingId(null)}
-                    onSave={(data) => {
-                      updateMutation.mutate(
-                        { id: skill.id, data },
-                        { onSuccess: () => setEditingId(null) }
+              <SkillRow
+                skill={skill}
+                isEditing
+                availableTools={availableTools}
+                onCancel={() => setEditingId(null)}
+                onSave={(data) => {
+                  updateMutation.mutate(
+                    { id: skill.id, data },
+                    { onSuccess: () => setEditingId(null) }
                       )
                     }}
                     isSaving={updateMutation.isPending}
@@ -365,6 +425,17 @@ export function SkillManager() {
           })
         }
         onCancel={() => setResetId(null)}
+      />
+
+      <ConfirmDialog
+        isOpen={showResetAllConfirm}
+        title={t('settings.skills.resetTitle')}
+        description={t('settings.skills.resetDescription')}
+        confirmText={t('settings.skills.reset')}
+        cancelText={t('common.cancel')}
+        variant="destructive"
+        onConfirm={handleResetAll}
+        onCancel={() => setShowResetAllConfirm(false)}
       />
     </div>
   )

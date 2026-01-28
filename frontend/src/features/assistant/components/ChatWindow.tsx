@@ -14,7 +14,7 @@ export function ChatWindow({ className, variant = 'default' }: ChatWindowProps) 
   return (
     <div className={cn('flex flex-col min-h-0', className)}>
       <div className="flex-1 overflow-hidden">
-        <MessageList messages={messages} variant={variant} />
+        <MessageList messages={messages} variant={variant} isLoading={isLoading} />
       </div>
       <ChatInput onSend={sendMessage} isLoading={isLoading} variant={variant} />
     </div>

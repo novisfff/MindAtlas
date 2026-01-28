@@ -14,21 +14,34 @@ import {
 /**
  * ReferenceList - 在消息末尾展示所有检索到的引用
  */
-export function ReferenceList() {
+interface ReferenceListProps {
+  content?: string
+  isStreaming?: boolean
+}
+
+export function ReferenceList({ content, isStreaming }: ReferenceListProps) {
   const { t } = useTranslation()
   const context = useCitationContextSafe()
   const navigate = useNavigate()
   const [isKgExpanded, setIsKgExpanded] = useState(false)
 
+  // 流式输出时隐藏参考来源
+  if (isStreaming) return null
+
   if (!context || context.registry.size === 0) {
     return null
   }
 
-  // 按类型分组
+  // 按类型分组，并过滤未被引用的内容
   const entries: CitationData[] = []
   const kgItems: CitationData[] = []
 
   context.registry.forEach((citation) => {
+    // 只显示在内容中被引用的 citation
+    if (content && !content.includes(`[^${citation.index}]`)) {
+      return
+    }
+
     switch (citation.type) {
       case 'entry':
         entries.push(citation)

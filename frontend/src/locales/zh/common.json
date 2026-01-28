@@ -205,7 +205,9 @@
       "noMessagesYet": "暂无消息",
       "startConversation": "开始与 AI 助手对话",
       "deleteTitle": "删除对话",
-      "deleteConfirm": "确定要删除此对话吗？此操作无法撤销。"
+      "deleteConfirm": "确定要删除此对话吗？此操作无法撤销。",
+      "searchingKnowledgeBase": "正在检索知识库...",
+      "generatingResponse": "正在生成回复..."
     }
   },
   "settings": {
@@ -296,6 +298,7 @@
       "timeout": "超时(秒)",
       "basicInfo": "基本信息",
       "inputParams": "输入参数",
+      "returns": "返回值",
       "paramName": "参数名",
       "paramDesc": "描述",
       "required": "必填",
@@ -373,7 +376,9 @@
       "systemPromptHelpText": "系统提示词用于指导 AI 如何使用工具完成任务",
       "kbEnabled": "知识库",
       "kbEnabledDesc": "自动召回相关知识并注入上下文",
-      "enableKB": "开启知识库"
+      "enableKB": "开启知识库",
+      "resetAllSuccess": "所有系统技能已重置",
+      "resetAllError": "重置系统技能失败"
     }
   },
   "aiProvider": {

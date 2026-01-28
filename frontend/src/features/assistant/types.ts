@@ -26,7 +26,7 @@ export interface Message {
   content: string
   toolCalls?: ToolCall[]
   skillCalls?: SkillCall[]
-  analysis?: Analysis
+  analysisSteps?: Analysis[]
   toolResults?: { id: string; status: string; result: string }[]
   createdAt: string
   updatedAt: string

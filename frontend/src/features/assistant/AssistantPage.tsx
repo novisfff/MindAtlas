@@ -80,14 +80,25 @@ function AssistantPageContent() {
               status: (sc.status === 'completed' ? 'completed' : sc.status === 'error' ? 'error' : 'running') as 'running' | 'completed' | 'error',
             }))
           }
-          // Map analysis from history
-          let analysis: { id: string; content: string; status: 'running' | 'completed' } | undefined
-          if (msg.analysis && typeof msg.analysis === 'object') {
-            const a = msg.analysis as { id: string; content: string; status: string }
-            analysis = {
-              id: a.id,
-              content: a.content || '',
-              status: (a.status === 'completed' ? 'completed' : 'running') as 'running' | 'completed',
+          // Map analysis from history (now as array)
+          let analysisSteps: { id: string; content: string; status: 'running' | 'completed' }[] | undefined
+          const rawAnalysis = msg.analysis || msg.analysisSteps
+          if (rawAnalysis) {
+            // Handle both old single object format and new array format
+            if (Array.isArray(rawAnalysis)) {
+              analysisSteps = rawAnalysis.map((a: any) => ({
+                id: a.id,
+                content: a.content || '',
+                status: (a.status === 'completed' ? 'completed' : 'running') as 'running' | 'completed',
+              }))
+            } else if (typeof rawAnalysis === 'object') {
+              // Legacy single object format - convert to array
+              const a = rawAnalysis as { id: string; content: string; status: string }
+              analysisSteps = [{
+                id: a.id,
+                content: a.content || '',
+                status: (a.status === 'completed' ? 'completed' : 'running') as 'running' | 'completed',
+              }]
             }
           }
           return {
@@ -96,7 +107,7 @@ function AssistantPageContent() {
             content: msg.content,
             toolCalls,
             skillCalls,
-            analysis,
+            analysisSteps,
             createdAt: new Date(msg.createdAt || msg.created_at).getTime(),
           }
         })
