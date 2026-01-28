@@ -28,6 +28,5 @@ __all__ = [
     "get_tag_statistics",
     "list_entry_types",
     "list_tags",
-    "kb_search",
     "kb_relation_recommendations",
 ]

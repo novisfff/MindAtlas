@@ -91,3 +91,15 @@ export const resetSkill = (id: string) =>
   apiClient.post<AssistantSkill>(`/api/assistant-config/skills/${id}/reset`, {
     body: { confirm: true },
   })
+
+export interface ResetAllSkillsResponse {
+  resetCount: number
+  deletedCount: number
+  createdCount: number
+  affected: Array<{ name: string; id: string | null; action: string }>
+}
+
+export const resetAllSkills = () =>
+  apiClient.post<ResetAllSkillsResponse>('/api/assistant-config/skills/reset-all', {
+    body: { confirm: true },
+  })

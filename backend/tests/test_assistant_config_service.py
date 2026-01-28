@@ -27,7 +27,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.db.close()
 
-    def test_sync_system_tools_creates_records(self) -> None:
+    def test_sync_system_tools_does_not_seed_records(self) -> None:
         from app.assistant_config.models import AssistantTool  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
@@ -36,9 +36,56 @@ class AssistantConfigServiceTests(unittest.TestCase):
             svc.sync_system_tools()
 
         tool = self.db.query(AssistantTool).filter(AssistantTool.name == "t1").first()
-        self.assertIsNotNone(tool)
-        self.assertTrue(tool.is_system)
-        self.assertEqual(tool.kind, "local")
+        self.assertIsNone(tool)
+
+    def test_sync_system_tools_prunes_stale_and_skill_refs(self) -> None:
+        from app.assistant_config.models import AssistantSkill, AssistantTool  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        # Pre-existing system tool that no longer exists in code
+        self.db.add(AssistantTool(name="old_tool", description="d", kind="local", is_system=True, enabled=True))
+        self.db.add(
+            AssistantSkill(
+                name="s1",
+                description="d",
+                intent_examples=[],
+                tools=["old_tool", "t1"],
+                mode="steps",
+                system_prompt=None,
+                is_system=False,
+                enabled=True,
+            )
+        )
+        self.db.commit()
+
+        svc = AssistantConfigService(self.db)
+        with patch("app.assistant_config.service.ToolRegistry.list_system_tools", return_value=[_SysTool("t1", "d")]):
+            svc.sync_system_tools()
+
+        self.assertIsNone(self.db.query(AssistantTool).filter(AssistantTool.name == "old_tool").first())
+        skill = self.db.query(AssistantSkill).filter(AssistantSkill.name == "s1").first()
+        self.assertIsNotNone(skill)
+        self.assertEqual(skill.tools, ["t1"])
+
+    def test_set_system_tool_enabled_creates_override_only_when_disabled(self) -> None:
+        from app.assistant_config.models import AssistantTool  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        with patch("app.assistant_config.service.ToolRegistry.list_system_tools", return_value=[_SysTool("t1", "d")]):
+            svc.set_system_tool_enabled("t1", enabled=False)
+
+        rec = self.db.query(AssistantTool).filter(AssistantTool.name == "t1").first()
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec.kind, "local")
+        self.assertTrue(rec.is_system)
+        self.assertFalse(rec.enabled)
+
+        with patch("app.assistant_config.service.ToolRegistry.list_system_tools", return_value=[_SysTool("t1", "d")]):
+            svc.set_system_tool_enabled("t1", enabled=True)
+
+        rec2 = self.db.query(AssistantTool).filter(AssistantTool.name == "t1").first()
+        self.assertIsNone(rec2)
 
     def test_sync_system_tools_integrity_error_40910(self) -> None:
         from app.assistant_config.service import AssistantConfigService  # noqa: E402

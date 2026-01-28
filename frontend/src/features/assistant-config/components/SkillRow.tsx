@@ -83,13 +83,13 @@ export function SkillRow({
         ? {
           tools: agentTools.length > 0 ? agentTools : undefined,
           systemPrompt: systemPrompt || undefined,
-          kbConfig: kbConfig.enabled ? kbConfig : undefined,
+          kbConfig,
           steps: undefined,
         }
         : {
           tools: derivedTools.length > 0 ? derivedTools : undefined,
           steps,
-          kbConfig: kbConfig.enabled ? kbConfig : undefined,
+          kbConfig,
           systemPrompt: undefined,
         }),
     }

@@ -10,6 +10,18 @@ export interface InputParam {
   required: boolean
 }
 
+// 系统工具完整定义（从代码获取）
+export interface SystemToolDefinition {
+  name: string
+  description: string | null
+  kind: 'local'
+  isSystem: true
+  enabled: boolean
+  inputParams: InputParam[] | null
+  returns: string | null
+  jsonSchema: Record<string, unknown> | null
+}
+
 export interface AssistantTool {
   id: string
   name: string
@@ -87,3 +99,21 @@ export const updateTool = (id: string, data: UpdateToolRequest) =>
 
 export const deleteTool = (id: string) =>
   apiClient.delete(`/api/assistant-config/tools/${id}`)
+
+// 获取系统工具完整定义（从代码获取）
+export const getSystemToolDefinitions = (params?: {
+  includeDisabled?: boolean
+  includeSchema?: boolean
+}) =>
+  apiClient.get<SystemToolDefinition[]>('/api/assistant-config/system-tools/definitions', {
+    query: {
+      include_disabled: params?.includeDisabled ?? true,
+      include_schema: params?.includeSchema ?? false,
+    },
+  })
+
+export const updateSystemToolEnabled = (name: string, enabled: boolean) =>
+  apiClient.put<{ name: string; enabled: boolean }>(
+    `/api/assistant-config/system-tools/${encodeURIComponent(name)}/enabled`,
+    { body: { enabled } }
+  )

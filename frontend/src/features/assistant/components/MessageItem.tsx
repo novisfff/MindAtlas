@@ -1,7 +1,7 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { remarkCitation } from './remark-citation'
-import { Bot, User } from 'lucide-react'
+import { Bot, User, Loader2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { ToolCall, SkillCall, Analysis } from '../types'
@@ -17,16 +17,28 @@ interface MessageItemProps {
     content: string
     toolCalls?: ToolCall[]
     skillCalls?: SkillCall[]
-    analysis?: Analysis
+    analysisSteps?: Analysis[]
     createdAt: number
   }
   variant?: 'default' | 'compact'
+  isStreaming?: boolean
 }
 
-export function MessageItem({ message, variant = 'default' }: MessageItemProps) {
+export function MessageItem({ message, variant = 'default', isStreaming }: MessageItemProps) {
   const { t } = useTranslation()
   const isUser = message.role === 'user'
   const isCompact = variant === 'compact'
+
+  // 检测正在运行的隐藏工具（KB 搜索）
+  const activeHiddenTools = message.toolCalls?.filter(
+    tc => tc.hidden && tc.status === 'running'
+  )
+
+  // 显示加载状态的条件：
+  // 1. 有正在运行的隐藏工具（KB 搜索中）
+  // 2. 流式输出中 + 内容为空（等待 AI 生成）
+  const showKbSearching = activeHiddenTools && activeHiddenTools.length > 0
+  const showGenerating = isStreaming && !message.content && !showKbSearching
 
   return (
     <div className={cn(
@@ -68,35 +80,51 @@ export function MessageItem({ message, variant = 'default' }: MessageItemProps) 
           {message.toolCalls && message.toolCalls.length > 0 && (
             <ToolCallDisplay toolCalls={message.toolCalls!} variant={variant} />
           )}
-          {message.analysis && (
-            <AnalysisDisplay analysis={message.analysis} />
+          {message.analysisSteps && message.analysisSteps.length > 0 && (
+            <AnalysisDisplay steps={message.analysisSteps} />
+          )}
+          {/* KB 搜索状态提示 */}
+          {showKbSearching && (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground my-2 animate-pulse px-1">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              <span>{t('pages.assistant.searchingKnowledgeBase', 'Searching knowledge base...')}</span>
+            </div>
+          )}
+          {/* 等待 AI 生成回复状态 */}
+          {showGenerating && (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground my-2 animate-pulse px-1">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              <span>{t('pages.assistant.generatingResponse', 'Generating response...')}</span>
+            </div>
           )}
           <CitationProvider content={message.content || ''} toolCalls={message.toolCalls}>
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm, remarkCitation]}
-              components={{
-                p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
-                code: ({ node, inline, className, children, ...props }: any) => {
-                  return inline ? (
-                    <code className="bg-black/10 dark:bg-white/10 px-1 py-0.5 rounded font-mono text-sm" {...props}>{children}</code>
-                  ) : (
-                    <code className="block bg-black/10 dark:bg-white/10 p-3 rounded-lg font-mono text-sm overflow-x-auto my-2" {...props}>{children}</code>
-                  )
-                },
-                // Handle our custom citation-marker node
-                // @ts-ignore - Custom element type from remark-citation
-                'citation-marker': ({ identifier }: { identifier: string }) => {
-                  return <CitationMarker identifier={identifier} label={identifier} />
-                },
-                // Fallback for regular superscripts or if plugin fails
-                sup: ({ children, ...props }) => {
-                  return <sup {...props}>{children}</sup>
-                },
-              }}
-            >
-              {message.content || '...'}
-            </ReactMarkdown>
-            <ReferenceList />
+            {message.content && (
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkCitation]}
+                components={{
+                  p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
+                  code: ({ node, inline, className, children, ...props }: any) => {
+                    return inline ? (
+                      <code className="bg-black/10 dark:bg-white/10 px-1 py-0.5 rounded font-mono text-sm" {...props}>{children}</code>
+                    ) : (
+                      <code className="block bg-black/10 dark:bg-white/10 p-3 rounded-lg font-mono text-sm overflow-x-auto my-2" {...props}>{children}</code>
+                    )
+                  },
+                  // Handle our custom citation-marker node
+                  // @ts-ignore - Custom element type from remark-citation
+                  'citation-marker': ({ identifier }: { identifier: string }) => {
+                    return <CitationMarker identifier={identifier} label={identifier} />
+                  },
+                  // Fallback for regular superscripts or if plugin fails
+                  sup: ({ children, ...props }) => {
+                    return <sup {...props}>{children}</sup>
+                  },
+                }}
+              >
+                {message.content}
+              </ReactMarkdown>
+            )}
+            <ReferenceList content={message.content} isStreaming={isStreaming} />
           </CitationProvider>
         </div>
       </div>

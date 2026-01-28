@@ -1,4 +1,4 @@
-"""Knowledge base (LightRAG) tools for the Assistant."""
+"""知识库（LightRAG）相关工具。"""
 from __future__ import annotations
 
 import json
@@ -133,14 +133,13 @@ def _build_references(
 def kb_search(
     query: str,
 ) -> str:
-    """Search (recall) evidence chunks with graph context via LightRAG.
+    """使用 LightRAG 进行知识库检索，返回证据片段与图谱上下文。
 
-    This tool is designed for retrieval only. The assistant should generate the final response.
-    Returns chunks grouped by Entry, plus knowledge graph entities and relationships for context.
+    该工具仅负责检索，助手应基于返回内容自行总结与组织输出。
+    返回结果包含：按 Entry 聚合的证据片段，以及相关的知识图谱实体与关系。
 
-    Note:
-        Retrieval parameters are configured via Settings (env/.env), not tool arguments
-        (the env var names are kept for backward compatibility):
+    注意:
+        检索参数通过 Settings（env/.env）配置，不作为工具入参：
         - ASSISTANT_KB_GRAPH_RECALL_MODE
         - ASSISTANT_KB_GRAPH_RECALL_TOP_K
         - ASSISTANT_KB_GRAPH_RECALL_CHUNK_TOP_K
@@ -151,10 +150,10 @@ def kb_search(
         - ASSISTANT_KB_GRAPH_RECALL_MAX_TOKENS
 
     Args:
-        query: User query text.
+        query: 用户查询文本。
 
     Returns:
-        JSON object string:
+        JSON 字符串（对象）：
           {
             "items": [
               {
@@ -354,19 +353,18 @@ def kb_relation_recommendations(
     exclude_existing_relations: bool = False,
     include_relation_type: bool = True,
 ) -> str:
-    """Recommend relations for an Entry using LightRAG.
+    """使用 LightRAG 为指定记录推荐可能的关联关系。
 
     Args:
-        entry_id: Source Entry UUID.
-        mode: LightRAG mode.
-        limit: Max number of recommendations (1-100).
-        min_score: Minimum similarity score (0.0-1.0).
-        exclude_existing_relations: Filter out entries with existing relations.
-        include_relation_type: Whether to predict relationType (slower).
+        entry_id: 源记录的 UUID。
+        mode: LightRAG 查询模式（naive/local/global/hybrid/mix）。
+        limit: 推荐数量上限（1-100）。
+        min_score: 最小相似度阈值（0.0-1.0）。
+        exclude_existing_relations: 是否过滤已存在关联的记录。
+        include_relation_type: 是否通过 LLM 预测关联类型（更慢）。
 
     Returns:
-        JSON object string:
-          {"items": [{"targetEntryId": "...", "relationType": "USES", "score": 0.83}]}
+        JSON 字符串：{"items": [{"targetEntryId": "...", "relationType": "USES", "score": 0.83}]}
     """
     try:
         src_id = UUID((entry_id or "").strip())

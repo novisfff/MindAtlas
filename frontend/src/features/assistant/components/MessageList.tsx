@@ -10,15 +10,16 @@ interface Message {
   createdAt: number
   toolCalls?: ToolCall[]
   skillCalls?: SkillCall[]
-  analysis?: Analysis
+  analysisSteps?: Analysis[]
 }
 
 interface MessageListProps {
   messages: Message[]
   variant?: 'default' | 'compact'
+  isLoading?: boolean
 }
 
-export function MessageList({ messages, variant = 'default' }: MessageListProps) {
+export function MessageList({ messages, variant = 'default', isLoading }: MessageListProps) {
   const { t } = useTranslation()
   const bottomRef = useRef<HTMLDivElement>(null)
 
@@ -37,9 +38,18 @@ export function MessageList({ messages, variant = 'default' }: MessageListProps)
 
   return (
     <div className="flex h-full flex-col overflow-y-auto overflow-x-hidden custom-scrollbar">
-      {messages.map((msg) => (
-        <MessageItem key={msg.id} message={msg} variant={variant} />
-      ))}
+      {messages.map((msg, index) => {
+        const isLast = index === messages.length - 1
+        const isStreaming = isLoading && isLast
+        return (
+          <MessageItem
+            key={msg.id}
+            message={msg}
+            variant={variant}
+            isStreaming={isStreaming}
+          />
+        )
+      })}
       <div ref={bottomRef} />
     </div>
   )

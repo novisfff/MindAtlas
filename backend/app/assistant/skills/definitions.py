@@ -1,7 +1,7 @@
 """Skill 定义"""
 from __future__ import annotations
 
-from app.assistant.skills.base import DEFAULT_SKILL_NAME, SkillDefinition, SkillStep
+from app.assistant.skills.base import DEFAULT_SKILL_NAME, SkillDefinition, SkillStep, SkillKBConfig
 
 
 # ==================== 默认 Skill（Fallback） ====================
@@ -11,76 +11,17 @@ GENERAL_CHAT = SkillDefinition(
     description="默认兜底对话（未匹配到任何 Skill 时使用）",
     intent_examples=[],
     tools=[
-        "search_entries",
-        "get_entry_detail",
-        "create_entry",
         "get_statistics",
         "list_entry_types",
         "list_tags",
-        "kb_relation_recommendations",
     ],
     mode="agent",
     system_prompt="你是 MindAtlas 的 AI 助手，友好地回复用户，可以按需调用工具。MindAtlas 是一款个人知识与经历管理系统，旨在帮助用户系统性地记录、关联、回顾和总结个人的知识积累与人生经历。",
+    kb=SkillKBConfig(enabled=True),
 )
 
 
 # ==================== 原子 Skills ====================
-
-SEARCH_ENTRIES = SkillDefinition(
-    name="search_entries",
-    description="搜索记录（支持关键词/类型/标签/时间范围）",
-    intent_examples=[
-        "找一下关于 React 的笔记",
-        "有没有记录过 Docker 配置",
-        "查询最近的会议记录",
-        "搜索包含'架构'的文档",
-        "列出上周的记录",
-        "找一下 2024-01-01 到 2024-01-31 的记录",
-    ],
-    tools=["search_entries"],
-    steps=[
-        SkillStep(
-            type="analysis",
-            instruction="理解用户的搜索意图（关键词/类型/标签/时间范围等过滤条件）；随后会调用搜索工具获取结果。",
-        ),
-        SkillStep(
-            type="tool",
-            tool_name="search_entries",
-            args_from="context",
-        ),
-        SkillStep(
-            type="summary",
-            instruction="向用户展示搜索到的记录列表，简要概括结果数量和主要内容。",
-        ),
-    ],
-)
-
-GET_ENTRY_DETAIL = SkillDefinition(
-    name="get_entry_detail",
-    description="获取记录详情",
-    intent_examples=[
-        "查看这条记录的详情",
-        "展开显示完整内容",
-        "显示 ID 为 xxx 的记录",
-        "详细看看这个",
-    ],
-    tools=["get_entry_detail"],
-    steps=[
-        SkillStep(
-            type="analysis",
-            instruction="理解用户想查看的记录对象与原因（例如通过ID/标题/上下文指代）。说明接下来会如何获取详情。",
-        ),
-        SkillStep(
-            type="tool",
-            tool_name="get_entry_detail",
-            args_from="context",
-        ),
-        SkillStep(
-            type="summary",
-            instruction="展示记录的完整内容，包括标题、正文、标签和属性。",
-        ),
-    ],
-)
 
 QUICK_STATS = SkillDefinition(
     name="quick_stats",
@@ -270,42 +211,13 @@ PERIODIC_REVIEW = SkillDefinition(
     ],
 )
 
-KNOWLEDGE_SYNTHESIS = SkillDefinition(
-    name="knowledge_synthesis",
-    description="知识综合与梳理",
-    intent_examples=[
-        "总结一下关于微服务架构的知识",
-        "梳理最近关于 AI Agent 的笔记",
-        "把 React 相关的记录整合一下",
-    ],
-    tools=["search_entries"],
-    steps=[
-        SkillStep(
-            type="analysis",
-            instruction="理解用户希望综合/梳理的主题，并说明计划：先搜索相关记录，再做归纳整理。",
-        ),
-        SkillStep(
-            type="tool",
-            tool_name="search_entries",
-            args_from="context",
-        ),
-        SkillStep(
-            type="summary",
-            instruction="综合搜索到的记录，生成连贯的知识总结，标注引用来源。",
-        ),
-    ],
-)
-
 
 # ==================== 导出 ====================
 
 SKILLS: list[SkillDefinition] = [
-    SEARCH_ENTRIES,
-    GET_ENTRY_DETAIL,
     QUICK_STATS,
     SMART_CAPTURE,
     PERIODIC_REVIEW,
-    KNOWLEDGE_SYNTHESIS,
     GENERAL_CHAT,
 ]
 

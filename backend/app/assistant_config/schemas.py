@@ -51,6 +51,23 @@ class InputParamSchema(CamelModel):
     required: bool = False
 
 
+class SystemToolDefinitionResponse(CamelModel):
+    """系统工具完整定义（代码即真相）。"""
+    name: str
+    description: str | None = None
+    kind: ToolKind = "local"
+    is_system: bool = True
+    enabled: bool = True
+    input_params: list[InputParamSchema] | None = None
+    returns: str | None = None
+    json_schema: dict | None = None
+
+
+class SystemToolEnabledUpdateRequest(CamelModel):
+    """更新系统工具启用状态（默认启用；禁用才会落库为覆盖配置）。"""
+    enabled: bool = True
+
+
 class AssistantToolCreateRequest(CamelModel):
     name: str = Field(..., min_length=1, max_length=128)
     description: str | None = None
@@ -357,6 +374,14 @@ class AssistantSkillUpdateRequest(CamelModel):
 
 class ResetSkillRequest(CamelModel):
     confirm: bool = False
+
+
+class ResetAllSkillsResponse(CamelModel):
+    """重置所有系统技能的响应"""
+    reset_count: int
+    deleted_count: int
+    created_count: int
+    affected: list[dict]
 
 
 class AssistantSkillStepResponse(OrmModel):
