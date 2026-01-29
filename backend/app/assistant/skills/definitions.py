@@ -14,7 +14,10 @@ from app.assistant.skills.base import (
 
 GENERAL_CHAT = SkillDefinition(
     name=DEFAULT_SKILL_NAME,
-    description="默认兜底对话（未匹配到任何 Skill 时使用）",
+    description=(
+        "默认兜底对话（未匹配到任何 Skill 时使用）：支持知识问答/总结/写作/翻译等；"
+        "可结合知识库检索结果回答；默认不执行写入/创建操作"
+    ),
     intent_examples=[],
     tools=[
         "get_statistics",
@@ -31,12 +34,15 @@ GENERAL_CHAT = SkillDefinition(
 
 QUICK_STATS = SkillDefinition(
     name="quick_stats",
-    description="快速统计",
+    description=(
+        "快速统计（仅统计 MindAtlas 系统内数据，如我的记录/条目/标签/类型/仪表盘概况；"
+        "不用于对外部组织/项目/人物的情况总结）"
+    ),
     intent_examples=[
-        "最近有多少条记录",
-        "查看数据统计",
-        "统计一下现在的知识库概况",
-        "看下仪表盘数据",
+        "统计一下我在 MindAtlas 里有多少条记录",
+        "看下我的仪表盘数据/数据概况",
+        "我有多少个标签、多少种类型？",
+        "现在的记录总数是多少",
     ],
     tools=["get_statistics"],
     steps=[
@@ -55,12 +61,16 @@ QUICK_STATS = SkillDefinition(
 
 SMART_CAPTURE = SkillDefinition(
     name="smart_capture",
-    description="智能创建记录",
+    description=(
+        "智能创建记录（将用户内容写入/保存为 MindAtlas 的一条记录；"
+        "在用户要求创建/新增/添加/记录/保存/入库时或用户直接提供内容时使用）"
+    ),
     intent_examples=[
         "帮我记录一下今天学到的 Python 技巧",
+        "把下面内容保存为一条笔记：……",
         "创建一个新任务：下周一交报告",
         "记笔记：React 19 的新特性包括...",
-        "添加一条关于健身的记录",
+        "我今天学习了React 19的特性",
     ],
     tools=["list_entry_types", "list_tags", "create_entry"],
     steps=[
@@ -171,12 +181,15 @@ SMART_CAPTURE = SkillDefinition(
 
 PERIODIC_REVIEW = SkillDefinition(
     name="periodic_review",
-    description="周期性回顾与分析",
+    description=(
+        "周期性回顾与分析（按时间范围回顾 MindAtlas 中我的记录并生成周报/月报/复盘；"
+        "需要明确时间范围，如上周/本月/某日期区间）"
+    ),
     intent_examples=[
-        "分析一下上周的记录",
-        "回顾本月的工作产出",
-        "查看这周的学习进度",
-        "生成月度报告",
+        "回顾我上周在 MindAtlas 里的记录并生成周报",
+        "复盘我本月的记录产出",
+        "分析 2025-01-01 到 2025-01-31 的我的记录",
+        "查看我这周的学习记录进度",
     ],
     tools=["get_entries_by_time_range", "analyze_activity"],
     steps=[
