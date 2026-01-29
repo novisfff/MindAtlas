@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Check, X, Pencil, Trash2 } from 'lucide-react'
 import type { Tag } from '@/types'
 import { useTranslation } from 'react-i18next'
+import { getRandomColor } from '@/lib/colors'
 
 interface TagRowProps {
   tag?: Tag
@@ -16,7 +17,7 @@ interface TagRowProps {
 
 export function TagRow({ tag, isNew, isEditing, onEdit, onCancel, onSave, onDelete, isSaving }: TagRowProps) {
   const [name, setName] = useState(tag?.name || '')
-  const [color, setColor] = useState(tag?.color || '#6B7280')
+  const [color, setColor] = useState(() => tag?.color || (isNew ? getRandomColor() : '#6B7280'))
   const { t } = useTranslation()
 
   if (isNew || isEditing) {

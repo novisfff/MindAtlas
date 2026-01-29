@@ -10,6 +10,7 @@ from uuid import UUID
 
 from langchain_core.tools import tool
 
+from app.common.color_utils import pick_material_600_color
 from app.entry.models import Entry, TimeMode
 from app.entry_type.models import EntryType
 from app.tag.models import Tag
@@ -180,7 +181,7 @@ def _normalize_tags(db, tag_names: list[str], existing_tags: list[Tag] | None = 
         if not name:
             continue
 
-        tag = Tag(name=name)
+        tag = Tag(name=name, color=pick_material_600_color(name))
         db.add(tag)
         existing_by_lower[key] = tag
         out.append(tag)

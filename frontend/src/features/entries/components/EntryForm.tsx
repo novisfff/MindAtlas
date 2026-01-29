@@ -10,6 +10,7 @@ import { MarkdownEditor } from './MarkdownEditor'
 import { cn } from '@/lib/utils'
 import { AiAssistButton, useAiGenerateMutation } from '@/features/ai'
 import { useTagsQuery, useCreateTagMutation } from '@/features/tags/queries'
+import { getColorByName } from '@/lib/colors'
 
 interface EntryFormProps {
   entry?: Entry
@@ -119,7 +120,7 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
     } else {
       // 2. Create new tag if it doesn't exist
       try {
-        const newTag = await createTagMutation.mutateAsync({ name: tagName })
+        const newTag = await createTagMutation.mutateAsync({ name: tagName, color: getColorByName(tagName) })
         setTagIds((prev) => [...prev, newTag.id])
       } catch (error) {
         console.error('Failed to create tag:', error)
