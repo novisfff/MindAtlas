@@ -19,6 +19,7 @@ AnalysisOutputMode = Literal["text", "json"]
 AuthType = Literal["none", "bearer", "basic", "api-key"]
 BodyType = Literal["none", "form-data", "x-www-form-urlencoded", "json", "xml", "raw"]
 SkillMode = Literal["steps", "agent"]
+OutputFieldType = Literal["string", "number", "integer", "boolean", "object", "array"]
 
 # 允许的 URL scheme
 ALLOWED_URL_SCHEMES = {"http", "https"}
@@ -183,14 +184,50 @@ class AssistantToolResponse(OrmModel):
 _TEMPLATE_VAR_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
 
 
+class OutputFieldSpecInput(CamelModel):
+    """输出字段规格定义（API 输入）"""
+    name: str = Field(..., min_length=1, max_length=64)
+    type: OutputFieldType = "string"
+    nullable: bool = False
+    items_type: OutputFieldType | None = None
+    enum: list[str] | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "OutputFieldSpecInput":
+        if not re.fullmatch(r"[a-zA-Z0-9_]+", self.name):
+            raise ValueError(f"Invalid output field name: {self.name}")
+        if self.type == "array" and not self.items_type:
+            raise ValueError("items_type is required when type=array")
+        if self.items_type == "array":
+            raise ValueError("items_type cannot be array")
+        return self
+
+
+def _extract_field_names(output_fields: list[OutputFieldSpecInput] | list[str] | None) -> set[str]:
+    """从 output_fields 提取字段名集合（兼容新旧格式）"""
+    if not output_fields:
+        return set()
+    names: set[str] = set()
+    for f in output_fields:
+        if isinstance(f, OutputFieldSpecInput):
+            names.add(f.name)
+        elif isinstance(f, str) and f.strip():
+            names.add(f.strip())
+        elif isinstance(f, dict):
+            name = f.get("name", "")
+            if isinstance(name, str) and name.strip():
+                names.add(name.strip())
+    return names
+
+
 def _validate_step_template_refs(steps: list["AssistantSkillStepInput"]) -> None:
     """校验模板变量引用：analysis jsonmode 仅允许引用其 output_fields 白名单。"""
     allowed_fields_by_step: dict[int, set[str]] = {}
     for idx, step in enumerate(steps):
         step_no = idx + 1
         if step.type == "analysis" and step.output_mode == "json":
-            fields = step.output_fields or []
-            allowed_fields_by_step[step_no] = set([f for f in fields if isinstance(f, str) and f.strip()])
+            # 使用新的提取函数，兼容新旧格式
+            allowed_fields_by_step[step_no] = _extract_field_names(step.output_fields)
 
     base_vars = {"user_input", "history", "last_step_result", "last_step_result_raw"}
 
@@ -271,7 +308,7 @@ class AssistantSkillStepInput(CamelModel):
     args_from: ArgsFrom | None = None
     args_template: str | None = Field(default=None, max_length=8000)
     output_mode: AnalysisOutputMode | None = None
-    output_fields: list[str] | None = None
+    output_fields: list[OutputFieldSpecInput] | list[str] | None = None  # 支持新旧格式
     include_in_summary: bool | None = True
     kb_config: dict | None = None
 
@@ -314,21 +351,16 @@ class AssistantSkillStepInput(CamelModel):
             fields = self.output_fields or []
             if not isinstance(fields, list) or len(fields) == 0:
                 raise ValueError("output_fields is required when output_mode=json for analysis step")
-            cleaned: list[str] = []
-            seen: set[str] = set()
-            for f in fields:
-                name = (f or "").strip() if isinstance(f, str) else ""
-                if not name:
-                    continue
+
+            # 兼容新旧格式：提取并校验字段名
+            field_names = _extract_field_names(fields)
+            if not field_names:
+                raise ValueError("output_fields is required when output_mode=json for analysis step")
+
+            # 校验字段名格式
+            for name in field_names:
                 if not re.fullmatch(r"[a-zA-Z0-9_]+", name):
                     raise ValueError(f"Invalid output field name: {name}")
-                if name in seen:
-                    continue
-                seen.add(name)
-                cleaned.append(name)
-            if not cleaned:
-                raise ValueError("output_fields is required when output_mode=json for analysis step")
-            self.output_fields = cleaned
         return self
 
 
@@ -393,7 +425,7 @@ class AssistantSkillStepResponse(OrmModel):
     args_from: str | None
     args_template: str | None
     output_mode: str | None
-    output_fields: list[str] | None
+    output_fields: list[dict] | list[str] | None  # 支持新旧格式
     include_in_summary: bool | None
     kb_config: dict | None
     created_at: datetime

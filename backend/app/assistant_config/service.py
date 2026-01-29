@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from app.assistant.skills.base import DEFAULT_SKILL_NAME
+from typing import Any
+
+from app.assistant.skills.base import DEFAULT_SKILL_NAME, OutputFieldSpec
 from app.assistant.skills.converters import db_skill_to_definition_light
 
 from sqlalchemy.exc import IntegrityError
@@ -16,6 +18,32 @@ from app.assistant_config.schemas import (
     AssistantToolUpdateRequest,
 )
 from app.common.exceptions import ApiException
+
+
+def serialize_output_fields(raw: Any) -> list[dict] | list[str] | None:
+    """将 output_fields 序列化为可 JSON 存储的格式
+
+    支持输入：
+    - list[OutputFieldSpec]: 转为 list[dict]
+    - list[str]: 原样返回
+    - None: 返回 None
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        return None
+    if not raw:
+        return None
+
+    # 检查第一个元素类型
+    first = raw[0]
+    if isinstance(first, OutputFieldSpec):
+        return [spec.model_dump() for spec in raw if isinstance(spec, OutputFieldSpec)]
+    elif isinstance(first, dict):
+        return raw
+    elif isinstance(first, str):
+        return raw
+    return None
 
 
 class AssistantConfigService:
@@ -194,7 +222,7 @@ class AssistantConfigService:
                         args_from=step.args_from,
                         args_template=getattr(step, "args_template", None),
                         output_mode=getattr(step, "output_mode", None),
-                        output_fields=getattr(step, "output_fields", None),
+                        output_fields=serialize_output_fields(getattr(step, "output_fields", None)),
                         include_in_summary=getattr(step, "include_in_summary", True),
                     )
                     for i, step in enumerate(s.steps)
@@ -450,7 +478,7 @@ class AssistantConfigService:
                 args_from=step.args_from,
                 args_template=step.args_template,
                 output_mode=getattr(step, "output_mode", None),
-                output_fields=getattr(step, "output_fields", None),
+                output_fields=serialize_output_fields(getattr(step, "output_fields", None)),
                 include_in_summary=step.include_in_summary if step.include_in_summary is not None else True,
                 kb_config=getattr(step, "kb_config", None),
             )
@@ -498,7 +526,7 @@ class AssistantConfigService:
                         args_from=step.args_from,
                         args_template=step.args_template,
                         output_mode=getattr(step, "output_mode", None),
-                        output_fields=getattr(step, "output_fields", None),
+                        output_fields=serialize_output_fields(getattr(step, "output_fields", None)),
                         include_in_summary=step.include_in_summary if step.include_in_summary is not None else True,
                         kb_config=getattr(step, "kb_config", None),
                     )
@@ -540,7 +568,7 @@ class AssistantConfigService:
                         args_from=step.args_from,
                         args_template=step.args_template,
                         output_mode=getattr(step, "output_mode", None),
-                        output_fields=getattr(step, "output_fields", None),
+                        output_fields=serialize_output_fields(getattr(step, "output_fields", None)),
                         include_in_summary=step.include_in_summary if step.include_in_summary is not None else True,
                         kb_config=getattr(step, "kb_config", None),
                     )
@@ -595,7 +623,7 @@ class AssistantConfigService:
                 args_from=step.args_from,
                 args_template=getattr(step, "args_template", None),
                 output_mode=getattr(step, "output_mode", None),
-                output_fields=getattr(step, "output_fields", None),
+                output_fields=serialize_output_fields(getattr(step, "output_fields", None)),
                 include_in_summary=getattr(step, "include_in_summary", True),
             )
             for i, step in enumerate(default.steps)
@@ -684,7 +712,7 @@ class AssistantConfigService:
                         args_from=step.args_from,
                         args_template=getattr(step, "args_template", None),
                         output_mode=getattr(step, "output_mode", None),
-                        output_fields=getattr(step, "output_fields", None),
+                        output_fields=serialize_output_fields(getattr(step, "output_fields", None)),
                         include_in_summary=getattr(step, "include_in_summary", True),
                     )
                     for i, step in enumerate(s.steps)
@@ -740,7 +768,7 @@ class AssistantConfigService:
                 args_from=step.args_from,
                 args_template=getattr(step, "args_template", None),
                 output_mode=getattr(step, "output_mode", None),
-                output_fields=getattr(step, "output_fields", None),
+                output_fields=serialize_output_fields(getattr(step, "output_fields", None)),
                 include_in_summary=getattr(step, "include_in_summary", True),
             )
             for i, step in enumerate(default.steps)
