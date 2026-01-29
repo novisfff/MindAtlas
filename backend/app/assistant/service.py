@@ -112,7 +112,16 @@ class AssistantService:
         tool_calls_data: list[dict] = []
         tool_results_data: list[dict] = []
         skill_calls_data: list[dict] = []
-        analysis_data: dict | None = None
+        analysis_steps: list[dict] = []
+
+        def _ensure_analysis_step(analysis_id: str) -> dict:
+            """Find or create an analysis step by id."""
+            for s in analysis_steps:
+                if s.get("id") == analysis_id:
+                    return s
+            s = {"id": analysis_id, "content": "", "status": "running"}
+            analysis_steps.append(s)
+            return s
 
         def on_tool_call_start(tool_call_id: str, name: str, args: dict, hidden: bool = False) -> None:
             tool_calls_data.append({
@@ -165,24 +174,17 @@ class AssistantService:
             }))
 
         def on_analysis_start(analysis_id: str) -> None:
-            nonlocal analysis_data
-            analysis_data = {
-                "id": analysis_id,
-                "content": "",
-                "status": "running",
-            }
+            _ensure_analysis_step(analysis_id)
             tool_events.append(self._sse("analysis_start", {"id": analysis_id}))
 
         def on_analysis_delta(analysis_id: str, delta: str) -> None:
-            nonlocal analysis_data
-            if analysis_data and analysis_data.get("id") == analysis_id:
-                analysis_data["content"] += delta
+            step = _ensure_analysis_step(analysis_id)
+            step["content"] += delta
             tool_events.append(self._sse("analysis_delta", {"id": analysis_id, "delta": delta}))
 
         def on_analysis_end(analysis_id: str) -> None:
-            nonlocal analysis_data
-            if analysis_data and analysis_data.get("id") == analysis_id:
-                analysis_data["status"] = "completed"
+            step = _ensure_analysis_step(analysis_id)
+            step["status"] = "completed"
             tool_events.append(self._sse("analysis_end", {"id": analysis_id}))
 
         try:
@@ -221,8 +223,8 @@ class AssistantService:
                 assistant_msg.tool_results = tool_results_data
             if skill_calls_data:
                 assistant_msg.skill_calls = skill_calls_data
-            if analysis_data:
-                assistant_msg.analysis = analysis_data
+            if analysis_steps:
+                assistant_msg.analysis = analysis_steps
             conversation.last_message_at = utcnow()
             self.db.commit()
 

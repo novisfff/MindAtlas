@@ -3,7 +3,12 @@ from __future__ import annotations
 
 from typing import Any, TYPE_CHECKING
 
-from app.assistant.skills.base import SkillDefinition, SkillKBConfig, SkillStep
+from app.assistant.skills.base import (
+    OutputFieldSpec,
+    SkillDefinition,
+    SkillKBConfig,
+    SkillStep,
+)
 
 if TYPE_CHECKING:
     from app.assistant_config.models import AssistantSkill
@@ -60,13 +65,28 @@ def db_skill_to_definition(skill: AssistantSkill) -> SkillDefinition:
             output_mode = None
 
         output_fields_raw = getattr(s, "output_fields", None)
-        output_fields: list[str] | None = None
+        output_fields: list[OutputFieldSpec] | list[str] | None = None
         if isinstance(output_fields_raw, list):
-            cleaned: list[str] = []
-            for v in output_fields_raw:
-                if isinstance(v, str) and v.strip():
-                    cleaned.append(v.strip())
-            output_fields = cleaned or None
+            # 检查是否为新格式（dict 列表）
+            if output_fields_raw and isinstance(output_fields_raw[0], dict):
+                # 新格式：解析为 OutputFieldSpec
+                specs: list[OutputFieldSpec] = []
+                for v in output_fields_raw:
+                    if isinstance(v, dict):
+                        try:
+                            specs.append(OutputFieldSpec(**v))
+                        except Exception:
+                            name = v.get("name", "")
+                            if isinstance(name, str) and name.strip():
+                                specs.append(OutputFieldSpec(name=name.strip()))
+                output_fields = specs or None
+            else:
+                # 旧格式：字符串列表
+                cleaned: list[str] = []
+                for v in output_fields_raw:
+                    if isinstance(v, str) and v.strip():
+                        cleaned.append(v.strip())
+                output_fields = cleaned or None
 
         include_in_summary = getattr(s, "include_in_summary", None)
         if include_in_summary is None:

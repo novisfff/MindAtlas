@@ -1,11 +1,22 @@
 import { useState, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Loader2, Check, X, Plus, Trash2, RotateCcw, MessageSquare, Wrench, Bot, ListChecks, FileText, BookOpen } from 'lucide-react'
-import type { AssistantSkill, CreateSkillRequest, UpdateSkillRequest, SkillStepInput, SkillMode, SkillKBConfig } from '../api/skills'
+import type { AssistantSkill, CreateSkillRequest, UpdateSkillRequest, SkillStepInput, SkillMode, SkillKBConfig, OutputFieldSpec, OutputFieldType } from '../api/skills'
 import type { AssistantTool, InputParam } from '../api/tools'
 import { RichMentionInput } from './RichMentionInput'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { SummaryIcon } from '@/components/icons/SummaryIcon'
+
+// Normalize outputFields to OutputFieldSpec[] format
+function normalizeOutputFields(fields: OutputFieldSpec[] | string[] | null | undefined): OutputFieldSpec[] {
+  if (!fields || fields.length === 0) return []
+  return fields.map(f => {
+    if (typeof f === 'string') {
+      return { name: f, type: 'string' as OutputFieldType, nullable: false }
+    }
+    return f as OutputFieldSpec
+  })
+}
 
 interface SkillRowProps {
   skill?: AssistantSkill
@@ -49,7 +60,7 @@ export function SkillRow({
       argsFrom: s.argsFrom || undefined,
       argsTemplate: s.argsTemplate || undefined,
       outputMode: s.outputMode || undefined,
-      outputFields: s.outputFields || undefined,
+      outputFields: normalizeOutputFields(s.outputFields),
       includeInSummary: s.includeInSummary ?? false,
     })) || [{ type: 'analysis', instruction: '' }]
   )
@@ -464,7 +475,8 @@ function StepEditor({ index, step, allSteps, availableTools, onChange, onRemove,
       const s = allSteps[i]
       if (s?.type === 'analysis' && (s.outputMode || 'text') === 'json' && Array.isArray(s.outputFields) && s.outputFields.length > 0) {
         s.outputFields.forEach((field) => {
-          const f = (field || '').trim()
+          const fieldName = typeof field === 'string' ? field : field.name
+          const f = (fieldName || '').trim()
           if (!f) return
           prev.push({
             name: `step_${i + 1}_${f}`,
@@ -620,28 +632,98 @@ function StepEditor({ index, step, allSteps, availableTools, onChange, onRemove,
                         </span>
                       </div>
 
-                      <div className="flex flex-wrap gap-2 items-center min-h-[32px]">
-                        {(step.outputFields || []).map((field, i) => (
-                          <div
-                            key={i}
-                            className="flex items-center gap-1 pl-2 pr-1 py-1 rounded bg-background border text-xs font-mono text-primary group"
-                          >
-                            <span>{field}</span>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const newFields = (step.outputFields || []).filter(
-                                  (_, idx) => idx !== i
-                                )
-                                onChange({ outputFields: newFields })
-                              }}
-                              className="p-0.5 rounded-sm opacity-50 text-muted-foreground hover:opacity-100 hover:bg-red-50 hover:text-red-500 transition-all"
+                      <div className="flex flex-col gap-2 min-h-[32px]">
+                        {(step.outputFields || []).map((field, i) => {
+                          const spec = typeof field === 'string'
+                            ? { name: field, type: 'string' as OutputFieldType, nullable: false }
+                            : field
+                          return (
+                            <div
+                              key={i}
+                              className="flex items-center gap-2 p-2 rounded bg-background border text-xs group"
                             >
-                              <X className="w-3 h-3" />
-                            </button>
-                          </div>
-                        ))}
+                              {/* Field Name */}
+                              <input
+                                type="text"
+                                value={spec.name}
+                                onChange={(e) => {
+                                  const newFields = [...(step.outputFields || [])] as OutputFieldSpec[]
+                                  newFields[i] = { ...spec, name: e.target.value }
+                                  onChange({ outputFields: newFields })
+                                }}
+                                className="w-24 px-2 py-1 rounded border bg-transparent font-mono focus:ring-1 focus:ring-primary/20"
+                                placeholder="name"
+                              />
+                              {/* Type Select */}
+                              <select
+                                value={spec.type}
+                                onChange={(e) => {
+                                  const newFields = [...(step.outputFields || [])] as OutputFieldSpec[]
+                                  const newType = e.target.value as OutputFieldType
+                                  newFields[i] = {
+                                    ...spec,
+                                    type: newType,
+                                    itemsType: newType === 'array' ? (spec.itemsType || 'string') : undefined
+                                  }
+                                  onChange({ outputFields: newFields })
+                                }}
+                                className="w-20 px-1 py-1 rounded border bg-transparent text-xs"
+                              >
+                                <option value="string">string</option>
+                                <option value="number">number</option>
+                                <option value="integer">integer</option>
+                                <option value="boolean">boolean</option>
+                                <option value="array">array</option>
+                                <option value="object">object</option>
+                              </select>
+                              {/* Items Type (for array) */}
+                              {spec.type === 'array' && (
+                                <select
+                                  value={spec.itemsType || 'string'}
+                                  onChange={(e) => {
+                                    const newFields = [...(step.outputFields || [])] as OutputFieldSpec[]
+                                    newFields[i] = { ...spec, itemsType: e.target.value as OutputFieldType }
+                                    onChange({ outputFields: newFields })
+                                  }}
+                                  className="w-20 px-1 py-1 rounded border bg-transparent text-xs"
+                                >
+                                  <option value="string">string</option>
+                                  <option value="number">number</option>
+                                  <option value="integer">integer</option>
+                                  <option value="boolean">boolean</option>
+                                  <option value="object">object</option>
+                                </select>
+                              )}
+                              {/* Nullable Toggle */}
+                              <label className="flex items-center gap-1 text-muted-foreground cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={spec.nullable}
+                                  onChange={(e) => {
+                                    const newFields = [...(step.outputFields || [])] as OutputFieldSpec[]
+                                    newFields[i] = { ...spec, nullable: e.target.checked }
+                                    onChange({ outputFields: newFields })
+                                  }}
+                                  className="w-3 h-3 rounded"
+                                />
+                                <span className="text-[10px]">null</span>
+                              </label>
+                              {/* Delete Button */}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const newFields = (step.outputFields || []).filter((_, idx) => idx !== i)
+                                  onChange({ outputFields: newFields })
+                                }}
+                                className="p-1 rounded-sm opacity-50 hover:opacity-100 hover:bg-red-50 hover:text-red-500 transition-all ml-auto"
+                              >
+                                <X className="w-3 h-3" />
+                              </button>
+                            </div>
+                          )
+                        })}
 
+                        {/* Add New Field */}
                         <div className="relative group">
                           <div className="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none">
                             <Plus className="w-3 h-3 text-muted-foreground group-focus-within:text-primary transition-colors" />
@@ -654,9 +736,17 @@ function StepEditor({ index, step, allSteps, availableTools, onChange, onRemove,
                               if (e.key === 'Enter') {
                                 e.preventDefault()
                                 const val = e.currentTarget.value.trim()
-                                if (val && !(step.outputFields || []).includes(val)) {
+                                const existingNames = (step.outputFields || []).map(f =>
+                                  typeof f === 'string' ? f : f.name
+                                )
+                                if (val && !existingNames.includes(val)) {
+                                  const newField: OutputFieldSpec = {
+                                    name: val,
+                                    type: 'string',
+                                    nullable: false
+                                  }
                                   onChange({
-                                    outputFields: [...(step.outputFields || []), val],
+                                    outputFields: [...(step.outputFields || []), newField] as OutputFieldSpec[],
                                   })
                                   e.currentTarget.value = ''
                                 }

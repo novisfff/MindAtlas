@@ -4,6 +4,18 @@ export interface SkillKBConfig {
   enabled?: boolean
 }
 
+// Output field type options
+export type OutputFieldType = 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array'
+
+// Output field specification for JSON mode
+export interface OutputFieldSpec {
+  name: string
+  type: OutputFieldType
+  nullable: boolean
+  itemsType?: OutputFieldType
+  enum?: string[]
+}
+
 export interface SkillStep {
   id: string
   stepOrder: number
@@ -13,7 +25,7 @@ export interface SkillStep {
   argsFrom: 'context' | 'previous' | 'custom' | 'json' | null
   argsTemplate: string | null
   outputMode: 'text' | 'json' | null
-  outputFields: string[] | null
+  outputFields: OutputFieldSpec[] | string[] | null
   includeInSummary: boolean | null
   createdAt: string
   updatedAt: string
@@ -44,7 +56,7 @@ export interface SkillStepInput {
   argsFrom?: 'context' | 'previous' | 'custom' | 'json'
   argsTemplate?: string
   outputMode?: 'text' | 'json'
-  outputFields?: string[]
+  outputFields?: OutputFieldSpec[]
   includeInSummary?: boolean
 }
 

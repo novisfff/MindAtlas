@@ -13,6 +13,7 @@ from langchain_core.tools import tool
 from app.common.color_utils import pick_material_600_color
 from app.entry.models import Entry, TimeMode
 from app.entry_type.models import EntryType
+from app.lightrag.models import EntryIndexOutbox
 from app.tag.models import Tag
 
 logger = logging.getLogger(__name__)
@@ -383,6 +384,16 @@ def create_entry(
     )
     entry.tags = tag_objects
     db.add(entry)
+    db.flush()  # Ensure entry.id / updated_at are available in the same transaction
+
+    # Add to outbox for LightRAG indexing (same as manual creation)
+    db.add(EntryIndexOutbox(
+        entry_id=entry.id,
+        op="upsert",
+        entry_updated_at=entry.updated_at,
+        status="pending",
+    ))
+
     db.commit()
     db.refresh(entry)
 
