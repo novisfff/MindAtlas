@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import ApiException
 from app.entry_type.models import EntryType
-from app.entry_type.schemas import EntryTypeRequest
+from app.entry_type.schemas import EntryTypeRequest, EntryTypeUpdateRequest
 
 
 class EntryTypeService:
@@ -55,27 +55,33 @@ class EntryTypeService:
         self.db.refresh(entry_type)
         return entry_type
 
-    def update(self, id: UUID, request: EntryTypeRequest) -> EntryType:
+    def update(self, id: UUID, request: EntryTypeUpdateRequest) -> EntryType:
         entry_type = self.find_by_id(id)
 
-        # Check if code is being changed and if new code already exists
-        if entry_type.code != request.code:
+        if "code" in request.model_fields_set and request.code is not None and entry_type.code != request.code:
             existing = self.db.query(EntryType).filter(EntryType.code == request.code).first()
             if existing:
                 raise ApiException(
                     status_code=400,
                     code=40001,
-                    message=f"EntryType code already exists: {request.code}"
+                    message=f"EntryType code already exists: {request.code}",
                 )
+            entry_type.code = request.code
 
-        entry_type.code = request.code
-        entry_type.name = request.name
-        entry_type.description = request.description
-        entry_type.color = request.color
-        entry_type.icon = request.icon
-        entry_type.graph_enabled = request.graph_enabled
-        entry_type.ai_enabled = request.ai_enabled
-        entry_type.enabled = request.enabled
+        if "name" in request.model_fields_set and request.name is not None:
+            entry_type.name = request.name
+        if "description" in request.model_fields_set:
+            entry_type.description = request.description
+        if "color" in request.model_fields_set:
+            entry_type.color = request.color
+        if "icon" in request.model_fields_set:
+            entry_type.icon = request.icon
+        if "graph_enabled" in request.model_fields_set and request.graph_enabled is not None:
+            entry_type.graph_enabled = request.graph_enabled
+        if "ai_enabled" in request.model_fields_set and request.ai_enabled is not None:
+            entry_type.ai_enabled = request.ai_enabled
+        if "enabled" in request.model_fields_set and request.enabled is not None:
+            entry_type.enabled = request.enabled
 
         self.db.commit()
         self.db.refresh(entry_type)

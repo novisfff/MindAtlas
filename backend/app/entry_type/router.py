@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.common.responses import ApiResponse
 from app.database import get_db
-from app.entry_type.schemas import EntryTypeRequest, EntryTypeResponse
+from app.entry_type.schemas import EntryTypeRequest, EntryTypeResponse, EntryTypeUpdateRequest
 from app.entry_type.service import EntryTypeService
 
 router = APIRouter(prefix="/api/entry-types", tags=["entry-types"])
@@ -35,7 +35,7 @@ def create_entry_type(request: EntryTypeRequest, db: Session = Depends(get_db)) 
 
 
 @router.put("/{id}", response_model=ApiResponse)
-def update_entry_type(id: UUID, request: EntryTypeRequest, db: Session = Depends(get_db)) -> ApiResponse:
+def update_entry_type(id: UUID, request: EntryTypeUpdateRequest, db: Session = Depends(get_db)) -> ApiResponse:
     service = EntryTypeService(db)
     entry_type = service.update(id, request)
     return ApiResponse.ok(EntryTypeResponse.model_validate(entry_type).model_dump(by_alias=True))

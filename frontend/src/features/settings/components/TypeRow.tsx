@@ -3,6 +3,7 @@ import { Check, X, Pencil, Trash2 } from 'lucide-react'
 import type { EntryType } from '@/types'
 import { cn } from '@/lib/utils'
 import { useTranslation } from 'react-i18next'
+import { getRandomColor } from '@/lib/colors'
 
 interface TypeRowProps {
   type?: EntryType
@@ -18,7 +19,7 @@ interface TypeRowProps {
 export function TypeRow({ type, isEditing, isNew, onEdit, onCancel, onSave, onDelete, isSaving }: TypeRowProps) {
   const [code, setCode] = useState(type?.code || '')
   const [name, setName] = useState(type?.name || '')
-  const [color, setColor] = useState(type?.color || '#6B7280')
+  const [color, setColor] = useState(() => type?.color || (isNew ? getRandomColor() : '#6B7280'))
   const { t } = useTranslation()
 
   if (isEditing || isNew) {

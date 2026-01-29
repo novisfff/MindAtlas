@@ -7,6 +7,7 @@ from sqlalchemy import delete
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.common.color_utils import is_valid_hex_color, pick_material_600_color
 from app.common.exceptions import ApiException
 from app.entry.models import entry_tag
 from app.tag.models import Tag
@@ -39,9 +40,14 @@ class TagService:
                 message=f"Tag name already exists: {request.name}"
             )
 
+        # Fallback color if not provided or invalid
+        color = request.color
+        if not is_valid_hex_color(color):
+            color = pick_material_600_color(request.name)
+
         tag = Tag(
             name=request.name,
-            color=request.color,
+            color=color,
             description=request.description,
         )
         self.db.add(tag)
