@@ -56,6 +56,7 @@ class EntryTypeServiceTests(unittest.TestCase):
 
     def test_create_and_update_code_uniqueness(self) -> None:
         from app.entry_type.schemas import EntryTypeRequest  # noqa: E402
+        from app.entry_type.schemas import EntryTypeUpdateRequest  # noqa: E402
         from app.entry_type.service import EntryTypeService  # noqa: E402
 
         svc = EntryTypeService(self.db)
@@ -104,34 +105,52 @@ class EntryTypeServiceTests(unittest.TestCase):
         with self.assertRaises(ApiException) as ctx2:
             svc.update(
                 t2.id,
-                EntryTypeRequest(
-                    code="knowledge",
-                    name="Project",
-                    description=None,
-                    color=None,
-                    icon=None,
-                    graph_enabled=True,
-                    ai_enabled=True,
-                    enabled=True,
-                ),
+                EntryTypeUpdateRequest(code="knowledge"),
             )
         self.assertEqual(ctx2.exception.status_code, 400)
         self.assertEqual(ctx2.exception.code, 40001)
 
         updated = svc.update(
             t1.id,
-            EntryTypeRequest(
-                code="knowledge",
-                name="Knowledge2",
-                description=None,
-                color=None,
-                icon=None,
-                graph_enabled=True,
-                ai_enabled=True,
-                enabled=True,
-            ),
+            EntryTypeUpdateRequest(name="Knowledge2"),
         )
         self.assertEqual(updated.name, "Knowledge2")
+
+    def test_update_partial_does_not_require_code_or_override_flags(self) -> None:
+        from app.entry_type.schemas import EntryTypeRequest  # noqa: E402
+        from app.entry_type.schemas import EntryTypeUpdateRequest  # noqa: E402
+        from app.entry_type.service import EntryTypeService  # noqa: E402
+
+        svc = EntryTypeService(self.db)
+        created = svc.create(
+            EntryTypeRequest(
+                code="knowledge",
+                name="Knowledge",
+                description="desc",
+                color="#111111",
+                icon=None,
+                graph_enabled=False,
+                ai_enabled=False,
+                enabled=True,
+            )
+        )
+
+        updated = svc.update(
+            created.id,
+            EntryTypeUpdateRequest(name="Knowledge2", color="#222222"),
+        )
+        self.assertEqual(updated.code, "knowledge")
+        self.assertEqual(updated.name, "Knowledge2")
+        self.assertEqual(updated.color, "#222222")
+        self.assertEqual(updated.graph_enabled, False)
+        self.assertEqual(updated.ai_enabled, False)
+        self.assertEqual(updated.enabled, True)
+
+        cleared = svc.update(
+            created.id,
+            EntryTypeUpdateRequest(description=None),
+        )
+        self.assertIsNone(cleared.description)
 
     def test_delete_referenced_by_entry_raises_409(self) -> None:
         from datetime import datetime, timezone

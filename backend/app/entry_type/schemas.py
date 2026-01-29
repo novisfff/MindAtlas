@@ -24,6 +24,17 @@ class EntryTypeRequest(EntryTypeBase):
     pass
 
 
+class EntryTypeUpdateRequest(CamelModel):
+    code: str | None = Field(default=None, min_length=1, max_length=64)
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+    color: str | None = Field(default=None, max_length=32)
+    icon: str | None = Field(default=None, max_length=64)
+    graph_enabled: bool | None = None
+    ai_enabled: bool | None = None
+    enabled: bool | None = None
+
+
 class EntryTypeResponse(OrmModel, EntryTypeBase):
     id: UUID
     created_at: datetime
