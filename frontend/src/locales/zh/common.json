@@ -4,7 +4,7 @@
     "assistant": "AI 助手",
     "entries": "记录",
     "graph": "图谱",
-    "timeline": "时间轴",
+    "calendar": "日历",
     "settings": "设置"
   },
   "common": {
@@ -464,6 +464,27 @@
     "noEntries": "暂无时间轴记录",
     "createPrompt": "创建包含时间信息的记录以在此显示",
     "createAction": "创建记录"
+  },
+  "calendar": {
+    "today": "今天",
+    "prev": "上一个",
+    "next": "下一个",
+    "view": {
+      "month": "月",
+      "week": "周",
+      "day": "日"
+    },
+    "weekday": {
+      "mon": "一",
+      "tue": "二",
+      "wed": "三",
+      "thu": "四",
+      "fri": "五",
+      "sat": "六",
+      "sun": "日"
+    },
+    "noEntries": "该日期暂无记录",
+    "moreEvents": "还有 {{count}} 项"
   },
   "relations": {
     "suggestions": {

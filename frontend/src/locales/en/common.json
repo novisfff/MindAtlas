@@ -4,7 +4,7 @@
     "assistant": "AI Assistant",
     "entries": "Entries",
     "graph": "Graph",
-    "timeline": "Timeline",
+    "calendar": "Calendar",
     "settings": "Settings"
   },
   "common": {
@@ -466,6 +466,27 @@
     "noEntries": "No timeline entries yet",
     "createPrompt": "Create entries with time information to see them here",
     "createAction": "Create Entry"
+  },
+  "calendar": {
+    "today": "Today",
+    "prev": "Previous",
+    "next": "Next",
+    "view": {
+      "month": "Month",
+      "week": "Week",
+      "day": "Day"
+    },
+    "weekday": {
+      "mon": "Mon",
+      "tue": "Tue",
+      "wed": "Wed",
+      "thu": "Thu",
+      "fri": "Fri",
+      "sat": "Sat",
+      "sun": "Sun"
+    },
+    "noEntries": "No entries for this date",
+    "moreEvents": "+{{count}} more"
   },
   "relations": {
     "suggestions": {

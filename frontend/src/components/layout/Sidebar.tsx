@@ -3,7 +3,7 @@ import {
   LayoutDashboard,
   FileText,
   Network,
-  Clock,
+  Calendar,
   Settings,
   ChevronLeft,
 
@@ -19,7 +19,7 @@ const navItems = [
   { icon: Sparkles, labelKey: 'navigation.assistant', href: '/assistant' },
   { icon: FileText, labelKey: 'navigation.entries', href: '/entries' },
   { icon: Network, labelKey: 'navigation.graph', href: '/graph' },
-  { icon: Clock, labelKey: 'navigation.timeline', href: '/timeline' },
+  { icon: Calendar, labelKey: 'navigation.calendar', href: '/calendar' },
   { icon: Settings, labelKey: 'navigation.settings', href: '/settings' },
 ]
 

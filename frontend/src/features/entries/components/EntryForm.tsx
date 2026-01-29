@@ -14,11 +14,12 @@ import { getColorByName } from '@/lib/colors'
 
 interface EntryFormProps {
   entry?: Entry
+  defaultDate?: string
   onSubmit: (data: EntryUpsertRequest) => Promise<void>
   isSubmitting?: boolean
 }
 
-export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
+export function EntryForm({ entry, defaultDate, onSubmit, isSubmitting }: EntryFormProps) {
   const navigate = useNavigate()
   const { t } = useTranslation()
   const { data: entryTypes = [], isLoading: typesLoading } = useEntryTypesQuery()
@@ -31,8 +32,8 @@ export function EntryForm({ entry, onSubmit, isSubmitting }: EntryFormProps) {
   const [content, setContent] = useState(entry?.content ?? '')
   const [typeId, setTypeId] = useState(entry?.type?.id ?? '')
   const [timeMode, setTimeMode] = useState<EntryTimeMode>((entry?.timeMode && entry.timeMode !== 'NONE') ? entry.timeMode : 'POINT')
-  const [timeAt, setTimeAt] = useState(entry?.timeAt?.split('T')[0] ?? new Date().toISOString().split('T')[0])
-  const [timeFrom, setTimeFrom] = useState(entry?.timeFrom?.split('T')[0] ?? '')
+  const [timeAt, setTimeAt] = useState(entry?.timeAt?.split('T')[0] ?? defaultDate ?? new Date().toISOString().split('T')[0])
+  const [timeFrom, setTimeFrom] = useState(entry?.timeFrom?.split('T')[0] ?? defaultDate ?? '')
   const [timeTo, setTimeTo] = useState(entry?.timeTo?.split('T')[0] ?? '')
   const [tagIds, setTagIds] = useState<string[]>(entry?.tags?.map(t => t.id) ?? [])
 
