@@ -5,7 +5,6 @@ import json
 import logging
 from datetime import date
 
-from langchain_openai import ChatOpenAI
 from sqlalchemy.orm import Session
 
 from app.assistant.skills.base import SkillDefinition, DEFAULT_SKILL_NAME, is_default_skill
@@ -26,8 +25,9 @@ ROUTER_PROMPT = """你是一个意图分类器，判断用户输入需要使用�
 ## 重要规则
 - **每次只返回一个 Skill**，不要返回多个
 - 优先选择最匹配用户意图的单个 Skill
-- **闲聊、问候、简单问答** → 返回空列表 `{{"skills": []}}`
-- 如果不确定，返回空列表让 AI 直接回复
+- 只有当用户意图与某个 Skill 的描述/示例**一致**时，才选择该 Skill
+- **闲聊、问候、知识问答、写作润色、翻译、泛化的“总结/介绍/分析”** → 返回 `{{"skills": ["{default_skill_name}"]}}`
+- 如果不确定，返回 `{{"skills": ["{default_skill_name}"]}}`
 
 ## 输出格式
 
@@ -35,7 +35,8 @@ ROUTER_PROMPT = """你是一个意图分类器，判断用户输入需要使用�
 {{"skills": ["skill_name"]}}
 
 不需要 Skill 时：
-{{"skills": []}}
+{{"skills": ["{default_skill_name}"]}}
+
 """
 
 
@@ -85,6 +86,9 @@ class SkillRouter:
     """Skill 路由器"""
 
     def __init__(self, api_key: str, base_url: str, model: str, db: Session | None = None):
+        # Optional dependency (tests may not install LangChain)
+        from langchain_openai import ChatOpenAI  # type: ignore
+
         self.llm = ChatOpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -139,6 +143,7 @@ class SkillRouter:
         prompt = ROUTER_PROMPT.format(
             skills_list=_build_skills_list(candidate_skills),
             current_date=date.today().isoformat(),
+            default_skill_name=DEFAULT_SKILL_NAME,
         )
 
         messages = [
@@ -156,10 +161,14 @@ class SkillRouter:
 
             # 验证 Skill 存在，只取第一个有效的（仅在候选列表中）
             valid_names = {s.name for s in candidate_skills}
-            for s in skills:
-                if s in valid_names:
-                    logger.info("Routed to skill: %s", s)
-                    return [s]  # 只返回一个 Skill
+            if isinstance(skills, list):
+                for s in skills:
+                    if s == DEFAULT_SKILL_NAME and default_available:
+                        logger.info("Routed to default skill: %s", s)
+                        return [DEFAULT_SKILL_NAME]
+                    if s in valid_names:
+                        logger.info("Routed to skill: %s", s)
+                        return [s]  # 只返回一个 Skill
 
             # 无匹配时 fallback 到默认 skill
             logger.debug("No valid skill found")
