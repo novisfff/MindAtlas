@@ -471,6 +471,8 @@
     "today": "Today",
     "prev": "Previous",
     "next": "Next",
+    "prevYear": "Previous year",
+    "nextYear": "Next year",
     "view": {
       "month": "Month",
       "week": "Week",

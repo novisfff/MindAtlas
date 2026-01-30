@@ -32,6 +32,7 @@ export function useCalendarEntriesQuery(params: CalendarEntriesParams) {
 
 interface PatchEntryTimeParams {
   id: string
+  timeMode?: 'NONE' | 'POINT' | 'RANGE'
   timeAt?: string
   timeFrom?: string
   timeTo?: string
@@ -59,6 +60,7 @@ export function usePatchEntryTimeMutation() {
             if (entry.id !== params.id) return entry
             return {
               ...entry,
+              timeMode: params.timeMode ?? entry.timeMode,
               timeAt: params.timeAt ?? entry.timeAt,
               timeFrom: params.timeFrom ?? entry.timeFrom,
               timeTo: params.timeTo ?? entry.timeTo,

@@ -7,6 +7,7 @@ interface MultiDayEventProps {
   span: number
   isStart?: boolean
   isEnd?: boolean
+  onClick?: () => void
 }
 
 export function MultiDayEvent({
@@ -14,14 +15,14 @@ export function MultiDayEvent({
   span,
   isStart = true,
   isEnd = true,
+  onClick,
 }: MultiDayEventProps) {
   const bgColor = entry.type.color || '#6B7280'
 
   return (
-    <Link
-      to={`/entries/${entry.id}`}
+    <div
       className={cn(
-        'block h-5 text-xs text-white truncate px-1.5 leading-5',
+        'block h-5 text-xs text-white truncate px-1.5 leading-5 cursor-pointer',
         'hover:opacity-80 transition-opacity',
         isStart && 'rounded-l',
         isEnd && 'rounded-r'
@@ -31,8 +32,12 @@ export function MultiDayEvent({
         gridColumn: `span ${span}`,
       }}
       title={entry.title}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick?.()
+      }}
     >
       {isStart && entry.title}
-    </Link>
+    </div>
   )
 }

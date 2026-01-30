@@ -61,7 +61,7 @@ export function assignRows(entries: Entry[], weekStart: Date): LayoutEntry[] {
   const result: LayoutEntry[] = []
   const rowOccupied: boolean[][] = []
 
-  const multiDayEntries = entries
+  const sortedEntries = entries
     .filter((entry) => {
       const range = getEntryDateRange(entry)
       if (!range) return false
@@ -77,7 +77,7 @@ export function assignRows(entries: Entry[], weekStart: Date): LayoutEntry[] {
       return durationB - durationA
     })
 
-  for (const entry of multiDayEntries) {
+  for (const entry of sortedEntries) {
     const range = getEntryDateRange(entry)!
     const clampedStart = isBefore(range.start, weekStartDay) ? weekStartDay : range.start
     const clampedEnd = isAfter(range.end, weekEndDay) ? weekEndDay : range.end

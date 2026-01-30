@@ -469,6 +469,8 @@
     "today": "今天",
     "prev": "上一个",
     "next": "下一个",
+    "prevYear": "上一年",
+    "nextYear": "下一年",
     "view": {
       "month": "月",
       "week": "周",

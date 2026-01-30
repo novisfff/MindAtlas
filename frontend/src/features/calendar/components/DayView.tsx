@@ -11,16 +11,20 @@ interface DayViewProps {
   currentDate: Date
   entries: Entry[]
   onDateDoubleClick?: (date: Date) => void
+  onEntryClick?: (entry: Entry) => void
 }
 
-export function DayView({ currentDate, entries, onDateDoubleClick }: DayViewProps) {
-  const { i18n } = useTranslation()
+export function DayView({ currentDate, entries, onDateDoubleClick, onEntryClick }: DayViewProps) {
+  const { t, i18n } = useTranslation()
   const locale = i18n.language === 'zh' ? zhCN : enUS
   const dayEntries = getEntriesForDate(entries, currentDate)
 
   return (
     <div className="flex flex-col h-full p-4">
       <div className="text-center mb-4">
+        <div className="text-xs text-muted-foreground mb-1">
+          {format(currentDate, 'MMM', { locale })}
+        </div>
         <div
           className={cn(
             'w-12 h-12 mx-auto flex items-center justify-center rounded-full text-xl',
@@ -39,11 +43,15 @@ export function DayView({ currentDate, entries, onDateDoubleClick }: DayViewProp
       >
         {dayEntries.length === 0 ? (
           <div className="text-center text-muted-foreground py-8">
-            No entries for this day
+            {t('calendar.noEntries')}
           </div>
         ) : (
           dayEntries.map((entry) => (
-            <CalendarEvent key={entry.id} entry={entry} />
+            <CalendarEvent
+              key={entry.id}
+              entry={entry}
+              onClick={() => onEntryClick?.(entry)}
+            />
           ))
         )}
       </div>

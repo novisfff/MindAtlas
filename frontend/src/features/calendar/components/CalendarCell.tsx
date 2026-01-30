@@ -1,34 +1,33 @@
 import { format } from 'date-fns'
 import { useDroppable } from '@dnd-kit/core'
+import { Plus } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { CalendarEvent } from './CalendarEvent'
-import { MoreEventsPopover } from './MoreEventsPopover'
-import type { Entry } from '@/types'
 
 const MAX_VISIBLE_ENTRIES = 3
 
 interface CalendarCellProps {
   date: Date
-  entries: Entry[]
   isToday: boolean
   isCurrentMonth: boolean
   onClick: () => void
   onDoubleClick?: () => void
+  onQuickCreate?: () => void
+  children?: React.ReactNode
 }
 
 export function CalendarCell({
   date,
-  entries,
   isToday,
   isCurrentMonth,
   onClick,
   onDoubleClick,
+  onQuickCreate,
+  children,
 }: CalendarCellProps) {
   const dateId = format(date, 'yyyy-MM-dd')
   const { setNodeRef, isOver } = useDroppable({ id: dateId })
 
-  const visibleEntries = entries.slice(0, MAX_VISIBLE_ENTRIES)
-  const hiddenEntries = entries.slice(MAX_VISIBLE_ENTRIES)
+
 
   return (
     <div
@@ -36,12 +35,30 @@ export function CalendarCell({
       onClick={onClick}
       onDoubleClick={onDoubleClick}
       className={cn(
-        'min-h-[100px] p-1 border-b border-r cursor-pointer',
+        'group relative min-h-[100px] p-1 border-b border-r cursor-pointer',
         'hover:bg-muted/50 transition-colors',
         !isCurrentMonth && 'bg-muted/30',
         isOver && 'bg-primary/10'
       )}
     >
+      <button
+        type="button"
+        aria-label="Create entry"
+        className={cn(
+          'absolute right-1 top-1 z-10',
+          'inline-flex h-6 w-6 items-center justify-center rounded-md',
+          'opacity-0 group-hover:opacity-100 transition-opacity',
+          'text-muted-foreground hover:text-foreground',
+          'hover:bg-muted'
+        )}
+        onClick={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          onQuickCreate?.()
+        }}
+      >
+        <Plus className="h-4 w-4" />
+      </button>
       <div
         className={cn(
           'w-7 h-7 flex items-center justify-center rounded-full text-sm',
@@ -52,16 +69,10 @@ export function CalendarCell({
         {format(date, 'd')}
       </div>
       <div className="mt-1 space-y-0.5">
-        {visibleEntries.map((entry) => (
-          <CalendarEvent key={entry.id} entry={entry} />
-        ))}
-        {hiddenEntries.length > 0 && (
-          <MoreEventsPopover
-            entries={entries}
-            date={date}
-            visibleCount={MAX_VISIBLE_ENTRIES}
-          />
-        )}
+        <div className="mt-1 space-y-0.5">
+          {/* Events are now rendered by the parent MonthView */}
+          {children}
+        </div>
       </div>
     </div>
   )
