@@ -51,6 +51,7 @@ docker compose up -d
 |------|------|
 | 前端应用 | http://localhost:3000 |
 | MinIO 控制台 | http://localhost:9001 |
+| Neo4j Browser（LightRAG） | http://localhost:7474 |
 
 ## 服务架构
 
@@ -61,7 +62,17 @@ docker compose up -d
 │  │ frontend │  │ backend  │  │    db    │  │  minio  │ │
 │  │ (nginx)  │──│ (uvicorn)│──│(postgres)│  │         │ │
 │  │  :80     │  │  :8000   │  │  :5432   │  │ :9000/1 │ │
-│  └──────────┘  └──────────┘  └──────────┘  └─────────┘ │
+│  └──────────┘  └─────┬────┘  └──────────┘  └─────────┘ │
+│                      │                                  │
+│                 ┌────▼─────┐                            │
+│                 │  neo4j   │                            │
+│                 │:7474/7687│                            │
+│                 └────┬─────┘                            │
+│                      │                                  │
+│                 ┌────▼─────┐                            │
+│                 │  worker  │                            │
+│                 │ (index)  │                            │
+│                 └──────────┘                            │
 └─────────────────────────────────────────────────────────┘
         │                                         │
         ▼                                         ▼
@@ -80,6 +91,10 @@ docker compose up -d
 | `MINIO_ACCESS_KEY` | MinIO 访问密钥 | minioadmin |
 | `MINIO_SECRET_KEY` | MinIO 密钥 | minioadmin |
 | `MINIO_BUCKET` | MinIO 桶名称 | mindatlas |
+| `NEO4J_USER` | Neo4j 用户名 | neo4j |
+| `NEO4J_PASSWORD` | Neo4j 密码 | password |
+| `NEO4J_HTTP_PORT` | Neo4j HTTP 端口 | 7474 |
+| `NEO4J_BOLT_PORT` | Neo4j Bolt 端口 | 7687 |
 | `FRONTEND_PORT` | 前端访问端口 | 3000 |
 
 ### `backend.env`（后端应用）
@@ -87,9 +102,9 @@ docker compose up -d
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `CORS_ORIGINS` | 允许跨域的来源（逗号分隔） | `http://localhost:3000` |
-| `AI_API_KEY` | AI API Key（OpenAI 兼容） | - |
+| `AI_API_KEY` | AI API Key（OpenAI 兼容；LightRAG 需要） | - |
 | `AI_PROVIDER_FERNET_KEY` | 用于加密存储在 DB 的 API Key | - |
-| `LIGHTRAG_ENABLED` | 是否开启 LightRAG | false |
+| `LIGHTRAG_ENABLED` | 是否开启 LightRAG | true |
 | `LIGHTRAG_LLM_MODEL` | LightRAG LLM 模型 | `gpt-4o-mini` |
 | `LIGHTRAG_EMBEDDING_MODEL` | Embedding 模型 | `text-embedding-3-small` |
 
