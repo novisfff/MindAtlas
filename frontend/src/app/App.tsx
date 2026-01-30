@@ -4,7 +4,7 @@ import { AppLayout } from '@/components/layout'
 import { EntriesPage, EntryDetailPage, EntryNewPage, EntryEditPage } from '@/features/entries'
 import { GraphPage } from '@/features/graph'
 import { DashboardPage } from '@/features/dashboard'
-import { TimelinePage } from '@/features/timeline'
+import { CalendarPage } from '@/features/calendar'
 import { SettingsPage, EntryTypeSettings, TagSettings } from '@/features/settings'
 import { AiProviderSettings } from '@/features/ai-providers'
 import { AssistantPage } from '@/features/assistant'
@@ -23,7 +23,7 @@ export default function App() {
             <Route path="/entries/:id" element={<EntryDetailPage />} />
             <Route path="/entries/:id/edit" element={<EntryEditPage />} />
             <Route path="/graph" element={<GraphPage />} />
-            <Route path="/timeline" element={<TimelinePage />} />
+            <Route path="/calendar" element={<CalendarPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/settings/entry-types" element={<EntryTypeSettings />} />
             <Route path="/settings/tags" element={<TagSettings />} />

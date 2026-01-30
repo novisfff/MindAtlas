@@ -60,3 +60,32 @@ class EntrySearchRequest(CamelModel):
     time_to: Optional[datetime] = None
     page: int = Field(default=0, ge=0)
     size: int = Field(default=20, ge=1, le=100)
+
+
+class EntryTimePatch(CamelModel):
+    time_mode: Optional[TimeMode] = None
+    time_at: Optional[datetime] = None
+    time_from: Optional[datetime] = None
+    time_to: Optional[datetime] = None
+
+    @model_validator(mode='after')
+    def validate_time_fields(self) -> 'EntryTimePatch':
+        has_any = any([
+            self.time_mode is not None,
+            self.time_at is not None,
+            self.time_from is not None,
+            self.time_to is not None,
+        ])
+        if not has_any:
+            raise ValueError('At least one time field must be provided')
+
+        if self.time_mode == TimeMode.POINT and self.time_at is None:
+            raise ValueError('time_at required when time_mode is POINT')
+
+        if self.time_mode == TimeMode.RANGE:
+            if self.time_from is None or self.time_to is None:
+                raise ValueError('time_from and time_to required when time_mode is RANGE')
+            if self.time_from > self.time_to:
+                raise ValueError('time_from must be <= time_to')
+
+        return self

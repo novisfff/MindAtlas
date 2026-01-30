@@ -11,7 +11,7 @@ from app.attachment.models import Attachment
 from app.common.exceptions import ApiException
 from app.common.storage import get_minio_client, remove_object_safe, StorageError
 from app.entry.models import Entry, TimeMode
-from app.entry.schemas import EntryRequest, EntrySearchRequest
+from app.entry.schemas import EntryRequest, EntrySearchRequest, EntryTimePatch
 from app.entry_type.service import EntryTypeService
 from app.relation.models import Relation
 from app.tag.models import Tag
@@ -217,3 +217,37 @@ class EntryService:
                 code=40900,
                 message="Entry is referenced by other resources; delete them first",
             ) from exc
+
+    def patch_time(self, id: UUID, request: EntryTimePatch) -> Entry:
+        entry = self.find_by_id(id)
+
+        if request.time_mode is not None:
+            entry.time_mode = request.time_mode
+        if request.time_at is not None:
+            entry.time_at = request.time_at
+        if request.time_from is not None:
+            entry.time_from = request.time_from
+        if request.time_to is not None:
+            entry.time_to = request.time_to
+
+        # Validate consistency
+        if entry.time_mode == TimeMode.POINT and entry.time_at is None:
+            raise ApiException(status_code=400, code=40002, message="time_at required for POINT mode")
+        if entry.time_mode == TimeMode.RANGE:
+            if entry.time_from is None or entry.time_to is None:
+                raise ApiException(status_code=400, code=40002, message="time_from and time_to required for RANGE mode")
+            if entry.time_from > entry.time_to:
+                raise ApiException(status_code=400, code=40002, message="time_from must be <= time_to")
+
+        self.db.flush()
+        self.db.add(
+            EntryIndexOutbox(
+                entry_id=entry.id,
+                op="upsert",
+                entry_updated_at=entry.updated_at,
+                status="pending",
+            )
+        )
+        self.db.commit()
+        self.db.refresh(entry)
+        return entry

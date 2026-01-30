@@ -10,7 +10,7 @@ from app.common.params import parse_uuid_csv
 from app.common.exceptions import ApiException
 from app.common.responses import ApiResponse
 from app.database import get_db
-from app.entry.schemas import EntryRequest, EntryResponse, EntrySearchRequest
+from app.entry.schemas import EntryRequest, EntryResponse, EntrySearchRequest, EntryTimePatch
 from app.entry.service import EntryService
 
 router = APIRouter(prefix="/api/entries", tags=["entries"])
@@ -95,3 +95,10 @@ def delete_entry(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
     service = EntryService(db)
     service.delete(id)
     return ApiResponse.ok(None, "Entry deleted successfully")
+
+
+@router.patch("/{id}/time", response_model=ApiResponse)
+def patch_entry_time(id: UUID, request: EntryTimePatch, db: Session = Depends(get_db)) -> ApiResponse:
+    service = EntryService(db)
+    entry = service.patch_time(id, request)
+    return ApiResponse.ok(EntryResponse.model_validate(entry).model_dump(by_alias=True))
