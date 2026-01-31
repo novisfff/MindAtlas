@@ -1,18 +1,16 @@
-import { Loader2, FileText, Tags, GitFork } from 'lucide-react'
+import { Loader2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { useDashboardStatsQuery } from './queries'
 import { useEntriesQuery } from '@/features/entries/queries'
-import { StatsCard } from './components/StatsCard'
 import { RecentEntries } from './components/RecentEntries'
-import { TypeDistribution } from './components/TypeDistribution'
 import { QuickActions } from './components/QuickActions'
+import { AIReportsContainer } from './components/AIReportsContainer'
+import { KeyMetricsCard } from './components/KeyMetricsCard'
+import { MiniCalendar } from './components/MiniCalendar'
+import { TypeTagHotness } from './components/TypeTagHotness'
 
 export function DashboardPage() {
   const { t } = useTranslation()
-  const { data: stats, isLoading: statsLoading } = useDashboardStatsQuery()
   const { data: entriesPage, isLoading: entriesLoading } = useEntriesQuery({ size: 5 })
-
-  const isLoading = statsLoading || entriesLoading
 
   const getGreeting = () => {
     const hour = new Date().getHours()
@@ -21,7 +19,7 @@ export function DashboardPage() {
     return t('greetings.evening')
   }
 
-  if (isLoading) {
+  if (entriesLoading) {
     return (
       <div className="flex items-center justify-center h-[calc(100vh-4rem)]">
         <Loader2 className="w-8 h-8 animate-spin text-primary" />
@@ -32,51 +30,34 @@ export function DashboardPage() {
   const recentEntries = entriesPage?.content ?? []
 
   return (
-    <div className="max-w-7xl mx-auto space-y-8 p-1">
-      <div className="flex flex-col gap-2">
-        <h1 className="text-3xl font-bold tracking-tight bg-gradient-to-r from-foreground to-foreground/60 bg-clip-text text-transparent">
-          {t('greetings.welcome', { greeting: getGreeting() })}
-        </h1>
-        <p className="text-muted-foreground">
-          {t('pages.dashboard.subtitle')}
-        </p>
-      </div>
-
-      {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <StatsCard
-          title={t('pages.dashboard.totalEntries')}
-          value={stats?.totalEntries ?? 0}
-          icon={FileText}
-          color="#3B82F6"
-          description={t('pages.dashboard.allTimeEntries')}
-        />
-        <StatsCard
-          title={t('pages.dashboard.tagsUsed')}
-          value={stats?.totalTags ?? 0}
-          icon={Tags}
-          color="#10B981"
-          description={t('pages.dashboard.categoriesDefined')}
-        />
-        <StatsCard
-          title={t('pages.dashboard.activeRelations')}
-          value={stats?.totalRelations ?? 0}
-          icon={GitFork}
-          color="#8B5CF6"
-          description={t('pages.dashboard.connectionsMade')}
-        />
-      </div>
-
-      {/* Main Content */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        <div className="lg:col-span-2 min-h-[400px]">
-          <RecentEntries entries={recentEntries} />
+    <div className="max-w-7xl mx-auto space-y-6 p-1">
+      {/* Header with Greeting and Quick Actions */}
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">
+            {t('greetings.welcome', { greeting: getGreeting() })}
+          </h1>
+          <p className="text-sm text-muted-foreground">
+            {t('pages.dashboard.subtitle')}
+          </p>
         </div>
-        <div className="space-y-8">
-          <QuickActions />
-          <div className="min-h-[300px]">
-            <TypeDistribution data={stats?.entriesByType ?? []} />
-          </div>
+        <QuickActions />
+      </div>
+
+      {/* Row 1: Key Metrics | Recent Entries | Mini Calendar */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_272px] lg:auto-rows-[280px] gap-4">
+        <KeyMetricsCard />
+        <RecentEntries entries={recentEntries} />
+        <MiniCalendar />
+      </div>
+
+      {/* Row 2: AI Reports | Type/Tag Hotness */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+        <div className="lg:col-span-3">
+          <AIReportsContainer />
+        </div>
+        <div className="lg:col-span-2">
+          <TypeTagHotness />
         </div>
       </div>
     </div>

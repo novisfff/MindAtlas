@@ -8,6 +8,7 @@ import { CalendarCell } from './CalendarCell'
 import { CalendarEvent } from './CalendarEvent'
 import { MoreEventsPopover } from './MoreEventsPopover'
 import type { Entry } from '@/types'
+import { cn } from '@/lib/utils'
 
 interface MonthViewProps {
   currentDate: Date
@@ -224,12 +225,12 @@ export function MonthView({
   }, [layoutsByWeek])
 
   return (
-    <div className="flex flex-col h-full border-l border-t bg-background" ref={containerRef}>
-      <div className="grid grid-cols-7 border-b">
+    <div className="flex flex-col h-full rounded-xl border bg-card overflow-hidden" ref={containerRef}>
+      <div className="grid grid-cols-7 border-b bg-muted/30">
         {weekdayLabelDates.map((day, idx) => (
           <div
             key={idx}
-            className="py-2 text-center text-sm font-medium text-muted-foreground border-r last:border-r-0"
+            className="py-2 text-center text-xs font-medium tracking-wide text-muted-foreground border-r border-border/60 last:border-r-0"
           >
             {format(day, 'EEE', { locale })}
           </div>
@@ -243,7 +244,7 @@ export function MonthView({
           const hiddenCounts = hiddenCountsByWeek[weekIndex] ?? Array(7).fill(0)
 
           return (
-            <div key={weekStart.toISOString()} className="flex-1 grid grid-cols-7 relative min-h-[132px] border-b last:border-b-0">
+            <div key={weekStart.toISOString()} className="flex-1 grid grid-cols-7 relative min-h-[132px]">
               {/* Background Layer: Cells */}
               {weekDays.map((day, dayIndex) => (
                 <CalendarCell
@@ -254,6 +255,10 @@ export function MonthView({
                   onClick={() => onDateSelect(day)}
                   onDoubleClick={() => onDateDoubleClick?.(day)}
                   onQuickCreate={() => onDateDoubleClick?.(day)}
+                  className={cn(
+                    dayIndex === 6 && 'border-r-0',
+                    weekIndex === weeks.length - 1 && 'border-b-0'
+                  )}
                 >
                   {/* Render 'More' button if needed in the cell flow? 
                       No, we render it in the Overlay Layer to align with the grid rows. 

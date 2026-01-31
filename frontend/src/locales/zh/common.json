@@ -15,6 +15,7 @@
     "edit": "编辑",
     "confirm": "确认",
     "add": "添加",
+    "back": "返回",
     "pageOf": "第 {{current}} 页，共 {{total}} 页"
   },
   "actions": {
@@ -454,6 +455,77 @@
       "title": "类型分布",
       "noData": "暂无分布数据",
       "description": "创建记录以查看内容分布情况。"
+    },
+    "heatmap": {
+      "title": "活动热力图",
+      "allTypes": "全部类型",
+      "entriesOnDate": "{{date}}: {{count}} 条记录"
+    },
+    "weeklyReport": {
+      "title": "AI 周报",
+      "noReport": "暂无周报，点击生成",
+      "generate": "生成周报",
+      "regenerate": "重新生成",
+      "generating": "正在生成周报...",
+      "failed": "生成失败",
+      "retry": "重试",
+      "history": "历史周报",
+      "noHistory": "暂无历史周报",
+      "entryCount": "{{count}} 条记录",
+      "summary": "活动总结",
+      "suggestions": "行动建议",
+      "trends": "趋势分析",
+      "error": "错误信息",
+      "status": {
+        "completed": "已完成",
+        "generating": "生成中",
+        "failed": "失败",
+        "pending": "待处理"
+      }
+    },
+    "monthlyReport": {
+      "title": "AI 月报",
+      "noReport": "暂无月报，点击生成",
+      "generate": "生成月报",
+      "regenerate": "重新生成",
+      "generating": "正在生成月报...",
+      "failed": "生成失败",
+      "retry": "重试",
+      "history": "历史月报",
+      "noHistory": "暂无历史月报",
+      "entryCount": "{{count}} 条记录",
+      "summary": "月度总结",
+      "suggestions": "下月建议",
+      "trends": "趋势与反思",
+      "error": "错误信息",
+      "status": {
+        "completed": "已完成",
+        "generating": "生成中",
+        "failed": "失败",
+        "pending": "待处理"
+      }
+    },
+    "reports": {
+      "title": "AI 洞察",
+      "tabs": {
+        "weekly": "周报",
+        "monthly": "月报"
+      }
+    },
+    "metrics": {
+      "weekEntries": "本周记录",
+      "activeDays": "活跃天数",
+      "totalEntries": "总记录数",
+      "totalRelations": "总关系数"
+    },
+    "miniCalendar": {
+      "entriesOnDate": "{{date}}: {{count}} 条记录"
+    },
+    "hotness": {
+      "title": "热门趋势",
+      "topTypes": "热门类型",
+      "topTags": "热门标签",
+      "noData": "暂无数据"
     }
   },
   "timeline": {
