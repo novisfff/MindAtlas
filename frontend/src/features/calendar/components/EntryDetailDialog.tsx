@@ -7,21 +7,34 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Clock, Edit, ExternalLink, Hash, FileText } from 'lucide-react'
+import { Clock, Edit, ExternalLink, Hash, FileText, Loader2 } from 'lucide-react'
 import type { Entry } from '@/types'
 
 interface EntryDetailDialogProps {
   entry: Entry | null
   open: boolean
+  loading?: boolean
   onOpenChange: (open: boolean) => void
 }
 
-export function EntryDetailDialog({ entry, open, onOpenChange }: EntryDetailDialogProps) {
+export function EntryDetailDialog({ entry, open, loading = false, onOpenChange }: EntryDetailDialogProps) {
   const navigate = useNavigate()
   const { t, i18n } = useTranslation()
   const locale = i18n.language === 'zh' ? zhCN : enUS
 
-  if (!entry) return null
+  if (!open) return null
+
+  if (loading || !entry) {
+    return (
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col p-0 gap-0">
+          <div className="p-10 flex items-center justify-center">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        </DialogContent>
+      </Dialog>
+    )
+  }
 
   const handleEdit = () => {
     onOpenChange(false)

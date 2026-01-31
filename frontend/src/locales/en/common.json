@@ -15,6 +15,7 @@
     "edit": "Edit",
     "confirm": "Confirm",
     "add": "Add",
+    "back": "Back",
     "pageOf": "Page {{current}} of {{total}}"
   },
   "actions": {
@@ -456,6 +457,77 @@
       "title": "Entries by Type",
       "noData": "No distribution data",
       "description": "Create entries to see how your content is distributed."
+    },
+    "heatmap": {
+      "title": "Activity Heatmap",
+      "allTypes": "All Types",
+      "entriesOnDate": "{{date}}: {{count}} entries"
+    },
+    "weeklyReport": {
+      "title": "AI Weekly Report",
+      "noReport": "No report yet, click to generate",
+      "generate": "Generate Report",
+      "regenerate": "Regenerate",
+      "generating": "Generating report...",
+      "failed": "Generation failed",
+      "retry": "Retry",
+      "history": "Weekly Report History",
+      "noHistory": "No report history",
+      "entryCount": "{{count}} entries",
+      "summary": "Activity Summary",
+      "suggestions": "Action Suggestions",
+      "trends": "Trend Analysis",
+      "error": "Error",
+      "status": {
+        "completed": "Completed",
+        "generating": "Generating",
+        "failed": "Failed",
+        "pending": "Pending"
+      }
+    },
+    "monthlyReport": {
+      "title": "AI Monthly Report",
+      "noReport": "No monthly report yet, click to generate",
+      "generate": "Generate Monthly Report",
+      "regenerate": "Regenerate",
+      "generating": "Generating monthly report...",
+      "failed": "Generation failed",
+      "retry": "Retry",
+      "history": "Monthly Report History",
+      "noHistory": "No monthly report history",
+      "entryCount": "{{count}} entries",
+      "summary": "Monthly Summary",
+      "suggestions": "Next Month Suggestions",
+      "trends": "Trends & Reflections",
+      "error": "Error",
+      "status": {
+        "completed": "Completed",
+        "generating": "Generating",
+        "failed": "Failed",
+        "pending": "Pending"
+      }
+    },
+    "reports": {
+      "title": "AI Insights",
+      "tabs": {
+        "weekly": "Weekly",
+        "monthly": "Monthly"
+      }
+    },
+    "metrics": {
+      "weekEntries": "This Week",
+      "activeDays": "Active Days",
+      "totalEntries": "Total Entries",
+      "totalRelations": "Total Relations"
+    },
+    "miniCalendar": {
+      "entriesOnDate": "{{date}}: {{count}} entries"
+    },
+    "hotness": {
+      "title": "Popularity Trends",
+      "topTypes": "Top Types",
+      "topTags": "Top Tags",
+      "noData": "No data"
     }
   },
   "timeline": {

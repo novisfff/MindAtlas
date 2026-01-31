@@ -1,2 +1,5 @@
 export { DashboardPage } from './DashboardPage'
-export { useDashboardStatsQuery } from './queries'
+export { useDashboardStatsQuery, useHeatmapQuery, useLatestWeeklyReportQuery, useLatestMonthlyReportQuery } from './queries'
+export { ActivityHeatmap } from './components/ActivityHeatmap'
+export { WeeklyReportCard } from './components/WeeklyReportCard'
+export { AIReportsContainer } from './components/AIReportsContainer'

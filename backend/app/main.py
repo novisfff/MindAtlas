@@ -4,6 +4,7 @@ import logging
 import os
 import time
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,6 +36,8 @@ from app.assistant_config.router import router as assistant_config_router
 from app.stats.router import router as stats_router
 from app.graph.router import router as graph_router
 from app.lightrag.router import router as lightrag_router
+from app.report.router import router as report_router
+from app.scheduler import setup_scheduler, shutdown_scheduler
 
 settings = get_settings()
 
@@ -43,9 +46,19 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan: startup and shutdown events."""
+    setup_scheduler()
+    yield
+    shutdown_scheduler()
+
+
 app = FastAPI(
     title=settings.app_name,
     debug=settings.debug,
+    lifespan=lifespan,
 )
 
 cors_origins = settings.cors_origins_list()
@@ -117,6 +130,7 @@ app.include_router(assistant_config_router)
 app.include_router(stats_router)
 app.include_router(graph_router)
 app.include_router(lightrag_router)
+app.include_router(report_router)
 
 
 @app.get("/health", response_model=ApiResponse)

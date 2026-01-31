@@ -81,7 +81,7 @@ export function CalendarHeader({
   }
 
   return (
-    <div className="flex items-center justify-between px-4 py-3 border-b">
+    <div className="flex items-center justify-between px-4 py-3 border-b bg-background">
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-1">
           <button
@@ -89,7 +89,11 @@ export function CalendarHeader({
               handleToday()
               setPickerOpen(false)
             }}
-            className="px-3 py-1.5 text-sm bg-white border rounded-md shadow-sm hover:bg-gray-50 active:scale-95 transition-all"
+            className={cn(
+              'px-3 py-1.5 text-sm font-medium rounded-md border',
+              'bg-background shadow-sm hover:bg-muted',
+              'active:scale-[0.98] transition-all'
+            )}
           >
             {t('calendar.today')}
           </button>
@@ -160,7 +164,7 @@ export function CalendarHeader({
             className={cn(
               'px-4 py-1.5 text-sm font-medium rounded-md transition-all',
               viewMode === mode
-                ? 'bg-white text-foreground shadow-sm'
+                ? 'bg-background text-foreground shadow-sm'
                 : 'text-muted-foreground hover:text-foreground'
             )}
           >

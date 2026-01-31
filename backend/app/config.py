@@ -117,6 +117,9 @@ class Settings(BaseSettings):
     # pgvector (optional, for vector storage in PostgreSQL)
     pgvector_enabled: bool = Field(default=False, alias="PGVECTOR_ENABLED")
 
+    # Scheduler (optional, for background jobs like weekly report generation)
+    scheduler_enabled: bool = Field(default=False, alias="SCHEDULER_ENABLED")
+
     # Server
     host: str = Field(default="0.0.0.0", alias="HOST")
     port: int = Field(default=8000, alias="PORT")

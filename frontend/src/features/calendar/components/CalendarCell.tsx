@@ -13,6 +13,7 @@ interface CalendarCellProps {
   onDoubleClick?: () => void
   onQuickCreate?: () => void
   children?: React.ReactNode
+  className?: string
 }
 
 export function CalendarCell({
@@ -23,6 +24,7 @@ export function CalendarCell({
   onDoubleClick,
   onQuickCreate,
   children,
+  className,
 }: CalendarCellProps) {
   const dateId = format(date, 'yyyy-MM-dd')
   const { setNodeRef, isOver } = useDroppable({ id: dateId })
@@ -35,10 +37,11 @@ export function CalendarCell({
       onClick={onClick}
       onDoubleClick={onDoubleClick}
       className={cn(
-        'group relative min-h-[100px] p-1 border-b border-r cursor-pointer',
-        'hover:bg-muted/50 transition-colors',
-        !isCurrentMonth && 'bg-muted/30',
-        isOver && 'bg-primary/10'
+        'group relative min-h-[104px] p-1.5 border-b border-r border-border/60 cursor-pointer',
+        'bg-background/60 hover:bg-muted/40 transition-colors',
+        !isCurrentMonth && 'bg-muted/20',
+        isOver && 'bg-primary/10',
+        className
       )}
     >
       <button
@@ -61,7 +64,7 @@ export function CalendarCell({
       </button>
       <div
         className={cn(
-          'w-7 h-7 flex items-center justify-center rounded-full text-sm',
+          'w-7 h-7 flex items-center justify-center rounded-full text-xs font-medium',
           isToday && 'bg-primary text-primary-foreground',
           !isCurrentMonth && 'text-muted-foreground'
         )}
@@ -69,10 +72,8 @@ export function CalendarCell({
         {format(date, 'd')}
       </div>
       <div className="mt-1 space-y-0.5">
-        <div className="mt-1 space-y-0.5">
-          {/* Events are now rendered by the parent MonthView */}
-          {children}
-        </div>
+        {/* Events are now rendered by the parent MonthView */}
+        {children}
       </div>
     </div>
   )
