@@ -66,6 +66,8 @@ class StatsService:
         self,
         months: int = 3,
         type_id: UUID | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
     ) -> HeatmapResponse:
         """
         Heatmap aggregation using difference array + prefix sum approach.
@@ -75,11 +77,15 @@ class StatsService:
         - range_start_count: RANGE entries starting on that date
         - range_active_count: RANGE entries covering that date (via prefix sum)
         """
-        end_date = date.today()
-        start_date = end_date - timedelta(days=months * 30)
+        if (start_date is None) != (end_date is None):
+            raise ValueError("start_date and end_date must be provided together")
+
+        window_end = end_date or date.today()
+        window_start = start_date or (window_end - timedelta(days=months * 30))
+        window_end_exclusive = window_end + timedelta(days=1)
 
         type_filter = ""
-        params: dict = {"start": start_date, "end": end_date}
+        params: dict = {"start": window_start, "end": window_end_exclusive}
         if type_id:
             type_filter = "AND type_id = :type_id"
             params["type_id"] = str(type_id)
@@ -196,8 +202,8 @@ class StatsService:
         ]
 
         return HeatmapResponse(
-            start_date=start_date,
-            end_date=end_date,
+            start_date=window_start,
+            end_date=window_end,
             data=data,
         )
 

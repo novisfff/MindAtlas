@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.common.responses import ApiResponse
@@ -24,10 +24,25 @@ def get_dashboard_stats(db: Session = Depends(get_db)) -> ApiResponse:
 def get_heatmap(
     months: int = Query(default=3, ge=1, le=12),
     type_id: UUID | None = Query(default=None, alias="typeId"),
+    start_date: date | None = Query(default=None, alias="startDate"),
+    end_date: date | None = Query(default=None, alias="endDate"),
     db: Session = Depends(get_db),
 ) -> ApiResponse:
+    if (start_date is None) != (end_date is None):
+        raise HTTPException(status_code=400, detail="startDate and endDate must be provided together")
+    if start_date and end_date:
+        if end_date < start_date:
+            raise HTTPException(status_code=400, detail="endDate must be >= startDate")
+        if (end_date - start_date).days > 400:
+            raise HTTPException(status_code=400, detail="date range too large")
+
     service = StatsService(db)
-    heatmap = service.get_heatmap(months=months, type_id=type_id)
+    heatmap = service.get_heatmap(
+        months=months,
+        type_id=type_id,
+        start_date=start_date,
+        end_date=end_date,
+    )
     return ApiResponse.ok(heatmap.model_dump(by_alias=True))
 
 

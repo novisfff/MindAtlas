@@ -92,7 +92,8 @@
     "unknown": "Unknown",
     "aiSuggestedRelations": "AI Suggested Relations",
     "sourceEntry": "Source Entry",
-    "keywords": "Keywords"
+    "keywords": "Keywords",
+    "noContent": "No additional content provided."
   },
   "pages": {
     "dashboard": {

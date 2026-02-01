@@ -91,7 +91,8 @@
     "created": "创建于",
     "unknown": "未知",
     "sourceEntry": "来源记录",
-    "keywords": "关键词"
+    "keywords": "关键词",
+    "noContent": "暂无详细内容"
   },
   "pages": {
     "dashboard": {

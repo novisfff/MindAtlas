@@ -23,12 +23,16 @@ export interface HeatmapResponse {
 export interface HeatmapParams {
   months?: number
   typeId?: string
+  startDate?: string
+  endDate?: string
 }
 
 export async function getHeatmap(params?: HeatmapParams): Promise<HeatmapResponse> {
   const searchParams = new URLSearchParams()
   if (params?.months) searchParams.set('months', String(params.months))
   if (params?.typeId) searchParams.set('typeId', params.typeId)
+  if (params?.startDate) searchParams.set('startDate', params.startDate)
+  if (params?.endDate) searchParams.set('endDate', params.endDate)
   const query = searchParams.toString()
   return apiClient.get<HeatmapResponse>(`/api/stats/heatmap${query ? `?${query}` : ''}`)
 }

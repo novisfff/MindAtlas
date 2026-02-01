@@ -1,7 +1,10 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { FileText, ArrowRight } from 'lucide-react'
 import type { Entry } from '@/types'
 import { useTranslation } from 'react-i18next'
+import { useEntryQuery } from '@/features/entries/queries'
+import { EntryDetailDialog } from '@/features/calendar/components/EntryDetailDialog'
 
 function formatTimeAgo(dateString: string, t: (key: string, options?: any) => string): string {
   const date = new Date(dateString)
@@ -26,6 +29,8 @@ interface RecentEntriesProps {
 
 export function RecentEntries({ entries }: RecentEntriesProps) {
   const { t } = useTranslation()
+  const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
+  const { data: selectedEntry, isLoading: isEntryLoading } = useEntryQuery(selectedEntryId ?? undefined)
 
   if (entries.length === 0) {
     return (
@@ -60,10 +65,12 @@ export function RecentEntries({ entries }: RecentEntriesProps) {
       </div>
       <div className="px-2.5 pb-2.5 pt-1 space-y-0.5 flex-1 min-h-0 overflow-auto">
         {entries.map((entry) => (
-          <Link
+          <button
             key={entry.id}
-            to={`/entries/${entry.id}`}
-            className="group flex items-center gap-2.5 p-1.5 rounded-lg hover:bg-muted/40 transition-colors border border-transparent hover:border-border/50"
+            type="button"
+            onClick={() => setSelectedEntryId(entry.id)}
+            aria-label={t('entry.card.viewEntryAria', { title: entry.title })}
+            className="group flex w-full items-center gap-2.5 p-1.5 rounded-lg hover:bg-muted/40 transition-colors border border-transparent hover:border-border/50"
           >
             <div
               className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-transform duration-200 group-hover:scale-105"
@@ -94,9 +101,15 @@ export function RecentEntries({ entries }: RecentEntriesProps) {
             </div>
 
             <ArrowRight className="w-3 h-3 text-muted-foreground/50 opacity-0 -translate-x-1 transition-all duration-200 group-hover:opacity-100 group-hover:translate-x-0" />
-          </Link>
+          </button>
         ))}
       </div>
+      <EntryDetailDialog
+        entry={selectedEntry ?? null}
+        open={Boolean(selectedEntryId)}
+        loading={isEntryLoading}
+        onOpenChange={(open) => !open && setSelectedEntryId(null)}
+      />
     </div>
   )
 }
