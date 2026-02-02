@@ -254,6 +254,37 @@ class OutboxRepoTests(unittest.TestCase):
         self.assertIsNone(outbox.locked_by)
         self.assertEqual(outbox.last_error, "test error")
 
+    def test_mark_pending(self) -> None:
+        """mark_pending should requeue without recording an error."""
+        from app.lightrag.models import EntryIndexOutbox
+        from app.lightrag.outbox_repo import OutboxRepo
+
+        now = datetime.now(timezone.utc)
+        next_available = now + timedelta(seconds=5)
+
+        outbox = EntryIndexOutbox(
+            entry_id=self.entry.id,
+            op="upsert",
+            entry_updated_at=self.entry.updated_at,
+            status="processing",
+            attempts=1,
+            available_at=now,
+            locked_at=now,
+            locked_by="worker",
+            last_error="previous error",
+        )
+        self.db.add(outbox)
+        self.db.commit()
+
+        repo = OutboxRepo(self.db)
+        repo.mark_pending(outbox_id=outbox.id, next_available_at=next_available)
+
+        self.db.refresh(outbox)
+        self.assertEqual(outbox.status, "pending")
+        self.assertIsNone(outbox.locked_at)
+        self.assertIsNone(outbox.locked_by)
+        self.assertIsNone(outbox.last_error)
+
     def test_mark_dead(self) -> None:
         """mark_dead should update status to dead and record error."""
         from app.lightrag.models import EntryIndexOutbox
@@ -583,6 +614,81 @@ class WorkerPayloadTests(unittest.TestCase):
         self.db.refresh(self.outbox_on)
         self.assertEqual(self.outbox_on.status, "succeeded")
         self.assertIsNotNone(fake.last_req)
+
+    def test_worker_requeues_when_content_changes_during_processing(self) -> None:
+        """Worker should coalesce by requeueing when title/summary/content changes mid-flight."""
+        from app.lightrag.outbox_repo import OutboxRepo
+        from app.lightrag.types import IndexResult, WorkerConfig
+        from app.lightrag.worker import Worker
+
+        db = self.db
+        entry_id = self.entry_on.id
+        EntryModel = type(self.entry_on)
+
+        class _FakeIndexer:
+            def handle(self, req):  # noqa: ANN001
+                # Simulate a user saving a new content version while this job is processing.
+                entry = db.query(EntryModel).filter(EntryModel.id == entry_id).first()
+                assert entry is not None
+                entry.content = "C-updated"
+                db.commit()
+                return IndexResult(ok=True)
+
+        fake = _FakeIndexer()
+        cfg = WorkerConfig(
+            enabled=True,
+            poll_interval_ms=2000,
+            batch_size=10,
+            max_attempts=6,
+            lock_ttl_sec=300,
+            worker_id="w",
+        )
+        repo = OutboxRepo(self.db, worker_id="w")
+        worker = Worker(cfg, indexer=fake, session_factory=lambda: self.db)
+        worker._process_one(self.db, repo, self.outbox_on, datetime.now(timezone.utc))
+
+        self.db.refresh(self.outbox_on)
+        self.assertEqual(self.outbox_on.status, "pending")
+
+    def test_worker_does_not_requeue_for_type_or_tag_only_changes(self) -> None:
+        """Type/tag-only changes should not trigger requeue coalescing."""
+        from app.lightrag.outbox_repo import OutboxRepo
+        from app.lightrag.types import IndexResult, WorkerConfig
+        from app.lightrag.worker import Worker
+
+        from app.entry_type.models import EntryType
+
+        other_type = EntryType(code="on2", name="On2", graph_enabled=True, ai_enabled=True, enabled=True)
+        self.db.add(other_type)
+        self.db.commit()
+
+        db = self.db
+        entry_id = self.entry_on.id
+        EntryModel = type(self.entry_on)
+
+        class _FakeIndexer:
+            def handle(self, req):  # noqa: ANN001
+                entry = db.query(EntryModel).filter(EntryModel.id == entry_id).first()
+                assert entry is not None
+                entry.type_id = other_type.id
+                db.commit()
+                return IndexResult(ok=True)
+
+        fake = _FakeIndexer()
+        cfg = WorkerConfig(
+            enabled=True,
+            poll_interval_ms=2000,
+            batch_size=10,
+            max_attempts=6,
+            lock_ttl_sec=300,
+            worker_id="w",
+        )
+        repo = OutboxRepo(self.db, worker_id="w")
+        worker = Worker(cfg, indexer=fake, session_factory=lambda: self.db)
+        worker._process_one(self.db, repo, self.outbox_on, datetime.now(timezone.utc))
+
+        self.db.refresh(self.outbox_on)
+        self.assertEqual(self.outbox_on.status, "succeeded")
 
     def test_worker_translates_upsert_to_delete_when_disabled_by_type(self) -> None:
         """Worker should translate upsert to delete when EntryType disables indexing."""

@@ -95,6 +95,10 @@
     "keywords": "Keywords",
     "noContent": "No additional content provided."
   },
+  "tags": {
+    "searchPlaceholder": "Search or create tags...",
+    "create": "Create tag \"{{name}}\""
+  },
   "pages": {
     "dashboard": {
       "title": "Dashboard",

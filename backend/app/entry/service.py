@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.attachment.models import Attachment
 from app.common.exceptions import ApiException
+from app.common.time import utcnow
 from app.common.storage import get_minio_client, remove_object_safe, StorageError
 from app.entry.models import Entry, TimeMode
 from app.entry.schemas import EntryRequest, EntrySearchRequest, EntryTimePatch
@@ -127,6 +128,53 @@ class EntryService:
         self.db.refresh(entry)
         return entry
 
+    def _should_enqueue_index_for_update(self, *, entry: Entry, request: EntryRequest) -> bool:
+        """Whether an update should enqueue LightRAG re-indexing.
+
+        Policy:
+        - Only re-index when textual content changes (title/summary/content).
+        - Changes to type/tags/time alone do not trigger indexing (per product requirement).
+        """
+        return (
+            entry.title != request.title
+            or entry.summary != request.summary
+            or entry.content != request.content
+        )
+
+    def _coalesce_upsert_outbox(self, *, entry_id: UUID, entry_updated_at) -> None:  # noqa: ANN001
+        """Coalesce an upsert outbox event for an entry.
+
+        If there is already an active (pending/processing) upsert event, do not enqueue a new row.
+        Instead, best-effort update the existing row's entry_updated_at and clear any backoff.
+        """
+        now = utcnow()
+        existing = (
+            self.db.query(EntryIndexOutbox)
+            .filter(
+                EntryIndexOutbox.entry_id == entry_id,
+                EntryIndexOutbox.op == "upsert",
+                EntryIndexOutbox.status.in_(["pending", "processing"]),
+            )
+            .order_by(EntryIndexOutbox.created_at.desc())
+            .first()
+        )
+
+        if existing:
+            existing.entry_updated_at = entry_updated_at
+            existing.last_error = None
+            if existing.status == "pending" and existing.available_at and existing.available_at > now:
+                existing.available_at = now
+            return
+
+        self.db.add(
+            EntryIndexOutbox(
+                entry_id=entry_id,
+                op="upsert",
+                entry_updated_at=entry_updated_at,
+                status="pending",
+            )
+        )
+
     def update(self, id: UUID, request: EntryRequest) -> Entry:
         entry = self.find_by_id(id)
 
@@ -140,6 +188,8 @@ class EntryService:
             if len(tags) != len(request.tag_ids):
                 raise ApiException(status_code=400, code=40001, message="Some tag IDs are invalid")
 
+        should_enqueue = self._should_enqueue_index_for_update(entry=entry, request=request)
+
         entry.title = request.title
         entry.summary = request.summary
         entry.content = request.content
@@ -151,26 +201,36 @@ class EntryService:
         entry.tags = tags
 
         self.db.flush()  # Ensure updated_at is bumped before enqueuing outbox event.
-        self.db.add(
-            EntryIndexOutbox(
-                entry_id=entry.id,
-                op="upsert",
-                entry_updated_at=entry.updated_at,
-                status="pending",
-            )
-        )
+        if should_enqueue:
+            self._coalesce_upsert_outbox(entry_id=entry.id, entry_updated_at=entry.updated_at)
         self.db.commit()
         self.db.refresh(entry)
         return entry
 
     def get_index_status(self, entry_id: UUID) -> dict:
         """Get the latest LightRAG index status for an entry."""
-        outbox = (
+        processing = (
             self.db.query(EntryIndexOutbox)
-            .filter(EntryIndexOutbox.entry_id == entry_id)
+            .filter(EntryIndexOutbox.entry_id == entry_id, EntryIndexOutbox.status == "processing")
             .order_by(EntryIndexOutbox.created_at.desc())
             .first()
         )
+        outbox = processing
+        if not outbox:
+            pending = (
+                self.db.query(EntryIndexOutbox)
+                .filter(EntryIndexOutbox.entry_id == entry_id, EntryIndexOutbox.status == "pending")
+                .order_by(EntryIndexOutbox.created_at.desc())
+                .first()
+            )
+            outbox = pending
+        if not outbox:
+            outbox = (
+                self.db.query(EntryIndexOutbox)
+                .filter(EntryIndexOutbox.entry_id == entry_id)
+                .order_by(EntryIndexOutbox.created_at.desc())
+                .first()
+            )
         if not outbox:
             return {"status": "unknown", "attempts": 0, "lastError": None, "updatedAt": None}
         return {
@@ -239,15 +299,8 @@ class EntryService:
             if entry.time_from > entry.time_to:
                 raise ApiException(status_code=400, code=40002, message="time_from must be <= time_to")
 
+        # Time-only updates do not affect LightRAG ingestion text; do not enqueue indexing.
         self.db.flush()
-        self.db.add(
-            EntryIndexOutbox(
-                entry_id=entry.id,
-                op="upsert",
-                entry_updated_at=entry.updated_at,
-                status="pending",
-            )
-        )
         self.db.commit()
         self.db.refresh(entry)
         return entry
