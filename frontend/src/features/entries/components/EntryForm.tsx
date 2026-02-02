@@ -316,7 +316,7 @@ export function EntryForm({ entry, defaultDate, onSubmit, isSubmitting }: EntryF
 
         <div>
           <label className="block text-sm font-medium mb-1.5">{t('labels.tags')}</label>
-          <TagSelector value={tagIds} onChange={setTagIds} disabled={isSubmitting} />
+          <TagSelector value={tagIds} onChange={setTagIds} disabled={isSubmitting} allowCreate />
           {suggestedTags.length > 0 && (
             <div className="mt-2 text-sm animate-in fade-in slide-in-from-top-1">
               <span className="text-muted-foreground mr-2">{t('entry.form.aiSuggestions')}:</span>

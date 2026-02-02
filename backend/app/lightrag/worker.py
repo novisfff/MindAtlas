@@ -29,6 +29,13 @@ from app.lightrag.types import IndexRequest, IndexResult, WorkerConfig
 
 logger = logging.getLogger(__name__)
 
+def _index_signature(entry: Entry) -> tuple[str, str | None, str | None]:
+    """Signature of fields that should trigger re-indexing.
+
+    Product policy: ignore type/tags-only changes (metadata churn).
+    """
+    return (entry.title, entry.summary, entry.content)
+
 
 def build_worker_config() -> WorkerConfig:
     """Build worker configuration from settings."""
@@ -147,6 +154,7 @@ class Worker:
             # For upsert, check if event is stale (防乱序护栏)
             payload = None
             effective_op = outbox.op
+            sig_before: tuple[str, str | None, str | None] | None = None
 
             if outbox.op == "upsert":
                 entry = db.query(Entry).filter(Entry.id == outbox.entry_id).first()
@@ -167,20 +175,38 @@ class Worker:
                         and entry.updated_at is not None
                         and entry.updated_at > outbox.entry_updated_at
                     ):
-                        # Entry has newer version, skip this stale event
-                        logger.info(
-                            "skipping stale upsert (newer version exists)",
-                            extra={
-                                "outbox_id": str(outbox.id),
-                                "entry_id": str(outbox.entry_id),
-                                "outbox_updated_at": outbox.entry_updated_at.isoformat(),
-                                "entry_updated_at": entry.updated_at.isoformat(),
-                            },
-                        )
-                        repo.mark_succeeded(outbox_id=outbox.id)
-                        return
+                        # If a newer outbox event exists for this entry, skip this stale one.
+                        # Otherwise (coalesced mode), process it against current entry state.
+                        from app.lightrag.models import EntryIndexOutbox  # local import to avoid cycles
 
-                    payload = build_document_payload(entry=entry, entry_updated_at=outbox.entry_updated_at)
+                        newer_exists = (
+                            db.query(EntryIndexOutbox)
+                            .filter(
+                                EntryIndexOutbox.entry_id == outbox.entry_id,
+                                EntryIndexOutbox.id != outbox.id,
+                                EntryIndexOutbox.op == "upsert",
+                                EntryIndexOutbox.status.in_(["pending", "processing"]),
+                                EntryIndexOutbox.created_at > outbox.created_at,
+                            )
+                            .first()
+                            is not None
+                        )
+
+                        if newer_exists:
+                            logger.info(
+                                "skipping stale upsert (newer outbox exists)",
+                                extra={
+                                    "outbox_id": str(outbox.id),
+                                    "entry_id": str(outbox.entry_id),
+                                    "outbox_updated_at": outbox.entry_updated_at.isoformat(),
+                                    "entry_updated_at": entry.updated_at.isoformat(),
+                                },
+                            )
+                            repo.mark_succeeded(outbox_id=outbox.id)
+                            return
+
+                    sig_before = _index_signature(entry)
+                    payload = build_document_payload(entry=entry, entry_updated_at=entry.updated_at)
                     if not should_index(payload):
                         # EntryType flags disable indexing: translate upsert -> delete (cleanup residue).
                         logger.info(
@@ -211,6 +237,18 @@ class Worker:
             result = self.indexer.handle(req)
 
             if result.ok:
+                # Coalesce rapid successive edits: if entry's index-signature changed while we were processing,
+                # requeue the same outbox message instead of creating another row.
+                if effective_op == "upsert" and sig_before is not None:
+                    current = db.query(Entry).filter(Entry.id == outbox.entry_id).first()
+                    if current is not None and _index_signature(current) != sig_before:
+                        repo.mark_pending(outbox_id=outbox.id, next_available_at=utcnow())
+                        logger.info(
+                            "requeued after concurrent update",
+                            extra={"outbox_id": str(outbox.id), "entry_id": str(outbox.entry_id)},
+                        )
+                        return
+
                 repo.mark_succeeded(outbox_id=outbox.id)
                 logger.info(
                     "index succeeded",

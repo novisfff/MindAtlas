@@ -94,6 +94,10 @@
     "keywords": "关键词",
     "noContent": "暂无详细内容"
   },
+  "tags": {
+    "searchPlaceholder": "搜索或创建标签...",
+    "create": "创建标签“{{name}}”"
+  },
   "pages": {
     "dashboard": {
       "title": "仪表盘",

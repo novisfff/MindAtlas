@@ -188,6 +188,34 @@ class OutboxRepo:
         )
         return False
 
+    def mark_pending(self, *, outbox_id: UUID, next_available_at: datetime) -> bool:
+        """Requeue an outbox message without recording an error.
+
+        Only updates if this worker still owns the lock (防止 late-ack 竞态).
+        Useful for coalescing rapid successive updates into a single message.
+        """
+        filters = [EntryIndexOutbox.id == outbox_id, EntryIndexOutbox.status == "processing"]
+        if self.worker_id:
+            filters.append(EntryIndexOutbox.locked_by == self.worker_id)
+
+        row = self.db.query(EntryIndexOutbox).filter(*filters).first()
+        if row:
+            row.status = "pending"
+            row.locked_at = None
+            row.locked_by = None
+            row.available_at = next_available_at
+            # This is not a failure; reset attempts so it won't be throttled by max_attempts.
+            row.attempts = 0
+            row.last_error = None
+            self.db.commit()
+            return True
+
+        logger.warning(
+            "mark_pending failed: lock lost or message not found",
+            extra={"outbox_id": str(outbox_id), "worker_id": self.worker_id},
+        )
+        return False
+
     def mark_dead(self, *, outbox_id: UUID, error_message: str) -> bool:
         """Mark an outbox message as dead (exceeded max attempts).
 
