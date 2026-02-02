@@ -128,6 +128,14 @@ class Worker:
 
             # Process each message
             for outbox in result.claimed:
+                logger.info(
+                    "processing outbox (outbox_id=%s entry_id=%s op=%s attempts=%s status=%s)",
+                    str(outbox.id),
+                    str(outbox.entry_id),
+                    getattr(outbox, "op", None),
+                    getattr(outbox, "attempts", None),
+                    getattr(outbox, "status", None),
+                )
                 self._process_one(db, repo, outbox, now)
 
             return len(result.claimed)
@@ -152,6 +160,12 @@ class Worker:
 
             if outbox.op == "upsert":
                 entry = db.query(Entry).filter(Entry.id == outbox.entry_id).first()
+                logger.info(
+                    "loaded entry for outbox (outbox_id=%s entry_id=%s found=%s)",
+                    str(outbox.id),
+                    str(outbox.entry_id),
+                    bool(entry),
+                )
 
                 if entry is None:
                     # Entry deleted, execute delete_document to clean up any index residue
@@ -228,7 +242,22 @@ class Worker:
             )
 
             # Call indexer
+            logger.info(
+                "calling indexer (outbox_id=%s entry_id=%s op=%s attempts=%s)",
+                str(outbox.id),
+                str(outbox.entry_id),
+                effective_op,
+                outbox.attempts,
+            )
             result = self.indexer.handle(req)
+            logger.info(
+                "indexer returned (outbox_id=%s entry_id=%s ok=%s retryable=%s detail=%s)",
+                str(outbox.id),
+                str(outbox.entry_id),
+                bool(getattr(result, "ok", False)),
+                bool(getattr(result, "retryable", True)),
+                (getattr(result, "detail", "") or "")[:200],
+            )
 
             if result.ok:
                 # Coalesce rapid successive edits: if entry's index-signature changed while we were processing,
