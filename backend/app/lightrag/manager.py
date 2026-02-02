@@ -14,10 +14,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
+import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 from functools import lru_cache, partial
+from urllib.parse import urlparse
 
 from app.config import get_settings
 from app.lightrag.errors import LightRagConfigError, LightRagDependencyError, LightRagNotEnabledError
@@ -84,10 +88,13 @@ def _parse_openai_compat_model_spec(raw: str | None, *, label: str) -> tuple[str
 
 
 def _normalize_neo4j_uri(uri: str) -> str:
-    u = (uri or "").strip()
-    if u.startswith("bolt://"):
-        return u.replace("bolt://", "neo4j://", 1)
-    return u
+    # Keep user-provided scheme as-is.
+    #
+    # NOTE: Using `neo4j://` enables routing. In containerized single-instance deployments,
+    # routing can break if Neo4j advertises an address not reachable from the client container,
+    # leading to long hangs/timeouts during initialization. Prefer `bolt://` unless you
+    # intentionally run a routed/cluster setup.
+    return (uri or "").strip()
 
 
 def _normalize_rerank_url(raw: str | None) -> str:
@@ -98,6 +105,85 @@ def _normalize_rerank_url(raw: str | None) -> str:
     if url.endswith("/v1"):
         return url + "/rerank"
     return url
+
+
+def _redact_url(url: str) -> str:
+    """Redact secrets from a URL for logging."""
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        if not host:
+            return url
+        port = f":{parsed.port}" if parsed.port else ""
+        scheme = parsed.scheme or ""
+        path = parsed.path or ""
+        return f"{scheme}://{host}{port}{path}".rstrip("/")
+    except Exception:
+        return url
+
+
+def _tcp_preflight(*, name: str, url: str, timeout_sec: float) -> None:
+    """Best-effort TCP connectivity check (DNS + connect)."""
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        logger.warning("lightrag preflight %s skipped (invalid url=%s)", name, _redact_url(url))
+        return
+    port = parsed.port
+    if port is None:
+        port = 443 if (parsed.scheme or "").lower() == "https" else 80
+
+    started = time.perf_counter()
+    try:
+        with socket.create_connection((host, port), timeout=timeout_sec):
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            logger.info("lightrag preflight %s ok (host=%s port=%s elapsed_ms=%s)", name, host, port, elapsed_ms)
+    except Exception as exc:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        logger.warning(
+            "lightrag preflight %s failed (host=%s port=%s elapsed_ms=%s error=%s)",
+            name,
+            host,
+            port,
+            elapsed_ms,
+            f"{type(exc).__name__}: {(str(exc) or repr(exc))}",
+        )
+
+
+def _bool_env(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _step_logger(*, prefix: str):
+    started = time.perf_counter()
+    last = started
+
+    def _log(step: str) -> None:
+        nonlocal last
+        now = time.perf_counter()
+        elapsed_total_ms = int((now - started) * 1000)
+        elapsed_step_ms = int((now - last) * 1000)
+        logger.info("%s%s (elapsed_total_ms=%s elapsed_step_ms=%s)", prefix, step, elapsed_total_ms, elapsed_step_ms)
+        last = now
+
+    return _log
+
+
+def _dump_stacks(*, label: str) -> None:
+    if not _bool_env("LIGHTRAG_DUMP_STACK_ON_TIMEOUT"):
+        return
+    try:
+        current_frames = sys._current_frames()  # noqa: SLF001
+        thread_names = {t.ident: t.name for t in threading.enumerate() if t.ident is not None}
+
+        lines: list[str] = [f"\n--- {label} (threads={len(current_frames)}) ---"]
+        for thread_id, frame in current_frames.items():
+            name = thread_names.get(thread_id, "<unknown>")
+            lines.append(f"\n# Thread: {name} (id={thread_id})")
+            lines.extend(traceback.format_stack(frame))
+        logger.warning("%s", "".join(lines))
+    except Exception:
+        logger.exception("failed to dump stacks (label=%s)", label)
 
 
 def _try_resolve_db_model_binding(*, model_type: str) -> _OpenAICompatModelConfig | None:
@@ -221,15 +307,44 @@ def _create_and_init_rag():
     runtime = get_lightrag_runtime()
 
     def _init_in_runtime():
+        step = _step_logger(prefix="lightrag init: ")
+        step("start")
+
+        step("resolve llm config")
         llm = _resolve_llm_config()
+        step("resolve embedding config")
         embedding = _resolve_embedding_config(llm=llm)
+        step("apply runtime env")
         _apply_runtime_env(llm=llm, embedding=embedding)
+        step("resolve local settings")
 
         working_dir = (getattr(settings, "lightrag_working_dir", "") or "").strip() or "./lightrag_storage"
         workspace = (getattr(settings, "lightrag_workspace", "") or "").strip()
         graph_storage = (getattr(settings, "lightrag_graph_storage", "") or "").strip() or "Neo4JStorage"
         embedding_dim = int(getattr(settings, "lightrag_embedding_dim", 1536) or 1536)
 
+        logger.info(
+            "lightrag init config neo4j_uri=%s graph_storage=%s working_dir=%s workspace=%s llm_model=%s llm_base=%s embedding_model=%s embedding_base=%s embedding_dim=%s",
+            _redact_url(os.environ.get("NEO4J_URI", "")),
+            graph_storage,
+            working_dir,
+            workspace,
+            llm.model,
+            _redact_url(llm.base_url),
+            embedding.model,
+            _redact_url(embedding.base_url),
+            embedding_dim,
+        )
+        step("preflight")
+
+        preflight_enabled = _bool_env("LIGHTRAG_PREFLIGHT_ENABLED")
+        if preflight_enabled:
+            timeout_sec = float(os.environ.get("LIGHTRAG_PREFLIGHT_TIMEOUT_SEC") or 5.0)
+            _tcp_preflight(name="neo4j", url=os.environ.get("NEO4J_URI", ""), timeout_sec=timeout_sec)
+            _tcp_preflight(name="llm", url=llm.base_url, timeout_sec=timeout_sec)
+            _tcp_preflight(name="embedding", url=embedding.base_url, timeout_sec=timeout_sec)
+
+        step("import lightrag")
         try:
             from lightrag import LightRAG
             from lightrag.llm.openai import openai_complete_if_cache, openai_embed
@@ -237,6 +352,7 @@ def _create_and_init_rag():
         except ImportError as e:
             raise LightRagDependencyError("lightrag-hku is not installed") from e
 
+        step("build llm/embedding funcs")
         async def llm_model_func(prompt, system_prompt=None, history_messages=None, **kwargs) -> str:
             return await openai_complete_if_cache(
                 llm.model,
@@ -261,6 +377,7 @@ def _create_and_init_rag():
             ),
         )
 
+        step("build rag kwargs")
         rag_kwargs = {
             "working_dir": working_dir,
             "graph_storage": graph_storage,
@@ -298,6 +415,7 @@ def _create_and_init_rag():
         os.environ["RERANK_BY_DEFAULT"] = "true" if rerank_enabled else "false"
 
         if rerank_enabled:
+            step("build rerank model func")
             from app.lightrag.rerank_client import RerankConfig, build_standard_rerank_model_func
 
             rerank_timeout_sec = float(getattr(settings, "lightrag_rerank_timeout_sec", 15.0) or 15.0)
@@ -322,19 +440,51 @@ def _create_and_init_rag():
             )
             rag_kwargs["min_rerank_score"] = max(0.0, min_rerank_score)
 
+        step("create LightRAG instance start")
         rag = LightRAG(**rag_kwargs)
+        step("create LightRAG instance done")
 
         init_timeout_sec = float(getattr(settings, "lightrag_init_timeout_sec", 120.0) or 120.0)
         started = time.perf_counter()
         loop = runtime.loop
-        loop.run_until_complete(asyncio.wait_for(rag.initialize_storages(), timeout=init_timeout_sec))
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        logger.info("lightrag initialized (elapsed_ms=%s)", elapsed_ms)
+        try:
+            step(f"initialize_storages start (timeout_sec={init_timeout_sec})")
+            loop.run_until_complete(asyncio.wait_for(rag.initialize_storages(), timeout=init_timeout_sec))
+        except asyncio.TimeoutError as exc:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            # NOTE: Some deployments may filter ERROR; keep this visible at WARNING too.
+            logger.warning(
+                "lightrag initialize_storages timed out (timeout_sec=%s elapsed_ms=%s)",
+                init_timeout_sec,
+                elapsed_ms,
+            )
+            _dump_stacks(label="lightrag initialize_storages timeout")
+            raise TimeoutError(f"initialize_storages timed out after {init_timeout_sec}s") from exc
+        except Exception:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            logger.exception("lightrag initialize_storages failed (elapsed_ms=%s)", elapsed_ms)
+            raise
+        else:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            logger.info("lightrag initialized (elapsed_ms=%s)", elapsed_ms)
+            step("initialize_storages done")
         return rag
 
     import asyncio
 
-    return runtime.call(_init_in_runtime, timeout_sec=float(getattr(settings, "lightrag_init_timeout_sec", 120.0) or 120.0) + 10.0)
+    init_timeout_sec = float(getattr(settings, "lightrag_init_timeout_sec", 120.0) or 120.0)
+    runtime_timeout_sec = init_timeout_sec + 10.0
+    try:
+        return runtime.call(_init_in_runtime, timeout_sec=runtime_timeout_sec)
+    except TimeoutError as exc:
+        # Distinguish the two different timeout sources:
+        # - our explicit initialize_storages timeout (message contains "initialize_storages timed out")
+        # - Future.result(timeout=...) timeout from runtime.call (often empty message)
+        msg = (str(exc) or "").strip()
+        if "initialize_storages timed out" in msg:
+            raise
+        _dump_stacks(label="lightrag runtime.call timeout")
+        raise TimeoutError(f"lightrag runtime init timed out after {runtime_timeout_sec}s") from exc
 
 
 @lru_cache(maxsize=1)

@@ -46,6 +46,13 @@ class Indexer:
         if not settings.lightrag_enabled:
             return IndexResult(ok=True, retryable=False, detail="skipped: LIGHTRAG_ENABLED=false")
 
+        logger.info(
+            "indexer init start (outbox_id=%s entry_id=%s op=%s attempts=%s)",
+            str(req.outbox_id),
+            str(req.entry_id),
+            req.op,
+            req.attempts,
+        )
         try:
             rag = get_rag()
         except LightRagNotEnabledError as e:
@@ -64,6 +71,13 @@ class Indexer:
                 retryable=True,
                 error_kind="unknown",
                 detail=f"init failed: {type(e).__name__}: {msg}",
+            )
+        finally:
+            logger.info(
+                "indexer init done (outbox_id=%s entry_id=%s op=%s)",
+                str(req.outbox_id),
+                str(req.entry_id),
+                req.op,
             )
 
         if req.op == "delete":
