@@ -55,7 +55,16 @@ class Indexer:
         except LightRagConfigError as e:
             return IndexResult(ok=False, retryable=False, error_kind="config", detail=str(e))
         except Exception as e:
-            return IndexResult(ok=False, retryable=True, error_kind="unknown", detail=f"init failed: {e}")
+            msg = (str(e) or "").strip()
+            if not msg:
+                # Many timeout-related exceptions have empty string representations.
+                msg = repr(e)
+            return IndexResult(
+                ok=False,
+                retryable=True,
+                error_kind="unknown",
+                detail=f"init failed: {type(e).__name__}: {msg}",
+            )
 
         if req.op == "delete":
             return self._delete_by_entry_id(rag, entry_id=str(req.entry_id))

@@ -328,7 +328,8 @@ def _create_and_init_rag():
         started = time.perf_counter()
         loop = runtime.loop
         loop.run_until_complete(asyncio.wait_for(rag.initialize_storages(), timeout=init_timeout_sec))
-        logger.info("lightrag initialized", extra={"elapsed_ms": int((time.perf_counter() - started) * 1000)})
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        logger.info("lightrag initialized (elapsed_ms=%s)", elapsed_ms)
         return rag
 
     import asyncio
