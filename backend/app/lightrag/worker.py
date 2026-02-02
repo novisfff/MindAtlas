@@ -124,13 +124,7 @@ class Worker:
             if not result.claimed:
                 return 0
 
-            logger.info(
-                "claimed batch",
-                extra={
-                    "worker_id": self.cfg.worker_id,
-                    "count": len(result.claimed),
-                },
-            )
+            logger.info("claimed batch (worker_id=%s count=%s)", self.cfg.worker_id, len(result.claimed))
 
             # Process each message
             for outbox in result.claimed:
@@ -288,13 +282,11 @@ class Worker:
         if not retryable:
             repo.mark_dead(outbox_id=outbox.id, error_message=error_message)
             logger.warning(
-                "index dead (non-retryable)",
-                extra={
-                    "outbox_id": str(outbox.id),
-                    "entry_id": str(outbox.entry_id),
-                    "attempts": outbox.attempts,
-                    "error": error_message[:200],
-                },
+                "index dead (non-retryable) outbox_id=%s entry_id=%s attempts=%s error=%s",
+                str(outbox.id),
+                str(outbox.entry_id),
+                outbox.attempts,
+                (error_message or "")[:200],
             )
             return
 
@@ -305,13 +297,11 @@ class Worker:
                 error_message=error_message,
             )
             logger.warning(
-                "index dead (max attempts exceeded)",
-                extra={
-                    "outbox_id": str(outbox.id),
-                    "entry_id": str(outbox.entry_id),
-                    "attempts": outbox.attempts,
-                    "error": error_message[:200],
-                },
+                "index dead (max attempts exceeded) outbox_id=%s entry_id=%s attempts=%s error=%s",
+                str(outbox.id),
+                str(outbox.entry_id),
+                outbox.attempts,
+                (error_message or "")[:200],
             )
         else:
             # Retry with backoff
@@ -324,14 +314,12 @@ class Worker:
                 error_message=error_message,
             )
             logger.info(
-                "index retry scheduled",
-                extra={
-                    "outbox_id": str(outbox.id),
-                    "entry_id": str(outbox.entry_id),
-                    "attempts": outbox.attempts,
-                    "next_available_at": next_available.isoformat(),
-                    "error": error_message[:200],
-                },
+                "index retry scheduled outbox_id=%s entry_id=%s attempts=%s next_available_at=%s error=%s",
+                str(outbox.id),
+                str(outbox.entry_id),
+                outbox.attempts,
+                next_available.isoformat(),
+                (error_message or "")[:200],
             )
 
 
