@@ -117,6 +117,15 @@ class Settings(BaseSettings):
     # pgvector (optional, for vector storage in PostgreSQL)
     pgvector_enabled: bool = Field(default=False, alias="PGVECTOR_ENABLED")
 
+    # Docling worker (optional, for attachment parsing)
+    docling_worker_enabled: bool = Field(default=False, alias="DOCLING_WORKER_ENABLED")
+    docling_worker_poll_interval_ms: int = Field(default=2000, alias="DOCLING_WORKER_POLL_INTERVAL_MS")
+    docling_worker_batch_size: int = Field(default=1, alias="DOCLING_WORKER_BATCH_SIZE")
+    docling_worker_max_attempts: int = Field(default=3, alias="DOCLING_WORKER_MAX_ATTEMPTS")
+    docling_worker_lock_ttl_sec: int = Field(default=600, alias="DOCLING_WORKER_LOCK_TTL_SEC")
+    docling_max_file_size_mb: int = Field(default=100, alias="DOCLING_MAX_FILE_SIZE_MB")
+    docling_max_pdf_pages: int = Field(default=500, alias="DOCLING_MAX_PDF_PAGES")
+
     # Scheduler (optional, for background jobs like weekly report generation)
     scheduler_enabled: bool = Field(default=False, alias="SCHEDULER_ENABLED")
 

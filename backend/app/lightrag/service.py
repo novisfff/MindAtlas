@@ -168,6 +168,7 @@ def _normalize_sources(value: Any) -> list[LightRagSource]:
                 out.append(
                     LightRagSource(
                         doc_id=str(item.get("doc_id") or item.get("docId") or item.get("id") or "") or None,
+                        file_path=str(item.get("file_path") or item.get("filePath") or "") or None,
                         content=(item.get("content") or item.get("text") or item.get("chunk") or None),
                         score=_normalize_score(item.get("score")),
                         metadata=(item.get("metadata") if isinstance(item.get("metadata"), dict) else None),
@@ -179,6 +180,38 @@ def _normalize_sources(value: Any) -> list[LightRagSource]:
     if isinstance(value, dict):
         return _normalize_sources([value])
     return [LightRagSource(content=str(value))]
+
+
+def _decorate_sources(sources: list[LightRagSource]) -> list[LightRagSource]:
+    """Derive entry/attachment linkage from doc_id/file_path.
+
+    Convention:
+    - Entry doc: doc_id == <entry_uuid>, file_path may also be <entry_uuid>
+    - Attachment doc: doc_id == "attachment:<attachment_uuid>", file_path == <entry_uuid>
+    """
+    for src in sources or []:
+        doc_id = (getattr(src, "doc_id", None) or "").strip()
+        file_path = (getattr(src, "file_path", None) or "").strip()
+
+        if doc_id.startswith("attachment:"):
+            attachment_id = doc_id.split(":", 1)[1].strip()
+            src.kind = "attachment"
+            src.attachment_id = attachment_id or None
+            try:
+                src.entry_id = str(UUID(file_path)) if file_path else None
+            except Exception:
+                src.entry_id = None
+            continue
+
+        # Default: try interpret doc_id as entry UUID.
+        try:
+            src.entry_id = str(UUID(doc_id)) if doc_id else None
+            if src.entry_id:
+                src.kind = "entry"
+        except Exception:
+            pass
+
+    return sources
 
 
 def _normalize_answer(raw: Any) -> tuple[str, list[LightRagSource]]:
@@ -279,6 +312,7 @@ def _call_rag_query_sync(*, query: str, mode: LightRagQueryMode, top_k: int, tim
                             score = hit.get("distance")
                         sources.append({
                             "doc_id": hit.get("full_doc_id") or hit.get("file_path") or "",
+                            "file_path": hit.get("file_path") or "",
                             "content": hit.get("content") or "",
                             "score": score if score is not None else 0.0,
                         })
@@ -291,6 +325,7 @@ def _call_rag_query_sync(*, query: str, mode: LightRagQueryMode, top_k: int, tim
                         if isinstance(chunk, dict):
                             sources.append({
                                 "doc_id": chunk.get("file_path") or "",
+                                "file_path": chunk.get("file_path") or "",
                                 "content": chunk.get("content") or "",
                                 "score": 0.5,  # Default score when not available
                             })
@@ -341,6 +376,7 @@ def _call_rag_recall_sync(*, query: str, top_k: int, timeout_sec: float = 30.0) 
             sources.append(
                 {
                     "doc_id": hit.get("full_doc_id") or hit.get("file_path") or "",
+                    "file_path": hit.get("file_path") or "",
                     "content": hit.get("content") or "",
                     "score": score if score is not None else 0.0,
                 }
@@ -395,6 +431,7 @@ def _extract_query_llm_chunks(raw: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
 
+        file_path = item.get("file_path") or item.get("filePath") or ""
         doc_id = (
             item.get("full_doc_id")
             or item.get("fullDocId")
@@ -416,6 +453,7 @@ def _extract_query_llm_chunks(raw: Any) -> list[dict[str, Any]]:
         out.append(
             {
                 "doc_id": str(doc_id) if doc_id is not None else "",
+                "file_path": str(file_path) if file_path is not None else "",
                 "content": str(content) if content is not None else "",
                 "score": score,
                 "metadata": metadata,
@@ -513,10 +551,17 @@ def _extract_candidate_entry_ids(graph_context: dict[str, Any]) -> set[UUID]:
     for chunk in graph_context.get("chunks") or []:
         if not isinstance(chunk, dict):
             continue
-        doc_id = (chunk.get("doc_id") or chunk.get("full_doc_id") or chunk.get("file_path") or "").strip()
+        doc_id = (chunk.get("doc_id") or chunk.get("full_doc_id") or "").strip()
+        file_path = (chunk.get("file_path") or "").strip()
         if doc_id:
             try:
                 entry_ids.add(UUID(doc_id))
+                continue
+            except (ValueError, TypeError):
+                pass
+        if file_path:
+            try:
+                entry_ids.add(UUID(file_path))
             except (ValueError, TypeError):
                 pass
 
@@ -1436,6 +1481,7 @@ class LightRagService:
 
         latency_ms = int((time.perf_counter() - queue_start) * 1000)
         answer, sources = _normalize_answer(raw)
+        sources = _decorate_sources(sources)
         result = LightRagQueryResponse(
             answer=answer,
             sources=sources,
@@ -1525,7 +1571,7 @@ class LightRagService:
             except Exception:
                 pass
 
-        sources = _normalize_sources(raw_sources)
+        sources = _decorate_sources(_normalize_sources(raw_sources))
         if cache_ttl > 0 and cache_maxsize > 0:
             _QUERY_CACHE.set(
                 cache_key,
@@ -1618,7 +1664,7 @@ class LightRagService:
             except Exception:
                 pass
 
-        sources = _normalize_sources(raw_sources)
+        sources = _decorate_sources(_normalize_sources(raw_sources))
         if cache_ttl > 0 and cache_maxsize > 0:
             _QUERY_CACHE.set(
                 cache_key,

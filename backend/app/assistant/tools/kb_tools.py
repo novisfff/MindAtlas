@@ -70,6 +70,22 @@ def _truncate(s: str | None, max_len: int) -> str:
     return t[:max_len] if len(t) > max_len else t
 
 
+def _normalize_score(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        v = float(value)
+    except Exception:
+        return None
+    if v != v:  # NaN
+        return None
+    if v == float("inf") or v == float("-inf"):
+        return None
+    return v
+
+
 def _parse_entry_title_from_chunk(text: str | None) -> str | None:
     raw = (text or "").strip()
     if not raw:
@@ -235,30 +251,45 @@ def kb_search(
     # Extract chunks from graph_data
     chunks = graph_data.get("chunks") or []
 
-    # Collect unique Entry UUIDs from chunks
-    entry_ids: set[UUID] = set()
     title_cache: dict[str, UUID] = {}
     title_db = None
+
+    # Normalize chunks and group by entry_id, keeping attachment chunks.
+    attachment_ids: set[UUID] = set()
+    chunks_by_entry: dict[UUID, list[dict[str, Any]]] = {}
     for src in chunks:
         if not isinstance(src, dict):
             continue
         doc_id = (src.get("doc_id") or "").strip()
-        entry_id: UUID | None = None
+        file_path = (src.get("file_path") or "").strip()
+        raw_chunk = src.get("content") or ""
+        score = _normalize_score(src.get("score"))
+
+        kind = "entry"
+        attachment_id: str | None = None
+        if doc_id.startswith("attachment:"):
+            kind = "attachment"
+            attachment_id = doc_id.split(":", 1)[1].strip() or None
+
+        entry_uuid: UUID | None = None
         if doc_id:
             try:
-                entry_id = UUID(doc_id)
+                entry_uuid = UUID(doc_id)
             except Exception:
-                entry_id = None
-
-        raw_chunk = src.get("content") or ""
+                entry_uuid = None
+        if entry_uuid is None and file_path:
+            try:
+                entry_uuid = UUID(file_path)
+            except Exception:
+                entry_uuid = None
 
         # Backward compat: try to map to Entry by parsing the rendered "Title:" line.
-        if entry_id is None:
+        if entry_uuid is None:
             title = _parse_entry_title_from_chunk(raw_chunk)
             if title:
                 cached = title_cache.get(title)
                 if cached is not None:
-                    entry_id = cached
+                    entry_uuid = cached
                 else:
                     if title_db is None:
                         title_db = get_current_db()
@@ -270,10 +301,36 @@ def kb_search(
                     )
                     if hit is not None:
                         title_cache[title] = hit.id
-                        entry_id = hit.id
+                        entry_uuid = hit.id
 
-        if entry_id is not None:
-            entry_ids.add(entry_id)
+        if entry_uuid is None:
+            continue
+
+        if score is not None and score < threshold:
+            continue
+
+        if kind == "attachment" and attachment_id:
+            try:
+                attachment_ids.add(UUID(attachment_id))
+            except Exception:
+                pass
+
+        chunks_by_entry.setdefault(entry_uuid, []).append(
+            {
+                "kind": kind,
+                "docId": doc_id or None,
+                "filePath": file_path or None,
+                "entryId": str(entry_uuid),
+                "attachmentId": attachment_id,
+                "score": score,
+                "content": _truncate(raw_chunk, mcc),
+            }
+        )
+
+    # Collect unique Entry UUIDs from chunks
+    entry_ids: set[UUID] = set()
+    for eid in chunks_by_entry.keys():
+        entry_ids.add(eid)
 
     # Build graphContext from entities and relationships
     graph_context: dict[str, Any] = {
@@ -318,13 +375,31 @@ def kb_search(
     db = get_current_db()
     entries = db.query(Entry).filter(Entry.id.in_(list(entry_ids))).limit(me).all()
 
+    attachment_name_by_id: dict[str, str] = {}
+    if attachment_ids:
+        try:
+            from app.attachment.models import Attachment
+
+            rows = db.query(Attachment.id, Attachment.original_filename).filter(Attachment.id.in_(list(attachment_ids))).all()
+            for aid, name in rows:
+                attachment_name_by_id[str(aid)] = name or ""
+        except Exception:
+            attachment_name_by_id = {}
+
     items: list[dict[str, Any]] = []
     for e in entries:
+        evidences = chunks_by_entry.get(e.id, [])
+        evidences.sort(key=lambda x: float(x.get("score") or 0.0), reverse=True)
+        evidences = evidences[:cpe]
+        for ev in evidences:
+            if ev.get("kind") == "attachment" and ev.get("attachmentId"):
+                ev["filename"] = attachment_name_by_id.get(ev["attachmentId"], "")
         items.append({
             "entryId": str(e.id),
             "title": e.title or "",
             "summary": e.summary or "",
             "content": e.content or "",
+            "evidences": evidences,
         })
 
     # Build numbered references for citation
@@ -335,6 +410,7 @@ def kb_search(
             "mode": m,
             "query": q,
             "items": items,
+            "chunks": [ev for item in items for ev in (item.get("evidences") or [])],
             "graphContext": graph_context,
             "references": references,
         },

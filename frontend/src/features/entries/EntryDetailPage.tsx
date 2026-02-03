@@ -23,6 +23,7 @@ import {
   useEntryAttachmentsQuery,
   useUploadAttachmentMutation,
   useDeleteAttachmentMutation,
+  useRetryAttachmentParseMutation,
 } from '@/features/attachments'
 
 export function EntryDetailPage() {
@@ -43,6 +44,7 @@ export function EntryDetailPage() {
   const { data: attachments = [] } = useEntryAttachmentsQuery(id || '')
   const uploadAttachmentMutation = useUploadAttachmentMutation(id || '')
   const deleteAttachmentMutation = useDeleteAttachmentMutation(id || '')
+  const retryAttachmentParseMutation = useRetryAttachmentParseMutation(id || '')
 
   const formatDate = (dateString?: string) => {
     if (!dateString) return ''
@@ -263,12 +265,14 @@ export function EntryDetailPage() {
         <AttachmentList
           attachments={attachments}
           onDelete={(attachmentId) => deleteAttachmentMutation.mutate(attachmentId)}
+          onRetry={(attachmentId) => retryAttachmentParseMutation.mutate(attachmentId)}
           isDeleting={deleteAttachmentMutation.isPending}
+          isRetrying={retryAttachmentParseMutation.isPending}
         />
 
         <div className="mt-4">
           <FileUpload
-            onUpload={(file) => uploadAttachmentMutation.mutate(file)}
+            onUpload={(file, indexToKg) => uploadAttachmentMutation.mutate({ file, indexToKg })}
             isUploading={uploadAttachmentMutation.isPending}
           />
         </div>

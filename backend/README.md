@@ -78,6 +78,28 @@ uvicorn app.main:app --reload --port 8000
 python -m app.lightrag.worker
 ```
 
+### 6. 启动附件解析 Worker（可选）
+
+附件解析 Worker 使用 Docling 库解析上传的文档（PDF、Office、图片），提取文本后索引到知识图谱。
+
+```bash
+# 安装 Docling 依赖（独立于主依赖，因为体积较大）
+pip install -r requirements-docling.txt
+
+# 在 .env 中配置（参考 .env.example）
+DOCLING_WORKER_ENABLED=true
+
+# 启动 Worker（自动从 .env 加载配置）
+python -m app.attachment.worker
+```
+
+**支持的文件格式**：
+- PDF（最大 500 页）
+- Office 文档：`.docx`, `.xlsx`, `.pptx`
+- 图片（OCR）：`.png`, `.jpg`, `.jpeg`
+
+**文件大小限制**：默认 100MB，可通过 `DOCLING_MAX_FILE_SIZE_MB` 配置。
+
 ## 环境变量
 
 | 变量 | 说明 | 默认值 |
@@ -104,6 +126,12 @@ python -m app.lightrag.worker
 | NEO4J_USER | Neo4j 用户名 | neo4j |
 | NEO4J_PASSWORD | Neo4j 密码 | - |
 | NEO4J_DATABASE | Neo4j 数据库 | neo4j |
+| DOCLING_WORKER_ENABLED | 附件解析 Worker 开关 | false |
+| DOCLING_WORKER_POLL_INTERVAL_MS | Worker 轮询间隔（毫秒） | 2000 |
+| DOCLING_WORKER_BATCH_SIZE | 每次处理批量大小 | 1 |
+| DOCLING_WORKER_MAX_ATTEMPTS | 最大重试次数 | 3 |
+| DOCLING_MAX_FILE_SIZE_MB | 最大文件大小（MB） | 100 |
+| DOCLING_MAX_PDF_PAGES | PDF 最大页数 | 500 |
 
 ## API 端点
 
@@ -134,8 +162,9 @@ python -m app.lightrag.worker
 ### Attachment
 - `GET /api/attachments` - 获取所有附件
 - `GET /api/attachments/entry/{entry_id}` - 获取 Entry 的附件
-- `POST /api/attachments/entry/{entry_id}` - 上传附件
+- `POST /api/attachments/entry/{entry_id}` - 上传附件（支持 `index_to_knowledge_graph` 参数）
 - `GET /api/attachments/{id}/download` - 下载附件
+- `POST /api/attachments/{id}/retry` - 重试解析失败的附件
 - `DELETE /api/attachments/{id}` - 删除附件
 
 ### Graph

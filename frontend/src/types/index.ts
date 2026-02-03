@@ -72,4 +72,12 @@ export interface Attachment {
   contentType: string
   size: number
   createdAt: string
+  indexToKnowledgeGraph?: boolean
+  parseStatus?: 'pending' | 'processing' | 'completed' | 'failed'
+  parsedAt?: string
+  parseLastError?: string
+  kgIndexStatus?: 'pending' | 'processing' | 'succeeded' | 'dead'
+  kgIndexAttempts?: number
+  kgIndexLastError?: string
+  kgIndexUpdatedAt?: string
 }

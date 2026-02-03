@@ -634,5 +634,27 @@
     "addRelation": "Add Relation",
     "noAttachments": "No attachments yet",
     "dropFile": "Drop file here or click to upload"
+  },
+  "attachment": {
+    "indexToKnowledgeGraph": "Index to Knowledge Graph",
+    "dropFile": "Drop file here or click to upload",
+    "supports": "Supports PDF, DOCX, TXT, MD, Images",
+    "parseStatus": {
+      "pending": "Queued for parsing",
+      "processing": "Parsing",
+      "completed": "Parsed",
+      "failed": "Parse failed"
+    },
+    "kgStatus": {
+      "queuedForParse": "Queued for parsing",
+      "parsing": "Parsing",
+      "parseFailed": "Parse failed",
+      "waitingIndex": "Waiting to index",
+      "indexQueued": "Index queued",
+      "indexing": "Indexing",
+      "indexed": "Indexed",
+      "indexFailed": "Index failed"
+    },
+    "retry": "Retry"
   }
 }

@@ -179,6 +179,38 @@ services:
       - mindatlas-network
     restart: unless-stopped
 
+  # Parse Worker (Docling document parsing)
+  parse-worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: parse-worker
+    container_name: mindatlas-parse-worker
+    env_file:
+      - ./backend.env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-mindatlas}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-mindatlas}
+      MINIO_SECURE: "false"
+      DOCLING_WORKER_ENABLED: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - mindatlas-network
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    restart: unless-stopped
+
   # Frontend (Nginx)
   frontend:
     build:

@@ -68,3 +68,46 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 # Stage 5: Worker target (LightRAG indexing worker)
 FROM base AS worker
 CMD ["python", "-m", "app.lightrag.worker"]
+
+# Stage 6: Parse Worker target (Docling document parsing)
+FROM python:3.11-slim AS parse-worker-builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY requirements.txt requirements-docling.txt ./
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt -r requirements-docling.txt
+
+FROM python:3.11-slim AS parse-worker
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /app
+
+# Install runtime dependencies including OCR support
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    curl \
+    poppler-utils \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-chi-sim \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --system app && \
+    useradd --system --gid app --create-home --home-dir /home/app app
+
+COPY --from=parse-worker-builder /opt/venv /opt/venv
+COPY --chown=app:app . .
+
+USER app
+
+CMD ["python", "-m", "app.attachment.worker"]

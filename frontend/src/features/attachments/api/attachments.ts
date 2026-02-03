@@ -5,9 +5,14 @@ export async function getEntryAttachments(entryId: string): Promise<Attachment[]
   return apiClient.get<Attachment[]>(`/api/attachments/entry/${encodeURIComponent(entryId)}`)
 }
 
-export async function uploadAttachment(entryId: string, file: File): Promise<Attachment> {
+export async function uploadAttachment(
+  entryId: string,
+  file: File,
+  indexToKnowledgeGraph: boolean = false
+): Promise<Attachment> {
   const formData = new FormData()
   formData.append('file', file)
+  formData.append('index_to_knowledge_graph', String(indexToKnowledgeGraph))
 
   const response = await fetch(`/api/attachments/entry/${encodeURIComponent(entryId)}`, {
     method: 'POST',
@@ -24,6 +29,10 @@ export async function uploadAttachment(entryId: string, file: File): Promise<Att
 
 export async function deleteAttachment(id: string): Promise<void> {
   await apiClient.delete<void>(`/api/attachments/${encodeURIComponent(id)}`)
+}
+
+export async function retryAttachmentParse(id: string): Promise<Attachment> {
+  return apiClient.post<Attachment>(`/api/attachments/${encodeURIComponent(id)}/retry`)
 }
 
 export function getDownloadUrl(id: string): string {

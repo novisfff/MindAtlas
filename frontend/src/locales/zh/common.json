@@ -632,5 +632,27 @@
     "addRelation": "添加关联",
     "noAttachments": "暂无附件",
     "dropFile": "拖拽文件到此处或点击上传"
+  },
+  "attachment": {
+    "indexToKnowledgeGraph": "索引到知识图谱",
+    "dropFile": "拖拽文件到此处或点击上传",
+    "supports": "支持 PDF, DOCX, TXT, MD, 图片",
+    "parseStatus": {
+      "pending": "待解析",
+      "processing": "解析中",
+      "completed": "解析完成",
+      "failed": "解析失败"
+    },
+    "kgStatus": {
+      "queuedForParse": "待解析",
+      "parsing": "解析中",
+      "parseFailed": "解析失败",
+      "waitingIndex": "待索引",
+      "indexQueued": "索引排队中",
+      "indexing": "索引中",
+      "indexed": "已索引",
+      "indexFailed": "索引失败"
+    },
+    "retry": "重试"
   }
 }

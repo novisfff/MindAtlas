@@ -1,0 +1,4 @@
+# Docling document parsing dependencies
+# Used by the parse-worker service for attachment text extraction
+
+docling>=2.0.0,<3.0.0
