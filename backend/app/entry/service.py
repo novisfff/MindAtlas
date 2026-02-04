@@ -258,7 +258,7 @@ class EntryService:
             try:
                 client, bucket = get_minio_client()
                 for attachment in attachments:
-                    if attachment.parse_status == "completed" and bool(attachment.index_to_knowledge_graph):
+                    if bool(attachment.index_to_knowledge_graph):
                         self.db.add(
                             AttachmentIndexOutbox(
                                 attachment_id=attachment.id,
@@ -272,7 +272,7 @@ class EntryService:
             except StorageError:
                 # Storage unavailable - still allow entry deletion, attachments will be orphaned
                 for attachment in attachments:
-                    if attachment.parse_status == "completed" and bool(attachment.index_to_knowledge_graph):
+                    if bool(attachment.index_to_knowledge_graph):
                         self.db.add(
                             AttachmentIndexOutbox(
                                 attachment_id=attachment.id,

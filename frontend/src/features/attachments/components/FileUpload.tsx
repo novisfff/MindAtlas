@@ -44,20 +44,32 @@ export function FileUpload({ onUpload, isUploading, accept }: FileUploadProps) {
     }
   }
 
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      inputRef.current?.click()
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div
+        role="button"
+        tabIndex={0}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         onClick={() => inputRef.current?.click()}
+        onKeyDown={handleKeyDown}
         className={cn(
           'relative border-2 border-dashed rounded-lg p-8 text-center transition-all cursor-pointer group',
+          'focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary',
           dragOver
             ? 'border-primary bg-primary/5 scale-[1.01]'
             : 'border-muted-foreground/25 hover:border-primary/50 hover:bg-muted/50',
           isUploading && 'opacity-50 pointer-events-none'
         )}
+        aria-label={t('attachment.dropFile')}
       >
         <input
           ref={inputRef}

@@ -8,8 +8,10 @@ interface AttachmentListProps {
   attachments: Attachment[]
   onDelete?: (id: string) => void
   onRetry?: (id: string) => void
+  onRetryIndex?: (id: string) => void
   isDeleting?: boolean
   isRetrying?: boolean
+  isRetryingIndex?: boolean
 }
 
 function formatFileSize(bytes: number): string {
@@ -98,7 +100,7 @@ function KnowledgeStatusBadge({ attachment }: { attachment: Attachment }) {
   )
 }
 
-export function AttachmentList({ attachments, onDelete, onRetry, isDeleting, isRetrying }: AttachmentListProps) {
+export function AttachmentList({ attachments, onDelete, onRetry, onRetryIndex, isDeleting, isRetrying, isRetryingIndex }: AttachmentListProps) {
   const { t } = useTranslation()
 
   if (attachments.length === 0) {
@@ -144,7 +146,18 @@ export function AttachmentList({ attachments, onDelete, onRetry, isDeleting, isR
                   aria-label="Retry parse"
                   className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
                 >
-                  <RefreshCw className="w-4 h-4" />
+                  <RefreshCw className={cn("w-4 h-4", isRetrying && "animate-spin")} />
+                </button>
+              )}
+              {attachment.parseStatus === 'completed' && attachment.kgIndexStatus === 'dead' && onRetryIndex && (
+                <button
+                  type="button"
+                  onClick={() => onRetryIndex(attachment.id)}
+                  disabled={isRetryingIndex}
+                  aria-label="Retry index"
+                  className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                >
+                  <RefreshCw className={cn("w-4 h-4", isRetryingIndex && "animate-spin")} />
                 </button>
               )}
               <a

@@ -604,9 +604,11 @@
   },
   "citation": {
     "entry": "记录",
+    "attachment": "附件",
     "entity": "实体",
     "relationship": "关系",
     "viewEntry": "查看记录",
+    "viewAttachment": "查看附件",
     "notFound": "引用未找到",
     "keywords": "关键词",
     "references": "参考来源",

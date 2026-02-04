@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { FileText, Network, ArrowRight } from 'lucide-react'
+import { FileText, Network, ArrowRight, Paperclip } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { CitationData } from './utils'
@@ -144,12 +144,61 @@ function RelationshipPreview({ citation }: CitationHoverCardProps) {
 }
 
 /**
+ * Attachment 引用预览卡片
+ */
+function AttachmentPreview({ citation }: CitationHoverCardProps) {
+  const navigate = useNavigate()
+  const { t } = useTranslation()
+  const data = citation.sourceData
+
+  const handleClick = () => {
+    if (data?.entryId) {
+      navigate(`/entries/${data.entryId}#attachments`)
+    }
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 text-cyan-600 dark:text-cyan-400">
+        <Paperclip className="h-4 w-4" />
+        <span className="text-xs font-medium">{t('citation.attachment', 'Attachment')}</span>
+      </div>
+
+      {(data?.filename || citation.text) && (
+        <h4 className="font-medium text-sm line-clamp-2">{data?.filename || citation.text}</h4>
+      )}
+
+      {data?.entryId && (
+        <button
+          onClick={handleClick}
+          className={cn(
+            "flex items-center gap-1 text-xs text-cyan-600 dark:text-cyan-400 hover:underline",
+            "mt-2 pt-2 border-t border-border/50"
+          )}
+        >
+          {t('citation.viewAttachment', 'View Attachment')}
+          <ArrowRight className="h-3 w-3" />
+        </button>
+      )}
+
+      {!data && (
+        <p className="text-xs text-muted-foreground italic">
+          {t('citation.notFound', 'Reference not found')}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
  * 引用预览卡片 - 根据类型渲染不同内容
  */
 export function CitationPreview({ citation }: CitationHoverCardProps) {
   switch (citation.type) {
     case 'entry':
       return <EntryPreview citation={citation} />
+    case 'attachment':
+      return <AttachmentPreview citation={citation} />
     case 'entity':
       return <EntityPreview citation={citation} />
     case 'rel':

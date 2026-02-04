@@ -4,6 +4,7 @@ import {
   uploadAttachment,
   deleteAttachment,
   retryAttachmentParse,
+  retryAttachmentIndex,
 } from './api/attachments'
 
 export const attachmentKeys = {
@@ -53,6 +54,16 @@ export function useRetryAttachmentParseMutation(entryId: string) {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: retryAttachmentParse,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: attachmentKeys.byEntry(entryId) })
+    },
+  })
+}
+
+export function useRetryAttachmentIndexMutation(entryId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: retryAttachmentIndex,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: attachmentKeys.byEntry(entryId) })
     },

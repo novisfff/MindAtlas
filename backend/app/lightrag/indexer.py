@@ -102,8 +102,12 @@ class Indexer:
     def upsert_attachment(self, *, attachment_id: str, entry_id: str, text: str) -> IndexResult:
         """Upsert an attachment document into LightRAG.
 
-        Attachment docs are independent from Entry docs. Relationship is carried via file_path=entry_id.
+        Attachment docs use unique file_path to avoid conflicts with Entry docs and other attachments.
+        - doc_id: "attachment:{attachment_id}" (unchanged for backward compatibility)
+        - file_path: "{entry_id}/attachments/{attachment_id}" (unique per attachment)
         """
+        from app.lightrag.source_ids import build_attachment_doc_id, build_attachment_file_path
+
         settings = get_settings()
         if not settings.lightrag_enabled:
             return IndexResult(ok=True, retryable=False, detail="skipped: LIGHTRAG_ENABLED=false")
@@ -121,13 +125,24 @@ class Indexer:
             return IndexResult(ok=False, retryable=True, error_kind="unknown", detail=f"init failed: {type(e).__name__}: {msg}")
 
         try:
-            doc_id = f"attachment:{attachment_id}"
-            track_id = self._replace_doc(rag, doc_id=doc_id, file_path=entry_id, text=text)
+            from app.lightrag.runtime import get_lightrag_runtime
+
+            runtime = get_lightrag_runtime()
+            doc_id = build_attachment_doc_id(attachment_id)
+            file_path = build_attachment_file_path(entry_id, attachment_id)
+
+            # IMPORTANT: run LightRAG async ops on the dedicated runtime thread/loop.
+            def _do() -> str:
+                return self._replace_doc(rag, doc_id=doc_id, file_path=file_path, text=text, runtime=runtime)
+
+            track_id = runtime.call(_do, timeout_sec=None)
             return IndexResult(ok=True, detail=f"indexed: track_id={track_id}")
         except Exception as e:
             return IndexResult(ok=False, retryable=True, error_kind="transient", detail=str(e))
 
     def delete_attachment(self, *, attachment_id: str) -> IndexResult:
+        from app.lightrag.source_ids import build_attachment_doc_id
+
         settings = get_settings()
         if not settings.lightrag_enabled:
             return IndexResult(ok=True, retryable=False, detail="skipped: LIGHTRAG_ENABLED=false")
@@ -144,7 +159,7 @@ class Indexer:
             msg = (str(e) or "").strip() or repr(e)
             return IndexResult(ok=False, retryable=True, error_kind="unknown", detail=f"init failed: {type(e).__name__}: {msg}")
 
-        doc_id = f"attachment:{attachment_id}"
+        doc_id = build_attachment_doc_id(attachment_id)
         return self._delete_by_doc_id(rag, doc_id=doc_id)
 
     def _upsert_by_entry_id(self, rag, *, entry_id: str, text: str) -> str:

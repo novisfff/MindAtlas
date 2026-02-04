@@ -125,3 +125,11 @@ def retry_attachment_parse(id: UUID, db: Session = Depends(get_db)) -> ApiRespon
     attachment = service.retry_parse(id)
     kg_map = service.get_latest_kg_index_map([attachment.id])
     return ApiResponse.ok(_attachment_to_response(attachment=attachment, kg_outbox=kg_map.get(attachment.id)))
+
+
+@router.post("/{id}/retry-index", response_model=ApiResponse)
+def retry_attachment_index(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
+    service = AttachmentService(db)
+    attachment = service.retry_index(id)
+    kg_map = service.get_latest_kg_index_map([attachment.id])
+    return ApiResponse.ok(_attachment_to_response(attachment=attachment, kg_outbox=kg_map.get(attachment.id)))

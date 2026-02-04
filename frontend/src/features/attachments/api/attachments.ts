@@ -35,6 +35,10 @@ export async function retryAttachmentParse(id: string): Promise<Attachment> {
   return apiClient.post<Attachment>(`/api/attachments/${encodeURIComponent(id)}/retry`)
 }
 
+export async function retryAttachmentIndex(id: string): Promise<Attachment> {
+  return apiClient.post<Attachment>(`/api/attachments/${encodeURIComponent(id)}/retry-index`)
+}
+
 export function getDownloadUrl(id: string): string {
   return `/api/attachments/${encodeURIComponent(id)}/download`
 }

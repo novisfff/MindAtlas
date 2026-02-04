@@ -606,9 +606,11 @@
   },
   "citation": {
     "entry": "Entry",
+    "attachment": "Attachment",
     "entity": "Entity",
     "relationship": "Relationship",
     "viewEntry": "View Entry",
+    "viewAttachment": "View Attachment",
     "notFound": "Reference not found",
     "keywords": "Keywords",
     "references": "References",

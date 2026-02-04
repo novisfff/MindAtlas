@@ -121,10 +121,12 @@ class Worker:
             with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as tmp:
                 tmp_path = tmp.name
                 response = client.get_object(bucket, attachment.file_path)
-                for chunk in response.stream(32 * 1024):
-                    tmp.write(chunk)
-                response.close()
-                response.release_conn()
+                try:
+                    for chunk in response.stream(32 * 1024):
+                        tmp.write(chunk)
+                finally:
+                    response.close()
+                    response.release_conn()
         except Exception as e:
             self._handle_error(db, repo, outbox, attachment, str(e), now)
             return

@@ -11,12 +11,9 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import ApiException
 from app.common.storage import get_minio_client, remove_object_safe, StorageError
-from app.common.time import utcnow
 from app.attachment.models import Attachment, AttachmentParseOutbox
+from app.attachment.parser import SUPPORTED_EXTENSIONS as SUPPORTED_PARSE_EXTENSIONS
 from app.config import get_settings
-
-
-SUPPORTED_PARSE_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".pptx", ".png", ".jpg", ".jpeg"}
 
 
 class AttachmentService:
@@ -26,6 +23,7 @@ class AttachmentService:
     def get_latest_kg_index_map(self, attachment_ids: list[UUID]) -> dict[UUID, object]:
         """Return latest AttachmentIndexOutbox row per attachment_id (best-effort).
 
+        Uses PostgreSQL DISTINCT ON for efficient single-row-per-group retrieval.
         Note: returns an empty map if the outbox table is not available (e.g. DB not migrated yet).
         """
         if not attachment_ids:
@@ -37,9 +35,13 @@ class AttachmentService:
             return {}
 
         try:
+            from sqlalchemy import func
+
+            # Use DISTINCT ON to get latest row per attachment_id efficiently
             rows = (
                 self.db.query(AttachmentIndexOutbox)
                 .filter(AttachmentIndexOutbox.attachment_id.in_(attachment_ids))
+                .distinct(AttachmentIndexOutbox.attachment_id)
                 .order_by(
                     AttachmentIndexOutbox.attachment_id.asc(),
                     AttachmentIndexOutbox.updated_at.desc(),
@@ -51,14 +53,7 @@ class AttachmentService:
             # Most commonly: relation/table doesn't exist yet. Do not break attachment UI.
             return {}
 
-        latest: dict[UUID, object] = {}
-        for row in rows:
-            aid = getattr(row, "attachment_id", None)
-            if aid is None:
-                continue
-            if aid not in latest:
-                latest[aid] = row
-        return latest
+        return {row.attachment_id: row for row in rows if row.attachment_id}
 
     def find_all(self) -> List[Attachment]:
         return self.db.query(Attachment).all()
@@ -192,7 +187,7 @@ class AttachmentService:
     def delete(self, id: UUID) -> None:
         attachment = self.find_by_id(id)
         entry_id = attachment.entry_id
-        was_indexed = attachment.parse_status == "completed" and bool(attachment.index_to_knowledge_graph)
+        should_cleanup_index = bool(attachment.index_to_knowledge_graph)
 
         try:
             client, bucket = get_minio_client()
@@ -207,7 +202,7 @@ class AttachmentService:
             )
 
         self.db.delete(attachment)
-        if was_indexed:
+        if should_cleanup_index:
             from app.lightrag.models import AttachmentIndexOutbox
 
             self.db.add(
@@ -242,6 +237,38 @@ class AttachmentService:
         self.db.commit()
         self.db.refresh(attachment)
 
+        return attachment
+
+    def retry_index(self, id: UUID) -> Attachment:
+        """Re-enqueue LightRAG indexing for an already-parsed attachment."""
+        attachment = self.find_by_id(id)
+
+        if not bool(attachment.index_to_knowledge_graph):
+            raise ApiException(
+                status_code=400,
+                code=40003,
+                message="Attachment is not configured to index to knowledge graph",
+            )
+
+        if attachment.parse_status != "completed":
+            raise ApiException(
+                status_code=400,
+                code=40004,
+                message="Only parsed attachments can be re-indexed",
+            )
+
+        from app.lightrag.models import AttachmentIndexOutbox
+
+        self.db.add(
+            AttachmentIndexOutbox(
+                attachment_id=attachment.id,
+                entry_id=attachment.entry_id,
+                op="upsert",
+                status="pending",
+            )
+        )
+        self.db.commit()
+        self.db.refresh(attachment)
         return attachment
 
     def get_object_stream(self, object_key: str):
