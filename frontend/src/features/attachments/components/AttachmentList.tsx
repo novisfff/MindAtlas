@@ -1,8 +1,10 @@
-import { File, Download, Trash2, Image, FileText, Loader2, CheckCircle, AlertCircle, RefreshCw } from 'lucide-react'
+import { useState } from 'react'
+import { File, Download, Trash2, Image, FileText, Loader2, CheckCircle, AlertCircle, RefreshCw, Eye } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { Attachment } from '@/types'
 import { getDownloadUrl } from '../api/attachments'
 import { cn } from '@/lib/utils'
+import { AttachmentPreview } from './AttachmentPreview'
 
 interface AttachmentListProps {
   attachments: Attachment[]
@@ -102,6 +104,7 @@ function KnowledgeStatusBadge({ attachment }: { attachment: Attachment }) {
 
 export function AttachmentList({ attachments, onDelete, onRetry, onRetryIndex, isDeleting, isRetrying, isRetryingIndex }: AttachmentListProps) {
   const { t } = useTranslation()
+  const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null)
 
   if (attachments.length === 0) {
     return (
@@ -112,81 +115,97 @@ export function AttachmentList({ attachments, onDelete, onRetry, onRetryIndex, i
   }
 
   return (
-    <div className="space-y-2">
-      {attachments.map((attachment) => {
-        const Icon = getFileIcon(attachment.contentType)
-        return (
-          <div
-            key={attachment.id}
-            className={cn(
-              'flex items-center justify-between p-3 rounded-lg border bg-card',
-              'hover:bg-accent/50 transition-colors'
-            )}
-          >
-            <div className="flex items-center gap-3 min-w-0">
-              <Icon className="w-5 h-5 text-muted-foreground flex-shrink-0" />
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <p className="text-sm font-medium truncate">
-                    {attachment.originalFilename}
+    <>
+      <div className="space-y-2">
+        {attachments.map((attachment) => {
+          const Icon = getFileIcon(attachment.contentType)
+          return (
+            <div
+              key={attachment.id}
+              className={cn(
+                'flex items-center justify-between p-3 rounded-lg border bg-card',
+                'hover:bg-accent/50 transition-colors'
+              )}
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <Icon className="w-5 h-5 text-muted-foreground flex-shrink-0" />
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-medium truncate">
+                      {attachment.originalFilename}
+                    </p>
+                    <KnowledgeStatusBadge attachment={attachment} />
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {formatFileSize(attachment.size)}
                   </p>
-                  <KnowledgeStatusBadge attachment={attachment} />
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  {formatFileSize(attachment.size)}
-                </p>
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setPreviewAttachment(attachment)}
+                  aria-label="Preview attachment"
+                  className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  <Eye className="w-4 h-4" />
+                </button>
+                {attachment.parseStatus === 'failed' && onRetry && (
+                  <button
+                    type="button"
+                    onClick={() => onRetry(attachment.id)}
+                    disabled={isRetrying}
+                    aria-label="Retry parse"
+                    className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                  >
+                    <RefreshCw className={cn("w-4 h-4", isRetrying && "animate-spin")} />
+                  </button>
+                )}
+                {attachment.parseStatus === 'completed' && attachment.kgIndexStatus === 'dead' && onRetryIndex && (
+                  <button
+                    type="button"
+                    onClick={() => onRetryIndex(attachment.id)}
+                    disabled={isRetryingIndex}
+                    aria-label="Retry index"
+                    className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                  >
+                    <RefreshCw className={cn("w-4 h-4", isRetryingIndex && "animate-spin")} />
+                  </button>
+                )}
+                <a
+                  href={getDownloadUrl(attachment.id)}
+                  download
+                  className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                  aria-label="Download attachment"
+                >
+                  <Download className="w-4 h-4" />
+                </a>
+                {onDelete && (
+                  <button
+                    type="button"
+                    onClick={() => onDelete(attachment.id)}
+                    disabled={isDeleting}
+                    aria-label="Delete attachment"
+                    className={cn(
+                      'p-1.5 rounded hover:bg-destructive/10',
+                      'text-muted-foreground hover:text-destructive',
+                      'transition-colors disabled:opacity-50'
+                    )}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
               </div>
             </div>
-            <div className="flex items-center gap-1">
-              {attachment.parseStatus === 'failed' && onRetry && (
-                <button
-                  type="button"
-                  onClick={() => onRetry(attachment.id)}
-                  disabled={isRetrying}
-                  aria-label="Retry parse"
-                  className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
-                >
-                  <RefreshCw className={cn("w-4 h-4", isRetrying && "animate-spin")} />
-                </button>
-              )}
-              {attachment.parseStatus === 'completed' && attachment.kgIndexStatus === 'dead' && onRetryIndex && (
-                <button
-                  type="button"
-                  onClick={() => onRetryIndex(attachment.id)}
-                  disabled={isRetryingIndex}
-                  aria-label="Retry index"
-                  className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
-                >
-                  <RefreshCw className={cn("w-4 h-4", isRetryingIndex && "animate-spin")} />
-                </button>
-              )}
-              <a
-                href={getDownloadUrl(attachment.id)}
-                download
-                className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-                aria-label="Download attachment"
-              >
-                <Download className="w-4 h-4" />
-              </a>
-              {onDelete && (
-                <button
-                  type="button"
-                  onClick={() => onDelete(attachment.id)}
-                  disabled={isDeleting}
-                  aria-label="Delete attachment"
-                  className={cn(
-                    'p-1.5 rounded hover:bg-destructive/10',
-                    'text-muted-foreground hover:text-destructive',
-                    'transition-colors disabled:opacity-50'
-                  )}
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              )}
-            </div>
-          </div>
-        )
-      })}
-    </div>
+          )
+        })}
+      </div>
+
+      <AttachmentPreview
+        attachment={previewAttachment}
+        isOpen={!!previewAttachment}
+        onClose={() => setPreviewAttachment(null)}
+      />
+    </>
   )
 }

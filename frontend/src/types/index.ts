@@ -81,3 +81,17 @@ export interface Attachment {
   kgIndexLastError?: string
   kgIndexUpdatedAt?: string
 }
+
+export type MarkdownState = 'ready' | 'processing' | 'failed' | 'unsupported'
+export type MarkdownSource = 'parsed_text' | 'file'
+
+export interface AttachmentMarkdownResponse {
+  attachmentId: string
+  state: MarkdownState
+  source: MarkdownSource | null
+  markdown: string | null
+  contentType: string
+  originalFilename: string
+  parseStatus: string | null
+  parseLastError: string | null
+}

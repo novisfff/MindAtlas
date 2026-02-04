@@ -293,3 +293,63 @@ class AttachmentService:
                 code=50001,
                 message="Failed to download attachment",
             ) from exc
+
+    @staticmethod
+    def iter_stream(stream, chunk_size: int = 32 * 1024):
+        """Iterate over stream in chunks, ensuring proper cleanup."""
+        try:
+            for chunk in stream.stream(chunk_size):
+                yield chunk
+        finally:
+            try:
+                stream.close()
+            finally:
+                try:
+                    stream.release_conn()
+                except Exception:
+                    pass
+
+    def read_text_content(self, object_key: str, max_size: int) -> str:
+        """Read text content from storage with size limit."""
+        try:
+            client, bucket = get_minio_client()
+        except StorageError as exc:
+            raise ApiException(status_code=500, code=50002, message="Storage service unavailable") from exc
+
+        try:
+            stat = client.stat_object(bucket, object_key)
+            file_size = getattr(stat, "size", 0) or 0
+            if file_size > max_size:
+                raise ApiException(
+                    status_code=413,
+                    code=41310,
+                    message="Attachment text too large to preview",
+                )
+
+            stream = client.get_object(bucket, object_key)
+            try:
+                content = stream.read().decode("utf-8", errors="replace")
+            finally:
+                stream.close()
+                stream.release_conn()
+            return content
+        except S3Error as exc:
+            if getattr(exc, "code", "") in ("NoSuchKey", "NoSuchObject"):
+                raise ApiException(
+                    status_code=404,
+                    code=40400,
+                    message="Attachment file not found"
+                ) from exc
+            raise ApiException(
+                status_code=500,
+                code=50001,
+                message="Failed to read attachment content",
+            ) from exc
+        except ApiException:
+            raise
+        except Exception as exc:
+            raise ApiException(
+                status_code=500,
+                code=50001,
+                message="Failed to read attachment content",
+            ) from exc

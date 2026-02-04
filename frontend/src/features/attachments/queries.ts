@@ -5,10 +5,12 @@ import {
   deleteAttachment,
   retryAttachmentParse,
   retryAttachmentIndex,
+  getAttachmentMarkdown,
 } from './api/attachments'
 
 export const attachmentKeys = {
   byEntry: (entryId: string) => ['attachments', 'entry', entryId] as const,
+  markdown: (id: string) => ['attachments', 'markdown', id] as const,
 }
 
 export function useEntryAttachmentsQuery(entryId: string) {
@@ -67,5 +69,15 @@ export function useRetryAttachmentIndexMutation(entryId: string) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: attachmentKeys.byEntry(entryId) })
     },
+  })
+}
+
+export function useAttachmentMarkdownQuery(id: string | undefined, enabled: boolean = true) {
+  return useQuery({
+    queryKey: attachmentKeys.markdown(id!),
+    queryFn: () => getAttachmentMarkdown(id!),
+    enabled: !!id && enabled,
+    staleTime: 5 * 60 * 1000,
+    retry: 1,
   })
 }

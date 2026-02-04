@@ -1,5 +1,5 @@
 import { apiClient } from '@/lib/api/client'
-import type { Attachment } from '@/types'
+import type { Attachment, AttachmentMarkdownResponse } from '@/types'
 
 export async function getEntryAttachments(entryId: string): Promise<Attachment[]> {
   return apiClient.get<Attachment[]>(`/api/attachments/entry/${encodeURIComponent(entryId)}`)
@@ -41,4 +41,12 @@ export async function retryAttachmentIndex(id: string): Promise<Attachment> {
 
 export function getDownloadUrl(id: string): string {
   return `/api/attachments/${encodeURIComponent(id)}/download`
+}
+
+export function getPreviewUrl(id: string): string {
+  return `/api/attachments/${encodeURIComponent(id)}/view`
+}
+
+export async function getAttachmentMarkdown(id: string): Promise<AttachmentMarkdownResponse> {
+  return apiClient.get<AttachmentMarkdownResponse>(`/api/attachments/${encodeURIComponent(id)}/markdown`)
 }
