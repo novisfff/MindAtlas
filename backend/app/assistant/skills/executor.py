@@ -11,6 +11,7 @@ from typing import Any, Callable, Iterator
 from langchain_openai import ChatOpenAI
 from sqlalchemy.orm import Session
 
+from app.assistant.openai_compat import build_openai_compat_client_headers
 from app.assistant.skills.base import (
     SkillDefinition,
     SkillStep,
@@ -73,19 +74,22 @@ class SkillExecutor:
         model: str,
         db: Session | None = None,
     ):
+        default_headers = build_openai_compat_client_headers()
         self.llm = ChatOpenAI(
-            api_key=api_key,
-            base_url=base_url,
+            api_key=(api_key or "").strip(),
+            base_url=(base_url or "").strip(),
             model=model,
             streaming=True,
+            default_headers=default_headers,
         )
         # tool 阶段参数生成使用非流式、低温度模型，更稳定可控
         self.args_llm = ChatOpenAI(
-            api_key=api_key,
-            base_url=base_url,
+            api_key=(api_key or "").strip(),
+            base_url=(base_url or "").strip(),
             model=model,
             streaming=False,
             temperature=0,
+            default_headers=default_headers,
         )
         self.db = db
         self._tool_cache: dict = {}  # 按需加载的工具缓存
@@ -1180,7 +1184,6 @@ class SkillExecutor:
                 # 注入总长度可配置；每条 reference 的 content 截断由 kb_search 控制（当前为 2000 字）
                 max_chars = int(getattr(get_settings(), "kb_context_max_chars", 16000) or 16000)
                 kb_prompt = self._format_kb_search_result_for_prompt(kb_result_str, max_chars=max_chars)
-                print(kb_prompt)
                 if kb_prompt.strip():
                     messages.append({"role": "system", "content": kb_prompt})
 

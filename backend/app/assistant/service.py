@@ -12,6 +12,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session, selectinload
 
 from app.ai_registry.runtime import resolve_openai_compat_config
+from app.assistant.openai_compat import build_openai_compat_request_headers
 from app.assistant.models import Conversation, Message
 from app.common.exceptions import ApiException
 from app.common.time import utcnow
@@ -432,10 +433,7 @@ class AssistantService:
         req = Request(
             url,
             data=json.dumps(body).encode("utf-8"),
-            headers={
-                "content-type": "application/json",
-                "authorization": f"Bearer {cfg.api_key}",
-            },
+            headers=build_openai_compat_request_headers(cfg.api_key),
             method="POST",
         )
 
@@ -471,10 +469,7 @@ class AssistantService:
         req = Request(
             url,
             data=json.dumps(body).encode("utf-8"),
-            headers={
-                "content-type": "application/json",
-                "authorization": f"Bearer {cfg.api_key}",
-            },
+            headers=build_openai_compat_request_headers(cfg.api_key),
             method="POST",
         )
 

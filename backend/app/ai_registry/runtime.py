@@ -13,6 +13,15 @@ AiComponent = Literal["assistant", "lightrag"]
 AiModelType = Literal["llm", "embedding"]
 
 
+def _normalize_openai_compat_base_url(base_url: str) -> str:
+    value = (base_url or "").strip().rstrip("/")
+    if not value:
+        return ""
+    if not value.endswith("/v1"):
+        value += "/v1"
+    return value
+
+
 @dataclass(frozen=True)
 class OpenAICompatConfig:
     """OpenAI 兼容配置 (用于运行时解析)"""
@@ -65,10 +74,16 @@ def resolve_openai_compat_config(
     except Exception:
         return None
 
+    model_name = (model.name or "").strip()
+    normalized_base_url = _normalize_openai_compat_base_url(credential.base_url)
+    normalized_api_key = (api_key or "").strip()
+    if not (model_name and normalized_base_url and normalized_api_key):
+        return None
+
     return OpenAICompatConfig(
-        api_key=api_key,
-        base_url=credential.base_url,
-        model=model.name,
+        api_key=normalized_api_key,
+        base_url=normalized_base_url,
+        model=model_name,
         credential_id=credential.id,
         model_id=model.id,
     )
