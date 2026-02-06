@@ -132,6 +132,14 @@ python -m app.attachment.worker
 | DOCLING_WORKER_MAX_ATTEMPTS | 最大重试次数 | 3 |
 | DOCLING_MAX_FILE_SIZE_MB | 最大文件大小（MB） | 100 |
 | DOCLING_MAX_PDF_PAGES | PDF 最大页数 | 500 |
+| DOCLING_OCR_ENABLED | 是否启用 OCR（图片/扫描件） | true |
+| DOCLING_OCR_FORCE_FULL_PAGE_OCR | 强制全页 OCR（适合纯图片/扫描件） | false |
+| DOCLING_OCR_LANGS | RapidOCR 语言（逗号分隔） | auto |
+| DOCLING_OCR_MODELSCOPE_ENABLED | 使用 ModelScope 下载 RapidOCR 模型 | true |
+| DOCLING_OCR_MODELSCOPE_REPO_ID | ModelScope RapidOCR 仓库 | RapidAI/RapidOCR |
+| DOCLING_OCR_DET_MODEL_PATH | 自定义 det 模型（优先于 ModelScope） | - |
+| DOCLING_OCR_REC_MODEL_PATH | 自定义 rec 模型（优先于 ModelScope） | - |
+| DOCLING_OCR_CLS_MODEL_PATH | 自定义 cls 模型（优先于 ModelScope） | - |
 
 ## API 端点
 

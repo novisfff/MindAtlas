@@ -2,3 +2,10 @@
 # Used by the parse-worker service for attachment text extraction
 
 docling>=2.0.0,<3.0.0
+
+# CPU-optimized OCR backend used by docling.datamodel.pipeline_options.RapidOcrOptions
+# Import module: rapidocr_onnxruntime
+rapidocr-onnxruntime
+
+# Optional: download RapidOCR models via ModelScope's snapshot_download
+modelscope
