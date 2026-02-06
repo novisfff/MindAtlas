@@ -22,7 +22,11 @@ from app.database import SessionLocal
 from app.entry.models import Entry
 import app.entry_type.models  # noqa: F401
 import app.tag.models  # noqa: F401
+import app.attachment.models  # noqa: F401
+from app.attachment.models import Attachment
 from app.lightrag.documents import build_document_payload, should_index
+from app.lightrag.attachment_documents import render_attachment_text
+from app.lightrag.attachment_outbox_repo import AttachmentOutboxRepo, compute_backoff as compute_attachment_backoff
 from app.lightrag.indexer import Indexer
 from app.lightrag.outbox_repo import OutboxRepo, compute_backoff
 from app.lightrag.types import IndexRequest, IndexResult, WorkerConfig
@@ -110,38 +114,162 @@ class Worker:
         db = self.session_factory()
 
         try:
-            repo = OutboxRepo(db, worker_id=self.cfg.worker_id)
+            processed = 0
 
-            # Claim batch of messages
-            result = repo.claim_batch(
+            entry_repo = OutboxRepo(db, worker_id=self.cfg.worker_id)
+            entry_result = entry_repo.claim_batch(
                 now=now,
                 batch_size=self.cfg.batch_size,
                 worker_id=self.cfg.worker_id,
                 lock_ttl_sec=self.cfg.lock_ttl_sec,
                 max_attempts=self.cfg.max_attempts,
             )
+            if entry_result.claimed:
+                logger.info("claimed entry batch (worker_id=%s count=%s)", self.cfg.worker_id, len(entry_result.claimed))
+                for outbox in entry_result.claimed:
+                    logger.info(
+                        "processing entry outbox (outbox_id=%s entry_id=%s op=%s attempts=%s status=%s)",
+                        str(outbox.id),
+                        str(outbox.entry_id),
+                        getattr(outbox, "op", None),
+                        getattr(outbox, "attempts", None),
+                        getattr(outbox, "status", None),
+                    )
+                    self._process_one(db, entry_repo, outbox, now)
+                processed += len(entry_result.claimed)
 
-            if not result.claimed:
-                return 0
-
-            logger.info("claimed batch (worker_id=%s count=%s)", self.cfg.worker_id, len(result.claimed))
-
-            # Process each message
-            for outbox in result.claimed:
+            attachment_repo = AttachmentOutboxRepo(db, worker_id=self.cfg.worker_id)
+            attachment_result = attachment_repo.claim_batch(
+                now=now,
+                batch_size=self.cfg.batch_size,
+                worker_id=self.cfg.worker_id,
+                lock_ttl_sec=self.cfg.lock_ttl_sec,
+                max_attempts=self.cfg.max_attempts,
+            )
+            if attachment_result.claimed:
                 logger.info(
-                    "processing outbox (outbox_id=%s entry_id=%s op=%s attempts=%s status=%s)",
-                    str(outbox.id),
-                    str(outbox.entry_id),
-                    getattr(outbox, "op", None),
-                    getattr(outbox, "attempts", None),
-                    getattr(outbox, "status", None),
+                    "claimed attachment batch (worker_id=%s count=%s)",
+                    self.cfg.worker_id,
+                    len(attachment_result.claimed),
                 )
-                self._process_one(db, repo, outbox, now)
+                for outbox in attachment_result.claimed:
+                    logger.info(
+                        "processing attachment outbox (outbox_id=%s attachment_id=%s entry_id=%s op=%s attempts=%s status=%s)",
+                        str(outbox.id),
+                        str(outbox.attachment_id),
+                        str(outbox.entry_id),
+                        getattr(outbox, "op", None),
+                        getattr(outbox, "attempts", None),
+                        getattr(outbox, "status", None),
+                    )
+                    self._process_one_attachment(db, attachment_repo, outbox, now)
+                processed += len(attachment_result.claimed)
 
-            return len(result.claimed)
-
+            return processed
         finally:
             db.close()
+
+    def _process_one_attachment(self, db, repo: AttachmentOutboxRepo, outbox, now: datetime) -> None:
+        try:
+            effective_op = getattr(outbox, "op", None) or "upsert"
+
+            attachment = db.query(Attachment).filter(Attachment.id == outbox.attachment_id).first()
+
+            # If attachment missing or not indexable, translate to delete for cleanup.
+            if effective_op == "upsert":
+                if attachment is None:
+                    effective_op = "delete"
+                elif not bool(getattr(attachment, "index_to_knowledge_graph", False)):
+                    effective_op = "delete"
+                elif getattr(attachment, "parse_status", None) != "completed":
+                    effective_op = "delete"
+
+            if effective_op == "delete":
+                result = self.indexer.delete_attachment(attachment_id=str(outbox.attachment_id))
+            else:
+                entry_title = None
+                try:
+                    entry = db.query(Entry).filter(Entry.id == outbox.entry_id).first()
+                    entry_title = getattr(entry, "title", None) if entry is not None else None
+                except Exception:
+                    entry_title = None
+
+                text = render_attachment_text(
+                    entry_id=str(outbox.entry_id),
+                    entry_title=entry_title,
+                    original_filename=getattr(attachment, "original_filename", "") if attachment is not None else "",
+                    content_type=getattr(attachment, "content_type", "") if attachment is not None else "",
+                    parsed_text=getattr(attachment, "parsed_text", "") if attachment is not None else "",
+                )
+                result = self.indexer.upsert_attachment(
+                    attachment_id=str(outbox.attachment_id),
+                    entry_id=str(outbox.entry_id),
+                    text=text,
+                )
+
+            if result.ok:
+                repo.mark_succeeded(outbox_id=outbox.id)
+                logger.info(
+                    "attachment index succeeded",
+                    extra={
+                        "outbox_id": str(outbox.id),
+                        "attachment_id": str(outbox.attachment_id),
+                        "entry_id": str(outbox.entry_id),
+                        "op": effective_op,
+                    },
+                )
+            else:
+                self._handle_attachment_failure(
+                    repo,
+                    outbox,
+                    result.detail or "indexer returned not ok",
+                    retryable=bool(result.retryable),
+                )
+        except Exception as e:
+            logger.exception(
+                "attachment index error",
+                extra={
+                    "outbox_id": str(outbox.id),
+                    "attachment_id": str(outbox.attachment_id),
+                    "entry_id": str(outbox.entry_id),
+                },
+            )
+            self._handle_attachment_failure(repo, outbox, str(e), retryable=True)
+
+    def _handle_attachment_failure(self, repo: AttachmentOutboxRepo, outbox, error_message: str, *, retryable: bool) -> None:
+        if not retryable:
+            repo.mark_dead(outbox_id=outbox.id, error_message=error_message)
+            logger.warning(
+                "attachment index dead (non-retryable) outbox_id=%s attachment_id=%s attempts=%s error=%s",
+                str(outbox.id),
+                str(outbox.attachment_id),
+                outbox.attempts,
+                (error_message or "")[:200],
+            )
+            return
+
+        if outbox.attempts >= self.cfg.max_attempts:
+            repo.mark_dead(outbox_id=outbox.id, error_message=error_message)
+            logger.warning(
+                "attachment index dead (max attempts exceeded) outbox_id=%s attachment_id=%s attempts=%s error=%s",
+                str(outbox.id),
+                str(outbox.attachment_id),
+                outbox.attempts,
+                (error_message or "")[:200],
+            )
+            return
+
+        backoff = compute_attachment_backoff(outbox.attempts)
+        next_available = utcnow() + backoff
+        repo.mark_retry(outbox_id=outbox.id, next_available_at=next_available, error_message=error_message)
+        logger.info(
+            "attachment index retry scheduled outbox_id=%s attachment_id=%s attempts=%s next_available_at=%s error=%s",
+            str(outbox.id),
+            str(outbox.attachment_id),
+            outbox.attempts,
+            next_available.isoformat(),
+            (error_message or "")[:200],
+        )
 
     def _process_one(self, db, repo: OutboxRepo, outbox, now: datetime) -> None:
         """Process a single outbox message.

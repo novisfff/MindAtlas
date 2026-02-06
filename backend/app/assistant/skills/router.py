@@ -7,6 +7,7 @@ from datetime import date
 
 from sqlalchemy.orm import Session
 
+from app.assistant.openai_compat import build_openai_compat_client_headers
 from app.assistant.skills.base import SkillDefinition, DEFAULT_SKILL_NAME, is_default_skill
 from app.assistant.skills.converters import db_skill_to_definition_light
 from app.assistant_config.registry import SkillRegistry
@@ -89,11 +90,14 @@ class SkillRouter:
         # Optional dependency (tests may not install LangChain)
         from langchain_openai import ChatOpenAI  # type: ignore
 
+        default_headers = build_openai_compat_client_headers()
+
         self.llm = ChatOpenAI(
-            api_key=api_key,
-            base_url=base_url,
+            api_key=(api_key or "").strip(),
+            base_url=(base_url or "").strip(),
             model=model,
             temperature=0,
+            default_headers=default_headers,
         )
         self.db = db
 

@@ -1,11 +1,11 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams, useLocation } from 'react-router-dom'
 import { ArrowLeft, Edit, Trash2, Calendar, Clock, Loader2, Link2, Paperclip } from 'lucide-react'
 import { useEntryQuery, useDeleteEntryMutation, useEntryIndexStatusQuery } from './queries'
 import { IndexStatusBadge } from './components/IndexStatusBadge'
 import { cn } from '@/lib/utils'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { remarkCitation } from '@/features/assistant/components/remark-citation'
 import { CitationMarker } from '@/features/assistant/components/citation'
@@ -23,11 +23,14 @@ import {
   useEntryAttachmentsQuery,
   useUploadAttachmentMutation,
   useDeleteAttachmentMutation,
+  useRetryAttachmentParseMutation,
+  useRetryAttachmentIndexMutation,
 } from '@/features/attachments'
 
 export function EntryDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const location = useLocation()
   const { data: entry, isLoading, error } = useEntryQuery(id)
   const { data: indexStatus } = useEntryIndexStatusQuery(id)
   const deleteMutation = useDeleteEntryMutation()
@@ -43,6 +46,16 @@ export function EntryDetailPage() {
   const { data: attachments = [] } = useEntryAttachmentsQuery(id || '')
   const uploadAttachmentMutation = useUploadAttachmentMutation(id || '')
   const deleteAttachmentMutation = useDeleteAttachmentMutation(id || '')
+  const retryAttachmentParseMutation = useRetryAttachmentParseMutation(id || '')
+  const retryAttachmentIndexMutation = useRetryAttachmentIndexMutation(id || '')
+  const attachmentsRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (location.hash === '#attachments' && attachmentsRef.current) {
+      attachmentsRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      attachmentsRef.current.focus()
+    }
+  }, [location.hash])
 
   const formatDate = (dateString?: string) => {
     if (!dateString) return ''
@@ -254,7 +267,12 @@ export function EntryDetailPage() {
       </div>
 
       {/* Attachments Section */}
-      <div className="mt-6 bg-card rounded-lg border shadow-sm p-6">
+      <div
+        ref={attachmentsRef}
+        id="attachments"
+        tabIndex={-1}
+        className="mt-6 bg-card rounded-lg border shadow-sm p-6 focus:outline-none"
+      >
         <div className="flex items-center gap-2 mb-4">
           <Paperclip className="w-5 h-5 text-muted-foreground" />
           <h2 className="text-lg font-semibold">{t('labels.attachments')}</h2>
@@ -263,12 +281,16 @@ export function EntryDetailPage() {
         <AttachmentList
           attachments={attachments}
           onDelete={(attachmentId) => deleteAttachmentMutation.mutate(attachmentId)}
+          onRetry={(attachmentId) => retryAttachmentParseMutation.mutate(attachmentId)}
+          onRetryIndex={(attachmentId) => retryAttachmentIndexMutation.mutate(attachmentId)}
           isDeleting={deleteAttachmentMutation.isPending}
+          isRetrying={retryAttachmentParseMutation.isPending}
+          isRetryingIndex={retryAttachmentIndexMutation.isPending}
         />
 
         <div className="mt-4">
           <FileUpload
-            onUpload={(file) => uploadAttachmentMutation.mutate(file)}
+            onUpload={(file, indexToKg) => uploadAttachmentMutation.mutate({ file, indexToKg })}
             isUploading={uploadAttachmentMutation.isPending}
           />
         </div>

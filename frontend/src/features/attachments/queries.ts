@@ -3,10 +3,14 @@ import {
   getEntryAttachments,
   uploadAttachment,
   deleteAttachment,
+  retryAttachmentParse,
+  retryAttachmentIndex,
+  getAttachmentMarkdown,
 } from './api/attachments'
 
 export const attachmentKeys = {
   byEntry: (entryId: string) => ['attachments', 'entry', entryId] as const,
+  markdown: (id: string) => ['attachments', 'markdown', id] as const,
 }
 
 export function useEntryAttachmentsQuery(entryId: string) {
@@ -14,13 +18,24 @@ export function useEntryAttachmentsQuery(entryId: string) {
     queryKey: attachmentKeys.byEntry(entryId),
     queryFn: () => getEntryAttachments(entryId),
     enabled: !!entryId,
+    refetchInterval: (query) => {
+      const data = query.state.data
+      const hasActiveJobs = data?.some((a) => {
+        const parsing = a.parseStatus === 'pending' || a.parseStatus === 'processing'
+        const indexing =
+          a.indexToKnowledgeGraph === true && (a.kgIndexStatus === 'pending' || a.kgIndexStatus === 'processing')
+        return parsing || indexing
+      })
+      return hasActiveJobs ? 3000 : false
+    },
   })
 }
 
 export function useUploadAttachmentMutation(entryId: string) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (file: File) => uploadAttachment(entryId, file),
+    mutationFn: ({ file, indexToKg }: { file: File; indexToKg: boolean }) =>
+      uploadAttachment(entryId, file, indexToKg),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: attachmentKeys.byEntry(entryId) })
     },
@@ -34,5 +49,35 @@ export function useDeleteAttachmentMutation(entryId: string) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: attachmentKeys.byEntry(entryId) })
     },
+  })
+}
+
+export function useRetryAttachmentParseMutation(entryId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: retryAttachmentParse,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: attachmentKeys.byEntry(entryId) })
+    },
+  })
+}
+
+export function useRetryAttachmentIndexMutation(entryId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: retryAttachmentIndex,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: attachmentKeys.byEntry(entryId) })
+    },
+  })
+}
+
+export function useAttachmentMarkdownQuery(id: string | undefined, enabled: boolean = true) {
+  return useQuery({
+    queryKey: attachmentKeys.markdown(id!),
+    queryFn: () => getAttachmentMarkdown(id!),
+    enabled: !!id && enabled,
+    staleTime: 5 * 60 * 1000,
+    retry: 1,
   })
 }

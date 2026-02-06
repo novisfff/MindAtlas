@@ -72,4 +72,26 @@ export interface Attachment {
   contentType: string
   size: number
   createdAt: string
+  indexToKnowledgeGraph?: boolean
+  parseStatus?: 'pending' | 'processing' | 'completed' | 'failed'
+  parsedAt?: string
+  parseLastError?: string
+  kgIndexStatus?: 'pending' | 'processing' | 'succeeded' | 'dead'
+  kgIndexAttempts?: number
+  kgIndexLastError?: string
+  kgIndexUpdatedAt?: string
+}
+
+export type MarkdownState = 'ready' | 'processing' | 'failed' | 'unsupported'
+export type MarkdownSource = 'parsed_text' | 'file'
+
+export interface AttachmentMarkdownResponse {
+  attachmentId: string
+  state: MarkdownState
+  source: MarkdownSource | null
+  markdown: string | null
+  contentType: string
+  originalFilename: string
+  parseStatus: string | null
+  parseLastError: string | null
 }

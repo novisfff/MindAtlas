@@ -25,6 +25,10 @@ class LightRagSource(CamelModel):
     """Source document chunk."""
 
     doc_id: str | None = None
+    file_path: str | None = None
+    kind: str | None = Field(default=None, description="Source kind: entry|attachment")
+    entry_id: str | None = Field(default=None, description="Associated Entry UUID if available")
+    attachment_id: str | None = Field(default=None, description="Associated Attachment UUID if available")
     content: str | None = None
     score: float | None = None
     metadata: dict | None = None

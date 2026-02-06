@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { FileText, ChevronRight, ChevronDown, Layers, Box, Share2 } from 'lucide-react'
+import { FileText, Paperclip, ChevronRight, ChevronDown, Layers, Box, Share2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCitationContextSafe } from './CitationContext'
 import { CitationData } from './utils'
@@ -25,6 +25,19 @@ export function ReferenceList({ content, isStreaming }: ReferenceListProps) {
   const navigate = useNavigate()
   const [isKgExpanded, setIsKgExpanded] = useState(false)
 
+  // 解析 content 中实际使用的引用标记 [^n]，使用 useMemo 缓存
+  const usedIndices = useMemo(() => {
+    const indices = new Set<string>()
+    if (content) {
+      const citationRegex = /\[\^(\d+)\]/g
+      let match: RegExpExecArray | null
+      while ((match = citationRegex.exec(content)) !== null) {
+        indices.add(match[1])
+      }
+    }
+    return indices
+  }, [content])
+
   // 流式输出时隐藏参考来源
   if (isStreaming) return null
 
@@ -32,19 +45,23 @@ export function ReferenceList({ content, isStreaming }: ReferenceListProps) {
     return null
   }
 
-  // 按类型分组，并过滤未被引用的内容
+  // 按类型分组，只显示在原文中被实际引用的来源
   const entries: CitationData[] = []
+  const attachments: CitationData[] = []
   const kgItems: CitationData[] = []
 
   context.registry.forEach((citation) => {
-    // 只显示在内容中被引用的 citation
-    if (content && !content.includes(`[^${citation.index}]`)) {
+    // 过滤未在原文中被引用的来源
+    if (!usedIndices.has(citation.index)) {
       return
     }
 
     switch (citation.type) {
       case 'entry':
         entries.push(citation)
+        break
+      case 'attachment':
+        attachments.push(citation)
         break
       case 'entity':
       case 'rel':
@@ -54,13 +71,19 @@ export function ReferenceList({ content, isStreaming }: ReferenceListProps) {
   })
 
   // 如果没有引用，直接返回null
-  if (entries.length === 0 && kgItems.length === 0) {
+  if (entries.length === 0 && attachments.length === 0 && kgItems.length === 0) {
     return null
   }
 
   const handleEntryClick = (entryId?: string) => {
     if (entryId) {
       navigate(`/entries/${entryId}`)
+    }
+  }
+
+  const handleAttachmentClick = (entryId?: string) => {
+    if (entryId) {
+      navigate(`/entries/${entryId}#attachments`)
     }
   }
 
@@ -126,6 +149,18 @@ export function ReferenceList({ content, isStreaming }: ReferenceListProps) {
           />
         ))}
 
+        {/* Attachment 引用 - 总是展开 */}
+        {attachments.map((citation) => (
+          <ReferenceItem
+            key={citation.index}
+            citation={citation}
+            icon={<Paperclip className="h-3.5 w-3.5" />}
+            iconColor="text-cyan-600 dark:text-cyan-400"
+            onClick={() => handleAttachmentClick(citation.sourceData?.entryId)}
+            clickable
+          />
+        ))}
+
         {/* 知识图谱引用 - 可折叠 */}
         {renderKgSection()}
       </div>
@@ -149,6 +184,8 @@ function ReferenceItem({ citation, icon, iconColor, onClick, clickable }: Refere
     switch (citation.type) {
       case 'entry':
         return data?.title || citation.text
+      case 'attachment':
+        return data?.filename || citation.text || citation.refId
       case 'entity':
         return data?.name || citation.refId
       case 'rel':
@@ -162,6 +199,8 @@ function ReferenceItem({ citation, icon, iconColor, onClick, clickable }: Refere
     switch (citation.type) {
       case 'entry':
         return data?.summary
+      case 'attachment':
+        return null
       case 'entity':
         return data?.description
       case 'rel':
@@ -175,6 +214,8 @@ function ReferenceItem({ citation, icon, iconColor, onClick, clickable }: Refere
     switch (citation.type) {
       case 'entry':
         return t('citation.entry', 'Entry')
+      case 'attachment':
+        return t('citation.attachment', 'Attachment')
       case 'entity':
         return data?.entityType || t('citation.entity', 'Entity')
       case 'rel':
@@ -199,6 +240,7 @@ function ReferenceItem({ citation, icon, iconColor, onClick, clickable }: Refere
           <span className={cn(
             "px-1 rounded text-[10px] font-medium shrink-0",
             citation.type === 'entry' && "bg-primary/10 text-primary",
+            citation.type === 'attachment' && "bg-cyan-600/10 text-cyan-600 dark:bg-cyan-400/10 dark:text-cyan-400",
             citation.type === 'entity' && "bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300",
             citation.type === 'rel' && "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300"
           )}>
@@ -218,6 +260,7 @@ function ReferenceItem({ citation, icon, iconColor, onClick, clickable }: Refere
                 <span className={cn(
                   "inline-block px-1 py-0.5 rounded text-[10px] font-medium",
                   citation.type === 'entry' && "bg-primary/10 text-primary",
+                  citation.type === 'attachment' && "bg-cyan-600/10 text-cyan-600 dark:bg-cyan-400/10 dark:text-cyan-400",
                   citation.type === 'entity' && "bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300",
                   citation.type === 'rel' && "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300"
                 )}>

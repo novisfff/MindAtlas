@@ -3,7 +3,7 @@
  */
 
 // 引用类型
-export type CitationType = 'entry' | 'entity' | 'rel'
+export type CitationType = 'entry' | 'attachment' | 'entity' | 'rel'
 
 // 引用数据结构
 export interface CitationData {
@@ -17,6 +17,9 @@ export interface CitationData {
     title?: string
     summary?: string
     content?: string
+    // Attachment 数据
+    attachmentId?: string
+    filename?: string
     // Entity 数据
     name?: string
     entityType?: string
@@ -31,11 +34,14 @@ export interface CitationData {
 // kb_search 返回的引用项
 export interface KbReference {
   index: number
-  type: 'entry' | 'entity' | 'rel'
+  type: 'entry' | 'attachment' | 'entity' | 'rel'
   // entry fields
   entryId?: string
   title?: string
   summary?: string
+  // attachment fields
+  attachmentId?: string
+  filename?: string
   // entity fields
   name?: string
   entityType?: string
@@ -76,9 +82,10 @@ export interface KbSearchResult {
 
 // 正则：匹配脚注定义中的自定义标记
 // [^1]: [[entry:uuid]] Title
+// [^2]: [[attachment:uuid]] filename
 // [^2]: [[entity:Name]] Type - Description
 // [^3]: [[rel:Source->Target]] Description
-const CITATION_DEF_REGEX = /\[\^(\d+)\]:\s*\[\[(entry|entity|rel):([^\]]+)\]\]\s*(.*)/g
+const CITATION_DEF_REGEX = /\[\^(\d+)\]:\s*\[\[(entry|attachment|entity|rel):([^\]]+)\]\]\s*(.*)/g
 
 /**
  * 解析 Markdown 内容中的脚注定义，提取引用元数据
@@ -221,6 +228,22 @@ export function generateRegistryFromKbResult(
             entryId: ref.entryId,
             title: ref.title,
             summary: ref.summary,
+          },
+        })
+        break
+
+      case 'attachment':
+        refId = ref.attachmentId || ''
+        text = ref.filename || ''
+        registry.set(index, {
+          index,
+          type,
+          refId,
+          text,
+          sourceData: {
+            entryId: ref.entryId,
+            attachmentId: ref.attachmentId,
+            filename: ref.filename,
           },
         })
         break

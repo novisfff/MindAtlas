@@ -28,6 +28,12 @@ _BLOCKED_NETWORKS = [
     ipaddress.ip_network("fe80::/10"),        # IPv6 link-local
 ]
 
+_OPENAI_COMPAT_DEFAULT_HEADERS = {
+    "Content-type": "application/json",
+    "accept": "application/json",
+    "user-agent": "MindAtlas/1.0",
+}
+
 
 def _validate_base_url(base_url: str) -> None:
     """Validate base_url to prevent SSRF attacks."""
@@ -80,6 +86,13 @@ def _infer_model_type(model_id: str) -> AiModelType:
     if "embedding" in value or value.startswith("text-embedding-") or value.startswith("embed-"):
         return "embedding"
     return "llm"
+
+
+def _build_openai_compat_headers(api_key: str) -> dict[str, str]:
+    return {
+        **_OPENAI_COMPAT_DEFAULT_HEADERS,
+        "Authorization": f"Bearer {(api_key or '').strip()}",
+    }
 
 
 class AiCredentialService:
@@ -178,10 +191,7 @@ class AiCredentialService:
         url = _normalize_base_url(cred.base_url) + "/models"
         req = Request(
             url,
-            headers={
-                "content-type": "application/json",
-                "authorization": f"Bearer {api_key}",
-            },
+            headers=_build_openai_compat_headers(api_key),
             method="GET",
         )
         try:
@@ -214,10 +224,7 @@ class AiCredentialService:
         url = _normalize_base_url(base_url) + "/models"
         req = Request(
             url,
-            headers={
-                "content-type": "application/json",
-                "authorization": f"Bearer {api_key}",
-            },
+            headers=_build_openai_compat_headers(api_key),
             method="GET",
         )
 

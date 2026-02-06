@@ -168,6 +168,7 @@ def _normalize_sources(value: Any) -> list[LightRagSource]:
                 out.append(
                     LightRagSource(
                         doc_id=str(item.get("doc_id") or item.get("docId") or item.get("id") or "") or None,
+                        file_path=str(item.get("file_path") or item.get("filePath") or "") or None,
                         content=(item.get("content") or item.get("text") or item.get("chunk") or None),
                         score=_normalize_score(item.get("score")),
                         metadata=(item.get("metadata") if isinstance(item.get("metadata"), dict) else None),
@@ -179,6 +180,53 @@ def _normalize_sources(value: Any) -> list[LightRagSource]:
     if isinstance(value, dict):
         return _normalize_sources([value])
     return [LightRagSource(content=str(value))]
+
+
+def _decorate_sources(sources: list[LightRagSource]) -> list[LightRagSource]:
+    """Derive entry/attachment linkage from doc_id/file_path.
+
+    Convention:
+    - Entry doc: doc_id == <entry_uuid>, file_path may also be <entry_uuid>
+    - Attachment doc: doc_id == "attachment:<attachment_uuid>", file_path == "{entry_uuid}/attachments/{attachment_uuid}" (new) or <entry_uuid> (old)
+    """
+    from app.lightrag.source_ids import (
+        is_attachment_doc_id,
+        parse_attachment_id_from_attachment_file_path,
+        parse_attachment_id_from_doc_id,
+        parse_entry_id_from_attachment_file_path,
+    )
+
+    for src in sources or []:
+        doc_id = (getattr(src, "doc_id", None) or "").strip()
+        file_path = (getattr(src, "file_path", None) or "").strip()
+
+        # Some upstream recall paths may lose attachment doc_id prefix; recover from file_path when possible.
+        if "/attachments/" in file_path:
+            attachment_id = parse_attachment_id_from_attachment_file_path(file_path)
+            entry_id = parse_entry_id_from_attachment_file_path(file_path)
+            if attachment_id and entry_id:
+                src.kind = "attachment"
+                src.attachment_id = attachment_id
+                src.entry_id = entry_id
+                continue
+
+        if is_attachment_doc_id(doc_id):
+            attachment_id = parse_attachment_id_from_doc_id(doc_id)
+            src.kind = "attachment"
+            src.attachment_id = attachment_id or None
+            # Support both old (UUID-only) and new (composite) file_path formats
+            src.entry_id = parse_entry_id_from_attachment_file_path(file_path)
+            continue
+
+        # Default: try interpret doc_id as entry UUID.
+        try:
+            src.entry_id = str(UUID(doc_id)) if doc_id else None
+            if src.entry_id:
+                src.kind = "entry"
+        except Exception:
+            pass
+
+    return sources
 
 
 def _normalize_answer(raw: Any) -> tuple[str, list[LightRagSource]]:
@@ -277,8 +325,19 @@ def _call_rag_query_sync(*, query: str, mode: LightRagQueryMode, top_k: int, tim
                         score = hit.get("score")
                         if score is None:
                             score = hit.get("distance")
+                        file_path = hit.get("file_path") or hit.get("filePath") or ""
+                        doc_id = (
+                            hit.get("full_doc_id")
+                            or hit.get("fullDocId")
+                            or hit.get("doc_id")
+                            or hit.get("docId")
+                            or hit.get("id")
+                            or file_path
+                            or ""
+                        )
                         sources.append({
-                            "doc_id": hit.get("full_doc_id") or hit.get("file_path") or "",
+                            "doc_id": doc_id,
+                            "file_path": file_path,
                             "content": hit.get("content") or "",
                             "score": score if score is not None else 0.0,
                         })
@@ -289,9 +348,20 @@ def _call_rag_query_sync(*, query: str, mode: LightRagQueryMode, top_k: int, tim
                     chunks = data.get("chunks") or []
                     for chunk in chunks:
                         if isinstance(chunk, dict):
+                            file_path = chunk.get("file_path") or chunk.get("filePath") or ""
+                            doc_id = (
+                                chunk.get("full_doc_id")
+                                or chunk.get("fullDocId")
+                                or chunk.get("doc_id")
+                                or chunk.get("docId")
+                                or chunk.get("id")
+                                or file_path
+                                or ""
+                            )
                             sources.append({
-                                "doc_id": chunk.get("file_path") or "",
-                                "content": chunk.get("content") or "",
+                                "doc_id": doc_id,
+                                "file_path": file_path,
+                                "content": chunk.get("content") or chunk.get("text") or chunk.get("chunk") or "",
                                 "score": 0.5,  # Default score when not available
                             })
 
@@ -338,9 +408,20 @@ def _call_rag_recall_sync(*, query: str, top_k: int, timeout_sec: float = 30.0) 
             if not isinstance(hit, dict):
                 continue
             score = hit.get("score")
+            file_path = hit.get("file_path") or hit.get("filePath") or ""
+            doc_id = (
+                hit.get("full_doc_id")
+                or hit.get("fullDocId")
+                or hit.get("doc_id")
+                or hit.get("docId")
+                or hit.get("id")
+                or file_path
+                or ""
+            )
             sources.append(
                 {
-                    "doc_id": hit.get("full_doc_id") or hit.get("file_path") or "",
+                    "doc_id": doc_id,
+                    "file_path": file_path,
                     "content": hit.get("content") or "",
                     "score": score if score is not None else 0.0,
                 }
@@ -395,6 +476,7 @@ def _extract_query_llm_chunks(raw: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
 
+        file_path = item.get("file_path") or item.get("filePath") or ""
         doc_id = (
             item.get("full_doc_id")
             or item.get("fullDocId")
@@ -413,9 +495,41 @@ def _extract_query_llm_chunks(raw: Any) -> list[dict[str, Any]]:
             score = item.get("similarity")
 
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else None
+
+        # Recover doc_id/file_path from metadata if upstream uses nested fields.
+        if metadata:
+            if not doc_id:
+                doc_id = (
+                    metadata.get("full_doc_id")
+                    or metadata.get("fullDocId")
+                    or metadata.get("doc_id")
+                    or metadata.get("docId")
+                    or metadata.get("id")
+                    or doc_id
+                )
+            if not file_path:
+                file_path = metadata.get("file_path") or metadata.get("filePath") or file_path
+
+        doc_id_s = str(doc_id).strip() if doc_id is not None else ""
+        file_path_s = str(file_path).strip() if file_path is not None else ""
+        if not doc_id_s and file_path_s:
+            doc_id_s = file_path_s
+
+        # If attachment chunks lost "attachment:" doc_id, recover from file_path composite.
+        if "/attachments/" in file_path_s and not doc_id_s.startswith("attachment:"):
+            try:
+                from app.lightrag.source_ids import build_attachment_doc_id, parse_attachment_id_from_attachment_file_path
+
+                attachment_id = parse_attachment_id_from_attachment_file_path(file_path_s)
+                if attachment_id:
+                    doc_id_s = build_attachment_doc_id(attachment_id)
+            except Exception:
+                pass
+
         out.append(
             {
-                "doc_id": str(doc_id) if doc_id is not None else "",
+                "doc_id": doc_id_s,
+                "file_path": file_path_s,
                 "content": str(content) if content is not None else "",
                 "score": score,
                 "metadata": metadata,
@@ -507,18 +621,45 @@ def _extract_candidate_entry_ids(graph_context: dict[str, Any]) -> set[UUID]:
     Returns:
         Set of valid UUIDs extracted from file_path/doc_id/entry_id fields
     """
+    from app.lightrag.source_ids import is_attachment_doc_id, parse_entry_id_from_attachment_file_path
+
     entry_ids: set[UUID] = set()
 
     # From chunks: use doc_id or file_path
     for chunk in graph_context.get("chunks") or []:
         if not isinstance(chunk, dict):
             continue
-        doc_id = (chunk.get("doc_id") or chunk.get("full_doc_id") or chunk.get("file_path") or "").strip()
+        doc_id = (chunk.get("doc_id") or chunk.get("full_doc_id") or "").strip()
+        file_path = (chunk.get("file_path") or "").strip()
+
+        # For attachment chunks, parse entry_id from composite file_path
+        if is_attachment_doc_id(doc_id):
+            parsed_entry_id = parse_entry_id_from_attachment_file_path(file_path)
+            if parsed_entry_id:
+                try:
+                    entry_ids.add(UUID(parsed_entry_id))
+                except (ValueError, TypeError):
+                    pass
+            continue
+
+        # For entry chunks, try doc_id first, then file_path
         if doc_id:
             try:
                 entry_ids.add(UUID(doc_id))
+                continue
             except (ValueError, TypeError):
                 pass
+        if file_path:
+            # Try as UUID first, then as composite format
+            try:
+                entry_ids.add(UUID(file_path))
+            except (ValueError, TypeError):
+                parsed = parse_entry_id_from_attachment_file_path(file_path)
+                if parsed:
+                    try:
+                        entry_ids.add(UUID(parsed))
+                    except (ValueError, TypeError):
+                        pass
 
     # From entities: use entry_id
     for ent in graph_context.get("entities") or []:
@@ -1436,6 +1577,7 @@ class LightRagService:
 
         latency_ms = int((time.perf_counter() - queue_start) * 1000)
         answer, sources = _normalize_answer(raw)
+        sources = _decorate_sources(sources)
         result = LightRagQueryResponse(
             answer=answer,
             sources=sources,
@@ -1525,7 +1667,7 @@ class LightRagService:
             except Exception:
                 pass
 
-        sources = _normalize_sources(raw_sources)
+        sources = _decorate_sources(_normalize_sources(raw_sources))
         if cache_ttl > 0 and cache_maxsize > 0:
             _QUERY_CACHE.set(
                 cache_key,
@@ -1618,7 +1760,7 @@ class LightRagService:
             except Exception:
                 pass
 
-        sources = _normalize_sources(raw_sources)
+        sources = _decorate_sources(_normalize_sources(raw_sources))
         if cache_ttl > 0 and cache_maxsize > 0:
             _QUERY_CACHE.set(
                 cache_key,

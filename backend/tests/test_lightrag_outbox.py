@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 from tests._db import make_session
@@ -85,6 +86,58 @@ class LightRagOutboxTests(unittest.TestCase):
         self.assertEqual(len(delete_events), 1)
         self.assertEqual(delete_events[0].status, "pending")
         self.assertIsNone(delete_events[0].entry_updated_at)
+
+    def test_entry_delete_enqueues_attachment_delete_outbox_even_if_not_parsed(self) -> None:
+        from app.attachment.models import Attachment  # noqa: E402
+        from app.entry.models import TimeMode  # noqa: E402
+        from app.entry.schemas import EntryRequest  # noqa: E402
+        from app.entry.service import EntryService  # noqa: E402
+        from app.lightrag.models import AttachmentIndexOutbox  # noqa: E402
+
+        svc = EntryService(self.db)
+        entry = svc.create(
+            EntryRequest(
+                title="t",
+                summary=None,
+                content="c",
+                type_id=self.entry_type.id,
+                time_mode=TimeMode.POINT,
+                time_at=datetime.now(timezone.utc),
+            )
+        )
+
+        attachment = Attachment(
+            entry_id=entry.id,
+            filename="f",
+            original_filename="o",
+            file_path="k",
+            size=1,
+            content_type="text/plain",
+            index_to_knowledge_graph=True,
+            parse_status="pending",
+        )
+        self.db.add(attachment)
+        self.db.commit()
+
+        from app.entry import service as entry_service_module  # noqa: E402
+
+        with patch.object(
+            entry_service_module,
+            "get_minio_client",
+            side_effect=entry_service_module.StorageError("down"),
+        ):
+            svc.delete(entry.id)
+
+        delete_events = (
+            self.db.query(AttachmentIndexOutbox)
+            .filter(
+                AttachmentIndexOutbox.attachment_id == attachment.id,
+                AttachmentIndexOutbox.op == "delete",
+            )
+            .all()
+        )
+        self.assertEqual(len(delete_events), 1)
+        self.assertEqual(delete_events[0].status, "pending")
 
     def test_entry_update_only_tags_and_type_does_not_enqueue_upsert(self) -> None:
         from app.entry.models import TimeMode  # noqa: E402

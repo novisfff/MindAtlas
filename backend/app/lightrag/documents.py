@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from uuid import UUID
 
 from app.entry.models import Entry
 from app.lightrag.types import DocumentPayload
@@ -17,6 +18,36 @@ def should_index(payload: DocumentPayload) -> bool:
     return bool(payload.type_enabled and payload.graph_enabled and payload.ai_enabled)
 
 
+def get_attachment_texts(entry_id: UUID, db=None) -> list[tuple[str, str]]:
+    """Get parsed attachment texts for an entry.
+
+    Args:
+        entry_id: The entry ID to get attachments for
+        db: Optional database session. If not provided, creates a new one.
+
+    Returns:
+        List of (filename, parsed_text) tuples
+    """
+    from app.attachment.models import Attachment
+
+    should_close = False
+    if db is None:
+        from app.database import SessionLocal
+        db = SessionLocal()
+        should_close = True
+
+    try:
+        attachments = db.query(Attachment).filter(
+            Attachment.entry_id == entry_id,
+            Attachment.parse_status == "completed",
+            Attachment.parsed_text.isnot(None),
+        ).all()
+        return [(a.original_filename, a.parsed_text) for a in attachments]
+    finally:
+        if should_close:
+            db.close()
+
+
 def render_entry_text(
     *,
     title: str,
@@ -25,6 +56,7 @@ def render_entry_text(
     type_name: str | None,
     type_code: str | None,
     tags: list[str],
+    attachments: list[tuple[str, str]] | None = None,
 ) -> str:
     """Render a stable text template for LightRAG ingestion.
 
@@ -66,6 +98,13 @@ def render_entry_text(
         lines.append("Content:")
         lines.append(safe_content)
 
+    if attachments:
+        for filename, text in attachments:
+            if text and text.strip():
+                lines.append("")
+                lines.append(f"--- Attachment: {filename} ---")
+                lines.append(text.strip())
+
     return "\n".join(lines).strip()
 
 
@@ -97,6 +136,7 @@ def build_document_payload(*, entry: Entry, entry_updated_at: datetime | None) -
         type_name=type_name,
         type_code=type_code,
         tags=tags,
+        attachments=None,
     )
 
     return DocumentPayload(

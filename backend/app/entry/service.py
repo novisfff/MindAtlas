@@ -253,14 +253,34 @@ class EntryService:
 
         attachments = self.db.query(Attachment).filter(Attachment.entry_id == id).all()
         if attachments:
+            from app.lightrag.models import AttachmentIndexOutbox
+
             try:
                 client, bucket = get_minio_client()
                 for attachment in attachments:
+                    if bool(attachment.index_to_knowledge_graph):
+                        self.db.add(
+                            AttachmentIndexOutbox(
+                                attachment_id=attachment.id,
+                                entry_id=entry.id,
+                                op="delete",
+                                status="pending",
+                            )
+                        )
                     remove_object_safe(client, bucket, attachment.file_path)
                     self.db.delete(attachment)
             except StorageError:
                 # Storage unavailable - still allow entry deletion, attachments will be orphaned
                 for attachment in attachments:
+                    if bool(attachment.index_to_knowledge_graph):
+                        self.db.add(
+                            AttachmentIndexOutbox(
+                                attachment_id=attachment.id,
+                                entry_id=entry.id,
+                                op="delete",
+                                status="pending",
+                            )
+                        )
                     self.db.delete(attachment)
 
         self.db.execute(

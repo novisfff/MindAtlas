@@ -8,6 +8,7 @@ from typing import Callable, Iterator
 from langchain_openai import ChatOpenAI
 from sqlalchemy.orm import Session
 
+from app.assistant.openai_compat import build_openai_compat_client_headers
 from app.assistant.skills.base import DEFAULT_SKILL_NAME
 from app.assistant.skills.executor import SkillExecutor
 from app.assistant.skills.router import SkillRouter
@@ -23,13 +24,15 @@ class AssistantAgent:
         self.base_url = base_url
         self.model = model
         self.db = db
+        default_headers = build_openai_compat_client_headers()
 
         # LLM 用于直接回复（不需要 Skill 时）
         self.llm = ChatOpenAI(
-            api_key=api_key,
-            base_url=base_url,
+            api_key=(api_key or "").strip(),
+            base_url=(base_url or "").strip(),
             model=model,
             streaming=True,
+            default_headers=default_headers,
         )
 
         # 初始化 Router 和 Executor

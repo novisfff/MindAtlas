@@ -117,6 +117,38 @@ class Settings(BaseSettings):
     # pgvector (optional, for vector storage in PostgreSQL)
     pgvector_enabled: bool = Field(default=False, alias="PGVECTOR_ENABLED")
 
+    # Docling worker (optional, for attachment parsing)
+    docling_worker_enabled: bool = Field(default=False, alias="DOCLING_WORKER_ENABLED")
+    docling_worker_poll_interval_ms: int = Field(default=2000, alias="DOCLING_WORKER_POLL_INTERVAL_MS")
+    docling_worker_batch_size: int = Field(default=1, alias="DOCLING_WORKER_BATCH_SIZE")
+    docling_worker_max_attempts: int = Field(default=3, alias="DOCLING_WORKER_MAX_ATTEMPTS")
+    docling_worker_lock_ttl_sec: int = Field(default=600, alias="DOCLING_WORKER_LOCK_TTL_SEC")
+    docling_max_file_size_mb: int = Field(default=100, alias="DOCLING_MAX_FILE_SIZE_MB")
+    docling_max_pdf_pages: int = Field(default=500, alias="DOCLING_MAX_PDF_PAGES")
+
+    # Docling OCR (RapidOCR, CPU optimized)
+    docling_ocr_enabled: bool = Field(default=True, alias="DOCLING_OCR_ENABLED")
+    docling_ocr_force_full_page_ocr: bool = Field(default=False, alias="DOCLING_OCR_FORCE_FULL_PAGE_OCR")
+    docling_ocr_langs: str = Field(default="auto", alias="DOCLING_OCR_LANGS")
+    docling_ocr_det_model_path: str = Field(default="", alias="DOCLING_OCR_DET_MODEL_PATH")
+    docling_ocr_rec_model_path: str = Field(default="", alias="DOCLING_OCR_REC_MODEL_PATH")
+    docling_ocr_cls_model_path: str = Field(default="", alias="DOCLING_OCR_CLS_MODEL_PATH")
+    docling_ocr_modelscope_enabled: bool = Field(default=True, alias="DOCLING_OCR_MODELSCOPE_ENABLED")
+    docling_ocr_modelscope_repo_id: str = Field(default="RapidAI/RapidOCR", alias="DOCLING_OCR_MODELSCOPE_REPO_ID")
+
+    # Docling picture description (remote VLM via OpenAI-compatible API)
+    docling_picture_description_enabled: bool = Field(default=False, alias="DOCLING_PICTURE_DESCRIPTION_ENABLED")
+    docling_picture_description_url: str = Field(default="", alias="DOCLING_PICTURE_DESCRIPTION_URL")
+    docling_picture_description_api_key: str | None = Field(default=None, alias="DOCLING_PICTURE_DESCRIPTION_API_KEY")
+    docling_picture_description_model: str = Field(default="", alias="DOCLING_PICTURE_DESCRIPTION_MODEL")
+    docling_picture_description_prompt: str = Field(
+        default="请简要描述这张图片的内容；如果是图表请提取关键数据。",
+        alias="DOCLING_PICTURE_DESCRIPTION_PROMPT",
+    )
+    docling_picture_description_timeout_sec: float = Field(default=60.0, alias="DOCLING_PICTURE_DESCRIPTION_TIMEOUT_SEC")
+    docling_picture_description_concurrency: int = Field(default=1, alias="DOCLING_PICTURE_DESCRIPTION_CONCURRENCY")
+    docling_picture_description_params_json: str = Field(default="", alias="DOCLING_PICTURE_DESCRIPTION_PARAMS_JSON")
+
     # Scheduler (optional, for background jobs like weekly report generation)
     scheduler_enabled: bool = Field(default=False, alias="SCHEDULER_ENABLED")
 

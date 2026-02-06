@@ -99,6 +99,69 @@ class Indexer:
         except Exception as e:
             return IndexResult(ok=False, retryable=True, error_kind="transient", detail=str(e))
 
+    def upsert_attachment(self, *, attachment_id: str, entry_id: str, text: str) -> IndexResult:
+        """Upsert an attachment document into LightRAG.
+
+        Attachment docs use unique file_path to avoid conflicts with Entry docs and other attachments.
+        - doc_id: "attachment:{attachment_id}" (unchanged for backward compatibility)
+        - file_path: "{entry_id}/attachments/{attachment_id}" (unique per attachment)
+        """
+        from app.lightrag.source_ids import build_attachment_doc_id, build_attachment_file_path
+
+        settings = get_settings()
+        if not settings.lightrag_enabled:
+            return IndexResult(ok=True, retryable=False, detail="skipped: LIGHTRAG_ENABLED=false")
+
+        try:
+            rag = get_rag()
+        except LightRagNotEnabledError as e:
+            return IndexResult(ok=True, retryable=False, detail=str(e))
+        except LightRagDependencyError as e:
+            return IndexResult(ok=False, retryable=False, error_kind="dependency", detail=str(e))
+        except LightRagConfigError as e:
+            return IndexResult(ok=False, retryable=False, error_kind="config", detail=str(e))
+        except Exception as e:
+            msg = (str(e) or "").strip() or repr(e)
+            return IndexResult(ok=False, retryable=True, error_kind="unknown", detail=f"init failed: {type(e).__name__}: {msg}")
+
+        try:
+            from app.lightrag.runtime import get_lightrag_runtime
+
+            runtime = get_lightrag_runtime()
+            doc_id = build_attachment_doc_id(attachment_id)
+            file_path = build_attachment_file_path(entry_id, attachment_id)
+
+            # IMPORTANT: run LightRAG async ops on the dedicated runtime thread/loop.
+            def _do() -> str:
+                return self._replace_doc(rag, doc_id=doc_id, file_path=file_path, text=text, runtime=runtime)
+
+            track_id = runtime.call(_do, timeout_sec=None)
+            return IndexResult(ok=True, detail=f"indexed: track_id={track_id}")
+        except Exception as e:
+            return IndexResult(ok=False, retryable=True, error_kind="transient", detail=str(e))
+
+    def delete_attachment(self, *, attachment_id: str) -> IndexResult:
+        from app.lightrag.source_ids import build_attachment_doc_id
+
+        settings = get_settings()
+        if not settings.lightrag_enabled:
+            return IndexResult(ok=True, retryable=False, detail="skipped: LIGHTRAG_ENABLED=false")
+
+        try:
+            rag = get_rag()
+        except LightRagNotEnabledError as e:
+            return IndexResult(ok=True, retryable=False, detail=str(e))
+        except LightRagDependencyError as e:
+            return IndexResult(ok=False, retryable=False, error_kind="dependency", detail=str(e))
+        except LightRagConfigError as e:
+            return IndexResult(ok=False, retryable=False, error_kind="config", detail=str(e))
+        except Exception as e:
+            msg = (str(e) or "").strip() or repr(e)
+            return IndexResult(ok=False, retryable=True, error_kind="unknown", detail=f"init failed: {type(e).__name__}: {msg}")
+
+        doc_id = build_attachment_doc_id(attachment_id)
+        return self._delete_by_doc_id(rag, doc_id=doc_id)
+
     def _upsert_by_entry_id(self, rag, *, entry_id: str, text: str) -> str:
         """Upsert a document into LightRAG on the dedicated runtime loop.
 
@@ -115,18 +178,14 @@ class Indexer:
         # Best-effort: ensure both doc_id and file_path are the Entry UUID, so query_llm chunks
         # can be mapped back to Entries (some upstream responses only include file_path).
         def _do() -> str:
-            try:
-                return runtime.loop.run_until_complete(rag.ainsert(text, ids=[entry_id], file_paths=[entry_id]))
-            except TypeError:
-                try:
-                    return runtime.loop.run_until_complete(rag.ainsert(text, ids=[entry_id], file_path=entry_id))
-                except TypeError:
-                    return runtime.loop.run_until_complete(rag.ainsert(text, ids=[entry_id]))
+            return self._replace_doc(rag, doc_id=entry_id, file_path=entry_id, text=text, runtime=runtime)
 
         return runtime.call(_do, timeout_sec=None)
 
     def _delete_by_entry_id(self, rag, *, entry_id: str) -> IndexResult:
-        doc_id = entry_id
+        return self._delete_by_doc_id(rag, doc_id=entry_id)
+
+    def _delete_by_doc_id(self, rag, *, doc_id: str) -> IndexResult:
         try:
             from app.lightrag.runtime import get_lightrag_runtime
 
@@ -140,3 +199,22 @@ class Indexer:
         except Exception as e:
             # Deletion should be idempotent; treat failures as retryable by default.
             return IndexResult(ok=False, retryable=True, error_kind="transient", detail=str(e))
+
+    def _replace_doc(self, rag, *, doc_id: str, file_path: str, text: str, runtime=None) -> str:
+        """Idempotent replace (best-effort delete, then insert)."""
+        from app.lightrag.runtime import get_lightrag_runtime
+
+        rt = runtime or get_lightrag_runtime()
+
+        # LightRAG insert is not a true upsert: if the same document ID already exists it may be ignored.
+        try:
+            rt.loop.run_until_complete(rag.adelete_by_doc_id(doc_id))
+        except Exception:
+            pass
+        try:
+            return rt.loop.run_until_complete(rag.ainsert(text, ids=[doc_id], file_paths=[file_path]))
+        except TypeError:
+            try:
+                return rt.loop.run_until_complete(rag.ainsert(text, ids=[doc_id], file_path=file_path))
+            except TypeError:
+                return rt.loop.run_until_complete(rag.ainsert(text, ids=[doc_id]))
