@@ -271,17 +271,25 @@ export function KnowledgeGraph({
                   {node.createdAt && (
                     <div>{t('labels.created')}: {format(new Date(node.createdAt), 'yyyy-MM-dd')}</div>
                   )}
-                  {(node.entryTitle || node.entryId || !node.entityType) && (
+                  {(node.entryTitle || node.entryId || node.attachmentTitle || node.attachmentId || !node.entityType) && (
                     <div
                       className="text-blue-500 mt-1 truncate max-w-[240px] cursor-pointer hover:underline"
-                      title={node.entryTitle || node.entryId || node.label}
+                      title={node.attachmentTitle || node.attachmentId || node.entryTitle || node.entryId || node.label}
                       onClick={(e) => {
                         e.stopPropagation()
                         const targetId = node.entryId || node.id
-                        if (targetId) navigate(`/entries/${targetId}`)
+                        if (targetId) {
+                          if (node.attachmentId) {
+                            navigate(`/entries/${targetId}#attachments`)
+                          } else {
+                            navigate(`/entries/${targetId}`)
+                          }
+                        }
                       }}
                     >
-                      {t('labels.sourceEntry')}: {node.entryTitle || node.label || (node.entryId ? `${node.entryId.slice(0, 8)}...` : node.id.slice(0, 8) + '...')}
+                      {node.attachmentId
+                        ? `${t('labels.sourceEntry')}: ${node.attachmentTitle || node.attachmentId}`
+                        : `${t('labels.sourceEntry')}: ${node.entryTitle || node.label || (node.entryId ? `${node.entryId.slice(0, 8)}...` : node.id.slice(0, 8) + '...')}`}
                     </div>
                   )}
                 </div>
@@ -387,18 +395,26 @@ export function KnowledgeGraph({
                 )}
               </div>
 
-              {(link.entryTitle || link.entryId) && (
+              {(link.entryTitle || link.entryId || link.attachmentTitle || link.attachmentId) && (
                 <div className="flex justify-end items-center text-[10px] text-zinc-400 mt-1">
                   <div
                     className="text-blue-500 cursor-pointer hover:underline truncate max-w-[120px]"
-                    title={link.entryTitle || link.entryId}
+                    title={link.attachmentTitle || link.attachmentId || link.entryTitle || link.entryId}
                     onClick={(e) => {
                       e.stopPropagation()
                       const targetId = link.entryId
-                      if (targetId) navigate(`/entries/${targetId}`)
+                      if (targetId) {
+                        if (link.attachmentId) {
+                          navigate(`/entries/${targetId}#attachments`)
+                        } else {
+                          navigate(`/entries/${targetId}`)
+                        }
+                      }
                     }}
                   >
-                    {link.entryTitle || (link.entryId ? `${link.entryId.slice(0, 8)}...` : '')}
+                    {link.attachmentId
+                      ? (link.attachmentTitle || link.attachmentId)
+                      : (link.entryTitle || (link.entryId ? `${link.entryId.slice(0, 8)}...` : ''))}
                   </div>
                 </div>
               )}

@@ -18,5 +18,6 @@ export function useLightRagGraphQuery(params?: LightRagGraphParams, enabled: boo
     queryKey: graphKeys.lightrag(params),
     queryFn: () => getLightRagGraphData(params),
     enabled,
+    retry: 1,
   })
 }

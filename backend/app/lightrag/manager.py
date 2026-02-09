@@ -491,8 +491,28 @@ def _create_and_init_rag():
 def get_rag():
     """Get LightRAG singleton instance for the current process."""
     # Double-locking: lru_cache prevents duplicate work; this lock keeps initialization linearized and explicit.
-    with _INIT_LOCK:
+    settings = get_settings()
+    init_timeout_sec = float(getattr(settings, "lightrag_init_timeout_sec", 120.0) or 120.0)
+    lock_timeout_sec = init_timeout_sec + 10.0
+    wait_started = time.perf_counter()
+    acquired = _INIT_LOCK.acquire(timeout=lock_timeout_sec)
+    wait_ms = int((time.perf_counter() - wait_started) * 1000)
+    if not acquired:
+        logger.warning(
+            "lightrag init lock timeout",
+            extra={
+                "lock_timeout_sec": lock_timeout_sec,
+                "wait_ms": wait_ms,
+            },
+        )
+        _dump_stacks(label="lightrag init lock timeout")
+        raise TimeoutError(f"lightrag init lock timed out after {lock_timeout_sec}s")
+    if wait_ms >= 1000:
+        logger.info("lightrag init lock waited", extra={"wait_ms": wait_ms})
+    try:
         return _create_and_init_rag()
+    finally:
+        _INIT_LOCK.release()
 
 
 def reset_lightrag_singletons_for_tests() -> None:

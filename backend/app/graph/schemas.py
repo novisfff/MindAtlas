@@ -21,6 +21,8 @@ class GraphNode(CamelModel):
     description: Optional[str] = None
     entry_id: Optional[str] = None
     entry_title: Optional[str] = None
+    attachment_id: Optional[str] = None
+    attachment_title: Optional[str] = None
     # System graph time fields
     time_mode: Optional[TimeMode] = None
     time_at: Optional[datetime] = None
@@ -39,6 +41,8 @@ class GraphLink(CamelModel):
     keywords: Optional[str] = None
     entry_id: Optional[str] = None
     entry_title: Optional[str] = None
+    attachment_id: Optional[str] = None
+    attachment_title: Optional[str] = None
     created_at: Optional[datetime] = None
 
 

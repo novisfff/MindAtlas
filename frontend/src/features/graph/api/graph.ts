@@ -14,6 +14,8 @@ export interface GraphNode {
   description?: string
   entryId?: string
   entryTitle?: string
+  attachmentId?: string
+  attachmentTitle?: string
   // System graph time fields
   timeMode?: 'NONE' | 'POINT' | 'RANGE'
   timeAt?: string
@@ -32,6 +34,8 @@ export interface GraphLink {
   keywords?: string
   entryId?: string
   entryTitle?: string
+  attachmentId?: string
+  attachmentTitle?: string
   createdAt?: string
 }
 

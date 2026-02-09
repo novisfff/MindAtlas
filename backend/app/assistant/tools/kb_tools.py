@@ -28,7 +28,7 @@ def _run_async(factory: Callable[[], Awaitable[T]]) -> T:
     import asyncio
     from app.config import get_settings
 
-    timeout_sec = float(getattr(get_settings(), "lightrag_query_timeout_sec", 30.0) or 30.0) + 10.0
+    timeout_sec = float(getattr(get_settings(), "lightrag_query_timeout_sec", 60.0) or 60.0) + 10.0
 
     async def _runner() -> T:
         return await asyncio.wait_for(factory(), timeout=timeout_sec)
@@ -143,6 +143,7 @@ def _build_references(
             "entityType": ent.get("type"),
             "description": ent.get("description"),
             "entryId": ent.get("entryId"),
+            "attachmentId": ent.get("attachmentId"),
         })
         idx += 1
 
@@ -156,6 +157,7 @@ def _build_references(
             "description": rel.get("description"),
             "keywords": rel.get("keywords"),
             "entryId": rel.get("entryId"),
+            "attachmentId": rel.get("attachmentId"),
         })
         idx += 1
 
@@ -333,7 +335,7 @@ def kb_search(
                         title_cache[title] = hit.id
                         entry_uuid = hit.id
 
-        if entry_uuid is None:
+        if entry_uuid is None and not (kind == "attachment" and attachment_id):
             continue
 
         # Filter by threshold: treat None as 0 to avoid low-quality/noise references
@@ -351,7 +353,7 @@ def kb_search(
             "kind": kind,
             "docId": doc_id or None,
             "filePath": file_path or None,
-            "entryId": str(entry_uuid),
+            "entryId": str(entry_uuid) if entry_uuid is not None else None,
             "attachmentId": attachment_id,
             "score": score,
             "content": _truncate(raw_chunk, mcc),
@@ -360,7 +362,8 @@ def kb_search(
             # Filter empty chunks early
             continue
 
-        chunks_by_entry.setdefault(entry_uuid, []).append(chunk)
+        if entry_uuid is not None:
+            chunks_by_entry.setdefault(entry_uuid, []).append(chunk)
         if kind == "attachment" and attachment_id:
             chunks_by_attachment.setdefault(attachment_id, []).append(chunk)
 
@@ -381,38 +384,61 @@ def kb_search(
         "entities": [],
         "relationships": [],
     }
+    attachment_entry_by_file_path: dict[str, str] = {}
+    for src in chunks:
+        if not isinstance(src, dict):
+            continue
+        fp = (src.get("file_path") or "").strip()
+        aid = (src.get("doc_id") or "").strip()
+        if not fp:
+            continue
+        if not aid.startswith("attachment:"):
+            continue
+        chunk_entry_id = ""
+        try:
+            parsed_entry_id = parse_entry_id_from_attachment_file_path(fp)
+            if parsed_entry_id:
+                chunk_entry_id = parsed_entry_id
+        except Exception:
+            chunk_entry_id = ""
+        if chunk_entry_id:
+            attachment_entry_by_file_path[fp] = chunk_entry_id
+
     for ent in graph_data.get("entities") or []:
         if not isinstance(ent, dict):
             continue
+        entry_id = ent.get("entry_id")
+        file_path = (ent.get("file_path") or "").strip()
+        attachment_id = ""
+        if file_path and "/attachments/" in file_path:
+            attachment_id = parse_attachment_id_from_attachment_file_path(file_path) or ""
+            if not entry_id:
+                entry_id = attachment_entry_by_file_path.get(file_path) or parse_entry_id_from_attachment_file_path(file_path)
         graph_context["entities"].append({
             "name": (ent.get("name") or "").strip(),
             "type": ent.get("type"),
             "description": ent.get("description"),
-            "entryId": ent.get("entry_id"),
+            "entryId": entry_id,
+            "attachmentId": attachment_id or None,
         })
     for rel in graph_data.get("relationships") or []:
         if not isinstance(rel, dict):
             continue
+        entry_id = rel.get("entry_id")
+        file_path = (rel.get("file_path") or "").strip()
+        attachment_id = ""
+        if file_path and "/attachments/" in file_path:
+            attachment_id = parse_attachment_id_from_attachment_file_path(file_path) or ""
+            if not entry_id:
+                entry_id = attachment_entry_by_file_path.get(file_path) or parse_entry_id_from_attachment_file_path(file_path)
         graph_context["relationships"].append({
             "source": (rel.get("source") or "").strip(),
             "target": (rel.get("target") or "").strip(),
             "description": rel.get("description"),
             "keywords": rel.get("keywords"),
-            "entryId": rel.get("entry_id"),
+            "entryId": entry_id,
+            "attachmentId": attachment_id or None,
         })
-
-    if not ranked_entry_ids:
-        # 即使没有 entry，也可能有 graphContext，生成 references
-        references = _build_references([], [], graph_context)
-        return json.dumps(
-            {
-                "mode": m,
-                "query": q,
-                "references": references,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
 
     db = get_current_db()
     selected_entry_ids = ranked_entry_ids[:me]
