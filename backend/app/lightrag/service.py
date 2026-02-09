@@ -747,6 +747,10 @@ def _knowledge_graph_to_graph_data(raw_kg: Any, *, db: "Session | None" = None):
         GraphData compatible with frontend
     """
     from app.graph.schemas import GraphData, GraphNode, GraphLink
+    from app.lightrag.source_ids import (
+        parse_attachment_id_from_attachment_file_path,
+        parse_entry_id_from_attachment_file_path,
+    )
 
     if raw_kg is None:
         return GraphData(nodes=[], links=[])
@@ -761,10 +765,11 @@ def _knowledge_graph_to_graph_data(raw_kg: Any, *, db: "Session | None" = None):
     else:
         return GraphData(nodes=[], links=[])
 
-    # Collect all entry_ids for batch title lookup
+    # Collect all entry_ids/attachment_ids for batch title lookup
     node_items: list[dict[str, Any]] = []
     link_items: list[dict[str, Any]] = []
     entry_uuids: set[UUID] = set()
+    attachment_uuids: set[UUID] = set()
 
     for n in raw_nodes:
         node_id = _get_node_attr(n, "id", "")
@@ -780,15 +785,24 @@ def _knowledge_graph_to_graph_data(raw_kg: Any, *, db: "Session | None" = None):
         entity_id = _normalize_text(props.get("entity_id") or props.get("entityId"))
         entity_type = _normalize_text(props.get("entity_type") or props.get("entityType"))
         description = _normalize_text(props.get("description") or props.get("summary"))
-        entry_id = _normalize_text(
+        source_path = _normalize_text(
             props.get("file_path")
             or props.get("filePath")
             or props.get("entry_id")
             or props.get("entryId")
         )
-        # Handle multiple entry IDs separated by <SEP>
-        if entry_id and "<SEP>" in entry_id:
-            entry_id = entry_id.split("<SEP>")[0].strip()
+        entry_id = source_path
+        attachment_id: str | None = None
+        # Handle multiple source IDs separated by <SEP>
+        if source_path and "<SEP>" in source_path:
+            source_path = source_path.split("<SEP>")[0].strip()
+            entry_id = source_path
+        if source_path and "/attachments/" in source_path:
+            parsed_entry = parse_entry_id_from_attachment_file_path(source_path)
+            parsed_attachment = parse_attachment_id_from_attachment_file_path(source_path)
+            entry_id = parsed_entry or entry_id
+            attachment_id = parsed_attachment
+
         # Normalize entry_id and collect for batch lookup
         if entry_id:
             try:
@@ -796,7 +810,14 @@ def _knowledge_graph_to_graph_data(raw_kg: Any, *, db: "Session | None" = None):
                 entry_uuids.add(u)
                 entry_id = str(u)
             except (ValueError, TypeError):
-                pass
+                entry_id = None
+        if attachment_id:
+            try:
+                a = UUID(attachment_id)
+                attachment_uuids.add(a)
+                attachment_id = str(a)
+            except (ValueError, TypeError):
+                attachment_id = None
         created_at = _normalize_datetime(props.get("created_at") or props.get("createdAt"))
 
         # Extract label: prefer entity_id for display
@@ -830,6 +851,7 @@ def _knowledge_graph_to_graph_data(raw_kg: Any, *, db: "Session | None" = None):
             "entity_type": entity_type,
             "description": description,
             "entry_id": entry_id,
+            "attachment_id": attachment_id,
         })
 
     links = []
@@ -846,15 +868,23 @@ def _knowledge_graph_to_graph_data(raw_kg: Any, *, db: "Session | None" = None):
 
         edge_description = _normalize_text(edge_props.get("description"))
         edge_keywords = _normalize_keywords(edge_props.get("keywords"))
-        edge_entry_id = _normalize_text(
+        edge_source_path = _normalize_text(
             edge_props.get("file_path")
             or edge_props.get("filePath")
             or edge_props.get("entry_id")
             or edge_props.get("entryId")
         )
-        # Handle multiple entry IDs separated by <SEP>
-        if edge_entry_id and "<SEP>" in edge_entry_id:
-            edge_entry_id = edge_entry_id.split("<SEP>")[0].strip()
+        edge_entry_id = edge_source_path
+        edge_attachment_id: str | None = None
+        # Handle multiple source IDs separated by <SEP>
+        if edge_source_path and "<SEP>" in edge_source_path:
+            edge_source_path = edge_source_path.split("<SEP>")[0].strip()
+            edge_entry_id = edge_source_path
+        if edge_source_path and "/attachments/" in edge_source_path:
+            parsed_entry = parse_entry_id_from_attachment_file_path(edge_source_path)
+            parsed_attachment = parse_attachment_id_from_attachment_file_path(edge_source_path)
+            edge_entry_id = parsed_entry or edge_entry_id
+            edge_attachment_id = parsed_attachment
         # Normalize entry_id and collect for batch lookup
         if edge_entry_id:
             try:
@@ -862,7 +892,14 @@ def _knowledge_graph_to_graph_data(raw_kg: Any, *, db: "Session | None" = None):
                 entry_uuids.add(u)
                 edge_entry_id = str(u)
             except (ValueError, TypeError):
-                pass
+                edge_entry_id = None
+        if edge_attachment_id:
+            try:
+                a = UUID(edge_attachment_id)
+                attachment_uuids.add(a)
+                edge_attachment_id = str(a)
+            except (ValueError, TypeError):
+                edge_attachment_id = None
         edge_created_at = _normalize_datetime(edge_props.get("created_at") or edge_props.get("createdAt"))
 
         edge_id = _get_node_attr(e, "id", "")
@@ -878,6 +915,7 @@ def _knowledge_graph_to_graph_data(raw_kg: Any, *, db: "Session | None" = None):
             "description": edge_description,
             "keywords": edge_keywords,
             "entry_id": edge_entry_id,
+            "attachment_id": edge_attachment_id,
             "created_at": edge_created_at,
         })
 
@@ -891,10 +929,25 @@ def _knowledge_graph_to_graph_data(raw_kg: Any, *, db: "Session | None" = None):
         except Exception as e:
             logger.warning("lightrag graph entry title resolve failed", extra={"error": str(e)})
 
+    # Batch lookup attachment titles
+    attachment_title_by_id: dict[str, str] = {}
+    if db is not None and attachment_uuids:
+        try:
+            from app.attachment.models import Attachment
+            rows = (
+                db.query(Attachment.id, Attachment.original_filename)
+                .filter(Attachment.id.in_(list(attachment_uuids)))
+                .all()
+            )
+            attachment_title_by_id = {str(aid): title for aid, title in rows if title}
+        except Exception as e:
+            logger.warning("lightrag graph attachment title resolve failed", extra={"error": str(e)})
+
     # Build final nodes with entry_title
     nodes: list[GraphNode] = []
     for item in node_items:
         eid = item.get("entry_id")
+        aid = item.get("attachment_id")
         nodes.append(GraphNode(
             id=item["id"],
             label=item["label"],
@@ -908,12 +961,15 @@ def _knowledge_graph_to_graph_data(raw_kg: Any, *, db: "Session | None" = None):
             description=item.get("description"),
             entry_id=eid,
             entry_title=entry_title_by_id.get(eid) if eid else None,
+            attachment_id=aid,
+            attachment_title=attachment_title_by_id.get(aid) if aid else None,
         ))
 
     # Build final links with entry_title
     links: list[GraphLink] = []
     for item in link_items:
         eid = item.get("entry_id")
+        aid = item.get("attachment_id")
         links.append(GraphLink(
             id=item["id"],
             source=item["source"],
@@ -923,6 +979,8 @@ def _knowledge_graph_to_graph_data(raw_kg: Any, *, db: "Session | None" = None):
             keywords=item.get("keywords"),
             entry_id=eid,
             entry_title=entry_title_by_id.get(eid) if eid else None,
+            attachment_id=aid,
+            attachment_title=attachment_title_by_id.get(aid) if aid else None,
             created_at=item.get("created_at"),
         ))
 
@@ -1525,7 +1583,7 @@ class LightRagService:
 
         max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
         sem = _get_query_semaphore(max_concurrency)
-        timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 30.0) or 30.0)
+        timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 60.0) or 60.0)
 
         queue_start = time.perf_counter()
         queue_wait_ms = 0
@@ -1632,7 +1690,7 @@ class LightRagService:
 
         max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
         sem = _get_query_semaphore(max_concurrency)
-        timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 30.0) or 30.0)
+        timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 60.0) or 60.0)
 
         acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
         if not acquired:
@@ -1717,7 +1775,7 @@ class LightRagService:
 
         max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
         sem = _get_query_semaphore(max_concurrency)
-        timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 30.0) or 30.0)
+        timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 60.0) or 60.0)
 
         acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
         if not acquired:
@@ -1800,7 +1858,7 @@ class LightRagService:
 
         max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
         sem = _get_query_semaphore(max_concurrency)
-        timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 30.0) or 30.0)
+        timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 60.0) or 60.0)
 
         acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
         if not acquired:
@@ -1865,7 +1923,7 @@ class LightRagService:
 
         max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
         sem = _get_query_semaphore(max_concurrency)
-        timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 30.0) or 30.0)
+        timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 60.0) or 60.0)
 
         acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
         if not acquired:
@@ -1951,7 +2009,7 @@ class LightRagService:
 
         max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
         sem = _get_query_semaphore(max_concurrency)
-        timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 30.0) or 30.0)
+        timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 60.0) or 60.0)
 
         acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
         if not acquired:
@@ -2152,6 +2210,15 @@ class LightRagService:
         if not settings.lightrag_enabled:
             raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled")
 
+        logger.info(
+            "lightrag graph request start",
+            extra={
+                "node_label": node_label,
+                "max_depth": max_depth,
+                "max_nodes": max_nodes,
+            },
+        )
+
         # Input validation
         node_label = (node_label or "*").strip()[:256]
         if node_label != "*" and not re.match(r"^[A-Za-z0-9_:\-\s]+$", node_label):
@@ -2159,15 +2226,26 @@ class LightRagService:
         max_depth = max(1, min(10, max_depth))
         max_nodes = max(1, min(5000, max_nodes))
 
-        timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 30.0) or 30.0)
+        timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 60.0) or 60.0)
         max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
         sem = _get_query_semaphore(max_concurrency)
+        queue_start = time.perf_counter()
 
         acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
+        queue_wait_ms = int((time.perf_counter() - queue_start) * 1000)
         if not acquired:
+            logger.warning(
+                "lightrag graph timeout before execution",
+                extra={
+                    "timeout_sec": timeout_sec,
+                    "queue_wait_ms": queue_wait_ms,
+                    "max_concurrency": max_concurrency,
+                },
+            )
             raise ApiException(status_code=504, code=50400, message="LightRAG graph timeout (queue)")
 
         try:
+            run_start = time.perf_counter()
             with anyio.fail_after(timeout_sec):
                 raw_kg = await anyio.to_thread.run_sync(
                     partial(
@@ -2179,8 +2257,12 @@ class LightRagService:
                     ),
                     abandon_on_cancel=True,
                 )
+            run_ms = int((time.perf_counter() - run_start) * 1000)
         except TimeoutError as e:
-            logger.warning("lightrag graph timeout", extra={"timeout_sec": timeout_sec})
+            logger.warning(
+                "lightrag graph timeout",
+                extra={"timeout_sec": timeout_sec, "queue_wait_ms": queue_wait_ms, "max_concurrency": max_concurrency},
+            )
             raise ApiException(status_code=504, code=50400, message="LightRAG graph timeout") from e
         except LightRagNotEnabledError as e:
             raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled") from e
@@ -2196,4 +2278,17 @@ class LightRagService:
             except Exception:
                 pass
 
-        return _knowledge_graph_to_graph_data(raw_kg, db=db)
+        graph_data = _knowledge_graph_to_graph_data(raw_kg, db=db)
+        logger.info(
+            "lightrag graph request done",
+            extra={
+                "node_label": node_label,
+                "max_depth": max_depth,
+                "max_nodes": max_nodes,
+                "queue_wait_ms": queue_wait_ms,
+                "run_ms": run_ms,
+                "nodes": len(getattr(graph_data, "nodes", []) or []),
+                "links": len(getattr(graph_data, "links", []) or []),
+            },
+        )
+        return graph_data

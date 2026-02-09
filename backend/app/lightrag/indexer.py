@@ -26,6 +26,8 @@ IndexerDependencyError = LightRagDependencyError
 class Indexer:
     """LightRAG-backed indexer (sync entry point, async internally)."""
 
+    _RUNTIME_CALL_TIMEOUT_SEC = 120.0
+
     def handle(self, req: IndexRequest) -> IndexResult:
         """Handle an outbox event (upsert/delete).
 
@@ -135,7 +137,15 @@ class Indexer:
             def _do() -> str:
                 return self._replace_doc(rag, doc_id=doc_id, file_path=file_path, text=text, runtime=runtime)
 
-            track_id = runtime.call(_do, timeout_sec=None)
+            logger.info(
+                "attachment upsert runtime call",
+                extra={
+                    "attachment_id": attachment_id,
+                    "entry_id": entry_id,
+                    "timeout_sec": self._RUNTIME_CALL_TIMEOUT_SEC,
+                },
+            )
+            track_id = runtime.call(_do, timeout_sec=self._RUNTIME_CALL_TIMEOUT_SEC)
             return IndexResult(ok=True, detail=f"indexed: track_id={track_id}")
         except Exception as e:
             return IndexResult(ok=False, retryable=True, error_kind="transient", detail=str(e))
@@ -180,7 +190,14 @@ class Indexer:
         def _do() -> str:
             return self._replace_doc(rag, doc_id=entry_id, file_path=entry_id, text=text, runtime=runtime)
 
-        return runtime.call(_do, timeout_sec=None)
+        logger.info(
+            "entry upsert runtime call",
+            extra={
+                "entry_id": entry_id,
+                "timeout_sec": self._RUNTIME_CALL_TIMEOUT_SEC,
+            },
+        )
+        return runtime.call(_do, timeout_sec=self._RUNTIME_CALL_TIMEOUT_SEC)
 
     def _delete_by_entry_id(self, rag, *, entry_id: str) -> IndexResult:
         return self._delete_by_doc_id(rag, doc_id=entry_id)

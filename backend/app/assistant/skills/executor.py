@@ -1163,7 +1163,7 @@ class SkillExecutor:
             kb_status = "completed"
             kb_result_str = ""
             try:
-                timeout_sec = float(getattr(get_settings(), "lightrag_query_timeout_sec", 30.0) or 30.0) + 15.0
+                timeout_sec = float(getattr(get_settings(), "lightrag_query_timeout_sec", 60.0) or 60.0) + 15.0
                 logger.info("KB prefetch start", extra={"timeout_sec": timeout_sec, "skill": skill.name})
                 kb_status, kb_result_str = call_kb_prefetch(
                     lambda: self._invoke_tool_sync("kb_search", kb_args),

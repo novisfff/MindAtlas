@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     lightrag_embedding_dim: int = Field(default=1536, alias="LIGHTRAG_EMBEDDING_DIM")
     lightrag_ai_key_source: str = Field(default="env_or_db", alias="LIGHTRAG_AI_KEY_SOURCE")
     lightrag_init_timeout_sec: float = Field(default=120.0, alias="LIGHTRAG_INIT_TIMEOUT_SEC")
-    lightrag_query_timeout_sec: float = Field(default=30.0, alias="LIGHTRAG_QUERY_TIMEOUT_SEC")
+    lightrag_query_timeout_sec: float = Field(default=60.0, alias="LIGHTRAG_QUERY_TIMEOUT_SEC")
     lightrag_query_max_concurrency: int = Field(default=1, alias="LIGHTRAG_QUERY_MAX_CONCURRENCY")
     lightrag_query_cache_ttl_sec: int = Field(default=0, alias="LIGHTRAG_QUERY_CACHE_TTL_SEC")
     lightrag_query_cache_maxsize: int = Field(default=128, alias="LIGHTRAG_QUERY_CACHE_MAXSIZE")
