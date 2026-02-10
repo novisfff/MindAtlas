@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import ipaddress
-import socket
-from urllib.parse import urlparse
 from uuid import UUID
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -14,70 +11,13 @@ from app.ai_provider.crypto import api_key_hint, decrypt_api_key, encrypt_api_ke
 from app.ai_registry.models import AiComponentBinding, AiCredential, AiModel
 from app.ai_registry.schemas import AiComponent, AiModelType, DiscoveredModel
 from app.common.exceptions import ApiException
-
-
-# Blocked IP ranges for SSRF protection
-_BLOCKED_NETWORKS = [
-    ipaddress.ip_network("127.0.0.0/8"),      # Loopback
-    ipaddress.ip_network("10.0.0.0/8"),       # Private
-    ipaddress.ip_network("172.16.0.0/12"),    # Private
-    ipaddress.ip_network("192.168.0.0/16"),   # Private
-    ipaddress.ip_network("169.254.0.0/16"),   # Link-local / AWS metadata
-    ipaddress.ip_network("::1/128"),          # IPv6 loopback
-    ipaddress.ip_network("fc00::/7"),         # IPv6 private
-    ipaddress.ip_network("fe80::/10"),        # IPv6 link-local
-]
+from app.common.ssrf import normalize_openai_base_url, validate_url_ssrf
 
 _OPENAI_COMPAT_DEFAULT_HEADERS = {
-    "Content-type": "application/json",
+    "content-type": "application/json",
     "accept": "application/json",
     "user-agent": "MindAtlas/1.0",
 }
-
-
-def _validate_base_url(base_url: str) -> None:
-    """Validate base_url to prevent SSRF attacks."""
-    if not base_url:
-        raise ApiException(status_code=400, code=40020, message="base_url is required")
-
-    parsed = urlparse(base_url)
-
-    # Only allow http/https schemes
-    if parsed.scheme not in ("http", "https"):
-        raise ApiException(status_code=400, code=40021, message="base_url must use http or https scheme")
-
-    hostname = parsed.hostname
-    if not hostname:
-        raise ApiException(status_code=400, code=40022, message="Invalid base_url: no hostname")
-
-    # Block localhost variants
-    if hostname.lower() in ("localhost", "localhost.localdomain"):
-        raise ApiException(status_code=400, code=40023, message="base_url cannot point to localhost")
-
-    # Resolve hostname and check IP
-    try:
-        addrs = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
-        for family, _, _, _, sockaddr in addrs:
-            ip_str = sockaddr[0]
-            ip = ipaddress.ip_address(ip_str)
-            for net in _BLOCKED_NETWORKS:
-                if ip in net:
-                    raise ApiException(status_code=400, code=40024, message=f"base_url resolves to blocked IP range")
-    except socket.gaierror:
-        # DNS resolution failed - allow it (might be valid external host)
-        pass
-    except ApiException:
-        raise
-    except Exception:
-        pass
-
-
-def _normalize_base_url(base_url: str) -> str:
-    """规范化 base_url, 确保以 /v1 结尾"""
-    base = (base_url or "").rstrip("/")
-    if not base.endswith("/v1"):
-        base += "/v1"
-    return base
 
 
 def _infer_model_type(model_id: str) -> AiModelType:
@@ -91,7 +31,7 @@ def _infer_model_type(model_id: str) -> AiModelType:
 def _build_openai_compat_headers(api_key: str) -> dict[str, str]:
     return {
         **_OPENAI_COMPAT_DEFAULT_HEADERS,
-        "Authorization": f"Bearer {(api_key or '').strip()}",
+        "authorization": f"Bearer {(api_key or '').strip()}",
     }
 
 
@@ -111,7 +51,7 @@ class AiCredentialService:
         return cred
 
     def create(self, name: str, base_url: str, api_key: str) -> AiCredential:
-        _validate_base_url(base_url)
+        validate_url_ssrf(base_url, raise_api_exception=True)
 
         existing = self.db.query(AiCredential).filter(AiCredential.name.ilike(name)).first()
         if existing:
@@ -143,7 +83,7 @@ class AiCredentialService:
             cred.name = name
 
         if base_url is not None:
-            _validate_base_url(base_url)
+            validate_url_ssrf(base_url, raise_api_exception=True)
             cred.base_url = base_url
 
         if api_key is not None:
@@ -188,7 +128,7 @@ class AiCredentialService:
         except Exception:
             return False, None, "Failed to decrypt API key"
 
-        url = _normalize_base_url(cred.base_url) + "/models"
+        url = normalize_openai_base_url(cred.base_url) + "/models"
         req = Request(
             url,
             headers=_build_openai_compat_headers(api_key),
@@ -219,9 +159,9 @@ class AiCredentialService:
         """通过 API Key 发现可用模型"""
         import json
 
-        _validate_base_url(base_url)
+        validate_url_ssrf(base_url, raise_api_exception=True)
 
-        url = _normalize_base_url(base_url) + "/models"
+        url = normalize_openai_base_url(base_url) + "/models"
         req = Request(
             url,
             headers=_build_openai_compat_headers(api_key),

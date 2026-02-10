@@ -33,7 +33,33 @@ class SystemToolFullDefinition:
     json_schema: dict | None
 
 
-class ToolRegistry:
+@dataclass(frozen=True)
+class SystemSkillDefinition:
+    name: str
+    description: str
+
+
+@dataclass(frozen=True)
+class SystemSkillFullDefinition:
+    name: str
+    description: str
+    intent_examples: list[str]
+    tools: list[str]
+    mode: str
+    system_prompt: str | None
+    steps: list[dict[str, Any]]
+    kb_config: dict | None
+    hidden: bool
+
+
+class _BaseRegistry:
+    """DB 驱动注册表基类。"""
+
+    def __init__(self, db: Session):
+        self.db = db
+
+
+class ToolRegistry(_BaseRegistry):
     """工具注册表 - 解析系统本地工具和数据库自定义工具"""
 
     # 内部系统工具：不对外展示，但仍可在运行时被内部逻辑调用
@@ -92,8 +118,16 @@ class ToolRegistry:
         from app.assistant import tools as assistant_tools
         return getattr(assistant_tools, tool_name, None)
 
-    def __init__(self, db: Session):
-        self.db = db
+    def list_db_tools(self, include_disabled: bool = False) -> list[AssistantTool]:
+        """获取数据库中的工具配置。
+
+        Args:
+            include_disabled: 是否包含禁用工具。
+        """
+        query = self.db.query(AssistantTool)
+        if not include_disabled:
+            query = query.filter(AssistantTool.enabled.is_(True))
+        return query.order_by(AssistantTool.created_at.desc()).all()
 
     def resolve(self, tool_name: str) -> Any | None:
         """解析工具 - 优先从数据库查找，正确处理禁用状态
@@ -307,7 +341,7 @@ class ToolRegistry:
         return [], doc_returns, None
 
 
-class SkillRegistry:
+class SkillRegistry(_BaseRegistry):
     """技能注册表 - 解析系统技能和数据库自定义技能"""
 
     @staticmethod
@@ -315,8 +349,53 @@ class SkillRegistry:
         from app.assistant.skills.definitions import SKILLS
         return list(SKILLS)
 
-    def __init__(self, db: Session):
-        self.db = db
+    @staticmethod
+    def list_system_skill_definitions() -> list[SystemSkillFullDefinition]:
+        """获取系统 Skill 元数据定义。"""
+        return [
+            SkillRegistry._to_skill_full_definition(skill, include_steps=True)
+            for skill in SkillRegistry.list_system_skills()
+        ]
+
+    @staticmethod
+    def resolve_system_skill(skill_name: str) -> Any | None:
+        """解析系统 Skill。"""
+        from app.assistant.skills.definitions import get_skill_by_name
+
+        return get_skill_by_name(skill_name)
+
+    def list_db_skills(
+        self,
+        include_steps: bool = False,
+        include_disabled: bool = False,
+    ) -> list[AssistantSkill]:
+        """获取数据库 Skills。
+
+        Args:
+            include_steps: 是否预加载 steps（路由阶段不需要，执行阶段需要）。
+            include_disabled: 是否包含禁用技能。
+        """
+        query = self.db.query(AssistantSkill)
+        if not include_disabled:
+            query = query.filter(AssistantSkill.enabled.is_(True))
+        if include_steps:
+            query = query.options(joinedload(AssistantSkill.steps))
+        return query.order_by(AssistantSkill.created_at.desc()).all()
+
+    def list_db_skill_definitions(
+        self,
+        include_steps: bool = False,
+        include_disabled: bool = False,
+    ) -> list[SystemSkillFullDefinition]:
+        """获取数据库 Skill 元数据定义。"""
+        skills = self.list_db_skills(
+            include_steps=include_steps,
+            include_disabled=include_disabled,
+        )
+        return [
+            self._to_skill_full_definition(skill, include_steps=include_steps)
+            for skill in skills
+        ]
 
     def list_enabled_db_skills(self, include_steps: bool = False) -> list[AssistantSkill]:
         """获取启用的数据库 Skills
@@ -324,10 +403,127 @@ class SkillRegistry:
         Args:
             include_steps: 是否预加载 steps（路由阶段不需要，执行阶段需要）
         """
-        query = (
-            self.db.query(AssistantSkill)
-            .filter(AssistantSkill.enabled.is_(True))
-        )
+        return self.list_db_skills(include_steps=include_steps, include_disabled=False)
+
+    def resolve(self, skill_name: str, include_steps: bool = True) -> Any | None:
+        """解析 Skill - 优先从数据库查找，未命中时回退到系统定义。
+
+        逻辑:
+        1. 查询数据库中是否存在该 Skill（不管启用状态）
+        2. 如果存在且被禁用，返回 None（不回退到系统 Skill）
+           例外：默认 Skill (general_chat) 不可被禁用，始终回退到系统定义
+        3. 如果存在且启用，返回对应 DB SkillDefinition
+        4. 如果不存在，回退到系统 Skill
+
+        Args:
+            skill_name: Skill 名称。
+            include_steps: 解析 DB Skill 时是否包含 steps。
+        """
+        from app.assistant.skills.base import DEFAULT_SKILL_NAME
+
+        query = self.db.query(AssistantSkill)
         if include_steps:
             query = query.options(joinedload(AssistantSkill.steps))
-        return query.order_by(AssistantSkill.created_at.desc()).all()
+        record = query.filter(AssistantSkill.name == skill_name).first()
+
+        if record:
+            if not record.enabled:
+                # 默认 Skill 不可被禁用，回退到系统定义
+                if skill_name == DEFAULT_SKILL_NAME:
+                    return self.resolve_system_skill(skill_name)
+                return None
+
+            from app.assistant.skills.converters import (
+                db_skill_to_definition,
+                db_skill_to_definition_light,
+            )
+
+            if include_steps:
+                return db_skill_to_definition(record)
+            return db_skill_to_definition_light(record)
+
+        return self.resolve_system_skill(skill_name)
+
+    def get_skill_by_name(self, skill_name: str, include_steps: bool = True) -> Any | None:
+        """按名称获取 Skill（先查 DB，再回退系统定义）。
+
+        Args:
+            skill_name: Skill 名称。
+            include_steps: 解析 DB Skill 时是否包含 steps。
+        """
+        return self.resolve(skill_name=skill_name, include_steps=include_steps)
+
+    @staticmethod
+    def _to_skill_full_definition(skill: Any, *, include_steps: bool) -> SystemSkillFullDefinition:
+        raw_intent_examples = getattr(skill, "intent_examples", None)
+        if not isinstance(raw_intent_examples, list):
+            raw_intent_examples = []
+
+        raw_tools = getattr(skill, "tools", None)
+        if not isinstance(raw_tools, list):
+            raw_tools = []
+
+        raw_kb = getattr(skill, "kb_config", None)
+        kb_config = raw_kb if isinstance(raw_kb, dict) else None
+        if kb_config is None:
+            kb = getattr(skill, "kb", None)
+            if kb is not None:
+                kb_config = {"enabled": bool(getattr(kb, "enabled", False))}
+
+        steps: list[dict[str, Any]] = []
+        if include_steps:
+            steps = [
+                SkillRegistry._serialize_skill_step(step)
+                for step in (getattr(skill, "steps", None) or [])
+            ]
+
+        return SystemSkillFullDefinition(
+            name=getattr(skill, "name", ""),
+            description=(getattr(skill, "description", "") or "").strip(),
+            intent_examples=[str(item) for item in raw_intent_examples if item is not None],
+            tools=[str(item) for item in raw_tools if item is not None],
+            mode=(getattr(skill, "mode", "steps") or "steps"),
+            system_prompt=getattr(skill, "system_prompt", None),
+            steps=steps,
+            kb_config=kb_config,
+            hidden=bool(getattr(skill, "hidden", False)),
+        )
+
+    @staticmethod
+    def _serialize_skill_step(step: Any) -> dict[str, Any]:
+        step_data: dict[str, Any] = {
+            "type": getattr(step, "type", None),
+            "instruction": getattr(step, "instruction", None),
+            "tool_name": getattr(step, "tool_name", None),
+            "args_from": getattr(step, "args_from", None),
+            "args_template": getattr(step, "args_template", None),
+            "output_mode": getattr(step, "output_mode", None),
+            "output_fields": SkillRegistry._normalize_output_fields(
+                getattr(step, "output_fields", None)
+            ),
+            "include_in_summary": getattr(step, "include_in_summary", True),
+        }
+        step_order = getattr(step, "step_order", None)
+        if step_order is not None:
+            step_data["step_order"] = step_order
+        return step_data
+
+    @staticmethod
+    def _normalize_output_fields(raw: Any) -> list[dict[str, Any]] | list[str] | None:
+        if not isinstance(raw, list):
+            return None
+
+        normalized: list[dict[str, Any]] | list[str] = []
+        for item in raw:
+            if isinstance(item, dict):
+                normalized.append(item)
+                continue
+            if isinstance(item, str):
+                normalized.append(item)
+                continue
+            if hasattr(item, "model_dump"):
+                try:
+                    normalized.append(item.model_dump())
+                except Exception:
+                    continue
+        return normalized or None

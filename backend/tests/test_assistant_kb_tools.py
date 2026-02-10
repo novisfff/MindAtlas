@@ -14,7 +14,7 @@ class AssistantKnowledgeBaseToolsTests(unittest.TestCase):
         from app.assistant import tools as assistant_tools  # noqa: E402
         from app.assistant_config.registry import ToolRegistry  # noqa: E402
 
-        self.assertIn("kb_search", getattr(assistant_tools, "__all__", []))
+        self.assertNotIn("kb_search", getattr(assistant_tools, "__all__", []))
         self.assertIn("kb_relation_recommendations", getattr(assistant_tools, "__all__", []))
         self.assertNotIn("kb_graph_recall", getattr(assistant_tools, "__all__", []))
 
@@ -27,13 +27,14 @@ class AssistantKnowledgeBaseToolsTests(unittest.TestCase):
         self.assertIsNone(getattr(assistant_tools, "kb_graph_recall", None))
 
         names = {t.name for t in ToolRegistry.list_system_tools()}
-        self.assertIn("kb_search", names)
+        self.assertNotIn("kb_search", names)
         self.assertIn("kb_relation_recommendations", names)
         self.assertNotIn("kb_graph_recall", names)
 
     def test_general_chat_includes_kb_tools(self) -> None:
         from app.assistant.skills.definitions import GENERAL_CHAT  # noqa: E402
 
-        self.assertIn("kb_search", GENERAL_CHAT.tools)
-        self.assertIn("kb_relation_recommendations", GENERAL_CHAT.tools)
+        # kb_search is internally prefetched when skill.kb.enabled=true, not exposed as a visible tool name.
+        self.assertNotIn("kb_search", GENERAL_CHAT.tools)
+        self.assertNotIn("kb_relation_recommendations", GENERAL_CHAT.tools)
         self.assertNotIn("kb_graph_recall", GENERAL_CHAT.tools)

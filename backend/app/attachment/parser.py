@@ -102,6 +102,132 @@ def _resolve_rapidocr_model_paths(
     )
 
 
+def _configure_ocr(
+    pipeline_options,
+    RapidOcrOptions,
+    *,
+    enabled: bool,
+    force_full_page_ocr: bool,
+    langs: str,
+    det_model_path: str,
+    rec_model_path: str,
+    cls_model_path: str,
+    modelscope_enabled: bool,
+    modelscope_repo_id: str,
+) -> None:
+    """Configure OCR options on the pipeline."""
+    if not enabled:
+        pipeline_options.do_ocr = False
+        return
+
+    pipeline_options.do_ocr = True
+    if not _rapidocr_is_available():
+        logger.warning("RapidOCR not available; using Docling default OCR")
+        return
+
+    parsed_langs = _parse_csv_list(langs) or ["english", "chinese"]
+    det, rec, cls = _resolve_rapidocr_model_paths(
+        det_model_path=det_model_path,
+        rec_model_path=rec_model_path,
+        cls_model_path=cls_model_path,
+        modelscope_enabled=bool(modelscope_enabled),
+        modelscope_repo_id=modelscope_repo_id,
+    )
+    det_exists = bool(det and os.path.exists(det))
+    rec_exists = bool(rec and os.path.exists(rec))
+    cls_exists = bool(cls and os.path.exists(cls))
+
+    if det_exists and rec_exists and cls_exists:
+        try:
+            pipeline_options.ocr_options = RapidOcrOptions(
+                det_model_path=det, rec_model_path=rec, cls_model_path=cls,
+                lang=parsed_langs, force_full_page_ocr=bool(force_full_page_ocr),
+            )
+            logger.info("Docling OCR enabled with RapidOCR (custom models)")
+            return
+        except Exception as exc:
+            logger.warning(
+                "RapidOcrOptions does not support custom model paths; falling back to defaults (%s)", exc,
+            )
+    elif det or rec or cls:
+        logger.warning(
+            "RapidOCR model paths provided but invalid; falling back to RapidOCR defaults. "
+            "det=%s (exists=%s) rec=%s (exists=%s) cls=%s (exists=%s)",
+            det, det_exists, rec, rec_exists, cls, cls_exists,
+        )
+
+    pipeline_options.ocr_options = RapidOcrOptions(
+        lang=parsed_langs, force_full_page_ocr=bool(force_full_page_ocr),
+    )
+    logger.info("Docling OCR enabled with RapidOCR")
+
+
+def _configure_picture_description(
+    pipeline_options,
+    PictureDescriptionApiOptions,
+    *,
+    enabled: bool,
+    url: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    timeout_sec: float,
+    concurrency: int,
+    params_json: str,
+) -> None:
+    """Configure picture description options on the pipeline."""
+    if not enabled:
+        pipeline_options.do_picture_description = False
+        return
+
+    resolved_url = _normalize_chat_completions_url(url)
+    resolved_key = (api_key or "").strip()
+    resolved_model = (model or "").strip()
+
+    if not resolved_url or not resolved_key or not resolved_model:
+        logger.warning(
+            "Picture description enabled but missing config; disabling. "
+            "Required: DOCLING_PICTURE_DESCRIPTION_URL/API_KEY/MODEL"
+        )
+        pipeline_options.do_picture_description = False
+        pipeline_options.generate_picture_images = False
+        return
+
+    try:
+        pipeline_options.generate_picture_images = True
+        pipeline_options.do_picture_description = True
+        pipeline_options.enable_remote_services = True
+
+        headers = {"Authorization": f"Bearer {resolved_key}"}
+        params: dict[str, Any] = {}
+        extra_params_raw = (params_json or "").strip()
+        if extra_params_raw:
+            try:
+                extra_params = json.loads(extra_params_raw)
+                if isinstance(extra_params, dict):
+                    if "model" in extra_params:
+                        logger.warning("DOCLING_PICTURE_DESCRIPTION_PARAMS_JSON contains 'model'; ignoring")
+                        extra_params.pop("model", None)
+                    params.update(extra_params)
+            except Exception:
+                logger.warning("Invalid DOCLING_PICTURE_DESCRIPTION_PARAMS_JSON; ignoring")
+        params["model"] = resolved_model
+
+        pipeline_options.picture_description_options = PictureDescriptionApiOptions(
+            url=resolved_url, headers=headers, params=params,
+            prompt=(prompt or "").strip() or "Describe this image.",
+            timeout=max(1.0, float(timeout_sec)),
+            concurrency=max(1, int(concurrency)),
+            provenance="openai_compat_api",
+        )
+        logger.info("Docling picture description enabled (model: %s)", resolved_model)
+    except Exception as e:
+        logger.warning("Failed to configure picture description: %s; disabling", e)
+        pipeline_options.do_picture_description = False
+        pipeline_options.generate_picture_images = False
+        pipeline_options.enable_remote_services = False
+
+
 @lru_cache(maxsize=4)
 def _get_docling_converter(
     *,
@@ -136,120 +262,28 @@ def _get_docling_converter(
 
     pipeline_options = PdfPipelineOptions()
 
-    # OCR configuration (RapidOCR, CPU optimized)
-    if ocr_enabled:
-        pipeline_options.do_ocr = True
-        if _rapidocr_is_available():
-            langs = _parse_csv_list(ocr_langs) or ["english", "chinese"]
-            det, rec, cls = _resolve_rapidocr_model_paths(
-                det_model_path=ocr_det_model_path,
-                rec_model_path=ocr_rec_model_path,
-                cls_model_path=ocr_cls_model_path,
-                modelscope_enabled=bool(ocr_modelscope_enabled),
-                modelscope_repo_id=ocr_modelscope_repo_id,
-            )
-            det_exists = bool(det and os.path.exists(det))
-            rec_exists = bool(rec and os.path.exists(rec))
-            cls_exists = bool(cls and os.path.exists(cls))
-
-            if det_exists and rec_exists and cls_exists:
-                try:
-                    pipeline_options.ocr_options = RapidOcrOptions(
-                        det_model_path=det,
-                        rec_model_path=rec,
-                        cls_model_path=cls,
-                        lang=langs,
-                        force_full_page_ocr=bool(ocr_force_full_page_ocr),
-                    )
-                    logger.info("Docling OCR enabled with RapidOCR (custom models)")
-                except Exception as exc:
-                    logger.warning(
-                        "RapidOcrOptions does not support custom model paths; falling back to defaults (%s)",
-                        exc,
-                    )
-                    pipeline_options.ocr_options = RapidOcrOptions(
-                        lang=langs,
-                        force_full_page_ocr=bool(ocr_force_full_page_ocr),
-                    )
-            elif det or rec or cls:
-                logger.warning(
-                    "RapidOCR model paths provided but invalid; falling back to RapidOCR defaults. "
-                    "det=%s (exists=%s) rec=%s (exists=%s) cls=%s (exists=%s)",
-                    det,
-                    det_exists,
-                    rec,
-                    rec_exists,
-                    cls,
-                    cls_exists,
-                )
-                pipeline_options.ocr_options = RapidOcrOptions(
-                    lang=langs,
-                    force_full_page_ocr=bool(ocr_force_full_page_ocr),
-                )
-            else:
-                pipeline_options.ocr_options = RapidOcrOptions(
-                    lang=langs,
-                    force_full_page_ocr=bool(ocr_force_full_page_ocr),
-                )
-                logger.info("Docling OCR enabled with RapidOCR")
-        else:
-            logger.warning("RapidOCR not available; using Docling default OCR")
-    else:
-        pipeline_options.do_ocr = False
-
-    # Picture description configuration (remote VLM)
-    if picture_description_enabled:
-        url = _normalize_chat_completions_url(picture_description_url)
-        api_key = (picture_description_api_key or "").strip()
-        model = (picture_description_model or "").strip()
-
-        if not url or not api_key or not model:
-            logger.warning(
-                "Picture description enabled but missing config; disabling. "
-                "Required: DOCLING_PICTURE_DESCRIPTION_URL/API_KEY/MODEL"
-            )
-            pipeline_options.do_picture_description = False
-            pipeline_options.generate_picture_images = False
-        else:
-            try:
-                pipeline_options.generate_picture_images = True
-                pipeline_options.do_picture_description = True
-                pipeline_options.enable_remote_services = True
-
-                headers = {"Authorization": f"Bearer {api_key}"}
-                # Merge extra params first, then force model to prevent override
-                params: dict[str, Any] = {}
-                extra_params_raw = (picture_description_params_json or "").strip()
-                if extra_params_raw:
-                    try:
-                        extra_params = json.loads(extra_params_raw)
-                        if isinstance(extra_params, dict):
-                            if "model" in extra_params:
-                                logger.warning("DOCLING_PICTURE_DESCRIPTION_PARAMS_JSON contains 'model'; ignoring")
-                                extra_params.pop("model", None)
-                            params.update(extra_params)
-                    except Exception:
-                        logger.warning("Invalid DOCLING_PICTURE_DESCRIPTION_PARAMS_JSON; ignoring")
-                # Force model after merge to prevent override
-                params["model"] = model
-
-                pipeline_options.picture_description_options = PictureDescriptionApiOptions(
-                    url=url,
-                    headers=headers,
-                    params=params,
-                    prompt=(picture_description_prompt or "").strip() or "Describe this image.",
-                    timeout=max(1.0, float(picture_description_timeout_sec)),
-                    concurrency=max(1, int(picture_description_concurrency)),
-                    provenance="openai_compat_api",
-                )
-                logger.info("Docling picture description enabled (model: %s)", model)
-            except Exception as e:
-                logger.warning("Failed to configure picture description: %s; disabling", e)
-                pipeline_options.do_picture_description = False
-                pipeline_options.generate_picture_images = False
-                pipeline_options.enable_remote_services = False
-    else:
-        pipeline_options.do_picture_description = False
+    _configure_ocr(
+        pipeline_options, RapidOcrOptions,
+        enabled=ocr_enabled,
+        force_full_page_ocr=ocr_force_full_page_ocr,
+        langs=ocr_langs,
+        det_model_path=ocr_det_model_path,
+        rec_model_path=ocr_rec_model_path,
+        cls_model_path=ocr_cls_model_path,
+        modelscope_enabled=ocr_modelscope_enabled,
+        modelscope_repo_id=ocr_modelscope_repo_id,
+    )
+    _configure_picture_description(
+        pipeline_options, PictureDescriptionApiOptions,
+        enabled=picture_description_enabled,
+        url=picture_description_url,
+        api_key=picture_description_api_key,
+        model=picture_description_model,
+        prompt=picture_description_prompt,
+        timeout_sec=picture_description_timeout_sec,
+        concurrency=picture_description_concurrency,
+        params_json=picture_description_params_json,
+    )
 
     return DocumentConverter(
         format_options={

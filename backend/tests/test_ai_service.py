@@ -21,22 +21,19 @@ class AiServiceTests(unittest.TestCase):
         from app.ai.service import AiService  # noqa: E402
 
         db = MagicMock()
-        db.query.return_value.filter.return_value.first.return_value = None
         svc = AiService(db)
-        out = svc.generate(AiGenerateRequest(type_name="t", title="x", content="c"))
+        with patch("app.ai.service.resolve_openai_compat_config", return_value=None):
+            out = svc.generate(AiGenerateRequest(type_name="t", title="x", content="c"))
         self.assertIsNone(out.summary)
         self.assertEqual(out.suggested_tags, [])
 
-    def test_generate_decrypt_failure(self) -> None:
+    def test_generate_config_resolve_failure(self) -> None:
         from app.ai.schemas import AiGenerateRequest  # noqa: E402
         from app.ai.service import AiService  # noqa: E402
 
         db = MagicMock()
-        provider = SimpleNamespace(is_active=True, api_key_encrypted="enc", base_url="https://x", model="m")
-        db.query.return_value.filter.return_value.first.return_value = provider
-
         svc = AiService(db)
-        with patch("app.ai.service.decrypt_api_key", side_effect=Exception("bad")):
+        with patch("app.ai.service.resolve_openai_compat_config", side_effect=Exception("bad")):
             out = svc.generate(AiGenerateRequest(type_name="t", title="x", content="c"))
         self.assertIsNone(out.summary)
         self.assertEqual(out.suggested_tags, [])
@@ -78,8 +75,6 @@ class AiServiceTests(unittest.TestCase):
         from app.ai.service import AiService  # noqa: E402
 
         db = MagicMock()
-        provider = SimpleNamespace(is_active=True, api_key_encrypted="enc", base_url="https://x", model="m")
-        db.query.return_value.filter.return_value.first.return_value = provider
         db.query.return_value.all.return_value = [SimpleNamespace(name="tag1"), SimpleNamespace(name="tag2")]
 
         svc = AiService(db)
@@ -88,7 +83,10 @@ class AiServiceTests(unittest.TestCase):
         raw = json.dumps({"choices": [{"message": {"content": json.dumps(content)}}]})
 
         with (
-            patch("app.ai.service.decrypt_api_key", return_value="k"),
+            patch(
+                "app.ai.service.resolve_openai_compat_config",
+                return_value=SimpleNamespace(api_key="k", base_url="https://x", model="m"),
+            ),
             patch.object(svc, "_call_openai", return_value=raw),
         ):
             out = svc.generate(AiGenerateRequest(type_name="t", title="x", content="c"))
