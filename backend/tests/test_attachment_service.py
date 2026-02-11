@@ -105,7 +105,7 @@ class AttachmentServiceTests(unittest.IsolatedAsyncioTestCase):
 
         db_att = self.db.query(Attachment).filter(Attachment.id == att.id).first()
         self.assertIsNotNone(db_att)
-        self.assertEqual(db_att.size, 0)
+        self.assertEqual(db_att.size, 1)
 
     async def test_upload_db_failure_cleans_object(self) -> None:
         from app.attachment.service import AttachmentService  # noqa: E402

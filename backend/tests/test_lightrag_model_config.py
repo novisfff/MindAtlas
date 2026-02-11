@@ -32,6 +32,13 @@ _ENV_KEYS = [
     "OPENAI_API_BASE",
     "LLM_MODEL",
     "EMBEDDING_MODEL",
+    "LIGHTRAG_RERANK_HOST",
+    "LIGHTRAG_RERANK_MODEL",
+    "LIGHTRAG_RERANK_KEY",
+    "NEO4J_URI",
+    "NEO4J_USER",
+    "NEO4J_PASSWORD",
+    "NEO4J_DATABASE",
 ]
 
 
@@ -61,6 +68,8 @@ class LightRagModelConfigTests(unittest.TestCase):
     def test_embedding_defaults_to_llm(self) -> None:
         os.environ["LIGHTRAG_LLM_MODEL"] = '{"MODEL":"m1","HOST":"http://llm/v1","KEY":"k1"}'
         os.environ["LIGHTRAG_EMBEDDING_MODEL"] = "text-embedding-3-small"
+        os.environ["LIGHTRAG_EMBEDDING_HOST"] = ""
+        os.environ["LIGHTRAG_EMBEDDING_KEY"] = ""
         reset_caches()
 
         llm = _resolve_llm_config()
@@ -72,6 +81,8 @@ class LightRagModelConfigTests(unittest.TestCase):
     def test_embedding_json_spec_overrides_host_key(self) -> None:
         os.environ["LIGHTRAG_LLM_MODEL"] = '{"MODEL":"m1","HOST":"http://llm/v1","KEY":"k1"}'
         os.environ["LIGHTRAG_EMBEDDING_MODEL"] = '{"MODEL":"e1","HOST":"http://emb/v1","KEY":"k2"}'
+        os.environ["LIGHTRAG_EMBEDDING_HOST"] = ""
+        os.environ["LIGHTRAG_EMBEDDING_KEY"] = ""
         reset_caches()
 
         llm = _resolve_llm_config()
@@ -98,4 +109,3 @@ class LightRagModelConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

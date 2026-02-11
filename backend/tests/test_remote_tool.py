@@ -3,6 +3,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError, URLError
 import io
+import socket
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 
@@ -11,6 +12,8 @@ bootstrap_backend_imports()
 reset_caches()
 
 import app.assistant_config.remote_tool as remote_tool  # noqa: E402
+from app.common.ssrf import SSRFError, validate_url_ssrf  # noqa: E402
+import app.common.ssrf as ssrf_mod  # noqa: E402
 
 
 class _FakeResponse:
@@ -27,52 +30,60 @@ class _FakeResponse:
         return self._body
 
 
+class _FakeOpener:
+    """Fake opener that captures the request instead of making a real HTTP call."""
+
+    def __init__(self, captured: dict, response_body: bytes = b"ok"):
+        self._captured = captured
+        self._response_body = response_body
+
+    def open(self, req, timeout=0):
+        self._captured["req"] = req
+        self._captured["timeout"] = timeout
+        return _FakeResponse(self._response_body)
+
+
 class RemoteToolTests(unittest.TestCase):
     def _headers(self, req) -> dict[str, str]:
         return {k.lower(): v for k, v in req.header_items()}
 
     def test_validate_url_security_blocks_localhost(self):
-        with self.assertRaises(remote_tool.SSRFError):
-            remote_tool.validate_url_security("http://localhost:8000/ping")
+        with self.assertRaises(SSRFError):
+            validate_url_ssrf("http://localhost:8000/ping")
 
     def test_validate_url_security_blocks_private_ip(self):
-        with self.assertRaises(remote_tool.SSRFError):
-            remote_tool.validate_url_security("http://127.0.0.1/ping")
-        with self.assertRaises(remote_tool.SSRFError):
-            remote_tool.validate_url_security("http://192.168.1.2/ping")
+        with self.assertRaises(SSRFError):
+            validate_url_ssrf("http://127.0.0.1/ping")
+        with self.assertRaises(SSRFError):
+            validate_url_ssrf("http://192.168.1.2/ping")
 
     def test_validate_url_security_blocks_bad_scheme(self):
-        with self.assertRaises(remote_tool.SSRFError):
-            remote_tool.validate_url_security("ftp://example.com/a")
+        with self.assertRaises(SSRFError):
+            validate_url_ssrf("ftp://example.com/a")
 
     def test_validate_url_security_requires_hostname(self):
-        with self.assertRaises(remote_tool.SSRFError):
-            remote_tool.validate_url_security("http:///no-host")
+        with self.assertRaises(SSRFError):
+            validate_url_ssrf("http:///no-host")
 
     def test_validate_url_security_allows_dns_failure(self):
-        with patch.object(remote_tool.socket, "getaddrinfo", side_effect=remote_tool.socket.gaierror()):
+        with patch.object(ssrf_mod.socket, "getaddrinfo", side_effect=socket.gaierror()):
             # DNS failure is treated as allowed (warning log), should not raise.
-            remote_tool.validate_url_security("https://example.com/api")
+            validate_url_ssrf("https://example.com/api")
 
     def test_validate_url_security_blocks_if_dns_resolves_private(self):
         with patch.object(
-            remote_tool.socket,
+            ssrf_mod.socket,
             "getaddrinfo",
-            return_value=[(remote_tool.socket.AF_INET, 0, 0, "", ("127.0.0.1", 0))],
+            return_value=[(socket.AF_INET, 0, 0, "", ("127.0.0.1", 0))],
         ):
-            with self.assertRaises(remote_tool.SSRFError):
-                remote_tool.validate_url_security("https://example.com/api")
+            with self.assertRaises(SSRFError):
+                validate_url_ssrf("https://example.com/api")
 
     def test_invoke_post_json_body_and_query_params_and_auth(self):
         captured = {}
 
-        def fake_urlopen(req, timeout=0):
-            captured["req"] = req
-            captured["timeout"] = timeout
-            return _FakeResponse(b"ok")
-
         safe_dns = [
-            (remote_tool.socket.AF_INET, 0, 0, "", ("93.184.216.34", 0)),  # example.com
+            (socket.AF_INET, 0, 0, "", ("93.184.216.34", 0)),  # example.com
         ]
 
         tool = remote_tool.RemoteTool(
@@ -93,9 +104,9 @@ class RemoteToolTests(unittest.TestCase):
         )
 
         with (
-            patch.object(remote_tool.socket, "getaddrinfo", return_value=safe_dns),
+            patch.object(ssrf_mod.socket, "getaddrinfo", return_value=safe_dns),
             patch.object(remote_tool, "decrypt_api_key", return_value="token123"),
-            patch.object(remote_tool, "urlopen", new=fake_urlopen),
+            patch.object(remote_tool, "build_opener", return_value=_FakeOpener(captured)),
         ):
             out = tool.invoke({"keyword": "abc", "user_input": "hi", "user": "u1"})
 
@@ -112,12 +123,8 @@ class RemoteToolTests(unittest.TestCase):
     def test_invoke_get_merges_query_params_and_args(self):
         captured = {}
 
-        def fake_urlopen(req, timeout=0):
-            captured["req"] = req
-            return _FakeResponse(b"ok")
-
         safe_dns = [
-            (remote_tool.socket.AF_INET, 0, 0, "", ("93.184.216.34", 0)),
+            (socket.AF_INET, 0, 0, "", ("93.184.216.34", 0)),
         ]
 
         tool = remote_tool.RemoteTool(
@@ -130,8 +137,8 @@ class RemoteToolTests(unittest.TestCase):
         )
 
         with (
-            patch.object(remote_tool.socket, "getaddrinfo", return_value=safe_dns),
-            patch.object(remote_tool, "urlopen", new=fake_urlopen),
+            patch.object(ssrf_mod.socket, "getaddrinfo", return_value=safe_dns),
+            patch.object(remote_tool, "build_opener", return_value=_FakeOpener(captured)),
         ):
             tool.invoke({"a": 1, "b": "x"})
 
@@ -144,12 +151,8 @@ class RemoteToolTests(unittest.TestCase):
     def test_invoke_form_data_sets_boundary_and_body(self):
         captured = {}
 
-        def fake_urlopen(req, timeout=0):
-            captured["req"] = req
-            return _FakeResponse(b"ok")
-
         safe_dns = [
-            (remote_tool.socket.AF_INET, 0, 0, "", ("93.184.216.34", 0)),
+            (socket.AF_INET, 0, 0, "", ("93.184.216.34", 0)),
         ]
 
         tool = remote_tool.RemoteTool(
@@ -162,8 +165,8 @@ class RemoteToolTests(unittest.TestCase):
         )
 
         with (
-            patch.object(remote_tool.socket, "getaddrinfo", return_value=safe_dns),
-            patch.object(remote_tool, "urlopen", new=fake_urlopen),
+            patch.object(ssrf_mod.socket, "getaddrinfo", return_value=safe_dns),
+            patch.object(remote_tool, "build_opener", return_value=_FakeOpener(captured)),
         ):
             tool.invoke({"a": "1"})
 
@@ -183,11 +186,7 @@ class RemoteToolTests(unittest.TestCase):
     def test_invoke_xml_sets_content_type(self):
         captured = {}
 
-        def fake_urlopen(req, timeout=0):
-            captured["req"] = req
-            return _FakeResponse(b"ok")
-
-        safe_dns = [(remote_tool.socket.AF_INET, 0, 0, "", ("93.184.216.34", 0))]
+        safe_dns = [(socket.AF_INET, 0, 0, "", ("93.184.216.34", 0))]
         tool = remote_tool.RemoteTool(
             name="t",
             description=None,
@@ -199,8 +198,8 @@ class RemoteToolTests(unittest.TestCase):
         )
 
         with (
-            patch.object(remote_tool.socket, "getaddrinfo", return_value=safe_dns),
-            patch.object(remote_tool, "urlopen", new=fake_urlopen),
+            patch.object(ssrf_mod.socket, "getaddrinfo", return_value=safe_dns),
+            patch.object(remote_tool, "build_opener", return_value=_FakeOpener(captured)),
         ):
             tool.invoke({"a": 1})
 
@@ -212,11 +211,7 @@ class RemoteToolTests(unittest.TestCase):
     def test_invoke_payload_wrapper(self):
         captured = {}
 
-        def fake_urlopen(req, timeout=0):
-            captured["req"] = req
-            return _FakeResponse(b"ok")
-
-        safe_dns = [(remote_tool.socket.AF_INET, 0, 0, "", ("93.184.216.34", 0))]
+        safe_dns = [(socket.AF_INET, 0, 0, "", ("93.184.216.34", 0))]
         tool = remote_tool.RemoteTool(
             name="t",
             description=None,
@@ -229,8 +224,8 @@ class RemoteToolTests(unittest.TestCase):
         )
 
         with (
-            patch.object(remote_tool.socket, "getaddrinfo", return_value=safe_dns),
-            patch.object(remote_tool, "urlopen", new=fake_urlopen),
+            patch.object(ssrf_mod.socket, "getaddrinfo", return_value=safe_dns),
+            patch.object(remote_tool, "build_opener", return_value=_FakeOpener(captured)),
         ):
             tool.invoke({"a": 1})
 
@@ -245,17 +240,88 @@ class RemoteToolTests(unittest.TestCase):
             hdrs=None,
             fp=io.BytesIO(b"oops"),
         )
-        with patch.object(remote_tool, "urlopen", side_effect=err):
+
+        class _ErrorOpener:
+            def open(self, req, timeout=0):
+                raise err
+
+        with patch.object(remote_tool, "build_opener", return_value=_ErrorOpener()):
             with self.assertRaises(RuntimeError) as ctx:
                 remote_tool.RemoteTool._do_request(remote_tool.Request("https://api.example.com"), timeout=1)
         self.assertIn("HTTP 400", str(ctx.exception))
         self.assertIn("oops", str(ctx.exception))
 
     def test_do_request_url_error(self):
-        with patch.object(remote_tool, "urlopen", side_effect=URLError("down")):
+        class _ErrorOpener:
+            def open(self, req, timeout=0):
+                raise URLError("down")
+
+        with patch.object(remote_tool, "build_opener", return_value=_ErrorOpener()):
             with self.assertRaises(RuntimeError) as ctx:
                 remote_tool.RemoteTool._do_request(remote_tool.Request("https://api.example.com"), timeout=1)
         self.assertIn("Connection failed", str(ctx.exception))
+
+    # --- IPv6-mapped IPv4 SSRF bypass tests ---
+
+    def test_validate_url_blocks_ipv6_mapped_loopback(self):
+        """::ffff:127.0.0.1 must be blocked (IPv6-mapped IPv4 loopback)."""
+        with self.assertRaises(SSRFError):
+            validate_url_ssrf("http://[::ffff:127.0.0.1]/ping")
+
+    def test_validate_url_blocks_ipv6_mapped_private(self):
+        """::ffff:192.168.1.1 must be blocked (IPv6-mapped private IP)."""
+        with self.assertRaises(SSRFError):
+            validate_url_ssrf("http://[::ffff:192.168.1.1]/ping")
+
+    def test_validate_url_blocks_ipv6_mapped_10_net(self):
+        """::ffff:10.0.0.1 must be blocked (IPv6-mapped 10.x private)."""
+        with self.assertRaises(SSRFError):
+            validate_url_ssrf("http://[::ffff:10.0.0.1]/api")
+
+    def test_validate_url_blocks_ipv6_loopback(self):
+        """Pure IPv6 loopback ::1 must be blocked."""
+        with self.assertRaises(SSRFError):
+            validate_url_ssrf("http://[::1]/ping")
+
+    def test_validate_url_blocks_dns_resolving_to_ipv6_mapped(self):
+        """DNS resolving to ::ffff:127.0.0.1 must be blocked."""
+        fake_addrs = [
+            (socket.AF_INET6, 0, 0, "", ("::ffff:127.0.0.1", 0, 0, 0)),
+        ]
+        with patch.object(ssrf_mod.socket, "getaddrinfo", return_value=fake_addrs):
+            with self.assertRaises(SSRFError):
+                validate_url_ssrf("https://evil.example.com/api")
+
+    # --- Redirect-based SSRF tests ---
+
+    def test_redirect_to_internal_ip_is_blocked(self):
+        """Redirect from external to internal IP must be blocked by SSRFSafeRedirectHandler."""
+        handler = remote_tool._SSRFSafeRedirectHandler()
+        req = remote_tool.Request("https://api.example.com/endpoint")
+        with self.assertRaises(SSRFError):
+            handler.redirect_request(
+                req, None, 302, "Found", {}, "http://127.0.0.1/secret"
+            )
+
+    def test_redirect_to_ipv6_mapped_loopback_is_blocked(self):
+        """Redirect to IPv6-mapped loopback must be blocked."""
+        handler = remote_tool._SSRFSafeRedirectHandler()
+        req = remote_tool.Request("https://api.example.com/endpoint")
+        with self.assertRaises(SSRFError):
+            handler.redirect_request(
+                req, None, 302, "Found", {}, "http://[::ffff:127.0.0.1]/secret"
+            )
+
+    def test_redirect_to_safe_url_is_allowed(self):
+        """Redirect to a safe external URL should be allowed."""
+        handler = remote_tool._SSRFSafeRedirectHandler()
+        req = remote_tool.Request("https://api.example.com/endpoint")
+        safe_dns = [(socket.AF_INET, 0, 0, "", ("93.184.216.34", 0))]
+        with patch.object(ssrf_mod.socket, "getaddrinfo", return_value=safe_dns):
+            result = handler.redirect_request(
+                req, None, 302, "Found", {}, "https://other.example.com/ok"
+            )
+        self.assertIsNotNone(result)
 
 
 if __name__ == "__main__":

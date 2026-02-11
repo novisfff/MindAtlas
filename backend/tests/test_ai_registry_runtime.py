@@ -15,14 +15,14 @@ class AiRegistryRuntimeTests(unittest.TestCase):
         reset_caches()
 
     def test_normalize_openai_compat_base_url_adds_v1(self) -> None:
-        from app.ai_registry.runtime import _normalize_openai_compat_base_url  # noqa: E402
+        from app.common.ssrf import normalize_openai_base_url  # noqa: E402
 
         self.assertEqual(
-            _normalize_openai_compat_base_url(" https://right.codes/codex "),
+            normalize_openai_base_url(" https://right.codes/codex "),
             "https://right.codes/codex/v1",
         )
         self.assertEqual(
-            _normalize_openai_compat_base_url("https://right.codes/codex/v1/"),
+            normalize_openai_base_url("https://right.codes/codex/v1/"),
             "https://right.codes/codex/v1",
         )
 

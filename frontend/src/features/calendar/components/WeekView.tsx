@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { addDays, differenceInDays, endOfDay, format, startOfDay } from 'date-fns'
+import { useMemo, useRef } from 'react'
+import { format } from 'date-fns'
 import { zhCN, enUS } from 'date-fns/locale'
 import { useDroppable } from '@dnd-kit/core'
 import { Plus } from 'lucide-react'
@@ -9,6 +9,7 @@ import { assignRows } from '../utils/layoutUtils'
 import { CalendarEvent } from './CalendarEvent'
 import { cn } from '@/lib/utils'
 import type { Entry } from '@/types'
+import { useCalendarResize } from '../hooks/useCalendarResize'
 
 interface WeekViewProps {
   currentDate: Date
@@ -17,23 +18,6 @@ interface WeekViewProps {
   onDateDoubleClick?: (date: Date) => void
   onEntryClick?: (entry: Entry) => void
   onEntryUpdate?: (entry: Entry, start: Date, end: Date) => void
-}
-
-interface ResizeRefState {
-  entryId: string
-  direction: 'left' | 'right'
-  pointerId: number
-  initialX: number
-  originalStart: Date
-  originalEnd: Date
-  newStart: Date
-  newEnd: Date
-  originalSpanDays: number
-}
-
-interface ResizePreviewMeta {
-  entryId: string
-  direction: 'left' | 'right'
 }
 
 const ROW_HEIGHT_PX = 24
@@ -55,20 +39,12 @@ export function WeekView({
   const weekStart = days[0]
 
   const containerRef = useRef<HTMLDivElement>(null)
-  const [resizePreviewMeta, setResizePreviewMeta] = useState<ResizePreviewMeta | null>(null)
-  const resizeRef = useRef<ResizeRefState | null>(null)
-  const resizeDeltaXRafRef = useRef<number | null>(null)
-  const resizeDeltaXPendingRef = useRef(0)
-  const entriesRef = useRef(entries)
-  const onEntryUpdateRef = useRef(onEntryUpdate)
 
-  useEffect(() => {
-    entriesRef.current = entries
-  }, [entries])
-
-  useEffect(() => {
-    onEntryUpdateRef.current = onEntryUpdate
-  }, [onEntryUpdate])
+  const { resizePreviewMeta, handleResizeStart } = useCalendarResize(
+    entries,
+    onEntryUpdate,
+    containerRef
+  )
 
   const layout = useMemo(() => assignRows(entries, weekStart), [entries, weekStart])
   const rowCount = useMemo(() => {
@@ -83,122 +59,6 @@ export function WeekView({
     const content = CONTENT_PADDING_TOP_PX + rowCount * ROW_HEIGHT_PX + CONTENT_PADDING_BOTTOM_PX
     return Math.max(MIN_BODY_HEIGHT_PX, content)
   }, [rowCount])
-
-  const setResizeDeltaXCssVar = useCallback((deltaX: number) => {
-    if (!containerRef.current) return
-    containerRef.current.style.setProperty('--calendar-resize-delta-x', `${deltaX}px`)
-  }, [])
-
-  const handleResizeStart = useCallback((entry: Entry, direction: 'left' | 'right', e: React.PointerEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-
-    let start: Date, end: Date
-    if (entry.timeMode === 'POINT' && entry.timeAt) {
-      start = startOfDay(new Date(entry.timeAt))
-      end = endOfDay(new Date(entry.timeAt))
-    } else if (entry.timeMode === 'RANGE' && entry.timeFrom && entry.timeTo) {
-      start = startOfDay(new Date(entry.timeFrom))
-      end = endOfDay(new Date(entry.timeTo))
-    } else {
-      return
-    }
-
-    const originalSpanDays = differenceInDays(startOfDay(end), startOfDay(start)) + 1
-    resizeRef.current = {
-      entryId: entry.id,
-      direction,
-      pointerId: e.pointerId,
-      initialX: e.clientX,
-      originalStart: start,
-      originalEnd: end,
-      newStart: start,
-      newEnd: end,
-      originalSpanDays,
-    }
-
-    setResizeDeltaXCssVar(0)
-    setResizePreviewMeta({ entryId: entry.id, direction })
-  }, [setResizeDeltaXCssVar])
-
-  const handleResizeMove = useCallback((e: PointerEvent) => {
-    const state = resizeRef.current
-    if (!state || !containerRef.current) return
-    if (e.pointerId !== state.pointerId) return
-
-    const gridWidth = containerRef.current.clientWidth
-    const cellWidth = gridWidth / 7
-
-    const rawDeltaX = e.clientX - state.initialX
-    const maxShrinkPx = Math.max(0, (state.originalSpanDays - 1) * cellWidth)
-    const clampedDeltaX = state.direction === 'right'
-      ? Math.max(rawDeltaX, -maxShrinkPx)
-      : Math.min(rawDeltaX, maxShrinkPx)
-
-    resizeDeltaXPendingRef.current = clampedDeltaX
-    if (resizeDeltaXRafRef.current == null) {
-      resizeDeltaXRafRef.current = window.requestAnimationFrame(() => {
-        resizeDeltaXRafRef.current = null
-        setResizeDeltaXCssVar(resizeDeltaXPendingRef.current)
-      })
-    }
-
-    const dayDelta = Math.round(clampedDeltaX / cellWidth)
-
-    let newStart = state.originalStart
-    let newEnd = state.originalEnd
-
-    if (state.direction === 'right') {
-      newEnd = addDays(state.originalEnd, dayDelta)
-      if (differenceInDays(newEnd, state.originalStart) < 0) {
-        newEnd = endOfDay(state.originalStart)
-      } else {
-        newEnd = endOfDay(newEnd)
-      }
-    } else {
-      newStart = addDays(state.originalStart, dayDelta)
-      if (differenceInDays(state.originalEnd, newStart) < 0) {
-        newStart = startOfDay(state.originalEnd)
-      } else {
-        newStart = startOfDay(newStart)
-      }
-    }
-
-    state.newStart = newStart
-    state.newEnd = newEnd
-  }, [setResizeDeltaXCssVar])
-
-  const handleResizeEnd = useCallback((e: PointerEvent) => {
-    const state = resizeRef.current
-    if (!state) return
-    if (e.pointerId !== state.pointerId) return
-
-    const entry = entriesRef.current.find(e => e.id === state.entryId)
-    const onEntryUpdate = onEntryUpdateRef.current
-    if (entry && onEntryUpdate) {
-      onEntryUpdate(entry, state.newStart, state.newEnd)
-    }
-
-    resizeRef.current = null
-    setResizePreviewMeta(null)
-    setResizeDeltaXCssVar(0)
-    if (resizeDeltaXRafRef.current != null) {
-      window.cancelAnimationFrame(resizeDeltaXRafRef.current)
-      resizeDeltaXRafRef.current = null
-    }
-  }, [setResizeDeltaXCssVar])
-
-  useEffect(() => {
-    if (!resizePreviewMeta) return
-    window.addEventListener('pointermove', handleResizeMove)
-    window.addEventListener('pointerup', handleResizeEnd)
-    window.addEventListener('pointercancel', handleResizeEnd)
-    return () => {
-      window.removeEventListener('pointermove', handleResizeMove)
-      window.removeEventListener('pointerup', handleResizeEnd)
-      window.removeEventListener('pointercancel', handleResizeEnd)
-    }
-  }, [resizePreviewMeta, handleResizeMove, handleResizeEnd])
 
   return (
     <div className="flex flex-col h-full">

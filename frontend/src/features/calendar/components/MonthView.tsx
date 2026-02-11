@@ -1,6 +1,6 @@
-import { useRef, useState, useEffect, useMemo, useCallback } from 'react'
+import { useRef, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import { addDays, differenceInDays, endOfDay, format, isSameDay, startOfDay, startOfWeek } from 'date-fns'
+import { addDays, format, startOfWeek } from 'date-fns'
 import { enUS, zhCN } from 'date-fns/locale'
 import { getMonthDays, isToday, isCurrentMonth } from '../utils/dateUtils'
 import { assignRows } from '../utils/layoutUtils'
@@ -9,6 +9,7 @@ import { CalendarEvent } from './CalendarEvent'
 import { MoreEventsPopover } from './MoreEventsPopover'
 import type { Entry } from '@/types'
 import { cn } from '@/lib/utils'
+import { useCalendarResize } from '../hooks/useCalendarResize'
 
 interface MonthViewProps {
   currentDate: Date
@@ -20,23 +21,6 @@ interface MonthViewProps {
 }
 
 const MAX_VISIBLE_ROWS = 3 // Rows 0..2 always shown; row 3 used for 4th event (if only 1 hidden) or "+N more" (if >=2 hidden).
-
-interface ResizeRefState {
-  entryId: string
-  direction: 'left' | 'right'
-  pointerId: number
-  initialX: number
-  originalStart: Date
-  originalEnd: Date
-  newStart: Date
-  newEnd: Date
-  originalSpanDays: number
-}
-
-interface ResizePreviewMeta {
-  entryId: string
-  direction: 'left' | 'right'
-}
 
 export function MonthView({
   currentDate,
@@ -50,20 +34,12 @@ export function MonthView({
   const locale = i18n.language === 'zh' ? zhCN : enUS
   const days = useMemo(() => getMonthDays(currentDate), [currentDate])
   const containerRef = useRef<HTMLDivElement>(null)
-  const [resizePreviewMeta, setResizePreviewMeta] = useState<ResizePreviewMeta | null>(null)
-  const resizeRef = useRef<ResizeRefState | null>(null)
-  const resizeDeltaXRafRef = useRef<number | null>(null)
-  const resizeDeltaXPendingRef = useRef(0)
-  const entriesRef = useRef(entries)
-  const onEntryUpdateRef = useRef(onEntryUpdate)
 
-  useEffect(() => {
-    entriesRef.current = entries
-  }, [entries])
-
-  useEffect(() => {
-    onEntryUpdateRef.current = onEntryUpdate
-  }, [onEntryUpdate])
+  const { resizePreviewMeta, handleResizeStart } = useCalendarResize(
+    entries,
+    onEntryUpdate,
+    containerRef
+  )
 
   // Chunk days into weeks
   const weeks = useMemo(() => {
@@ -78,134 +54,6 @@ export function MonthView({
     const base = startOfWeek(new Date(), { weekStartsOn: 1 })
     return Array.from({ length: 7 }, (_, i) => addDays(base, i))
   }, [])
-
-  const setResizeDeltaXCssVar = useCallback((deltaX: number) => {
-    if (!containerRef.current) return
-    containerRef.current.style.setProperty('--calendar-resize-delta-x', `${deltaX}px`)
-  }, [])
-
-  const handleResizeStart = (entry: Entry, direction: 'left' | 'right', e: React.PointerEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-
-    // Get basic time info
-    let start: Date, end: Date
-    if (entry.timeMode === 'POINT' && entry.timeAt) {
-      start = startOfDay(new Date(entry.timeAt))
-      end = endOfDay(new Date(entry.timeAt))
-    } else if (entry.timeMode === 'RANGE' && entry.timeFrom && entry.timeTo) {
-      start = startOfDay(new Date(entry.timeFrom))
-      end = endOfDay(new Date(entry.timeTo))
-    } else {
-      return // Should not happen for displayable events
-    }
-
-    const originalSpanDays = differenceInDays(startOfDay(end), startOfDay(start)) + 1
-    resizeRef.current = {
-      entryId: entry.id,
-      direction,
-      pointerId: e.pointerId,
-      initialX: e.clientX,
-      originalStart: start,
-      originalEnd: end,
-      newStart: start,
-      newEnd: end,
-      originalSpanDays,
-    }
-
-    setResizeDeltaXCssVar(0)
-    setResizePreviewMeta({ entryId: entry.id, direction })
-  }
-
-  const handleResizeMove = useCallback((e: PointerEvent) => {
-    const state = resizeRef.current
-    if (!state || !containerRef.current) return
-    if (e.pointerId !== state.pointerId) return
-
-    const gridWidth = containerRef.current.clientWidth
-    const cellWidth = gridWidth / 7
-
-    const rawDeltaX = e.clientX - state.initialX
-    const maxShrinkPx = Math.max(0, (state.originalSpanDays - 1) * cellWidth)
-    const clampedDeltaX = state.direction === 'right'
-      ? Math.max(rawDeltaX, -maxShrinkPx)
-      : Math.min(rawDeltaX, maxShrinkPx)
-
-    resizeDeltaXPendingRef.current = clampedDeltaX
-    if (resizeDeltaXRafRef.current == null) {
-      resizeDeltaXRafRef.current = window.requestAnimationFrame(() => {
-        resizeDeltaXRafRef.current = null
-        setResizeDeltaXCssVar(resizeDeltaXPendingRef.current)
-      })
-    }
-
-    // Round to nearest day for the committed value (snaps to date boundaries on release)
-    const dayDelta = Math.round(clampedDeltaX / cellWidth)
-
-    let newStart = state.originalStart
-    let newEnd = state.originalEnd
-
-    if (state.direction === 'right') {
-      newEnd = addDays(state.originalEnd, dayDelta)
-      // Constraints: End cannot be before Start
-      if (differenceInDays(newEnd, state.originalStart) < 0) {
-        newEnd = endOfDay(state.originalStart)
-      } else {
-        newEnd = endOfDay(newEnd)
-      }
-    } else { // direction === 'left'
-      newStart = addDays(state.originalStart, dayDelta)
-      // Constraints: Start cannot be after End
-      if (differenceInDays(state.originalEnd, newStart) < 0) {
-        newStart = startOfDay(state.originalEnd)
-      } else {
-        newStart = startOfDay(newStart)
-      }
-    }
-
-    const didChange =
-      newStart.getTime() !== state.newStart.getTime() ||
-      newEnd.getTime() !== state.newEnd.getTime()
-
-    if (didChange) {
-      state.newStart = newStart
-      state.newEnd = newEnd
-    }
-  }, [setResizeDeltaXCssVar])
-
-  const handleResizeEnd = useCallback((e: PointerEvent) => {
-    const state = resizeRef.current
-    if (!state) return
-    if (e.pointerId !== state.pointerId) return
-
-    const entry = entriesRef.current.find(e => e.id === state.entryId)
-    const onEntryUpdate = onEntryUpdateRef.current
-    if (entry && onEntryUpdate) {
-      onEntryUpdate(entry, state.newStart, state.newEnd)
-    }
-
-    resizeRef.current = null
-    setResizePreviewMeta(null)
-    setResizeDeltaXCssVar(0)
-    if (resizeDeltaXRafRef.current != null) {
-      window.cancelAnimationFrame(resizeDeltaXRafRef.current)
-      resizeDeltaXRafRef.current = null
-    }
-  }, [setResizeDeltaXCssVar])
-
-  // Global listeners
-  useEffect(() => {
-    if (resizePreviewMeta) {
-      window.addEventListener('pointermove', handleResizeMove)
-      window.addEventListener('pointerup', handleResizeEnd)
-      window.addEventListener('pointercancel', handleResizeEnd)
-    }
-    return () => {
-      window.removeEventListener('pointermove', handleResizeMove)
-      window.removeEventListener('pointerup', handleResizeEnd)
-      window.removeEventListener('pointercancel', handleResizeEnd)
-    }
-  }, [resizePreviewMeta, handleResizeMove, handleResizeEnd])
 
   const layoutsByWeek = useMemo(() => {
     return weeks.map((weekDays) => assignRows(entries, weekDays[0]))

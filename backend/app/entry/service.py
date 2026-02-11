@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timezone
 from typing import List
 from uuid import UUID
 
@@ -162,8 +163,11 @@ class EntryService:
         if existing:
             existing.entry_updated_at = entry_updated_at
             existing.last_error = None
-            if existing.status == "pending" and existing.available_at and existing.available_at > now:
-                existing.available_at = now
+            available_at = existing.available_at
+            if existing.status == "pending" and available_at:
+                available_at_cmp = available_at.replace(tzinfo=timezone.utc) if available_at.tzinfo is None else available_at
+                if available_at_cmp > now:
+                    existing.available_at = now
             return
 
         self.db.add(

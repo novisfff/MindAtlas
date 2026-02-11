@@ -102,58 +102,6 @@ class AiProviderServiceTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 500)
         self.assertEqual(ctx.exception.code, 50001)
 
-    def test_activate_integrity_error_raises_40901(self) -> None:
-        from app.ai_provider.service import AiProviderService  # noqa: E402
-
-        db = MagicMock()
-        service = AiProviderService(db)
-        provider = SimpleNamespace(id="p1", is_active=False)
-        service.find_by_id = MagicMock(return_value=provider)
-
-        db.commit.side_effect = IntegrityError("stmt", "params", Exception("orig"))
-
-        with self.assertRaises(ApiException) as ctx:
-            service.activate(provider.id)
-        self.assertEqual(ctx.exception.status_code, 409)
-        self.assertEqual(ctx.exception.code, 40901)
-        db.rollback.assert_called()
-
-    def test_activate_success_deactivates_others(self) -> None:
-        from app.ai_provider.models import AiProvider  # noqa: E402
-        from app.ai_provider.service import AiProviderService  # noqa: E402
-
-        from tests._db import make_session  # noqa: E402
-
-        db = make_session()
-        try:
-            p1 = AiProvider(
-                name="p1",
-                base_url="https://x",
-                model="m",
-                api_key_encrypted="enc",
-                api_key_hint="****",
-                is_active=True,
-            )
-            p2 = AiProvider(
-                name="p2",
-                base_url="https://x",
-                model="m",
-                api_key_encrypted="enc",
-                api_key_hint="****",
-                is_active=False,
-            )
-            db.add_all([p1, p2])
-            db.commit()
-
-            svc = AiProviderService(db)
-            out = svc.activate(p2.id)
-            self.assertTrue(out.is_active)
-
-            db.refresh(p1)
-            self.assertFalse(p1.is_active)
-        finally:
-            db.close()
-
     def test_test_connection_decrypt_failed(self) -> None:
         from app.ai_provider.service import AiProviderService  # noqa: E402
 

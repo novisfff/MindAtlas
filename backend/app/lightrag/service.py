@@ -1,15 +1,13 @@
 """Business service for LightRAG queries (Phase 5)."""
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import logging
 import math
 import numbers
 import re
-import threading
 import time
-from collections import OrderedDict
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, AsyncIterator
@@ -23,6 +21,14 @@ from app.common.responses import ApiResponse
 from app.config import get_settings
 from app.lightrag.errors import LightRagConfigError, LightRagDependencyError, LightRagNotEnabledError
 from app.lightrag.manager import get_rag
+from app.lightrag.query_cache import (
+    QUERY_CACHE,
+    acquire_query_semaphore,
+    get_query_semaphore,
+    hash_for_cache,
+    make_cache_key,
+    reset_query_state_for_tests,
+)
 from app.lightrag.schemas import (
     LightRagEntryRelationRecommendationItem,
     LightRagEntryRelationRecommendationsResponse,
@@ -35,93 +41,13 @@ from app.lightrag.schemas import (
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class _CacheEntry:
-    value: LightRagQueryResponse
-    expires_at: float
-
-
-class _TtlCache:
-    def __init__(self) -> None:
-        self._data: "OrderedDict[str, _CacheEntry]" = OrderedDict()
-        self._lock = threading.Lock()
-
-    def get(self, key: str, *, now: float) -> LightRagQueryResponse | None:
-        with self._lock:
-            entry = self._data.get(key)
-            if entry is None:
-                return None
-            if entry.expires_at <= now:
-                self._data.pop(key, None)
-                return None
-            self._data.move_to_end(key)
-            return entry.value
-
-    def set(self, key: str, value: LightRagQueryResponse, *, now: float, ttl_sec: int, maxsize: int) -> None:
-        if ttl_sec <= 0 or maxsize <= 0:
-            return
-        with self._lock:
-            self._data[key] = _CacheEntry(value=value, expires_at=now + float(ttl_sec))
-            self._data.move_to_end(key)
-            while len(self._data) > maxsize:
-                self._data.popitem(last=False)
-
-    def clear(self) -> None:
-        with self._lock:
-            self._data.clear()
-
-
-_QUERY_CACHE = _TtlCache()
-
-_QUERY_SEMAPHORES: dict[int, threading.BoundedSemaphore] = {}
-_QUERY_SEMAPHORES_LOCK = threading.Lock()
-
-
-def _get_query_semaphore(max_concurrency: int) -> threading.BoundedSemaphore:
-    n = max(1, int(max_concurrency or 1))
-    with _QUERY_SEMAPHORES_LOCK:
-        sem = _QUERY_SEMAPHORES.get(n)
-        if sem is None:
-            sem = threading.BoundedSemaphore(n)
-            _QUERY_SEMAPHORES[n] = sem
-        return sem
-
-
-async def _acquire_query_semaphore(sem: threading.BoundedSemaphore, *, timeout_sec: float) -> bool:
-    t = float(timeout_sec or 0.0)
-    if t <= 0:
-        return await anyio.to_thread.run_sync(lambda: sem.acquire(blocking=False), abandon_on_cancel=True)
-    return await anyio.to_thread.run_sync(lambda: sem.acquire(timeout=t), abandon_on_cancel=True)
-
-
 def reset_lightrag_query_state_for_tests() -> None:
-    """Best-effort test hook to clear in-process caches."""
-    try:
-        with _QUERY_SEMAPHORES_LOCK:
-            _QUERY_SEMAPHORES.clear()
-    except Exception:
-        pass
-    try:
-        _QUERY_CACHE.clear()
-    except Exception:
-        pass
+    """Backward-compatible alias to reset in-process query cache state."""
+    reset_query_state_for_tests()
 
 
 def _sse_frame(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\\n\\n"
-
-
-def _hash_for_cache(value: str) -> str:
-    s = (value or "").strip()
-    if not s:
-        return ""
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()
-
-
-def _make_cache_key(*, query: str, mode: LightRagQueryMode, top_k: int) -> str:
-    # Keep key stable and safe: do not include secrets.
-    q = (query or "").strip()
-    return f"m={mode}|k={top_k}|ql={len(q)}|qh={_hash_for_cache(q)}"
 
 
 def _normalize_score(value: Any) -> float | None:
@@ -1562,12 +1488,12 @@ class LightRagService:
         query_len = len((query or "").strip())
         cache_ttl = int(getattr(settings, "lightrag_query_cache_ttl_sec", 0) or 0)
         cache_maxsize = int(getattr(settings, "lightrag_query_cache_maxsize", 0) or 0)
-        cache_key = _make_cache_key(query=query, mode=mode, top_k=top_k)
+        cache_key = make_cache_key(query=query, mode=mode, top_k=top_k)
         now = time.monotonic()
 
         cache_hit = False
         if cache_ttl > 0 and cache_maxsize > 0:
-            cached = _QUERY_CACHE.get(cache_key, now=now)
+            cached = QUERY_CACHE.get(cache_key, now=now)
             if cached is not None:
                 cache_hit = True
                 return LightRagQueryResponse(
@@ -1582,7 +1508,7 @@ class LightRagService:
                 )
 
         max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
-        sem = _get_query_semaphore(max_concurrency)
+        sem = get_query_semaphore(max_concurrency)
         timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 60.0) or 60.0)
 
         queue_start = time.perf_counter()
@@ -1590,7 +1516,7 @@ class LightRagService:
         run_ms = 0
         acquired = False
         try:
-            acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
+            acquired = await acquire_query_semaphore(sem, timeout_sec=timeout_sec)
             acquired_at = time.perf_counter()
             queue_wait_ms = int((acquired_at - queue_start) * 1000)
             if not acquired:
@@ -1648,7 +1574,7 @@ class LightRagService:
         )
 
         if cache_ttl > 0 and cache_maxsize > 0:
-            _QUERY_CACHE.set(cache_key, result, now=time.monotonic(), ttl_sec=cache_ttl, maxsize=cache_maxsize)
+            QUERY_CACHE.set(cache_key, result, now=time.monotonic(), ttl_sec=cache_ttl, maxsize=cache_maxsize)
 
         logger.info(
             "lightrag query done",
@@ -1680,19 +1606,19 @@ class LightRagService:
         q = (query or "").strip()
         cache_ttl = int(getattr(settings, "lightrag_query_cache_ttl_sec", 0) or 0)
         cache_maxsize = int(getattr(settings, "lightrag_query_cache_maxsize", 0) or 0)
-        cache_key = f"recall|{_make_cache_key(query=q, mode=mode, top_k=top_k)}"
+        cache_key = f"recall|{make_cache_key(query=q, mode=mode, top_k=top_k)}"
         now = time.monotonic()
 
         if cache_ttl > 0 and cache_maxsize > 0:
-            cached = _QUERY_CACHE.get(cache_key, now=now)
+            cached = QUERY_CACHE.get(cache_key, now=now)
             if cached is not None:
                 return list(cached.sources or [])
 
         max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
-        sem = _get_query_semaphore(max_concurrency)
+        sem = get_query_semaphore(max_concurrency)
         timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 60.0) or 60.0)
 
-        acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
+        acquired = await acquire_query_semaphore(sem, timeout_sec=timeout_sec)
         if not acquired:
             logger.warning(
                 "lightrag query concurrency timeout",
@@ -1727,7 +1653,7 @@ class LightRagService:
 
         sources = _decorate_sources(_normalize_sources(raw_sources))
         if cache_ttl > 0 and cache_maxsize > 0:
-            _QUERY_CACHE.set(
+            QUERY_CACHE.set(
                 cache_key,
                 LightRagQueryResponse(
                     answer="",
@@ -1765,19 +1691,19 @@ class LightRagService:
 
         cache_ttl = int(getattr(settings, "lightrag_query_cache_ttl_sec", 0) or 0)
         cache_maxsize = int(getattr(settings, "lightrag_query_cache_maxsize", 0) or 0)
-        cache_key = f"graphrecall|m={mode}|k={k}|ck={ck}|mt={mt}|ql={len(q)}|qh={_hash_for_cache(q)}"
+        cache_key = f"graphrecall|m={mode}|k={k}|ck={ck}|mt={mt}|ql={len(q)}|qh={hash_for_cache(q)}"
         now = time.monotonic()
 
         if cache_ttl > 0 and cache_maxsize > 0:
-            cached = _QUERY_CACHE.get(cache_key, now=now)
+            cached = QUERY_CACHE.get(cache_key, now=now)
             if cached is not None:
                 return list(cached.sources or [])
 
         max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
-        sem = _get_query_semaphore(max_concurrency)
+        sem = get_query_semaphore(max_concurrency)
         timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 60.0) or 60.0)
 
-        acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
+        acquired = await acquire_query_semaphore(sem, timeout_sec=timeout_sec)
         if not acquired:
             logger.warning(
                 "lightrag query concurrency timeout",
@@ -1820,7 +1746,7 @@ class LightRagService:
 
         sources = _decorate_sources(_normalize_sources(raw_sources))
         if cache_ttl > 0 and cache_maxsize > 0:
-            _QUERY_CACHE.set(
+            QUERY_CACHE.set(
                 cache_key,
                 LightRagQueryResponse(
                     answer="",
@@ -1857,10 +1783,10 @@ class LightRagService:
         mt = max(1, min(64, int(max_tokens or 1)))
 
         max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
-        sem = _get_query_semaphore(max_concurrency)
+        sem = get_query_semaphore(max_concurrency)
         timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 60.0) or 60.0)
 
-        acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
+        acquired = await acquire_query_semaphore(sem, timeout_sec=timeout_sec)
         if not acquired:
             logger.warning(
                 "lightrag query concurrency timeout",
@@ -1913,19 +1839,19 @@ class LightRagService:
         q = (prompt or "").strip()
         cache_ttl = int(getattr(settings, "lightrag_query_cache_ttl_sec", 0) or 0)
         cache_maxsize = int(getattr(settings, "lightrag_query_cache_maxsize", 0) or 0)
-        cache_key = f"llm|m={mode}|ql={len(q)}|qh={_hash_for_cache(q)}"
+        cache_key = f"llm|m={mode}|ql={len(q)}|qh={hash_for_cache(q)}"
         now = time.monotonic()
 
         if cache_ttl > 0 and cache_maxsize > 0:
-            cached = _QUERY_CACHE.get(cache_key, now=now)
+            cached = QUERY_CACHE.get(cache_key, now=now)
             if cached is not None:
                 return cached.answer or ""
 
         max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
-        sem = _get_query_semaphore(max_concurrency)
+        sem = get_query_semaphore(max_concurrency)
         timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 60.0) or 60.0)
 
-        acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
+        acquired = await acquire_query_semaphore(sem, timeout_sec=timeout_sec)
         if not acquired:
             logger.warning(
                 "lightrag query concurrency timeout",
@@ -1960,7 +1886,7 @@ class LightRagService:
 
         answer, _ = _normalize_answer(raw)
         if cache_ttl > 0 and cache_maxsize > 0:
-            _QUERY_CACHE.set(
+            QUERY_CACHE.set(
                 cache_key,
                 LightRagQueryResponse(
                     answer=answer,
@@ -2008,10 +1934,10 @@ class LightRagService:
         ck = max(1, min(50, int(chunk_top_k or k)))
 
         max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
-        sem = _get_query_semaphore(max_concurrency)
+        sem = get_query_semaphore(max_concurrency)
         timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 60.0) or 60.0)
 
-        acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
+        acquired = await acquire_query_semaphore(sem, timeout_sec=timeout_sec)
         if not acquired:
             raise ApiException(status_code=504, code=50400, message="LightRAG query timeout")
         try:
@@ -2228,10 +2154,10 @@ class LightRagService:
 
         timeout_sec = float(getattr(settings, "lightrag_query_timeout_sec", 60.0) or 60.0)
         max_concurrency = int(getattr(settings, "lightrag_query_max_concurrency", 1) or 1)
-        sem = _get_query_semaphore(max_concurrency)
+        sem = get_query_semaphore(max_concurrency)
         queue_start = time.perf_counter()
 
-        acquired = await _acquire_query_semaphore(sem, timeout_sec=timeout_sec)
+        acquired = await acquire_query_semaphore(sem, timeout_sec=timeout_sec)
         queue_wait_ms = int((time.perf_counter() - queue_start) * 1000)
         if not acquired:
             logger.warning(

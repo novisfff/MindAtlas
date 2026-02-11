@@ -1,96 +1,30 @@
 from __future__ import annotations
 
-import ipaddress
 import json
 import logging
 import re
-import socket
 import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen, HTTPRedirectHandler, build_opener
 
 from app.ai_provider.crypto import decrypt_api_key
+from app.common.ssrf import validate_url_ssrf
+
+
+class _SSRFSafeRedirectHandler(HTTPRedirectHandler):
+    """Redirect handler that validates each redirect target against SSRF rules."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        validate_url_ssrf(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 if TYPE_CHECKING:
     from app.assistant_config.models import AssistantTool
 
 logger = logging.getLogger(__name__)
-
-# 允许的 URL scheme
-ALLOWED_SCHEMES = {"http", "https"}
-
-# 禁止访问的内网 IP 范围
-BLOCKED_IP_NETWORKS = [
-    ipaddress.ip_network("0.0.0.0/8"),        # "This" network
-    ipaddress.ip_network("127.0.0.0/8"),      # Loopback
-    ipaddress.ip_network("10.0.0.0/8"),       # Private Class A
-    ipaddress.ip_network("172.16.0.0/12"),    # Private Class B
-    ipaddress.ip_network("192.168.0.0/16"),   # Private Class C
-    ipaddress.ip_network("100.64.0.0/10"),    # Carrier-grade NAT
-    ipaddress.ip_network("169.254.0.0/16"),   # Link-local / Cloud metadata
-    ipaddress.ip_network("::1/128"),          # IPv6 loopback
-    ipaddress.ip_network("::/128"),           # Unspecified
-    ipaddress.ip_network("fc00::/7"),         # IPv6 private
-    ipaddress.ip_network("fe80::/10"),        # IPv6 link-local
-]
-
-
-class SSRFError(ValueError):
-    """SSRF 安全错误"""
-    pass
-
-
-def validate_url_security(url: str) -> None:
-    """验证 URL 安全性，防止 SSRF 攻击
-
-    检查项:
-    1. URL scheme 必须是 http 或 https
-    2. 不能访问内网 IP 地址
-    3. 不能访问 localhost
-    """
-    parsed = urlparse(url)
-
-    # 检查 scheme
-    if parsed.scheme.lower() not in ALLOWED_SCHEMES:
-        raise SSRFError(f"不允许的 URL scheme: {parsed.scheme}，只允许 http/https")
-
-    # 检查 hostname
-    hostname = parsed.hostname
-    if not hostname:
-        raise SSRFError("URL 缺少主机名")
-
-    # 检查 localhost 变体
-    if hostname.lower() in ("localhost", "localhost.localdomain"):
-        raise SSRFError("不允许访问 localhost")
-
-    def ensure_ip_allowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
-        for network in BLOCKED_IP_NETWORKS:
-            if ip in network:
-                raise SSRFError(f"不允许访问内网地址: {ip}")
-
-    # 解析 IP 地址并检查是否为内网（同时覆盖 IPv4/IPv6）
-    try:
-        # 尝试直接解析为 IP
-        ensure_ip_allowed(ipaddress.ip_address(hostname))
-        return
-    except ValueError:
-        pass
-
-    try:
-        # 不是 IP 地址，尝试 DNS 解析（getaddrinfo 覆盖 AAAA 记录，避免 IPv6 绕过）
-        infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
-    except socket.gaierror:
-        # DNS 解析失败，允许继续（可能是临时网络问题）
-        logger.warning("DNS 解析失败: %s", hostname)
-        return
-
-    for info in infos:
-        sockaddr = info[4]
-        ip_str = sockaddr[0]
-        ensure_ip_allowed(ipaddress.ip_address(ip_str))
 
 
 _TEMPLATE_VAR_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
@@ -193,7 +127,7 @@ class RemoteTool:
             raise ValueError("RemoteTool endpoint_url is empty")
 
         # SSRF 安全检查
-        validate_url_security(url)
+        validate_url_ssrf(url)
 
         method = (self.http_method or "POST").strip().upper()
         timeout = max(1, int(self.timeout_seconds or 15))
@@ -304,7 +238,8 @@ class RemoteTool:
     @staticmethod
     def _do_request(req: Request, timeout: int) -> str:
         try:
-            with urlopen(req, timeout=timeout) as resp:
+            opener = build_opener(_SSRFSafeRedirectHandler)
+            with opener.open(req, timeout=timeout) as resp:
                 raw = resp.read()
                 return raw.decode("utf-8", errors="ignore")
         except HTTPError as exc:
