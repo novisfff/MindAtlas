@@ -15,6 +15,8 @@ from app.assistant_config.schemas import (
     ResetSkillRequest,
     SystemToolDefinitionResponse,
     SystemToolEnabledUpdateRequest,
+    WorkflowInput,
+    WorkflowValidationResponse,
 )
 from app.assistant_config.service import AssistantConfigService
 from app.common.responses import ApiResponse
@@ -154,3 +156,83 @@ def delete_skill(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
     service = AssistantConfigService(db)
     service.delete_skill(id)
     return ApiResponse.ok(None, "Skill deleted")
+
+
+# ==================== Workflow ====================
+
+@router.get("/workflow/node-types", response_model=ApiResponse)
+def list_node_types() -> ApiResponse:
+    """获取支持的工作流节点类型目录"""
+    from app.assistant.skills.base import NodeType
+    from typing import get_args
+
+    node_types = []
+    for nt in get_args(NodeType):
+        node_types.append({
+            "type": nt,
+            "label": _NODE_TYPE_LABELS.get(nt, nt),
+            "description": _NODE_TYPE_DESCRIPTIONS.get(nt, ""),
+        })
+    return ApiResponse.ok(node_types)
+
+
+@router.put("/skills/{id}/workflow", response_model=ApiResponse)
+def update_workflow(
+    id: UUID,
+    request: WorkflowInput,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    """仅更新 Skill 的工作流 DAG（nodes + edges + viewport）"""
+    service = AssistantConfigService(db)
+    skill = service.update_workflow(id, request)
+    return ApiResponse.ok(
+        AssistantSkillResponse.model_validate(skill).model_dump(by_alias=True)
+    )
+
+
+@router.post("/skills/{id}/validate-workflow", response_model=ApiResponse)
+def validate_workflow(
+    id: UUID,
+    request: WorkflowInput,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    """验证工作流 DAG 拓扑"""
+    from app.assistant.skills.workflow_validator import (
+        validate_parallel_branches,
+        validate_workflow as _validate_workflow,
+    )
+
+    result = _validate_workflow(request.nodes, request.edges)
+    # Also run parallel branch validation
+    parallel_result = validate_parallel_branches(request.nodes, request.edges)
+    all_errors = result.errors + parallel_result.errors
+
+    resp = WorkflowValidationResponse(
+        valid=len(all_errors) == 0,
+        errors=[{"node_id": e.node_id, "message": e.message} for e in all_errors],
+    )
+    return ApiResponse.ok(resp.model_dump(by_alias=True))
+
+
+# Node type metadata
+_NODE_TYPE_LABELS = {
+    "start": "Start",
+    "llm": "LLM",
+    "tool": "Tool",
+    "if_else": "IF/ELSE",
+    "template": "Template",
+    "parameter_extractor": "Parameter Extractor",
+    "knowledge_retrieval": "Knowledge Retrieval",
+    "variable_aggregator": "Variable Aggregator",
+}
+
+_NODE_TYPE_DESCRIPTIONS = {
+    "start": "Workflow entry point, defines input variables",
+    "llm": "Call LLM for analysis or optional final output",
+    "tool": "Execute a registered tool",
+    "if_else": "IF/ELIF/ELSE branching with configurable conditions and logic",
+    "template": "Transform data using template strings",
+    "parameter_extractor": "Extract structured parameters from text using LLM",
+    "knowledge_retrieval": "Search knowledge base for relevant context",
+    "variable_aggregator": "Merge outputs from parallel branches",
+}

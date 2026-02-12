@@ -249,6 +249,7 @@ class AssistantService:
             for delta in agent.stream(
                 history[:-1],
                 user_input,
+                runtime_context={"conversation_id": str(conversation_id)},
                 on_tool_call_start=on_tool_call_start,
                 on_tool_call_end=on_tool_call_end,
                 on_skill_start=on_skill_start,

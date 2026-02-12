@@ -50,8 +50,9 @@ class AssistantConfigServiceTests(unittest.TestCase):
                 description="d",
                 intent_examples=[],
                 tools=["old_tool", "t1"],
-                mode="steps",
-                system_prompt=None,
+                mode="langgraph",
+                langgraph_pattern="agent_loop",
+                system_prompt="p",
                 is_system=False,
                 enabled=True,
             )
@@ -100,33 +101,30 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertEqual(ctx.exception.code, 40910)
 
-    def test_sync_system_skills_creates_records_and_backfills(self) -> None:
+    def test_sync_system_skills_forces_langgraph_mode(self) -> None:
         from app.assistant_config.models import AssistantSkill  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
-
-        class FakeStep:
-            def __init__(self) -> None:
-                self.type = "analysis"
-                self.instruction = "x"
-                self.tool_name = None
-                self.args_from = None
 
         class FakeSkill:
             name = "s1"
             description = "d"
             intent_examples = []
             tools = []
-            mode = "agent"
+            mode = "langgraph"
+            langgraph_pattern = "agent_loop"
             system_prompt = "p"
-            steps = [FakeStep()]
+            kb = None
+            workflow_nodes = []
+            workflow_edges = []
 
-        # existing record that should be backfilled (steps->agent)
+        # existing record should be normalized to langgraph
         existing = AssistantSkill(
             name="s1",
             description="old",
             intent_examples=[],
             tools=[],
-            mode="steps",
+            mode="agent",
+            langgraph_pattern=None,
             system_prompt=None,
             is_system=True,
             enabled=True,
@@ -141,9 +139,143 @@ class AssistantConfigServiceTests(unittest.TestCase):
         skill = self.db.query(AssistantSkill).filter(AssistantSkill.name == "s1").first()
         self.assertIsNotNone(skill)
         self.assertTrue(skill.is_system)
-        # gentle backfill applied
-        self.assertEqual(skill.mode, "agent")
-        self.assertEqual(skill.system_prompt, "p")
+        self.assertEqual(skill.mode, "langgraph")
+        self.assertEqual(skill.langgraph_pattern, "agent_loop")
+
+    def test_sync_system_skills_backfills_missing_langgraph_pattern(self) -> None:
+        from app.assistant_config.models import AssistantSkill  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        class FakeSkill:
+            name = "smart_capture"
+            description = "d"
+            intent_examples = []
+            tools = []
+            mode = "langgraph"
+            langgraph_pattern = "workflow_dag"
+            system_prompt = None
+            kb = None
+            workflow_nodes = []
+            workflow_edges = []
+
+        existing = AssistantSkill(
+            name="smart_capture",
+            description="old",
+            intent_examples=[],
+            tools=[],
+            mode="langgraph",
+            langgraph_pattern=None,
+            system_prompt=None,
+            is_system=True,
+            enabled=True,
+        )
+        self.db.add(existing)
+        self.db.commit()
+
+        svc = AssistantConfigService(self.db)
+        with patch("app.assistant_config.service.SkillRegistry.list_system_skills", return_value=[FakeSkill()]):
+            svc.sync_system_skills()
+
+        skill = self.db.query(AssistantSkill).filter(AssistantSkill.name == "smart_capture").first()
+        self.assertIsNotNone(skill)
+        self.assertEqual(skill.mode, "langgraph")
+        self.assertEqual(skill.langgraph_pattern, "workflow_dag")
+
+    def test_sync_system_skills_migrates_tool_text_refs_to_result(self) -> None:
+        from app.assistant_config.models import AssistantSkill, AssistantSkillNode  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        class FakeSkill:
+            name = "smart_capture"
+            description = "d"
+            intent_examples = []
+            tools = []
+            mode = "langgraph"
+            langgraph_pattern = "workflow_dag"
+            system_prompt = None
+            kb = None
+            workflow_nodes = []
+            workflow_edges = []
+
+        existing = AssistantSkill(
+            name="smart_capture",
+            description="old",
+            intent_examples=[],
+            tools=[],
+            mode="langgraph",
+            langgraph_pattern="workflow_dag",
+            system_prompt=None,
+            is_system=True,
+            enabled=True,
+        )
+        existing.nodes = [
+            AssistantSkillNode(
+                node_id="tool_create",
+                node_type="tool",
+                label="tool",
+                position_x=0,
+                position_y=0,
+                config={"toolName": "create_entry", "inputBindings": {}},
+            ),
+            AssistantSkillNode(
+                node_id="llm_output",
+                node_type="llm",
+                label="out",
+                position_x=0,
+                position_y=0,
+                config={
+                    "userInput": "{{tool_create.text}}",
+                    "systemPrompt": "summary {{tool_create.text}}",
+                },
+            ),
+        ]
+        self.db.add(existing)
+        self.db.commit()
+
+        svc = AssistantConfigService(self.db)
+        with patch("app.assistant_config.service.SkillRegistry.list_system_skills", return_value=[FakeSkill()]):
+            svc.sync_system_skills()
+
+        skill = self.db.query(AssistantSkill).filter(AssistantSkill.name == "smart_capture").first()
+        self.assertIsNotNone(skill)
+        self.assertEqual(skill.nodes[1].config.get("userInput"), "{{tool_create.result}}")
+        self.assertIn("{{tool_create.result}}", skill.nodes[1].config.get("systemPrompt", ""))
+
+    def test_reset_skill_restores_langgraph_pattern(self) -> None:
+        from app.assistant_config.models import AssistantSkill  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        class DefaultSkill:
+            description = "d"
+            intent_examples = []
+            tools = []
+            mode = "langgraph"
+            langgraph_pattern = "workflow_dag"
+            system_prompt = None
+            kb = None
+            workflow_nodes = []
+            workflow_edges = []
+
+        skill = AssistantSkill(
+            name="smart_capture",
+            description="old",
+            intent_examples=[],
+            tools=[],
+            mode="langgraph",
+            langgraph_pattern=None,
+            system_prompt=None,
+            is_system=True,
+            enabled=True,
+        )
+        self.db.add(skill)
+        self.db.commit()
+
+        svc = AssistantConfigService(self.db)
+        with patch("app.assistant.skills.definitions.get_skill_by_name", return_value=DefaultSkill()):
+            out = svc.reset_skill(skill.id, confirm=True)
+
+        self.assertEqual(out.mode, "langgraph")
+        self.assertEqual(out.langgraph_pattern, "workflow_dag")
 
     def test_sync_system_skills_integrity_error_40911(self) -> None:
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -155,9 +287,12 @@ class AssistantConfigServiceTests(unittest.TestCase):
             description = "d"
             intent_examples = []
             tools = []
-            mode = "steps"
+            mode = "langgraph"
+            langgraph_pattern = "agent_loop"
             system_prompt = None
-            steps = []
+            kb = None
+            workflow_nodes = []
+            workflow_edges = []
 
         with (
             patch("app.assistant_config.service.SkillRegistry.list_system_skills", return_value=[FakeSkill()]),
@@ -216,7 +351,15 @@ class AssistantConfigServiceTests(unittest.TestCase):
         from app.assistant_config.models import AssistantSkill  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
-        skill = AssistantSkill(name="s", description="d", is_system=False, enabled=True, mode="steps")
+        skill = AssistantSkill(
+            name="s",
+            description="d",
+            is_system=False,
+            enabled=True,
+            mode="langgraph",
+            langgraph_pattern="agent_loop",
+            system_prompt="x",
+        )
         self.db.add(skill)
         self.db.commit()
 
@@ -234,7 +377,15 @@ class AssistantConfigServiceTests(unittest.TestCase):
         from app.assistant_config.models import AssistantSkill  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
-        skill = AssistantSkill(name="s", description="d", is_system=True, enabled=True, mode="steps")
+        skill = AssistantSkill(
+            name="s",
+            description="d",
+            is_system=True,
+            enabled=True,
+            mode="langgraph",
+            langgraph_pattern="agent_loop",
+            system_prompt="x",
+        )
         self.db.add(skill)
         self.db.commit()
 
@@ -251,7 +402,15 @@ class AssistantConfigServiceTests(unittest.TestCase):
         from app.assistant_config.schemas import AssistantSkillUpdateRequest  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
-        skill = AssistantSkill(name="s", description="d", is_system=True, enabled=True, mode="steps")
+        skill = AssistantSkill(
+            name="s",
+            description="d",
+            is_system=True,
+            enabled=True,
+            mode="langgraph",
+            langgraph_pattern="agent_loop",
+            system_prompt="x",
+        )
         self.db.add(skill)
         self.db.commit()
 
@@ -265,7 +424,15 @@ class AssistantConfigServiceTests(unittest.TestCase):
         from app.assistant_config.models import AssistantSkill  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
-        skill = AssistantSkill(name="s", description="d", is_system=True, enabled=True, mode="steps")
+        skill = AssistantSkill(
+            name="s",
+            description="d",
+            is_system=True,
+            enabled=True,
+            mode="langgraph",
+            langgraph_pattern="agent_loop",
+            system_prompt="x",
+        )
         self.db.add(skill)
         self.db.commit()
 

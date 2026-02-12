@@ -38,3 +38,21 @@ class AssistantKnowledgeBaseToolsTests(unittest.TestCase):
         self.assertNotIn("kb_search", GENERAL_CHAT.tools)
         self.assertNotIn("kb_relation_recommendations", GENERAL_CHAT.tools)
         self.assertNotIn("kb_graph_recall", GENERAL_CHAT.tools)
+
+    def test_system_tool_output_contracts_are_complete_and_parseable(self) -> None:
+        from app.assistant_config.registry import ToolRegistry  # noqa: E402
+
+        definitions = ToolRegistry.list_system_tool_definitions()
+        self.assertGreater(len(definitions), 0)
+
+        for tool in definitions:
+            self.assertTrue(tool.output_params, f"{tool.name} output_params should not be empty")
+            self.assertTrue(tool.returns, f"{tool.name} returns should not be empty")
+            for param in tool.output_params:
+                self.assertTrue(param.name, f"{tool.name} output param name should not be empty")
+                self.assertTrue(param.param_type, f"{tool.name}.{param.name} param_type should not be empty")
+                self.assertIn(
+                    f"- {param.name} ({param.param_type})",
+                    tool.returns,
+                    f"{tool.name} returns should include list item for {param.name}",
+                )

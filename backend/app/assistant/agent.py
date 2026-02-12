@@ -10,8 +10,9 @@ from sqlalchemy.orm import Session
 
 from app.assistant.openai_compat import build_openai_compat_client_headers
 from app.assistant.skills.base import DEFAULT_SKILL_NAME
-from app.assistant.skills.executor import SkillExecutor
+from app.assistant.skills.langgraph_engine import LangGraphEngine
 from app.assistant.skills.router import SkillRouter
+from app.assistant_config.registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +36,15 @@ class AssistantAgent:
             default_headers=default_headers,
         )
 
-        # 初始化 Router 和 Executor
+        # 初始化 Router 和 LangGraph 引擎
         self.router = SkillRouter(api_key, base_url, model, db)
-        self.executor = SkillExecutor(api_key, base_url, model, db)
+        self.langgraph_engine = LangGraphEngine(api_key, base_url, model, db)
 
     def stream(
         self,
         history: list[dict],
         user_input: str,
+        runtime_context: dict | None = None,
         on_tool_call_start: Callable[[str, str, dict], None] | None = None,
         on_tool_call_end: Callable[[str, str, str], None] | None = None,
         on_skill_start: Callable[[str, str, bool], None] | None = None,
@@ -76,18 +78,27 @@ class AssistantAgent:
             yield ""  # 触发事件发送
 
         try:
-            logger.debug("agent skill %s executor.execute start", skill_name)
-            yield from self.executor.execute(
-                skill_name=skill_name,
+            skill_def = None
+            if self.db is not None:
+                skill_def = SkillRegistry(self.db).resolve(skill_name, include_workflow=True)
+            else:
+                skill_def = SkillRegistry.resolve_system_skill(skill_name)
+            if skill_def is None:
+                raise ValueError(f"Skill not found or disabled: {skill_name}")
+
+            logger.debug("agent skill %s mode=langgraph", skill_name)
+            yield from self.langgraph_engine.execute(
+                skill=skill_def,
                 user_input=user_input,
                 history=history,
+                runtime_context=runtime_context,
                 on_tool_call_start=on_tool_call_start,
                 on_tool_call_end=on_tool_call_end,
                 on_analysis_start=on_analysis_start,
                 on_analysis_delta=on_analysis_delta,
                 on_analysis_end=on_analysis_end,
             )
-            logger.debug("agent skill %s executor.execute end", skill_name)
+            logger.debug("agent skill %s execution end", skill_name)
             # 通知 Skill 完成
             if on_skill_end:
                 on_skill_end(skill_id, "completed")

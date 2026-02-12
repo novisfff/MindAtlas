@@ -23,7 +23,7 @@ class AssistantAgentHeaderTests(unittest.TestCase):
 
         with (
             patch("app.assistant.agent.ChatOpenAI", new=FakeChatOpenAI),
-            patch("app.assistant.skills.executor.ChatOpenAI", new=FakeChatOpenAI),
+            patch("app.assistant.skills.langgraph_engine.ChatOpenAI", new=FakeChatOpenAI),
             patch("langchain_openai.ChatOpenAI", new=FakeChatOpenAI),
         ):
             from app.assistant.agent import AssistantAgent  # noqa: E402

@@ -1,3 +1,4 @@
+import { lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AppProviders } from './providers'
 import { AppLayout } from '@/components/layout'
@@ -10,12 +11,24 @@ import { AiProviderSettings } from '@/features/ai-providers'
 import { AssistantPage } from '@/features/assistant'
 import { ToolSettings, SkillSettings } from '@/features/assistant-config'
 
+const WorkflowEditorPage = lazy(
+  () => import('@/features/assistant-config/pages/WorkflowEditorPage'),
+)
+
 export default function App() {
   return (
     <AppProviders>
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route
+            path="/settings/workflow-editor/:skillId"
+            element={
+              <Suspense fallback={<div className="flex h-screen items-center justify-center">Loading...</div>}>
+                <WorkflowEditorPage />
+              </Suspense>
+            }
+          />
           <Route element={<AppLayout />}>
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/entries" element={<EntriesPage />} />

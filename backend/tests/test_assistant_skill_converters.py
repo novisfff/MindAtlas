@@ -21,10 +21,12 @@ class AssistantSkillConvertersTests(unittest.TestCase):
         skill.description = "d"
         skill.intent_examples = []
         skill.tools = []
-        skill.mode = "agent"
+        skill.mode = "langgraph"
+        skill.langgraph_pattern = "agent_loop"
         skill.system_prompt = "x"
-        skill.steps = []
-        skill.kb_config = {"enabled": True, "useInAgent": True, "stepsSummaryDefault": True}
+        skill.kb_config = {"enabled": True}
+        skill.nodes = []
+        skill.edges = []
 
         definition = db_skill_to_definition(skill)
         self.assertIsNotNone(definition.kb)
@@ -38,8 +40,9 @@ class AssistantSkillConvertersTests(unittest.TestCase):
         skill.description = "d"
         skill.intent_examples = []
         skill.tools = []
-        skill.mode = "agent"
-        skill.system_prompt = "x"
+        skill.mode = "langgraph"
+        skill.langgraph_pattern = "workflow_dag"
+        skill.system_prompt = None
         skill.kb_config = {"enabled": True}
 
         definition = db_skill_to_definition_light(skill)
@@ -54,11 +57,34 @@ class AssistantSkillConvertersTests(unittest.TestCase):
         skill.description = "d"
         skill.intent_examples = []
         skill.tools = []
-        skill.mode = "agent"
+        skill.mode = "langgraph"
+        skill.langgraph_pattern = "agent_loop"
         skill.system_prompt = "x"
-        skill.steps = []
         skill.kb_config = "not-a-dict"
+        skill.nodes = []
+        skill.edges = []
 
         definition = db_skill_to_definition(skill)
         self.assertIsNone(definition.kb)
 
+    def test_db_skill_to_definition_rejects_legacy_mode(self) -> None:
+        from app.assistant.skills.converters import db_skill_to_definition  # noqa: E402
+
+        skill = type("Skill", (), {})()
+        skill.name = "legacy"
+        skill.description = "d"
+        skill.intent_examples = []
+        skill.tools = []
+        skill.mode = "agent"
+        skill.langgraph_pattern = "agent_loop"
+        skill.system_prompt = "x"
+        skill.kb_config = None
+        skill.nodes = []
+        skill.edges = []
+
+        with self.assertRaises(ValueError):
+            db_skill_to_definition(skill)
+
+
+if __name__ == "__main__":
+    unittest.main()

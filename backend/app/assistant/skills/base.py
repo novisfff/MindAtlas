@@ -19,6 +19,24 @@ AnalysisOutputMode = Literal["text", "json"]
 # 输出字段类型
 OutputFieldType = Literal["string", "number", "integer", "boolean", "object", "array"]
 
+# DAG 节点类型
+NodeType = Literal[
+    "start", "llm", "tool", "if_else", "template",
+    "parameter_extractor", "knowledge_retrieval",
+    "variable_aggregator",
+]
+
+# 条件运算符
+ConditionOperator = Literal[
+    "contains", "not_contains", "starts_with", "ends_with",
+    "is", "is_not", "is_empty", "is_not_empty",
+    # legacy operators kept for runtime compatibility
+    "equals", "not_equals", "gt", "lt", "gte", "lte",
+]
+
+# 并行分支合并策略
+MergeStrategy = Literal["all_required", "first_completed"]
+
 
 # ==================== Output Field 配置 ====================
 
@@ -113,22 +131,69 @@ def build_json_output_constraint(field_specs: list[OutputFieldSpec]) -> str:
 
 
 class SkillKBConfig(BaseModel):
-    """Skill 级别的知识库配置（仅 Agent 模式支持）"""
+    """Skill 级别的知识库配置（仅 agent_loop 模式支持）"""
     enabled: bool = False  # 是否启用知识库
 
 
 # ==================== Skill 数据结构 ====================
 
 
+class ConditionExpression(BaseModel):
+    """IF/ELSE 条件表达式"""
+    id: str
+    variable: str  # e.g. "llm_1.sentiment"
+    operator: ConditionOperator
+    value: Optional[str] = None
+    handle: str  # output handle name
+
+
+class IfElseConditionClause(BaseModel):
+    """Single condition clause in IF/ELIF branch."""
+    id: str
+    variable: str  # e.g. "llm_1.response" or "sys.date"
+    operator: ConditionOperator
+    value: Optional[str] = None
+
+
+class IfElseBranch(BaseModel):
+    """IF/ELIF branch definition."""
+    id: str  # also used as source_handle
+    label: str = ""
+    logic: Literal["and", "or"] = "and"
+    conditions: list[IfElseConditionClause] = Field(default_factory=list)
+
+
+class WorkflowNodeDefinition(BaseModel):
+    """工作流 DAG 节点定义"""
+    node_id: str
+    node_type: NodeType
+    label: str = ""
+    position_x: float = 0.0
+    position_y: float = 0.0
+    config: dict = Field(default_factory=dict)
+
+
+class WorkflowEdgeDefinition(BaseModel):
+    """工作流 DAG 边定义"""
+    edge_id: str
+    source_node_id: str
+    target_node_id: str
+    source_handle: str = "output"
+    target_handle: str = "input"
+    condition_type: Optional[Literal["expression", "default"]] = None
+    condition_expr: Optional[ConditionExpression] = None
+    label: Optional[str] = None
+
+
 class SkillStep(BaseModel):
-    """Skill 执行步骤"""
+    """Legacy step type kept for helper compatibility; no longer used in skill execution."""
     type: Literal["analysis", "tool", "summary"]
     instruction: Optional[str] = None
     tool_name: Optional[str] = None
     args_from: Optional[Literal["context", "previous", "custom", "json"]] = None
     args_template: Optional[str] = None
     output_mode: Optional[AnalysisOutputMode] = None
-    output_fields: Optional[list[OutputFieldSpec] | list[str]] = None  # 支持新旧两种格式
+    output_fields: Optional[list[OutputFieldSpec] | list[str]] = None
     include_in_summary: Optional[bool] = True
 
 
@@ -138,10 +203,13 @@ class SkillDefinition(BaseModel):
     description: str
     intent_examples: list[str]
     tools: list[str] = Field(default_factory=list)  # 该 Skill 需要的工具列表
-    mode: Literal["steps", "agent"] = "steps"  # 执行模式
-    system_prompt: Optional[str] = None  # Agent 模式的系统提示词
-    steps: list[SkillStep] = Field(default_factory=list)  # Steps 模式的执行步骤
+    mode: Literal["langgraph"] = "langgraph"  # 执行模式（仅 LangGraph）
+    langgraph_pattern: Optional[Literal["agent_loop", "workflow_dag"]] = None
+    system_prompt: Optional[str] = None
     kb: Optional[SkillKBConfig] = None  # 知识库配置
+    # workflow_dag 模式
+    workflow_nodes: list[WorkflowNodeDefinition] = Field(default_factory=list)
+    workflow_edges: list[WorkflowEdgeDefinition] = Field(default_factory=list)
 
     @property
     def hidden(self) -> bool:

@@ -4,14 +4,15 @@ from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
 from app.assistant.skills.base import (
-    OutputFieldSpec,
+    ConditionExpression,
     SkillDefinition,
     SkillKBConfig,
-    SkillStep,
+    WorkflowEdgeDefinition,
+    WorkflowNodeDefinition,
 )
 
 if TYPE_CHECKING:
-    from app.assistant_config.models import AssistantSkill
+    from app.assistant_config.models import AssistantSkill, AssistantSkillEdge, AssistantSkillNode
 
 
 def _parse_skill_kb_config(raw: Any) -> SkillKBConfig | None:
@@ -21,7 +22,7 @@ def _parse_skill_kb_config(raw: Any) -> SkillKBConfig | None:
 
 
 def db_skill_to_definition_light(skill: AssistantSkill) -> SkillDefinition:
-    """轻量级转换 - 用于路由阶段，不加载 steps（避免 N+1）。"""
+    """轻量级转换 - 用于路由阶段，不加载 nodes/edges 详情。"""
     raw_intent_examples = skill.intent_examples or []
     if not isinstance(raw_intent_examples, list):
         raw_intent_examples = []
@@ -32,15 +33,29 @@ def db_skill_to_definition_light(skill: AssistantSkill) -> SkillDefinition:
         raw_tools = []
     tools = [str(x) for x in raw_tools]
 
+    if (skill.mode or "langgraph") != "langgraph":
+        raise ValueError(
+            f"Skill '{skill.name}' uses legacy mode '{skill.mode}'. "
+            "Only langgraph mode is supported."
+        )
+    pattern = getattr(skill, "langgraph_pattern", None)
+    if pattern not in ("agent_loop", "workflow_dag"):
+        raise ValueError(
+            f"Skill '{skill.name}' has invalid langgraph_pattern '{pattern}'. "
+            "Supported patterns: agent_loop, workflow_dag."
+        )
+
     return SkillDefinition(
         name=skill.name,
         description=skill.description or "",
         intent_examples=intent_examples,
         tools=tools,
-        mode=skill.mode or "steps",
+        mode="langgraph",
+        langgraph_pattern=pattern,
         system_prompt=skill.system_prompt,
-        steps=[],  # 路由阶段不需要 steps
         kb=_parse_skill_kb_config(getattr(skill, "kb_config", None)),
+        workflow_nodes=[],
+        workflow_edges=[],
     )
 
 
@@ -51,66 +66,75 @@ def db_skill_to_definition(skill: AssistantSkill) -> SkillDefinition:
         raw_intent_examples = []
     intent_examples = [str(x) for x in raw_intent_examples]
 
+    if (skill.mode or "langgraph") != "langgraph":
+        raise ValueError(
+            f"Skill '{skill.name}' uses legacy mode '{skill.mode}'. "
+            "Only langgraph mode is supported."
+        )
+    pattern = getattr(skill, "langgraph_pattern", None)
+    if pattern not in ("agent_loop", "workflow_dag"):
+        raise ValueError(
+            f"Skill '{skill.name}' has invalid langgraph_pattern '{pattern}'. "
+            "Supported patterns: agent_loop, workflow_dag."
+        )
+
     raw_tools = skill.tools or []
     if not isinstance(raw_tools, list):
         raw_tools = []
     tools = [str(x) for x in raw_tools]
-
-    steps: list[SkillStep] = []
-    for s in (skill.steps or []):
-        step_type = s.type if s.type in ("analysis", "tool", "summary") else "analysis"
-        args_from = s.args_from if s.args_from in ("context", "previous", "custom", "json") else None
-        output_mode = getattr(s, "output_mode", None)
-        if output_mode not in ("text", "json"):
-            output_mode = None
-
-        output_fields_raw = getattr(s, "output_fields", None)
-        output_fields: list[OutputFieldSpec] | list[str] | None = None
-        if isinstance(output_fields_raw, list):
-            # 检查是否为新格式（dict 列表）
-            if output_fields_raw and isinstance(output_fields_raw[0], dict):
-                # 新格式：解析为 OutputFieldSpec
-                specs: list[OutputFieldSpec] = []
-                for v in output_fields_raw:
-                    if isinstance(v, dict):
-                        try:
-                            specs.append(OutputFieldSpec(**v))
-                        except Exception:
-                            name = v.get("name", "")
-                            if isinstance(name, str) and name.strip():
-                                specs.append(OutputFieldSpec(name=name.strip()))
-                output_fields = specs or None
-            else:
-                # 旧格式：字符串列表
-                cleaned: list[str] = []
-                for v in output_fields_raw:
-                    if isinstance(v, str) and v.strip():
-                        cleaned.append(v.strip())
-                output_fields = cleaned or None
-
-        include_in_summary = getattr(s, "include_in_summary", None)
-        if include_in_summary is None:
-            include_in_summary = True
-        steps.append(
-            SkillStep(
-                type=step_type,
-                instruction=s.instruction,
-                tool_name=s.tool_name,
-                args_from=args_from,
-                args_template=getattr(s, "args_template", None),
-                output_mode=output_mode,
-                output_fields=output_fields,
-                include_in_summary=bool(include_in_summary),
-            )
-        )
 
     return SkillDefinition(
         name=skill.name,
         description=skill.description or "",
         intent_examples=intent_examples,
         tools=tools,
-        mode=skill.mode or "steps",
+        mode="langgraph",
+        langgraph_pattern=pattern,
         system_prompt=skill.system_prompt,
-        steps=steps,
         kb=_parse_skill_kb_config(getattr(skill, "kb_config", None)),
+        workflow_nodes=db_nodes_to_definitions(getattr(skill, "nodes", None) or []),
+        workflow_edges=db_edges_to_definitions(getattr(skill, "edges", None) or []),
     )
+
+
+def db_nodes_to_definitions(nodes: list[AssistantSkillNode]) -> list[WorkflowNodeDefinition]:
+    """将数据库节点模型列表转换为 WorkflowNodeDefinition 列表。"""
+    result: list[WorkflowNodeDefinition] = []
+    for n in nodes:
+        if n.node_type == "answer":
+            raise ValueError(
+                f"Workflow node '{n.node_id}' uses legacy type 'answer'. "
+                "Please migrate it to an llm node with isOutput=true."
+            )
+        result.append(WorkflowNodeDefinition(
+            node_id=n.node_id,
+            node_type=n.node_type,
+            label=n.label or "",
+            position_x=n.position_x or 0.0,
+            position_y=n.position_y or 0.0,
+            config=n.config or {},
+        ))
+    return result
+
+
+def db_edges_to_definitions(edges: list[AssistantSkillEdge]) -> list[WorkflowEdgeDefinition]:
+    """将数据库边模型列表转换为 WorkflowEdgeDefinition 列表。"""
+    result: list[WorkflowEdgeDefinition] = []
+    for e in edges:
+        cond_expr = None
+        if e.condition_expr and isinstance(e.condition_expr, dict):
+            try:
+                cond_expr = ConditionExpression(**e.condition_expr)
+            except Exception:
+                pass
+        result.append(WorkflowEdgeDefinition(
+            edge_id=e.edge_id,
+            source_node_id=e.source_node_id,
+            target_node_id=e.target_node_id,
+            source_handle=e.source_handle or "output",
+            target_handle=e.target_handle or "input",
+            condition_type=e.condition_type,
+            condition_expr=cond_expr,
+            label=e.label,
+        ))
+    return result

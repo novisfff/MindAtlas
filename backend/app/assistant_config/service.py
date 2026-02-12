@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from app.assistant.skills.base import DEFAULT_SKILL_NAME, OutputFieldSpec
-from app.assistant.skills.converters import db_skill_to_definition_light
+from app.assistant.skills.base import DEFAULT_SKILL_NAME
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.ai_provider.crypto import api_key_hint, encrypt_api_key
-from app.assistant_config.models import AssistantSkill, AssistantSkillStep, AssistantTool
+from app.assistant_config.models import (
+    AssistantSkill,
+    AssistantSkillEdge,
+    AssistantSkillNode,
+    AssistantTool,
+)
 from app.assistant_config.registry import SkillRegistry, ToolRegistry
 from app.assistant_config.schemas import (
     AssistantSkillCreateRequest,
@@ -19,31 +24,7 @@ from app.assistant_config.schemas import (
 )
 from app.common.exceptions import ApiException
 
-
-def serialize_output_fields(raw: Any) -> list[dict] | list[str] | None:
-    """将 output_fields 序列化为可 JSON 存储的格式
-
-    支持输入：
-    - list[OutputFieldSpec]: 转为 list[dict]
-    - list[str]: 原样返回
-    - None: 返回 None
-    """
-    if raw is None:
-        return None
-    if not isinstance(raw, list):
-        return None
-    if not raw:
-        return None
-
-    # 检查第一个元素类型
-    first = raw[0]
-    if isinstance(first, OutputFieldSpec):
-        return [spec.model_dump() for spec in raw if isinstance(spec, OutputFieldSpec)]
-    elif isinstance(first, dict):
-        return raw
-    elif isinstance(first, str):
-        return raw
-    return None
+_TOOL_TEXT_REF_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\.text\s*\}\}")
 
 
 class AssistantConfigService:
@@ -140,7 +121,7 @@ class AssistantConfigService:
         include_schema: bool = True,
     ) -> list[dict]:
         """返回系统工具完整定义：从代码提取，DB 仅用于 overlay enabled 状态。"""
-        from app.assistant_config.schemas import InputParamSchema
+        from app.assistant_config.schemas import InputParamSchema, OutputParamSchema
 
         definitions = ToolRegistry.list_system_tool_definitions()
         names = [d.name for d in definitions]
@@ -179,6 +160,14 @@ class AssistantConfigService:
                     )
                     for p in (d.input_params or [])
                 ],
+                "output_params": [
+                    OutputParamSchema(
+                        name=p.name,
+                        description=p.description,
+                        param_type=p.param_type,
+                    )
+                    for p in (d.output_params or [])
+                ],
                 "returns": d.returns,
                 "json_schema": d.json_schema if include_schema else None,
             })
@@ -207,49 +196,118 @@ class AssistantConfigService:
                     description=s.description,
                     intent_examples=s.intent_examples,
                     tools=s.tools,
-                    mode=s.mode,
+                    mode="langgraph",
+                    langgraph_pattern=getattr(s, "langgraph_pattern", None),
                     system_prompt=s.system_prompt,
                     kb_config=kb_config_data,
                     is_system=True,
                     enabled=True,
                 )
-                skill.steps = [
-                    AssistantSkillStep(
-                        step_order=i,
-                        type=step.type,
-                        instruction=step.instruction,
-                        tool_name=step.tool_name,
-                        args_from=step.args_from,
-                        args_template=getattr(step, "args_template", None),
-                        output_mode=getattr(step, "output_mode", None),
-                        output_fields=serialize_output_fields(getattr(step, "output_fields", None)),
-                        include_in_summary=getattr(step, "include_in_summary", True),
-                    )
-                    for i, step in enumerate(s.steps)
-                ]
+                # Persist workflow nodes/edges for workflow_dag skills
+                if getattr(s, "workflow_nodes", None):
+                    skill.nodes = [
+                        AssistantSkillNode(
+                            node_id=n.node_id, node_type=n.node_type, label=n.label,
+                            position_x=n.position_x, position_y=n.position_y, config=n.config,
+                        )
+                        for n in s.workflow_nodes
+                    ]
+                if getattr(s, "workflow_edges", None):
+                    skill.edges = [
+                        AssistantSkillEdge(
+                            edge_id=e.edge_id, source_node_id=e.source_node_id,
+                            target_node_id=e.target_node_id, source_handle=e.source_handle,
+                            target_handle=e.target_handle, condition_type=e.condition_type,
+                            condition_expr=e.condition_expr.model_dump() if e.condition_expr else None,
+                            label=e.label,
+                        )
+                        for e in s.workflow_edges
+                    ]
                 self.db.add(skill)
             else:
                 # 不覆盖已存在记录的配置，只确保 is_system 标记正确
                 existing.is_system = True
+                existing.mode = "langgraph"
 
                 # 强制启用默认 Skill
                 if existing.name == DEFAULT_SKILL_NAME and not existing.enabled:
                     existing.enabled = True
 
-                # 温和回填：仅当 existing.mode=="steps" 且系统定义是 agent 且 existing.system_prompt 为空时修复
+                # 缺失或非法 pattern 时，从系统定义补齐
                 if (
-                    existing.mode == "steps"
-                    and s.mode == "agent"
-                    and not existing.system_prompt
+                    getattr(existing, "langgraph_pattern", None) not in {"agent_loop", "workflow_dag"}
+                    and getattr(s, "langgraph_pattern", None)
                 ):
-                    existing.mode = s.mode
-                    existing.system_prompt = s.system_prompt
+                    existing.langgraph_pattern = s.langgraph_pattern
+
+                # 兼容修复：旧系统 workflow 里 tool_x.text → tool_x.result
+                # （工具节点已产品化为 result + output params，不再暴露 text）
+                if (
+                    existing.is_system
+                    and existing.mode == "langgraph"
+                    and getattr(existing, "langgraph_pattern", None) == "workflow_dag"
+                ):
+                    self._migrate_workflow_tool_text_refs(existing)
 
         try:
             self.db.commit()
         except IntegrityError as exc:
             self.db.rollback()
             raise ApiException(status_code=409, code=40911, message="Sync system skills failed") from exc
+
+    @staticmethod
+    def _replace_tool_text_refs_in_value(value: Any, tool_node_ids: set[str]) -> tuple[Any, bool]:
+        changed = False
+
+        if isinstance(value, str):
+            def _repl(match: re.Match[str]) -> str:
+                nonlocal changed
+                node_id = match.group(1)
+                if node_id in tool_node_ids:
+                    changed = True
+                    return f"{{{{{node_id}.result}}}}"
+                return match.group(0)
+
+            return _TOOL_TEXT_REF_RE.sub(_repl, value), changed
+
+        if isinstance(value, list):
+            out: list[Any] = []
+            for item in value:
+                new_item, item_changed = AssistantConfigService._replace_tool_text_refs_in_value(item, tool_node_ids)
+                out.append(new_item)
+                changed = changed or item_changed
+            return out, changed
+
+        if isinstance(value, dict):
+            out: dict[Any, Any] = {}
+            for k, v in value.items():
+                new_v, v_changed = AssistantConfigService._replace_tool_text_refs_in_value(v, tool_node_ids)
+                out[k] = new_v
+                changed = changed or v_changed
+            return out, changed
+
+        return value, False
+
+    def _migrate_workflow_tool_text_refs(self, skill: AssistantSkill) -> None:
+        nodes = getattr(skill, "nodes", None) or []
+        if not nodes:
+            return
+        tool_node_ids = {
+            str(getattr(node, "node_id", "") or "").strip()
+            for node in nodes
+            if str(getattr(node, "node_type", "") or "").strip() == "tool"
+        }
+        tool_node_ids.discard("")
+        if not tool_node_ids:
+            return
+
+        for node in nodes:
+            cfg = getattr(node, "config", None)
+            if not isinstance(cfg, dict):
+                continue
+            new_cfg, changed = self._replace_tool_text_refs_in_value(cfg, tool_node_ids)
+            if changed:
+                node.config = new_cfg
 
     # -------------------------
     # Tools CRUD
@@ -463,27 +521,16 @@ class AssistantConfigService:
             description=request.description,
             intent_examples=request.intent_examples,
             tools=request.tools,
-            mode=request.mode,
+            mode="langgraph",
+            langgraph_pattern=request.langgraph_pattern,
             system_prompt=request.system_prompt,
             kb_config=request.kb_config,
             is_system=False,
             enabled=request.enabled,
         )
-        skill.steps = [
-            AssistantSkillStep(
-                step_order=i,
-                type=step.type,
-                instruction=step.instruction,
-                tool_name=step.tool_name,
-                args_from=step.args_from,
-                args_template=step.args_template,
-                output_mode=getattr(step, "output_mode", None),
-                output_fields=serialize_output_fields(getattr(step, "output_fields", None)),
-                include_in_summary=step.include_in_summary if step.include_in_summary is not None else True,
-                kb_config=getattr(step, "kb_config", None),
-            )
-            for i, step in enumerate(request.steps)
-        ]
+        # Persist workflow DAG data
+        if request.workflow is not None:
+            self._apply_workflow_to_skill(skill, request.workflow)
         self.db.add(skill)
         try:
             self.db.commit()
@@ -500,80 +547,47 @@ class AssistantConfigService:
             # 系统技能允许编辑内容，但禁止改名
             if request.name is not None and request.name != skill.name:
                 raise ApiException(status_code=400, code=40021, message="System skill cannot be renamed")
-            if request.description is not None:
-                skill.description = request.description
-            if request.intent_examples is not None:
-                skill.intent_examples = request.intent_examples
-            if request.tools is not None:
-                skill.tools = request.tools
-            if request.mode is not None:
-                skill.mode = request.mode
-            if request.system_prompt is not None:
-                skill.system_prompt = request.system_prompt
-            if request.kb_config is not None:
-                skill.kb_config = request.kb_config
-            if request.steps is not None:
-                # 先删除旧 steps，避免唯一约束冲突
-                for old_step in skill.steps:
-                    self.db.delete(old_step)
-                self.db.flush()
-                skill.steps = [
-                    AssistantSkillStep(
-                        step_order=i,
-                        type=step.type,
-                        instruction=step.instruction,
-                        tool_name=step.tool_name,
-                        args_from=step.args_from,
-                        args_template=step.args_template,
-                        output_mode=getattr(step, "output_mode", None),
-                        output_fields=serialize_output_fields(getattr(step, "output_fields", None)),
-                        include_in_summary=step.include_in_summary if step.include_in_summary is not None else True,
-                        kb_config=getattr(step, "kb_config", None),
-                    )
-                    for i, step in enumerate(request.steps)
-                ]
-            if request.enabled is not None:
-                # 阻止禁用默认 Skill
-                if skill.name == DEFAULT_SKILL_NAME and request.enabled is False:
-                    raise ApiException(status_code=400, code=40025, message="General chat skill cannot be disabled")
-                skill.enabled = request.enabled
         else:
             if request.name is not None:
                 skill.name = request.name
-            if request.description is not None:
-                skill.description = request.description
-            if request.intent_examples is not None:
-                skill.intent_examples = request.intent_examples
-            if request.tools is not None:
-                skill.tools = request.tools
-            if request.mode is not None:
-                skill.mode = request.mode
-            if request.system_prompt is not None:
-                skill.system_prompt = request.system_prompt
-            if request.kb_config is not None:
-                skill.kb_config = request.kb_config
-            if request.enabled is not None:
-                skill.enabled = request.enabled
-            if request.steps is not None:
-                # 先删除旧 steps，避免唯一约束冲突
-                for old_step in skill.steps:
-                    self.db.delete(old_step)
-                self.db.flush()
-                skill.steps = [
-                    AssistantSkillStep(
-                        step_order=i,
-                        type=step.type,
-                        instruction=step.instruction,
-                        tool_name=step.tool_name,
-                        args_from=step.args_from,
-                        args_template=step.args_template,
-                        output_mode=getattr(step, "output_mode", None),
-                        output_fields=serialize_output_fields(getattr(step, "output_fields", None)),
-                        include_in_summary=step.include_in_summary if step.include_in_summary is not None else True,
-                        kb_config=getattr(step, "kb_config", None),
-                    )
-                    for i, step in enumerate(request.steps)
-                ]
+
+        if request.description is not None:
+            skill.description = request.description
+        if request.intent_examples is not None:
+            skill.intent_examples = request.intent_examples
+        if request.tools is not None:
+            skill.tools = request.tools
+        if request.mode is not None and request.mode != "langgraph":
+            raise ApiException(status_code=422, code=42204, message="mode must be langgraph")
+        skill.mode = "langgraph"
+        if request.langgraph_pattern is not None:
+            skill.langgraph_pattern = request.langgraph_pattern
+        if request.system_prompt is not None:
+            skill.system_prompt = request.system_prompt
+        if request.kb_config is not None:
+            skill.kb_config = request.kb_config
+        if request.enabled is not None:
+            # 阻止禁用默认 Skill
+            if skill.name == DEFAULT_SKILL_NAME and request.enabled is False:
+                raise ApiException(status_code=400, code=40025, message="General chat skill cannot be disabled")
+            skill.enabled = request.enabled
+
+        # Persist workflow DAG data (applies to both system and non-system skills)
+        if request.workflow is not None:
+            self._apply_workflow_to_skill(skill, request.workflow)
+
+        if skill.langgraph_pattern not in {"agent_loop", "workflow_dag"}:
+            raise ApiException(
+                status_code=422,
+                code=42205,
+                message="langgraph_pattern must be one of: agent_loop, workflow_dag",
+            )
+        if skill.langgraph_pattern == "agent_loop" and not (skill.system_prompt or "").strip():
+            raise ApiException(
+                status_code=422,
+                code=42206,
+                message="agent_loop requires non-empty system_prompt",
+            )
 
         try:
             self.db.commit()
@@ -598,37 +612,7 @@ class AssistantConfigService:
         if not default:
             raise ApiException(status_code=404, code=40412, message=f"Default not found: {skill.name}")
 
-        # 保留 enabled 状态，只复位内容
-        enabled = skill.enabled
-        skill.description = default.description
-        skill.intent_examples = default.intent_examples
-        skill.tools = default.tools
-        skill.mode = default.mode
-        skill.system_prompt = default.system_prompt
-        # 重置 kb_config
-        if getattr(default, "kb", None) is not None:
-            skill.kb_config = {"enabled": bool(default.kb.enabled)}
-        else:
-            skill.kb_config = {"enabled": False}
-        # 先删除旧 steps，避免唯一约束冲突
-        for old_step in skill.steps:
-            self.db.delete(old_step)
-        self.db.flush()
-        skill.steps = [
-            AssistantSkillStep(
-                step_order=i,
-                type=step.type,
-                instruction=step.instruction,
-                tool_name=step.tool_name,
-                args_from=step.args_from,
-                args_template=getattr(step, "args_template", None),
-                output_mode=getattr(step, "output_mode", None),
-                output_fields=serialize_output_fields(getattr(step, "output_fields", None)),
-                include_in_summary=getattr(step, "include_in_summary", True),
-            )
-            for i, step in enumerate(default.steps)
-        ]
-        skill.enabled = enabled
+        self._reset_skill_to_default(skill, default)
 
         try:
             self.db.commit()
@@ -678,8 +662,10 @@ class AssistantConfigService:
                     affected.append({"name": skill.name, "id": str(skill.id), "action": "reset"})
             else:
                 # 已下线的系统技能，删除
-                for old_step in skill.steps:
-                    self.db.delete(old_step)
+                for old_node in list(getattr(skill, "nodes", None) or []):
+                    self.db.delete(old_node)
+                for old_edge in list(getattr(skill, "edges", None) or []):
+                    self.db.delete(old_edge)
                 self.db.delete(skill)
                 deleted_count += 1
                 affected.append({"name": skill.name, "id": str(skill.id), "action": "deleted"})
@@ -697,26 +683,33 @@ class AssistantConfigService:
                     description=s.description,
                     intent_examples=s.intent_examples,
                     tools=s.tools,
-                    mode=s.mode,
+                    mode="langgraph",
+                    langgraph_pattern=getattr(s, "langgraph_pattern", None),
                     system_prompt=s.system_prompt,
                     kb_config=kb_config_data,
                     is_system=True,
                     enabled=True,
                 )
-                skill.steps = [
-                    AssistantSkillStep(
-                        step_order=i,
-                        type=step.type,
-                        instruction=step.instruction,
-                        tool_name=step.tool_name,
-                        args_from=step.args_from,
-                        args_template=getattr(step, "args_template", None),
-                        output_mode=getattr(step, "output_mode", None),
-                        output_fields=serialize_output_fields(getattr(step, "output_fields", None)),
-                        include_in_summary=getattr(step, "include_in_summary", True),
-                    )
-                    for i, step in enumerate(s.steps)
-                ]
+                # Persist workflow nodes/edges for workflow_dag skills
+                if getattr(s, "workflow_nodes", None):
+                    skill.nodes = [
+                        AssistantSkillNode(
+                            node_id=n.node_id, node_type=n.node_type, label=n.label,
+                            position_x=n.position_x, position_y=n.position_y, config=n.config,
+                        )
+                        for n in s.workflow_nodes
+                    ]
+                if getattr(s, "workflow_edges", None):
+                    skill.edges = [
+                        AssistantSkillEdge(
+                            edge_id=e.edge_id, source_node_id=e.source_node_id,
+                            target_node_id=e.target_node_id, source_handle=e.source_handle,
+                            target_handle=e.target_handle, condition_type=e.condition_type,
+                            condition_expr=e.condition_expr.model_dump() if e.condition_expr else None,
+                            label=e.label,
+                        )
+                        for e in s.workflow_edges
+                    ]
                 self.db.add(skill)
                 created_count += 1
                 affected.append({"name": s.name, "id": None, "action": "created"})
@@ -744,7 +737,8 @@ class AssistantConfigService:
         skill.description = default.description
         skill.intent_examples = default.intent_examples
         skill.tools = default.tools
-        skill.mode = default.mode
+        skill.mode = "langgraph"
+        skill.langgraph_pattern = default.langgraph_pattern
         skill.system_prompt = default.system_prompt
 
         # 重置 kb_config
@@ -753,24 +747,164 @@ class AssistantConfigService:
         else:
             skill.kb_config = {"enabled": False}
 
-        # 删除旧 steps
-        for old_step in skill.steps:
-            self.db.delete(old_step)
+        # 删除旧 workflow nodes/edges
+        for old_node in list(getattr(skill, "nodes", None) or []):
+            self.db.delete(old_node)
+        for old_edge in list(getattr(skill, "edges", None) or []):
+            self.db.delete(old_edge)
         self.db.flush()
 
-        # 创建新 steps
-        skill.steps = [
-            AssistantSkillStep(
-                step_order=i,
-                type=step.type,
-                instruction=step.instruction,
-                tool_name=step.tool_name,
-                args_from=step.args_from,
-                args_template=getattr(step, "args_template", None),
-                output_mode=getattr(step, "output_mode", None),
-                output_fields=serialize_output_fields(getattr(step, "output_fields", None)),
-                include_in_summary=getattr(step, "include_in_summary", True),
-            )
-            for i, step in enumerate(default.steps)
-        ]
+        # 创建新 workflow nodes/edges
+        if getattr(default, "workflow_nodes", None):
+            skill.nodes = [
+                AssistantSkillNode(
+                    node_id=n.node_id, node_type=n.node_type, label=n.label,
+                    position_x=n.position_x, position_y=n.position_y, config=n.config,
+                )
+                for n in default.workflow_nodes
+            ]
+        else:
+            skill.nodes = []
+        if getattr(default, "workflow_edges", None):
+            skill.edges = [
+                AssistantSkillEdge(
+                    edge_id=e.edge_id, source_node_id=e.source_node_id,
+                    target_node_id=e.target_node_id, source_handle=e.source_handle,
+                    target_handle=e.target_handle, condition_type=e.condition_type,
+                    condition_expr=e.condition_expr.model_dump() if e.condition_expr else None,
+                    label=e.label,
+                )
+                for e in default.workflow_edges
+            ]
+        else:
+            skill.edges = []
+
         skill.enabled = enabled
+
+    def _apply_workflow_to_skill(self, skill: AssistantSkill, workflow) -> None:
+        """Replace workflow nodes and edges on a skill, with topology validation."""
+        from app.assistant.skills.workflow_validator import validate_workflow, validate_parallel_branches
+
+        # Validate topology before persisting
+        nodes_raw = [{"node_id": n.node_id, "node_type": n.node_type, "config": n.config} for n in workflow.nodes]
+        edges_raw = [{"source_node_id": e.source_node_id, "target_node_id": e.target_node_id, "source_handle": e.source_handle} for e in workflow.edges]
+
+        result = validate_workflow(nodes_raw, edges_raw)
+        if not result.valid:
+            msgs = "; ".join(e.message for e in result.errors[:5])
+            raise ApiException(status_code=422, code=42201, message=f"Invalid workflow topology: {msgs}")
+
+        par_result = validate_parallel_branches(nodes_raw, edges_raw)
+        if not par_result.valid:
+            msgs = "; ".join(e.message for e in par_result.errors[:5])
+            raise ApiException(status_code=422, code=42202, message=f"Invalid parallel branches: {msgs}")
+
+        workflow_tool_names = self._collect_workflow_tool_names(workflow.nodes)
+        self._validate_workflow_tool_names(workflow_tool_names)
+
+        for old_node in list(getattr(skill, "nodes", None) or []):
+            self.db.delete(old_node)
+        for old_edge in list(getattr(skill, "edges", None) or []):
+            self.db.delete(old_edge)
+        self.db.flush()
+
+        skill.nodes = [
+            AssistantSkillNode(
+                node_id=n.node_id,
+                node_type=n.node_type,
+                label=n.label,
+                position_x=n.position_x,
+                position_y=n.position_y,
+                config=n.config,
+            )
+            for n in workflow.nodes
+        ]
+        skill.edges = [
+            AssistantSkillEdge(
+                edge_id=e.edge_id,
+                source_node_id=e.source_node_id,
+                target_node_id=e.target_node_id,
+                source_handle=e.source_handle,
+                target_handle=e.target_handle,
+                condition_type=e.condition_type,
+                condition_expr=e.condition_expr.model_dump() if e.condition_expr else None,
+                label=e.label,
+            )
+            for e in workflow.edges
+        ]
+        if workflow.viewport is not None:
+            skill.workflow_viewport = workflow.viewport
+        skill.workflow_version = (skill.workflow_version or 0) + 1
+        # 工作流保存时自动同步 skill.tools，避免 DAG 执行期 tool_map 缺失。
+        skill.tools = sorted(workflow_tool_names)
+
+    @staticmethod
+    def _collect_workflow_tool_names(workflow_nodes: list) -> set[str]:
+        tool_names: set[str] = set()
+        for node in workflow_nodes:
+            node_type = getattr(node, "node_type", None)
+            if node_type != "tool":
+                continue
+            cfg = getattr(node, "config", None) or {}
+            if not isinstance(cfg, dict):
+                continue
+            tool_name = cfg.get("toolName") or cfg.get("tool_name")
+            if isinstance(tool_name, str) and tool_name.strip():
+                tool_names.add(tool_name.strip())
+        return tool_names
+
+    def _validate_workflow_tool_names(self, tool_names: set[str]) -> None:
+        if not tool_names:
+            return
+
+        system_names = {
+            t.name
+            for t in ToolRegistry.list_system_tools()
+            if getattr(t, "name", None)
+        }
+        disabled_names = {
+            name
+            for name, in self.db.query(AssistantTool.name).filter(AssistantTool.enabled.is_(False)).all()
+            if name
+        }
+        enabled_remote_names = {
+            name
+            for name, in self.db.query(AssistantTool.name).filter(
+                AssistantTool.kind == "remote",
+                AssistantTool.enabled.is_(True),
+            ).all()
+            if name
+        }
+
+        unavailable: list[str] = []
+        for tool_name in sorted(tool_names):
+            if tool_name in disabled_names:
+                unavailable.append(f"{tool_name} (disabled)")
+                continue
+            if tool_name in system_names or tool_name in enabled_remote_names:
+                continue
+            unavailable.append(f"{tool_name} (not found)")
+
+        if unavailable:
+            raise ApiException(
+                status_code=422,
+                code=42203,
+                message=f"Workflow references unavailable tools: {', '.join(unavailable)}",
+            )
+
+    def update_workflow(self, skill_id, workflow) -> AssistantSkill:
+        """Update only the workflow DAG for a skill."""
+        from uuid import UUID as _UUID
+        skill = self.get_skill(
+            _UUID(str(skill_id)) if not isinstance(skill_id, _UUID) else skill_id
+        )
+        self._apply_workflow_to_skill(skill, workflow)
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(
+                status_code=409, code=40924, message="Update workflow failed"
+            ) from exc
+        self.db.refresh(skill)
+        return skill

@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from app.assistant.skills.base import (
     DEFAULT_SKILL_NAME,
-    OutputFieldSpec,
     SkillDefinition,
     SkillKBConfig,
-    SkillStep,
+    WorkflowEdgeDefinition,
+    WorkflowNodeDefinition,
 )
 
 
@@ -24,7 +24,8 @@ GENERAL_CHAT = SkillDefinition(
         "list_entry_types",
         "list_tags",
     ],
-    mode="agent",
+    mode="langgraph",
+    langgraph_pattern="agent_loop",
     system_prompt="你是 MindAtlas 的 AI 助手，友好地回复用户，可以按需调用工具。MindAtlas 是一款个人知识与经历管理系统，旨在帮助用户系统性地记录、关联、回顾和总结个人的知识积累与人生经历。",
     kb=SkillKBConfig(enabled=True),
 )
@@ -45,15 +46,35 @@ QUICK_STATS = SkillDefinition(
         "现在的记录总数是多少",
     ],
     tools=["get_statistics"],
-    steps=[
-        SkillStep(
-            type="tool",
-            tool_name="get_statistics",
+    mode="langgraph",
+    langgraph_pattern="workflow_dag",
+    workflow_nodes=[
+        WorkflowNodeDefinition(node_id="start", node_type="start", label="Start", position_x=120, position_y=220),
+        WorkflowNodeDefinition(
+            node_id="tool_stats",
+            node_type="tool",
+            label="获取统计",
+            position_x=460,
+            position_y=220,
+            config={"toolName": "get_statistics", "inputBindings": {}},
         ),
-        SkillStep(
-            type="summary",
-            instruction="汇报当前的记录总数、最近活动趋势等统计信息。",
+        WorkflowNodeDefinition(
+            node_id="llm_output",
+            node_type="llm",
+            label="汇报统计",
+            position_x=800,
+            position_y=220,
+            config={
+                "systemPrompt": "汇报当前的记录总数、最近活动趋势等统计信息，输出简洁清晰。",
+                "userInput": "{{tool_stats.result}}",
+                "outputMode": "text",
+                "isOutput": True,
+            },
         ),
+    ],
+    workflow_edges=[
+        WorkflowEdgeDefinition(edge_id="e_start_tool", source_node_id="start", target_node_id="tool_stats"),
+        WorkflowEdgeDefinition(edge_id="e_tool_output", source_node_id="tool_stats", target_node_id="llm_output"),
     ],
 )
 
@@ -73,109 +94,158 @@ SMART_CAPTURE = SkillDefinition(
         "我今天学习了React 19的特性",
     ],
     tools=["list_entry_types", "list_tags", "create_entry"],
-    steps=[
-        SkillStep(
-            type="tool",
-            tool_name="list_entry_types",
-            args_from="json",
-            args_template="{}",
+    mode="langgraph",
+    langgraph_pattern="workflow_dag",
+    workflow_nodes=[
+        WorkflowNodeDefinition(
+            node_id="start", node_type="start", label="Start",
+            position_x=80, position_y=320,
         ),
-        SkillStep(
-            type="tool",
-            tool_name="list_tags",
-            args_from="json",
-            args_template="{}",
+        WorkflowNodeDefinition(
+            node_id="tool_types", node_type="tool", label="获取类型列表",
+            position_x=320, position_y=200,
+            config={"toolName": "list_entry_types", "inputBindings": {}},
         ),
-        SkillStep(
-            type="analysis",
-            instruction=(
-                "你是 MindAtlas 的“智能创建记录”技能，正在做结构化入库前的字段生成。\n"
-                "当前任务：基于用户原始内容生成 title（标题），用于最终写入数据库。\n"
-                "规范：title 简洁准确，不超过 30 个字。"
-            ),
-            output_mode="json",
-            output_fields=[OutputFieldSpec(name="title")],
+        WorkflowNodeDefinition(
+            node_id="tool_tags", node_type="tool", label="获取标签列表",
+            position_x=320, position_y=440,
+            config={"toolName": "list_tags", "inputBindings": {}},
         ),
-        SkillStep(
-            type="analysis",
-            instruction=(
-                "你是 MindAtlas 的“智能创建记录”技能，正在做结构化入库前的字段生成。\n"
-                "当前任务：基于用户原始内容生成 summary（摘要），用于最终写入数据库。\n"
-                "规范：summary 为 50-150 字的一段话概括核心内容。"
-            ),
-            output_mode="json",
-            output_fields=[OutputFieldSpec(name="summary")],
+        WorkflowNodeDefinition(
+            node_id="llm_title", node_type="llm", label="生成标题",
+            position_x=560, position_y=320,
+            config={
+                "systemPrompt": (
+                    "你是 MindAtlas 的\u201c智能创建记录\u201d技能，正在做结构化入库前的字段生成。\n"
+                    "当前任务：基于用户原始内容生成 title（标题），用于最终写入数据库。\n"
+                    "规范：title 简洁准确，不超过 30 个字。"
+                ),
+                "outputMode": "structured",
+                "outputFields": [{"name": "title"}],
+            },
         ),
-        SkillStep(
-            type="analysis",
-            instruction=(
-                "你是 MindAtlas 的“智能创建记录”技能，正在做结构化入库前的字段生成。\n"
-                "当前任务：基于用户原始内容生成 content（正文），用于最终写入数据库。\n"
-                "规范：content 可用 Markdown；禁止一级标题（#）；不扩写/不编造用户未提供的事实细节。"
-            ),
-            output_mode="json",
-            output_fields=[OutputFieldSpec(name="content")],
+        WorkflowNodeDefinition(
+            node_id="llm_summary", node_type="llm", label="生成摘要",
+            position_x=800, position_y=320,
+            config={
+                "systemPrompt": (
+                    "你是 MindAtlas 的\u201c智能创建记录\u201d技能，正在做结构化入库前的字段生成。\n"
+                    "当前任务：基于用户原始内容生成 summary（摘要），用于最终写入数据库。\n"
+                    "规范：summary 为 50-150 字的一段话概括核心内容。"
+                ),
+                "outputMode": "structured",
+                "outputFields": [{"name": "summary"}],
+            },
         ),
-        SkillStep(
-            type="analysis",
-            instruction=(
-                "你是 MindAtlas 的“智能创建记录”技能，正在为入库选择类型。\n"
-                "当前任务：选择 type_code（类型编码），用于最终写入数据库。\n"
-                "约束：type_code 必须且只能从 {{step_1_result_raw}} 的 code 中选择（JSON 数组，字段含 code/name）。无法判断时选择第一个可用 code。"
-            ),
-            output_mode="json",
-            output_fields=[OutputFieldSpec(name="type_code")],
+        WorkflowNodeDefinition(
+            node_id="llm_content", node_type="llm", label="生成正文",
+            position_x=1040, position_y=320,
+            config={
+                "systemPrompt": (
+                    "你是 MindAtlas 的\u201c智能创建记录\u201d技能，正在做结构化入库前的字段生成。\n"
+                    "当前任务：基于用户原始内容生成 content（正文），用于最终写入数据库。\n"
+                    "规范：content 可用 Markdown；禁止一级标题（#）；不扩写/不编造用户未提供的事实细节。"
+                ),
+                "outputMode": "structured",
+                "outputFields": [{"name": "content"}],
+            },
         ),
-        SkillStep(
-            type="analysis",
-            instruction=(
-                "你是 MindAtlas 的“智能创建记录”技能，正在为入库生成标签。\n"
-                "当前任务：生成 tags（标签名数组），用于最终写入数据库。\n"
-                "约束：优先复用 {{step_2_result_raw}} 中的 name（大小写不敏感匹配；输出尽量返回列表中的原始写法）；最多新增 5 个新标签；宁缺毋滥，不要为了凑数而编造标签；tags 元素为纯标签名字符串（不要带 # 前缀），去重。"
-            ),
-            output_mode="json",
-            output_fields=[OutputFieldSpec(name="tags", type="array", items_type="string")],
+        WorkflowNodeDefinition(
+            node_id="llm_type", node_type="llm", label="选择类型",
+            position_x=1280, position_y=320,
+            config={
+                "systemPrompt": (
+                    "你是 MindAtlas 的\u201c智能创建记录\u201d技能，正在为入库选择类型。\n"
+                    "当前任务：选择 type_code（类型编码），用于最终写入数据库。\n"
+                    "约束：type_code 必须且只能从 {{tool_types.result}} 的 code 中选择"
+                    "（JSON 数组，字段含 code/name）。无法判断时选择第一个可用 code。"
+                ),
+                "outputMode": "structured",
+                "outputFields": [{"name": "type_code"}],
+            },
         ),
-        SkillStep(
-            type="analysis",
-            instruction=(
-                "你是 MindAtlas 的“智能创建记录”技能，正在为入库识别时间字段。\n"
-                "当前任务：识别时间信息并输出 time_mode + 对应日期字段，用于最终写入数据库。\n"
-                "规则：\n"
-                "- 无明确时间信息：默认 time_mode=POINT 且 time_at=今天（YYYY-MM-DD）。\n"
-                "- POINT：填写 time_at（YYYY-MM-DD），time_from/time_to 为 null。\n"
-                "- RANGE：填写 time_from/time_to（YYYY-MM-DD，且起止都不为空，且 time_from<=time_to），time_at 为 null。"
-            ),
-            output_mode="json",
-            output_fields=[
-                OutputFieldSpec(name="time_mode", enum=["POINT", "RANGE"]),
-                OutputFieldSpec(name="time_at", nullable=True),
-                OutputFieldSpec(name="time_from", nullable=True),
-                OutputFieldSpec(name="time_to", nullable=True),
-            ],
+        WorkflowNodeDefinition(
+            node_id="llm_tags", node_type="llm", label="生成标签",
+            position_x=1520, position_y=320,
+            config={
+                "systemPrompt": (
+                    "你是 MindAtlas 的\u201c智能创建记录\u201d技能，正在为入库生成标签。\n"
+                    "当前任务：生成 tags（标签名数组），用于最终写入数据库。\n"
+                    "约束：优先复用 {{tool_tags.result}} 中的 name"
+                    "（大小写不敏感匹配；输出尽量返回列表中的原始写法）；"
+                    "最多新增 5 个新标签；宁缺毋滥，不要为了凑数而编造标签；"
+                    "tags 元素为纯标签名字符串（不要带 # 前缀），去重。"
+                ),
+                "outputMode": "structured",
+                "outputFields": [{"name": "tags", "type": "array", "itemsType": "string"}],
+            },
         ),
-        SkillStep(
-            type="tool",
-            tool_name="create_entry",
-            args_from="json",
-            args_template=(
-                "{"
-                "\"title\": {{step_3_title}}, "
-                "\"summary\": {{step_4_summary}}, "
-                "\"content\": {{step_5_content}}, "
-                "\"type_code\": {{step_6_type_code}}, "
-                "\"tags\": {{step_7_tags}}, "
-                "\"time_mode\": {{step_8_time_mode}}, "
-                "\"time_at\": {{step_8_time_at}}, "
-                "\"time_from\": {{step_8_time_from}}, "
-                "\"time_to\": {{step_8_time_to}}"
-                "}"
-            ),
+        WorkflowNodeDefinition(
+            node_id="llm_time", node_type="llm", label="识别时间",
+            position_x=1760, position_y=320,
+            config={
+                "systemPrompt": (
+                    "你是 MindAtlas 的\u201c智能创建记录\u201d技能，正在为入库识别时间字段。\n"
+                    "当前任务：识别时间信息并输出 time_mode + 对应日期字段，用于最终写入数据库。\n"
+                    "规则：\n"
+                    "- 无明确时间信息：默认 time_mode=POINT 且 time_at=今天（YYYY-MM-DD）。\n"
+                    "- POINT：填写 time_at（YYYY-MM-DD），time_from/time_to 为 null。\n"
+                    "- RANGE：填写 time_from/time_to（YYYY-MM-DD，且起止都不为空，"
+                    "且 time_from<=time_to），time_at 为 null。"
+                ),
+                "outputMode": "structured",
+                "outputFields": [
+                    {"name": "time_mode", "enum": ["POINT", "RANGE"]},
+                    {"name": "time_at", "nullable": True},
+                    {"name": "time_from", "nullable": True},
+                    {"name": "time_to", "nullable": True},
+                ],
+            },
         ),
-        SkillStep(
-            type="summary",
-            instruction="告知用户记录已创建，展示标题、类型与时间信息，并给出需要的话可继续补充/修改的提示。",
+        WorkflowNodeDefinition(
+            node_id="tool_create", node_type="tool", label="创建记录",
+            position_x=2000, position_y=320,
+            config={
+                "toolName": "create_entry",
+                "inputBindings": {
+                    "title": "{{llm_title.title}}",
+                    "summary": "{{llm_summary.summary}}",
+                    "content": "{{llm_content.content}}",
+                    "type_code": "{{llm_type.type_code}}",
+                    "tags": "{{llm_tags.tags}}",
+                    "time_mode": "{{llm_time.time_mode}}",
+                    "time_at": "{{llm_time.time_at}}",
+                    "time_from": "{{llm_time.time_from}}",
+                    "time_to": "{{llm_time.time_to}}",
+                },
+            },
         ),
+        WorkflowNodeDefinition(
+            node_id="llm_output", node_type="llm", label="创建结果",
+            position_x=2240, position_y=320,
+            config={
+                "systemPrompt": "告知用户记录已创建，展示标题、类型与时间信息，并给出可继续补充/修改的提示。",
+                "userInput": "{{tool_create.result}}",
+                "outputMode": "text",
+                "isOutput": True,
+            },
+        ),
+    ],
+    workflow_edges=[
+        # start fans out to both tool nodes in parallel
+        WorkflowEdgeDefinition(edge_id="e_start_types", source_node_id="start", target_node_id="tool_types"),
+        WorkflowEdgeDefinition(edge_id="e_start_tags", source_node_id="start", target_node_id="tool_tags"),
+        # both tools feed into llm_title (aggregation point)
+        WorkflowEdgeDefinition(edge_id="e_types_title", source_node_id="tool_types", target_node_id="llm_title"),
+        WorkflowEdgeDefinition(edge_id="e_tags_title", source_node_id="tool_tags", target_node_id="llm_title"),
+        # linear chain: title → summary → content → type → tags → time → create → output llm
+        WorkflowEdgeDefinition(edge_id="e_title_summary", source_node_id="llm_title", target_node_id="llm_summary"),
+        WorkflowEdgeDefinition(edge_id="e_summary_content", source_node_id="llm_summary", target_node_id="llm_content"),
+        WorkflowEdgeDefinition(edge_id="e_content_type", source_node_id="llm_content", target_node_id="llm_type"),
+        WorkflowEdgeDefinition(edge_id="e_type_tags", source_node_id="llm_type", target_node_id="llm_tags"),
+        WorkflowEdgeDefinition(edge_id="e_tags_time", source_node_id="llm_tags", target_node_id="llm_time"),
+        WorkflowEdgeDefinition(edge_id="e_time_create", source_node_id="llm_time", target_node_id="tool_create"),
+        WorkflowEdgeDefinition(edge_id="e_create_output", source_node_id="tool_create", target_node_id="llm_output"),
     ],
 )
 
@@ -192,40 +262,71 @@ PERIODIC_REVIEW = SkillDefinition(
         "查看我这周的学习记录进度",
     ],
     tools=["get_entries_by_time_range", "analyze_activity"],
-    steps=[
-        SkillStep(
-            type="analysis",
-            instruction=(
-                "理解用户希望回顾/分析的时间范围，输出结构化检索参数。\n"
-                "规则：\n"
-                "- start_date/end_date 格式为 YYYY-MM-DD，且 start_date<=end_date。\n"
-                "- 用户未明确给出具体日期时，结合用户说法（如上周/本月/今年等）推断。"
-            ),
-            output_mode="json",
-            output_fields=[
-                OutputFieldSpec(name="start_date"),
-                OutputFieldSpec(name="end_date"),
-            ],
+    mode="langgraph",
+    langgraph_pattern="workflow_dag",
+    workflow_nodes=[
+        WorkflowNodeDefinition(
+            node_id="start", node_type="start", label="Start",
+            position_x=120, position_y=320,
         ),
-        SkillStep(
-            type="tool",
-            tool_name="get_entries_by_time_range",
-            args_from="json",
-            args_template="{\"start_date\": {{step_1_start_date}}, \"end_date\": {{step_1_end_date}}}",
+        WorkflowNodeDefinition(
+            node_id="llm_dates", node_type="llm", label="解析时间范围",
+            position_x=440, position_y=320,
+            config={
+                "systemPrompt": (
+                    "理解用户希望回顾/分析的时间范围，输出结构化检索参数。\n"
+                    "规则：\n"
+                    "- start_date/end_date 格式为 YYYY-MM-DD，且 start_date<=end_date。\n"
+                    "- 用户未明确给出具体日期时，结合用户说法（如上周/本月/今年等）推断。"
+                ),
+                "outputMode": "structured",
+                "outputFields": [
+                    {"name": "start_date"},
+                    {"name": "end_date"},
+                ],
+            },
         ),
-        SkillStep(
-            type="tool",
-            tool_name="analyze_activity",
-            args_from="json",
-            args_template=(
-                "{\"start_date\": {{step_1_start_date}}, "
-                "\"end_date\": {{step_1_end_date}}}"
-            ),
+        WorkflowNodeDefinition(
+            node_id="tool_entries", node_type="tool", label="获取记录",
+            position_x=760, position_y=220,
+            config={
+                "toolName": "get_entries_by_time_range",
+                "inputBindings": {
+                    "start_date": "{{llm_dates.start_date}}",
+                    "end_date": "{{llm_dates.end_date}}",
+                },
+            },
         ),
-        SkillStep(
-            type="summary",
-            instruction="生成结构化的回顾报告，包含关键成就、活动分布和洞察。",
+        WorkflowNodeDefinition(
+            node_id="tool_activity", node_type="tool", label="分析活动",
+            position_x=760, position_y=420,
+            config={
+                "toolName": "analyze_activity",
+                "inputBindings": {
+                    "start_date": "{{llm_dates.start_date}}",
+                    "end_date": "{{llm_dates.end_date}}",
+                },
+            },
         ),
+        WorkflowNodeDefinition(
+            node_id="llm_output", node_type="llm", label="生成报告",
+            position_x=1080, position_y=320,
+            config={
+                "systemPrompt": "生成结构化的回顾报告，包含关键成就、活动分布和洞察。",
+                "userInput": "{{tool_entries.result}}\n\n{{tool_activity.result}}",
+                "outputMode": "text",
+                "isOutput": True,
+            },
+        ),
+    ],
+    workflow_edges=[
+        WorkflowEdgeDefinition(edge_id="e_start_dates", source_node_id="start", target_node_id="llm_dates"),
+        # llm_dates fans out to both tool nodes in parallel
+        WorkflowEdgeDefinition(edge_id="e_dates_entries", source_node_id="llm_dates", target_node_id="tool_entries"),
+        WorkflowEdgeDefinition(edge_id="e_dates_activity", source_node_id="llm_dates", target_node_id="tool_activity"),
+        # both tools feed into final llm output (aggregation point)
+        WorkflowEdgeDefinition(edge_id="e_entries_output", source_node_id="tool_entries", target_node_id="llm_output"),
+        WorkflowEdgeDefinition(edge_id="e_activity_output", source_node_id="tool_activity", target_node_id="llm_output"),
     ],
 )
 

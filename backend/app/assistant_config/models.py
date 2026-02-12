@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, JSON, String, Text
+from sqlalchemy import Boolean, Column, Float, ForeignKey, Index, Integer, JSON, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -55,28 +55,38 @@ class AssistantSkill(UuidPrimaryKeyMixin, TimestampMixin, Base):
     intent_examples = Column(JSON, nullable=True)
     tools = Column(JSON, nullable=True)
 
-    # 执行模式: steps (步骤模式) | agent (Agent 模式)
-    mode = Column(String(32), nullable=False, default="steps")
-    # Agent 模式的系统提示词
+    # 执行模式固定为 langgraph（保留列用于显式约束）
+    mode = Column(String(32), nullable=False, default="langgraph")
+    # LangGraph 子图模式: agent_loop | workflow_dag
+    langgraph_pattern = Column(String(32), nullable=True)
+    # agent_loop 模式的系统提示词
     system_prompt = Column(Text, nullable=True)
     # 知识库配置 (JSON)
     kb_config = Column(JSON, nullable=True)
+    # 工作流版本号 (workflow_dag 模式)
+    workflow_version = Column(Integer, nullable=False, default=1)
+    # 画布视口状态 (JSON: {x, y, zoom})
+    workflow_viewport = Column(JSON, nullable=True)
 
     is_system = Column(Boolean, nullable=False, default=False)
     enabled = Column(Boolean, nullable=False, default=True)
 
-    steps = relationship(
-        "AssistantSkillStep",
+    nodes = relationship(
+        "AssistantSkillNode",
         back_populates="skill",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        order_by="AssistantSkillStep.step_order.asc()",
+    )
+    edges = relationship(
+        "AssistantSkillEdge",
+        back_populates="skill",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
-
-class AssistantSkillStep(UuidPrimaryKeyMixin, TimestampMixin, Base):
-    """AI 助手技能步骤"""
-    __tablename__ = "assistant_skill_step"
+class AssistantSkillNode(UuidPrimaryKeyMixin, TimestampMixin, Base):
+    """工作流 DAG 节点"""
+    __tablename__ = "assistant_skill_node"
 
     skill_id = Column(
         UUID(as_uuid=True),
@@ -84,23 +94,46 @@ class AssistantSkillStep(UuidPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         index=True,
     )
-    step_order = Column(Integer, nullable=False)
-    type = Column(String(32), nullable=False)  # analysis | tool | summary
-    instruction = Column(Text, nullable=True)
-    tool_name = Column(String(128), nullable=True)
-    args_from = Column(String(32), nullable=True)  # context | previous | custom
-    args_template = Column(Text, nullable=True)  # custom 模式的模板
-    # analysis 输出配置：text | json
-    output_mode = Column(String(16), nullable=True)
-    # analysis 输出字段白名单（仅 output_mode=json 时生效）
-    output_fields = Column(JSON, nullable=True)
-    # 是否将该步骤信息提供给 summary（默认 True）
-    include_in_summary = Column(Boolean, nullable=False, default=True)
-    # Step 级别知识库配置 (JSON)
-    kb_config = Column(JSON, nullable=True)
+    node_id = Column(String(128), nullable=False)
+    node_type = Column(String(32), nullable=False)
+    label = Column(String(256), nullable=False, default="")
+    position_x = Column(Float, nullable=False, default=0.0)
+    position_y = Column(Float, nullable=False, default=0.0)
+    config = Column(JSON, nullable=True)
 
-    skill = relationship("AssistantSkill", back_populates="steps")
+    skill = relationship("AssistantSkill", back_populates="nodes")
 
     __table_args__ = (
-        Index("uq_assistant_skill_step_skill_order", "skill_id", "step_order", unique=True),
+        Index("uq_skill_node_id", "skill_id", "node_id", unique=True),
+    )
+
+
+class AssistantSkillEdge(UuidPrimaryKeyMixin, TimestampMixin, Base):
+    """工作流 DAG 边"""
+    __tablename__ = "assistant_skill_edge"
+
+    skill_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_skill.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    edge_id = Column(String(128), nullable=False)
+    source_node_id = Column(String(128), nullable=False)
+    target_node_id = Column(String(128), nullable=False)
+    source_handle = Column(String(64), nullable=False, default="output")
+    target_handle = Column(String(64), nullable=False, default="input")
+    condition_type = Column(String(32), nullable=True)
+    condition_expr = Column(JSON, nullable=True)
+    label = Column(String(256), nullable=True)
+
+    skill = relationship("AssistantSkill", back_populates="edges")
+
+    __table_args__ = (
+        Index(
+            "uq_skill_edge",
+            "skill_id", "source_node_id", "source_handle",
+            "target_node_id", "target_handle",
+            unique=True,
+        ),
     )

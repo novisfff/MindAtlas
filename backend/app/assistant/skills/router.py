@@ -104,7 +104,7 @@ class SkillRouter:
     def _list_skills(self) -> list[SkillDefinition]:
         """获取所有可用 Skills（系统 + 数据库启用技能）。
 
-        路由阶段使用轻量级转换，不加载 steps 避免 N+1 查询。
+        路由阶段使用轻量级转换，不加载 workflow 详情以避免 N+1 查询。
         """
         system_skills: list[SkillDefinition] = list(SkillRegistry.list_system_skills())
         if self.db is None:
@@ -128,8 +128,8 @@ class SkillRouter:
         if disabled_names:
             system_skills = [s for s in system_skills if s.name not in disabled_names]
 
-        # 路由阶段不需要 steps，使用轻量级转换
-        db_skills = [db_skill_to_definition_light(s) for s in registry.list_enabled_db_skills(include_steps=False)]
+        # 路由阶段不需要 workflow nodes/edges，使用轻量级转换
+        db_skills = [db_skill_to_definition_light(s) for s in registry.list_enabled_db_skills(include_workflow=False)]
 
         merged: dict[str, SkillDefinition] = {s.name: s for s in system_skills}
         for s in db_skills:

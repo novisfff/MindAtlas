@@ -1,9 +1,10 @@
 import { useTranslation } from 'react-i18next'
-import { Loader2, Check, X, Plus, RotateCcw, MessageSquare, Wrench, Bot, ListChecks, BookOpen } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { Loader2, Check, X, Plus, RotateCcw, MessageSquare, Wrench, Bot, BookOpen, Workflow, ArrowRight } from 'lucide-react'
 import type { AssistantSkill, CreateSkillRequest, UpdateSkillRequest } from '../api/skills'
 import type { AssistantTool } from '../api/tools'
 import { useSkillForm } from './useSkillForm'
-import { StepEditor } from './SkillStepsEditor'
+import { WorkflowReadonlyPreview } from './workflow/WorkflowReadonlyPreview'
 
 export interface SkillRowProps {
   skill?: AssistantSkill
@@ -26,11 +27,18 @@ export function SkillRowEditor({
   isSaving,
 }: SkillRowProps) {
   const { t } = useTranslation()
-  const { state, derivedTools, isValid, actions, buildSubmitData } = useSkillForm({ skill })
+  const navigate = useNavigate()
+  const { state, isValid, actions, buildSubmitData } = useSkillForm({ skill })
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     onSave(buildSubmitData())
+  }
+
+  const isWorkflowMode = state.langgraphPattern === 'workflow_dag'
+  const openWorkflowEditor = () => {
+    if (!skill?.id) return
+    navigate(`/settings/workflow-editor/${skill.id}`)
   }
 
   return (
@@ -77,37 +85,37 @@ export function SkillRowEditor({
         <div className="flex gap-2">
           <button
             type="button"
-            onClick={() => actions.setMode('steps')}
-            className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg border-2 transition-all ${state.mode === 'steps'
+            onClick={() => actions.setLanggraphPattern('workflow_dag')}
+            className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg border-2 transition-all ${isWorkflowMode
               ? 'border-primary bg-primary/5 text-primary'
               : 'border-muted hover:border-muted-foreground/30'
               }`}
           >
-            <ListChecks className="w-5 h-5" />
+            <Workflow className="w-5 h-5" />
             <div className="text-left">
-              <div className="font-medium">{t('settings.skills.modeSteps')}</div>
-              <div className="text-xs text-muted-foreground">{t('settings.skills.modeStepsDesc')}</div>
+              <div className="font-medium">{t('settings.skills.modeWorkflow')}</div>
+              <div className="text-xs text-muted-foreground">{t('settings.skills.modeWorkflowDesc')}</div>
             </div>
           </button>
           <button
             type="button"
-            onClick={() => actions.setMode('agent')}
-            className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg border-2 transition-all ${state.mode === 'agent'
+            onClick={() => actions.setLanggraphPattern('agent_loop')}
+            className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg border-2 transition-all ${!isWorkflowMode
               ? 'border-primary bg-primary/5 text-primary'
               : 'border-muted hover:border-muted-foreground/30'
               }`}
           >
             <Bot className="w-5 h-5" />
             <div className="text-left">
-              <div className="font-medium">{t('settings.skills.modeAgent')}</div>
-              <div className="text-xs text-muted-foreground">{t('settings.skills.modeAgentDesc')}</div>
+              <div className="font-medium">{t('settings.skills.modeAgentLoop')}</div>
+              <div className="text-xs text-muted-foreground">{t('settings.skills.modeAgentLoopDesc')}</div>
             </div>
           </button>
         </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {state.mode === 'agent' && (
+        {!isWorkflowMode && (
           <div className="space-y-3 p-4 rounded-lg bg-muted/30 border">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
@@ -119,14 +127,12 @@ export function SkillRowEditor({
                 role="switch"
                 aria-checked={state.kbConfig.enabled}
                 onClick={() => actions.setKbConfig({ ...state.kbConfig, enabled: !state.kbConfig.enabled })}
-                className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 ${
-                  state.kbConfig.enabled ? 'bg-primary' : 'bg-input/50'
-                }`}
+                className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 ${state.kbConfig.enabled ? 'bg-primary' : 'bg-input/50'
+                  }`}
               >
                 <span
-                  className={`pointer-events-none block h-5 w-5 rounded-full bg-background shadow-lg ring-0 transition-transform ${
-                    state.kbConfig.enabled ? 'translate-x-5' : 'translate-x-0'
-                  }`}
+                  className={`pointer-events-none block h-5 w-5 rounded-full bg-background shadow-lg ring-0 transition-transform ${state.kbConfig.enabled ? 'translate-x-5' : 'translate-x-0'
+                    }`}
                 />
               </button>
             </div>
@@ -184,7 +190,7 @@ export function SkillRowEditor({
             {t('settings.skills.tools')}
           </div>
 
-          {state.mode === 'agent' ? (
+          {!isWorkflowMode ? (
             <div className="space-y-2 max-h-[200px] overflow-y-auto custom-scrollbar">
               {availableTools.map((tool) => (
                 <label
@@ -211,60 +217,30 @@ export function SkillRowEditor({
           ) : (
             <>
               <div className="space-y-2 max-h-[200px] overflow-y-auto custom-scrollbar">
-                {derivedTools.map((tool, i) => (
+                {state.agentTools.map((tool, i) => (
                   <div
-                    key={i}
+                    key={`${tool}-${i}`}
                     className="flex items-center gap-2 p-2 rounded-md bg-background border text-sm"
                   >
                     <Wrench className="w-3 h-3 text-muted-foreground" />
                     <span>{tool}</span>
                   </div>
                 ))}
-                {derivedTools.length === 0 && (
+                {state.agentTools.length === 0 && (
                   <div className="text-sm text-muted-foreground italic px-2">
                     {t('settings.skills.noToolsSelected')}
                   </div>
                 )}
               </div>
               <div className="text-xs text-muted-foreground px-2">
-                {t('settings.skills.toolsHelpText')}
+                {t('settings.skills.workflowToolsReadonly')}
               </div>
             </>
           )}
         </div>
       </div>
 
-      {state.mode === 'steps' ? (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <label className="text-sm font-medium">
-              {t('settings.skills.stepsDetail')} <span className="text-red-500">*</span>
-            </label>
-            <button
-              type="button"
-              onClick={actions.addStep}
-              className="text-xs px-3 py-1.5 rounded-lg bg-muted hover:bg-muted/80 font-medium transition-colors flex items-center gap-1"
-            >
-              <Plus className="w-3 h-3" />
-              {t('settings.skills.addStep')}
-            </button>
-          </div>
-          <div className="space-y-3">
-            {state.steps.map((step, i) => (
-              <StepEditor
-                key={i}
-                index={i}
-                step={step}
-                allSteps={state.steps}
-                availableTools={availableTools}
-                onChange={(updates) => actions.updateStep(i, updates)}
-                onRemove={() => actions.removeStep(i)}
-                canRemove={state.steps.length > 1}
-              />
-            ))}
-          </div>
-        </div>
-      ) : (
+      {!isWorkflowMode ? (
         <div className="space-y-3">
           <label className="text-sm font-medium">
             {t('settings.skills.systemPrompt')} <span className="text-red-500">*</span>
@@ -279,6 +255,34 @@ export function SkillRowEditor({
           <div className="text-xs text-muted-foreground">
             {t('settings.skills.systemPromptHelpText')}
           </div>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {skill?.id ? (
+            <>
+              <WorkflowReadonlyPreview skill={skill} onOpenEditor={openWorkflowEditor} />
+              <button
+                type="button"
+                onClick={openWorkflowEditor}
+                className="w-full flex items-center justify-between p-4 rounded-xl border-2 border-dashed border-primary/20 hover:border-primary/40 bg-primary/5 hover:bg-primary/10 transition-all group"
+              >
+                <div className="flex items-center gap-4">
+                  <div className="p-3 rounded-lg bg-primary/10 group-hover:bg-primary/20 transition-colors">
+                    <Workflow className="w-6 h-6 text-primary" />
+                  </div>
+                  <div className="text-left">
+                    <div className="font-semibold text-primary text-lg">{t('settings.skills.editWorkflow')}</div>
+                    <div className="text-sm text-muted-foreground mt-0.5">{t('settings.skills.modeWorkflowDesc')}</div>
+                  </div>
+                </div>
+                <ArrowRight className="w-5 h-5 text-primary/50 group-hover:text-primary transition-colors" />
+              </button>
+            </>
+          ) : (
+            <div className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              {t('settings.skills.createFirstForWorkflow')}
+            </div>
+          )}
         </div>
       )}
 

@@ -27,6 +27,10 @@ interface SkillItemProps {
 function SkillItem({ skill, onEdit, onDelete, onToggle, isToggling }: SkillItemProps) {
   const { t } = useTranslation()
   const [expanded, setExpanded] = useState(false)
+  const isWorkflowMode = skill.langgraphPattern === 'workflow_dag'
+  const modeLabel = isWorkflowMode
+    ? t('settings.skills.modeWorkflow')
+    : t('settings.skills.modeAgentLoop')
 
   return (
     <div
@@ -77,15 +81,15 @@ function SkillItem({ skill, onEdit, onDelete, onToggle, isToggling }: SkillItemP
                 {t('settings.skills.custom')}
               </span>
             )}
-            {skill.mode === 'agent' ? (
-              <span className="text-xs px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300">
-                Agent
-              </span>
-            ) : (
-              <span className="text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-                {skill.steps?.length || 0} {t('settings.skills.steps')}
-              </span>
-            )}
+            <span
+              className={`text-xs px-1.5 py-0.5 rounded ${
+                isWorkflowMode
+                  ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300'
+                  : 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
+              }`}
+            >
+              {modeLabel}
+            </span>
           </div>
           <p className="text-sm text-muted-foreground truncate">{skill.description}</p>
         </div>
@@ -144,39 +148,6 @@ function SkillItem({ skill, onEdit, onDelete, onToggle, isToggling }: SkillItemP
                     {tool}
                   </span>
                 ))}
-              </div>
-            </div>
-          )}
-
-          {skill.steps && skill.steps.length > 0 && (
-            <div className="mt-3">
-              <p className="text-xs font-medium text-muted-foreground mb-1">
-                {t('settings.skills.stepsDetail')}
-              </p>
-              <div className="space-y-1">
-                {skill.steps
-                  .sort((a, b) => a.stepOrder - b.stepOrder)
-                  .map((step, i) => (
-                    <div
-                      key={step.id}
-                      className="text-xs p-2 rounded bg-muted flex items-start gap-2"
-                    >
-                      <span className="font-mono text-muted-foreground">
-                        {i + 1}.
-                      </span>
-                      <div>
-                        <span className="font-medium">[{step.type}]</span>
-                        {step.toolName && (
-                          <span className="ml-1 text-blue-600">{step.toolName}</span>
-                        )}
-                        {step.instruction && (
-                          <p className="text-muted-foreground mt-0.5">
-                            {step.instruction}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  ))}
               </div>
             </div>
           )}
