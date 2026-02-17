@@ -12,6 +12,7 @@ const DEFAULT_LABEL_BY_TYPE: Record<NodeType, string> = {
   knowledge_retrieval: 'Knowledge Retrieval',
   iteration: 'Iteration',
   loop: 'Loop',
+  output: 'Output',
 }
 
 const NODE_TYPE_LABEL_KEY: Record<NodeType, string> = {
@@ -23,6 +24,7 @@ const NODE_TYPE_LABEL_KEY: Record<NodeType, string> = {
   knowledge_retrieval: 'settings.skills.nodeTypes.knowledge_retrieval',
   iteration: 'settings.skills.nodeTypes.iteration',
   loop: 'settings.skills.nodeTypes.loop',
+  output: 'settings.skills.nodeTypes.output',
 }
 
 function normalizeCasefold(value: string): string {

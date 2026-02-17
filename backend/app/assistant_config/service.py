@@ -23,6 +23,7 @@ from app.assistant_config.schemas import (
     AssistantSkillUpdateRequest,
     AssistantToolCreateRequest,
     AssistantToolUpdateRequest,
+    WorkflowInput,
 )
 from app.common.exceptions import ApiException
 
@@ -32,6 +33,63 @@ _TOOL_TEXT_REF_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\.text\s*\}\}")
 class AssistantConfigService:
     def __init__(self, db: Session):
         self.db = db
+
+    @staticmethod
+    def _build_default_workflow_input() -> WorkflowInput:
+        """Build a default start -> llm -> output workflow for new workflow_dag skills."""
+        return WorkflowInput.model_validate(
+            {
+                "nodes": [
+                    {
+                        "node_id": "start",
+                        "node_type": "start",
+                        "label": "Start",
+                        "position_x": 120,
+                        "position_y": 220,
+                        "config": {},
+                    },
+                    {
+                        "node_id": "llm_1",
+                        "node_type": "llm",
+                        "label": "LLM",
+                        "position_x": 460,
+                        "position_y": 220,
+                        "config": {
+                            "outputMode": "text",
+                            "userInput": "{{start.user_input}}",
+                            "modelSource": "default",
+                        },
+                    },
+                    {
+                        "node_id": "output_1",
+                        "node_type": "output",
+                        "label": "Output",
+                        "position_x": 800,
+                        "position_y": 220,
+                        "config": {
+                            "outputMode": "text",
+                            "textTemplate": "{{llm_1.response}}",
+                        },
+                    },
+                ],
+                "edges": [
+                    {
+                        "edge_id": "edge_start_llm",
+                        "source_node_id": "start",
+                        "target_node_id": "llm_1",
+                        "source_handle": "output",
+                        "target_handle": "input",
+                    },
+                    {
+                        "edge_id": "edge_llm_output",
+                        "source_node_id": "llm_1",
+                        "target_node_id": "output_1",
+                        "source_handle": "output",
+                        "target_handle": "input",
+                    },
+                ],
+            }
+        )
 
     # -------------------------
     # System seed / sync
@@ -249,6 +307,8 @@ class AssistantConfigService:
                     and existing.mode == "langgraph"
                     and getattr(existing, "langgraph_pattern", None) == "workflow_dag"
                 ):
+                    if self._requires_system_workflow_output_migration(existing):
+                        self._replace_workflow_with_default(existing, s)
                     self._migrate_workflow_tool_text_refs(existing)
 
         try:
@@ -310,6 +370,84 @@ class AssistantConfigService:
             new_cfg, changed = self._replace_tool_text_refs_in_value(cfg, tool_node_ids)
             if changed:
                 node.config = new_cfg
+
+    @staticmethod
+    def _requires_system_workflow_output_migration(skill: AssistantSkill) -> bool:
+        """Detect legacy system workflow graphs that do not use output-node terminal semantics."""
+        nodes = list(getattr(skill, "nodes", None) or [])
+        edges = list(getattr(skill, "edges", None) or [])
+        if not nodes:
+            return True
+
+        output_nodes = [
+            node
+            for node in nodes
+            if str(getattr(node, "node_type", "") or "").strip().lower() == "output"
+        ]
+        if len(output_nodes) != 1:
+            return True
+
+        output_node_id = str(getattr(output_nodes[0], "node_id", "") or "").strip()
+        if not output_node_id:
+            return True
+
+        has_incoming = any(
+            str(getattr(edge, "target_node_id", "") or "").strip() == output_node_id
+            for edge in edges
+        )
+        has_outgoing = any(
+            str(getattr(edge, "source_node_id", "") or "").strip() == output_node_id
+            for edge in edges
+        )
+        if has_outgoing or not has_incoming:
+            return True
+
+        for node in nodes:
+            cfg = getattr(node, "config", None)
+            if isinstance(cfg, dict) and ("isOutput" in cfg or "is_output" in cfg):
+                return True
+
+        return False
+
+    def _replace_workflow_with_default(self, skill: AssistantSkill, default) -> None:
+        """Replace only workflow graph (nodes/edges) from system default definition."""
+        for old_node in list(getattr(skill, "nodes", None) or []):
+            self.db.delete(old_node)
+        for old_edge in list(getattr(skill, "edges", None) or []):
+            self.db.delete(old_edge)
+        self.db.flush()
+
+        if getattr(default, "workflow_nodes", None):
+            skill.nodes = [
+                AssistantSkillNode(
+                    node_id=n.node_id,
+                    node_type=n.node_type,
+                    label=n.label,
+                    position_x=n.position_x,
+                    position_y=n.position_y,
+                    config=n.config,
+                )
+                for n in default.workflow_nodes
+            ]
+        else:
+            skill.nodes = []
+
+        if getattr(default, "workflow_edges", None):
+            skill.edges = [
+                AssistantSkillEdge(
+                    edge_id=e.edge_id,
+                    source_node_id=e.source_node_id,
+                    target_node_id=e.target_node_id,
+                    source_handle=e.source_handle,
+                    target_handle=e.target_handle,
+                    condition_type=e.condition_type,
+                    condition_expr=e.condition_expr.model_dump() if e.condition_expr else None,
+                    label=e.label,
+                )
+                for e in default.workflow_edges
+            ]
+        else:
+            skill.edges = []
 
     # -------------------------
     # Tools CRUD
@@ -533,6 +671,8 @@ class AssistantConfigService:
         # Persist workflow DAG data
         if request.workflow is not None:
             self._apply_workflow_to_skill(skill, request.workflow)
+        elif request.langgraph_pattern == "workflow_dag":
+            self._apply_workflow_to_skill(skill, self._build_default_workflow_input())
         self.db.add(skill)
         try:
             self.db.commit()
@@ -544,6 +684,7 @@ class AssistantConfigService:
 
     def update_skill(self, id: UUID, request: AssistantSkillUpdateRequest) -> AssistantSkill:
         skill = self.get_skill(id)
+        previous_langgraph_pattern = skill.langgraph_pattern
 
         if skill.is_system:
             # 系统技能允许编辑内容，但禁止改名
@@ -577,6 +718,12 @@ class AssistantConfigService:
         # Persist workflow DAG data (applies to both system and non-system skills)
         if request.workflow is not None:
             self._apply_workflow_to_skill(skill, request.workflow)
+        elif (
+            request.langgraph_pattern == "workflow_dag"
+            and previous_langgraph_pattern != "workflow_dag"
+            and not (getattr(skill, "nodes", None) or getattr(skill, "edges", None))
+        ):
+            self._apply_workflow_to_skill(skill, self._build_default_workflow_input())
 
         if skill.langgraph_pattern not in {"agent_loop", "workflow_dag"}:
             raise ApiException(

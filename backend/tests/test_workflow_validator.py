@@ -9,6 +9,38 @@ bootstrap_backend_imports()
 
 
 class WorkflowValidatorTests(unittest.TestCase):
+    @staticmethod
+    def _append_output_node(
+        nodes: list[dict],
+        edges: list[dict],
+        *source_node_ids: str,
+    ) -> tuple[list[dict], list[dict]]:
+        output_node_id = "output_final"
+        next_nodes = [
+            *nodes,
+            {
+                "node_id": output_node_id,
+                "node_type": "output",
+                "label": "Output",
+                "config": {
+                    "outputMode": "text",
+                    "textTemplate": f"{{{{{source_node_ids[0]}.response}}}}" if source_node_ids else "{{start.user_input}}",
+                },
+            },
+        ]
+        next_edges = [
+            *edges,
+            *[
+                {
+                    "source_node_id": source_node_id,
+                    "target_node_id": output_node_id,
+                    "source_handle": "output",
+                }
+                for source_node_id in source_node_ids
+            ],
+        ]
+        return next_nodes, next_edges
+
     def test_answer_node_is_rejected(self) -> None:
         from app.assistant.skills.workflow_validator import validate_workflow
 
@@ -30,7 +62,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
             {"node_id": "tpl_1", "node_type": "template", "label": "Tpl", "config": {"template": "x"}},
-            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {"isOutput": True}},
+            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "tpl_1", "source_handle": "output"},
@@ -41,12 +73,12 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertTrue(any("template" in e.message and "removed" in e.message for e in result.errors))
 
-    def test_missing_llm_output_is_rejected(self) -> None:
+    def test_missing_output_node_is_rejected(self) -> None:
         from app.assistant.skills.workflow_validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
-            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {"isOutput": False}},
+            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "llm_1", "source_handle": "output"},
@@ -54,7 +86,7 @@ class WorkflowValidatorTests(unittest.TestCase):
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
-        self.assertTrue(any("isOutput=true" in e.message for e in result.errors))
+        self.assertTrue(any("exactly one output node" in e.message for e in result.errors))
 
     def test_valid_workflow_passes(self) -> None:
         from app.assistant.skills.workflow_validator import validate_workflow
@@ -65,12 +97,13 @@ class WorkflowValidatorTests(unittest.TestCase):
                 "node_id": "llm_output",
                 "node_type": "llm",
                 "label": "Final Reply",
-                "config": {"systemPrompt": "reply", "isOutput": True, "outputMode": "text"},
+                "config": {"systemPrompt": "reply", "outputMode": "text"},
             },
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "llm_output", "source_handle": "output"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_output")
 
         result = validate_workflow(nodes, edges)
         self.assertTrue(result.valid, [e.message for e in result.errors])
@@ -81,12 +114,13 @@ class WorkflowValidatorTests(unittest.TestCase):
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
             {"node_id": "tool_1", "node_type": "tool", "label": "Create Record", "config": {}},
-            {"node_id": "llm_output", "node_type": "llm", "label": "Summary", "config": {"isOutput": True}},
+            {"node_id": "llm_output", "node_type": "llm", "label": "Summary", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "tool_1", "source_handle": "output"},
             {"source_node_id": "tool_1", "target_node_id": "llm_output", "source_handle": "output"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_output")
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
@@ -103,12 +137,13 @@ class WorkflowValidatorTests(unittest.TestCase):
                 "label": "Create Record",
                 "config": {"toolName": "create_entry", "inputBindings": "invalid"},
             },
-            {"node_id": "llm_output", "node_type": "llm", "label": "Summary", "config": {"isOutput": True}},
+            {"node_id": "llm_output", "node_type": "llm", "label": "Summary", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "tool_1", "source_handle": "output"},
             {"source_node_id": "tool_1", "target_node_id": "llm_output", "source_handle": "output"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_output")
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
@@ -125,12 +160,13 @@ class WorkflowValidatorTests(unittest.TestCase):
                 "label": "Create Record",
                 "config": {"toolName": "create_entry"},
             },
-            {"node_id": "llm_output", "node_type": "llm", "label": "Summary", "config": {"isOutput": True}},
+            {"node_id": "llm_output", "node_type": "llm", "label": "Summary", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "tool_1", "source_handle": "output"},
             {"source_node_id": "tool_1", "target_node_id": "llm_output", "source_handle": "output"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_output")
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
@@ -164,14 +200,15 @@ class WorkflowValidatorTests(unittest.TestCase):
                     "elseHandle": "else",
                 },
             },
-            {"node_id": "llm_true", "node_type": "llm", "label": "True Reply", "config": {"isOutput": True}},
-            {"node_id": "llm_else", "node_type": "llm", "label": "Else Reply", "config": {"isOutput": False}},
+            {"node_id": "llm_true", "node_type": "llm", "label": "True Reply", "config": {}},
+            {"node_id": "llm_else", "node_type": "llm", "label": "Else Reply", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "if_1", "source_handle": "output"},
             {"source_node_id": "if_1", "target_node_id": "llm_true", "source_handle": "if_main"},
             {"source_node_id": "if_1", "target_node_id": "llm_else", "source_handle": "else"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_true", "llm_else")
 
         result = validate_workflow(nodes, edges)
         self.assertTrue(result.valid, [e.message for e in result.errors])
@@ -204,12 +241,13 @@ class WorkflowValidatorTests(unittest.TestCase):
                     "elseHandle": "else",
                 },
             },
-            {"node_id": "llm_true", "node_type": "llm", "label": "True Reply", "config": {"isOutput": True}},
+            {"node_id": "llm_true", "node_type": "llm", "label": "True Reply", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "if_1", "source_handle": "output"},
             {"source_node_id": "if_1", "target_node_id": "llm_true", "source_handle": "if_main"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_true")
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
@@ -243,14 +281,15 @@ class WorkflowValidatorTests(unittest.TestCase):
                     "elseHandle": "else",
                 },
             },
-            {"node_id": "llm_true", "node_type": "llm", "label": "True Reply", "config": {"isOutput": True}},
-            {"node_id": "llm_else", "node_type": "llm", "label": "Else Reply", "config": {"isOutput": False}},
+            {"node_id": "llm_true", "node_type": "llm", "label": "True Reply", "config": {}},
+            {"node_id": "llm_else", "node_type": "llm", "label": "Else Reply", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "if_1", "source_handle": "output"},
             {"source_node_id": "if_1", "target_node_id": "llm_true", "source_handle": "if_main"},
             {"source_node_id": "if_1", "target_node_id": "llm_else", "source_handle": "else"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_true", "llm_else")
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
@@ -263,13 +302,14 @@ class WorkflowValidatorTests(unittest.TestCase):
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
-            {"node_id": "llm_1", "node_type": "llm", "label": "Summary", "config": {"isOutput": True}},
-            {"node_id": "llm_2", "node_type": "llm", "label": "summary", "config": {"isOutput": False}},
+            {"node_id": "llm_1", "node_type": "llm", "label": "Summary", "config": {}},
+            {"node_id": "llm_2", "node_type": "llm", "label": "summary", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "llm_1", "source_handle": "output"},
             {"source_node_id": "start", "target_node_id": "llm_2", "source_handle": "output"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_1")
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
@@ -280,11 +320,12 @@ class WorkflowValidatorTests(unittest.TestCase):
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
-            {"node_id": "llm_1", "node_type": "llm", "label": "Reply.v1", "config": {"isOutput": True}},
+            {"node_id": "llm_1", "node_type": "llm", "label": "Reply.v1", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "llm_1", "source_handle": "output"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_1")
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
@@ -295,11 +336,12 @@ class WorkflowValidatorTests(unittest.TestCase):
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
-            {"node_id": "llm_1", "node_type": "llm", "label": " ", "config": {"isOutput": True}},
+            {"node_id": "llm_1", "node_type": "llm", "label": " ", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "llm_1", "source_handle": "output"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_1")
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
@@ -321,7 +363,6 @@ class WorkflowValidatorTests(unittest.TestCase):
                 "node_type": "llm",
                 "label": "LLM",
                 "config": {
-                    "isOutput": True,
                     "knowledgeEnabled": True,
                     "knowledgeSourceNodeIds": ["tool_1"],
                 },
@@ -331,6 +372,7 @@ class WorkflowValidatorTests(unittest.TestCase):
             {"source_node_id": "start", "target_node_id": "tool_1", "source_handle": "output"},
             {"source_node_id": "tool_1", "target_node_id": "llm_1", "source_handle": "output"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_1")
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
@@ -346,7 +388,6 @@ class WorkflowValidatorTests(unittest.TestCase):
                 "node_type": "llm",
                 "label": "LLM",
                 "config": {
-                    "isOutput": True,
                     "knowledgeEnabled": True,
                     "knowledgeSourceNodeIds": ["kr_later"],
                 },
@@ -362,6 +403,7 @@ class WorkflowValidatorTests(unittest.TestCase):
             {"source_node_id": "start", "target_node_id": "llm_1", "source_handle": "output"},
             {"source_node_id": "llm_1", "target_node_id": "kr_later", "source_handle": "output"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_1")
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
@@ -378,12 +420,13 @@ class WorkflowValidatorTests(unittest.TestCase):
                 "label": "Extract",
                 "config": {"modelSource": "custom", "instruction": "extract"},
             },
-            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {"isOutput": True}},
+            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "extract_1", "source_handle": "output"},
             {"source_node_id": "extract_1", "target_node_id": "llm_1", "source_handle": "output"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_1")
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
@@ -399,7 +442,6 @@ class WorkflowValidatorTests(unittest.TestCase):
                 "node_type": "llm",
                 "label": "LLM",
                 "config": {
-                    "isOutput": True,
                     "modelSource": "default",
                     "modelId": "not-a-uuid",
                 },
@@ -408,6 +450,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         edges = [
             {"source_node_id": "start", "target_node_id": "llm_1", "source_handle": "output"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_1")
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
@@ -429,12 +472,13 @@ class WorkflowValidatorTests(unittest.TestCase):
                     "outputFields": [],
                 },
             },
-            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {"isOutput": True}},
+            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "extract_1", "source_handle": "output"},
             {"source_node_id": "extract_1", "target_node_id": "llm_1", "source_handle": "output"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_1")
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
@@ -454,12 +498,13 @@ class WorkflowValidatorTests(unittest.TestCase):
                     "outputFields": [{"name": "city", "type": "string"}],
                 },
             },
-            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {"isOutput": True}},
+            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "extract_1", "source_handle": "output"},
             {"source_node_id": "extract_1", "target_node_id": "llm_1", "source_handle": "output"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_1")
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
@@ -484,12 +529,13 @@ class WorkflowValidatorTests(unittest.TestCase):
                     ],
                 },
             },
-            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {"isOutput": True}},
+            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "extract_1", "source_handle": "output"},
             {"source_node_id": "extract_1", "target_node_id": "llm_1", "source_handle": "output"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_1")
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
@@ -513,12 +559,13 @@ class WorkflowValidatorTests(unittest.TestCase):
                     "outputFields": [{"name": "city", "type": "string"}],
                 },
             },
-            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {"isOutput": True}},
+            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "extract_1", "source_handle": "output"},
             {"source_node_id": "extract_1", "target_node_id": "llm_1", "source_handle": "output"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_1")
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
@@ -541,12 +588,13 @@ class WorkflowValidatorTests(unittest.TestCase):
                     "bodyEdges": [],
                 },
             },
-            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {"isOutput": True}},
+            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "iter_1", "source_handle": "output"},
             {"source_node_id": "iter_1", "target_node_id": "llm_1", "source_handle": "output"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_1")
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
         messages = [e.message for e in result.errors]
@@ -576,12 +624,13 @@ class WorkflowValidatorTests(unittest.TestCase):
                     ],
                 },
             },
-            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {"isOutput": True}},
+            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "iter_1", "source_handle": "output"},
             {"source_node_id": "iter_1", "target_node_id": "llm_1", "source_handle": "output"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_1")
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
         self.assertTrue(any("must not nest iteration/loop" in e.message for e in result.errors))
@@ -601,12 +650,13 @@ class WorkflowValidatorTests(unittest.TestCase):
                     "bodyEdges": [],
                 },
             },
-            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {"isOutput": True}},
+            {"node_id": "llm_1", "node_type": "llm", "label": "LLM", "config": {}},
         ]
         edges = [
             {"source_node_id": "start", "target_node_id": "loop_1", "source_handle": "output"},
             {"source_node_id": "loop_1", "target_node_id": "llm_1", "source_handle": "output"},
         ]
+        nodes, edges = self._append_output_node(nodes, edges, "llm_1")
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
         self.assertTrue(any("loop maxIterations must be between 1 and 1000" in e.message for e in result.errors))

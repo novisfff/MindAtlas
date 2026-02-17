@@ -416,6 +416,12 @@
       "nodeModelNoModels": "No available models. Create an LLM model in system settings first.",
       "llmOutputModeStructured": "Structured",
       "llmOutputFields": "Structured Fields",
+      "outputTextTemplate": "Text Template",
+      "outputTextTemplatePlaceholder": "Use {{Node.field}} to compose final response...",
+      "outputStructuredFields": "Structured Output Fields",
+      "outputFieldValueTemplate": "Value Template",
+      "outputEnumPlaceholder": "enum1, enum2 (optional)",
+      "outputNullable": "Nullable",
       "workflowPaletteNodes": "Nodes",
       "workflowPaletteTools": "Tools",
       "workflowToolSearchPlaceholder": "Search tools",
@@ -490,7 +496,8 @@
         "parameter_extractor": "Param Extractor",
         "knowledge_retrieval": "KB Retrieval",
         "iteration": "Iteration",
-        "loop": "Loop"
+        "loop": "Loop",
+        "output": "Output"
       },
       "operators": {
         "equals": "Equals",

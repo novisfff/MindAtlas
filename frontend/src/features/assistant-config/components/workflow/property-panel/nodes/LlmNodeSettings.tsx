@@ -204,14 +204,6 @@ export function LlmNodeSettings({
                     </div>
                 )}
 
-                <div className="pt-2">
-                    <CommonSwitch
-                        label={t('settings.skills.llmIsOutput') || 'Return as Workflow Output'}
-                        checked={Boolean(config.isOutput)}
-                        onChange={(checked) => onChange('isOutput', checked)}
-                    />
-                </div>
-
                 <div className="space-y-3 pt-2 border-t border-border/50">
                     <CommonSwitch
                         label={t('settings.skills.llmKnowledgeEnabled')}

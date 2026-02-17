@@ -236,15 +236,17 @@ _NODE_TYPE_LABELS = {
     "knowledge_retrieval": "Knowledge Retrieval",
     "iteration": "Iteration",
     "loop": "Loop",
+    "output": "Output",
 }
 
 _NODE_TYPE_DESCRIPTIONS = {
     "start": "Workflow entry point, defines input variables",
-    "llm": "Call LLM for analysis or optional final output",
+    "llm": "Call LLM for analysis and intermediate generation",
     "tool": "Execute a registered tool",
     "if_else": "IF/ELIF/ELSE branching with configurable conditions and logic",
     "parameter_extractor": "Extract structured parameters from text using LLM",
     "knowledge_retrieval": "Search knowledge base with optional mode/topK overrides",
     "iteration": "Iterate over an array and execute inner subflow per item",
     "loop": "Repeat inner subflow until termination conditions are met",
+    "output": "Workflow terminal node that formats and emits final response",
 }

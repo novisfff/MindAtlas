@@ -26,6 +26,7 @@ from app.assistant.tools._context import reset_current_db, set_current_db
 logger = logging.getLogger(__name__)
 
 _TEMPLATE_VAR_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
+_OUTPUT_SINGLE_VAR_RE = re.compile(r"^\s*\{\{\s*([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\s*\}\}\s*$")
 
 
 # ==================== State Types (Task 2.1) ====================
@@ -114,6 +115,85 @@ def _extract_json_object(content: str) -> dict[str, Any] | None:
             except Exception:
                 return None
         return None
+
+
+def _extract_single_template_reference(template: str) -> tuple[str, str] | None:
+    matched = _OUTPUT_SINGLE_VAR_RE.fullmatch(template or "")
+    if not matched:
+        return None
+    return matched.group(1), matched.group(2)
+
+
+def _parse_output_boolean(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "n", "off"}:
+            return False
+    raise ValueError(f"invalid boolean value: {value}")
+
+
+def _coerce_output_field_value(field_name: str, rendered_value: str, field_spec: dict[str, Any]) -> Any:
+    raw_type = field_spec.get("type", "string")
+    field_type = str(raw_type or "string").strip().lower() or "string"
+    nullable = bool(field_spec.get("nullable", False))
+    trimmed = rendered_value.strip()
+    if nullable and trimmed == "":
+        return None
+
+    if field_type == "string":
+        out_value: Any = rendered_value
+    elif field_type == "number":
+        out_value = float(trimmed)
+    elif field_type == "integer":
+        out_value = int(trimmed)
+    elif field_type == "boolean":
+        out_value = _parse_output_boolean(trimmed if trimmed else rendered_value)
+    elif field_type == "object":
+        parsed = json.loads(trimmed)
+        if not isinstance(parsed, dict):
+            raise ValueError("must be a JSON object")
+        out_value = parsed
+    elif field_type == "array":
+        parsed = json.loads(trimmed)
+        if not isinstance(parsed, list):
+            raise ValueError("must be a JSON array")
+        items_type_raw = field_spec.get("items_type", field_spec.get("itemsType", ""))
+        items_type = str(items_type_raw or "").strip().lower()
+        if items_type and items_type != "array":
+            for idx, item in enumerate(parsed):
+                if items_type == "string" and not isinstance(item, str):
+                    raise ValueError(f"array item {idx} must be string")
+                if items_type == "number" and (
+                    not isinstance(item, (int, float)) or isinstance(item, bool)
+                ):
+                    raise ValueError(f"array item {idx} must be number")
+                if items_type == "integer" and (
+                    not isinstance(item, int) or isinstance(item, bool)
+                ):
+                    raise ValueError(f"array item {idx} must be integer")
+                if items_type == "boolean" and not isinstance(item, bool):
+                    raise ValueError(f"array item {idx} must be boolean")
+                if items_type == "object" and not isinstance(item, dict):
+                    raise ValueError(f"array item {idx} must be object")
+        out_value = parsed
+    else:
+        raise ValueError(f"unsupported type: {field_type}")
+
+    if out_value is None:
+        return None
+
+    enum_values = field_spec.get("enum")
+    if isinstance(enum_values, list) and enum_values:
+        if str(out_value) not in {str(item) for item in enum_values}:
+            raise ValueError(f"value '{out_value}' not in enum")
+
+    return out_value
 
 
 def _emit(metadata: dict, event: str, **kwargs: Any) -> None:
@@ -385,6 +465,8 @@ class WorkflowState(TypedDict, total=False):
     sys_vars: dict[str, str]
     workflow_node_types: dict[str, str]
     node_llms: dict[str, Any]
+    stream_output_enabled: bool
+    output_stream_source_node_id: str
 
 
 def _cfg_bool_value(cfg: dict[str, Any], *keys: str, default: bool = False) -> bool:
@@ -989,7 +1071,6 @@ def _build_dag_llm_node(
         if not user_input_rendered.strip():
             user_input_rendered = start_inputs.get("user_input", "") or state.get("user_input", "")
 
-        is_output = _cfg_bool_value(node_cfg, "is_output", "isOutput", default=False)
         knowledge_enabled = _cfg_bool_value(
             node_cfg, "knowledge_enabled", "knowledgeEnabled", default=False
         )
@@ -1011,6 +1092,8 @@ def _build_dag_llm_node(
         )
         output_fields = node_cfg.get("output_fields") or []
         field_names = [f.get("name", "") if isinstance(f, dict) else str(f) for f in output_fields]
+        stream_output_enabled = bool(state.get("stream_output_enabled", True))
+        output_stream_source_node_id = str(state.get("output_stream_source_node_id", "") or "")
 
         structured_mode = output_mode == "structured"
         if structured_mode and field_names:
@@ -1124,7 +1207,11 @@ def _build_dag_llm_node(
                     continue
                 chunks.append(chunk.content)
                 _emit(metadata, "on_node_output_delta", node_id=node_id, delta=chunk.content)
-                if allow_content_stream and is_output:
+                if (
+                    allow_content_stream
+                    and stream_output_enabled
+                    and output_stream_source_node_id == node_id
+                ):
                     _emit(metadata, "on_content_delta", chunk=chunk.content)
             return "".join(chunks).strip()
 
@@ -1167,8 +1254,6 @@ def _build_dag_llm_node(
                 "raw": parsed_structured,
                 "json_fields": json_fields,
             }
-            if is_output:
-                _emit(metadata, "on_content_delta", chunk=json_text)
 
         _emit(metadata, "on_node_end", node_id=node_id, status="ok")
 
@@ -1177,6 +1262,114 @@ def _build_dag_llm_node(
             "execution_trace": [node_id],
         }
     return llm_node
+
+
+def _build_output_node(
+    node_id: str,
+    node_cfg: dict,
+) -> Callable[[WorkflowState], dict]:
+    def output_node(state: WorkflowState) -> dict:
+        metadata = state.get("metadata", {})
+        node_outputs = dict(state.get("node_outputs", {}))
+        start_inputs = _get_start_inputs(node_outputs)
+        sys_vars = state.get("sys_vars", {}) or {}
+        workflow_node_types = state.get("workflow_node_types", {}) or {}
+        stream_output_enabled = bool(state.get("stream_output_enabled", True))
+        output_stream_source_node_id = str(state.get("output_stream_source_node_id", "") or "")
+
+        output_mode = str(node_cfg.get("output_mode", "text") or "text").strip().lower()
+        if output_mode == "json":
+            output_mode = "structured"
+        if output_mode not in {"text", "structured"}:
+            raise RuntimeError(f"DAG output node {node_id}: unsupported output_mode={output_mode}")
+
+        _emit(metadata, "on_node_start", node_id=node_id, node_type="output")
+
+        if output_mode == "text":
+            text_template = node_cfg.get("text_template", "{{start.user_input}}")
+            if not isinstance(text_template, str):
+                raise RuntimeError(
+                    f"DAG output node {node_id}: textTemplate must be string in text mode"
+                )
+
+            rendered_text = _resolve_node_template_vars(
+                text_template, node_outputs, start_inputs, sys_vars,
+            )
+            node_out: NodeOutput = {
+                "status": "ok",
+                "text": rendered_text,
+                "raw": rendered_text,
+                "json_fields": {"response": rendered_text},
+            }
+
+            # When output is a direct single-ref passthrough from an LLM source, LLM node streams tokens.
+            single_ref = _extract_single_template_reference(text_template)
+            should_skip_final_emit = (
+                stream_output_enabled
+                and single_ref is not None
+                and single_ref[0] == output_stream_source_node_id
+                and workflow_node_types.get(single_ref[0]) == "llm"
+                and single_ref[1] in {"response", "text"}
+            )
+            if not should_skip_final_emit and rendered_text:
+                _emit(metadata, "on_content_delta", chunk=rendered_text)
+
+            _emit(metadata, "on_node_end", node_id=node_id, status="ok")
+            return {
+                "node_outputs": {node_id: node_out},
+                "execution_trace": [node_id],
+            }
+
+        output_fields = node_cfg.get("output_fields")
+        if not isinstance(output_fields, list) or not output_fields:
+            raise RuntimeError(
+                f"DAG output node {node_id}: structured mode requires output_fields"
+            )
+
+        structured_payload: dict[str, Any] = {}
+        for raw_field in output_fields:
+            if not isinstance(raw_field, dict):
+                raise RuntimeError(
+                    f"DAG output node {node_id}: output_fields items must be objects"
+                )
+            field_name = str(raw_field.get("name", "") or "").strip()
+            if not field_name:
+                raise RuntimeError(f"DAG output node {node_id}: output field name is required")
+            value_template = raw_field.get("value", "")
+            if not isinstance(value_template, str):
+                raise RuntimeError(
+                    f"DAG output node {node_id}: output field '{field_name}' requires string value"
+                )
+            rendered_value = _resolve_node_template_vars(
+                value_template, node_outputs, start_inputs, sys_vars,
+            )
+            try:
+                coerced = _coerce_output_field_value(field_name, rendered_value, raw_field)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"DAG output node {node_id}: output field '{field_name}' invalid value: {exc}"
+                ) from exc
+            structured_payload[field_name] = coerced
+
+        json_text = json.dumps(structured_payload, ensure_ascii=False)
+        json_fields = dict(structured_payload)
+        json_fields["response"] = json_text
+        node_out = NodeOutput(
+            status="ok",
+            text=json_text,
+            raw=structured_payload,
+            json_fields=json_fields,
+        )
+        if json_text:
+            _emit(metadata, "on_content_delta", chunk=json_text)
+
+        _emit(metadata, "on_node_end", node_id=node_id, status="ok")
+        return {
+            "node_outputs": {node_id: node_out},
+            "execution_trace": [node_id],
+        }
+
+    return output_node
 
 
 def _build_dag_tool_node(
@@ -1893,6 +2086,7 @@ def _get_start_inputs(node_outputs: dict[str, NodeOutput]) -> dict[str, Any]:
 NODE_BUILDERS: dict[str, str] = {
     "start": "_build_start_node",
     "llm": "_build_dag_llm_node",
+    "output": "_build_output_node",
     "tool": "_build_dag_tool_node",
     "if_else": "_build_if_else_node",
     "parameter_extractor": "_build_param_extractor_node",
@@ -1977,6 +2171,8 @@ def build_workflow_dag_subgraph(
             node_fn = _build_start_node(cfg)
         elif ntype == "llm":
             node_fn = _build_dag_llm_node(nid, cfg, llm, node_llms=node_llms)
+        elif ntype == "output":
+            node_fn = _build_output_node(nid, cfg)
         elif ntype == "tool":
             node_fn = _build_dag_tool_node(nid, cfg, tool_map, args_llm, db_bind)
         elif ntype == "if_else":
@@ -2468,6 +2664,11 @@ class LangGraphEngine:
         tool_map = {getattr(t, "name", ""): t for t in tools}
         now = datetime.utcnow()
         context = runtime_context or {}
+        raw_stream_output = context.get("stream_output", context.get("streamOutput", True))
+        try:
+            stream_output_enabled = _parse_output_boolean(raw_stream_output)
+        except Exception:
+            stream_output_enabled = True
         conversation_id = str(context.get("conversation_id") or "")
         sys_vars = {
             "date": now.date().isoformat(),
@@ -2556,6 +2757,7 @@ class LangGraphEngine:
 
         workflow_node_types: dict[str, str] = {}
         node_llms: dict[str, ChatOpenAI] = {}
+        output_stream_source_node_id = ""
 
         if pattern == "agent_loop":
             # 设置 system prompt
@@ -2573,11 +2775,44 @@ class LangGraphEngine:
             if not wf_nodes:
                 raise ValueError(f"workflow_dag skill {skill.name} has no workflow nodes")
             node_llms = self._resolve_workflow_node_llms(skill)
+            workflow_node_configs: dict[str, dict[str, Any]] = {}
             workflow_node_types = {
                 str(getattr(n, "node_id", "") or ""): str(getattr(n, "node_type", "") or "")
                 for n in wf_nodes
                 if getattr(n, "node_id", None)
             }
+            for node in wf_nodes:
+                node_id = str(getattr(node, "node_id", "") or "").strip()
+                if not node_id:
+                    continue
+                raw_cfg = getattr(node, "config", None)
+                workflow_node_configs[node_id] = _normalize_config(raw_cfg) if isinstance(raw_cfg, dict) else {}
+
+            output_node_ids = [nid for nid, ntype in workflow_node_types.items() if ntype == "output"]
+            if len(output_node_ids) == 1:
+                output_node_cfg = workflow_node_configs.get(output_node_ids[0], {})
+                output_mode = str(output_node_cfg.get("output_mode", "text") or "text").strip().lower()
+                if output_mode == "json":
+                    output_mode = "structured"
+                if output_mode == "text":
+                    text_template = output_node_cfg.get("text_template", "")
+                    if isinstance(text_template, str):
+                        single_ref = _extract_single_template_reference(text_template)
+                        if single_ref is not None:
+                            ref_node_id, ref_field = single_ref
+                            ref_node_cfg = workflow_node_configs.get(ref_node_id, {})
+                            ref_output_mode = str(
+                                ref_node_cfg.get("output_mode", "text") or "text"
+                            ).strip().lower()
+                            if ref_output_mode == "json":
+                                ref_output_mode = "structured"
+                            if (
+                                workflow_node_types.get(ref_node_id) == "llm"
+                                and ref_output_mode == "text"
+                                and ref_field in {"response", "text"}
+                            ):
+                                output_stream_source_node_id = ref_node_id
+
             compiled = _get_or_compile_graph(
                 cache_key,
                 lambda: build_workflow_dag_subgraph(
@@ -2600,6 +2835,8 @@ class LangGraphEngine:
                 "sys_vars": sys_vars,
                 "workflow_node_types": workflow_node_types,
                 "node_llms": node_llms,
+                "stream_output_enabled": stream_output_enabled,
+                "output_stream_source_node_id": output_stream_source_node_id,
             }
         else:
             initial_state: dict = {
@@ -2631,6 +2868,7 @@ class LangGraphEngine:
             graph_thread.start()
 
             graph_done = False
+            buffered_content_chunks: list[str] = []
             while not graph_done or not runtime_events.empty():
                 try:
                     event_name, payload = runtime_events.get(timeout=0.1)
@@ -2642,7 +2880,10 @@ class LangGraphEngine:
                 if event_name == "content_delta":
                     chunk = payload.get("chunk", "")
                     if chunk:
-                        yield str(chunk)
+                        if stream_output_enabled:
+                            yield str(chunk)
+                        else:
+                            buffered_content_chunks.append(str(chunk))
                     continue
 
                 if event_name == "tool_call_start" and on_tool_call_start:
@@ -2713,6 +2954,8 @@ class LangGraphEngine:
             graph_thread.join()
             if graph_errors:
                 raise graph_errors[0]
+            if not stream_output_enabled and buffered_content_chunks:
+                yield "".join(buffered_content_chunks)
         except Exception as e:
             logger.error("LangGraph execution failed: skill=%s error=%s",
                          skill.name, e, exc_info=True)

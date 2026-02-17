@@ -207,6 +207,7 @@ def _iter_config_template_texts(cfg: dict) -> list[str]:
         "input_content", "inputContent",
         "instruction",
         "template",
+        "text_template", "textTemplate",
         "query",
         "args_template", "argsTemplate",
         "input_source", "inputSource",
@@ -231,6 +232,16 @@ def _iter_config_template_texts(cfg: dict) -> list[str]:
                     value = item.get("value")
                     if isinstance(value, str):
                         texts.append(value)
+
+    for key in ("output_fields", "outputFields"):
+        items = cfg.get(key)
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                value = item.get("value")
+                if isinstance(value, str):
+                    texts.append(value)
 
     for key in ("conditions", "terminationConditions"):
         conds = cfg.get(key)
@@ -287,6 +298,7 @@ _SUPPORTED_NODE_TYPES = {
     "knowledge_retrieval",
     "iteration",
     "loop",
+    "output",
 }
 _CONTAINER_BODY_ALLOWED_NODE_TYPES = {
     "start",
@@ -297,7 +309,7 @@ _CONTAINER_BODY_ALLOWED_NODE_TYPES = {
     "knowledge_retrieval",
 }
 _REMOVED_NODE_TYPE_MESSAGES = {
-    "answer": "Node type 'answer' is no longer supported. Use llm node with isOutput=true.",
+    "answer": "Node type 'answer' is no longer supported. Use the output node instead.",
     "template": "Node type 'template' has been removed. Please refactor with supported nodes.",
     "variable_aggregator": "Node type 'variable_aggregator' has been removed. Please refactor with supported nodes.",
 }
@@ -477,19 +489,19 @@ def validate_workflow(
                 ValidationError(node_id=nid, message=f"Unsupported node type: {ntype}")
             )
 
-    # Rule 3: at least one llm output node
-    output_llm_nodes: list[str] = []
-    for nid, ntype in type_map.items():
-        if ntype != "llm":
-            continue
-        cfg = config_map.get(nid, {})
-        if _cfg_bool(cfg, "is_output", "isOutput", default=False):
-            output_llm_nodes.append(nid)
-    if not output_llm_nodes:
+    # Rule 3: workflow must have exactly one output node
+    output_nodes = [nid for nid, ntype in type_map.items() if ntype == "output"]
+    if len(output_nodes) == 0:
         errors.append(ValidationError(
             node_id=None,
-            message="Must have at least one llm node with isOutput=true",
+            message="Must have exactly one output node",
         ))
+    elif len(output_nodes) > 1:
+        for nid in output_nodes:
+            errors.append(ValidationError(
+                node_id=nid,
+                message="Only one output node is allowed",
+            ))
 
     # Rule 4: node_id uniqueness (already checked above)
 
@@ -554,6 +566,16 @@ def validate_workflow(
     for nid in start_nodes:
         if in_edge_count[nid] > 0:
             errors.append(ValidationError(node_id=nid, message="start node must not have incoming edges"))
+
+    # Rule 9.5: output node must be terminal (no outgoing edges)
+    for nid in output_nodes:
+        if out_edge_count[nid] > 0:
+            errors.append(
+                ValidationError(
+                    node_id=nid,
+                    message="output node must not have outgoing edges",
+                )
+            )
 
     # Rule 10: template variable references must point to upstream nodes
     topo_index = {nid: i for i, nid in enumerate(topo_order)}
@@ -734,7 +756,122 @@ def validate_workflow(
                         message=f"if_else has unknown outgoing handle: {handle}",
                     ))
 
-        # Rule 13: llm knowledge binding config validation (save-time)
+        # Rule 13: output node config validation (save-time)
+        if type_map.get(nid) == "output":
+            output_mode_raw = _cfg_get(cfg, "output_mode", "outputMode", default="text")
+            output_mode = str(output_mode_raw or "text").strip().lower()
+            if output_mode == "json":
+                output_mode = "structured"
+            if output_mode not in {"text", "structured"}:
+                errors.append(
+                    ValidationError(
+                        node_id=nid,
+                        message=f"Unsupported output outputMode: {output_mode_raw}",
+                    )
+                )
+                continue
+
+            text_template = _cfg_get(cfg, "text_template", "textTemplate", default="")
+            output_fields = _cfg_get(cfg, "output_fields", "outputFields", default=None)
+
+            if output_mode == "text":
+                if text_template is not None and not isinstance(text_template, str):
+                    errors.append(
+                        ValidationError(
+                            node_id=nid,
+                            message="output text mode requires textTemplate to be a string",
+                        )
+                    )
+            else:
+                if not isinstance(output_fields, list) or not output_fields:
+                    errors.append(
+                        ValidationError(
+                            node_id=nid,
+                            message="output structured mode requires outputFields",
+                        )
+                    )
+                else:
+                    for field in output_fields:
+                        if not isinstance(field, dict):
+                            errors.append(
+                                ValidationError(
+                                    node_id=nid,
+                                    message="output outputFields items must be objects",
+                                )
+                            )
+                            continue
+
+                        field_name = str(field.get("name", "") or "").strip()
+                        if not field_name or not _OUTPUT_FIELD_NAME_RE.fullmatch(field_name):
+                            errors.append(
+                                ValidationError(
+                                    node_id=nid,
+                                    message=f"Invalid output field name: {field_name}",
+                                )
+                            )
+
+                        value = field.get("value", None)
+                        if not isinstance(value, str):
+                            errors.append(
+                                ValidationError(
+                                    node_id=nid,
+                                    message=f"output field '{field_name or '<unknown>'}' requires string value template",
+                                )
+                            )
+
+                        field_type_raw = field.get("type", "string")
+                        field_type = str(field_type_raw or "string").strip().lower() or "string"
+                        if field_type not in _OUTPUT_FIELD_TYPES:
+                            errors.append(
+                                ValidationError(
+                                    node_id=nid,
+                                    message=f"Invalid output field type: {field_type_raw}",
+                                )
+                            )
+
+                        nullable_raw = field.get("nullable", None)
+                        if nullable_raw is not None and not isinstance(nullable_raw, bool):
+                            errors.append(
+                                ValidationError(
+                                    node_id=nid,
+                                    message=f"output field '{field_name or '<unknown>'}' nullable must be boolean",
+                                )
+                            )
+
+                        items_type_raw = field.get("items_type", field.get("itemsType"))
+                        items_type = str(items_type_raw or "").strip().lower()
+                        if field_type == "array":
+                            if not items_type:
+                                errors.append(
+                                    ValidationError(
+                                        node_id=nid,
+                                        message=f"output field '{field_name}' type=array requires itemsType",
+                                    )
+                                )
+                            elif items_type not in _OUTPUT_FIELD_TYPES or items_type == "array":
+                                errors.append(
+                                    ValidationError(
+                                        node_id=nid,
+                                        message=(
+                                            f"output field '{field_name}' has invalid itemsType: {items_type_raw}"
+                                        ),
+                                    )
+                                )
+
+                        enum_value = field.get("enum")
+                        if enum_value is not None:
+                            if not isinstance(enum_value, list) or any(
+                                not isinstance(item, str) or not item.strip()
+                                for item in enum_value
+                            ):
+                                errors.append(
+                                    ValidationError(
+                                        node_id=nid,
+                                        message=f"output field '{field_name}' enum must be non-empty string list",
+                                    )
+                                )
+
+        # Rule 14: llm knowledge binding config validation (save-time)
         if type_map.get(nid) == "llm":
             knowledge_source_ids = _cfg_str_list(cfg, "knowledge_source_node_ids", "knowledgeSourceNodeIds")
             raw_inject_mode = str(
@@ -792,7 +929,7 @@ def validate_workflow(
                         )
                     )
 
-        # Rule 14: llm / parameter_extractor model selection validation (save-time)
+        # Rule 15: llm / parameter_extractor model selection validation (save-time)
         if type_map.get(nid) in {"llm", "parameter_extractor"}:
             raw_model_source = _cfg_get(cfg, "model_source", "modelSource", default=None)
             model_source = str(raw_model_source or "default").strip().lower() or "default"
@@ -831,7 +968,7 @@ def validate_workflow(
                         )
                     )
 
-        # Rule 15: parameter_extractor config validation (save-time)
+        # Rule 16: parameter_extractor config validation (save-time)
         if type_map.get(nid) == "parameter_extractor":
             input_content = _cfg_get(cfg, "input_content", "inputContent", default=None)
             if input_content is not None and not isinstance(input_content, str):
@@ -1260,6 +1397,65 @@ def validate_workflow_compile(
                                     node_id=nid,
                                     message=f"Invalid output field name: {name}",
                                 ))
+
+        # Output node: output_mode/output_fields format
+        if ntype == "output":
+            output_mode_raw = _cfg_get(cfg, "output_mode", "outputMode", default="text")
+            output_mode = str(output_mode_raw or "text").strip().lower()
+            if output_mode == "json":
+                output_mode = "structured"
+            if output_mode not in {"text", "structured"}:
+                errors.append(
+                    ValidationError(
+                        node_id=nid,
+                        message=f"Unsupported output output_mode: {output_mode_raw}",
+                    )
+                )
+                continue
+
+            text_template = _cfg_get(cfg, "text_template", "textTemplate", default="")
+            output_fields = _cfg_get(cfg, "output_fields", "outputFields", default=None)
+            if output_mode == "text":
+                if text_template is not None and not isinstance(text_template, str):
+                    errors.append(
+                        ValidationError(
+                            node_id=nid,
+                            message="output text mode requires textTemplate to be a string",
+                        )
+                    )
+            else:
+                if not isinstance(output_fields, list) or not output_fields:
+                    errors.append(
+                        ValidationError(
+                            node_id=nid,
+                            message="output structured mode requires output_fields",
+                        )
+                    )
+                else:
+                    for f in output_fields:
+                        if not isinstance(f, dict):
+                            errors.append(
+                                ValidationError(
+                                    node_id=nid,
+                                    message="output output_fields items must be objects",
+                                )
+                            )
+                            continue
+                        name = str(f.get("name", "") or "").strip()
+                        if not name or not re.fullmatch(r"[a-zA-Z0-9_]+", name):
+                            errors.append(
+                                ValidationError(
+                                    node_id=nid,
+                                    message=f"Invalid output field name: {name}",
+                                )
+                            )
+                        if not isinstance(f.get("value"), str):
+                            errors.append(
+                                ValidationError(
+                                    node_id=nid,
+                                    message=f"output field '{name or '<unknown>'}' requires string value",
+                                )
+                            )
 
         # if_else: compile-time variable path check for normalized branches
         if ntype == "if_else":

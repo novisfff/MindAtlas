@@ -199,7 +199,7 @@ export function deserializeFromSkill(skill: AssistantSkill): {
     ? { x: skill.workflowViewport.x, y: skill.workflowViewport.y, zoom: skill.workflowViewport.zoom }
     : undefined
 
-  // If no nodes exist, create a default start + llm(output) layout
+  // If no nodes exist, create a default start -> llm -> output layout.
   if (nodes.length === 0) {
     nodes.push(
       {
@@ -218,8 +218,20 @@ export function deserializeFromSkill(skill: AssistantSkill): {
           config: {
             outputMode: 'text',
             userInput: '{{start.user_input}}',
-            isOutput: true,
             modelSource: 'default',
+          },
+        },
+      },
+      {
+        id: 'output_1',
+        type: 'output',
+        position: { x: 800, y: 220 },
+        data: {
+          nodeType: 'output',
+          label: defaultLabelForNodeType('output'),
+          config: {
+            outputMode: 'text',
+            textTemplate: '{{llm_1.response}}',
           },
         },
       },
@@ -228,6 +240,14 @@ export function deserializeFromSkill(skill: AssistantSkill): {
       id: 'edge_start_llm',
       source: 'start',
       target: 'llm_1',
+      sourceHandle: 'output',
+      targetHandle: 'input',
+      type: 'workflowBezier',
+    })
+    edges.push({
+      id: 'edge_llm_output',
+      source: 'llm_1',
+      target: 'output_1',
       sourceHandle: 'output',
       targetHandle: 'input',
       type: 'workflowBezier',

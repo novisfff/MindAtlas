@@ -98,6 +98,66 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertEqual(created.mode, "langgraph")
         self.assertEqual(created.langgraph_pattern, "agent_loop")
 
+    def test_create_workflow_skill_without_workflow_seeds_default_graph(self) -> None:
+        from app.assistant_config.schemas import AssistantSkillCreateRequest  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        created = svc.create_skill(
+            AssistantSkillCreateRequest(
+                name="wf_seed_default",
+                description="d",
+                intent_examples=[],
+                tools=[],
+                mode="langgraph",
+                langgraph_pattern="workflow_dag",
+                enabled=True,
+            )
+        )
+
+        node_by_id = {node.node_id: node for node in (created.nodes or [])}
+        edge_pairs = {(edge.source_node_id, edge.target_node_id) for edge in (created.edges or [])}
+
+        self.assertSetEqual(set(node_by_id.keys()), {"start", "llm_1", "output_1"})
+        self.assertEqual(node_by_id["output_1"].node_type, "output")
+        self.assertEqual((node_by_id["output_1"].config or {}).get("textTemplate"), "{{llm_1.response}}")
+        self.assertIn(("start", "llm_1"), edge_pairs)
+        self.assertIn(("llm_1", "output_1"), edge_pairs)
+
+    def test_update_skill_switch_to_workflow_without_workflow_seeds_default_graph(self) -> None:
+        from app.assistant_config.schemas import AssistantSkillCreateRequest, AssistantSkillUpdateRequest  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        created = svc.create_skill(
+            AssistantSkillCreateRequest(
+                name="switch_seed_default",
+                description="d",
+                intent_examples=[],
+                tools=[],
+                mode="langgraph",
+                langgraph_pattern="agent_loop",
+                system_prompt="sys",
+                enabled=True,
+            )
+        )
+
+        updated = svc.update_skill(
+            created.id,
+            AssistantSkillUpdateRequest(
+                langgraph_pattern="workflow_dag",
+            ),
+        )
+
+        node_by_id = {node.node_id: node for node in (updated.nodes or [])}
+        edge_pairs = {(edge.source_node_id, edge.target_node_id) for edge in (updated.edges or [])}
+
+        self.assertSetEqual(set(node_by_id.keys()), {"start", "llm_1", "output_1"})
+        self.assertEqual(node_by_id["output_1"].node_type, "output")
+        self.assertEqual((node_by_id["output_1"].config or {}).get("textTemplate"), "{{llm_1.response}}")
+        self.assertIn(("start", "llm_1"), edge_pairs)
+        self.assertIn(("llm_1", "output_1"), edge_pairs)
+
     def test_update_skill_rejects_non_langgraph_mode(self) -> None:
         from app.assistant_config.models import AssistantSkill  # noqa: E402
         from app.assistant_config.schemas import AssistantSkillUpdateRequest  # noqa: E402
@@ -146,12 +206,19 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
                     node_id="llm_1",
                     node_type="llm",
                     label="LLM",
-                    config={"isOutput": True, "outputMode": "text"},
+                    config={"outputMode": "text"},
+                ),
+                WorkflowNodeInput(
+                    node_id="output_1",
+                    node_type="output",
+                    label="Output",
+                    config={"outputMode": "text", "textTemplate": "{{llm_1.response}}"},
                 ),
             ],
             edges=[
                 WorkflowEdgeInput(edge_id="e1", source_node_id="start", target_node_id="tool_1"),
                 WorkflowEdgeInput(edge_id="e2", source_node_id="tool_1", target_node_id="llm_1"),
+                WorkflowEdgeInput(edge_id="e3", source_node_id="llm_1", target_node_id="output_1"),
             ],
         )
 
@@ -194,12 +261,19 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
                     node_id="llm_1",
                     node_type="llm",
                     label="LLM",
-                    config={"isOutput": True, "outputMode": "text"},
+                    config={"outputMode": "text"},
+                ),
+                WorkflowNodeInput(
+                    node_id="output_1",
+                    node_type="output",
+                    label="Output",
+                    config={"outputMode": "text", "textTemplate": "{{llm_1.response}}"},
                 ),
             ],
             edges=[
                 WorkflowEdgeInput(edge_id="e1", source_node_id="start", target_node_id="tool_1"),
                 WorkflowEdgeInput(edge_id="e2", source_node_id="tool_1", target_node_id="llm_1"),
+                WorkflowEdgeInput(edge_id="e3", source_node_id="llm_1", target_node_id="output_1"),
             ],
         )
 
@@ -237,15 +311,21 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
                     node_type="llm",
                     label="LLM",
                     config={
-                        "isOutput": True,
                         "outputMode": "text",
                         "modelSource": "custom",
                         "modelId": str(uuid4()),
                     },
                 ),
+                WorkflowNodeInput(
+                    node_id="output_1",
+                    node_type="output",
+                    label="Output",
+                    config={"outputMode": "text", "textTemplate": "{{llm_1.response}}"},
+                ),
             ],
             edges=[
                 WorkflowEdgeInput(edge_id="e1", source_node_id="start", target_node_id="llm_1"),
+                WorkflowEdgeInput(edge_id="e2", source_node_id="llm_1", target_node_id="output_1"),
             ],
         )
 
@@ -302,15 +382,21 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
                     node_type="llm",
                     label="LLM",
                     config={
-                        "isOutput": True,
                         "outputMode": "text",
                         "modelSource": "custom",
                         "modelId": str(embedding_model.id),
                     },
                 ),
+                WorkflowNodeInput(
+                    node_id="output_1",
+                    node_type="output",
+                    label="Output",
+                    config={"outputMode": "text", "textTemplate": "{{llm_1.response}}"},
+                ),
             ],
             edges=[
                 WorkflowEdgeInput(edge_id="e1", source_node_id="start", target_node_id="llm_1"),
+                WorkflowEdgeInput(edge_id="e2", source_node_id="llm_1", target_node_id="output_1"),
             ],
         )
 

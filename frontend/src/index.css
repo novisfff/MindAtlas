@@ -140,3 +140,19 @@ body {
     @apply bg-background text-foreground;
   }
 }
+
+/* We render a custom node for type "output"; suppress ReactFlow built-in output wrapper chrome. */
+.workflow-editor-flow .react-flow__node-output {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  width: auto;
+}
+
+.workflow-editor-flow .react-flow__node-output.selectable:hover,
+.workflow-editor-flow .react-flow__node-output.selectable.selected,
+.workflow-editor-flow .react-flow__node-output.selectable:focus,
+.workflow-editor-flow .react-flow__node-output.selectable:focus-visible {
+  box-shadow: none;
+}

@@ -71,7 +71,7 @@ def chat(
     service = AssistantService(db)
     service.get_conversation_basic(id)  # 验证存在
     return StreamingResponse(
-        service.chat_stream(id, request.message),
+        service.chat_stream(id, request.message, stream_output=request.stream_output),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

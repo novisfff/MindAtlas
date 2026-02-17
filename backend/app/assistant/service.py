@@ -146,7 +146,7 @@ class AssistantService:
         self.db.delete(conversation)
         self.db.commit()
 
-    def chat_stream(self, conversation_id: UUID, user_message: str) -> Iterator[bytes]:
+    def chat_stream(self, conversation_id: UUID, user_message: str, *, stream_output: bool = True) -> Iterator[bytes]:
         """SSE 流式聊天"""
         conversation = self.get_conversation_basic(conversation_id)
         user_msg = Message(
@@ -176,6 +176,7 @@ class AssistantService:
             content_parts: list[str] = []
             for delta in self._generate_response(
                 conversation.id,
+                stream_output=stream_output,
                 on_tool_call_start=event_adapter.on_tool_call_start,
                 on_tool_call_end=event_adapter.on_tool_call_end,
                 on_skill_start=event_adapter.on_skill_start,
@@ -219,6 +220,7 @@ class AssistantService:
     def _generate_response(
         self,
         conversation_id: UUID,
+        stream_output: bool = True,
         on_tool_call_start: Callable[[str, str, dict], None] | None = None,
         on_tool_call_end: Callable[[str, str, str], None] | None = None,
         on_skill_start: Callable[[str, str, bool], None] | None = None,
@@ -249,7 +251,10 @@ class AssistantService:
             for delta in agent.stream(
                 history[:-1],
                 user_input,
-                runtime_context={"conversation_id": str(conversation_id)},
+                runtime_context={
+                    "conversation_id": str(conversation_id),
+                    "stream_output": bool(stream_output),
+                },
                 on_tool_call_start=on_tool_call_start,
                 on_tool_call_end=on_tool_call_end,
                 on_skill_start=on_skill_start,

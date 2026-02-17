@@ -99,7 +99,7 @@ function getSubflowPreview(nodeType: ContainerBodyNodeType, config: Record<strin
   const cfg = (config ?? {}) as Record<string, unknown>
   switch (nodeType) {
     case 'llm':
-      return (cfg.isOutput ? '[Output] ' : '') + truncate(cfg.systemPrompt as string, PREVIEW_MAX)
+      return truncate(cfg.systemPrompt as string, PREVIEW_MAX)
     case 'tool':
       return (cfg.toolName as string) || ''
     case 'if_else': {
@@ -1068,6 +1068,7 @@ export function ContainerSubflowCanvas({
       tabIndex={0}
       className="rounded-xl border bg-card/50 p-2.5 outline-none"
       onPointerDown={handleContainerPointerDown}
+      onClick={(event) => event.stopPropagation()}
       onKeyDownCapture={handleSubflowDeleteKey}
     >
       <div className="rounded-xl border bg-background overflow-hidden" style={{ height: `${canvasHeight}px` }}>
@@ -1080,15 +1081,18 @@ export function ContainerSubflowCanvas({
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
-            onNodeClick={(_, node) => {
+            onNodeClick={(event, node) => {
+              event.stopPropagation()
               setSelectedNodeId(node.id)
               setSelectedEdgeId(null)
             }}
-            onEdgeClick={(_, edge) => {
+            onEdgeClick={(event, edge) => {
+              event.stopPropagation()
               setSelectedEdgeId(edge.id)
               setSelectedNodeId(null)
             }}
-            onPaneClick={() => {
+            onPaneClick={(event) => {
+              event.stopPropagation()
               setSelectedNodeId(null)
               setSelectedEdgeId(null)
             }}

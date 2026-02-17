@@ -20,6 +20,7 @@ import {
   IterationNodeSettings,
   LoopNodeSettings,
 } from './property-panel/nodes/OtherNodeSettings'
+import { OutputNodeSettings } from './property-panel/nodes/OutputNodeSettings'
 import { useModelsQuery } from '../../../ai-providers/queries'
 import { X } from 'lucide-react'
 import { defaultLabelForNodeType } from './labelUtils'
@@ -585,6 +586,8 @@ export function PropertyPanel({ tools }: PropertyPanelProps) {
         return <IterationNodeSettings {...commonProps} />
       case 'loop':
         return <LoopNodeSettings {...commonProps} />
+      case 'output':
+        return <OutputNodeSettings {...commonProps} />
       default:
         return <div className="text-sm text-muted-foreground p-4 text-center">{t('settings.skills.noSettingsAvailable')}</div>
     }

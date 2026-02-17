@@ -14,6 +14,7 @@ const DEFAULT_NODE_SIZE: Record<string, { width: number; height: number }> = {
   knowledge_retrieval: { width: 260, height: 96 },
   iteration: { width: 320, height: 220 },
   loop: { width: 320, height: 220 },
+  output: { width: 260, height: 112 },
 }
 
 const SUBFLOW_NODE_SIZE: Record<string, { width: number; height: number }> = {

@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { NodeType } from '../../../api/workflow'
-import { Brain, GitBranch, ScanSearch, BookOpen, Wrench, Play, RefreshCw, Infinity } from 'lucide-react'
+import { Brain, GitBranch, ScanSearch, BookOpen, Wrench, Play, RefreshCw, Infinity, SendHorizontal } from 'lucide-react'
 
 interface NodeHeaderProps {
     nodeType: NodeType
@@ -19,6 +19,7 @@ const NODE_ICONS: Record<string, React.ElementType> = {
     start: Play,
     iteration: RefreshCw,
     loop: Infinity,
+    output: SendHorizontal,
 }
 
 const NODE_COLORS: Record<string, string> = {
@@ -30,6 +31,7 @@ const NODE_COLORS: Record<string, string> = {
     start: 'text-emerald-600 bg-emerald-50 border-emerald-100',
     iteration: 'text-cyan-600 bg-cyan-50 border-cyan-100',
     loop: 'text-blue-600 bg-blue-50 border-blue-100',
+    output: 'text-indigo-600 bg-indigo-50 border-indigo-100',
 }
 
 export function NodeHeader({ nodeType, label, onLabelChange }: NodeHeaderProps) {

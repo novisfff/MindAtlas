@@ -11,6 +11,7 @@ export type NodeType =
   | 'knowledge_retrieval'
   | 'iteration'
   | 'loop'
+  | 'output'
 
 export type ConditionOperator =
   | 'contains'
@@ -65,13 +66,25 @@ export interface LLMNodeConfig {
   }>
   temperature?: number
   userInput?: string
-  isOutput?: boolean
   knowledgeEnabled?: boolean
   knowledgeSourceNodeIds?: string[]
   knowledgeInjectMode?: 'references_only' | 'full_payload'
   knowledgeMaxRefs?: number
   modelSource?: 'default' | 'custom'
   modelId?: string
+}
+
+export interface OutputNodeConfig {
+  outputMode?: 'text' | 'structured' | 'json'
+  textTemplate?: string
+  outputFields?: Array<{
+    name: string
+    type?: string
+    nullable?: boolean
+    itemsType?: string
+    enum?: string[]
+    value: string
+  }>
 }
 
 export interface ToolNodeConfig {
@@ -157,6 +170,7 @@ export interface LoopNodeConfig {
 
 export type NodeConfig =
   | LLMNodeConfig
+  | OutputNodeConfig
   | ToolNodeConfig
   | IfElseNodeConfig
   | ParameterExtractorNodeConfig

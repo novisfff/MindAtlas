@@ -27,6 +27,7 @@ type WorkflowReadonlyPreviewProps = {
 
 function PreviewNode({ data }: NodeProps<Node<PreviewNodeData>>) {
   const nodeData = data as PreviewNodeData
+  const isOutputNode = nodeData.nodeType === 'output'
   return (
     <div className="relative min-w-[96px] max-w-[132px] rounded-md border bg-background/95 px-2 py-1 shadow-sm">
       <Handle
@@ -37,12 +38,14 @@ function PreviewNode({ data }: NodeProps<Node<PreviewNodeData>>) {
       />
       <div className="text-[9px] text-muted-foreground uppercase tracking-wide">{nodeData.nodeType}</div>
       <div className="text-[11px] font-medium truncate">{nodeData.label}</div>
-      <Handle
-        type="source"
-        position={Position.Right}
-        id="output"
-        className="!h-2 !w-2 !opacity-0 !pointer-events-none"
-      />
+      {!isOutputNode && (
+        <Handle
+          type="source"
+          position={Position.Right}
+          id="output"
+          className="!h-2 !w-2 !opacity-0 !pointer-events-none"
+        />
+      )}
     </div>
   )
 }
@@ -51,11 +54,6 @@ function WorkflowReadonlyPreviewInner({ skill, onOpenEditor }: WorkflowReadonlyP
   const { t } = useTranslation()
 
   const { nodes, edges } = useMemo(() => {
-    const hasNodes = Array.isArray(skill.nodes) && skill.nodes.length > 0
-    if (!hasNodes) {
-      return { nodes: [] as Node<PreviewNodeData>[], edges: [] as Edge[] }
-    }
-
     try {
       const parsed = deserializeFromSkill(skill)
       const minX = parsed.nodes.reduce((acc, n) => Math.min(acc, n.position.x), Number.POSITIVE_INFINITY)

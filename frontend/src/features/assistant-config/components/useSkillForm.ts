@@ -72,12 +72,10 @@ export function useSkillForm({ skill }: UseSkillFormOptions) {
     kbConfig: langgraphPattern === 'agent_loop' ? kbConfig : undefined,
   })
 
-  const isNewWorkflowDAG = !skill?.id && langgraphPattern === 'workflow_dag'
   const isValid =
     !!name &&
     !!description &&
-    (langgraphPattern !== 'agent_loop' || !!systemPrompt.trim()) &&
-    !isNewWorkflowDAG
+    (langgraphPattern !== 'agent_loop' || !!systemPrompt.trim())
 
   return {
     state: {

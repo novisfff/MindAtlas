@@ -56,6 +56,8 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
                     "system_prompt",
                     "userInput",
                     "user_input",
+                    "textTemplate",
+                    "text_template",
                     "template",
                     "instruction",
                     "argsTemplate",
@@ -70,6 +72,15 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
                     for k, v in input_bindings.items():
                         if isinstance(v, str):
                             text_fields.append((f"inputBindings.{k}", v))
+
+                output_fields = cfg.get("outputFields")
+                if isinstance(output_fields, list):
+                    for index, item in enumerate(output_fields):
+                        if not isinstance(item, dict):
+                            continue
+                        value = item.get("value")
+                        if isinstance(value, str):
+                            text_fields.append((f"outputFields[{index}].value", value))
 
                 for key, text in text_fields:
                     for m in _VAR_RE.finditer(text):
@@ -137,6 +148,21 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
 
         if node_type == "knowledge_retrieval":
             return {"result", "query", "mode", "references", "references_count"}
+
+        if node_type == "output":
+            output_mode = str(cfg.get("outputMode", "text") or "text").strip().lower()
+            if output_mode == "json":
+                output_mode = "structured"
+            if output_mode != "structured":
+                return {"response"}
+            fields = {"response"}
+            for item in (cfg.get("outputFields") or []):
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).strip()
+                if name:
+                    fields.add(name)
+            return fields
 
         return {"text"}
 

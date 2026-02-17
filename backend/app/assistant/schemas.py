@@ -11,6 +11,7 @@ from app.common.schemas import CamelModel, OrmModel
 
 class ChatRequest(CamelModel):
     message: str = Field(..., min_length=1, max_length=8000)
+    stream_output: bool = True
 
 
 class ConversationCreateRequest(CamelModel):

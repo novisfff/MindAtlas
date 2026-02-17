@@ -108,7 +108,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(tokens[0], "A")
         self.assertEqual(tokens[1], "B")
 
-    def test_workflow_llm_node_is_output_false_does_not_emit_content_delta(self) -> None:
+    def test_workflow_llm_node_without_stream_passthrough_does_not_emit_content_delta(self) -> None:
         from app.assistant.skills.langgraph_engine import _build_dag_llm_node
 
         class _Chunk:
@@ -129,7 +129,6 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
                 "system_prompt": "reply",
                 "output_mode": "text",
                 "user_input": "{{start.user_input}}",
-                "is_output": False,
             },
             _LLM(),
         )
@@ -140,6 +139,8 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
                 "node_outputs": {
                     "start": {"json_fields": {"user_input": "hello"}, "text": "hello", "status": "ok"},
                 },
+                "stream_output_enabled": True,
+                "output_stream_source_node_id": "",
                 "metadata": {
                     "on_content_delta": lambda chunk: content_emitted.append(chunk),
                     "on_node_output_delta": lambda node_id, delta: node_delta_emitted.append(delta),
@@ -152,7 +153,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(out["node_outputs"]["llm_1"]["text"], "AB")
         self.assertEqual(out["node_outputs"]["llm_1"]["json_fields"]["response"], "AB")
 
-    def test_workflow_llm_node_is_output_true_emits_content_delta(self) -> None:
+    def test_workflow_llm_node_with_stream_passthrough_emits_content_delta(self) -> None:
         from app.assistant.skills.langgraph_engine import _build_dag_llm_node
 
         class _Chunk:
@@ -172,7 +173,6 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
                 "system_prompt": "reply",
                 "output_mode": "text",
                 "user_input": "{{start.user_input}}",
-                "is_output": True,
             },
             _LLM(),
         )
@@ -183,6 +183,8 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
                 "node_outputs": {
                     "start": {"json_fields": {"user_input": "hello"}, "text": "hello", "status": "ok"},
                 },
+                "stream_output_enabled": True,
+                "output_stream_source_node_id": "llm_1",
                 "metadata": {
                     "on_content_delta": lambda chunk: content_emitted.append(chunk),
                 },
@@ -190,6 +192,107 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         )
 
         self.assertEqual(content_emitted, ["A", "B"])
+
+    def test_output_node_text_single_ref_skips_duplicate_emit_when_passthrough(self) -> None:
+        from app.assistant.skills.langgraph_engine import _build_output_node
+
+        content_emitted: list[str] = []
+        node = _build_output_node(
+            "output_1",
+            {
+                "output_mode": "text",
+                "text_template": "{{llm_1.response}}",
+            },
+        )
+
+        out = node(
+            {
+                "node_outputs": {
+                    "start": {"json_fields": {"user_input": "hello"}, "text": "hello", "status": "ok"},
+                    "llm_1": {"json_fields": {"response": "AB"}, "text": "AB", "status": "ok"},
+                },
+                "workflow_node_types": {"llm_1": "llm", "output_1": "output"},
+                "stream_output_enabled": True,
+                "output_stream_source_node_id": "llm_1",
+                "metadata": {"on_content_delta": lambda chunk: content_emitted.append(chunk)},
+            }
+        )
+
+        self.assertEqual(content_emitted, [])
+        self.assertEqual(out["node_outputs"]["output_1"]["text"], "AB")
+        self.assertEqual(out["node_outputs"]["output_1"]["json_fields"]["response"], "AB")
+
+    def test_output_node_text_non_passthrough_emits_once(self) -> None:
+        from app.assistant.skills.langgraph_engine import _build_output_node
+
+        content_emitted: list[str] = []
+        node = _build_output_node(
+            "output_1",
+            {
+                "output_mode": "text",
+                "text_template": "Result: {{llm_1.response}}",
+            },
+        )
+
+        out = node(
+            {
+                "node_outputs": {
+                    "start": {"json_fields": {"user_input": "hello"}, "text": "hello", "status": "ok"},
+                    "llm_1": {"json_fields": {"response": "AB"}, "text": "AB", "status": "ok"},
+                },
+                "workflow_node_types": {"llm_1": "llm", "output_1": "output"},
+                "stream_output_enabled": True,
+                "output_stream_source_node_id": "llm_1",
+                "metadata": {"on_content_delta": lambda chunk: content_emitted.append(chunk)},
+            }
+        )
+
+        self.assertEqual(content_emitted, ["Result: AB"])
+        self.assertEqual(out["node_outputs"]["output_1"]["text"], "Result: AB")
+
+    def test_output_node_structured_emits_json_once(self) -> None:
+        from app.assistant.skills.langgraph_engine import _build_output_node
+
+        content_emitted: list[str] = []
+        node = _build_output_node(
+            "output_1",
+            {
+                "output_mode": "structured",
+                "output_fields": [
+                    {"name": "answer", "type": "string", "value": "{{llm_1.response}}"},
+                    {"name": "count", "type": "integer", "value": "2"},
+                ],
+            },
+        )
+
+        out = node(
+            {
+                "node_outputs": {
+                    "start": {"json_fields": {"user_input": "hello"}, "text": "hello", "status": "ok"},
+                    "llm_1": {"json_fields": {"response": "AB"}, "text": "AB", "status": "ok"},
+                },
+                "workflow_node_types": {"llm_1": "llm", "output_1": "output"},
+                "stream_output_enabled": True,
+                "output_stream_source_node_id": "llm_1",
+                "metadata": {"on_content_delta": lambda chunk: content_emitted.append(chunk)},
+            }
+        )
+
+        self.assertEqual(len(content_emitted), 1)
+        parsed = json.loads(content_emitted[0])
+        self.assertEqual(parsed["answer"], "AB")
+        self.assertEqual(parsed["count"], 2)
+        self.assertEqual(out["node_outputs"]["output_1"]["json_fields"]["count"], 2)
+
+    def test_output_field_integer_array_rejects_boolean_items(self) -> None:
+        from app.assistant.skills.langgraph_engine import _coerce_output_field_value
+
+        with self.assertRaises(ValueError):
+            _coerce_output_field_value(
+                "values",
+                "[1, true, 3]",
+                {"type": "array", "itemsType": "integer"},
+            )
 
     def test_workflow_llm_structured_retry_success(self) -> None:
         from app.assistant.skills.langgraph_engine import _build_dag_llm_node
@@ -219,7 +322,6 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
                 "output_mode": "structured",
                 "output_fields": [{"name": "title"}],
                 "user_input": "{{start.user_input}}",
-                "is_output": True,
             },
             llm,
         )
@@ -259,7 +361,6 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
                 "output_mode": "structured",
                 "output_fields": [{"name": "title"}],
                 "user_input": "{{start.user_input}}",
-                "is_output": True,
             },
             _LLM(),
         )
@@ -536,6 +637,78 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertTrue(sys_vars.get("date"))
         self.assertTrue(sys_vars.get("datetime"))
 
+    def test_execute_output_passthrough_source_skips_structured_llm(self) -> None:
+        from app.assistant.skills.base import SkillDefinition
+        from app.assistant.skills.langgraph_engine import LangGraphEngine
+
+        class _FakeChunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _FakeLLM:
+            def stream(self, _messages):
+                yield _FakeChunk("x")
+
+        captured_state: dict[str, object] = {}
+
+        class _FakeCompiled:
+            def stream(self, state):
+                captured_state.update(state)
+                cb = state["metadata"].get("on_content_delta")
+                if callable(cb):
+                    cb("ok")
+                yield {"step": 1}
+
+        skill = SkillDefinition(
+            name="wf_skill_structured_passthrough",
+            description="d",
+            intent_examples=[],
+            tools=[],
+            mode="langgraph",
+            langgraph_pattern="workflow_dag",
+            workflow_nodes=[
+                {"node_id": "start", "node_type": "start", "config": {}},
+                {
+                    "node_id": "llm_1",
+                    "node_type": "llm",
+                    "config": {
+                        "outputMode": "structured",
+                        "outputFields": [{"name": "title"}],
+                    },
+                },
+                {
+                    "node_id": "output_1",
+                    "node_type": "output",
+                    "config": {
+                        "outputMode": "text",
+                        "textTemplate": "{{llm_1.response}}",
+                    },
+                },
+            ],
+            workflow_edges=[
+                {"source_node_id": "start", "target_node_id": "llm_1"},
+                {"source_node_id": "llm_1", "target_node_id": "output_1"},
+            ],
+        )
+
+        with patch("app.assistant.skills.langgraph_engine.ChatOpenAI", return_value=_FakeLLM()):
+            engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=None)
+
+        with patch(
+            "app.assistant.skills.langgraph_engine._get_or_compile_graph",
+            return_value=_FakeCompiled(),
+        ):
+            _ = list(
+                engine.execute(
+                    skill=skill,
+                    user_input="u",
+                    history=[],
+                    runtime_context={"conversation_id": "conv-abc", "stream_output": True},
+                )
+            )
+
+        self.assertEqual(captured_state.get("output_stream_source_node_id"), "")
+
     def test_workflow_parallel_branches_no_current_node_conflict(self) -> None:
         from app.assistant.skills.base import (
             SkillDefinition,
@@ -596,7 +769,6 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
                     "systemPrompt": "summarize",
                     "userInput": "{{tool_a_1.result}}\\n{{tool_b_1.result}}",
                     "outputMode": "text",
-                    "isOutput": True,
                 },
             ),
         ]
@@ -707,7 +879,6 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
                 "system_prompt": "reply",
                 "output_mode": "text",
                 "user_input": "{{start.user_input}}",
-                "is_output": False,
                 "knowledge_enabled": True,
                 "knowledge_source_node_ids": ["kr_1"],
                 "knowledge_inject_mode": "references_only",
@@ -774,7 +945,6 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
                 "system_prompt": "reply",
                 "output_mode": "text",
                 "user_input": "{{start.user_input}}",
-                "is_output": False,
                 "knowledge_enabled": True,
                 "knowledge_source_node_ids": ["kr_1"],
                 "knowledge_inject_mode": "full_payload",
@@ -833,7 +1003,6 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
                 "system_prompt": "reply",
                 "output_mode": "text",
                 "user_input": "{{start.user_input}}",
-                "is_output": False,
             },
             default_llm,
         )
@@ -1047,7 +1216,6 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
                     "node_type": "llm",
                     "label": "LLM",
                     "config": {
-                        "isOutput": True,
                         "modelSource": "custom",
                         "modelId": str(uuid4()),
                     },
@@ -1181,7 +1349,6 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
                             "system_prompt": "echo",
                             "output_mode": "text",
                             "user_input": "{{container.item}}",
-                            "is_output": False,
                         },
                     },
                 ],

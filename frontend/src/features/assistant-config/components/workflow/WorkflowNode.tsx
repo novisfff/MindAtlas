@@ -10,6 +10,7 @@ import {
   RefreshCw,
   Infinity,
   Plus,
+  SendHorizontal,
 } from 'lucide-react'
 import type { WfNodeData } from '../../stores/workflow-editor-store'
 import { useWorkflowEditorStore } from '../../stores/workflow-editor-store'
@@ -30,6 +31,7 @@ const NODE_STYLES: Record<NodeType, { header: string; icon: typeof Play; iconCol
   knowledge_retrieval: { header: 'bg-teal-50 border-b border-teal-100', icon: BookOpen, iconColor: 'text-teal-600' },
   iteration: { header: 'bg-cyan-50 border-b border-cyan-100', icon: RefreshCw, iconColor: 'text-cyan-600' },
   loop: { header: 'bg-blue-50 border-b border-blue-100', icon: Infinity, iconColor: 'text-blue-600' },
+  output: { header: 'bg-indigo-50 border-b border-indigo-100', icon: SendHorizontal, iconColor: 'text-indigo-600' },
 }
 const HANDLE_TOP_OFFSET = 28
 const CONTAINER_HANDLE_TOP = 20
@@ -169,7 +171,7 @@ function getPreview(data: WfNodeData): string {
   const cfg = (data.config ?? {}) as Record<string, unknown>
   switch (data.nodeType) {
     case 'llm':
-      return (cfg.isOutput ? '[Output] ' : '') + truncate(cfg.systemPrompt as string, 50)
+      return truncate(cfg.systemPrompt as string, 50)
     case 'tool':
       return (cfg.toolName as string) || ''
     case 'if_else': {
@@ -205,6 +207,18 @@ function getPreview(data: WfNodeData): string {
     case 'loop': {
       const maxIterations = Number.isFinite(Number(cfg.maxIterations)) ? String(cfg.maxIterations) : '10'
       return `最大循环 ${maxIterations} 次`
+    }
+    case 'output': {
+      const mode = String(cfg.outputMode ?? 'text').trim().toLowerCase() === 'structured' ? 'structured' : 'text'
+      if (mode === 'text') {
+        return truncate(String(cfg.textTemplate ?? ''), 50)
+      }
+      const fields = (Array.isArray(cfg.outputFields) ? cfg.outputFields : [])
+        .map((item) => (item && typeof item === 'object' ? String((item as Record<string, unknown>).name ?? '').trim() : ''))
+        .filter(Boolean)
+      if (fields.length === 0) return 'Structured output'
+      const brief = fields.slice(0, 3).join(', ')
+      return fields.length > 3 ? `${brief} +${fields.length - 3}` : brief
     }
     default:
       return ''
@@ -284,6 +298,7 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
   const previewText = preview || '\u00A0'
   const isStart = nodeData.nodeType === 'start'
   const isIfElse = nodeData.nodeType === 'if_else'
+  const isOutputNode = nodeData.nodeType === 'output'
   const isContainer = nodeData.nodeType === 'iteration' || nodeData.nodeType === 'loop'
   const containerConfig = ((nodeData.config ?? {}) as Record<string, unknown>)
   const bodyNodes = isContainer ? normalizeContainerBodyNodes(containerConfig) : []
@@ -468,7 +483,7 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
       )}
 
       {/* Output handle(s) */}
-      {!isIfElse && (
+      {!isIfElse && !isOutputNode && (
         <>
           <Handle
             type="source"

@@ -414,6 +414,12 @@
       "nodeModelNoModels": "暂无可用模型，请先在系统设置中创建 LLM 模型",
       "llmOutputModeStructured": "结构化",
       "llmOutputFields": "结构化字段",
+      "outputTextTemplate": "文本模板",
+      "outputTextTemplatePlaceholder": "使用 {{节点.字段}} 组合最终输出内容...",
+      "outputStructuredFields": "结构化输出字段",
+      "outputFieldValueTemplate": "值模板",
+      "outputEnumPlaceholder": "枚举值1, 枚举值2（可选）",
+      "outputNullable": "允许为空",
       "workflowPaletteNodes": "节点",
       "workflowPaletteTools": "工具",
       "workflowToolSearchPlaceholder": "搜索工具",
@@ -488,7 +494,8 @@
         "parameter_extractor": "参数提取",
         "knowledge_retrieval": "知识检索",
         "iteration": "迭代",
-        "loop": "循环"
+        "loop": "循环",
+        "output": "输出"
       },
       "operators": {
         "equals": "等于",

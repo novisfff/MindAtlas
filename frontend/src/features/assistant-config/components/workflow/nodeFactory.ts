@@ -18,8 +18,14 @@ export function createDefaultNodeConfig(
     return {
       outputMode: 'text',
       userInput: '{{start.user_input}}',
-      isOutput: false,
       modelSource: 'default',
+    }
+  }
+
+  if (nodeType === 'output') {
+    return {
+      outputMode: 'text',
+      textTemplate: '{{start.user_input}}',
     }
   }
 

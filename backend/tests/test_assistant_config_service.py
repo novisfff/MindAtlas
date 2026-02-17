@@ -241,6 +241,108 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertEqual(skill.nodes[1].config.get("userInput"), "{{tool_create.result}}")
         self.assertIn("{{tool_create.result}}", skill.nodes[1].config.get("systemPrompt", ""))
 
+    def test_sync_system_skills_migrates_legacy_workflow_output_to_output_node(self) -> None:
+        from app.assistant.skills.base import WorkflowEdgeDefinition, WorkflowNodeDefinition  # noqa: E402
+        from app.assistant_config.models import AssistantSkill, AssistantSkillEdge, AssistantSkillNode  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        class FakeSkill:
+            name = "smart_capture"
+            description = "d"
+            intent_examples = []
+            tools = []
+            mode = "langgraph"
+            langgraph_pattern = "workflow_dag"
+            system_prompt = None
+            kb = None
+            workflow_nodes = [
+                WorkflowNodeDefinition(
+                    node_id="start",
+                    node_type="start",
+                    label="Start",
+                    position_x=120,
+                    position_y=220,
+                    config={},
+                ),
+                WorkflowNodeDefinition(
+                    node_id="llm_output",
+                    node_type="llm",
+                    label="生成回复",
+                    position_x=460,
+                    position_y=220,
+                    config={"outputMode": "text"},
+                ),
+                WorkflowNodeDefinition(
+                    node_id="output_final",
+                    node_type="output",
+                    label="输出",
+                    position_x=780,
+                    position_y=220,
+                    config={"outputMode": "text", "textTemplate": "{{llm_output.response}}"},
+                ),
+            ]
+            workflow_edges = [
+                WorkflowEdgeDefinition(edge_id="e1", source_node_id="start", target_node_id="llm_output"),
+                WorkflowEdgeDefinition(edge_id="e2", source_node_id="llm_output", target_node_id="output_final"),
+            ]
+
+        existing = AssistantSkill(
+            name="smart_capture",
+            description="old",
+            intent_examples=[],
+            tools=[],
+            mode="langgraph",
+            langgraph_pattern="workflow_dag",
+            system_prompt=None,
+            is_system=True,
+            enabled=True,
+        )
+        existing.nodes = [
+            AssistantSkillNode(
+                node_id="start",
+                node_type="start",
+                label="Start",
+                position_x=120,
+                position_y=220,
+                config={},
+            ),
+            AssistantSkillNode(
+                node_id="llm_output",
+                node_type="llm",
+                label="生成回复",
+                position_x=460,
+                position_y=220,
+                config={"outputMode": "text", "isOutput": True},
+            ),
+        ]
+        existing.edges = [
+            AssistantSkillEdge(
+                edge_id="legacy_e1",
+                source_node_id="start",
+                target_node_id="llm_output",
+                source_handle="output",
+                target_handle="input",
+            ),
+        ]
+        self.db.add(existing)
+        self.db.commit()
+
+        svc = AssistantConfigService(self.db)
+        with patch("app.assistant_config.service.SkillRegistry.list_system_skills", return_value=[FakeSkill()]):
+            svc.sync_system_skills()
+
+        skill = self.db.query(AssistantSkill).filter(AssistantSkill.name == "smart_capture").first()
+        self.assertIsNotNone(skill)
+
+        nodes = list(skill.nodes or [])
+        edges = list(skill.edges or [])
+        output_nodes = [node for node in nodes if node.node_type == "output"]
+        self.assertEqual(len(output_nodes), 1)
+        self.assertEqual(output_nodes[0].node_id, "output_final")
+        self.assertFalse(any(isinstance(node.config, dict) and "isOutput" in node.config for node in nodes))
+        self.assertTrue(any(edge.target_node_id == "output_final" for edge in edges))
+        self.assertFalse(any(edge.source_node_id == "output_final" for edge in edges))
+
     def test_reset_skill_restores_langgraph_pattern(self) -> None:
         from app.assistant_config.models import AssistantSkill  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402

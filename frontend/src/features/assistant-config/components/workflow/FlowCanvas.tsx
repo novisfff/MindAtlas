@@ -33,6 +33,7 @@ const nodeTypes: NodeTypes = {
   knowledge_retrieval: WorkflowNode,
   iteration: WorkflowNode,
   loop: WorkflowNode,
+  output: WorkflowNode,
 }
 
 const edgeTypes = {
@@ -96,6 +97,7 @@ function normalizeConnectionTargetHandle(
 function resolveRenderSourceHandle(edge: Edge, sourceNode: Node<WfNodeData> | undefined): string | undefined {
   if (!sourceNode) return edge.sourceHandle ?? 'output'
   if (sourceNode.data.nodeType === 'if_else') return edge.sourceHandle ?? undefined
+  if (sourceNode.data.nodeType === 'output') return undefined
   if (isContainerNodeType(sourceNode.data.nodeType)) return CONTAINER_OUTPUT_HANDLE_ID
   return edge.sourceHandle ?? 'output'
 }
@@ -108,6 +110,9 @@ function resolveRenderTargetHandle(edge: Edge, targetNode: Node<WfNodeData> | un
 }
 
 function sourceHandlesForNode(node: Node<WfNodeData>): string[] {
+  if (node.data.nodeType === 'output') {
+    return []
+  }
   if (node.data.nodeType !== 'if_else') {
     return ['output']
   }
@@ -269,6 +274,7 @@ export function FlowCanvas({ tools }: FlowCanvasProps) {
         if (payload.kind === 'tool') return `tool_${Date.now()}_${++nodeCounter}`
         const nodeType = payload.nodeType as NodeType
         if (!nodeType || nodeType === 'start') return null
+        if (nodeType === 'output' && store.nodes.some((item) => item.data.nodeType === 'output')) return null
         return `${nodeType}_${Date.now()}_${++nodeCounter}`
       })()
       if (!nextNodeId) return
@@ -302,6 +308,7 @@ export function FlowCanvas({ tools }: FlowCanvasProps) {
         draftNode.data.nodeType === 'if_else'
           ? sourceHandlesForNode(draftNode)[0] ?? 'else'
           : 'output'
+      if (isInputSide && draftNode.data.nodeType === 'output') return
       const draftSourceRelativeTop = resolveHandleRelativeTop(draftNode, defaultSourceHandle)
       const initial = {
         x: isInputSide
@@ -378,6 +385,7 @@ export function FlowCanvas({ tools }: FlowCanvasProps) {
       if (!connection.source || !connection.target) return
       const sourceNode = nodeMap.get(connection.source)
       const targetNode = nodeMap.get(connection.target)
+      if (sourceNode?.data.nodeType === 'output') return
       const normalizedSourceHandle = normalizeConnectionSourceHandle(sourceNode, connection.sourceHandle)
       const normalizedTargetHandle = normalizeConnectionTargetHandle(targetNode, connection.targetHandle)
       // Prevent duplicate edges
@@ -456,6 +464,7 @@ export function FlowCanvas({ tools }: FlowCanvasProps) {
 
       const nodeType = e.dataTransfer.getData('application/workflow-node-type') as NodeType
       if (!nodeType) return
+      if (nodeType === 'output' && store.nodes.some((node) => node.data.nodeType === 'output')) return
       const nodeId = `${nodeType}_${Date.now()}_${++nodeCounter}`
 
       store.addNode(createMainFlowNode({ id: nodeId, nodeType, position }))
@@ -502,6 +511,7 @@ export function FlowCanvas({ tools }: FlowCanvasProps) {
   return (
     <div ref={reactFlowWrapper} className="flex-1 h-full">
       <ReactFlow
+        className="workflow-editor-flow"
         nodes={nodesWithRuntimeData}
         edges={edgesWithInteractions}
         nodeTypes={nodeTypes}

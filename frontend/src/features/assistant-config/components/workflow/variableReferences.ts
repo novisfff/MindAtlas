@@ -130,6 +130,17 @@ function buildNodeOutputFields(
     return ['iterations', 'terminated', 'last_item', ...varNames]
   }
 
+  if (node.data.nodeType === 'output') {
+    const mode = normalizeOutputMode(cfg.outputMode)
+    if (mode === 'text') return ['response']
+    const fields = Array.isArray(cfg.outputFields)
+      ? cfg.outputFields
+        .map((item) => (item && typeof item === 'object' ? String((item as Record<string, unknown>).name ?? '') : ''))
+        .filter((name) => !!name)
+      : []
+    return ['response', ...fields]
+  }
+
   if (node.data.nodeType === 'if_else') return ['handle']
   return ['text']
 }

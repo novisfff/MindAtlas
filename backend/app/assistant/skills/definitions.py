@@ -68,13 +68,24 @@ QUICK_STATS = SkillDefinition(
                 "systemPrompt": "汇报当前的记录总数、最近活动趋势等统计信息，输出简洁清晰。",
                 "userInput": "{{tool_stats.result}}",
                 "outputMode": "text",
-                "isOutput": True,
+            },
+        ),
+        WorkflowNodeDefinition(
+            node_id="output_final",
+            node_type="output",
+            label="输出",
+            position_x=1080,
+            position_y=220,
+            config={
+                "outputMode": "text",
+                "textTemplate": "{{llm_output.response}}",
             },
         ),
     ],
     workflow_edges=[
         WorkflowEdgeDefinition(edge_id="e_start_tool", source_node_id="start", target_node_id="tool_stats"),
         WorkflowEdgeDefinition(edge_id="e_tool_output", source_node_id="tool_stats", target_node_id="llm_output"),
+        WorkflowEdgeDefinition(edge_id="e_llm_output_final", source_node_id="llm_output", target_node_id="output_final"),
     ],
 )
 
@@ -227,7 +238,14 @@ SMART_CAPTURE = SkillDefinition(
                 "systemPrompt": "告知用户记录已创建，展示标题、类型与时间信息，并给出可继续补充/修改的提示。",
                 "userInput": "{{tool_create.result}}",
                 "outputMode": "text",
-                "isOutput": True,
+            },
+        ),
+        WorkflowNodeDefinition(
+            node_id="output_final", node_type="output", label="输出",
+            position_x=2480, position_y=320,
+            config={
+                "outputMode": "text",
+                "textTemplate": "{{llm_output.response}}",
             },
         ),
     ],
@@ -238,7 +256,7 @@ SMART_CAPTURE = SkillDefinition(
         # both tools feed into llm_title (aggregation point)
         WorkflowEdgeDefinition(edge_id="e_types_title", source_node_id="tool_types", target_node_id="llm_title"),
         WorkflowEdgeDefinition(edge_id="e_tags_title", source_node_id="tool_tags", target_node_id="llm_title"),
-        # linear chain: title → summary → content → type → tags → time → create → output llm
+        # linear chain: title → summary → content → type → tags → time → create → output llm → output
         WorkflowEdgeDefinition(edge_id="e_title_summary", source_node_id="llm_title", target_node_id="llm_summary"),
         WorkflowEdgeDefinition(edge_id="e_summary_content", source_node_id="llm_summary", target_node_id="llm_content"),
         WorkflowEdgeDefinition(edge_id="e_content_type", source_node_id="llm_content", target_node_id="llm_type"),
@@ -246,6 +264,7 @@ SMART_CAPTURE = SkillDefinition(
         WorkflowEdgeDefinition(edge_id="e_tags_time", source_node_id="llm_tags", target_node_id="llm_time"),
         WorkflowEdgeDefinition(edge_id="e_time_create", source_node_id="llm_time", target_node_id="tool_create"),
         WorkflowEdgeDefinition(edge_id="e_create_output", source_node_id="tool_create", target_node_id="llm_output"),
+        WorkflowEdgeDefinition(edge_id="e_output_final", source_node_id="llm_output", target_node_id="output_final"),
     ],
 )
 
@@ -315,7 +334,14 @@ PERIODIC_REVIEW = SkillDefinition(
                 "systemPrompt": "生成结构化的回顾报告，包含关键成就、活动分布和洞察。",
                 "userInput": "{{tool_entries.result}}\n\n{{tool_activity.result}}",
                 "outputMode": "text",
-                "isOutput": True,
+            },
+        ),
+        WorkflowNodeDefinition(
+            node_id="output_final", node_type="output", label="输出",
+            position_x=1320, position_y=320,
+            config={
+                "outputMode": "text",
+                "textTemplate": "{{llm_output.response}}",
             },
         ),
     ],
@@ -327,6 +353,7 @@ PERIODIC_REVIEW = SkillDefinition(
         # both tools feed into final llm output (aggregation point)
         WorkflowEdgeDefinition(edge_id="e_entries_output", source_node_id="tool_entries", target_node_id="llm_output"),
         WorkflowEdgeDefinition(edge_id="e_activity_output", source_node_id="tool_activity", target_node_id="llm_output"),
+        WorkflowEdgeDefinition(edge_id="e_output_final", source_node_id="llm_output", target_node_id="output_final"),
     ],
 )
 

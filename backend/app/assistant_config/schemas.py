@@ -216,7 +216,7 @@ class OutputFieldSpecInput(CamelModel):
 NodeType = Literal[
     "start", "llm", "tool", "if_else",
     "parameter_extractor", "knowledge_retrieval",
-    "iteration", "loop",
+    "iteration", "loop", "output",
 ]
 ConditionOperator = Literal[
     "contains", "not_contains", "starts_with", "ends_with",
@@ -300,8 +300,6 @@ class AssistantSkillCreateRequest(CamelModel):
             raise ValueError("langgraph_pattern is required")
         if self.langgraph_pattern == "agent_loop" and not (self.system_prompt or "").strip():
             raise ValueError("agent_loop requires system_prompt")
-        if self.langgraph_pattern == "workflow_dag" and not self.workflow:
-            raise ValueError("workflow_dag requires workflow data")
         return self
 
 
@@ -324,8 +322,6 @@ class AssistantSkillUpdateRequest(CamelModel):
         if self.langgraph_pattern == "agent_loop" and self.system_prompt is not None:
             if not self.system_prompt.strip():
                 raise ValueError("agent_loop requires system_prompt")
-        if self.langgraph_pattern == "workflow_dag" and self.workflow is None:
-            raise ValueError("workflow_dag update requires workflow data")
         return self
 
 
