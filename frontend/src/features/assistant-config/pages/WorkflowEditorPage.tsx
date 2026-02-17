@@ -14,7 +14,7 @@ import { NodePalette } from '../components/workflow/NodePalette'
 import { PropertyPanel } from '../components/workflow/PropertyPanel'
 import { serializeToWorkflowInput, deserializeFromSkill } from '../components/workflow/serialization'
 import type { WorkflowToolDefinition } from '../components/workflow/types'
-import { autoLayoutWorkflowNodes } from '../components/workflow/autoLayout'
+import { autoLayoutWorkflowWithSubflows } from '../components/workflow/autoLayout'
 
 import '@xyflow/react/dist/style.css'
 
@@ -107,7 +107,7 @@ export default function WorkflowEditorPage() {
 
   const handleAutoLayout = useCallback(() => {
     if (store.nodes.length <= 1) return
-    const laidOut = autoLayoutWorkflowNodes(store.nodes, store.edges)
+    const laidOut = autoLayoutWorkflowWithSubflows(store.nodes, store.edges)
     store.pushHistory()
     store.setNodes(laidOut)
   }, [store])

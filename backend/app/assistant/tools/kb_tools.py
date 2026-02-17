@@ -167,6 +167,8 @@ def _build_references(
 @tool
 def kb_search(
     query: str,
+    mode: str | None = None,
+    top_k: int | None = None,
 ) -> str:
     """使用 LightRAG 进行知识库检索，返回证据片段与图谱上下文。
 
@@ -175,6 +177,8 @@ def kb_search(
 
     Args:
         query: 用户查询文本。
+        mode: 可选检索模式（naive/local/global/hybrid/mix），为空时使用系统默认配置。
+        top_k: 可选召回条数，为空时使用系统默认配置。
 
     Returns:
         JSON 字符串（对象）：
@@ -207,8 +211,14 @@ def kb_search(
     from app.config import get_settings
 
     settings = get_settings()
-    m = _normalize_mode(getattr(settings, "assistant_kb_graph_recall_mode", "mix"))
-    k = _clamp_int(getattr(settings, "assistant_kb_graph_recall_top_k", 10), default=10, min_value=1, max_value=50)
+    mode_setting = getattr(settings, "assistant_kb_graph_recall_mode", "mix")
+    m = _normalize_mode(mode if mode is not None else mode_setting)
+    k = _clamp_int(
+        top_k if top_k is not None else getattr(settings, "assistant_kb_graph_recall_top_k", 10),
+        default=10,
+        min_value=1,
+        max_value=50,
+    )
     ck = _clamp_int(
         getattr(settings, "assistant_kb_graph_recall_chunk_top_k", 20),
         default=max(k, 1),

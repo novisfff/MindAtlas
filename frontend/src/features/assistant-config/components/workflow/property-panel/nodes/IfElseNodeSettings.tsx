@@ -1,9 +1,8 @@
 
 import { useTranslation } from 'react-i18next'
 import { Plus, Trash2, X } from 'lucide-react'
-import { CommonRichInput, CommonSelect, Label } from '../CommonInputs'
 import { RichMentionInput } from '../../../RichMentionInput'
-import type { IfElseBranch, NodeConfig } from '../../../../api/workflow'
+import type { IfElseBranch } from '../../../../api/workflow'
 import {
     IF_ELSE_OPERATOR_OPTIONS,
     createBranchId,
@@ -13,13 +12,9 @@ import {
     normalizeIfElseConfig,
 } from '../../ifElseConfig'
 import type { NodeSettingsProps } from './ToolNodeSettings'
-import { useWorkflowEditorStore } from '../../../../stores/workflow-editor-store'
 
-export function IfElseNodeSettings({ config, onUpdate, mentionParams }: NodeSettingsProps) {
+export function IfElseNodeSettings({ config, onUpdate, mentionParams, onDeleteBranchEdges }: NodeSettingsProps) {
     const { t } = useTranslation()
-    const edges = useWorkflowEditorStore((s) => s.edges)
-    const setEdges = useWorkflowEditorStore((s) => s.setEdges)
-    const selectedNodeId = useWorkflowEditorStore((s) => s.selectedNodeId)
 
     const ifElseNormalized = normalizeIfElseConfig(config)
     const conditionVariableOptions = mentionParams
@@ -42,16 +37,8 @@ export function IfElseNodeSettings({ config, onUpdate, mentionParams }: NodeSett
 
     const handleDeleteBranch = (branchId: string) => {
         const nextBranches = ifElseNormalized.branches.filter((item) => item.id !== branchId)
-
-        // Also remove edges connected to this branch
-        if (selectedNodeId) {
-            const filteredEdges = edges.filter(
-                (edge) => !(edge.source === selectedNodeId && edge.sourceHandle === branchId)
-            )
-            setEdges(filteredEdges)
-        }
-
         writeIfElseConfig(nextBranches)
+        onDeleteBranchEdges?.(branchId)
     }
 
     const handleUpdateCondition = (branchId: string, conditionId: string, updates: Record<string, any>) => {
@@ -144,8 +131,8 @@ export function IfElseNodeSettings({ config, onUpdate, mentionParams }: NodeSett
                         {branch.conditions.map((condition) => {
                             const requiresValue = ifElseOperatorRequiresValue(condition.operator)
                             return (
-                                <div key={condition.id} className="group relative flex flex-col gap-2 p-2 rounded border bg-background hover:border-primary/30 transition-colors">
-                                    <div className="grid grid-cols-[1fr,100px] gap-2">
+                                <div key={condition.id} className="group relative flex flex-col gap-2 p-2.5 rounded-md border border-border/50 bg-muted/20 hover:bg-muted/30 transition-all">
+                                    <div className="grid grid-cols-[1fr,110px] gap-2 mr-5">
                                         <div className="space-y-1">
                                             <input
                                                 type="text"
@@ -182,16 +169,17 @@ export function IfElseNodeSettings({ config, onUpdate, mentionParams }: NodeSett
                                             inputParams={mentionParams}
                                             placeholder={t('settings.skills.ifElseValuePlaceholder')}
                                             multiline={false}
-                                            className="min-h-[32px] text-xs"
+                                            className="min-h-[32px] text-xs bg-background"
                                         />
                                     )}
 
                                     {branch.conditions.length > 1 && (
                                         <button
                                             onClick={() => handleRemoveCondition(branch.id, condition.id)}
-                                            className="absolute -right-2 -top-2 opacity-0 group-hover:opacity-100 bg-background border rounded-full p-0.5 shadow-sm text-muted-foreground hover:text-red-500 transition-all"
+                                            className="absolute right-2 top-2.5 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500 transition-all p-0.5 hover:bg-red-100 rounded"
+                                            title={t('actions.remove')}
                                         >
-                                            <X className="w-3 h-3" />
+                                            <X className="w-3.5 h-3.5" />
                                         </button>
                                     )}
                                 </div>

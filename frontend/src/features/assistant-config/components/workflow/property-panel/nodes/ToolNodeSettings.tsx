@@ -1,6 +1,6 @@
 
 import { useTranslation } from 'react-i18next'
-import { CommonRichInput, CommonSelect, Label, CommonOutputList } from '../CommonInputs'
+import { CommonRichInput, Label, CommonOutputList } from '../CommonInputs'
 import type { WorkflowToolDefinition } from '../../../../components/workflow/types'
 import { Info } from 'lucide-react'
 
@@ -10,6 +10,8 @@ export interface NodeSettingsProps {
     onUpdate: (updates: Record<string, unknown>) => void
     mentionParams: any[] // InputParam[] but using any to avoid strict type issues for now, or match CommonInputs
     tools?: WorkflowToolDefinition[] // Optional, only for ToolNode
+    modelOptions?: Array<{ id: string; label: string }>
+    onDeleteBranchEdges?: (branchId: string) => void
 }
 
 export function ToolNodeSettings({ config, onUpdate, mentionParams, tools = [] }: NodeSettingsProps) {
@@ -24,21 +26,6 @@ export function ToolNodeSettings({ config, onUpdate, mentionParams, tools = [] }
             ? (rawBindings as Record<string, string>)
             : {}
 
-    const handleToolChange = (toolName: string) => {
-        const nextTool = tools.find((tool) => tool.name === toolName)
-        const nextBindings = Object.fromEntries(
-            (nextTool?.inputParams ?? []).map((param) => [
-                param.name,
-                typeof inputBindings[param.name] === 'string' ? inputBindings[param.name] : '',
-            ]),
-        )
-
-        onUpdate({
-            toolName: toolName,
-            inputBindings: nextBindings
-        })
-    }
-
     const handleBindingChange = (paramName: string, value: string) => {
         onUpdate({
             inputBindings: {
@@ -48,17 +35,14 @@ export function ToolNodeSettings({ config, onUpdate, mentionParams, tools = [] }
         })
     }
 
-    const toolOptions = tools.map(t => ({ label: t.name, value: t.name }))
-
     return (
         <div className="space-y-6">
-            <CommonSelect
-                label={t('settings.skills.workflowToolName') || 'Select Tool'}
-                value={selectedToolName}
-                onChange={handleToolChange}
-                options={toolOptions}
-                placeholder={t('settings.skills.selectTool') || 'Choose a tool...'}
-            />
+            <div className="space-y-1.5">
+                <Label>{t('settings.skills.workflowToolName') || 'Tool Name'}</Label>
+                <div className="w-full px-2.5 py-2 text-xs rounded-md border bg-muted/30 text-foreground break-all">
+                    {selectedToolName || '-'}
+                </div>
+            </div>
 
             {selectedTool && (
                 <div className="space-y-4">
@@ -87,6 +71,12 @@ export function ToolNodeSettings({ config, onUpdate, mentionParams, tools = [] }
                             </div>
                         )}
                     </div>
+                </div>
+            )}
+
+            {!selectedTool && (
+                <div className="text-xs text-muted-foreground italic text-center py-2 border border-dashed rounded-md">
+                    {t('settings.skills.workflowNoTools')}
                 </div>
             )}
 

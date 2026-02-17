@@ -10,6 +10,7 @@ from tests._db import make_session
 
 bootstrap_backend_imports()
 reset_caches()
+import app.ai_registry.models  # noqa: F401,E402
 
 
 class AssistantConfigServiceMoreTests(unittest.TestCase):
@@ -134,13 +135,19 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         svc = AssistantConfigService(self.db)
         workflow = WorkflowInput(
             nodes=[
-                WorkflowNodeInput(node_id="start", node_type="start", config={}),
+                WorkflowNodeInput(node_id="start", node_type="start", label="Start", config={}),
                 WorkflowNodeInput(
                     node_id="tool_1",
                     node_type="tool",
+                    label="Tool",
                     config={"toolName": "create_entry", "inputBindings": {"title": "{{start.user_input}}"}},
                 ),
-                WorkflowNodeInput(node_id="llm_1", node_type="llm", config={"isOutput": True, "outputMode": "text"}),
+                WorkflowNodeInput(
+                    node_id="llm_1",
+                    node_type="llm",
+                    label="LLM",
+                    config={"isOutput": True, "outputMode": "text"},
+                ),
             ],
             edges=[
                 WorkflowEdgeInput(edge_id="e1", source_node_id="start", target_node_id="tool_1"),
@@ -176,13 +183,19 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         svc = AssistantConfigService(self.db)
         workflow = WorkflowInput(
             nodes=[
-                WorkflowNodeInput(node_id="start", node_type="start", config={}),
+                WorkflowNodeInput(node_id="start", node_type="start", label="Start", config={}),
                 WorkflowNodeInput(
                     node_id="tool_1",
                     node_type="tool",
+                    label="Tool",
                     config={"toolName": "missing_tool", "inputBindings": {"q": "{{start.user_input}}"}},
                 ),
-                WorkflowNodeInput(node_id="llm_1", node_type="llm", config={"isOutput": True, "outputMode": "text"}),
+                WorkflowNodeInput(
+                    node_id="llm_1",
+                    node_type="llm",
+                    label="LLM",
+                    config={"isOutput": True, "outputMode": "text"},
+                ),
             ],
             edges=[
                 WorkflowEdgeInput(edge_id="e1", source_node_id="start", target_node_id="tool_1"),
@@ -208,3 +221,114 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.status_code, 422)
         self.assertEqual(ctx.exception.code, 42203)
+
+    def test_create_workflow_skill_rejects_missing_custom_model(self) -> None:
+        from uuid import uuid4
+        from app.assistant_config.schemas import AssistantSkillCreateRequest, WorkflowInput, WorkflowNodeInput, WorkflowEdgeInput  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+        from app.common.exceptions import ApiException  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        workflow = WorkflowInput(
+            nodes=[
+                WorkflowNodeInput(node_id="start", node_type="start", label="Start", config={}),
+                WorkflowNodeInput(
+                    node_id="llm_1",
+                    node_type="llm",
+                    label="LLM",
+                    config={
+                        "isOutput": True,
+                        "outputMode": "text",
+                        "modelSource": "custom",
+                        "modelId": str(uuid4()),
+                    },
+                ),
+            ],
+            edges=[
+                WorkflowEdgeInput(edge_id="e1", source_node_id="start", target_node_id="llm_1"),
+            ],
+        )
+
+        with patch("app.assistant_config.service.ToolRegistry.list_system_tools", return_value=[]):
+            with self.assertRaises(ApiException) as ctx:
+                svc.create_skill(
+                    AssistantSkillCreateRequest(
+                        name="wf_missing_model",
+                        description="d",
+                        intent_examples=[],
+                        tools=[],
+                        mode="langgraph",
+                        langgraph_pattern="workflow_dag",
+                        system_prompt="x",
+                        enabled=True,
+                        workflow=workflow,
+                    )
+                )
+
+        self.assertEqual(ctx.exception.status_code, 422)
+        self.assertEqual(ctx.exception.code, 42207)
+
+    def test_create_workflow_skill_rejects_custom_model_type_mismatch(self) -> None:
+        from app.ai_registry.models import AiCredential, AiModel  # noqa: E402
+        from app.assistant_config.schemas import AssistantSkillCreateRequest, WorkflowInput, WorkflowNodeInput, WorkflowEdgeInput  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+        from app.common.exceptions import ApiException  # noqa: E402
+
+        cred = AiCredential(
+            name="svc-model-cred",
+            base_url="https://example.com/v1",
+            api_key_encrypted="enc",
+            api_key_hint="****",
+        )
+        self.db.add(cred)
+        self.db.commit()
+        self.db.refresh(cred)
+
+        embedding_model = AiModel(
+            credential_id=cred.id,
+            name="text-embedding-3-small",
+            model_type="embedding",
+        )
+        self.db.add(embedding_model)
+        self.db.commit()
+        self.db.refresh(embedding_model)
+
+        svc = AssistantConfigService(self.db)
+        workflow = WorkflowInput(
+            nodes=[
+                WorkflowNodeInput(node_id="start", node_type="start", label="Start", config={}),
+                WorkflowNodeInput(
+                    node_id="llm_1",
+                    node_type="llm",
+                    label="LLM",
+                    config={
+                        "isOutput": True,
+                        "outputMode": "text",
+                        "modelSource": "custom",
+                        "modelId": str(embedding_model.id),
+                    },
+                ),
+            ],
+            edges=[
+                WorkflowEdgeInput(edge_id="e1", source_node_id="start", target_node_id="llm_1"),
+            ],
+        )
+
+        with patch("app.assistant_config.service.ToolRegistry.list_system_tools", return_value=[]):
+            with self.assertRaises(ApiException) as ctx:
+                svc.create_skill(
+                    AssistantSkillCreateRequest(
+                        name="wf_model_type_mismatch",
+                        description="d",
+                        intent_examples=[],
+                        tools=[],
+                        mode="langgraph",
+                        langgraph_pattern="workflow_dag",
+                        system_prompt="x",
+                        enabled=True,
+                        workflow=workflow,
+                    )
+                )
+
+        self.assertEqual(ctx.exception.status_code, 422)
+        self.assertEqual(ctx.exception.code, 42207)

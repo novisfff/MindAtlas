@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import unittest
+from uuid import uuid4
 from unittest.mock import patch
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
@@ -634,6 +636,627 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             )
 
         self.assertGreaterEqual(len(events), 1)
+
+    def test_kr_node_uses_override_params_and_outputs_structured_fields(self) -> None:
+        from app.assistant.skills.langgraph_engine import _build_kr_node
+
+        captured_args: dict[str, object] = {}
+
+        class _KBTool:
+            name = "kb_search"
+
+            @staticmethod
+            def func(**kwargs):
+                captured_args.update(kwargs)
+                return json.dumps(
+                    {
+                        "result": "hit",
+                        "mode": "local",
+                        "references": [{"index": 1}, {"index": 2}],
+                    },
+                    ensure_ascii=False,
+                )
+
+        with patch(
+            "app.assistant.skills.langgraph_engine._wrap_tool_with_db",
+            side_effect=lambda tool, _db_bind: (lambda **kwargs: tool.func(**kwargs)),
+        ):
+            node = _build_kr_node(
+                "kr_1",
+                {"query": "Q: {{start.user_input}}", "mode": "local", "topK": 3},
+                {"kb_search": _KBTool()},
+                db_bind=object(),
+            )
+            out = node(
+                {
+                    "node_outputs": {
+                        "start": {"json_fields": {"user_input": "hello"}, "text": "hello", "status": "ok"},
+                    },
+                    "metadata": {},
+                }
+            )
+
+        self.assertEqual(captured_args["query"], "Q: hello")
+        self.assertEqual(captured_args["mode"], "local")
+        self.assertEqual(captured_args["top_k"], 3)
+        kr_out = out["node_outputs"]["kr_1"]
+        self.assertEqual(kr_out["json_fields"]["result"], "hit")
+        self.assertEqual(kr_out["json_fields"]["query"], "Q: hello")
+        self.assertEqual(kr_out["json_fields"]["mode"], "local")
+        self.assertEqual(kr_out["json_fields"]["references_count"], 2)
+
+    def test_llm_knowledge_injection_references_only(self) -> None:
+        from app.assistant.skills.langgraph_engine import _build_dag_llm_node
+
+        class _Chunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _LLM:
+            def __init__(self) -> None:
+                self.calls: list[list[dict[str, str]]] = []
+
+            def stream(self, messages):
+                self.calls.append(messages)
+                yield _Chunk("ok")
+
+        llm = _LLM()
+        node = _build_dag_llm_node(
+            "llm_1",
+            {
+                "system_prompt": "reply",
+                "output_mode": "text",
+                "user_input": "{{start.user_input}}",
+                "is_output": False,
+                "knowledge_enabled": True,
+                "knowledge_source_node_ids": ["kr_1"],
+                "knowledge_inject_mode": "references_only",
+                "knowledge_max_refs": 10,
+            },
+            llm,
+        )
+
+        node(
+            {
+                "user_input": "hello",
+                "node_outputs": {
+                    "start": {"json_fields": {"user_input": "hello"}, "text": "hello", "status": "ok"},
+                    "kr_1": {
+                        "status": "ok",
+                        "text": "KR TEXT",
+                        "raw": {"result": "KR", "references": [{"index": 1}]},
+                        "json_fields": {
+                            "result": "KR",
+                            "query": "hello",
+                            "mode": "hybrid",
+                            "references": [{"index": 1}],
+                            "references_count": 1,
+                        },
+                    },
+                },
+                "workflow_node_types": {"start": "start", "kr_1": "knowledge_retrieval", "llm_1": "llm"},
+                "metadata": {},
+            }
+        )
+
+        self.assertEqual(len(llm.calls), 1)
+        messages = llm.calls[0]
+        context_msg = next(m for m in messages if m.get("content", "").startswith("上下文数据"))
+        context_payload = json.loads(context_msg["content"].split("\n", 1)[1])
+        self.assertNotIn("kr_1", context_payload)
+
+        injected = next(m for m in messages if "\"inject_mode\"" in m.get("content", ""))
+        payload = json.loads(injected["content"])
+        self.assertEqual(payload["inject_mode"], "references_only")
+        self.assertEqual(payload["sources"][0]["node_id"], "kr_1")
+        self.assertIn("references", payload["sources"][0])
+        self.assertNotIn("result", payload["sources"][0])
+
+    def test_llm_knowledge_injection_full_payload(self) -> None:
+        from app.assistant.skills.langgraph_engine import _build_dag_llm_node
+
+        class _Chunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _LLM:
+            def __init__(self) -> None:
+                self.calls: list[list[dict[str, str]]] = []
+
+            def stream(self, messages):
+                self.calls.append(messages)
+                yield _Chunk("ok")
+
+        llm = _LLM()
+        node = _build_dag_llm_node(
+            "llm_1",
+            {
+                "system_prompt": "reply",
+                "output_mode": "text",
+                "user_input": "{{start.user_input}}",
+                "is_output": False,
+                "knowledge_enabled": True,
+                "knowledge_source_node_ids": ["kr_1"],
+                "knowledge_inject_mode": "full_payload",
+                "knowledge_max_refs": 10,
+            },
+            llm,
+        )
+
+        node(
+            {
+                "user_input": "hello",
+                "node_outputs": {
+                    "start": {"json_fields": {"user_input": "hello"}, "text": "hello", "status": "ok"},
+                    "kr_1": {
+                        "status": "ok",
+                        "text": "KR TEXT",
+                        "raw": {"result": "KR", "mode": "hybrid", "query": "hello", "references": [{"index": 1}]},
+                        "json_fields": {
+                            "result": "KR",
+                            "query": "hello",
+                            "mode": "hybrid",
+                            "references": [{"index": 1}],
+                            "references_count": 1,
+                        },
+                    },
+                },
+                "workflow_node_types": {"start": "start", "kr_1": "knowledge_retrieval", "llm_1": "llm"},
+                "metadata": {},
+            }
+        )
+
+        injected = next(m for m in llm.calls[0] if "\"inject_mode\"" in m.get("content", ""))
+        payload = json.loads(injected["content"])
+        self.assertEqual(payload["inject_mode"], "full_payload")
+        self.assertEqual(payload["sources"][0]["result"], "KR")
+
+    def test_workflow_llm_node_uses_runtime_node_llm_override(self) -> None:
+        from app.assistant.skills.langgraph_engine import _build_dag_llm_node
+
+        class _Chunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _LLM:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+            def stream(self, _messages):
+                yield _Chunk(self.text)
+
+        default_llm = _LLM("default")
+        custom_llm = _LLM("custom")
+        node = _build_dag_llm_node(
+            "llm_1",
+            {
+                "system_prompt": "reply",
+                "output_mode": "text",
+                "user_input": "{{start.user_input}}",
+                "is_output": False,
+            },
+            default_llm,
+        )
+
+        out = node(
+            {
+                "user_input": "hello",
+                "node_outputs": {
+                    "start": {"json_fields": {"user_input": "hello"}, "text": "hello", "status": "ok"},
+                },
+                "node_llms": {"llm_1": custom_llm},
+                "metadata": {},
+            }
+        )
+        self.assertEqual(out["node_outputs"]["llm_1"]["text"], "custom")
+
+    def test_parameter_extractor_node_uses_runtime_node_llm_override(self) -> None:
+        from app.assistant.skills.langgraph_engine import _build_param_extractor_node
+
+        class _Chunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _LLM:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+            def stream(self, _messages):
+                yield _Chunk(self.text)
+
+        default_llm = _LLM('{"city":"beijing"}')
+        custom_llm = _LLM('{"city":"shanghai"}')
+        node = _build_param_extractor_node(
+            "extract_1",
+            {
+                "instruction": "extract city",
+                "output_fields": [{"name": "city"}],
+            },
+            default_llm,
+        )
+
+        out = node(
+            {
+                "user_input": "上海天气",
+                "node_outputs": {
+                    "start": {"json_fields": {"user_input": "上海天气"}, "text": "上海天气", "status": "ok"},
+                },
+                "node_llms": {"extract_1": custom_llm},
+                "metadata": {},
+            }
+        )
+        self.assertEqual(out["node_outputs"]["extract_1"]["json_fields"]["city"], "shanghai")
+
+    def test_parameter_extractor_node_structured_output_success(self) -> None:
+        from app.assistant.skills.langgraph_engine import _build_param_extractor_node
+
+        class _Chunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _LLM:
+            def __init__(self) -> None:
+                self.calls: list[list[dict[str, str]]] = []
+
+            def stream(self, messages):
+                self.calls.append(messages)
+                yield _Chunk('{"city":"shanghai","intent":"weather"}')
+
+        llm = _LLM()
+        node = _build_param_extractor_node(
+            "extract_1",
+            {
+                "input_content": "用户输入={{start.user_input}}；日期={{sys.date}}",
+                "instruction": "抽取城市与意图",
+                "output_fields": [{"name": "city"}, {"name": "intent"}],
+            },
+            llm,
+        )
+
+        out = node(
+            {
+                "user_input": "上海天气",
+                "node_outputs": {
+                    "start": {"json_fields": {"user_input": "上海天气"}, "text": "上海天气", "status": "ok"},
+                },
+                "sys_vars": {"date": "2026-02-13"},
+                "metadata": {},
+            }
+        )
+
+        node_out = out["node_outputs"]["extract_1"]
+        self.assertEqual(node_out["json_fields"]["city"], "shanghai")
+        self.assertEqual(node_out["json_fields"]["intent"], "weather")
+        self.assertEqual(node_out["raw"]["city"], "shanghai")
+        self.assertEqual(json.loads(node_out["text"])["intent"], "weather")
+        self.assertIn("用户输入=上海天气；日期=2026-02-13", llm.calls[0][1]["content"])
+
+    def test_parameter_extractor_node_invalid_json_raises(self) -> None:
+        from app.assistant.skills.langgraph_engine import _build_param_extractor_node
+
+        class _Chunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _LLM:
+            def stream(self, _messages):
+                yield _Chunk("not-json")
+
+        node = _build_param_extractor_node(
+            "extract_1",
+            {
+                "instruction": "extract city",
+                "output_fields": [{"name": "city"}],
+            },
+            _LLM(),
+        )
+
+        with self.assertRaises(RuntimeError):
+            node(
+                {
+                    "user_input": "上海天气",
+                    "node_outputs": {
+                        "start": {"json_fields": {"user_input": "上海天气"}, "text": "上海天气", "status": "ok"},
+                    },
+                    "metadata": {},
+                }
+            )
+
+    def test_parameter_extractor_node_missing_output_field_raises(self) -> None:
+        from app.assistant.skills.langgraph_engine import _build_param_extractor_node
+
+        class _Chunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _LLM:
+            def stream(self, _messages):
+                yield _Chunk('{"city":"shanghai"}')
+
+        node = _build_param_extractor_node(
+            "extract_1",
+            {
+                "instruction": "extract city and intent",
+                "output_fields": [{"name": "city"}, {"name": "intent"}],
+            },
+            _LLM(),
+        )
+
+        with self.assertRaises(RuntimeError):
+            node(
+                {
+                    "user_input": "上海天气",
+                    "node_outputs": {
+                        "start": {"json_fields": {"user_input": "上海天气"}, "text": "上海天气", "status": "ok"},
+                    },
+                    "metadata": {},
+                }
+            )
+
+    def test_custom_model_llm_client_is_cached_by_model_id(self) -> None:
+        from app.assistant.skills.langgraph_engine import LangGraphEngine
+
+        class _FakeLLM:
+            def stream(self, _messages):
+                return iter(())
+
+        class _Cfg:
+            def __init__(self) -> None:
+                self.api_key = "sk-test"
+                self.base_url = "https://example.com/v1"
+                self.model = "gpt-4.1-mini"
+                self.model_id = uuid4()
+
+        with patch("app.assistant.skills.langgraph_engine.ChatOpenAI", return_value=_FakeLLM()) as mocked_chat:
+            engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=object())
+            with patch(
+                "app.assistant.skills.langgraph_engine.resolve_openai_compat_config_by_model_id",
+                return_value=_Cfg(),
+            ):
+                llm_a = engine._resolve_node_custom_llm("model-1", node_id="llm_1")
+                llm_b = engine._resolve_node_custom_llm("model-1", node_id="llm_2")
+
+        self.assertIs(llm_a, llm_b)
+        # 2 calls from engine init (self.llm/self.args_llm) + 1 custom model client
+        self.assertEqual(mocked_chat.call_count, 3)
+
+    def test_resolve_workflow_node_llms_raises_when_custom_model_unavailable(self) -> None:
+        from app.assistant.skills.base import SkillDefinition
+        from app.assistant.skills.langgraph_engine import LangGraphEngine
+
+        class _FakeLLM:
+            def stream(self, _messages):
+                return iter(())
+
+        skill = SkillDefinition(
+            name="wf",
+            description="d",
+            intent_examples=[],
+            tools=[],
+            mode="langgraph",
+            langgraph_pattern="workflow_dag",
+            workflow_nodes=[
+                {
+                    "node_id": "start",
+                    "node_type": "start",
+                    "label": "Start",
+                    "config": {},
+                },
+                {
+                    "node_id": "llm_1",
+                    "node_type": "llm",
+                    "label": "LLM",
+                    "config": {
+                        "isOutput": True,
+                        "modelSource": "custom",
+                        "modelId": str(uuid4()),
+                    },
+                },
+            ],
+            workflow_edges=[
+                {
+                    "edge_id": "e1",
+                    "source_node_id": "start",
+                    "target_node_id": "llm_1",
+                    "source_handle": "output",
+                    "target_handle": "input",
+                }
+            ],
+        )
+
+        with patch("app.assistant.skills.langgraph_engine.ChatOpenAI", return_value=_FakeLLM()):
+            engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=object())
+        with patch(
+            "app.assistant.skills.langgraph_engine.resolve_openai_compat_config_by_model_id",
+            return_value=None,
+        ):
+            with self.assertRaises(RuntimeError):
+                engine._resolve_workflow_node_llms(skill)
+
+    def test_resolve_workflow_node_llms_supports_container_body_custom_model(self) -> None:
+        from app.assistant.skills.base import SkillDefinition
+        from app.assistant.skills.langgraph_engine import LangGraphEngine
+
+        class _FakeLLM:
+            def stream(self, _messages):
+                return iter(())
+
+        class _Cfg:
+            def __init__(self) -> None:
+                self.api_key = "sk-test"
+                self.base_url = "https://example.com/v1"
+                self.model = "gpt-4.1-mini"
+                self.model_id = uuid4()
+
+        body_model_id = str(uuid4())
+        skill = SkillDefinition(
+            name="wf",
+            description="d",
+            intent_examples=[],
+            tools=[],
+            mode="langgraph",
+            langgraph_pattern="workflow_dag",
+            workflow_nodes=[
+                {
+                    "node_id": "start",
+                    "node_type": "start",
+                    "label": "Start",
+                    "config": {},
+                },
+                {
+                    "node_id": "iter_1",
+                    "node_type": "iteration",
+                    "label": "Iteration",
+                    "config": {
+                        "inputSource": "{{start.user_input}}",
+                        "outputVariable": "items",
+                        "outputSelector": "{{llm_body.response}}",
+                        "bodyNodes": [
+                            {"nodeId": "start", "nodeType": "start", "label": "Start", "config": {}},
+                            {
+                                "nodeId": "llm_body",
+                                "nodeType": "llm",
+                                "label": "Body LLM",
+                                "config": {
+                                    "modelSource": "custom",
+                                    "modelId": body_model_id,
+                                    "userInput": "{{container.item}}",
+                                },
+                            },
+                        ],
+                        "bodyEdges": [
+                            {"sourceNodeId": "start", "targetNodeId": "llm_body", "sourceHandle": "output"},
+                        ],
+                    },
+                },
+            ],
+            workflow_edges=[
+                {
+                    "edge_id": "e1",
+                    "source_node_id": "start",
+                    "target_node_id": "iter_1",
+                    "source_handle": "output",
+                    "target_handle": "input",
+                }
+            ],
+        )
+
+        with patch("app.assistant.skills.langgraph_engine.ChatOpenAI", return_value=_FakeLLM()):
+            engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=object())
+        with patch(
+            "app.assistant.skills.langgraph_engine.resolve_openai_compat_config_by_model_id",
+            return_value=_Cfg(),
+        ):
+            node_llms = engine._resolve_workflow_node_llms(skill)
+
+        self.assertIn("iter_1::llm_body", node_llms)
+
+    def test_iteration_node_aggregates_body_outputs(self) -> None:
+        from app.assistant.skills.langgraph_engine import _build_iteration_node
+
+        class _Chunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _LLM:
+            def stream(self, messages):
+                payload = messages[-1]["content"] if messages else ""
+                yield _Chunk(str(payload))
+
+        node = _build_iteration_node(
+            "iter_1",
+            {
+                "input_source": "{{start.user_input}}",
+                "output_variable": "items",
+                "output_selector": "{{llm_1.response}}",
+                "parallel_mode": False,
+                "error_strategy": "fail_fast",
+                "flatten_output": False,
+                "body_nodes": [
+                    {"node_id": "start", "node_type": "start", "config": {}},
+                    {
+                        "node_id": "llm_1",
+                        "node_type": "llm",
+                        "config": {
+                            "system_prompt": "echo",
+                            "output_mode": "text",
+                            "user_input": "{{container.item}}",
+                            "is_output": False,
+                        },
+                    },
+                ],
+                "body_edges": [
+                    {"source_node_id": "start", "target_node_id": "llm_1", "source_handle": "output"},
+                ],
+            },
+            _LLM(),
+            _LLM(),
+            {},
+            object(),
+            node_llms=None,
+        )
+
+        out = node(
+            {
+                "user_input": '["a", "b"]',
+                "node_outputs": {
+                    "start": {
+                        "status": "ok",
+                        "text": '["a", "b"]',
+                        "raw": ["a", "b"],
+                        "json_fields": {"user_input": '["a", "b"]'},
+                    }
+                },
+                "metadata": {},
+            }
+        )
+
+        node_out = out["node_outputs"]["iter_1"]
+        self.assertIn("items", node_out["json_fields"])
+        self.assertEqual(len(node_out["json_fields"]["items"]), 2)
+
+    def test_loop_node_terminates_by_container_condition(self) -> None:
+        from app.assistant.skills.langgraph_engine import _build_loop_node
+
+        class _LLM:
+            def stream(self, _messages):
+                return iter(())
+
+        node = _build_loop_node(
+            "loop_1",
+            {
+                "max_iterations": 10,
+                "termination_logic": "and",
+                "termination_conditions": [
+                    {
+                        "id": "cond_1",
+                        "variable": "container.index",
+                        "operator": "gte",
+                        "value": "2",
+                    }
+                ],
+                "body_nodes": [{"node_id": "start", "node_type": "start", "config": {}}],
+                "body_edges": [],
+            },
+            _LLM(),
+            _LLM(),
+            {},
+            object(),
+            node_llms=None,
+        )
+
+        out = node(
+            {
+                "user_input": "x",
+                "node_outputs": {
+                    "start": {"status": "ok", "text": "x", "raw": "x", "json_fields": {"user_input": "x"}},
+                },
+                "metadata": {},
+            }
+        )
+        node_out = out["node_outputs"]["loop_1"]
+        self.assertTrue(node_out["json_fields"]["terminated"])
+        self.assertEqual(node_out["json_fields"]["iterations"], 3)
 
 
 if __name__ == "__main__":

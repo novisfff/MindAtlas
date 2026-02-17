@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { NodeType } from '../../../api/workflow'
-import { Brain, FileText, GitBranch, Merge, ScanSearch, BookOpen, Wrench, Play } from 'lucide-react'
+import { Brain, GitBranch, ScanSearch, BookOpen, Wrench, Play, RefreshCw, Infinity } from 'lucide-react'
 
 interface NodeHeaderProps {
     nodeType: NodeType
@@ -12,24 +12,24 @@ interface NodeHeaderProps {
 
 const NODE_ICONS: Record<string, React.ElementType> = {
     llm: Brain,
-    template: FileText,
     if_else: GitBranch,
-    variable_aggregator: Merge,
     parameter_extractor: ScanSearch,
     knowledge_retrieval: BookOpen,
     tool: Wrench,
-    start: Play
+    start: Play,
+    iteration: RefreshCw,
+    loop: Infinity,
 }
 
 const NODE_COLORS: Record<string, string> = {
     llm: 'text-purple-600 bg-purple-50 border-purple-100',
-    template: 'text-blue-600 bg-blue-50 border-blue-100',
     if_else: 'text-orange-600 bg-orange-50 border-orange-100',
-    variable_aggregator: 'text-pink-600 bg-pink-50 border-pink-100',
     parameter_extractor: 'text-cyan-600 bg-cyan-50 border-cyan-100',
     knowledge_retrieval: 'text-green-600 bg-green-50 border-green-100',
     tool: 'text-sky-600 bg-sky-50 border-sky-100',
-    start: 'text-emerald-600 bg-emerald-50 border-emerald-100'
+    start: 'text-emerald-600 bg-emerald-50 border-emerald-100',
+    iteration: 'text-cyan-600 bg-cyan-50 border-cyan-100',
+    loop: 'text-blue-600 bg-blue-50 border-blue-100',
 }
 
 export function NodeHeader({ nodeType, label, onLabelChange }: NodeHeaderProps) {

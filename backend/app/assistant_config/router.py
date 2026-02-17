@@ -19,6 +19,7 @@ from app.assistant_config.schemas import (
     WorkflowValidationResponse,
 )
 from app.assistant_config.service import AssistantConfigService
+from app.common.exceptions import ApiException
 from app.common.responses import ApiResponse
 from app.database import get_db
 
@@ -205,11 +206,22 @@ def validate_workflow(
     result = _validate_workflow(request.nodes, request.edges)
     # Also run parallel branch validation
     parallel_result = validate_parallel_branches(request.nodes, request.edges)
-    all_errors = result.errors + parallel_result.errors
+    all_errors: list[dict] = [
+        {"node_id": e.node_id, "message": e.message}
+        for e in (result.errors + parallel_result.errors)
+    ]
+
+    # Run save-time dependency checks (tools/models) early for UI validate action.
+    if len(all_errors) == 0:
+        service = AssistantConfigService(db)
+        try:
+            service.validate_workflow_dependencies(request)
+        except ApiException as exc:
+            all_errors.append({"node_id": None, "message": exc.message})
 
     resp = WorkflowValidationResponse(
         valid=len(all_errors) == 0,
-        errors=[{"node_id": e.node_id, "message": e.message} for e in all_errors],
+        errors=all_errors,
     )
     return ApiResponse.ok(resp.model_dump(by_alias=True))
 
@@ -220,10 +232,10 @@ _NODE_TYPE_LABELS = {
     "llm": "LLM",
     "tool": "Tool",
     "if_else": "IF/ELSE",
-    "template": "Template",
     "parameter_extractor": "Parameter Extractor",
     "knowledge_retrieval": "Knowledge Retrieval",
-    "variable_aggregator": "Variable Aggregator",
+    "iteration": "Iteration",
+    "loop": "Loop",
 }
 
 _NODE_TYPE_DESCRIPTIONS = {
@@ -231,8 +243,8 @@ _NODE_TYPE_DESCRIPTIONS = {
     "llm": "Call LLM for analysis or optional final output",
     "tool": "Execute a registered tool",
     "if_else": "IF/ELIF/ELSE branching with configurable conditions and logic",
-    "template": "Transform data using template strings",
     "parameter_extractor": "Extract structured parameters from text using LLM",
-    "knowledge_retrieval": "Search knowledge base for relevant context",
-    "variable_aggregator": "Merge outputs from parallel branches",
+    "knowledge_retrieval": "Search knowledge base with optional mode/topK overrides",
+    "iteration": "Iterate over an array and execute inner subflow per item",
+    "loop": "Repeat inner subflow until termination conditions are met",
 }

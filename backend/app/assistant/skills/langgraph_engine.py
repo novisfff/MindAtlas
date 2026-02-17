@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from functools import lru_cache
 from queue import Empty, Queue
@@ -17,6 +18,7 @@ from langchain_openai import ChatOpenAI
 from sqlalchemy.orm import Session, sessionmaker
 from typing_extensions import Annotated, TypedDict
 
+from app.ai_registry.runtime import resolve_openai_compat_config_by_model_id
 from app.assistant.openai_compat import build_openai_compat_client_headers
 from app.assistant.skills.base import SkillDefinition
 from app.assistant.tools._context import reset_current_db, set_current_db
@@ -381,6 +383,60 @@ class WorkflowState(TypedDict, total=False):
     execution_trace: Annotated[list[str], _merge_trace]
     branch_decisions: Annotated[dict[str, str], _merge_branch_decisions]
     sys_vars: dict[str, str]
+    workflow_node_types: dict[str, str]
+    node_llms: dict[str, Any]
+
+
+def _cfg_bool_value(cfg: dict[str, Any], *keys: str, default: bool = False) -> bool:
+    raw = default
+    for key in keys:
+        if key in cfg:
+            raw = cfg.get(key)
+            break
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(raw)
+
+
+def _cfg_int_value(
+    cfg: dict[str, Any],
+    *keys: str,
+    default: int,
+    min_value: int,
+    max_value: int,
+) -> int:
+    raw: Any = default
+    for key in keys:
+        if key in cfg:
+            raw = cfg.get(key)
+            break
+    try:
+        val = int(raw)
+    except Exception:
+        val = default
+    return max(min_value, min(max_value, val))
+
+
+def _cfg_string_list(cfg: dict[str, Any], *keys: str) -> list[str]:
+    raw: Any = None
+    for key in keys:
+        if key in cfg:
+            raw = cfg.get(key)
+            break
+    if not isinstance(raw, list):
+        return []
+    result: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if text:
+            result.append(text)
+    return result
 
 
 def _resolve_node_template_vars(
@@ -388,11 +444,13 @@ def _resolve_node_template_vars(
     node_outputs: dict[str, NodeOutput],
     start_inputs: dict[str, Any],
     sys_vars: dict[str, str] | None = None,
+    container_fields: dict[str, Any] | None = None,
 ) -> str:
     """Resolve {{node_id.field}} template variables from DAG node outputs."""
     if not template:
         return ""
     sys_ctx = sys_vars or {}
+    container_ctx = container_fields or {}
 
     def _repl(match: re.Match) -> str:
         node_id = match.group(1)
@@ -402,6 +460,12 @@ def _resolve_node_template_vars(
             return _truncate(start_inputs.get(field, ""))
         if node_id == "sys":
             return _truncate(sys_ctx.get(field, ""))
+        if node_id == "container":
+            if field in container_ctx:
+                return _truncate(container_ctx.get(field, ""))
+            container_out = node_outputs.get("container", {})
+            container_json = container_out.get("json_fields", {}) if isinstance(container_out, dict) else {}
+            return _truncate(container_json.get(field, ""))
 
         out = node_outputs.get(node_id)
         if not out:
@@ -577,6 +641,284 @@ def _resolve_tool_output_param_names(tool_name: str, tool: Any) -> list[str]:
     return _get_system_tool_output_param_map().get(tool_name, [])
 
 
+def _cfg_list_value(cfg: dict[str, Any], *keys: str) -> list[Any]:
+    for key in keys:
+        if key in cfg and isinstance(cfg.get(key), list):
+            return cfg.get(key) or []
+    return []
+
+
+def _normalize_container_body_nodes(node_cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_nodes = _cfg_list_value(node_cfg, "body_nodes", "bodyNodes")
+    nodes: list[dict[str, Any]] = []
+    for raw in raw_nodes:
+        if not isinstance(raw, dict):
+            continue
+        node_id = str(raw.get("node_id", raw.get("nodeId", "")) or "").strip()
+        node_type = str(raw.get("node_type", raw.get("nodeType", "")) or "").strip()
+        if not node_id or not node_type:
+            continue
+        cfg = raw.get("config")
+        nodes.append(
+            {
+                "node_id": node_id,
+                "node_type": node_type,
+                "label": str(raw.get("label", "") or node_id),
+                "config": _normalize_config(cfg) if isinstance(cfg, dict) else {},
+            }
+        )
+
+    if not nodes:
+        nodes = [
+            {
+                "node_id": "start",
+                "node_type": "start",
+                "label": "start",
+                "config": {},
+            }
+        ]
+
+    if not any(node.get("node_type") == "start" for node in nodes):
+        nodes.insert(
+            0,
+            {
+                "node_id": "start",
+                "node_type": "start",
+                "label": "start",
+                "config": {},
+            },
+        )
+
+    return nodes
+
+
+def _normalize_container_body_edges(node_cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_edges = _cfg_list_value(node_cfg, "body_edges", "bodyEdges")
+    edges: list[dict[str, Any]] = []
+    for raw in raw_edges:
+        if not isinstance(raw, dict):
+            continue
+        source = str(raw.get("source_node_id", raw.get("sourceNodeId", "")) or "").strip()
+        target = str(raw.get("target_node_id", raw.get("targetNodeId", "")) or "").strip()
+        if not source or not target:
+            continue
+        edges.append(
+            {
+                "source_node_id": source,
+                "target_node_id": target,
+                "source_handle": str(raw.get("source_handle", raw.get("sourceHandle", "output")) or "output"),
+                "target_handle": str(raw.get("target_handle", raw.get("targetHandle", "input")) or "input"),
+                "condition_expr": raw.get("condition_expr", raw.get("conditionExpr")),
+            }
+        )
+    return edges
+
+
+def _coerce_array_input(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return parsed
+            return [parsed]
+        except Exception:
+            return [text]
+    return [value]
+
+
+def _parse_loose_json_value(value: str) -> Any:
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("{") or text.startswith("[") or text.startswith('"'):
+        try:
+            return json.loads(text)
+        except Exception:
+            return text
+    return text
+
+
+def _build_container_start_node(container_input: Any, container_fields: dict[str, Any]) -> Callable[[WorkflowState], dict]:
+    def start_node(_state: WorkflowState) -> dict:
+        text = _stringify(container_input)
+        return {
+            "node_outputs": {
+                "start": NodeOutput(
+                    status="ok",
+                    text=text,
+                    raw=container_input,
+                    json_fields={
+                        "user_input": container_input,
+                        **container_fields,
+                    },
+                )
+            },
+            "execution_trace": ["start"],
+        }
+
+    return start_node
+
+
+def _execute_container_body(
+    *,
+    container_node_id: str,
+    container_node_type: str,
+    node_cfg: dict[str, Any],
+    parent_state: WorkflowState,
+    llm: ChatOpenAI,
+    args_llm: ChatOpenAI,
+    tool_map: dict[str, Any],
+    db_bind: Any,
+    node_llms: dict[str, ChatOpenAI] | None = None,
+    container_input: Any = "",
+    container_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    body_nodes = _normalize_container_body_nodes(node_cfg)
+    body_edges = _normalize_container_body_edges(node_cfg)
+    body_node_map = {str(node["node_id"]): node for node in body_nodes}
+    body_type_map = {str(node["node_id"]): str(node["node_type"]) for node in body_nodes}
+
+    if "start" not in body_node_map:
+        raise RuntimeError(f"{container_node_type} node {container_node_id} body has no start node")
+
+    out_edges: dict[str, list[tuple[str, str]]] = {}
+    in_degree: dict[str, int] = {node_id: 0 for node_id in body_node_map}
+    for edge in body_edges:
+        src = str(edge["source_node_id"])
+        tgt = str(edge["target_node_id"])
+        if src not in body_node_map or tgt not in body_node_map:
+            continue
+        out_edges.setdefault(src, []).append((tgt, str(edge.get("source_handle", "output") or "output")))
+        in_degree[tgt] = in_degree.get(tgt, 0) + 1
+
+    metadata = parent_state.get("metadata", {}) or {}
+    sys_vars = parent_state.get("sys_vars", {}) or {}
+    runtime_node_llms_raw = parent_state.get("node_llms", {}) or {}
+    runtime_node_llms: dict[str, Any]
+    if isinstance(runtime_node_llms_raw, dict):
+        runtime_node_llms = dict(runtime_node_llms_raw)
+    else:
+        runtime_node_llms = {}
+    scoped_node_llms: dict[str, Any] = dict(node_llms or {})
+
+    container_ctx = dict(container_fields or {})
+    start_result = _build_container_start_node(container_input, container_ctx)({})
+    node_outputs_local: dict[str, NodeOutput] = dict(parent_state.get("node_outputs", {}))
+    node_outputs_local.update(start_result.get("node_outputs", {}))
+    node_outputs_local["container"] = NodeOutput(
+        status="ok",
+        text=_stringify(container_ctx),
+        raw=container_ctx,
+        json_fields=container_ctx,
+    )
+
+    execution_trace: list[str] = ["start"]
+    branch_decisions: dict[str, str] = {}
+
+    queue: list[str] = []
+    for target, _ in out_edges.get("start", []):
+        in_degree[target] = max(0, in_degree.get(target, 0) - 1)
+        if in_degree[target] == 0:
+            queue.append(target)
+
+    executed_nodes = {"start"}
+
+    while queue:
+        current = queue.pop(0)
+        if current in executed_nodes:
+            continue
+        node_meta = body_node_map.get(current)
+        if not node_meta:
+            continue
+        node_type = body_type_map.get(current, "")
+        cfg = node_meta.get("config") if isinstance(node_meta.get("config"), dict) else {}
+        scoped_model_key = f"{container_node_id}::{current}"
+        if scoped_model_key in runtime_node_llms:
+            runtime_node_llms[current] = runtime_node_llms[scoped_model_key]
+        if scoped_model_key in scoped_node_llms:
+            scoped_node_llms[current] = scoped_node_llms[scoped_model_key]
+
+        state_for_node: WorkflowState = {
+            "metadata": metadata,
+            "node_outputs": node_outputs_local,
+            "user_input": _stringify(container_input),
+            "sys_vars": sys_vars,
+            "workflow_node_types": body_type_map,
+            "node_llms": runtime_node_llms,
+        }
+
+        if node_type == "llm":
+            node_fn = _build_dag_llm_node(current, cfg, llm, node_llms=scoped_node_llms)
+        elif node_type == "tool":
+            node_fn = _build_dag_tool_node(current, cfg, tool_map, args_llm, db_bind)
+        elif node_type == "if_else":
+            node_fn = _build_if_else_node(current, cfg)
+        elif node_type == "parameter_extractor":
+            node_fn = _build_param_extractor_node(current, cfg, llm, node_llms=scoped_node_llms)
+        elif node_type == "knowledge_retrieval":
+            node_fn = _build_kr_node(current, cfg, tool_map, db_bind)
+        elif node_type == "start":
+            node_fn = _build_container_start_node(container_input, container_ctx)
+        else:
+            raise RuntimeError(
+                f"{container_node_type} node {container_node_id} body node {current} has unsupported type: {node_type}"
+            )
+
+        result = node_fn(state_for_node)
+        if isinstance(result.get("node_outputs"), dict):
+            node_outputs_local.update(result["node_outputs"])
+        if isinstance(result.get("execution_trace"), list):
+            execution_trace.extend([str(item) for item in result["execution_trace"]])
+        if isinstance(result.get("branch_decisions"), dict):
+            branch_decisions.update({str(k): str(v) for k, v in result["branch_decisions"].items()})
+
+        executed_nodes.add(current)
+
+        outgoing = out_edges.get(current, [])
+        if not outgoing:
+            continue
+        if node_type == "if_else":
+            chosen = branch_decisions.get(current)
+            for target, handle in outgoing:
+                normalized_handle = "else" if handle == "default" else handle
+                if normalized_handle != chosen:
+                    continue
+                in_degree[target] = max(0, in_degree.get(target, 0) - 1)
+                if in_degree[target] == 0:
+                    queue.append(target)
+            continue
+
+        for target, _ in outgoing:
+            in_degree[target] = max(0, in_degree.get(target, 0) - 1)
+            if in_degree[target] == 0:
+                queue.append(target)
+
+    produced = {
+        node_id: out
+        for node_id, out in node_outputs_local.items()
+        if node_id in body_node_map and node_id != "start"
+    }
+    terminal_nodes = [
+        node_id
+        for node_id in produced.keys()
+        if len(out_edges.get(node_id, [])) == 0
+    ]
+    last_terminal = terminal_nodes[-1] if terminal_nodes else (list(produced.keys())[-1] if produced else "start")
+    return {
+        "node_outputs": produced,
+        "all_node_outputs": node_outputs_local,
+        "last_node_id": last_terminal,
+        "execution_trace": execution_trace,
+    }
+
+
 # ==================== DAG Node Builders (Task 14.3) ====================
 
 
@@ -609,12 +951,22 @@ def _build_dag_llm_node(
     node_id: str,
     node_cfg: dict,
     llm: ChatOpenAI,
+    node_llms: dict[str, ChatOpenAI] | None = None,
 ) -> Callable[[WorkflowState], dict]:
     def llm_node(state: WorkflowState) -> dict:
         metadata = state.get("metadata", {})
         node_outputs = dict(state.get("node_outputs", {}))
         start_inputs = _get_start_inputs(node_outputs)
         sys_vars = state.get("sys_vars", {}) or {}
+        workflow_node_types = state.get("workflow_node_types", {}) or {}
+        runtime_node_llms = state.get("node_llms", {}) or {}
+        if not isinstance(runtime_node_llms, dict):
+            runtime_node_llms = {}
+        llm_for_node = runtime_node_llms.get(node_id)
+        if llm_for_node is None and node_llms is not None:
+            llm_for_node = node_llms.get(node_id)
+        if llm_for_node is None:
+            llm_for_node = llm
 
         system_prompt_raw = node_cfg.get("system_prompt", "")
         if not isinstance(system_prompt_raw, str):
@@ -637,11 +989,26 @@ def _build_dag_llm_node(
         if not user_input_rendered.strip():
             user_input_rendered = start_inputs.get("user_input", "") or state.get("user_input", "")
 
-        raw_is_output = node_cfg.get("is_output", False)
-        if isinstance(raw_is_output, str):
-            is_output = raw_is_output.strip().lower() in {"1", "true", "yes", "y", "on"}
-        else:
-            is_output = bool(raw_is_output)
+        is_output = _cfg_bool_value(node_cfg, "is_output", "isOutput", default=False)
+        knowledge_enabled = _cfg_bool_value(
+            node_cfg, "knowledge_enabled", "knowledgeEnabled", default=False
+        )
+        knowledge_source_node_ids = _cfg_string_list(
+            node_cfg, "knowledge_source_node_ids", "knowledgeSourceNodeIds"
+        )
+        raw_inject_mode = str(
+            node_cfg.get("knowledge_inject_mode", node_cfg.get("knowledgeInjectMode", "references_only"))
+            or "references_only"
+        ).strip().lower()
+        knowledge_inject_mode = raw_inject_mode if raw_inject_mode in {"references_only", "full_payload"} else "references_only"
+        knowledge_max_refs = _cfg_int_value(
+            node_cfg,
+            "knowledge_max_refs",
+            "knowledgeMaxRefs",
+            default=20,
+            min_value=1,
+            max_value=100,
+        )
         output_fields = node_cfg.get("output_fields") or []
         field_names = [f.get("name", "") if isinstance(f, dict) else str(f) for f in output_fields]
 
@@ -670,22 +1037,89 @@ def _build_dag_llm_node(
         if constraint:
             full_prompt += f"## {constraint}\n\n"
 
-        context_data = {}
+        context_data: dict[str, str] = {}
         for nid, out in node_outputs.items():
+            if workflow_node_types.get(nid) == "knowledge_retrieval":
+                # KR 输出只允许通过显式 knowledge binding 注入，避免隐式混入。
+                continue
             context_data[nid] = _truncate(out.get("text", ""), 2000)
         context_snapshot = json.dumps(context_data, ensure_ascii=False, default=str)[:4000]
 
         msgs = [
             {"role": "system", "content": full_prompt},
             {"role": "user", "content": f"上下文数据：\n{context_snapshot}"},
-            {"role": "user", "content": user_input_rendered},
         ]
+
+        if knowledge_enabled and knowledge_source_node_ids:
+            remaining_refs = knowledge_max_refs
+            selected_payloads: list[dict[str, Any]] = []
+            for source_id in knowledge_source_node_ids:
+                if remaining_refs <= 0:
+                    break
+                if workflow_node_types.get(source_id) != "knowledge_retrieval":
+                    continue
+                source_out = node_outputs.get(source_id) or {}
+                source_fields = source_out.get("json_fields") if isinstance(source_out.get("json_fields"), dict) else {}
+                references = source_fields.get("references") if isinstance(source_fields, dict) else None
+                if not isinstance(references, list):
+                    raw_payload = source_out.get("raw")
+                    if isinstance(raw_payload, dict):
+                        references = raw_payload.get("references")
+                if not isinstance(references, list):
+                    references = []
+                clipped_refs = references[:remaining_refs]
+                remaining_refs -= len(clipped_refs)
+
+                if knowledge_inject_mode == "references_only":
+                    selected_payloads.append({
+                        "node_id": source_id,
+                        "query": source_fields.get("query", ""),
+                        "mode": source_fields.get("mode", ""),
+                        "references": clipped_refs,
+                        "references_count": len(clipped_refs),
+                    })
+                    continue
+
+                raw_payload = source_out.get("raw")
+                full_payload = dict(raw_payload) if isinstance(raw_payload, dict) else {"payload": raw_payload}
+                full_payload["node_id"] = source_id
+                full_payload["query"] = full_payload.get("query", source_fields.get("query", ""))
+                full_payload["mode"] = full_payload.get("mode", source_fields.get("mode", ""))
+                full_payload["result"] = full_payload.get("result", source_fields.get("result", source_out.get("text", "")))
+                full_payload["references"] = clipped_refs
+                full_payload["references_count"] = len(clipped_refs)
+                selected_payloads.append(full_payload)
+
+            if selected_payloads:
+                msgs.append({
+                    "role": "system",
+                    "content": (
+                        "以下是你显式绑定的知识检索结果(JSON)。"
+                        "你只能把这些内容作为知识依据，不要杜撰引用。"
+                    ),
+                })
+                msgs.append({
+                    "role": "user",
+                    "content": _truncate(
+                        json.dumps(
+                            {
+                                "inject_mode": knowledge_inject_mode,
+                                "sources": selected_payloads,
+                            },
+                            ensure_ascii=False,
+                            default=str,
+                        ),
+                        8000,
+                    ),
+                })
+
+        msgs.append({"role": "user", "content": user_input_rendered})
 
         _emit(metadata, "on_node_start", node_id=node_id, node_type="llm")
 
         def _run_once(allow_content_stream: bool) -> str:
             chunks: list[str] = []
-            for chunk in llm.stream(msgs):
+            for chunk in llm_for_node.stream(msgs):
                 if not chunk.content:
                     continue
                 chunks.append(chunk.content)
@@ -941,79 +1375,122 @@ def _eval_condition(actual: str, operator: str, value: str) -> bool:
     return False
 
 
-def _build_template_node(
-    node_id: str,
-    node_cfg: dict,
-) -> Callable[[WorkflowState], dict]:
-    def template_node(state: WorkflowState) -> dict:
-        metadata = state.get("metadata", {})
-        node_outputs = dict(state.get("node_outputs", {}))
-        start_inputs = _get_start_inputs(node_outputs)
-        sys_vars = state.get("sys_vars", {}) or {}
-        template = node_cfg.get("template", "")
-
-        _emit(metadata, "on_node_start", node_id=node_id, node_type="template")
-
-        rendered = _resolve_node_template_vars(template, node_outputs, start_inputs, sys_vars)
-        node_out = NodeOutput(status="ok", text=rendered, raw=rendered, json_fields={})
-
-        _emit(metadata, "on_node_end", node_id=node_id, status="ok")
-        return {
-            "node_outputs": {node_id: node_out},
-            "execution_trace": [node_id],
-        }
-    return template_node
-
-
 def _build_param_extractor_node(
     node_id: str,
     node_cfg: dict,
     llm: ChatOpenAI,
+    node_llms: dict[str, ChatOpenAI] | None = None,
 ) -> Callable[[WorkflowState], dict]:
     def param_extractor_node(state: WorkflowState) -> dict:
         metadata = state.get("metadata", {})
         node_outputs = dict(state.get("node_outputs", {}))
         start_inputs = _get_start_inputs(node_outputs)
         sys_vars = state.get("sys_vars", {}) or {}
+        runtime_node_llms = state.get("node_llms", {}) or {}
+        if not isinstance(runtime_node_llms, dict):
+            runtime_node_llms = {}
+        llm_for_node = runtime_node_llms.get(node_id)
+        if llm_for_node is None and node_llms is not None:
+            llm_for_node = node_llms.get(node_id)
+        if llm_for_node is None:
+            llm_for_node = llm
 
-        instruction = _resolve_node_template_vars(
-            node_cfg.get("instruction", ""), node_outputs, start_inputs, sys_vars,
+        input_content_template = node_cfg.get("input_content")
+        if input_content_template is None:
+            input_content_template = node_cfg.get("inputContent", "")
+        if not isinstance(input_content_template, str):
+            input_content_template = ""
+        input_content = _resolve_node_template_vars(
+            input_content_template, node_outputs, start_inputs, sys_vars,
         )
-        output_fields = node_cfg.get("output_fields") or []
-        field_names = [f.get("name", "") if isinstance(f, dict) else str(f) for f in output_fields]
+
+        instruction_template = node_cfg.get("instruction", "")
+        if not isinstance(instruction_template, str):
+            instruction_template = ""
+        instruction = _resolve_node_template_vars(
+            instruction_template, node_outputs, start_inputs, sys_vars,
+        )
+
+        output_fields = node_cfg.get("output_fields")
+        if output_fields is None:
+            output_fields = node_cfg.get("outputFields")
+        if not isinstance(output_fields, list) or not output_fields:
+            raise RuntimeError(
+                f"DAG parameter_extractor node {node_id}: output_fields must be non-empty"
+            )
 
         from app.assistant.skills.base import OutputFieldSpec, build_json_output_constraint
-        specs = []
-        for f in output_fields:
-            if isinstance(f, dict):
-                try:
-                    specs.append(OutputFieldSpec(**f))
-                except Exception:
-                    specs.append(OutputFieldSpec(name=f.get("name", "field")))
-        constraint = build_json_output_constraint(specs) if specs else ""
+        specs: list[OutputFieldSpec] = []
+        for field in output_fields:
+            if isinstance(field, str):
+                name = field.strip()
+                if name:
+                    specs.append(OutputFieldSpec(name=name))
+                continue
+            if not isinstance(field, dict):
+                continue
 
-        prompt = f"从以下文本中提取结构化参数。\n\n{instruction}\n\n{constraint}"
+            payload = dict(field)
+            if "itemsType" in payload and "items_type" not in payload:
+                payload["items_type"] = payload.get("itemsType")
+            try:
+                specs.append(OutputFieldSpec(**payload))
+            except Exception:
+                name = str(payload.get("name", "") or "").strip()
+                if name:
+                    specs.append(OutputFieldSpec(name=name))
+
+        if not specs:
+            raise RuntimeError(
+                f"DAG parameter_extractor node {node_id}: output_fields are invalid"
+            )
+
+        field_names = [spec.name for spec in specs]
+        constraint = build_json_output_constraint(specs)
+
+        system_prompt = (
+            "你是结构化参数提取器。"
+            "你的任务是根据输入内容，提取目标字段并严格返回一个 JSON 对象。"
+        )
+        if instruction.strip():
+            system_prompt += f"\n\n额外提取说明：\n{instruction.strip()}"
+        if constraint:
+            system_prompt += f"\n\n{constraint}"
+
         msgs = [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": state.get("user_input", "")},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"输入内容：\n{input_content}"},
         ]
 
         _emit(metadata, "on_node_start", node_id=node_id, node_type="parameter_extractor")
 
         chunks: list[str] = []
-        for chunk in llm.stream(msgs):
+        for chunk in llm_for_node.stream(msgs):
             if chunk.content:
                 chunks.append(chunk.content)
+                _emit(metadata, "on_node_output_delta", node_id=node_id, delta=chunk.content)
 
         text = "".join(chunks).strip()
-        node_out: NodeOutput = {"status": "ok", "text": text, "raw": None, "json_fields": {}}
+        parsed = _extract_json_object(text)
+        if parsed is None:
+            raise RuntimeError(
+                f"DAG parameter_extractor node {node_id}: model output must be a valid JSON object"
+            )
 
-        if text:
-            parsed = _extract_json_object(text)
-            if parsed:
-                filtered = {k: parsed.get(k) for k in field_names} if field_names else parsed
-                node_out["raw"] = filtered
-                node_out["json_fields"] = filtered
+        missing_fields = [name for name in field_names if name not in parsed]
+        if missing_fields:
+            raise RuntimeError(
+                f"DAG parameter_extractor node {node_id}: missing output fields: {', '.join(missing_fields)}"
+            )
+
+        filtered = {name: parsed.get(name) for name in field_names}
+        json_text = json.dumps(filtered, ensure_ascii=False)
+        node_out: NodeOutput = {
+            "status": "ok",
+            "text": json_text,
+            "raw": parsed,
+            "json_fields": filtered,
+        }
 
         node_outputs[node_id] = node_out
         _emit(metadata, "on_node_end", node_id=node_id, status="ok")
@@ -1037,25 +1514,77 @@ def _build_kr_node(
         start_inputs = _get_start_inputs(node_outputs)
         sys_vars = state.get("sys_vars", {}) or {}
 
+        query_template = node_cfg.get("query", "{{start.user_input}}")
+        if not isinstance(query_template, str):
+            query_template = "{{start.user_input}}"
         query = _resolve_node_template_vars(
-            node_cfg.get("query", "{{start.user_input}}"), node_outputs, start_inputs, sys_vars,
+            query_template, node_outputs, start_inputs, sys_vars,
         )
+        raw_mode = node_cfg.get("mode")
+        mode = raw_mode.strip() if isinstance(raw_mode, str) and raw_mode.strip() else None
+        raw_top_k = node_cfg.get("top_k")
+        if raw_top_k is None:
+            raw_top_k = node_cfg.get("topK")
+        top_k: int | None = None
+        if raw_top_k is not None and str(raw_top_k).strip() != "":
+            try:
+                top_k = max(1, min(50, int(raw_top_k)))
+            except Exception:
+                top_k = None
 
         _emit(metadata, "on_node_start", node_id=node_id, node_type="knowledge_retrieval")
 
         kb_tool = tool_map.get("kb_search")
         result_text = ""
+        raw_payload: Any = ""
         if kb_tool:
             wrapped = _wrap_tool_with_db(kb_tool, db_bind)
+            invoke_args: dict[str, Any] = {"query": query}
+            if mode is not None:
+                invoke_args["mode"] = mode
+            if top_k is not None:
+                invoke_args["top_k"] = top_k
             try:
-                result_text = _stringify(wrapped(query=query))
+                raw_result = wrapped(**invoke_args)
+                result_text = _stringify(raw_result)
+                raw_payload = raw_result
+                if isinstance(raw_result, str):
+                    parsed = _extract_json_object(raw_result)
+                    if parsed is not None:
+                        raw_payload = parsed
             except Exception as e:
                 logger.warning("KR node %s failed: %s", node_id, e)
                 result_text = f"知识库检索失败: {e}"
+                raw_payload = {"error": str(e)}
         else:
             result_text = "知识库工具不可用"
+            raw_payload = {"error": "kb_search not available"}
 
-        node_out = NodeOutput(status="ok", text=result_text, raw=result_text, json_fields={})
+        payload_obj = raw_payload if isinstance(raw_payload, dict) else {}
+        references = payload_obj.get("references") if isinstance(payload_obj, dict) else None
+        if not isinstance(references, list):
+            references = []
+        references_count = len(references)
+        payload_mode = payload_obj.get("mode") if isinstance(payload_obj, dict) else None
+        mode_value = payload_mode if isinstance(payload_mode, str) and payload_mode.strip() else (mode or "system_default")
+        result_value = payload_obj.get("result") if isinstance(payload_obj, dict) else None
+        if result_value is None:
+            result_value = result_text or f"检索到 {references_count} 条参考资料"
+        if not result_text:
+            result_text = _stringify(result_value)
+
+        node_out = NodeOutput(
+            status="ok",
+            text=result_text,
+            raw=raw_payload,
+            json_fields={
+                "result": result_value,
+                "query": query,
+                "mode": mode_value,
+                "references": references,
+                "references_count": references_count,
+            },
+        )
         _emit(metadata, "on_node_end", node_id=node_id, status="ok")
 
         return {
@@ -1065,37 +1594,292 @@ def _build_kr_node(
     return kr_node
 
 
-def _build_aggregator_node(
+def _build_iteration_node(
     node_id: str,
     node_cfg: dict,
+    llm: ChatOpenAI,
+    args_llm: ChatOpenAI,
+    tool_map: dict[str, Any],
+    db_bind: Any,
+    node_llms: dict[str, ChatOpenAI] | None = None,
 ) -> Callable[[WorkflowState], dict]:
-    def aggregator_node(state: WorkflowState) -> dict:
+    def iteration_node(state: WorkflowState) -> dict:
         metadata = state.get("metadata", {})
         node_outputs = dict(state.get("node_outputs", {}))
+        start_inputs = _get_start_inputs(node_outputs)
+        sys_vars = state.get("sys_vars", {}) or {}
 
-        _emit(metadata, "on_node_start", node_id=node_id, node_type="variable_aggregator")
+        input_source_tpl = str(node_cfg.get("input_source", node_cfg.get("inputSource", "")) or "").strip()
+        if not input_source_tpl:
+            raise RuntimeError(f"DAG iteration node {node_id}: inputSource is required")
+        rendered_input = _resolve_node_template_vars(
+            input_source_tpl,
+            node_outputs,
+            start_inputs,
+            sys_vars,
+        )
+        items = _coerce_array_input(_parse_loose_json_value(rendered_input))
+        output_variable = str(node_cfg.get("output_variable", node_cfg.get("outputVariable", "results")) or "results").strip() or "results"
+        output_selector_tpl = str(node_cfg.get("output_selector", node_cfg.get("outputSelector", "{{container.item}}")) or "{{container.item}}")
+        parallel_mode = _cfg_bool_value(node_cfg, "parallel_mode", "parallelMode", default=False)
+        error_strategy = str(node_cfg.get("error_strategy", node_cfg.get("errorStrategy", "fail_fast")) or "fail_fast").strip().lower()
+        flatten_output = _cfg_bool_value(node_cfg, "flatten_output", "flattenOutput", default=True)
 
-        # Collect outputs from specified source nodes or all available
-        source_nodes = node_cfg.get("source_nodes", [])
-        merged: dict[str, Any] = {}
-        for src in source_nodes:
-            out = node_outputs.get(src)
-            if out:
-                merged[src] = out.get("raw") or out.get("text", "")
+        _emit(metadata, "on_node_start", node_id=node_id, node_type="iteration")
 
-        if not source_nodes:
-            # Auto-collect from all predecessors (will be populated by edges)
-            merged = {k: (v.get("raw") or v.get("text", "")) for k, v in node_outputs.items()}
+        aggregated: list[Any] = []
+        errors_payload: list[dict[str, Any]] = []
 
-        merged_text = json.dumps(merged, ensure_ascii=False, default=str)
-        node_out = NodeOutput(status="ok", text=merged_text, raw=merged, json_fields=merged)
+        def _run_single(index: int, item: Any) -> tuple[int, Any, dict[str, Any] | None]:
+            container_fields = {"item": item, "index": index}
+            body_result = _execute_container_body(
+                container_node_id=node_id,
+                container_node_type="iteration",
+                node_cfg=node_cfg,
+                parent_state=state,
+                llm=llm,
+                args_llm=args_llm,
+                tool_map=tool_map,
+                db_bind=db_bind,
+                node_llms=node_llms,
+                container_input=item,
+                container_fields=container_fields,
+            )
+            selected_text = _resolve_node_template_vars(
+                output_selector_tpl,
+                body_result.get("all_node_outputs", {}),
+                {"user_input": item, "item": item, "index": index},
+                sys_vars,
+                container_fields=container_fields,
+            )
+            selected_value = _parse_loose_json_value(selected_text)
+            return index, selected_value, None
+
+        if parallel_mode and len(items) > 1:
+            with ThreadPoolExecutor(max_workers=min(8, len(items))) as executor:
+                futures = {
+                    executor.submit(_run_single, index, item): (index, item)
+                    for index, item in enumerate(items)
+                }
+                results_by_index: dict[int, Any] = {}
+                for future in as_completed(futures):
+                    index, item = futures[future]
+                    try:
+                        _, value, _ = future.result()
+                        results_by_index[index] = value
+                    except Exception as exc:
+                        err_item = {"index": index, "item": item, "error": str(exc)}
+                        if error_strategy == "skip_item":
+                            errors_payload.append(err_item)
+                            continue
+                        raise RuntimeError(f"DAG iteration node {node_id} failed at index {index}: {exc}") from exc
+                for index in range(len(items)):
+                    if index in results_by_index:
+                        aggregated.append(results_by_index[index])
+        else:
+            for index, item in enumerate(items):
+                try:
+                    _, value, _ = _run_single(index, item)
+                    aggregated.append(value)
+                except Exception as exc:
+                    err_item = {"index": index, "item": item, "error": str(exc)}
+                    if error_strategy == "skip_item":
+                        errors_payload.append(err_item)
+                        continue
+                    raise RuntimeError(f"DAG iteration node {node_id} failed at index {index}: {exc}") from exc
+
+        if flatten_output:
+            flattened: list[Any] = []
+            for item in aggregated:
+                if isinstance(item, list):
+                    flattened.extend(item)
+                else:
+                    flattened.append(item)
+            aggregated = flattened
+
+        raw_payload = {
+            "items": aggregated,
+            "count": len(aggregated),
+            "errors": errors_payload,
+        }
+        node_out = NodeOutput(
+            status="ok",
+            text=json.dumps(raw_payload, ensure_ascii=False),
+            raw=raw_payload,
+            json_fields={
+                output_variable: aggregated,
+                "count": len(aggregated),
+                "errors": errors_payload,
+            },
+        )
 
         _emit(metadata, "on_node_end", node_id=node_id, status="ok")
         return {
             "node_outputs": {node_id: node_out},
             "execution_trace": [node_id],
         }
-    return aggregator_node
+
+    return iteration_node
+
+
+def _build_loop_node(
+    node_id: str,
+    node_cfg: dict,
+    llm: ChatOpenAI,
+    args_llm: ChatOpenAI,
+    tool_map: dict[str, Any],
+    db_bind: Any,
+    node_llms: dict[str, ChatOpenAI] | None = None,
+) -> Callable[[WorkflowState], dict]:
+    def loop_node(state: WorkflowState) -> dict:
+        metadata = state.get("metadata", {})
+        node_outputs = dict(state.get("node_outputs", {}))
+        start_inputs = _get_start_inputs(node_outputs)
+        sys_vars = state.get("sys_vars", {}) or {}
+
+        initial_vars = _cfg_list_value(node_cfg, "initial_vars", "initialVars")
+        update_mappings = _cfg_list_value(node_cfg, "update_mappings", "updateMappings")
+        termination_conditions = _cfg_list_value(node_cfg, "termination_conditions", "terminationConditions")
+        termination_logic = str(node_cfg.get("termination_logic", node_cfg.get("terminationLogic", "and")) or "and").strip().lower()
+        if termination_logic not in {"and", "or"}:
+            termination_logic = "and"
+        max_iterations = _cfg_int_value(
+            node_cfg,
+            "max_iterations",
+            "maxIterations",
+            default=10,
+            min_value=1,
+            max_value=1000,
+        )
+
+        loop_vars: dict[str, Any] = {}
+        for raw in initial_vars:
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("name", "") or "").strip()
+            if not name:
+                continue
+            value_tpl = str(raw.get("value", "") or "")
+            rendered = _resolve_node_template_vars(
+                value_tpl,
+                node_outputs,
+                start_inputs,
+                sys_vars,
+                container_fields=loop_vars,
+            )
+            loop_vars[name] = _parse_loose_json_value(rendered)
+
+        _emit(metadata, "on_node_start", node_id=node_id, node_type="loop")
+
+        iteration_count = 0
+        terminated = False
+        last_item: Any = None
+        iteration_outputs: list[Any] = []
+
+        while iteration_count < max_iterations:
+            container_fields = {"index": iteration_count, **loop_vars}
+            body_result = _execute_container_body(
+                container_node_id=node_id,
+                container_node_type="loop",
+                node_cfg=node_cfg,
+                parent_state=state,
+                llm=llm,
+                args_llm=args_llm,
+                tool_map=tool_map,
+                db_bind=db_bind,
+                node_llms=node_llms,
+                container_input=start_inputs.get("user_input", state.get("user_input", "")),
+                container_fields=container_fields,
+            )
+            iteration_outputs.append(body_result.get("node_outputs", {}))
+            last_node_id = str(body_result.get("last_node_id", "") or "")
+            last_out = (body_result.get("all_node_outputs", {}) or {}).get(last_node_id, {})
+            last_item = last_out.get("raw", last_out.get("text"))
+
+            for raw in update_mappings:
+                if not isinstance(raw, dict):
+                    continue
+                name = str(raw.get("name", "") or "").strip()
+                if not name:
+                    continue
+                value_tpl = str(raw.get("value", "") or "")
+                rendered = _resolve_node_template_vars(
+                    value_tpl,
+                    body_result.get("all_node_outputs", {}),
+                    {"user_input": start_inputs.get("user_input", state.get("user_input", ""))},
+                    sys_vars,
+                    container_fields={"index": iteration_count, **loop_vars},
+                )
+                loop_vars[name] = _parse_loose_json_value(rendered)
+
+            if termination_conditions:
+                evaluated: list[bool] = []
+                for cond in termination_conditions:
+                    if not isinstance(cond, dict):
+                        continue
+                    variable = str(cond.get("variable", "") or "").strip()
+                    operator = _normalize_if_else_operator(cond.get("operator"))
+                    value_tpl = "" if cond.get("value") is None else str(cond.get("value"))
+                    rhs_value = _resolve_node_template_vars(
+                        value_tpl,
+                        body_result.get("all_node_outputs", {}),
+                        {"user_input": start_inputs.get("user_input", state.get("user_input", ""))},
+                        sys_vars,
+                        container_fields={"index": iteration_count, **loop_vars},
+                    )
+
+                    actual_value = ""
+                    if variable.startswith("sys."):
+                        sys_key = variable.split(".", 1)[1] if "." in variable else ""
+                        actual_value = str(sys_vars.get(sys_key, "") or "")
+                    elif variable.startswith("container."):
+                        var_key = variable.split(".", 1)[1] if "." in variable else ""
+                        actual_value = str(loop_vars.get(var_key, ""))
+                    else:
+                        parts = variable.split(".", 1)
+                        ref_node = parts[0]
+                        ref_field = parts[1] if len(parts) > 1 else "text"
+                        out = (body_result.get("all_node_outputs", {}) or {}).get(ref_node, {})
+                        actual = out.get("json_fields", {}).get(ref_field, out.get("text", ""))
+                        actual_value = str(actual) if actual is not None else ""
+
+                    evaluated.append(_eval_condition(actual_value, operator, rhs_value))
+
+                if evaluated:
+                    matched = all(evaluated) if termination_logic == "and" else any(evaluated)
+                    if matched:
+                        terminated = True
+                        iteration_count += 1
+                        break
+
+            iteration_count += 1
+
+        raw_payload = {
+            "iterations": iteration_count,
+            "terminated": terminated,
+            "last_item": last_item,
+            "vars": loop_vars,
+        }
+        json_fields = {
+            "iterations": iteration_count,
+            "terminated": terminated,
+            "last_item": last_item,
+            **loop_vars,
+        }
+        node_out = NodeOutput(
+            status="ok",
+            text=json.dumps(raw_payload, ensure_ascii=False),
+            raw=raw_payload,
+            json_fields=json_fields,
+        )
+
+        _emit(metadata, "on_node_end", node_id=node_id, status="ok")
+        return {
+            "node_outputs": {node_id: node_out},
+            "execution_trace": [node_id],
+        }
+
+    return loop_node
 
 
 def _get_start_inputs(node_outputs: dict[str, NodeOutput]) -> dict[str, Any]:
@@ -1111,10 +1895,10 @@ NODE_BUILDERS: dict[str, str] = {
     "llm": "_build_dag_llm_node",
     "tool": "_build_dag_tool_node",
     "if_else": "_build_if_else_node",
-    "template": "_build_template_node",
     "parameter_extractor": "_build_param_extractor_node",
     "knowledge_retrieval": "_build_kr_node",
-    "variable_aggregator": "_build_aggregator_node",
+    "iteration": "_build_iteration_node",
+    "loop": "_build_loop_node",
 }
 
 
@@ -1129,6 +1913,7 @@ def build_workflow_dag_subgraph(
     args_llm: ChatOpenAI,
     tool_map: dict[str, Any],
     db_bind: Any,
+    node_llms: dict[str, ChatOpenAI] | None = None,
 ) -> Any:
     """Compile a workflow DAG into a LangGraph StateGraph."""
     from collections import defaultdict, deque
@@ -1142,10 +1927,11 @@ def build_workflow_dag_subgraph(
     for n in nodes:
         nid = getattr(n, "node_id", None) or (n.get("node_id") if isinstance(n, dict) else None)
         ntype = getattr(n, "node_type", None) or (n.get("node_type") if isinstance(n, dict) else None)
+        label = getattr(n, "label", None) or (n.get("label") if isinstance(n, dict) else None) or nid
         cfg = getattr(n, "config", None) or (n.get("config") if isinstance(n, dict) else None)
         node_map[nid] = _normalize_config(cfg) if isinstance(cfg, dict) else {}
         type_map[nid] = ntype or ""
-        nodes_raw.append({"node_id": nid, "node_type": ntype, "config": node_map[nid]})
+        nodes_raw.append({"node_id": nid, "node_type": ntype, "label": label, "config": node_map[nid]})
 
     out_edges: dict[str, list[tuple[str, str, dict | None]]] = defaultdict(list)
     edges_raw: list[dict[str, Any]] = []
@@ -1190,19 +1976,35 @@ def build_workflow_dag_subgraph(
         if ntype == "start":
             node_fn = _build_start_node(cfg)
         elif ntype == "llm":
-            node_fn = _build_dag_llm_node(nid, cfg, llm)
+            node_fn = _build_dag_llm_node(nid, cfg, llm, node_llms=node_llms)
         elif ntype == "tool":
             node_fn = _build_dag_tool_node(nid, cfg, tool_map, args_llm, db_bind)
         elif ntype == "if_else":
             node_fn = _build_if_else_node(nid, cfg)
-        elif ntype == "template":
-            node_fn = _build_template_node(nid, cfg)
         elif ntype == "parameter_extractor":
-            node_fn = _build_param_extractor_node(nid, cfg, llm)
+            node_fn = _build_param_extractor_node(nid, cfg, llm, node_llms=node_llms)
         elif ntype == "knowledge_retrieval":
             node_fn = _build_kr_node(nid, cfg, tool_map, db_bind)
-        elif ntype == "variable_aggregator":
-            node_fn = _build_aggregator_node(nid, cfg)
+        elif ntype == "iteration":
+            node_fn = _build_iteration_node(
+                nid,
+                cfg,
+                llm,
+                args_llm,
+                tool_map,
+                db_bind,
+                node_llms=node_llms,
+            )
+        elif ntype == "loop":
+            node_fn = _build_loop_node(
+                nid,
+                cfg,
+                llm,
+                args_llm,
+                tool_map,
+                db_bind,
+                node_llms=node_llms,
+            )
         else:
             raise ValueError(f"Unknown node type: {ntype}")
 
@@ -1492,6 +2294,7 @@ class LangGraphEngine:
             default_headers=default_headers,
         )
         self._tool_cache: dict[str, Any] = {}
+        self._node_llm_cache: dict[str, tuple[tuple[str, str, str], ChatOpenAI]] = {}
 
     def _get_tool(self, tool_name: str) -> Any:
         if tool_name in self._tool_cache:
@@ -1558,6 +2361,86 @@ class LangGraphEngine:
             )
 
         return prompt
+
+    def _resolve_node_custom_llm(self, model_id: str, *, node_id: str) -> ChatOpenAI:
+        if self.db is None:
+            raise RuntimeError(
+                f"Workflow node {node_id} requires custom model {model_id}, but DB session is unavailable"
+            )
+
+        cfg = resolve_openai_compat_config_by_model_id(
+            self.db,
+            model_id=model_id,
+            model_type="llm",
+        )
+        if cfg is None:
+            raise RuntimeError(
+                f"Workflow node {node_id} references unavailable llm model: {model_id}"
+            )
+
+        cache_key = str(cfg.model_id)
+        fingerprint = (cfg.base_url, cfg.model, cfg.api_key)
+        cached = self._node_llm_cache.get(cache_key)
+        if cached and cached[0] == fingerprint:
+            return cached[1]
+
+        default_headers = build_openai_compat_client_headers()
+        node_llm = ChatOpenAI(
+            api_key=cfg.api_key,
+            base_url=cfg.base_url,
+            model=cfg.model,
+            streaming=True,
+            default_headers=default_headers,
+        )
+        self._node_llm_cache[cache_key] = (fingerprint, node_llm)
+        return node_llm
+
+    def _resolve_workflow_node_llms(self, skill: SkillDefinition) -> dict[str, ChatOpenAI]:
+        node_llms: dict[str, ChatOpenAI] = {}
+        if skill.langgraph_pattern != "workflow_dag":
+            return node_llms
+
+        def _bind_model_for_node(*, runtime_key: str, cfg: dict[str, Any]) -> None:
+            model_source = str(cfg.get("model_source", "default") or "default").strip().lower()
+            if model_source in {"", "default"}:
+                return
+            if model_source != "custom":
+                raise RuntimeError(
+                    f"Workflow node {runtime_key} has unsupported modelSource: {model_source}"
+                )
+
+            model_id = str(cfg.get("model_id", "") or "").strip()
+            if not model_id:
+                raise RuntimeError(
+                    f"Workflow node {runtime_key} requires modelId when modelSource=custom"
+                )
+            node_llms[runtime_key] = self._resolve_node_custom_llm(model_id, node_id=runtime_key)
+
+        for node in getattr(skill, "workflow_nodes", None) or []:
+            node_id = str(getattr(node, "node_id", "") or "").strip()
+            node_type = str(getattr(node, "node_type", "") or "").strip()
+            if not node_id:
+                continue
+
+            raw_cfg = getattr(node, "config", None)
+            cfg = _normalize_config(raw_cfg) if isinstance(raw_cfg, dict) else {}
+            if node_type in {"llm", "parameter_extractor"}:
+                _bind_model_for_node(runtime_key=node_id, cfg=cfg)
+                continue
+            if node_type not in {"iteration", "loop"}:
+                continue
+
+            body_nodes = _normalize_container_body_nodes(cfg)
+            for body in body_nodes:
+                body_id = str(body.get("node_id", "") or "").strip()
+                body_type = str(body.get("node_type", "") or "").strip()
+                if not body_id or body_type not in {"llm", "parameter_extractor"}:
+                    continue
+                body_cfg = body.get("config") if isinstance(body.get("config"), dict) else {}
+                runtime_key = f"{node_id}::{body_id}"
+                _bind_model_for_node(runtime_key=runtime_key, cfg=body_cfg)
+
+        return node_llms
 
     def execute(
         self,
@@ -1671,6 +2554,9 @@ class LangGraphEngine:
                 "Supported patterns: agent_loop, workflow_dag."
             )
 
+        workflow_node_types: dict[str, str] = {}
+        node_llms: dict[str, ChatOpenAI] = {}
+
         if pattern == "agent_loop":
             # 设置 system prompt
             tool_names = [getattr(t, "name", "") for t in tools]
@@ -1686,11 +2572,18 @@ class LangGraphEngine:
             wf_edges = getattr(skill, "workflow_edges", None) or []
             if not wf_nodes:
                 raise ValueError(f"workflow_dag skill {skill.name} has no workflow nodes")
+            node_llms = self._resolve_workflow_node_llms(skill)
+            workflow_node_types = {
+                str(getattr(n, "node_id", "") or ""): str(getattr(n, "node_type", "") or "")
+                for n in wf_nodes
+                if getattr(n, "node_id", None)
+            }
             compiled = _get_or_compile_graph(
                 cache_key,
                 lambda: build_workflow_dag_subgraph(
                     skill, wf_nodes, wf_edges,
                     self.llm, self.args_llm, tool_map, db_bind,
+                    node_llms=node_llms,
                 ),
             )
         # 构建初始 state
@@ -1705,6 +2598,8 @@ class LangGraphEngine:
                 "execution_trace": [],
                 "branch_decisions": {},
                 "sys_vars": sys_vars,
+                "workflow_node_types": workflow_node_types,
+                "node_llms": node_llms,
             }
         else:
             initial_state: dict = {

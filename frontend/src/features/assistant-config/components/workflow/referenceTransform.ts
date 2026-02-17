@@ -5,9 +5,15 @@ const TEMPLATE_KEYS = [
   'systemPrompt',
   'user_input',
   'userInput',
+  'input_content',
+  'inputContent',
   'template',
   'instruction',
   'query',
+  'input_source',
+  'inputSource',
+  'output_selector',
+  'outputSelector',
   'args_template',
   'argsTemplate',
 ] as const
@@ -47,6 +53,39 @@ function rewriteConditionPath(
   const nextHead = resolver(parsed.head, parsed.field)
   if (!nextHead) return value
   return `${nextHead}.${parsed.field}`
+}
+
+function transformBodyNodes(
+  rawNodes: unknown[],
+  resolver: (head: string, field: string) => string | null,
+): unknown[] {
+  const bodyNodes = rawNodes.filter(
+    (item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item),
+  )
+  const localLabelToId = new Map<string, string>()
+  const localIds = new Set<string>()
+  bodyNodes.forEach((item) => {
+    const nodeId = String(item.nodeId ?? item.node_id ?? '').trim()
+    if (!nodeId) return
+    localIds.add(nodeId)
+    const label = String(item.label ?? '').trim()
+    if (label) {
+      localLabelToId.set(label.toLocaleLowerCase(), nodeId)
+    }
+  })
+
+  return rawNodes.map((node) => {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) return node
+    const nodeRecord = { ...(node as Record<string, unknown>) }
+    nodeRecord.config = transformConfig(nodeRecord.config, (head, field) => {
+      if (head === 'sys' || head === 'container') return head
+      if (localIds.has(head)) return head
+      const local = localLabelToId.get(head.trim().toLocaleLowerCase())
+      if (local) return local
+      return resolver(head, field)
+    })
+    return nodeRecord
+  })
 }
 
 function transformConfig(
@@ -105,6 +144,40 @@ function transformConfig(
     next.conditions = next.conditions.map(rewriteBranchCondition)
   }
 
+  if (Array.isArray(next.terminationConditions)) {
+    next.terminationConditions = next.terminationConditions.map(rewriteBranchCondition)
+  }
+
+  if (Array.isArray(next.initialVars)) {
+    next.initialVars = next.initialVars.map((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return item
+      const record = { ...(item as Record<string, unknown>) }
+      if (typeof record.value === 'string') {
+        record.value = rewriteTemplateRefs(record.value, resolver)
+      }
+      return record
+    })
+  }
+
+  if (Array.isArray(next.updateMappings)) {
+    next.updateMappings = next.updateMappings.map((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return item
+      const record = { ...(item as Record<string, unknown>) }
+      if (typeof record.value === 'string') {
+        record.value = rewriteTemplateRefs(record.value, resolver)
+      }
+      return record
+    })
+  }
+
+  if (Array.isArray(next.bodyNodes)) {
+    next.bodyNodes = transformBodyNodes(next.bodyNodes, resolver)
+  }
+
+  if (Array.isArray(next.body_nodes)) {
+    next.body_nodes = transformBodyNodes(next.body_nodes, resolver)
+  }
+
   return next
 }
 
@@ -113,7 +186,7 @@ export function toDisplayReferencesFromStored(
   idToLabel: Map<string, string>,
 ): unknown {
   return transformConfig(config, (head) => {
-    if (head === 'sys') return 'sys'
+    if (head === 'sys' || head === 'container') return head
     return idToLabel.get(head) ?? null
   })
 }
@@ -124,7 +197,7 @@ export function toStoredReferencesFromDisplay(
   nodeIds: Set<string>,
 ): unknown {
   return transformConfig(config, (head) => {
-    if (head === 'sys') return 'sys'
+    if (head === 'sys' || head === 'container') return head
     return resolveLabelToId(head, labelToId, nodeIds)
   })
 }

@@ -71,3 +71,58 @@ class AiRegistryRuntimeTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_resolve_openai_compat_config_by_model_id(self) -> None:
+        from app.ai_registry.models import AiCredential, AiModel  # noqa: E402
+        from app.ai_registry.runtime import resolve_openai_compat_config_by_model_id  # noqa: E402
+        from tests._db import make_session  # noqa: E402
+
+        db = make_session()
+        try:
+            cred = AiCredential(
+                name="custom-runtime",
+                base_url=" https://example.com/openai ",
+                api_key_encrypted="enc",
+                api_key_hint="****",
+            )
+            db.add(cred)
+            db.commit()
+            db.refresh(cred)
+
+            llm_model = AiModel(
+                credential_id=cred.id,
+                name="gpt-4.1-mini",
+                model_type="llm",
+            )
+            db.add(llm_model)
+            db.commit()
+            db.refresh(llm_model)
+
+            embedding_model = AiModel(
+                credential_id=cred.id,
+                name="text-embedding-3-small",
+                model_type="embedding",
+            )
+            db.add(embedding_model)
+            db.commit()
+            db.refresh(embedding_model)
+
+            with patch("app.ai_registry.runtime.decrypt_api_key", return_value=" sk-custom "):
+                cfg = resolve_openai_compat_config_by_model_id(
+                    db,
+                    model_id=str(llm_model.id),
+                    model_type="llm",
+                )
+            self.assertIsNotNone(cfg)
+            assert cfg is not None
+            self.assertEqual(cfg.model_id, llm_model.id)
+            self.assertEqual(cfg.model, "gpt-4.1-mini")
+
+            with patch("app.ai_registry.runtime.decrypt_api_key", return_value=" sk-custom "):
+                bad_cfg = resolve_openai_compat_config_by_model_id(
+                    db,
+                    model_id=str(embedding_model.id),
+                    model_type="llm",
+                )
+            self.assertIsNone(bad_cfg)
+        finally:
+            db.close()

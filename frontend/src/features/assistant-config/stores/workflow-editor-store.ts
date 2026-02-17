@@ -25,6 +25,9 @@ interface WorkflowEditorState {
   // Selection
   selectedNodeId: string | null
   selectedEdgeId: string | null
+  selectedSubflowContainerId: string | null
+  selectedSubflowNodeId: string | null
+  selectedSubflowEdgeId: string | null
 
   // Dirty tracking
   isDirty: boolean
@@ -39,10 +42,12 @@ interface WorkflowEditorState {
   setViewport: (viewport: Viewport) => void
   setSelectedNodeId: (id: string | null) => void
   setSelectedEdgeId: (id: string | null) => void
+  setSelectedSubflowSelection: (containerId: string, nodeId: string | null, edgeId: string | null) => void
+  clearSelectedSubflowSelection: () => void
 
   addNode: (node: Node<WfNodeData>) => void
   removeNode: (id: string) => void
-  updateNodeConfig: (id: string, config: NodeConfig) => void
+  updateNodeConfig: (id: string, config: NodeConfig, options?: { pushHistory?: boolean }) => void
   updateNodeLabel: (id: string, label: string) => void
   updateNodePosition: (id: string, x: number, y: number) => void
 
@@ -68,6 +73,9 @@ export const useWorkflowEditorStore = create<WorkflowEditorState>()((set, get) =
   viewport: DEFAULT_VIEWPORT,
   selectedNodeId: null,
   selectedEdgeId: null,
+  selectedSubflowContainerId: null,
+  selectedSubflowNodeId: null,
+  selectedSubflowEdgeId: null,
   isDirty: false,
   history: [],
   historyIndex: -1,
@@ -75,8 +83,56 @@ export const useWorkflowEditorStore = create<WorkflowEditorState>()((set, get) =
   setNodes: (nodes) => set({ nodes, isDirty: true }),
   setEdges: (edges) => set({ edges, isDirty: true }),
   setViewport: (viewport) => set({ viewport }),
-  setSelectedNodeId: (id) => set({ selectedNodeId: id, selectedEdgeId: null }),
-  setSelectedEdgeId: (id) => set({ selectedEdgeId: id, selectedNodeId: null }),
+  setSelectedNodeId: (id) =>
+    set({
+      selectedNodeId: id,
+      selectedEdgeId: null,
+      selectedSubflowContainerId: null,
+      selectedSubflowNodeId: null,
+      selectedSubflowEdgeId: null,
+    }),
+  setSelectedEdgeId: (id) =>
+    set({
+      selectedEdgeId: id,
+      selectedNodeId: null,
+      selectedSubflowContainerId: null,
+      selectedSubflowNodeId: null,
+      selectedSubflowEdgeId: null,
+    }),
+  setSelectedSubflowSelection: (containerId, nodeId, edgeId) =>
+    set((state) => {
+      if (!nodeId && !edgeId) {
+        return {
+          selectedSubflowContainerId: null,
+          selectedSubflowNodeId: null,
+          selectedSubflowEdgeId: null,
+        }
+      }
+      if (
+        state.selectedSubflowContainerId === containerId &&
+        state.selectedSubflowNodeId === nodeId &&
+        state.selectedSubflowEdgeId === edgeId &&
+        state.selectedNodeId === containerId &&
+        state.selectedEdgeId === null
+      ) {
+        return {}
+      }
+      return {
+        selectedNodeId: containerId,
+        selectedEdgeId: null,
+        selectedSubflowContainerId: containerId,
+        selectedSubflowNodeId: nodeId,
+        selectedSubflowEdgeId: edgeId,
+      }
+    }),
+  clearSelectedSubflowSelection: () =>
+    set({
+      selectedNodeId: null,
+      selectedEdgeId: null,
+      selectedSubflowContainerId: null,
+      selectedSubflowNodeId: null,
+      selectedSubflowEdgeId: null,
+    }),
 
   addNode: (node) => {
     const { nodes } = get()
@@ -96,18 +152,33 @@ export const useWorkflowEditorStore = create<WorkflowEditorState>()((set, get) =
   },
 
   removeNode: (id) => {
-    const { nodes, edges, selectedNodeId } = get()
+    const {
+      nodes,
+      edges,
+      selectedNodeId,
+      selectedSubflowContainerId,
+      selectedSubflowNodeId,
+      selectedSubflowEdgeId,
+    } = get()
     get().pushHistory()
+    const shouldClearSubflow = selectedSubflowContainerId === id
     set({
       nodes: nodes.filter((n) => n.id !== id),
       edges: edges.filter((e) => e.source !== id && e.target !== id),
       selectedNodeId: selectedNodeId === id ? null : selectedNodeId,
+      selectedSubflowContainerId: shouldClearSubflow ? null : selectedSubflowContainerId,
+      selectedSubflowNodeId: shouldClearSubflow ? null : selectedSubflowNodeId,
+      selectedSubflowEdgeId: shouldClearSubflow ? null : selectedSubflowEdgeId,
       isDirty: true,
     })
   },
 
-  updateNodeConfig: (id, config) => {
+  updateNodeConfig: (id, config, options) => {
     const { nodes } = get()
+    if (!nodes.some((node) => node.id === id)) return
+    if (options?.pushHistory) {
+      get().pushHistory()
+    }
     set({
       nodes: nodes.map((n) =>
         n.id === id ? { ...n, data: { ...n.data, config } } : n,
@@ -127,6 +198,8 @@ export const useWorkflowEditorStore = create<WorkflowEditorState>()((set, get) =
       .filter((n) => n.id !== id)
       .map((n) => String(n.data.label ?? ''))
     const uniqueLabel = makeUniqueLabel(base, existing)
+    if (uniqueLabel === String(target.data.label ?? '')) return
+    get().pushHistory()
     set({
       nodes: nodes.map((n) =>
         n.id === id
@@ -228,5 +301,8 @@ export const useWorkflowEditorStore = create<WorkflowEditorState>()((set, get) =
       historyIndex: -1,
       selectedNodeId: null,
       selectedEdgeId: null,
+      selectedSubflowContainerId: null,
+      selectedSubflowNodeId: null,
+      selectedSubflowEdgeId: null,
     }),
 }))

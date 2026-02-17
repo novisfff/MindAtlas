@@ -5,6 +5,7 @@ import re
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Sequence
+from uuid import UUID
 
 
 @dataclass
@@ -37,6 +38,226 @@ def _cfg_bool(cfg: dict, *keys: str, default: bool = False) -> bool:
     return bool(value)
 
 
+def _cfg_str_list(cfg: dict, *keys: str) -> list[str]:
+    value = _cfg_get(cfg, *keys, default=None)
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def _cfg_list(cfg: dict, *keys: str) -> list:
+    value = _cfg_get(cfg, *keys, default=None)
+    return value if isinstance(value, list) else []
+
+
+def _is_valid_node_id(value: str) -> bool:
+    return bool(re.fullmatch(r"[a-zA-Z0-9_]+", value))
+
+
+def _extract_container_body(cfg: dict) -> tuple[list[dict], list[dict]]:
+    body_nodes_raw = _cfg_get(cfg, "body_nodes", "bodyNodes", default=[])
+    body_edges_raw = _cfg_get(cfg, "body_edges", "bodyEdges", default=[])
+    body_nodes = body_nodes_raw if isinstance(body_nodes_raw, list) else []
+    body_edges = body_edges_raw if isinstance(body_edges_raw, list) else []
+    return body_nodes, body_edges
+
+
+def _validate_container_subflow(
+    parent_node_id: str,
+    parent_type: str,
+    body_nodes: list[dict],
+    body_edges: list[dict],
+    errors: list[ValidationError],
+) -> tuple[dict[str, dict], dict[str, str], list[str]]:
+    body_node_map: dict[str, dict] = {}
+    body_type_map: dict[str, str] = {}
+    in_degree: dict[str, int] = {}
+    out_edges: dict[str, list[str]] = defaultdict(list)
+
+    for raw in body_nodes:
+        if not isinstance(raw, dict):
+            errors.append(
+                ValidationError(
+                    node_id=parent_node_id,
+                    message=f"{parent_type} bodyNodes contains non-object node item",
+                )
+            )
+            continue
+
+        node_id = str(raw.get("node_id", raw.get("nodeId", "")) or "").strip()
+        node_type = str(raw.get("node_type", raw.get("nodeType", "")) or "").strip()
+        if not node_id or not _is_valid_node_id(node_id):
+            errors.append(
+                ValidationError(
+                    node_id=parent_node_id,
+                    message=f"{parent_type} body node has invalid nodeId: {node_id or '<empty>'}",
+                )
+            )
+            continue
+        if node_id in body_node_map:
+            errors.append(
+                ValidationError(
+                    node_id=parent_node_id,
+                    message=f"{parent_type} body node duplicated nodeId: {node_id}",
+                )
+            )
+            continue
+        if node_type not in _CONTAINER_BODY_ALLOWED_NODE_TYPES:
+            errors.append(
+                ValidationError(
+                    node_id=parent_node_id,
+                    message=f"{parent_type} body node '{node_id}' has unsupported node type: {node_type}",
+                )
+            )
+        body_node_map[node_id] = raw
+        body_type_map[node_id] = node_type
+        in_degree[node_id] = 0
+
+        if node_type in {"iteration", "loop"}:
+            errors.append(
+                ValidationError(
+                    node_id=parent_node_id,
+                    message=f"{parent_type} body node '{node_id}' must not nest iteration/loop nodes",
+                )
+            )
+
+    start_count = sum(1 for t in body_type_map.values() if t == "start")
+    if start_count != 1:
+        errors.append(
+            ValidationError(
+                node_id=parent_node_id,
+                message=f"{parent_type} body must contain exactly one start node",
+            )
+        )
+
+    for raw in body_edges:
+        if not isinstance(raw, dict):
+            errors.append(
+                ValidationError(
+                    node_id=parent_node_id,
+                    message=f"{parent_type} bodyEdges contains non-object edge item",
+                )
+            )
+            continue
+        source = str(raw.get("source_node_id", raw.get("sourceNodeId", "")) or "").strip()
+        target = str(raw.get("target_node_id", raw.get("targetNodeId", "")) or "").strip()
+        if not source or not target:
+            errors.append(
+                ValidationError(
+                    node_id=parent_node_id,
+                    message=f"{parent_type} body edge has empty source/target",
+                )
+            )
+            continue
+        if source not in body_node_map:
+            errors.append(
+                ValidationError(
+                    node_id=parent_node_id,
+                    message=f"{parent_type} body edge references unknown source node: {source}",
+                )
+            )
+            continue
+        if target not in body_node_map:
+            errors.append(
+                ValidationError(
+                    node_id=parent_node_id,
+                    message=f"{parent_type} body edge references unknown target node: {target}",
+                )
+            )
+            continue
+        out_edges[source].append(target)
+        in_degree[target] = in_degree.get(target, 0) + 1
+
+    queue = deque([node_id for node_id, deg in in_degree.items() if deg == 0])
+    topo_order: list[str] = []
+    while queue:
+        node_id = queue.popleft()
+        topo_order.append(node_id)
+        for target in out_edges.get(node_id, []):
+            in_degree[target] -= 1
+            if in_degree[target] == 0:
+                queue.append(target)
+
+    if body_node_map and len(topo_order) != len(body_node_map):
+        errors.append(
+            ValidationError(
+                node_id=parent_node_id,
+                message=f"{parent_type} body graph contains cycle(s)",
+            )
+        )
+
+    return body_node_map, body_type_map, topo_order
+
+
+def _iter_config_template_texts(cfg: dict) -> list[str]:
+    texts: list[str] = []
+    if not isinstance(cfg, dict):
+        return texts
+
+    for key in (
+        "system_prompt", "systemPrompt",
+        "user_input", "userInput",
+        "input_content", "inputContent",
+        "instruction",
+        "template",
+        "query",
+        "args_template", "argsTemplate",
+        "input_source", "inputSource",
+        "output_selector", "outputSelector",
+    ):
+        value = cfg.get(key, "")
+        if isinstance(value, str):
+            texts.append(value)
+
+    for key in ("input_bindings", "inputBindings"):
+        bindings = cfg.get(key)
+        if isinstance(bindings, dict):
+            for value in bindings.values():
+                if isinstance(value, str):
+                    texts.append(value)
+
+    for key in ("initial_vars", "initialVars", "update_mappings", "updateMappings"):
+        items = cfg.get(key)
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    value = item.get("value")
+                    if isinstance(value, str):
+                        texts.append(value)
+
+    for key in ("conditions", "terminationConditions"):
+        conds = cfg.get(key)
+        if isinstance(conds, list):
+            for cond in conds:
+                if isinstance(cond, dict):
+                    value = cond.get("value")
+                    if isinstance(value, str):
+                        texts.append(value)
+
+    branches = cfg.get("branches")
+    if isinstance(branches, list):
+        for branch in branches:
+            if not isinstance(branch, dict):
+                continue
+            conditions = branch.get("conditions")
+            if isinstance(conditions, list):
+                for condition in conditions:
+                    if not isinstance(condition, dict):
+                        continue
+                    value = condition.get("value")
+                    if isinstance(value, str):
+                        texts.append(value)
+
+    return texts
+
+
 _IF_ELSE_HANDLE_RE = re.compile(r"[a-zA-Z0-9_]+")
 _IF_ELSE_NEW_OPERATORS = {
     "contains",
@@ -55,6 +276,31 @@ _IF_ELSE_LEGACY_OPERATOR_MAP = {
     "not_equals": "is_not",
 }
 _SYS_FIELDS = {"date", "datetime", "conversation_id"}
+_OUTPUT_FIELD_NAME_RE = re.compile(r"[a-zA-Z0-9_]+")
+_OUTPUT_FIELD_TYPES = {"string", "number", "integer", "boolean", "object", "array"}
+_SUPPORTED_NODE_TYPES = {
+    "start",
+    "llm",
+    "tool",
+    "if_else",
+    "parameter_extractor",
+    "knowledge_retrieval",
+    "iteration",
+    "loop",
+}
+_CONTAINER_BODY_ALLOWED_NODE_TYPES = {
+    "start",
+    "llm",
+    "tool",
+    "if_else",
+    "parameter_extractor",
+    "knowledge_retrieval",
+}
+_REMOVED_NODE_TYPE_MESSAGES = {
+    "answer": "Node type 'answer' is no longer supported. Use llm node with isOutput=true.",
+    "template": "Node type 'template' has been removed. Please refactor with supported nodes.",
+    "variable_aggregator": "Node type 'variable_aggregator' has been removed. Please refactor with supported nodes.",
+}
 
 
 def _normalize_if_else_operator(raw: object) -> str:
@@ -220,13 +466,16 @@ def validate_workflow(
         for nid in start_nodes[1:]:
             errors.append(ValidationError(node_id=nid, message="Multiple start nodes found"))
 
-    # Rule 2: answer node is no longer supported (strict replacement by llm.is_output)
-    answer_nodes = [nid for nid, nt in type_map.items() if nt == "answer"]
-    for nid in answer_nodes:
-        errors.append(ValidationError(
-            node_id=nid,
-            message="Node type 'answer' is no longer supported. Use llm node with isOutput=true.",
-        ))
+    # Rule 2: removed / unknown node types are rejected explicitly
+    for nid, ntype in type_map.items():
+        if ntype in _REMOVED_NODE_TYPE_MESSAGES:
+            errors.append(
+                ValidationError(node_id=nid, message=_REMOVED_NODE_TYPE_MESSAGES[ntype])
+            )
+        elif ntype not in _SUPPORTED_NODE_TYPES:
+            errors.append(
+                ValidationError(node_id=nid, message=f"Unsupported node type: {ntype}")
+            )
 
     # Rule 3: at least one llm output node
     output_llm_nodes: list[str] = []
@@ -246,7 +495,6 @@ def validate_workflow(
 
     # Build adjacency structures
     out_edges: dict[str, list[str]] = defaultdict(list)
-    in_edges: dict[str, list[str]] = defaultdict(list)
     out_handles: dict[str, list[str]] = defaultdict(list)
     out_edge_count: dict[str, int] = defaultdict(int)
     in_edge_count: dict[str, int] = defaultdict(int)
@@ -266,7 +514,6 @@ def validate_workflow(
 
         if src in node_ids and tgt in node_ids:
             out_edges[src].append(tgt)
-            in_edges[tgt].append(src)
             out_handles[src].append(_normalize_if_else_handle(src_handle))
             out_edge_count[src] += 1
             in_edge_count[tgt] += 1
@@ -303,33 +550,17 @@ def validate_workflow(
         if nt == "if_else" and out_edge_count[nid] < 2:
             errors.append(ValidationError(node_id=nid, message="if_else node must have at least 2 outgoing edges"))
 
-    # Rule 9: variable_aggregator must have at least 2 incoming edges
-    for nid, nt in type_map.items():
-        if nt == "variable_aggregator" and in_edge_count[nid] < 2:
-            errors.append(ValidationError(node_id=nid, message="variable_aggregator must have at least 2 incoming edges"))
-
-    # Rule 10: start has no in-edges
+    # Rule 9: start has no in-edges
     for nid in start_nodes:
         if in_edge_count[nid] > 0:
             errors.append(ValidationError(node_id=nid, message="start node must not have incoming edges"))
 
-    # Rule 11: template variable references must point to upstream nodes
+    # Rule 10: template variable references must point to upstream nodes
     topo_index = {nid: i for i, nid in enumerate(topo_order)}
     _VAR_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\s*\}\}")
     for nid in node_ids:
         cfg = config_map.get(nid, {})
-        # Check template strings in config (snake_case + camelCase)
-        for key in (
-            "system_prompt", "systemPrompt",
-            "user_input", "userInput",
-            "instruction",
-            "template",
-            "query",
-            "args_template", "argsTemplate",
-        ):
-            text = cfg.get(key, "")
-            if not isinstance(text, str):
-                continue
+        for text in _iter_config_template_texts(cfg):
             for m in _VAR_RE.finditer(text):
                 ref_node = m.group(1)
                 ref_field = m.group(2)
@@ -339,6 +570,8 @@ def validate_workflow(
                             node_id=nid,
                             message=f"Template references unsupported sys variable: sys.{ref_field}",
                         ))
+                    continue
+                if ref_node == "container" and type_map.get(nid) in {"iteration", "loop"}:
                     continue
                 if ref_node not in node_ids:
                     errors.append(ValidationError(
@@ -352,7 +585,7 @@ def validate_workflow(
                             message=f"Template references non-upstream node: {ref_node}",
                         ))
 
-        # Rule 12: tool node config validation (save-time)
+        # Rule 11: tool node config validation (save-time)
         if type_map.get(nid) == "tool":
             tool_name = _cfg_get(cfg, "tool_name", "toolName", default="")
             if not isinstance(tool_name, str) or not tool_name.strip():
@@ -386,7 +619,7 @@ def validate_workflow(
                             message=f"tool.inputBindings['{key}'] must be a string",
                         ))
 
-        # Rule 13: if_else config and edge-handle validation
+        # Rule 12: if_else config and edge-handle validation
         if type_map.get(nid) == "if_else":
             normalized = _normalize_if_else_config(cfg)
             branches = normalized.get("branches")
@@ -501,6 +734,467 @@ def validate_workflow(
                         message=f"if_else has unknown outgoing handle: {handle}",
                     ))
 
+        # Rule 13: llm knowledge binding config validation (save-time)
+        if type_map.get(nid) == "llm":
+            knowledge_source_ids = _cfg_str_list(cfg, "knowledge_source_node_ids", "knowledgeSourceNodeIds")
+            raw_inject_mode = str(
+                _cfg_get(cfg, "knowledge_inject_mode", "knowledgeInjectMode", default="references_only")
+                or "references_only"
+            ).strip().lower()
+            if raw_inject_mode not in {"references_only", "full_payload"}:
+                errors.append(
+                    ValidationError(
+                        node_id=nid,
+                        message=f"Unsupported llm knowledgeInjectMode: {raw_inject_mode}",
+                    )
+                )
+            raw_max_refs = _cfg_get(cfg, "knowledge_max_refs", "knowledgeMaxRefs", default=None)
+            if raw_max_refs is not None and str(raw_max_refs).strip() != "":
+                try:
+                    max_refs_val = int(raw_max_refs)
+                except Exception:
+                    errors.append(
+                        ValidationError(
+                            node_id=nid,
+                            message="llm knowledgeMaxRefs must be an integer",
+                        )
+                    )
+                else:
+                    if max_refs_val < 1 or max_refs_val > 100:
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message="llm knowledgeMaxRefs must be between 1 and 100",
+                            )
+                        )
+
+            for source_id in knowledge_source_ids:
+                if source_id not in node_ids:
+                    errors.append(
+                        ValidationError(
+                            node_id=nid,
+                            message=f"llm knowledge source node not found: {source_id}",
+                        )
+                    )
+                    continue
+                if type_map.get(source_id) != "knowledge_retrieval":
+                    errors.append(
+                        ValidationError(
+                            node_id=nid,
+                            message=f"llm knowledge source must be knowledge_retrieval node: {source_id}",
+                        )
+                    )
+                if nid in topo_index and source_id in topo_index and topo_index[source_id] >= topo_index[nid]:
+                    errors.append(
+                        ValidationError(
+                            node_id=nid,
+                            message=f"llm knowledge source must be upstream node: {source_id}",
+                        )
+                    )
+
+        # Rule 14: llm / parameter_extractor model selection validation (save-time)
+        if type_map.get(nid) in {"llm", "parameter_extractor"}:
+            raw_model_source = _cfg_get(cfg, "model_source", "modelSource", default=None)
+            model_source = str(raw_model_source or "default").strip().lower() or "default"
+            if model_source not in {"default", "custom"}:
+                errors.append(
+                    ValidationError(
+                        node_id=nid,
+                        message=f"Unsupported node modelSource: {raw_model_source}",
+                    )
+                )
+
+            raw_model_id = _cfg_get(cfg, "model_id", "modelId", default=None)
+            model_id = str(raw_model_id).strip() if raw_model_id is not None else ""
+            if model_source == "custom" and not model_id:
+                errors.append(
+                    ValidationError(
+                        node_id=nid,
+                        message="custom modelSource requires modelId",
+                    )
+                )
+            if model_source == "default" and model_id:
+                errors.append(
+                    ValidationError(
+                        node_id=nid,
+                        message="default modelSource must not provide modelId",
+                    )
+                )
+            if model_id:
+                try:
+                    UUID(model_id)
+                except Exception:
+                    errors.append(
+                        ValidationError(
+                            node_id=nid,
+                            message=f"Invalid node modelId (must be UUID): {model_id}",
+                        )
+                    )
+
+        # Rule 15: parameter_extractor config validation (save-time)
+        if type_map.get(nid) == "parameter_extractor":
+            input_content = _cfg_get(cfg, "input_content", "inputContent", default=None)
+            if input_content is not None and not isinstance(input_content, str):
+                errors.append(
+                    ValidationError(
+                        node_id=nid,
+                        message="parameter_extractor inputContent must be a string",
+                    )
+                )
+
+            output_fields = _cfg_get(cfg, "output_fields", "outputFields", default=None)
+            if not isinstance(output_fields, list) or not output_fields:
+                errors.append(
+                    ValidationError(
+                        node_id=nid,
+                        message="parameter_extractor outputFields must be a non-empty list",
+                    )
+                )
+                continue
+
+            for field in output_fields:
+                if not isinstance(field, dict):
+                    errors.append(
+                        ValidationError(
+                            node_id=nid,
+                            message="parameter_extractor outputFields items must be objects",
+                        )
+                    )
+                    continue
+
+                field_name = str(field.get("name", "") or "").strip()
+                if not field_name or not _OUTPUT_FIELD_NAME_RE.fullmatch(field_name):
+                    errors.append(
+                        ValidationError(
+                            node_id=nid,
+                            message=f"Invalid parameter_extractor output field name: {field_name}",
+                        )
+                    )
+
+                field_type_raw = field.get("type", "string")
+                field_type = str(field_type_raw or "string").strip().lower() or "string"
+                if field_type not in _OUTPUT_FIELD_TYPES:
+                    errors.append(
+                        ValidationError(
+                            node_id=nid,
+                            message=f"Invalid parameter_extractor output field type: {field_type_raw}",
+                        )
+                    )
+
+                nullable_raw = field.get("nullable", None)
+                if nullable_raw is not None and not isinstance(nullable_raw, bool):
+                    errors.append(
+                        ValidationError(
+                            node_id=nid,
+                            message=f"parameter_extractor field '{field_name}' nullable must be boolean",
+                        )
+                    )
+
+                items_type_raw = field.get("items_type", field.get("itemsType"))
+                items_type = str(items_type_raw or "").strip().lower()
+
+                if field_type == "array":
+                    if not items_type:
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message=f"parameter_extractor array field '{field_name}' requires itemsType",
+                            )
+                        )
+                    elif items_type not in _OUTPUT_FIELD_TYPES:
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message=(
+                                    f"parameter_extractor array field '{field_name}' has invalid "
+                                    f"itemsType: {items_type_raw}"
+                                ),
+                            )
+                        )
+                    elif items_type == "array":
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message=f"parameter_extractor field '{field_name}' itemsType cannot be array",
+                            )
+                        )
+                elif items_type:
+                    if items_type not in _OUTPUT_FIELD_TYPES:
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message=(
+                                    f"parameter_extractor field '{field_name}' has invalid "
+                                    f"itemsType: {items_type_raw}"
+                                ),
+                            )
+                        )
+                    elif items_type == "array":
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message=f"parameter_extractor field '{field_name}' itemsType cannot be array",
+                            )
+                        )
+
+                enum_raw = field.get("enum")
+                if enum_raw is not None:
+                    if not isinstance(enum_raw, list) or any(not isinstance(item, str) for item in enum_raw):
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message=f"parameter_extractor field '{field_name}' enum must be string array",
+                            )
+                        )
+
+        # Rule 16: iteration container validation
+        if type_map.get(nid) == "iteration":
+            input_source = _cfg_get(cfg, "input_source", "inputSource", default=None)
+            if not isinstance(input_source, str) or not input_source.strip():
+                errors.append(
+                    ValidationError(
+                        node_id=nid,
+                        message="iteration inputSource is required and must be a string",
+                    )
+                )
+            output_variable = str(_cfg_get(cfg, "output_variable", "outputVariable", default="") or "").strip()
+            if not output_variable or not _OUTPUT_FIELD_NAME_RE.fullmatch(output_variable):
+                errors.append(
+                    ValidationError(
+                        node_id=nid,
+                        message="iteration outputVariable must match [a-zA-Z0-9_]+",
+                    )
+                )
+            output_selector = _cfg_get(cfg, "output_selector", "outputSelector", default=None)
+            if not isinstance(output_selector, str) or not output_selector.strip():
+                errors.append(
+                    ValidationError(
+                        node_id=nid,
+                        message="iteration outputSelector is required and must be a string",
+                    )
+                )
+            error_strategy = str(_cfg_get(cfg, "error_strategy", "errorStrategy", default="fail_fast") or "fail_fast").strip().lower()
+            if error_strategy not in {"fail_fast", "skip_item"}:
+                errors.append(
+                    ValidationError(
+                        node_id=nid,
+                        message=f"iteration errorStrategy is invalid: {error_strategy}",
+                    )
+                )
+
+            body_nodes, body_edges = _extract_container_body(cfg)
+            body_node_map, _, body_topo = _validate_container_subflow(
+                nid, "iteration", body_nodes, body_edges, errors
+            )
+            body_topo_index = {node_id: index for index, node_id in enumerate(body_topo)}
+            for body_node_id, raw_body_node in body_node_map.items():
+                body_cfg = raw_body_node.get("config")
+                if not isinstance(body_cfg, dict):
+                    continue
+                for text in _iter_config_template_texts(body_cfg):
+                    for m in _VAR_RE.finditer(text):
+                        ref_node = m.group(1)
+                        ref_field = m.group(2)
+                        if ref_node == "sys":
+                            if ref_field not in _SYS_FIELDS:
+                                errors.append(
+                                    ValidationError(
+                                        node_id=nid,
+                                        message=f"iteration body node '{body_node_id}' references unsupported sys variable: sys.{ref_field}",
+                                    )
+                                )
+                            continue
+                        if ref_node == "container":
+                            continue
+                        if ref_node not in body_node_map:
+                            errors.append(
+                                ValidationError(
+                                    node_id=nid,
+                                    message=f"iteration body node '{body_node_id}' references unknown node: {ref_node}",
+                                )
+                            )
+                            continue
+                        if (
+                            body_node_id in body_topo_index
+                            and ref_node in body_topo_index
+                            and body_topo_index[ref_node] >= body_topo_index[body_node_id]
+                        ):
+                            errors.append(
+                                ValidationError(
+                                    node_id=nid,
+                                    message=(
+                                        f"iteration body node '{body_node_id}' references non-upstream node: {ref_node}"
+                                    ),
+                                )
+                            )
+
+        # Rule 17: loop container validation
+        if type_map.get(nid) == "loop":
+            max_iterations_raw = _cfg_get(cfg, "max_iterations", "maxIterations", default=10)
+            try:
+                max_iterations = int(max_iterations_raw)
+            except Exception:
+                max_iterations = 0
+            if max_iterations < 1 or max_iterations > 1000:
+                errors.append(
+                    ValidationError(
+                        node_id=nid,
+                        message="loop maxIterations must be between 1 and 1000",
+                    )
+                )
+
+            termination_logic = str(_cfg_get(cfg, "termination_logic", "terminationLogic", default="and") or "and").strip().lower()
+            if termination_logic not in {"and", "or"}:
+                errors.append(
+                    ValidationError(
+                        node_id=nid,
+                        message=f"loop terminationLogic is invalid: {termination_logic}",
+                    )
+                )
+
+            initial_vars = _cfg_get(cfg, "initial_vars", "initialVars", default=[])
+            if initial_vars is not None and not isinstance(initial_vars, list):
+                errors.append(
+                    ValidationError(
+                        node_id=nid,
+                        message="loop initialVars must be a list",
+                    )
+                )
+            elif isinstance(initial_vars, list):
+                for item in initial_vars:
+                    if not isinstance(item, dict):
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message="loop initialVars items must be objects",
+                            )
+                        )
+                        continue
+                    name = str(item.get("name", "") or "").strip()
+                    if not name or not _OUTPUT_FIELD_NAME_RE.fullmatch(name):
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message=f"loop initialVars contains invalid variable name: {name}",
+                            )
+                        )
+
+            update_mappings = _cfg_get(cfg, "update_mappings", "updateMappings", default=[])
+            if update_mappings is not None and not isinstance(update_mappings, list):
+                errors.append(
+                    ValidationError(
+                        node_id=nid,
+                        message="loop updateMappings must be a list",
+                    )
+                )
+            elif isinstance(update_mappings, list):
+                for item in update_mappings:
+                    if not isinstance(item, dict):
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message="loop updateMappings items must be objects",
+                            )
+                        )
+                        continue
+                    name = str(item.get("name", "") or "").strip()
+                    value = item.get("value")
+                    if not name or not _OUTPUT_FIELD_NAME_RE.fullmatch(name):
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message=f"loop updateMappings contains invalid variable name: {name}",
+                            )
+                        )
+                    if not isinstance(value, str) or not value.strip():
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message=f"loop updateMappings variable '{name or '<empty>'}' requires string value",
+                            )
+                        )
+
+            termination_conditions = _cfg_get(cfg, "termination_conditions", "terminationConditions", default=[])
+            if termination_conditions is not None and not isinstance(termination_conditions, list):
+                errors.append(
+                    ValidationError(
+                        node_id=nid,
+                        message="loop terminationConditions must be a list",
+                    )
+                )
+            elif isinstance(termination_conditions, list):
+                for cond in termination_conditions:
+                    if not isinstance(cond, dict):
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message="loop terminationConditions contains invalid condition item",
+                            )
+                        )
+                        continue
+                    var = str(cond.get("variable", "") or "").strip()
+                    if not var:
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message="loop terminationConditions requires variable",
+                            )
+                        )
+                        continue
+                    if not re.fullmatch(r"[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+", var):
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message=f"Invalid loop condition variable path: {var}",
+                            )
+                        )
+
+            body_nodes, body_edges = _extract_container_body(cfg)
+            body_node_map, _, body_topo = _validate_container_subflow(
+                nid, "loop", body_nodes, body_edges, errors
+            )
+            body_topo_index = {node_id: index for index, node_id in enumerate(body_topo)}
+            for body_node_id, raw_body_node in body_node_map.items():
+                body_cfg = raw_body_node.get("config")
+                if not isinstance(body_cfg, dict):
+                    continue
+                for text in _iter_config_template_texts(body_cfg):
+                    for m in _VAR_RE.finditer(text):
+                        ref_node = m.group(1)
+                        ref_field = m.group(2)
+                        if ref_node == "sys":
+                            if ref_field not in _SYS_FIELDS:
+                                errors.append(
+                                    ValidationError(
+                                        node_id=nid,
+                                        message=f"loop body node '{body_node_id}' references unsupported sys variable: sys.{ref_field}",
+                                    )
+                                )
+                            continue
+                        if ref_node == "container":
+                            continue
+                        if ref_node not in body_node_map:
+                            errors.append(
+                                ValidationError(
+                                    node_id=nid,
+                                    message=f"loop body node '{body_node_id}' references unknown node: {ref_node}",
+                                )
+                            )
+                            continue
+                        if (
+                            body_node_id in body_topo_index
+                            and ref_node in body_topo_index
+                            and body_topo_index[ref_node] >= body_topo_index[body_node_id]
+                        ):
+                            errors.append(
+                                ValidationError(
+                                    node_id=nid,
+                                    message=(
+                                        f"loop body node '{body_node_id}' references non-upstream node: {ref_node}"
+                                    ),
+                                )
+                            )
+
     return ValidationResult(valid=len(errors) == 0, errors=errors)
 
 
@@ -595,6 +1289,100 @@ def validate_workflow_compile(
                                     message=f"Unsupported sys variable in condition: {var}",
                                 ))
 
+        # iteration/loop body nodes: compile-time checks
+        if ntype in {"iteration", "loop"}:
+            body_nodes, _ = _extract_container_body(cfg)
+            for raw_body_node in body_nodes:
+                if not isinstance(raw_body_node, dict):
+                    continue
+                body_node_id = str(raw_body_node.get("node_id", raw_body_node.get("nodeId", "")) or "").strip() or "<unknown>"
+                body_type = str(raw_body_node.get("node_type", raw_body_node.get("nodeType", "")) or "").strip()
+                body_cfg = raw_body_node.get("config")
+                if not isinstance(body_cfg, dict):
+                    body_cfg = {}
+
+                if body_type == "tool" and tool_names is not None:
+                    body_tool_name = _cfg_get(body_cfg, "tool_name", "toolName", default="")
+                    if (
+                        isinstance(body_tool_name, str)
+                        and body_tool_name.strip()
+                        and body_tool_name not in tool_names
+                    ):
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message=(
+                                    f"{ntype} body node '{body_node_id}' references unknown tool: {body_tool_name}"
+                                ),
+                            )
+                        )
+
+                if body_type == "llm":
+                    body_output_mode_raw = _cfg_get(body_cfg, "output_mode", "outputMode", default="text")
+                    body_output_mode = str(body_output_mode_raw or "text").strip().lower()
+                    if body_output_mode == "json":
+                        body_output_mode = "structured"
+                    if body_output_mode not in {"text", "structured"}:
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message=(
+                                    f"{ntype} body node '{body_node_id}' has unsupported llm output_mode: "
+                                    f"{body_output_mode_raw}"
+                                ),
+                            )
+                        )
+
+                    body_output_fields = _cfg_get(body_cfg, "output_fields", "outputFields")
+                    if body_output_mode == "structured" and (
+                        not isinstance(body_output_fields, list) or not body_output_fields
+                    ):
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message=(
+                                    f"{ntype} body node '{body_node_id}' structured mode requires output_fields"
+                                ),
+                            )
+                        )
+
+                if body_type == "if_else":
+                    normalized = _normalize_if_else_config(body_cfg)
+                    branches = normalized.get("branches", [])
+                    if isinstance(branches, list):
+                        for branch in branches:
+                            if not isinstance(branch, dict):
+                                continue
+                            for cond in (branch.get("conditions") or []):
+                                if not isinstance(cond, dict):
+                                    continue
+                                var = str(cond.get("variable") or "").strip()
+                                if not var:
+                                    continue
+                                if not re.fullmatch(r"[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+", var):
+                                    errors.append(
+                                        ValidationError(
+                                            node_id=nid,
+                                            message=(
+                                                f"{ntype} body node '{body_node_id}' has invalid "
+                                                f"condition variable path: {var}"
+                                            ),
+                                        )
+                                    )
+                                    continue
+                                if var.startswith("sys."):
+                                    sys_field = var.split(".", 1)[1]
+                                    if sys_field not in _SYS_FIELDS:
+                                        errors.append(
+                                            ValidationError(
+                                                node_id=nid,
+                                                message=(
+                                                    f"{ntype} body node '{body_node_id}' uses unsupported "
+                                                    f"sys variable in condition: {var}"
+                                                ),
+                                            )
+                                        )
+
     return ValidationResult(valid=len(errors) == 0, errors=errors)
 
 
@@ -612,7 +1400,6 @@ def validate_parallel_branches(
 
     node_types: dict[str, str] = {}
     out_edges: dict[str, list[str]] = defaultdict(list)
-    in_edges: dict[str, list[str]] = defaultdict(list)
 
     for n in nodes:
         nid = getattr(n, "node_id", None) or (n.get("node_id") if isinstance(n, dict) else None)
@@ -625,7 +1412,6 @@ def validate_parallel_branches(
         tgt = getattr(e, "target_node_id", None) or (e.get("target_node_id") if isinstance(e, dict) else None)
         if src and tgt:
             out_edges[src].append(tgt)
-            in_edges[tgt].append(src)
 
     # Find fan-out points (nodes with >1 outgoing edges, excluding if_else which is conditional)
     fan_out_nodes = [
@@ -642,14 +1428,10 @@ def validate_parallel_branches(
             ))
 
     # Parallel depth check via DFS from fan-out points
-    aggregator_nodes = {nid for nid, nt in node_types.items() if nt == "variable_aggregator"}
-
     def _find_parallel_depth(start: str, depth: int) -> int:
         """Recursively find max parallel nesting depth."""
         max_depth = depth
         for tgt in out_edges.get(start, []):
-            if tgt in aggregator_nodes:
-                continue
             # Check if this target is itself a fan-out (nested parallel)
             if len(out_edges.get(tgt, [])) > 1 and node_types.get(tgt) != "if_else":
                 nested = _find_parallel_depth(tgt, depth + 1)
@@ -670,7 +1452,7 @@ def validate_parallel_branches(
         queue = deque(out_edges.get(fan_nid, []))
         while queue:
             cur = queue.popleft()
-            if cur in visited or cur in aggregator_nodes:
+            if cur in visited:
                 continue
             visited.add(cur)
             if node_types.get(cur) == "if_else":

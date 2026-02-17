@@ -109,11 +109,37 @@ function buildNodeOutputFields(
         .map((item) => (item && typeof item === 'object' ? String((item as Record<string, unknown>).name ?? '') : ''))
         .filter((name) => !!name)
       : []
-    return fields.length > 0 ? fields : ['text']
+    return fields
+  }
+
+  if (node.data.nodeType === 'knowledge_retrieval') {
+    return ['result', 'query', 'mode', 'references', 'references_count']
+  }
+
+  if (node.data.nodeType === 'iteration') {
+    const outputVariable = String(cfg.outputVariable ?? '').trim() || 'results'
+    return [outputVariable, 'count', 'errors']
+  }
+
+  if (node.data.nodeType === 'loop') {
+    const varNames = Array.isArray(cfg.initialVars)
+      ? cfg.initialVars
+        .map((item) => (item && typeof item === 'object' ? String((item as Record<string, unknown>).name ?? '') : ''))
+        .filter(Boolean)
+      : []
+    return ['iterations', 'terminated', 'last_item', ...varNames]
   }
 
   if (node.data.nodeType === 'if_else') return ['handle']
   return ['text']
+}
+
+function inferFieldType(field: string): InputParam['paramType'] {
+  if (field === 'result' || field === 'references') return 'object'
+  if (field === 'references_count') return 'number'
+  if (field === 'count' || field === 'iterations') return 'number'
+  if (field === 'errors') return 'array'
+  return 'string'
 }
 
 function nodeDisplayLabel(node: Node<WfNodeData>): string {
@@ -148,7 +174,7 @@ export function buildWorkflowReferenceParams(
         groupKey,
         groupLabel,
         itemLabel: field,
-        paramType: field === 'result' ? 'object' : 'string',
+        paramType: inferFieldType(field),
         required: false,
         description: `${groupLabel}.${field}`,
       })

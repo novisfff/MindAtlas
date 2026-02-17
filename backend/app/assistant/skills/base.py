@@ -21,9 +21,9 @@ OutputFieldType = Literal["string", "number", "integer", "boolean", "object", "a
 
 # DAG 节点类型
 NodeType = Literal[
-    "start", "llm", "tool", "if_else", "template",
+    "start", "llm", "tool", "if_else",
     "parameter_extractor", "knowledge_retrieval",
-    "variable_aggregator",
+    "iteration", "loop",
 ]
 
 # 条件运算符
@@ -33,10 +33,6 @@ ConditionOperator = Literal[
     # legacy operators kept for runtime compatibility
     "equals", "not_equals", "gt", "lt", "gte", "lte",
 ]
-
-# 并行分支合并策略
-MergeStrategy = Literal["all_required", "first_completed"]
-
 
 # ==================== Output Field 配置 ====================
 

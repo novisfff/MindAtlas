@@ -1,34 +1,11 @@
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
-  Play,
-  Brain,
   Wrench,
-  GitBranch,
-  FileText,
-  ScanSearch,
-  BookOpen,
-  Merge,
 } from 'lucide-react'
 import type { NodeType } from '../../api/workflow'
 import type { WorkflowToolDefinition } from './types'
-
-interface PaletteItem {
-  type: NodeType
-  icon: typeof Play
-  category: 'basic' | 'logic' | 'data'
-}
-
-const PALETTE_ITEMS: PaletteItem[] = [
-  { type: 'llm', icon: Brain, category: 'basic' },
-  { type: 'template', icon: FileText, category: 'basic' },
-  { type: 'if_else', icon: GitBranch, category: 'logic' },
-  { type: 'variable_aggregator', icon: Merge, category: 'logic' },
-  { type: 'parameter_extractor', icon: ScanSearch, category: 'data' },
-  { type: 'knowledge_retrieval', icon: BookOpen, category: 'data' },
-]
-
-const CATEGORIES = ['basic', 'logic', 'data'] as const
+import { NODE_CATALOG_CATEGORIES, NODE_CATALOG_ITEMS } from './nodeCatalog'
 
 interface NodePaletteProps {
   tools: WorkflowToolDefinition[]
@@ -56,9 +33,9 @@ export function NodePalette({ tools }: NodePaletteProps) {
     e.dataTransfer.effectAllowed = 'move'
   }
 
-  const grouped = CATEGORIES.map((cat) => ({
+  const grouped = NODE_CATALOG_CATEGORIES.map((cat) => ({
     category: cat,
-    items: PALETTE_ITEMS.filter((p) => p.category === cat),
+    items: NODE_CATALOG_ITEMS.filter((p) => p.category === cat),
   }))
 
   const visibleTools = useMemo(() => {

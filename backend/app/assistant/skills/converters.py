@@ -15,6 +15,13 @@ if TYPE_CHECKING:
     from app.assistant_config.models import AssistantSkill, AssistantSkillEdge, AssistantSkillNode
 
 
+_REMOVED_WORKFLOW_NODE_TYPES = {
+    "answer",
+    "template",
+    "variable_aggregator",
+}
+
+
 def _parse_skill_kb_config(raw: Any) -> SkillKBConfig | None:
     if not raw or not isinstance(raw, dict):
         return None
@@ -101,10 +108,11 @@ def db_nodes_to_definitions(nodes: list[AssistantSkillNode]) -> list[WorkflowNod
     """将数据库节点模型列表转换为 WorkflowNodeDefinition 列表。"""
     result: list[WorkflowNodeDefinition] = []
     for n in nodes:
-        if n.node_type == "answer":
+        if n.node_type in _REMOVED_WORKFLOW_NODE_TYPES:
             raise ValueError(
-                f"Workflow node '{n.node_id}' uses legacy type 'answer'. "
-                "Please migrate it to an llm node with isOutput=true."
+                f"Workflow node '{n.node_id}' uses unsupported type '{n.node_type}'. "
+                "Removed node types: answer/template/variable_aggregator. "
+                "Please migrate to supported node types."
             )
         result.append(WorkflowNodeDefinition(
             node_id=n.node_id,

@@ -7,10 +7,10 @@ export type NodeType =
   | 'llm'
   | 'tool'
   | 'if_else'
-  | 'template'
   | 'parameter_extractor'
   | 'knowledge_retrieval'
-  | 'variable_aggregator'
+  | 'iteration'
+  | 'loop'
 
 export type ConditionOperator =
   | 'contains'
@@ -28,8 +28,6 @@ export type ConditionOperator =
   | 'lt'
   | 'gte'
   | 'lte'
-
-export type MergeStrategy = 'all_required' | 'first_completed'
 
 // ==================== Node Configs ====================
 
@@ -68,6 +66,12 @@ export interface LLMNodeConfig {
   temperature?: number
   userInput?: string
   isOutput?: boolean
+  knowledgeEnabled?: boolean
+  knowledgeSourceNodeIds?: string[]
+  knowledgeInjectMode?: 'references_only' | 'full_payload'
+  knowledgeMaxRefs?: number
+  modelSource?: 'default' | 'custom'
+  modelId?: string
 }
 
 export interface ToolNodeConfig {
@@ -82,33 +86,83 @@ export interface IfElseNodeConfig {
   conditions?: ConditionExpression[]
 }
 
-export interface TemplateNodeConfig {
-  template?: string
-}
-
 export interface ParameterExtractorNodeConfig {
+  inputContent?: string
   instruction?: string
-  outputFields?: Array<{ name: string; type?: string; nullable?: boolean }>
+  outputFields?: Array<{
+    name: string
+    type?: string
+    nullable?: boolean
+    itemsType?: string
+    enum?: string[]
+  }>
+  modelSource?: 'default' | 'custom'
+  modelId?: string
 }
 
 export interface KnowledgeRetrievalNodeConfig {
   query?: string
+  mode?: string
   topK?: number
 }
 
-export interface VariableAggregatorNodeConfig {
-  sourceNodes?: string[]
-  mergeStrategy?: MergeStrategy
+export type ContainerBodyNodeType =
+  | 'start'
+  | 'llm'
+  | 'tool'
+  | 'if_else'
+  | 'parameter_extractor'
+  | 'knowledge_retrieval'
+
+export interface ContainerBodyNode {
+  nodeId: string
+  nodeType: ContainerBodyNodeType
+  label: string
+  positionX?: number
+  positionY?: number
+  config?: Record<string, unknown> | null
+}
+
+export interface ContainerBodyEdge {
+  edgeId: string
+  sourceNodeId: string
+  targetNodeId: string
+  sourceHandle?: string
+  targetHandle?: string
+  conditionType?: 'expression' | 'default' | null
+  conditionExpr?: ConditionExpression | null
+  label?: string | null
+}
+
+export interface IterationNodeConfig {
+  inputSource?: string
+  outputVariable?: string
+  outputSelector?: string
+  parallelMode?: boolean
+  errorStrategy?: 'fail_fast' | 'skip_item'
+  flattenOutput?: boolean
+  bodyNodes?: ContainerBodyNode[]
+  bodyEdges?: ContainerBodyEdge[]
+}
+
+export interface LoopNodeConfig {
+  initialVars?: Array<{ name: string; value?: string }>
+  updateMappings?: Array<{ name: string; value: string }>
+  terminationLogic?: 'and' | 'or'
+  terminationConditions?: ConditionClause[]
+  maxIterations?: number
+  bodyNodes?: ContainerBodyNode[]
+  bodyEdges?: ContainerBodyEdge[]
 }
 
 export type NodeConfig =
   | LLMNodeConfig
   | ToolNodeConfig
   | IfElseNodeConfig
-  | TemplateNodeConfig
   | ParameterExtractorNodeConfig
   | KnowledgeRetrievalNodeConfig
-  | VariableAggregatorNodeConfig
+  | IterationNodeConfig
+  | LoopNodeConfig
   | Record<string, unknown>
 
 // ==================== Workflow Data ====================

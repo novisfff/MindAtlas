@@ -9,6 +9,8 @@ interface LlmNodeSettingsProps {
     config: Record<string, unknown>
     onChange: (field: string, value: unknown) => void
     mentionParams: InputParam[]
+    knowledgeSourceOptions: Array<{ id: string; label: string }>
+    modelOptions: Array<{ id: string; label: string }>
 }
 
 const FIELD_TYPES = [
@@ -19,12 +21,40 @@ const FIELD_TYPES = [
     { label: 'Object', value: 'object' },
     { label: 'Array', value: 'array' },
 ]
+const DEFAULT_MODEL_VALUE = '__system_default_model__'
 
-export function LlmNodeSettings({ config, onChange, mentionParams }: LlmNodeSettingsProps) {
+export function LlmNodeSettings({
+    config,
+    onChange,
+    mentionParams,
+    knowledgeSourceOptions,
+    modelOptions,
+}: LlmNodeSettingsProps) {
     const { t } = useTranslation()
 
     const outputMode = String(config.outputMode ?? 'text').trim().toLowerCase() === 'structured' ? 'structured' : 'text'
     const outputFields = (Array.isArray(config.outputFields) ? config.outputFields : []) as Record<string, unknown>[]
+    const knowledgeEnabled = Boolean(config.knowledgeEnabled)
+    const knowledgeSourceNodeIds = Array.isArray(config.knowledgeSourceNodeIds)
+        ? config.knowledgeSourceNodeIds.map((item) => String(item)).filter(Boolean)
+        : []
+    const knowledgeInjectMode = String(config.knowledgeInjectMode ?? 'references_only') === 'full_payload'
+        ? 'full_payload'
+        : 'references_only'
+    const knowledgeMaxRefsValue = typeof config.knowledgeMaxRefs === 'number'
+        ? String(config.knowledgeMaxRefs)
+        : ''
+    const modelSource = String(config.modelSource ?? 'default') === 'custom' ? 'custom' : 'default'
+    const rawModelId = typeof config.modelId === 'string' ? config.modelId : ''
+    const isModelInList = modelOptions.some((item) => item.id === rawModelId)
+    const modelSelectValue = modelSource === 'custom' && rawModelId ? rawModelId : DEFAULT_MODEL_VALUE
+    const modelSelectOptions = [
+        { label: t('settings.skills.nodeModelDefault'), value: DEFAULT_MODEL_VALUE },
+        ...modelOptions.map((item) => ({ label: item.label, value: item.id })),
+        ...(!isModelInList && modelSource === 'custom' && rawModelId
+            ? [{ label: `${t('settings.skills.nodeModelCustom')}: ${rawModelId}`, value: rawModelId }]
+            : []),
+    ]
 
     const handleAddField = () => {
         const newFields = [...outputFields, { name: 'field', type: 'string', nullable: false }]
@@ -43,8 +73,33 @@ export function LlmNodeSettings({ config, onChange, mentionParams }: LlmNodeSett
         onChange('outputFields', newFields)
     }
 
+    const toggleKnowledgeSource = (nodeId: string) => {
+        const set = new Set(knowledgeSourceNodeIds)
+        if (set.has(nodeId)) {
+            set.delete(nodeId)
+        } else {
+            set.add(nodeId)
+        }
+        onChange('knowledgeSourceNodeIds', Array.from(set))
+    }
+
     return (
         <div className="space-y-6">
+            <CommonSelect
+                label={t('settings.skills.nodeModel')}
+                value={modelSelectValue}
+                onChange={(val) => {
+                    if (val === DEFAULT_MODEL_VALUE) {
+                        onChange('modelSource', 'default')
+                        onChange('modelId', undefined)
+                        return
+                    }
+                    onChange('modelSource', 'custom')
+                    onChange('modelId', val || undefined)
+                }}
+                options={modelSelectOptions}
+            />
+
             {/* System Prompt */}
             <div className="space-y-1.5">
                 <Label>{t('settings.skills.llmSystemPrompt') || 'System Prompt'}</Label>
@@ -155,6 +210,73 @@ export function LlmNodeSettings({ config, onChange, mentionParams }: LlmNodeSett
                         checked={Boolean(config.isOutput)}
                         onChange={(checked) => onChange('isOutput', checked)}
                     />
+                </div>
+
+                <div className="space-y-3 pt-2 border-t border-border/50">
+                    <CommonSwitch
+                        label={t('settings.skills.llmKnowledgeEnabled')}
+                        checked={knowledgeEnabled}
+                        onChange={(checked) => onChange('knowledgeEnabled', checked)}
+                        description={t('settings.skills.llmKnowledgeEnabledDesc')}
+                    />
+
+                    {knowledgeEnabled && (
+                        <div className="space-y-3 pl-1">
+                            <div className="space-y-1.5">
+                                <Label>{t('settings.skills.llmKnowledgeSources')}</Label>
+                                {knowledgeSourceOptions.length === 0 ? (
+                                    <div className="text-[11px] text-muted-foreground border border-dashed rounded-md px-2 py-2">
+                                        {t('settings.skills.llmKnowledgeNoSources')}
+                                    </div>
+                                ) : (
+                                    <div className="space-y-1.5">
+                                        {knowledgeSourceOptions.map((item) => (
+                                            <label key={item.id} className="flex items-center gap-2 text-xs rounded border px-2 py-1.5 bg-muted/20">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={knowledgeSourceNodeIds.includes(item.id)}
+                                                    onChange={() => toggleKnowledgeSource(item.id)}
+                                                />
+                                                <span className="truncate">{item.label}</span>
+                                            </label>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            <CommonSelect
+                                label={t('settings.skills.llmKnowledgeInjectMode')}
+                                value={knowledgeInjectMode}
+                                onChange={(val) => onChange('knowledgeInjectMode', val)}
+                                options={[
+                                    { label: t('settings.skills.llmKnowledgeInjectReferencesOnly'), value: 'references_only' },
+                                    { label: t('settings.skills.llmKnowledgeInjectFullPayload'), value: 'full_payload' },
+                                ]}
+                            />
+
+                            <div className="space-y-1.5">
+                                <Label>{t('settings.skills.llmKnowledgeMaxRefs')}</Label>
+                                <input
+                                    type="number"
+                                    value={knowledgeMaxRefsValue}
+                                    onChange={(e) => {
+                                        const val = e.target.value.trim()
+                                        if (!val) {
+                                            onChange('knowledgeMaxRefs', undefined)
+                                            return
+                                        }
+                                        const parsed = Number.parseInt(val, 10)
+                                        if (Number.isNaN(parsed)) return
+                                        onChange('knowledgeMaxRefs', Math.max(1, Math.min(100, parsed)))
+                                    }}
+                                    className="w-full px-3 py-2 text-xs rounded-md border bg-background/50 focus:ring-1 focus:ring-primary/20 focus:border-primary/50 outline-none"
+                                    min={1}
+                                    max={100}
+                                    placeholder="20"
+                                />
+                            </div>
+                        </div>
+                    )}
                 </div>
 
                 <CommonOutputList

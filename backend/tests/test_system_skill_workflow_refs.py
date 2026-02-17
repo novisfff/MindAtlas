@@ -135,6 +135,9 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
             names.discard("")
             return names or {"text"}
 
+        if node_type == "knowledge_retrieval":
+            return {"result", "query", "mode", "references", "references_count"}
+
         return {"text"}
 
     def _assert_branch_targets_have_y_offset(self, skill, source_node_id: str) -> None:

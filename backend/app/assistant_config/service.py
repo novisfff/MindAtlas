@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from uuid import UUID
 
 from app.assistant.skills.base import DEFAULT_SKILL_NAME
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.ai_registry.models import AiModel
 from app.ai_provider.crypto import api_key_hint, encrypt_api_key
 from app.assistant_config.models import (
     AssistantSkill,
@@ -786,7 +788,15 @@ class AssistantConfigService:
         from app.assistant.skills.workflow_validator import validate_workflow, validate_parallel_branches
 
         # Validate topology before persisting
-        nodes_raw = [{"node_id": n.node_id, "node_type": n.node_type, "config": n.config} for n in workflow.nodes]
+        nodes_raw = [
+            {
+                "node_id": n.node_id,
+                "node_type": n.node_type,
+                "label": (getattr(n, "label", "") or getattr(n, "node_id", "")),
+                "config": n.config,
+            }
+            for n in workflow.nodes
+        ]
         edges_raw = [{"source_node_id": e.source_node_id, "target_node_id": e.target_node_id, "source_handle": e.source_handle} for e in workflow.edges]
 
         result = validate_workflow(nodes_raw, edges_raw)
@@ -799,8 +809,7 @@ class AssistantConfigService:
             msgs = "; ".join(e.message for e in par_result.errors[:5])
             raise ApiException(status_code=422, code=42202, message=f"Invalid parallel branches: {msgs}")
 
-        workflow_tool_names = self._collect_workflow_tool_names(workflow.nodes)
-        self._validate_workflow_tool_names(workflow_tool_names)
+        workflow_tool_names = self.validate_workflow_dependencies(workflow)
 
         for old_node in list(getattr(skill, "nodes", None) or []):
             self.db.delete(old_node)
@@ -838,20 +847,75 @@ class AssistantConfigService:
         # 工作流保存时自动同步 skill.tools，避免 DAG 执行期 tool_map 缺失。
         skill.tools = sorted(workflow_tool_names)
 
+    def validate_workflow_dependencies(self, workflow) -> set[str]:
+        """Validate workflow external dependencies (tools/models) before persistence."""
+        workflow_tool_names = self._collect_workflow_tool_names(workflow.nodes)
+        self._validate_workflow_tool_names(workflow_tool_names)
+        custom_model_ids = self._collect_workflow_custom_model_ids(workflow.nodes)
+        self._validate_workflow_model_ids(custom_model_ids)
+        return workflow_tool_names
+
     @staticmethod
     def _collect_workflow_tool_names(workflow_nodes: list) -> set[str]:
         tool_names: set[str] = set()
-        for node in workflow_nodes:
-            node_type = getattr(node, "node_type", None)
-            if node_type != "tool":
-                continue
-            cfg = getattr(node, "config", None) or {}
-            if not isinstance(cfg, dict):
-                continue
-            tool_name = cfg.get("toolName") or cfg.get("tool_name")
-            if isinstance(tool_name, str) and tool_name.strip():
-                tool_names.add(tool_name.strip())
+
+        def _walk(nodes: list) -> None:
+            for node in nodes:
+                if isinstance(node, dict):
+                    node_type = node.get("node_type") or node.get("nodeType")
+                    cfg = node.get("config") or {}
+                else:
+                    node_type = getattr(node, "node_type", None)
+                    cfg = getattr(node, "config", None) or {}
+
+                if node_type == "tool" and isinstance(cfg, dict):
+                    tool_name = cfg.get("toolName") or cfg.get("tool_name")
+                    if isinstance(tool_name, str) and tool_name.strip():
+                        tool_names.add(tool_name.strip())
+
+                if node_type in {"iteration", "loop"} and isinstance(cfg, dict):
+                    body_nodes = cfg.get("bodyNodes", cfg.get("body_nodes"))
+                    if isinstance(body_nodes, list):
+                        _walk(body_nodes)
+
+        _walk(workflow_nodes)
         return tool_names
+
+    @staticmethod
+    def _collect_workflow_custom_model_ids(workflow_nodes: list) -> set[UUID]:
+        model_ids: set[UUID] = set()
+
+        def _walk(nodes: list) -> None:
+            for node in nodes:
+                if isinstance(node, dict):
+                    node_type = node.get("node_type") or node.get("nodeType")
+                    cfg = node.get("config") or {}
+                else:
+                    node_type = getattr(node, "node_type", None)
+                    cfg = getattr(node, "config", None) or {}
+
+                if node_type in {"llm", "parameter_extractor"} and isinstance(cfg, dict):
+                    model_source_raw = cfg.get("modelSource", cfg.get("model_source", "default"))
+                    model_source = str(model_source_raw or "default").strip().lower()
+                    if model_source == "custom":
+                        model_id_raw = cfg.get("modelId", cfg.get("model_id"))
+                        if isinstance(model_id_raw, str):
+                            model_id_text = model_id_raw.strip()
+                            if model_id_text:
+                                try:
+                                    model_ids.add(UUID(model_id_text))
+                                except Exception:
+                                    # UUID format is validated in workflow validator. Ignore here.
+                                    pass
+
+                if node_type in {"iteration", "loop"} and isinstance(cfg, dict):
+                    body_nodes = cfg.get("bodyNodes", cfg.get("body_nodes"))
+                    if isinstance(body_nodes, list):
+                        _walk(body_nodes)
+
+        _walk(workflow_nodes)
+
+        return model_ids
 
     def _validate_workflow_tool_names(self, tool_names: set[str]) -> None:
         if not tool_names:
@@ -890,6 +954,36 @@ class AssistantConfigService:
                 status_code=422,
                 code=42203,
                 message=f"Workflow references unavailable tools: {', '.join(unavailable)}",
+            )
+
+    def _validate_workflow_model_ids(self, model_ids: set[UUID]) -> None:
+        if not model_ids:
+            return
+
+        rows = (
+            self.db.query(AiModel.id, AiModel.model_type)
+            .filter(AiModel.id.in_(tuple(model_ids)))
+            .all()
+        )
+        found: dict[UUID, str] = {mid: str(model_type or "") for mid, model_type in rows}
+
+        missing = sorted(str(mid) for mid in model_ids if mid not in found)
+        type_mismatch = sorted(
+            str(mid)
+            for mid, model_type in found.items()
+            if model_type.strip() != "llm"
+        )
+
+        if missing or type_mismatch:
+            parts: list[str] = []
+            if missing:
+                parts.append(f"not found: {', '.join(missing)}")
+            if type_mismatch:
+                parts.append(f"not llm: {', '.join(type_mismatch)}")
+            raise ApiException(
+                status_code=422,
+                code=42207,
+                message=f"Workflow references invalid node models ({'; '.join(parts)})",
             )
 
     def update_workflow(self, skill_id, workflow) -> AssistantSkill:

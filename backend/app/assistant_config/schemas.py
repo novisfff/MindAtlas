@@ -214,9 +214,9 @@ class OutputFieldSpecInput(CamelModel):
 # ==================== Workflow DAG Schemas ====================
 
 NodeType = Literal[
-    "start", "llm", "tool", "if_else", "template",
+    "start", "llm", "tool", "if_else",
     "parameter_extractor", "knowledge_retrieval",
-    "variable_aggregator",
+    "iteration", "loop",
 ]
 ConditionOperator = Literal[
     "contains", "not_contains", "starts_with", "ends_with",

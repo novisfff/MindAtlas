@@ -1,16 +1,28 @@
 import type { Node } from '@xyflow/react'
 import type { NodeType } from '../../api/workflow'
 import type { WfNodeData } from '../../stores/workflow-editor-store'
+import i18n from '@/lib/i18n'
 
 const DEFAULT_LABEL_BY_TYPE: Record<NodeType, string> = {
   start: 'Start',
   llm: 'LLM',
   tool: 'Tool',
   if_else: 'If Else',
-  template: 'Template',
   parameter_extractor: 'Parameter Extractor',
   knowledge_retrieval: 'Knowledge Retrieval',
-  variable_aggregator: 'Variable Aggregator',
+  iteration: 'Iteration',
+  loop: 'Loop',
+}
+
+const NODE_TYPE_LABEL_KEY: Record<NodeType, string> = {
+  start: 'settings.skills.nodeTypes.start',
+  llm: 'settings.skills.nodeTypes.llm',
+  tool: 'settings.skills.nodeTypes.tool',
+  if_else: 'settings.skills.nodeTypes.if_else',
+  parameter_extractor: 'settings.skills.nodeTypes.parameter_extractor',
+  knowledge_retrieval: 'settings.skills.nodeTypes.knowledge_retrieval',
+  iteration: 'settings.skills.nodeTypes.iteration',
+  loop: 'settings.skills.nodeTypes.loop',
 }
 
 function normalizeCasefold(value: string): string {
@@ -18,7 +30,10 @@ function normalizeCasefold(value: string): string {
 }
 
 export function defaultLabelForNodeType(nodeType: NodeType): string {
-  return DEFAULT_LABEL_BY_TYPE[nodeType] ?? 'Node'
+  const fallback = DEFAULT_LABEL_BY_TYPE[nodeType] ?? 'Node'
+  const key = NODE_TYPE_LABEL_KEY[nodeType]
+  if (!key) return fallback
+  return i18n.t(key, { defaultValue: fallback })
 }
 
 export function normalizeLabel(raw: unknown): string {
