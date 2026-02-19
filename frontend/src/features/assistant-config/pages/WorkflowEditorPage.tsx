@@ -1,20 +1,37 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ReactFlowProvider } from '@xyflow/react'
-import { ArrowLeft, Save, Undo2, Redo2, Loader2, LayoutTemplate } from 'lucide-react'
+import { ArrowLeft, Save, Undo2, Redo2, Loader2, LayoutTemplate, Play, ListChecks, AlertCircle } from 'lucide-react'
 import { toast } from 'sonner'
 import { getSkill } from '../api/skills'
-import { saveWorkflow, validateWorkflow } from '../api/workflow'
+import { saveWorkflow, validateWorkflow, type WorkflowInput } from '../api/workflow'
 import { getSystemToolDefinitions, getToolsWithParams } from '../api/tools'
 import { useWorkflowEditorStore } from '../stores/workflow-editor-store'
+import { useWorkflowTestRunStore } from '../stores/workflow-test-run-store'
 import { FlowCanvas } from '../components/workflow/FlowCanvas'
 import { NodePalette } from '../components/workflow/NodePalette'
 import { PropertyPanel } from '../components/workflow/PropertyPanel'
+import { WorkflowTestRunPanel } from '../components/workflow/WorkflowTestRunPanel'
+import { WorkflowValidationChecklistPanel } from '../components/workflow/WorkflowValidationChecklistPanel'
 import { serializeToWorkflowInput, deserializeFromSkill } from '../components/workflow/serialization'
+import {
+  buildValidationSignature,
+  computeDeadEndWarnings,
+  normalizeValidationIssues,
+  type WorkflowValidationIssue,
+} from '../components/workflow/workflowValidation'
 import type { WorkflowToolDefinition } from '../components/workflow/types'
 import { autoLayoutWorkflowWithSubflows } from '../components/workflow/autoLayout'
+
+
+import { Tooltip } from '../../../components/ui/Tooltip'
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from '../../../components/ui/hover-card'
 
 import '@xyflow/react/dist/style.css'
 
@@ -26,6 +43,18 @@ export default function WorkflowEditorPage() {
   const initialized = useRef(false)
 
   const store = useWorkflowEditorStore()
+  const testRunPanelOpen = useWorkflowTestRunStore((s) => s.panelOpen)
+  const setTestRunPanelOpen = useWorkflowTestRunStore((s) => s.setPanelOpen)
+  const [validationPanelOpen, setValidationPanelOpen] = useState(false)
+  const [isValidating, setIsValidating] = useState(false)
+  const [validationErrors, setValidationErrors] = useState<WorkflowValidationIssue[]>([])
+  const [validationWarnings, setValidationWarnings] = useState<WorkflowValidationIssue[]>([])
+  const [validationRequestError, setValidationRequestError] = useState<string | null>(null)
+  const [lastValidatedAt, setLastValidatedAt] = useState<number | null>(null)
+  const validationSeqRef = useRef(0)
+  const debounceTimerRef = useRef<number | null>(null)
+  const latestSignatureRef = useRef('')
+  const workflowSnapshotRef = useRef<WorkflowInput | null>(null)
 
   const { data: skill, isLoading } = useQuery({
     queryKey: ['assistant-skill', skillId],
@@ -66,6 +95,19 @@ export default function WorkflowEditorPage() {
     return Array.from(merged.values()).sort((a, b) => a.name.localeCompare(b.name))
   }, [customTools, systemToolDefs])
 
+  const workflowInput = useMemo(
+    () => serializeToWorkflowInput(store.nodes, store.edges, store.viewport),
+    [store.edges, store.nodes, store.viewport],
+  )
+  const validationSignature = useMemo(
+    () => buildValidationSignature(workflowInput),
+    [workflowInput],
+  )
+
+
+
+
+
   // Load workflow data into store on first fetch
   useEffect(() => {
     if (skill && !initialized.current) {
@@ -74,6 +116,108 @@ export default function WorkflowEditorPage() {
       store.loadWorkflow(nodes, edges, viewport)
     }
   }, [skill])
+
+  useEffect(() => {
+    setValidationErrors([])
+    setValidationWarnings([])
+    setValidationRequestError(null)
+    setLastValidatedAt(null)
+    setValidationPanelOpen(false)
+    setIsValidating(false)
+    validationSeqRef.current = 0
+    latestSignatureRef.current = ''
+    workflowSnapshotRef.current = null
+    if (debounceTimerRef.current) {
+      window.clearTimeout(debounceTimerRef.current)
+      debounceTimerRef.current = null
+    }
+  }, [skillId])
+
+  const runWorkflowValidation = useCallback(
+    async (input: WorkflowInput, signature: string, force = false) => {
+      if (!skillId) return
+      if (!initialized.current) return
+      if (!force && signature === latestSignatureRef.current) return
+
+      if (debounceTimerRef.current) {
+        window.clearTimeout(debounceTimerRef.current)
+        debounceTimerRef.current = null
+      }
+
+      const seq = validationSeqRef.current + 1
+      validationSeqRef.current = seq
+      workflowSnapshotRef.current = input
+
+      setIsValidating(true)
+      setValidationRequestError(null)
+
+      try {
+        const validation = await validateWorkflow(skillId, input)
+        if (seq !== validationSeqRef.current) return
+
+        const warningMessage = t('settings.skills.workflowValidationDeadEndWarning')
+        const reachabilityWarnings = computeDeadEndWarnings(input, warningMessage)
+        const normalized = normalizeValidationIssues(validation.errors, reachabilityWarnings)
+        setValidationErrors(normalized.errors)
+        setValidationWarnings(normalized.warnings)
+        setLastValidatedAt(Date.now())
+        setValidationRequestError(null)
+        latestSignatureRef.current = signature
+      } catch (err) {
+        if (seq !== validationSeqRef.current) return
+        const message = err instanceof Error
+          ? err.message
+          : t('settings.skills.workflowValidationChecklistRequestFailed')
+        setValidationRequestError(message)
+      } finally {
+        if (seq === validationSeqRef.current) {
+          setIsValidating(false)
+        }
+      }
+    },
+    [skillId, t],
+  )
+
+  useEffect(() => {
+    if (!skillId) return
+    if (!initialized.current) return
+    if (validationSignature === latestSignatureRef.current) return
+    if (debounceTimerRef.current) {
+      window.clearTimeout(debounceTimerRef.current)
+      debounceTimerRef.current = null
+    }
+    debounceTimerRef.current = window.setTimeout(() => {
+      void runWorkflowValidation(workflowInput, validationSignature)
+    }, 500)
+    return () => {
+      if (debounceTimerRef.current) {
+        window.clearTimeout(debounceTimerRef.current)
+        debounceTimerRef.current = null
+      }
+    }
+  }, [skillId, runWorkflowValidation, validationSignature, workflowInput])
+
+  const handleValidateNow = useCallback(() => {
+    setValidationPanelOpen((prev) => !prev)
+    void runWorkflowValidation(workflowInput, validationSignature, true)
+  }, [runWorkflowValidation, validationSignature, workflowInput])
+
+  const handleValidationRefresh = useCallback(() => {
+    void runWorkflowValidation(workflowInput, validationSignature, true)
+  }, [runWorkflowValidation, validationSignature, workflowInput])
+
+  const handleLocateValidationIssue = useCallback((issue: WorkflowValidationIssue) => {
+    if (!issue.nodeId) return
+    const exists = store.nodes.some((node) => node.id === issue.nodeId)
+    if (!exists) return
+    if (issue.subflowNodeId) {
+      store.setSelectedSubflowSelection(issue.nodeId, issue.subflowNodeId, null)
+      store.requestFocusNode(issue.nodeId)
+      return
+    }
+    store.setSelectedNodeId(issue.nodeId)
+    store.requestFocusNode(issue.nodeId)
+  }, [store])
 
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -145,6 +289,13 @@ export default function WorkflowEditorPage() {
     return () => window.removeEventListener('beforeunload', handler)
   }, [store.isDirty])
 
+  // Mutual exclusion: Close test run panel when property panel opens (node selected)
+  useEffect(() => {
+    if (store.selectedNodeId || store.selectedSubflowNodeId) {
+      setTestRunPanelOpen(false)
+    }
+  }, [store.selectedNodeId, store.selectedSubflowNodeId, setTestRunPanelOpen])
+
   if (isLoading) {
     return (
       <div className="flex h-screen items-center justify-center">
@@ -204,6 +355,107 @@ export default function WorkflowEditorPage() {
             >
               <LayoutTemplate className="w-4 h-4" />
             </button>
+            <button
+              onClick={() => {
+                if (!testRunPanelOpen) {
+                  store.setSelectedNodeId(null)
+                  store.clearSelectedSubflowSelection()
+                }
+                setTestRunPanelOpen(!testRunPanelOpen)
+              }}
+              className={`
+                flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all
+                ${testRunPanelOpen
+                  ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                  : 'bg-white hover:bg-slate-100 text-slate-700 border border-slate-200'
+                }
+              `}
+              title={t('settings.skills.workflowActions.testRun')}
+            >
+              <Play className="w-3.5 h-3.5 fill-current" />
+              {t('settings.skills.workflowActions.testRun')}
+            </button>
+            <HoverCard openDelay={200} closeDelay={100}>
+              <HoverCardTrigger asChild>
+                <button
+                  onClick={handleValidateNow}
+                  className={`
+                    relative flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all
+                    ${validationPanelOpen
+                      ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                      : 'bg-white hover:bg-slate-100 text-slate-700 border border-slate-200'
+                    }
+                  `}
+                >
+                  <ListChecks className={`w-3.5 h-3.5 ${isValidating ? 'animate-pulse text-blue-600' : ''}`} />
+                  {t('settings.skills.workflowActions.validate')}
+                  {(validationErrors.length > 0) && (
+                    <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500"></span>
+                    </span>
+                  )}
+                  {(!isValidating && lastValidatedAt && validationErrors.length === 0) && (
+                    <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
+                      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500"></span>
+                    </span>
+                  )}
+                </button>
+              </HoverCardTrigger>
+              <HoverCardContent side="bottom" align="end" className="w-60 p-3">
+                <div
+                  className="flex flex-col gap-2 cursor-pointer"
+                  onClick={() => setValidationPanelOpen(true)}
+                >
+                  <div className="flex items-center gap-2">
+                    {isValidating ? (
+                      <Loader2 className="w-4 h-4 text-blue-600 animate-spin" />
+                    ) : validationErrors.length > 0 ? (
+                      <AlertCircle className="w-4 h-4 text-red-600" />
+                    ) : validationWarnings.length > 0 ? (
+                      <AlertCircle className="w-4 h-4 text-amber-600" />
+                    ) : lastValidatedAt ? (
+                      <ListChecks className="w-4 h-4 text-green-600" />
+                    ) : (
+                      <ListChecks className="w-4 h-4 text-muted-foreground" />
+                    )}
+                    <span className={`text-sm font-medium ${isValidating ? 'text-blue-700' :
+                      validationErrors.length > 0 ? 'text-red-700' :
+                        validationWarnings.length > 0 ? 'text-amber-700' :
+                          lastValidatedAt ? 'text-green-700' : 'text-foreground'
+                      }`}>
+                      {isValidating ? t('settings.skills.workflowValidationPopup.running') :
+                        validationErrors.length > 0 ? t('settings.skills.workflowValidationPopup.failed') :
+                          validationWarnings.length > 0 ? t('settings.skills.workflowValidationPopup.warnings') :
+                            lastValidatedAt ? t('settings.skills.workflowValidationPopup.success') :
+                              t('settings.skills.workflowValidationPopup.ready')}
+                    </span>
+                  </div>
+
+                  {(validationErrors.length > 0 || validationWarnings.length > 0) && (
+                    <div className="flex items-center gap-3 text-xs pl-6">
+                      {validationErrors.length > 0 && (
+                        <span className="text-red-600 font-medium">
+                          {validationErrors.length} {t('settings.skills.workflowValidationPopup.errors')}
+                        </span>
+                      )}
+                      {validationWarnings.length > 0 && (
+                        <span className="text-amber-600 font-medium">
+                          {validationWarnings.length} {t('settings.skills.workflowValidationPopup.warns')}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  {lastValidatedAt && (
+                    <div className="text-[10px] text-muted-foreground border-t pt-2 mt-1 flex justify-between items-center">
+                      <span>{t('settings.skills.workflowValidationPopup.lastValidated', { time: new Date(lastValidatedAt).toLocaleTimeString() })}</span>
+                      <ArrowLeft className="w-3 h-3 rotate-180 opacity-50" />
+                    </div>
+                  )}
+                </div>
+              </HoverCardContent>
+            </HoverCard>
             <div className="w-px h-4 bg-border mx-2" />
             <button
               onClick={() => saveMutation.mutate()}
@@ -227,7 +479,7 @@ export default function WorkflowEditorPage() {
         </div>
 
         {/* Floating Palette (Left) */}
-        <div className="absolute left-4 top-24 bottom-4 z-10 w-fit pointer-events-none flex flex-col justify-center">
+        <div className="absolute left-4 top-20 bottom-24 z-10 w-fit pointer-events-none flex flex-col justify-start">
           <div className="pointer-events-auto">
             <NodePalette tools={workflowTools} />
           </div>
@@ -239,6 +491,20 @@ export default function WorkflowEditorPage() {
             <PropertyPanel tools={workflowTools} />
           </div>
         </div>
+
+        <WorkflowValidationChecklistPanel
+          open={validationPanelOpen}
+          isValidating={isValidating}
+          errors={validationErrors}
+          warnings={validationWarnings}
+          requestError={validationRequestError}
+          lastValidatedAt={lastValidatedAt}
+          onClose={() => setValidationPanelOpen(false)}
+          onLocate={handleLocateValidationIssue}
+          onRefresh={handleValidationRefresh}
+        />
+
+        {skillId && <WorkflowTestRunPanel skillId={skillId} />}
       </div>
     </ReactFlowProvider>
   )

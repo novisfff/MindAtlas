@@ -28,6 +28,8 @@ interface WorkflowEditorState {
   selectedSubflowContainerId: string | null
   selectedSubflowNodeId: string | null
   selectedSubflowEdgeId: string | null
+  focusTargetNodeId: string | null
+  focusRequestNonce: number
 
   // Dirty tracking
   isDirty: boolean
@@ -44,6 +46,7 @@ interface WorkflowEditorState {
   setSelectedEdgeId: (id: string | null) => void
   setSelectedSubflowSelection: (containerId: string, nodeId: string | null, edgeId: string | null) => void
   clearSelectedSubflowSelection: () => void
+  requestFocusNode: (id: string) => void
 
   addNode: (node: Node<WfNodeData>) => void
   removeNode: (id: string) => void
@@ -76,6 +79,8 @@ export const useWorkflowEditorStore = create<WorkflowEditorState>()((set, get) =
   selectedSubflowContainerId: null,
   selectedSubflowNodeId: null,
   selectedSubflowEdgeId: null,
+  focusTargetNodeId: null,
+  focusRequestNonce: 0,
   isDirty: false,
   history: [],
   historyIndex: -1,
@@ -133,6 +138,11 @@ export const useWorkflowEditorStore = create<WorkflowEditorState>()((set, get) =
       selectedSubflowNodeId: null,
       selectedSubflowEdgeId: null,
     }),
+  requestFocusNode: (id) =>
+    set((state) => ({
+      focusTargetNodeId: id,
+      focusRequestNonce: state.focusRequestNonce + 1,
+    })),
 
   addNode: (node) => {
     const { nodes } = get()
@@ -304,5 +314,7 @@ export const useWorkflowEditorStore = create<WorkflowEditorState>()((set, get) =
       selectedSubflowContainerId: null,
       selectedSubflowNodeId: null,
       selectedSubflowEdgeId: null,
+      focusTargetNodeId: null,
+      focusRequestNonce: 0,
     }),
 }))

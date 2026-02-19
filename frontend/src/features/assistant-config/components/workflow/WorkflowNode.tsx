@@ -56,6 +56,8 @@ type ContainerBodyEdge = {
   targetHandle?: string
 }
 
+type RuntimeStatus = 'running' | 'success' | 'error'
+
 function normalizeSubflowSourceHandle(
   sourceNode: ContainerBodyNode | undefined,
   rawSourceHandle: string,
@@ -294,6 +296,10 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
   const isSelected = selectedNodeId === id
   const style = NODE_STYLES[nodeData.nodeType] ?? NODE_STYLES.llm
   const Icon = style.icon
+  const runtimeStatusRaw = (nodeData as { runtimeStatus?: unknown }).runtimeStatus
+  const runtimeStatus = runtimeStatusRaw === 'running' || runtimeStatusRaw === 'success' || runtimeStatusRaw === 'error'
+    ? (runtimeStatusRaw as RuntimeStatus)
+    : null
   const preview = getPreview(nodeData)
   const previewText = preview || '\u00A0'
   const isStart = nodeData.nodeType === 'start'
@@ -383,6 +389,14 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
     pointerDownRef.current = null
   }
 
+  const runtimeCardClass = runtimeStatus === 'running'
+    ? 'ring-2 ring-amber-300 border-amber-400 shadow-md'
+    : runtimeStatus === 'success'
+      ? 'ring-2 ring-emerald-300 border-emerald-400 shadow-md'
+      : runtimeStatus === 'error'
+        ? 'ring-2 ring-red-300 border-red-400 shadow-md'
+        : ''
+
   const renderQuickAddPopover = (
     handleId: string,
     side: 'left' | 'right',
@@ -418,7 +432,7 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
     <div
       className={`
         group/workflow-node relative ${isContainer ? '' : 'w-[240px]'} rounded-xl bg-white shadow-sm border transaction-all duration-200
-        ${isSelected ? 'ring-2 ring-primary border-primary shadow-md' : 'border-border hover:shadow-md'}
+        ${isSelected ? 'ring-2 ring-primary border-primary shadow-md' : runtimeCardClass || 'border-border hover:shadow-md'}
       `}
       style={{
         width: isContainer && containerSize ? `${containerSize.width}px` : undefined,
@@ -437,6 +451,18 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
         <span className="text-xs font-semibold text-foreground/80 truncate flex-1">
           {nodeData.label || nodeData.nodeType}
         </span>
+        {runtimeStatus && (
+          <span
+            className={`inline-flex h-2.5 w-2.5 rounded-full ${
+              runtimeStatus === 'running'
+                ? 'bg-amber-500'
+                : runtimeStatus === 'success'
+                  ? 'bg-emerald-500'
+                  : 'bg-red-500'
+            }`}
+            title={`runtime-${runtimeStatus}`}
+          />
+        )}
       </div>
 
       {!isContainer && (

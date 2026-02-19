@@ -16,7 +16,12 @@
     "confirm": "Confirm",
     "add": "Add",
     "back": "Back",
-    "pageOf": "Page {{current}} of {{total}}"
+    "pageOf": "Page {{current}} of {{total}}",
+    "zoomIn": "Zoom In",
+    "zoomOut": "Zoom Out",
+    "fitView": "Fit View",
+    "lock": "Lock Canvas",
+    "unlock": "Unlock Canvas"
   },
   "actions": {
     "save": "Save",
@@ -520,8 +525,31 @@
         "undo": "Undo",
         "redo": "Redo",
         "autoLayout": "Auto Layout",
+        "testRun": "Test Run",
         "validate": "Validate",
         "back": "Back"
+      },
+      "workflowValidationChecklistTitle": "Validation Checklist",
+      "workflowValidationChecklistErrors": "Errors {{count}}",
+      "workflowValidationChecklistWarnings": "Warnings {{count}}",
+      "workflowValidationChecklistValidating": "Validating...",
+      "workflowValidationChecklistUpdatedAt": "Last checked: {{time}}",
+      "workflowValidationChecklistNoIssues": "No validation issues found.",
+      "workflowValidationChecklistLocate": "Locate",
+      "workflowValidationChecklistRequestFailed": "Validation request failed",
+      "workflowValidationDeadEndWarning": "This node does not contribute to final output (warning only).",
+      "workflowValidationSeverityError": "Error",
+      "workflowValidationSeverityWarning": "Warning",
+      "workflowValidationPopup": {
+        "running": "Validating...",
+        "failed": "Validation Failed",
+        "warnings": "Warnings Found",
+        "success": "Validation Passed",
+        "ready": "Ready to Validate",
+        "errors": "Errors",
+        "warns": "Warnings",
+        "lastValidated": "Last validated: {{time}}",
+        "viewDetails": "View Details"
       }
     }
   },

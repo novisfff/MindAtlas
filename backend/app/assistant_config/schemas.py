@@ -270,6 +270,13 @@ class WorkflowInput(CamelModel):
     viewport: dict | None = None
 
 
+class WorkflowTestRunRequest(CamelModel):
+    """工作流测试运行请求（仅运行草稿，不持久化）。"""
+    workflow: WorkflowInput
+    user_input: str = Field(..., min_length=1, max_length=8000)
+    stream_output: bool = True
+
+
 class WorkflowValidationError(CamelModel):
     """工作流验证错误项"""
     node_id: str | None = None

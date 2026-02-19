@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 
 _TEMPLATE_VAR_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
 _OUTPUT_SINGLE_VAR_RE = re.compile(r"^\s*\{\{\s*([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\s*\}\}\s*$")
+_NODE_SNAPSHOT_STRING_LIMIT = 64 * 1024
+_NODE_SNAPSHOT_TEXT_PREVIEW_LIMIT = 4000
 
 
 # ==================== State Types (Task 2.1) ====================
@@ -201,6 +203,86 @@ def _emit(metadata: dict, event: str, **kwargs: Any) -> None:
     cb = metadata.get(event)
     if callable(cb):
         cb(**kwargs)
+
+
+def _trim_snapshot_string(value: str, truncation_meta: dict[str, bool]) -> str:
+    if len(value) <= _NODE_SNAPSHOT_STRING_LIMIT:
+        return value
+    truncation_meta["hard_truncated"] = True
+    return value[:_NODE_SNAPSHOT_STRING_LIMIT] + "...(truncated)"
+
+
+def _sanitize_node_snapshot_value(
+    value: Any,
+    truncation_meta: dict[str, bool],
+    *,
+    _visited: set[int] | None = None,
+) -> Any:
+    visited = _visited if _visited is not None else set()
+
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+
+    if isinstance(value, str):
+        return _trim_snapshot_string(value, truncation_meta)
+
+    if isinstance(value, bytes):
+        return _trim_snapshot_string(value.decode("utf-8", errors="replace"), truncation_meta)
+
+    if isinstance(value, dict):
+        identity = id(value)
+        if identity in visited:
+            return "(circular)"
+        visited.add(identity)
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = _trim_snapshot_string(str(key), truncation_meta)
+            sanitized[key_text] = _sanitize_node_snapshot_value(item, truncation_meta, _visited=visited)
+        visited.remove(identity)
+        return sanitized
+
+    if isinstance(value, (list, tuple, set)):
+        identity = id(value)
+        if identity in visited:
+            return ["(circular)"]
+        visited.add(identity)
+        sanitized_list = [
+            _sanitize_node_snapshot_value(item, truncation_meta, _visited=visited)
+            for item in list(value)
+        ]
+        visited.remove(identity)
+        return sanitized_list
+
+    return _trim_snapshot_string(_stringify(value), truncation_meta)
+
+
+def _emit_node_snapshot(
+    metadata: dict[str, Any],
+    *,
+    node_id: str,
+    node_type: str,
+    status: str,
+    input_data: Any,
+    output_data: Any,
+    error_message: str | None = None,
+) -> None:
+    truncation_meta = {"hard_truncated": False}
+    safe_input = _sanitize_node_snapshot_value(input_data, truncation_meta)
+    safe_output = _sanitize_node_snapshot_value(output_data, truncation_meta)
+    safe_error = None
+    if error_message:
+        safe_error = _trim_snapshot_string(str(error_message), truncation_meta)
+    _emit(
+        metadata,
+        "on_node_snapshot",
+        node_id=node_id,
+        node_type=node_type,
+        status=status,
+        input=safe_input,
+        output=safe_output,
+        error_message=safe_error,
+        hard_truncated=bool(truncation_meta["hard_truncated"]),
+    )
 
 
 # ==================== DB Session Wrapper (Task 2.2) ====================
@@ -730,6 +812,294 @@ def _cfg_list_value(cfg: dict[str, Any], *keys: str) -> list[Any]:
     return []
 
 
+def _build_node_snapshot_input(
+    node_type: str,
+    node_cfg: dict[str, Any],
+    state: WorkflowState,
+) -> dict[str, Any]:
+    node_outputs = dict(state.get("node_outputs", {}))
+    start_inputs = _get_start_inputs(node_outputs)
+    sys_vars = state.get("sys_vars", {}) or {}
+
+    if node_type == "start":
+        return {
+            "user_input": state.get("user_input", ""),
+            "sys_vars": sys_vars,
+        }
+
+    if node_type == "llm":
+        user_input_template = node_cfg.get("user_input", "{{start.user_input}}")
+        if not isinstance(user_input_template, str):
+            user_input_template = "{{start.user_input}}"
+        rendered_user_input = _resolve_node_template_vars(
+            user_input_template, node_outputs, start_inputs, sys_vars,
+        )
+        system_prompt_template = node_cfg.get("system_prompt", "")
+        if not isinstance(system_prompt_template, str):
+            system_prompt_template = ""
+        rendered_system_prompt = _resolve_node_template_vars(
+            system_prompt_template, node_outputs, start_inputs, sys_vars,
+        )
+        raw_output_mode = str(node_cfg.get("output_mode", "text") or "text").strip().lower()
+        output_mode = "structured" if raw_output_mode == "json" else raw_output_mode
+        return {
+            "systemPrompt": rendered_system_prompt,
+            "userInput": rendered_user_input,
+            "outputMode": output_mode,
+            "knowledgeBindings": {
+                "enabled": _cfg_bool_value(node_cfg, "knowledge_enabled", "knowledgeEnabled", default=False),
+                "sourceNodeIds": _cfg_string_list(node_cfg, "knowledge_source_node_ids", "knowledgeSourceNodeIds"),
+                "injectMode": str(
+                    node_cfg.get("knowledge_inject_mode", node_cfg.get("knowledgeInjectMode", "references_only"))
+                    or "references_only"
+                ),
+                "maxRefs": _cfg_int_value(
+                    node_cfg, "knowledge_max_refs", "knowledgeMaxRefs", default=20, min_value=1, max_value=100
+                ),
+            },
+        }
+
+    if node_type == "output":
+        raw_output_mode = str(node_cfg.get("output_mode", "text") or "text").strip().lower()
+        output_mode = "structured" if raw_output_mode == "json" else raw_output_mode
+        if output_mode == "text":
+            return {
+                "outputMode": output_mode,
+                "textTemplate": node_cfg.get("text_template", "{{start.user_input}}"),
+            }
+        output_fields = node_cfg.get("output_fields")
+        if not isinstance(output_fields, list):
+            output_fields = []
+        return {
+            "outputMode": output_mode,
+            "outputFields": output_fields,
+        }
+
+    if node_type == "tool":
+        input_bindings = node_cfg.get("input_bindings")
+        resolved_args: dict[str, Any] = {}
+        if isinstance(input_bindings, dict):
+            for key, raw_tpl in input_bindings.items():
+                key_text = str(key).strip()
+                if not key_text:
+                    continue
+                if isinstance(raw_tpl, str):
+                    resolved_args[key_text] = _resolve_node_template_vars(raw_tpl, node_outputs, start_inputs, sys_vars)
+                elif raw_tpl is None:
+                    resolved_args[key_text] = ""
+                else:
+                    resolved_args[key_text] = str(raw_tpl)
+        return {
+            "toolName": node_cfg.get("tool_name", ""),
+            "resolvedArgs": resolved_args,
+        }
+
+    if node_type == "if_else":
+        normalized_cfg = _normalize_if_else_config(node_cfg)
+        branches = normalized_cfg.get("branches", [])
+        summarized_branches: list[dict[str, Any]] = []
+        for branch in branches:
+            if not isinstance(branch, dict):
+                continue
+            conditions = branch.get("conditions")
+            summarized_conditions: list[dict[str, Any]] = []
+            if isinstance(conditions, list):
+                for cond in conditions:
+                    if not isinstance(cond, dict):
+                        continue
+                    value_template = cond.get("value")
+                    rhs_template = "" if value_template is None else str(value_template)
+                    rhs_value = _resolve_node_template_vars(rhs_template, node_outputs, start_inputs, sys_vars)
+                    summarized_conditions.append(
+                        {
+                            "variable": str(cond.get("variable", "") or ""),
+                            "operator": _normalize_if_else_operator(cond.get("operator")),
+                            "value": rhs_value,
+                        }
+                    )
+            summarized_branches.append(
+                {
+                    "id": str(branch.get("id", "") or ""),
+                    "logic": str(branch.get("logic", "and") or "and"),
+                    "conditions": summarized_conditions,
+                }
+            )
+        return {
+            "elseHandle": normalized_cfg.get("else_handle", "else"),
+            "branches": summarized_branches,
+        }
+
+    if node_type == "parameter_extractor":
+        input_content_template = node_cfg.get("input_content", node_cfg.get("inputContent", ""))
+        if not isinstance(input_content_template, str):
+            input_content_template = ""
+        instruction_template = node_cfg.get("instruction", "")
+        if not isinstance(instruction_template, str):
+            instruction_template = ""
+        output_fields = node_cfg.get("output_fields")
+        if output_fields is None:
+            output_fields = node_cfg.get("outputFields")
+        if not isinstance(output_fields, list):
+            output_fields = []
+        return {
+            "inputContent": _resolve_node_template_vars(input_content_template, node_outputs, start_inputs, sys_vars),
+            "instruction": _resolve_node_template_vars(instruction_template, node_outputs, start_inputs, sys_vars),
+            "outputFields": output_fields,
+        }
+
+    if node_type == "knowledge_retrieval":
+        query_template = node_cfg.get("query", "{{start.user_input}}")
+        if not isinstance(query_template, str):
+            query_template = "{{start.user_input}}"
+        raw_top_k = node_cfg.get("top_k", node_cfg.get("topK"))
+        top_k = None
+        if raw_top_k is not None and str(raw_top_k).strip():
+            try:
+                top_k = int(raw_top_k)
+            except Exception:
+                top_k = None
+        return {
+            "query": _resolve_node_template_vars(query_template, node_outputs, start_inputs, sys_vars),
+            "mode": node_cfg.get("mode"),
+            "topK": top_k,
+        }
+
+    if node_type == "iteration":
+        input_source_tpl = str(node_cfg.get("input_source", node_cfg.get("inputSource", "")) or "")
+        rendered_input = _resolve_node_template_vars(input_source_tpl, node_outputs, start_inputs, sys_vars)
+        return {
+            "inputSource": input_source_tpl,
+            "resolvedInput": _truncate(rendered_input, _NODE_SNAPSHOT_TEXT_PREVIEW_LIMIT),
+            "outputVariable": str(node_cfg.get("output_variable", node_cfg.get("outputVariable", "results")) or "results"),
+            "outputSelector": str(node_cfg.get("output_selector", node_cfg.get("outputSelector", "{{container.item}}")) or "{{container.item}}"),
+            "parallelMode": _cfg_bool_value(node_cfg, "parallel_mode", "parallelMode", default=False),
+            "errorStrategy": str(node_cfg.get("error_strategy", node_cfg.get("errorStrategy", "fail_fast")) or "fail_fast"),
+            "flattenOutput": _cfg_bool_value(node_cfg, "flatten_output", "flattenOutput", default=True),
+        }
+
+    if node_type == "loop":
+        return {
+            "initialVars": _cfg_list_value(node_cfg, "initial_vars", "initialVars"),
+            "updateMappings": _cfg_list_value(node_cfg, "update_mappings", "updateMappings"),
+            "terminationLogic": str(node_cfg.get("termination_logic", node_cfg.get("terminationLogic", "and")) or "and"),
+            "terminationConditions": _cfg_list_value(node_cfg, "termination_conditions", "terminationConditions"),
+            "maxIterations": _cfg_int_value(
+                node_cfg, "max_iterations", "maxIterations", default=10, min_value=1, max_value=1000
+            ),
+        }
+
+    return {
+        "config": node_cfg,
+    }
+
+
+def _build_node_snapshot_output(
+    node_type: str,
+    node_out: NodeOutput | None,
+    result: dict[str, Any] | None,
+) -> Any:
+    if not isinstance(node_out, dict):
+        return None
+
+    if node_type == "if_else":
+        json_fields = node_out.get("json_fields", {})
+        chosen_handle = json_fields.get("handle") if isinstance(json_fields, dict) else None
+        if chosen_handle is None:
+            chosen_handle = node_out.get("raw", node_out.get("text"))
+        return {"chosenHandle": chosen_handle}
+
+    if node_type == "iteration":
+        raw_payload = node_out.get("raw")
+        if isinstance(raw_payload, dict):
+            errors = raw_payload.get("errors")
+            return {
+                "count": raw_payload.get("count"),
+                "errors": errors,
+                "errorsCount": len(errors) if isinstance(errors, list) else 0,
+                "itemsPreview": _truncate(_stringify(raw_payload.get("items", [])), _NODE_SNAPSHOT_TEXT_PREVIEW_LIMIT),
+            }
+
+    if node_type == "loop":
+        raw_payload = node_out.get("raw")
+        if isinstance(raw_payload, dict):
+            return {
+                "iterations": raw_payload.get("iterations"),
+                "terminated": raw_payload.get("terminated"),
+                "lastItemPreview": _truncate(_stringify(raw_payload.get("last_item")), _NODE_SNAPSHOT_TEXT_PREVIEW_LIMIT),
+                "vars": raw_payload.get("vars"),
+            }
+
+    raw_payload = node_out.get("raw")
+    if raw_payload is not None:
+        return raw_payload
+    json_fields = node_out.get("json_fields")
+    if isinstance(json_fields, dict):
+        return json_fields
+    text_payload = node_out.get("text")
+    if text_payload is not None:
+        return text_payload
+    return result
+
+
+def _wrap_workflow_node_with_snapshot(
+    node_id: str,
+    node_type: str,
+    node_cfg: dict[str, Any],
+    node_fn: Callable[[WorkflowState], dict],
+) -> Callable[[WorkflowState], dict]:
+    def wrapped(state: WorkflowState) -> dict:
+        metadata = state.get("metadata", {}) if isinstance(state, dict) else {}
+        try:
+            snapshot_input = _build_node_snapshot_input(node_type, node_cfg, state)
+        except Exception as exc:
+            snapshot_input = {
+                "snapshotError": f"failed to build input snapshot: {exc}",
+            }
+        try:
+            result = node_fn(state)
+        except Exception as exc:
+            _emit_node_snapshot(
+                metadata,
+                node_id=node_id,
+                node_type=node_type,
+                status="error",
+                input_data=snapshot_input,
+                output_data=None,
+                error_message=str(exc),
+            )
+            raise
+
+        node_out: NodeOutput | None = None
+        if isinstance(result, dict):
+            node_outputs = result.get("node_outputs")
+            if isinstance(node_outputs, dict):
+                candidate = node_outputs.get(node_id)
+                if isinstance(candidate, dict):
+                    node_out = candidate
+        try:
+            output_data = _build_node_snapshot_output(
+                node_type,
+                node_out,
+                result if isinstance(result, dict) else None,
+            )
+        except Exception as exc:
+            output_data = {
+                "snapshotError": f"failed to build output snapshot: {exc}",
+            }
+        _emit_node_snapshot(
+            metadata,
+            node_id=node_id,
+            node_type=node_type,
+            status="ok",
+            input_data=snapshot_input,
+            output_data=output_data,
+            error_message=None,
+        )
+        return result
+
+    return wrapped
+
+
 def _normalize_container_body_nodes(node_cfg: dict[str, Any]) -> list[dict[str, Any]]:
     raw_nodes = _cfg_list_value(node_cfg, "body_nodes", "bodyNodes")
     nodes: list[dict[str, Any]] = []
@@ -848,6 +1218,67 @@ def _build_container_start_node(container_input: Any, container_fields: dict[str
     return start_node
 
 
+def _build_container_scoped_metadata(
+    container_node_id: str,
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    raw_metadata = metadata if isinstance(metadata, dict) else {}
+    scoped = dict(raw_metadata)
+
+    def _scoped_node_id(node_id: str) -> str:
+        return f"{container_node_id}::{node_id}"
+
+    on_node_start = raw_metadata.get("on_node_start")
+    if callable(on_node_start):
+        def _wrapped_node_start(*, node_id: str, node_type: str, _cb=on_node_start) -> None:
+            _cb(node_id=_scoped_node_id(node_id), node_type=node_type)
+        scoped["on_node_start"] = _wrapped_node_start
+
+    on_node_output_delta = raw_metadata.get("on_node_output_delta")
+    if callable(on_node_output_delta):
+        def _wrapped_node_output_delta(*, node_id: str, delta: str, _cb=on_node_output_delta) -> None:
+            _cb(node_id=_scoped_node_id(node_id), delta=delta)
+        scoped["on_node_output_delta"] = _wrapped_node_output_delta
+
+    on_node_end = raw_metadata.get("on_node_end")
+    if callable(on_node_end):
+        def _wrapped_node_end(*, node_id: str, status: str, _cb=on_node_end) -> None:
+            _cb(node_id=_scoped_node_id(node_id), status=status)
+        scoped["on_node_end"] = _wrapped_node_end
+
+    on_branch_decision = raw_metadata.get("on_branch_decision")
+    if callable(on_branch_decision):
+        def _wrapped_branch_decision(*, node_id: str, handle: str, _cb=on_branch_decision) -> None:
+            _cb(node_id=_scoped_node_id(node_id), handle=handle)
+        scoped["on_branch_decision"] = _wrapped_branch_decision
+
+    on_node_snapshot = raw_metadata.get("on_node_snapshot")
+    if callable(on_node_snapshot):
+        def _wrapped_node_snapshot(
+            *,
+            node_id: str,
+            node_type: str,
+            status: str,
+            input: Any,
+            output: Any,
+            error_message: str | None = None,
+            hard_truncated: bool = False,
+            _cb=on_node_snapshot,
+        ) -> None:
+            _cb(
+                node_id=_scoped_node_id(node_id),
+                node_type=node_type,
+                status=status,
+                input=input,
+                output=output,
+                error_message=error_message,
+                hard_truncated=hard_truncated,
+            )
+        scoped["on_node_snapshot"] = _wrapped_node_snapshot
+
+    return scoped
+
+
 def _execute_container_body(
     *,
     container_node_id: str,
@@ -880,7 +1311,10 @@ def _execute_container_body(
         out_edges.setdefault(src, []).append((tgt, str(edge.get("source_handle", "output") or "output")))
         in_degree[tgt] = in_degree.get(tgt, 0) + 1
 
-    metadata = parent_state.get("metadata", {}) or {}
+    metadata = _build_container_scoped_metadata(
+        container_node_id,
+        parent_state.get("metadata", {}) or {},
+    )
     sys_vars = parent_state.get("sys_vars", {}) or {}
     runtime_node_llms_raw = parent_state.get("node_llms", {}) or {}
     runtime_node_llms: dict[str, Any]
@@ -953,6 +1387,7 @@ def _execute_container_body(
                 f"{container_node_type} node {container_node_id} body node {current} has unsupported type: {node_type}"
             )
 
+        node_fn = _wrap_workflow_node_with_snapshot(current, node_type, cfg, node_fn)
         result = node_fn(state_for_node)
         if isinstance(result.get("node_outputs"), dict):
             node_outputs_local.update(result["node_outputs"])
@@ -2204,6 +2639,7 @@ def build_workflow_dag_subgraph(
         else:
             raise ValueError(f"Unknown node type: {ntype}")
 
+        node_fn = _wrap_workflow_node_with_snapshot(nid, ntype, cfg, node_fn)
         graph.add_node(nid, node_fn)
 
     # Find start node
@@ -2653,6 +3089,7 @@ class LangGraphEngine:
         on_node_output_delta: Callable | None = None,
         on_node_end: Callable | None = None,
         on_branch_decision: Callable | None = None,
+        on_node_snapshot: Callable | None = None,
     ) -> Iterator[str]:
         """执行 LangGraph skill，yield 流式内容。"""
         logger.info("LangGraphEngine.execute: skill=%s pattern=%s",
@@ -2730,6 +3167,19 @@ class LangGraphEngine:
         if on_branch_decision:
             metadata["on_branch_decision"] = lambda node_id, handle: (
                 _push_runtime_event("branch_decision", node_id=node_id, handle=handle)
+            )
+        if on_node_snapshot:
+            metadata["on_node_snapshot"] = lambda node_id, node_type, status, input, output, error_message=None, hard_truncated=False: (
+                _push_runtime_event(
+                    "node_snapshot",
+                    node_id=node_id,
+                    node_type=node_type,
+                    status=status,
+                    input=input,
+                    output=output,
+                    error_message=error_message,
+                    hard_truncated=hard_truncated,
+                )
             )
 
         # 构建初始消息
@@ -2939,6 +3389,19 @@ class LangGraphEngine:
 
                 if event_name == "branch_decision" and on_branch_decision:
                     on_branch_decision(payload.get("node_id", ""), payload.get("handle", ""))
+                    yield ""
+                    continue
+
+                if event_name == "node_snapshot" and on_node_snapshot:
+                    on_node_snapshot(
+                        payload.get("node_id", ""),
+                        payload.get("node_type", ""),
+                        payload.get("status", ""),
+                        payload.get("input"),
+                        payload.get("output"),
+                        payload.get("error_message"),
+                        bool(payload.get("hard_truncated", False)),
+                    )
                     yield ""
                     continue
 

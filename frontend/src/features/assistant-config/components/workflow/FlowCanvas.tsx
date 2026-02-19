@@ -1,8 +1,7 @@
-import { useCallback, useRef, useEffect, useMemo } from 'react'
+import { useCallback, useRef, useEffect, useMemo, useState } from 'react'
 import {
   ReactFlow,
   Background,
-  Controls,
   MiniMap,
   useReactFlow,
   type OnConnect,
@@ -15,6 +14,7 @@ import {
   type Edge,
 } from '@xyflow/react'
 import { useWorkflowEditorStore, type WfNodeData } from '../../stores/workflow-editor-store'
+import { useWorkflowTestRunStore } from '../../stores/workflow-test-run-store'
 import type { NodeType } from '../../api/workflow'
 import { WorkflowNode } from './WorkflowNode'
 import type { WorkflowToolDefinition } from './types'
@@ -23,6 +23,7 @@ import { WorkflowDeletableEdge } from './WorkflowDeletableEdge'
 import { createMainFlowNode } from './nodeFactory'
 import type { QuickAddPayload } from './QuickAddPopover'
 import { estimateContainerNodeSizeFromConfig } from './containerLayout'
+import { FlowControls } from './FlowControls'
 
 const nodeTypes: NodeTypes = {
   start: WorkflowNode,
@@ -216,14 +217,56 @@ interface FlowCanvasProps {
   tools: WorkflowToolDefinition[]
 }
 
+type RuntimeNodeStatus = 'running' | 'success' | 'error'
+
+const RUNTIME_STATUS_PRIORITY: Record<RuntimeNodeStatus, number> = {
+  running: 3,
+  error: 2,
+  success: 1,
+}
+
 export function FlowCanvas({ tools }: FlowCanvasProps) {
   const reactFlowWrapper = useRef<HTMLDivElement>(null)
-  const { screenToFlowPosition } = useReactFlow()
+  const { screenToFlowPosition, setCenter } = useReactFlow()
   const store = useWorkflowEditorStore()
+  const [isInteractive, setIsInteractive] = useState(true)
+
+  const nodeTraceMap = useWorkflowTestRunStore((s) => s.nodeTraceMap)
   const nodeMap = useMemo(
     () => new Map(store.nodes.map((node) => [node.id, node])),
     [store.nodes],
   )
+
+  const runtimeStatusByNodeId = useMemo(() => {
+    const merged: Record<string, RuntimeNodeStatus> = {}
+
+    const mergeStatus = (nodeId: string, status: RuntimeNodeStatus) => {
+      const current = merged[nodeId]
+      if (!current || RUNTIME_STATUS_PRIORITY[status] > RUNTIME_STATUS_PRIORITY[current]) {
+        merged[nodeId] = status
+      }
+    }
+
+    Object.entries(nodeTraceMap).forEach(([rawNodeId, trace]) => {
+      const mappedStatus = trace.status === 'running'
+        ? 'running'
+        : trace.status === 'error'
+          ? 'error'
+          : trace.status === 'success'
+            ? 'success'
+            : null
+      if (!mappedStatus) return
+      const scopeIdx = rawNodeId.indexOf('::')
+      if (scopeIdx > 0) {
+        const containerId = rawNodeId.slice(0, scopeIdx)
+        mergeStatus(containerId, mappedStatus)
+        return
+      }
+      mergeStatus(rawNodeId, mappedStatus)
+    })
+
+    return merged
+  }, [nodeTraceMap])
 
   const handleDeleteEdge = useCallback(
     (edgeId: string) => {
@@ -349,12 +392,13 @@ export function FlowCanvas({ tools }: FlowCanvasProps) {
         ...node,
         data: {
           ...node.data,
+          runtimeStatus: runtimeStatusByNodeId[node.id],
           quickAddHandles: quickAddHandleMap.get(node.id) ?? [],
           onQuickAdd: handleQuickAdd,
           quickAddTools: tools,
         },
       })),
-    [handleQuickAdd, quickAddHandleMap, store.nodes, tools],
+    [handleQuickAdd, quickAddHandleMap, runtimeStatusByNodeId, store.nodes, tools],
   )
 
   const onEdgeClick = useCallback(
@@ -508,6 +552,19 @@ export function FlowCanvas({ tools }: FlowCanvasProps) {
     return () => window.removeEventListener('keydown', onDelete)
   }, [onDelete])
 
+  useEffect(() => {
+    const nodeId = store.focusTargetNodeId
+    if (!nodeId || store.focusRequestNonce <= 0) return
+    const node = store.nodes.find((item) => item.id === nodeId)
+    if (!node) return
+    const size = estimateMainNodeSize(node)
+    void setCenter(
+      node.position.x + size.width / 2,
+      node.position.y + size.height / 2,
+      { duration: 280 },
+    )
+  }, [setCenter, store.focusRequestNonce, store.focusTargetNodeId, store.nodes])
+
   return (
     <div ref={reactFlowWrapper} className="flex-1 h-full">
       <ReactFlow
@@ -534,9 +591,12 @@ export function FlowCanvas({ tools }: FlowCanvasProps) {
         snapGrid={[16, 16]}
         fitView
         deleteKeyCode={null}
+        nodesDraggable={isInteractive}
+        nodesConnectable={isInteractive}
+        elementsSelectable={isInteractive}
       >
         <Background gap={16} size={1} />
-        <Controls />
+        <FlowControls isInteractive={isInteractive} onLockChange={setIsInteractive} />
         <MiniMap
           nodeStrokeWidth={3}
           zoomable

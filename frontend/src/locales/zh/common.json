@@ -16,7 +16,12 @@
     "confirm": "确认",
     "add": "添加",
     "back": "返回",
-    "pageOf": "第 {{current}} 页，共 {{total}} 页"
+    "pageOf": "第 {{current}} 页，共 {{total}} 页",
+    "zoomIn": "放大",
+    "zoomOut": "缩小",
+    "fitView": "适应屏幕",
+    "lock": "锁定画布",
+    "unlock": "解锁画布"
   },
   "actions": {
     "save": "保存",
@@ -518,9 +523,34 @@
         "undo": "撤销",
         "redo": "重做",
         "autoLayout": "自动整理",
+        "testRun": "测试运行",
         "validate": "验证",
         "back": "返回"
-      }
+      },
+      "workflowValidationChecklistTitle": "检查清单",
+      "workflowValidationChecklistErrors": "错误 {{count}}",
+      "workflowValidationChecklistWarnings": "提示 {{count}}",
+      "workflowValidationChecklistValidating": "校验中...",
+      "workflowValidationChecklistUpdatedAt": "最近校验: {{time}}",
+      "workflowValidationChecklistNoIssues": "当前未发现错误或提示项。",
+      "workflowValidationChecklistLocate": "定位",
+      "workflowValidationChecklistRequestFailed": "校验请求失败",
+      "workflowValidationDeadEndWarning": "该节点不会汇入最终输出（仅提示）",
+      "workflowValidationSeverityError": "错误",
+      "workflowValidationSeverityWarning": "提示",
+      "workflowValidationPopup": {
+        "running": "校验中...",
+        "failed": "校验不通过",
+        "warnings": "发现警告",
+        "success": "校验通过",
+        "ready": "点击校验",
+        "errors": "错误",
+        "warns": "警告",
+        "lastValidated": "上次校验：{{time}}",
+        "viewDetails": "查看详情"
+      },
+      "workflowPaletteCollapse": "收起面板",
+      "workflowPaletteExpand": "展开面板"
     }
   },
   "aiProvider": {

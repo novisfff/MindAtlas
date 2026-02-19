@@ -4,60 +4,7 @@ import { useChatStore } from '../stores/chat-store'
 import { createConversation } from '../api'
 import { assistantKeys } from '../queries'
 import { ToolCall, SkillCall } from '../types'
-
-interface SSEEvent {
-  event: string
-  data: Record<string, unknown>
-}
-
-/**
- * SSE 解析器类，支持跨 chunk 的事件解析
- */
-class SSEParser {
-  private buffer = ''
-
-  parse(chunk: string): SSEEvent[] {
-    this.buffer += chunk
-    const events: SSEEvent[] = []
-
-    // 按双换行分割完整事件
-    const parts = this.buffer.split('\n\n')
-    // 最后一部分可能不完整，保留在 buffer 中
-    this.buffer = parts.pop() || ''
-
-    for (const part of parts) {
-      if (!part.trim()) continue
-
-      let eventType = ''
-      let eventData = ''
-
-      for (const line of part.split('\n')) {
-        if (line.startsWith('event: ')) {
-          eventType = line.slice(7)
-        } else if (line.startsWith('data: ')) {
-          eventData = line.slice(6)
-        }
-      }
-
-      if (eventType && eventData) {
-        try {
-          events.push({
-            event: eventType,
-            data: JSON.parse(eventData)
-          })
-        } catch {
-          // ignore parse errors
-        }
-      }
-    }
-
-    return events
-  }
-
-  reset() {
-    this.buffer = ''
-  }
-}
+import { SSEParser } from '@/lib/sse/SSEParser'
 
 export function useChat() {
   const queryClient = useQueryClient()

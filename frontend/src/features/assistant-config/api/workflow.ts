@@ -1,4 +1,5 @@
 import { apiClient } from '@/lib/api/client'
+import { SSEParser } from '@/lib/sse/SSEParser'
 
 // ==================== Node Types ====================
 
@@ -245,6 +246,128 @@ export interface WorkflowValidationResponse {
   errors: WorkflowValidationError[]
 }
 
+export interface WorkflowTestRunRequest {
+  workflow: WorkflowInput
+  userInput: string
+  streamOutput?: boolean
+}
+
+export type WorkflowRunEvent =
+  | {
+      event: 'run_start'
+      data: {
+        runId: string
+        skillId: string
+        streamOutput: boolean
+        startedAt: string
+      }
+    }
+  | {
+      event: 'node_start'
+      data: {
+        runId: string
+        nodeId: string
+        nodeType: string
+        ts: string
+      }
+    }
+  | {
+      event: 'node_output_delta'
+      data: {
+        runId: string
+        nodeId: string
+        // merged delta payload (not guaranteed one token per event)
+        delta: string
+        ts: string
+      }
+    }
+  | {
+      event: 'branch_decision'
+      data: {
+        runId: string
+        nodeId: string
+        handle: string
+        ts: string
+      }
+    }
+  | {
+      event: 'tool_call_start'
+      data: {
+        runId: string
+        toolCallId: string
+        name: string
+        args: Record<string, unknown>
+        ts: string
+      }
+    }
+  | {
+      event: 'tool_call_end'
+      data: {
+        runId: string
+        toolCallId: string
+        status: string
+        result: string
+        ts: string
+      }
+    }
+  | {
+      event: 'content_delta'
+      data: {
+        runId: string
+        // merged delta payload (not guaranteed one token per event)
+        delta: string
+        ts: string
+      }
+    }
+  | {
+      event: 'node_end'
+      data: {
+        runId: string
+        nodeId: string
+        status: string
+        ts: string
+      }
+    }
+  | {
+      event: 'node_snapshot'
+      data: {
+        runId: string
+        nodeId: string
+        nodeType: string
+        status: 'ok' | 'error'
+        input: unknown
+        output: unknown | null
+        errorMessage: string | null
+        hardTruncated?: boolean
+        ts: string
+      }
+    }
+  | {
+      event: 'run_end'
+      data: {
+        runId: string
+        status: 'completed' | 'error' | 'cancelled'
+        durationMs: number
+        finalText: string
+        finalJson: Record<string, unknown> | Array<unknown> | null
+        streamOutput: boolean
+      }
+    }
+  | {
+      event: 'run_error'
+      data: {
+        runId: string
+        message: string
+        stage: 'bootstrap' | 'runtime' | 'unknown'
+        ts: string
+      }
+    }
+
+export interface WorkflowTestStreamOptions {
+  signal?: AbortSignal
+  onEvent?: (event: WorkflowRunEvent) => void
+}
+
 export interface NodeTypeDefinition {
   type: NodeType
   label: string
@@ -264,3 +387,52 @@ export const validateWorkflow = (skillId: string, data: WorkflowInput) =>
     `/api/assistant-config/skills/${skillId}/validate-workflow`,
     { body: data },
   )
+
+export const runWorkflowTestStream = async (
+  skillId: string,
+  payload: WorkflowTestRunRequest,
+  options: WorkflowTestStreamOptions = {},
+) => {
+  const response = await fetch(`/api/assistant-config/skills/${skillId}/workflow/test-run`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+    signal: options.signal,
+  })
+
+  if (!response.ok || !response.body) {
+    const text = await response.text()
+    let message = `HTTP ${response.status}: ${response.statusText}`
+    try {
+      const payloadError = text ? JSON.parse(text) : null
+      if (payloadError && typeof payloadError === 'object') {
+        const maybeMsg = (payloadError as { message?: unknown }).message
+        if (typeof maybeMsg === 'string' && maybeMsg.trim()) {
+          message = maybeMsg
+        }
+      }
+    } catch {
+      if (text.trim()) message = text
+    }
+    throw new Error(message)
+  }
+
+  const parser = new SSEParser()
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const chunk = decoder.decode(value, { stream: true })
+      const events = parser.parse(chunk)
+      for (const evt of events) {
+        options.onEvent?.(evt as WorkflowRunEvent)
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}

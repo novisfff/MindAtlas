@@ -3,6 +3,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.assistant_config.schemas import (
@@ -16,8 +17,10 @@ from app.assistant_config.schemas import (
     SystemToolDefinitionResponse,
     SystemToolEnabledUpdateRequest,
     WorkflowInput,
+    WorkflowTestRunRequest,
     WorkflowValidationResponse,
 )
+from app.assistant_config.workflow_test_service import WorkflowTestRunService
 from app.assistant_config.service import AssistantConfigService
 from app.common.exceptions import ApiException
 from app.common.responses import ApiResponse
@@ -224,6 +227,26 @@ def validate_workflow(
         errors=all_errors,
     )
     return ApiResponse.ok(resp.model_dump(by_alias=True))
+
+
+@router.post("/skills/{id}/workflow/test-run")
+def test_run_workflow(
+    id: UUID,
+    request: WorkflowTestRunRequest,
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    """在编辑器草稿上执行工作流测试运行（不持久化）。"""
+    service = WorkflowTestRunService(db)
+    prepared = service.prepare(id, request)
+    return StreamingResponse(
+        service.stream(prepared),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # Node type metadata
