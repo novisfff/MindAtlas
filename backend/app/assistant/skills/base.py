@@ -201,6 +201,9 @@ class SkillDefinition(BaseModel):
     tools: list[str] = Field(default_factory=list)  # 该 Skill 需要的工具列表
     mode: Literal["langgraph"] = "langgraph"  # 执行模式（仅 LangGraph）
     langgraph_pattern: Optional[Literal["agent_loop", "workflow_dag"]] = None
+    # agent_loop 模式可选模型配置：default=系统默认，custom=指定模型
+    model_source: Literal["default", "custom"] = "default"
+    model_id: Optional[str] = None
     system_prompt: Optional[str] = None
     kb: Optional[SkillKBConfig] = None  # 知识库配置
     # workflow_dag 模式

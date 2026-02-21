@@ -1,33 +1,58 @@
 from __future__ import annotations
 
 import re
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
 from app.assistant.skills.base import DEFAULT_SKILL_NAME
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.ai_registry.models import AiModel
+from app.ai_registry.runtime import resolve_openai_compat_config_by_model_id
 from app.ai_provider.crypto import api_key_hint, encrypt_api_key
 from app.assistant_config.models import (
+    AssistantAgentProfile,
+    AssistantAgentProfileVersion,
     AssistantSkill,
     AssistantSkillEdge,
     AssistantSkillNode,
+    AssistantWorkflow,
+    AssistantWorkflowEdge,
+    AssistantWorkflowNode,
+    AssistantWorkflowVersion,
     AssistantTool,
 )
 from app.assistant_config.registry import SkillRegistry, ToolRegistry
 from app.assistant_config.schemas import (
+    AgentPublishDraftInput,
+    AgentPublishRequest,
+    AgentVersionListResponse,
+    AssistantAgentProfileCreateRequest,
+    AssistantAgentProfileUpdateRequest,
     AssistantSkillCreateRequest,
     AssistantSkillUpdateRequest,
     AssistantToolCreateRequest,
     AssistantToolUpdateRequest,
+    AssistantWorkflowCreateRequest,
+    AssistantWorkflowUpdateRequest,
+    ClearVersionsResponse,
+    DeleteVersionResponse,
+    RollbackVersionResponse,
+    TargetType,
+    TargetVersionResponse,
+    WorkflowPublishRequest,
+    WorkflowVersionListResponse,
     WorkflowInput,
 )
 from app.common.exceptions import ApiException
 
 _TOOL_TEXT_REF_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\.text\s*\}\}")
+_TARGET_VERSION_LIMIT = 100
 
 
 class AssistantConfigService:
@@ -90,6 +115,1079 @@ class AssistantConfigService:
                 ],
             }
         )
+
+    @staticmethod
+    def _derive_target_type(
+        *,
+        target_type: TargetType | None = None,
+        workflow_id: UUID | None = None,
+        agent_profile_id: UUID | None = None,
+        langgraph_pattern: str | None = None,
+    ) -> TargetType:
+        if target_type in {"workflow", "agent"}:
+            return target_type
+        if workflow_id is not None:
+            return "workflow"
+        if agent_profile_id is not None:
+            return "agent"
+        if str(langgraph_pattern or "").strip().lower() == "workflow_dag":
+            return "workflow"
+        return "agent"
+
+    @staticmethod
+    def _to_workflow_input_from_entity(workflow: AssistantWorkflow) -> WorkflowInput:
+        nodes = [
+            {
+                "node_id": node.node_id,
+                "node_type": node.node_type,
+                "label": node.label,
+                "position_x": node.position_x,
+                "position_y": node.position_y,
+                "config": node.config or {},
+            }
+            for node in (workflow.nodes or [])
+        ]
+        edges = [
+            {
+                "edge_id": edge.edge_id,
+                "source_node_id": edge.source_node_id,
+                "target_node_id": edge.target_node_id,
+                "source_handle": edge.source_handle,
+                "target_handle": edge.target_handle,
+                "condition_type": edge.condition_type,
+                "condition_expr": edge.condition_expr,
+                "label": edge.label,
+            }
+            for edge in (workflow.edges or [])
+        ]
+        return WorkflowInput.model_validate(
+            {
+                "nodes": nodes,
+                "edges": edges,
+                "viewport": workflow.workflow_viewport,
+            }
+        )
+
+    @staticmethod
+    def _utcnow() -> datetime:
+        return datetime.now(timezone.utc)
+
+    @staticmethod
+    def _default_version_name(version_name: str | None) -> str:
+        value = str(version_name or "").strip()
+        if value:
+            return value[:255]
+        return AssistantConfigService._utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _workflow_input_to_snapshot(workflow: WorkflowInput) -> dict[str, Any]:
+        return {
+            "nodes": [
+                {
+                    "node_id": n.node_id,
+                    "node_type": n.node_type,
+                    "label": n.label,
+                    "position_x": n.position_x,
+                    "position_y": n.position_y,
+                    "config": n.config,
+                }
+                for n in workflow.nodes
+            ],
+            "edges": [
+                {
+                    "edge_id": e.edge_id,
+                    "source_node_id": e.source_node_id,
+                    "target_node_id": e.target_node_id,
+                    "source_handle": e.source_handle,
+                    "target_handle": e.target_handle,
+                    "condition_type": e.condition_type,
+                    "condition_expr": e.condition_expr.model_dump() if e.condition_expr else None,
+                    "label": e.label,
+                }
+                for e in workflow.edges
+            ],
+            "viewport": workflow.viewport,
+        }
+
+    @staticmethod
+    def _workflow_input_from_snapshot(snapshot: dict | None) -> WorkflowInput:
+        payload = snapshot if isinstance(snapshot, dict) else {}
+        return WorkflowInput.model_validate(
+            {
+                "nodes": payload.get("nodes") or [],
+                "edges": payload.get("edges") or [],
+                "viewport": payload.get("viewport"),
+            }
+        )
+
+    @staticmethod
+    def _resolve_start_input_mode(workflow: WorkflowInput) -> str:
+        for node in workflow.nodes:
+            if node.node_type != "start":
+                continue
+            cfg = node.config if isinstance(node.config, dict) else {}
+            raw_mode = str(cfg.get("input_mode", cfg.get("inputMode", "text")) or "text").strip().lower()
+            return "structured" if raw_mode == "structured" else "text"
+        return "text"
+
+    def _is_workflow_structured_input(self, workflow: AssistantWorkflow) -> bool:
+        draft = self._get_workflow_draft_input(workflow)
+        return self._resolve_start_input_mode(draft) == "structured"
+
+    def _enforce_workflow_structured_input_constraints(
+        self,
+        *,
+        workflow: AssistantWorkflow,
+        workflow_input: WorkflowInput,
+        raise_error: bool = True,
+    ) -> list[str]:
+        if self._resolve_start_input_mode(workflow_input) != "structured":
+            return []
+        if not workflow.skills:
+            return []
+        skill_names = ", ".join(sorted(skill.name for skill in workflow.skills))
+        message = (
+            "Structured-input workflow cannot be referenced by skills. "
+            f"Current referenced skills: {skill_names}"
+        )
+        if raise_error:
+            raise ApiException(status_code=409, code=40948, message=message)
+        return [message]
+
+    def collect_workflow_extra_validation_errors(
+        self,
+        *,
+        workflow: AssistantWorkflow | None,
+        workflow_input: WorkflowInput,
+    ) -> list[str]:
+        errors: list[str] = []
+        if workflow is not None:
+            errors.extend(
+                self._enforce_workflow_structured_input_constraints(
+                    workflow=workflow,
+                    workflow_input=workflow_input,
+                    raise_error=False,
+                )
+            )
+        return errors
+
+    @staticmethod
+    def _workflow_response_nodes_from_input(
+        *,
+        workflow_id: UUID,
+        workflow: WorkflowInput,
+        ts: datetime,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": uuid.uuid5(uuid.NAMESPACE_URL, f"{workflow_id}:node:{n.node_id}"),
+                "node_id": n.node_id,
+                "node_type": n.node_type,
+                "label": n.label,
+                "position_x": n.position_x,
+                "position_y": n.position_y,
+                "config": n.config,
+                "created_at": ts,
+                "updated_at": ts,
+            }
+            for n in workflow.nodes
+        ]
+
+    @staticmethod
+    def _workflow_response_edges_from_input(
+        *,
+        workflow_id: UUID,
+        workflow: WorkflowInput,
+        ts: datetime,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": uuid.uuid5(uuid.NAMESPACE_URL, f"{workflow_id}:edge:{e.edge_id}"),
+                "edge_id": e.edge_id,
+                "source_node_id": e.source_node_id,
+                "target_node_id": e.target_node_id,
+                "source_handle": e.source_handle,
+                "target_handle": e.target_handle,
+                "condition_type": e.condition_type,
+                "condition_expr": e.condition_expr.model_dump() if e.condition_expr else None,
+                "label": e.label,
+                "created_at": ts,
+                "updated_at": ts,
+            }
+            for e in workflow.edges
+        ]
+
+    def _get_workflow_draft_input(self, workflow: AssistantWorkflow) -> WorkflowInput:
+        if workflow.draft_version_id:
+            draft = (
+                self.db.query(AssistantWorkflowVersion)
+                .filter(
+                    AssistantWorkflowVersion.id == workflow.draft_version_id,
+                    AssistantWorkflowVersion.workflow_id == workflow.id,
+                )
+                .first()
+            )
+            if draft and isinstance(draft.snapshot, dict):
+                try:
+                    return self._workflow_input_from_snapshot(draft.snapshot)
+                except Exception:
+                    pass
+        return self._to_workflow_input_from_entity(workflow)
+
+    @staticmethod
+    def _agent_snapshot_from_fields(
+        *,
+        system_prompt: str,
+        tools: list[str] | None,
+        kb_config: dict | None,
+        model_source: str,
+        model_id: UUID | None,
+    ) -> dict[str, Any]:
+        snapshot_kb = dict(kb_config or {})
+        snapshot_kb["model_source"] = model_source
+        snapshot_kb["model_id"] = str(model_id) if model_id is not None else None
+        snapshot_kb.pop("modelSource", None)
+        snapshot_kb.pop("modelId", None)
+        return {
+            "system_prompt": system_prompt,
+            "tools": [str(item) for item in (tools or []) if str(item).strip()],
+            "kb_config": snapshot_kb,
+            "model_source": model_source,
+            "model_id": str(model_id) if model_id is not None else None,
+        }
+
+    def _agent_draft_from_snapshot(self, snapshot: dict | None) -> AgentPublishDraftInput:
+        payload = snapshot if isinstance(snapshot, dict) else {}
+        kb_config = payload.get("kb_config") if isinstance(payload.get("kb_config"), dict) else {"enabled": False}
+        model_source = str(payload.get("model_source", kb_config.get("model_source", "default"))).strip().lower()
+        if model_source not in {"default", "custom"}:
+            model_source = "default"
+
+        raw_model_id = payload.get("model_id", kb_config.get("model_id"))
+        parsed_model_id: UUID | None = None
+        if raw_model_id is not None:
+            text = str(raw_model_id).strip()
+            if text:
+                try:
+                    parsed_model_id = UUID(text)
+                except Exception:
+                    parsed_model_id = None
+
+        if model_source == "default":
+            parsed_model_id = None
+
+        return AgentPublishDraftInput.model_validate(
+            {
+                "system_prompt": str(payload.get("system_prompt") or ""),
+                "tools": payload.get("tools") or [],
+                "kb_config": kb_config,
+                "model_source": model_source,
+                "model_id": parsed_model_id,
+            }
+        )
+
+    def _get_agent_profile_draft(self, agent_profile: AssistantAgentProfile) -> AgentPublishDraftInput:
+        if agent_profile.draft_version_id:
+            draft = (
+                self.db.query(AssistantAgentProfileVersion)
+                .filter(
+                    AssistantAgentProfileVersion.id == agent_profile.draft_version_id,
+                    AssistantAgentProfileVersion.agent_profile_id == agent_profile.id,
+                )
+                .first()
+            )
+            if draft and isinstance(draft.snapshot, dict):
+                try:
+                    return self._agent_draft_from_snapshot(draft.snapshot)
+                except Exception:
+                    pass
+
+        raw_kb = agent_profile.kb_config if isinstance(agent_profile.kb_config, dict) else {"enabled": False}
+        model_source, model_id = self._read_agent_model_config(raw_kb)
+        return AgentPublishDraftInput.model_validate(
+            {
+                "system_prompt": agent_profile.system_prompt or "",
+                "tools": agent_profile.tools or [],
+                "kb_config": raw_kb,
+                "model_source": model_source,
+                "model_id": model_id,
+            }
+        )
+
+    def _next_workflow_version_seq(self, workflow_id: UUID) -> int:
+        max_seq = (
+            self.db.query(func.max(AssistantWorkflowVersion.sequence_no))
+            .filter(AssistantWorkflowVersion.workflow_id == workflow_id)
+            .scalar()
+        )
+        return int(max_seq or 0) + 1
+
+    def _next_agent_version_seq(self, agent_profile_id: UUID) -> int:
+        max_seq = (
+            self.db.query(func.max(AssistantAgentProfileVersion.sequence_no))
+            .filter(AssistantAgentProfileVersion.agent_profile_id == agent_profile_id)
+            .scalar()
+        )
+        return int(max_seq or 0) + 1
+
+    def _create_workflow_version(
+        self,
+        *,
+        workflow: AssistantWorkflow,
+        workflow_input: WorkflowInput,
+        version_source: str,
+        version_name: str | None = None,
+    ) -> AssistantWorkflowVersion:
+        version = AssistantWorkflowVersion(
+            workflow_id=workflow.id,
+            sequence_no=self._next_workflow_version_seq(workflow.id),
+            version_name=self._default_version_name(version_name),
+            version_source=version_source,
+            snapshot=self._workflow_input_to_snapshot(workflow_input),
+        )
+        self.db.add(version)
+        self.db.flush()
+        return version
+
+    def _create_agent_profile_version(
+        self,
+        *,
+        agent_profile: AssistantAgentProfile,
+        draft: AgentPublishDraftInput,
+        version_source: str,
+        version_name: str | None = None,
+    ) -> AssistantAgentProfileVersion:
+        normalized_kb = self._normalize_agent_kb_config(
+            kb_config=draft.kb_config,
+            model_source=draft.model_source,
+            model_id=draft.model_id,
+            existing_kb_config=draft.kb_config if isinstance(draft.kb_config, dict) else {"enabled": False},
+        )
+        snapshot = self._agent_snapshot_from_fields(
+            system_prompt=draft.system_prompt,
+            tools=draft.tools,
+            kb_config=normalized_kb,
+            model_source=draft.model_source,
+            model_id=draft.model_id,
+        )
+        version = AssistantAgentProfileVersion(
+            agent_profile_id=agent_profile.id,
+            sequence_no=self._next_agent_version_seq(agent_profile.id),
+            version_name=self._default_version_name(version_name),
+            version_source=version_source,
+            snapshot=snapshot,
+        )
+        self.db.add(version)
+        self.db.flush()
+        return version
+
+    def _resolve_system_workflow_baseline_input(self, workflow: AssistantWorkflow) -> WorkflowInput | None:
+        if not workflow.is_system:
+            return None
+
+        from app.assistant.skills.defaults_loader import get_system_workflow_baseline
+
+        for linked_skill in (workflow.skills or []):
+            if not bool(getattr(linked_skill, "is_system", False)):
+                continue
+            name = str(getattr(linked_skill, "name", "") or "").strip()
+            if not name:
+                continue
+            baseline = get_system_workflow_baseline(name)
+            if baseline is not None:
+                return baseline
+        return None
+
+    def _resolve_system_agent_baseline_draft(self, agent_profile: AssistantAgentProfile) -> AgentPublishDraftInput | None:
+        if not agent_profile.is_system:
+            return None
+
+        from app.assistant.skills.defaults_loader import get_system_agent_baseline
+
+        for linked_skill in (agent_profile.skills or []):
+            if not bool(getattr(linked_skill, "is_system", False)):
+                continue
+            name = str(getattr(linked_skill, "name", "") or "").strip()
+            if not name:
+                continue
+            baseline = get_system_agent_baseline(name)
+            if baseline is not None:
+                return baseline
+        return None
+
+    def _get_workflow_system_baseline_version_id(self, workflow_id: UUID) -> UUID | None:
+        baseline = (
+            self.db.query(AssistantWorkflowVersion.id)
+            .filter(
+                AssistantWorkflowVersion.workflow_id == workflow_id,
+                AssistantWorkflowVersion.version_source == "publish",
+            )
+            .order_by(AssistantWorkflowVersion.sequence_no.asc())
+            .first()
+        )
+        if baseline and baseline[0] is not None:
+            return baseline[0]
+        return None
+
+    def _get_agent_system_baseline_version_id(self, agent_profile_id: UUID) -> UUID | None:
+        baseline = (
+            self.db.query(AssistantAgentProfileVersion.id)
+            .filter(
+                AssistantAgentProfileVersion.agent_profile_id == agent_profile_id,
+                AssistantAgentProfileVersion.version_source == "publish",
+            )
+            .order_by(AssistantAgentProfileVersion.sequence_no.asc())
+            .first()
+        )
+        if baseline and baseline[0] is not None:
+            return baseline[0]
+        return None
+
+    def _get_workflow_protected_version_ids(self, workflow: AssistantWorkflow) -> set[UUID]:
+        protected_ids: set[UUID] = set()
+        if workflow.draft_version_id is not None:
+            protected_ids.add(workflow.draft_version_id)
+        if workflow.published_version_id is not None:
+            protected_ids.add(workflow.published_version_id)
+        if workflow.is_system:
+            baseline_id = self._get_workflow_system_baseline_version_id(workflow.id)
+            if baseline_id is not None:
+                protected_ids.add(baseline_id)
+        return protected_ids
+
+    def _get_agent_protected_version_ids(self, agent_profile: AssistantAgentProfile) -> set[UUID]:
+        protected_ids: set[UUID] = set()
+        if agent_profile.draft_version_id is not None:
+            protected_ids.add(agent_profile.draft_version_id)
+        if agent_profile.published_version_id is not None:
+            protected_ids.add(agent_profile.published_version_id)
+        if agent_profile.is_system:
+            baseline_id = self._get_agent_system_baseline_version_id(agent_profile.id)
+            if baseline_id is not None:
+                protected_ids.add(baseline_id)
+        return protected_ids
+
+    def _trim_workflow_versions(self, workflow: AssistantWorkflow) -> None:
+        protected_ids = self._get_workflow_protected_version_ids(workflow)
+        versions = (
+            self.db.query(AssistantWorkflowVersion)
+            .filter(AssistantWorkflowVersion.workflow_id == workflow.id)
+            .order_by(AssistantWorkflowVersion.sequence_no.desc())
+            .all()
+        )
+        keep_ids: set[UUID] = set()
+        for item in versions[:_TARGET_VERSION_LIMIT]:
+            keep_ids.add(item.id)
+        keep_ids.update(protected_ids)
+        for item in versions[_TARGET_VERSION_LIMIT:]:
+            if item.id in keep_ids:
+                continue
+            self.db.delete(item)
+
+    def _trim_agent_versions(self, agent_profile: AssistantAgentProfile) -> None:
+        protected_ids = self._get_agent_protected_version_ids(agent_profile)
+        versions = (
+            self.db.query(AssistantAgentProfileVersion)
+            .filter(AssistantAgentProfileVersion.agent_profile_id == agent_profile.id)
+            .order_by(AssistantAgentProfileVersion.sequence_no.desc())
+            .all()
+        )
+        keep_ids: set[UUID] = set()
+        for item in versions[:_TARGET_VERSION_LIMIT]:
+            keep_ids.add(item.id)
+        keep_ids.update(protected_ids)
+        for item in versions[_TARGET_VERSION_LIMIT:]:
+            if item.id in keep_ids:
+                continue
+            self.db.delete(item)
+
+    def _serialize_workflow(self, workflow: AssistantWorkflow) -> dict[str, Any]:
+        referenced_skill_ids = [s.id for s in (workflow.skills or [])]
+        draft_workflow = self._get_workflow_draft_input(workflow)
+        ts = workflow.updated_at or workflow.created_at or self._utcnow()
+        return {
+            "id": workflow.id,
+            "name": workflow.name,
+            "description": workflow.description or "",
+            "is_system": bool(workflow.is_system),
+            "enabled": bool(workflow.enabled),
+            "workflow_version": workflow.workflow_version or 1,
+            "workflow_viewport": draft_workflow.viewport,
+            "nodes": self._workflow_response_nodes_from_input(
+                workflow_id=workflow.id,
+                workflow=draft_workflow,
+                ts=ts,
+            ),
+            "edges": self._workflow_response_edges_from_input(
+                workflow_id=workflow.id,
+                workflow=draft_workflow,
+                ts=ts,
+            ),
+            "draft_version_id": workflow.draft_version_id,
+            "published_version_id": workflow.published_version_id,
+            "referenced_skill_ids": referenced_skill_ids,
+            "reference_count": len(referenced_skill_ids),
+            "created_at": workflow.created_at,
+            "updated_at": workflow.updated_at,
+        }
+
+    def serialize_workflow(self, workflow: AssistantWorkflow) -> dict[str, Any]:
+        return self._serialize_workflow(workflow)
+
+    def _serialize_agent_profile(self, agent_profile: AssistantAgentProfile) -> dict[str, Any]:
+        referenced_skill_ids = [s.id for s in (agent_profile.skills or [])]
+        draft = self._get_agent_profile_draft(agent_profile)
+        normalized_kb = dict(draft.kb_config or {})
+        normalized_kb["model_source"] = draft.model_source
+        normalized_kb["model_id"] = str(draft.model_id) if draft.model_id is not None else None
+        model_source, model_id = self._read_agent_model_config(normalized_kb)
+        return {
+            "id": agent_profile.id,
+            "name": agent_profile.name,
+            "description": agent_profile.description or "",
+            "system_prompt": draft.system_prompt,
+            "tools": draft.tools or [],
+            "kb_config": normalized_kb,
+            "model_source": model_source,
+            "model_id": model_id,
+            "is_system": bool(agent_profile.is_system),
+            "enabled": bool(agent_profile.enabled),
+            "draft_version_id": agent_profile.draft_version_id,
+            "published_version_id": agent_profile.published_version_id,
+            "referenced_skill_ids": referenced_skill_ids,
+            "reference_count": len(referenced_skill_ids),
+            "created_at": agent_profile.created_at,
+            "updated_at": agent_profile.updated_at,
+        }
+
+    def serialize_agent_profile(self, agent_profile: AssistantAgentProfile) -> dict[str, Any]:
+        return self._serialize_agent_profile(agent_profile)
+
+    @staticmethod
+    def _read_agent_model_config(kb_config: dict | None) -> tuple[str, UUID | None]:
+        raw = kb_config if isinstance(kb_config, dict) else {}
+        source_raw = raw.get("model_source", raw.get("modelSource", "default"))
+        source = str(source_raw or "default").strip().lower()
+        if source not in {"default", "custom"}:
+            source = "default"
+
+        model_id_value = raw.get("model_id", raw.get("modelId"))
+        parsed_model_id: UUID | None = None
+        if model_id_value is not None:
+            text = str(model_id_value).strip()
+            if text:
+                try:
+                    parsed_model_id = UUID(text)
+                except Exception:
+                    parsed_model_id = None
+
+        if source == "custom" and parsed_model_id is not None:
+            return ("custom", parsed_model_id)
+        return ("default", None)
+
+    def _normalize_agent_kb_config(
+        self,
+        *,
+        kb_config: dict | None,
+        model_source: str | None,
+        model_id: UUID | None,
+        existing_kb_config: dict | None = None,
+    ) -> dict:
+        base: dict[str, Any] = {}
+        if isinstance(existing_kb_config, dict):
+            base.update(existing_kb_config)
+        if isinstance(kb_config, dict):
+            base.update(kb_config)
+
+        source_from_existing, id_from_existing = self._read_agent_model_config(base)
+        source = (str(model_source).strip().lower() if model_source is not None else source_from_existing)
+        if model_source is None and model_id is not None:
+            source = "custom"
+        if source not in {"default", "custom"}:
+            raise ApiException(status_code=422, code=42243, message=f"Unsupported agent model_source: {model_source}")
+
+        resolved_model_id = model_id if model_id is not None else id_from_existing
+        if source == "custom":
+            if resolved_model_id is None:
+                raise ApiException(status_code=422, code=42244, message="custom model_source requires model_id")
+            cfg = resolve_openai_compat_config_by_model_id(
+                self.db,
+                model_id=resolved_model_id,
+                model_type="llm",
+            )
+            if cfg is None:
+                raise ApiException(
+                    status_code=422,
+                    code=42245,
+                    message=f"Agent references unavailable llm model: {resolved_model_id}",
+                )
+        else:
+            resolved_model_id = None
+
+        base["enabled"] = bool(base.get("enabled", False))
+        base["model_source"] = source
+        base["model_id"] = str(resolved_model_id) if resolved_model_id is not None else None
+        # 清理历史 camelCase 键，避免同义键冲突
+        base.pop("modelSource", None)
+        base.pop("modelId", None)
+        return base
+
+    def serialize_skill(self, skill: AssistantSkill) -> dict[str, Any]:
+        target_type = self._derive_target_type(
+            workflow_id=skill.workflow_id,
+            agent_profile_id=skill.agent_profile_id,
+            langgraph_pattern=getattr(skill, "langgraph_pattern", None),
+        )
+        workflow = skill.workflow
+        agent_profile = skill.agent_profile
+
+        if target_type == "workflow":
+            nodes = (workflow.nodes if workflow is not None else skill.nodes) or []
+            edges = (workflow.edges if workflow is not None else skill.edges) or []
+            workflow_version = (workflow.workflow_version if workflow is not None else skill.workflow_version) or 1
+            workflow_viewport = workflow.workflow_viewport if workflow is not None else skill.workflow_viewport
+            tools = skill.tools or []
+            kb_config = skill.kb_config if isinstance(skill.kb_config, dict) else None
+            system_prompt = None
+            target_summary = None
+            if workflow is not None:
+                target_summary = {
+                    "id": workflow.id,
+                    "name": workflow.name,
+                    "enabled": bool(workflow.enabled),
+                }
+        else:
+            nodes = []
+            edges = []
+            workflow_version = 1
+            workflow_viewport = None
+            tools = (
+                agent_profile.tools
+                if agent_profile is not None and isinstance(agent_profile.tools, list)
+                else (skill.tools or [])
+            )
+            kb_config = (
+                agent_profile.kb_config
+                if agent_profile is not None and isinstance(agent_profile.kb_config, dict)
+                else (skill.kb_config if isinstance(skill.kb_config, dict) else {"enabled": False})
+            )
+            system_prompt = (
+                agent_profile.system_prompt
+                if agent_profile is not None
+                else skill.system_prompt
+            )
+            target_summary = None
+            if agent_profile is not None:
+                target_summary = {
+                    "id": agent_profile.id,
+                    "name": agent_profile.name,
+                    "enabled": bool(agent_profile.enabled),
+                }
+
+        return {
+            "id": skill.id,
+            "name": skill.name,
+            "description": skill.description or "",
+            "intent_examples": skill.intent_examples or [],
+            "tools": tools or [],
+            "mode": "langgraph",
+            "target_type": target_type,
+            "workflow_id": skill.workflow_id,
+            "agent_profile_id": skill.agent_profile_id,
+            "target_summary": target_summary,
+            "langgraph_pattern": "workflow_dag" if target_type == "workflow" else "agent_loop",
+            "system_prompt": system_prompt,
+            "is_system": bool(skill.is_system),
+            "enabled": bool(skill.enabled),
+            "kb_config": kb_config,
+            "workflow_version": workflow_version,
+            "workflow_viewport": workflow_viewport,
+            "nodes": nodes,
+            "edges": edges,
+            "created_at": skill.created_at,
+            "updated_at": skill.updated_at,
+        }
+
+    def _apply_workflow_to_workflow_entity(
+        self,
+        workflow_model: AssistantWorkflow,
+        workflow: WorkflowInput,
+        *,
+        persist: bool = True,
+    ) -> set[str]:
+        """Validate workflow and optionally persist nodes/edges onto workflow entity."""
+        from app.assistant.skills.workflow_validator import validate_workflow, validate_parallel_branches
+
+        nodes_raw = [
+            {
+                "node_id": n.node_id,
+                "node_type": n.node_type,
+                "label": (getattr(n, "label", "") or getattr(n, "node_id", "")),
+                "config": n.config,
+            }
+            for n in workflow.nodes
+        ]
+        edges_raw = [
+            {
+                "source_node_id": e.source_node_id,
+                "target_node_id": e.target_node_id,
+                "source_handle": e.source_handle,
+            }
+            for e in workflow.edges
+        ]
+
+        result = validate_workflow(nodes_raw, edges_raw)
+        if not result.valid:
+            msgs = "; ".join(e.message for e in result.errors[:5])
+            raise ApiException(status_code=422, code=42201, message=f"Invalid workflow topology: {msgs}")
+
+        par_result = validate_parallel_branches(nodes_raw, edges_raw)
+        if not par_result.valid:
+            msgs = "; ".join(e.message for e in par_result.errors[:5])
+            raise ApiException(status_code=422, code=42202, message=f"Invalid parallel branches: {msgs}")
+
+        workflow_tool_names = self.validate_workflow_dependencies(workflow)
+
+        if not persist:
+            return workflow_tool_names
+
+        for old_node in list(getattr(workflow_model, "nodes", None) or []):
+            self.db.delete(old_node)
+        for old_edge in list(getattr(workflow_model, "edges", None) or []):
+            self.db.delete(old_edge)
+        self.db.flush()
+
+        workflow_model.nodes = [
+            AssistantWorkflowNode(
+                node_id=n.node_id,
+                node_type=n.node_type,
+                label=n.label,
+                position_x=n.position_x,
+                position_y=n.position_y,
+                config=n.config,
+            )
+            for n in workflow.nodes
+        ]
+        workflow_model.edges = [
+            AssistantWorkflowEdge(
+                edge_id=e.edge_id,
+                source_node_id=e.source_node_id,
+                target_node_id=e.target_node_id,
+                source_handle=e.source_handle,
+                target_handle=e.target_handle,
+                condition_type=e.condition_type,
+                condition_expr=e.condition_expr.model_dump() if e.condition_expr else None,
+                label=e.label,
+            )
+            for e in workflow.edges
+        ]
+        workflow_model.workflow_version = (workflow_model.workflow_version or 0) + 1
+        if workflow.viewport is not None:
+            workflow_model.workflow_viewport = workflow.viewport
+        return workflow_tool_names
+
+    def _bind_skill_to_workflow(
+        self,
+        *,
+        skill: AssistantSkill,
+        workflow_id: UUID | None,
+        request_workflow: WorkflowInput | None,
+        default_name: str,
+        description: str,
+        enabled: bool,
+        is_system: bool,
+    ) -> None:
+        if request_workflow is not None and self._resolve_start_input_mode(request_workflow) == "structured":
+            raise ApiException(
+                status_code=422,
+                code=42248,
+                message="Structured-input workflow cannot be bound to skills",
+            )
+
+        workflow_model: AssistantWorkflow
+        if workflow_id is not None:
+            workflow_model = self.get_workflow(workflow_id)
+            if self._is_workflow_structured_input(workflow_model):
+                raise ApiException(
+                    status_code=422,
+                    code=42248,
+                    message="Structured-input workflow cannot be bound to skills",
+                )
+        else:
+            workflow_model = AssistantWorkflow(
+                name=f"{default_name}__workflow",
+                description=description,
+                workflow_version=0,
+                workflow_viewport=None,
+                is_system=is_system,
+                enabled=enabled,
+            )
+            self.db.add(workflow_model)
+            self.db.flush()
+
+        should_update_workflow_graph = request_workflow is not None or workflow_id is None
+        if should_update_workflow_graph:
+            workflow_input = request_workflow or self._build_default_workflow_input()
+            workflow_tool_names = self._apply_workflow_to_workflow_entity(workflow_model, workflow_input)
+            published = self._create_workflow_version(
+                workflow=workflow_model,
+                workflow_input=workflow_input,
+                version_source="publish",
+                version_name=None,
+            )
+            workflow_model.draft_version_id = published.id
+            workflow_model.published_version_id = published.id
+            self._trim_workflow_versions(workflow_model)
+        else:
+            workflow_tool_names = self._collect_workflow_tool_names(workflow_model.nodes or [])
+            self._validate_workflow_tool_names(workflow_tool_names)
+
+        skill.workflow_id = workflow_model.id
+        skill.agent_profile_id = None
+        skill.langgraph_pattern = "workflow_dag"
+        skill.system_prompt = None
+        skill.kb_config = {"enabled": False}
+        skill.tools = sorted(workflow_tool_names)
+
+    def _bind_skill_to_agent_profile(
+        self,
+        *,
+        skill: AssistantSkill,
+        agent_profile_id: UUID | None,
+        request_system_prompt: str | None,
+        request_tools: list[str] | None,
+        request_kb_config: dict | None,
+        default_name: str,
+        description: str,
+        enabled: bool,
+        is_system: bool,
+    ) -> None:
+        if agent_profile_id is not None:
+            agent_profile = self.get_agent_profile(agent_profile_id)
+        else:
+            system_prompt = (request_system_prompt or "").strip() or "你是 MindAtlas 的 AI 助手，友好地回复用户。"
+            normalized_kb = self._normalize_agent_kb_config(
+                kb_config=request_kb_config,
+                model_source=None,
+                model_id=None,
+                existing_kb_config={"enabled": False},
+            )
+            agent_profile = AssistantAgentProfile(
+                name=f"{default_name}__agent",
+                description=description,
+                system_prompt=system_prompt,
+                tools=list(request_tools or []),
+                kb_config=normalized_kb,
+                is_system=is_system,
+                enabled=enabled,
+            )
+            self.db.add(agent_profile)
+            self.db.flush()
+            initial_draft = AgentPublishDraftInput.model_validate(
+                {
+                    "system_prompt": system_prompt,
+                    "tools": request_tools or [],
+                    "kb_config": normalized_kb,
+                    "model_source": "default",
+                    "model_id": None,
+                }
+            )
+            published = self._create_agent_profile_version(
+                agent_profile=agent_profile,
+                draft=initial_draft,
+                version_source="publish",
+                version_name=None,
+            )
+            agent_profile.draft_version_id = published.id
+            agent_profile.published_version_id = published.id
+            self._trim_agent_versions(agent_profile)
+
+        skill.workflow_id = None
+        skill.agent_profile_id = agent_profile.id
+        skill.langgraph_pattern = "agent_loop"
+        skill.system_prompt = agent_profile.system_prompt
+        skill.kb_config = agent_profile.kb_config if isinstance(agent_profile.kb_config, dict) else {"enabled": False}
+        skill.tools = list(agent_profile.tools or [])
+
+    def _workflow_input_from_skill_default(self, default) -> WorkflowInput:
+        workflow_input = self._build_default_workflow_input()
+        if getattr(default, "workflow_nodes", None):
+            workflow_input = WorkflowInput.model_validate(
+                {
+                    "nodes": [
+                        {
+                            "node_id": n.node_id,
+                            "node_type": n.node_type,
+                            "label": n.label,
+                            "position_x": n.position_x,
+                            "position_y": n.position_y,
+                            "config": n.config,
+                        }
+                        for n in default.workflow_nodes
+                    ],
+                    "edges": [
+                        {
+                            "edge_id": e.edge_id,
+                            "source_node_id": e.source_node_id,
+                            "target_node_id": e.target_node_id,
+                            "source_handle": e.source_handle,
+                            "target_handle": e.target_handle,
+                            "condition_type": e.condition_type,
+                            "condition_expr": e.condition_expr.model_dump() if e.condition_expr else None,
+                            "label": e.label,
+                        }
+                        for e in (getattr(default, "workflow_edges", None) or [])
+                    ],
+                    "viewport": getattr(default, "workflow_viewport", None),
+                }
+            )
+        return workflow_input
+
+    @staticmethod
+    def _skill_default_kb_config(default) -> dict[str, Any]:
+        return {"enabled": bool(getattr(getattr(default, "kb", None), "enabled", False))}
+
+    def _agent_draft_from_skill_default(self, default) -> AgentPublishDraftInput:
+        kb_config = self._skill_default_kb_config(default)
+        model_source = str(getattr(default, "model_source", "default") or "default")
+        model_id = getattr(default, "model_id", None)
+        return AgentPublishDraftInput.model_validate(
+            {
+                "system_prompt": str(getattr(default, "system_prompt", "") or ""),
+                "tools": [str(item) for item in (getattr(default, "tools", None) or []) if str(item).strip()],
+                "kb_config": kb_config,
+                "model_source": model_source,
+                "model_id": model_id,
+            }
+        )
+
+    def _resolve_or_create_system_workflow_for_reset(
+        self,
+        *,
+        skill: AssistantSkill,
+        default,
+        enabled: bool,
+    ) -> AssistantWorkflow:
+        if skill.workflow_id is not None and skill.workflow is not None and skill.workflow.is_system:
+            workflow = skill.workflow
+        else:
+            expected_name = f"{skill.name}__workflow"
+            workflow = (
+                self.db.query(AssistantWorkflow)
+                .filter(
+                    AssistantWorkflow.name == expected_name,
+                    AssistantWorkflow.is_system.is_(True),
+                )
+                .first()
+            )
+            if workflow is None:
+                conflicting = (
+                    self.db.query(AssistantWorkflow)
+                    .filter(AssistantWorkflow.name == expected_name)
+                    .first()
+                )
+                if conflicting is not None and not bool(conflicting.is_system):
+                    raise ApiException(
+                        status_code=409,
+                        code=40946,
+                        message=f"Cannot create system workflow target due to custom name conflict: {expected_name}",
+                    )
+                workflow = AssistantWorkflow(
+                    name=expected_name,
+                    description=default.description or "",
+                    workflow_version=0,
+                    workflow_viewport=None,
+                    is_system=True,
+                    enabled=bool(enabled),
+                )
+                self.db.add(workflow)
+                self.db.flush()
+
+        workflow.is_system = True
+        workflow.enabled = bool(enabled)
+        workflow.description = default.description or ""
+        return workflow
+
+    def _resolve_or_create_system_agent_profile_for_reset(
+        self,
+        *,
+        skill: AssistantSkill,
+        default,
+        enabled: bool,
+    ) -> AssistantAgentProfile:
+        if skill.agent_profile_id is not None and skill.agent_profile is not None and skill.agent_profile.is_system:
+            profile = skill.agent_profile
+        else:
+            expected_name = f"{skill.name}__agent"
+            profile = (
+                self.db.query(AssistantAgentProfile)
+                .filter(
+                    AssistantAgentProfile.name == expected_name,
+                    AssistantAgentProfile.is_system.is_(True),
+                )
+                .first()
+            )
+            if profile is None:
+                conflicting = (
+                    self.db.query(AssistantAgentProfile)
+                    .filter(AssistantAgentProfile.name == expected_name)
+                    .first()
+                )
+                if conflicting is not None and not bool(conflicting.is_system):
+                    raise ApiException(
+                        status_code=409,
+                        code=40947,
+                        message=f"Cannot create system agent target due to custom name conflict: {expected_name}",
+                    )
+                initial_draft = self._agent_draft_from_skill_default(default)
+                normalized_kb = self._normalize_agent_kb_config(
+                    kb_config=initial_draft.kb_config,
+                    model_source=initial_draft.model_source,
+                    model_id=initial_draft.model_id,
+                    existing_kb_config=(
+                        initial_draft.kb_config if isinstance(initial_draft.kb_config, dict) else {"enabled": False}
+                    ),
+                )
+                profile = AssistantAgentProfile(
+                    name=expected_name,
+                    description=default.description or "",
+                    system_prompt=initial_draft.system_prompt,
+                    tools=list(initial_draft.tools or []),
+                    kb_config=normalized_kb,
+                    is_system=True,
+                    enabled=bool(enabled),
+                )
+                self.db.add(profile)
+                self.db.flush()
+
+        profile.is_system = True
+        profile.enabled = bool(enabled)
+        profile.description = default.description or ""
+        return profile
+
+    def _keep_only_workflow_version(self, workflow: AssistantWorkflow, keep_version_id: UUID) -> None:
+        (
+            self.db.query(AssistantWorkflowVersion)
+            .filter(
+                AssistantWorkflowVersion.workflow_id == workflow.id,
+                AssistantWorkflowVersion.id != keep_version_id,
+            )
+            .delete(synchronize_session=False)
+        )
+        workflow.draft_version_id = keep_version_id
+        workflow.published_version_id = keep_version_id
+
+    def _keep_only_agent_version(self, agent_profile: AssistantAgentProfile, keep_version_id: UUID) -> None:
+        (
+            self.db.query(AssistantAgentProfileVersion)
+            .filter(
+                AssistantAgentProfileVersion.agent_profile_id == agent_profile.id,
+                AssistantAgentProfileVersion.id != keep_version_id,
+            )
+            .delete(synchronize_session=False)
+        )
+        agent_profile.draft_version_id = keep_version_id
+        agent_profile.published_version_id = keep_version_id
 
     # -------------------------
     # System seed / sync
@@ -234,58 +1332,99 @@ class AssistantConfigService:
         return result
 
     def sync_system_skills(self) -> None:
-        """同步系统技能到数据库"""
+        """同步系统技能到数据库。
+
+        Note:
+        - 系统 Workflow 的节点坐标基线来自 JSON 默认定义（system_defaults）。
+        - 这些坐标仅在“首次创建系统目标执行体”时生效。
+        - 对于已存在且已绑定 workflow_id 的系统技能，sync 不覆盖图结构与坐标，
+          以避免覆盖用户已手动调整过的布局。
+        """
         system_skills = SkillRegistry.list_system_skills()
         if not system_skills:
             return
 
         for s in system_skills:
+            target_type = self._derive_target_type(
+                langgraph_pattern=getattr(s, "langgraph_pattern", None),
+            )
+            kb_config_data = {"enabled": bool(getattr(getattr(s, "kb", None), "enabled", False))}
             existing = (
                 self.db.query(AssistantSkill)
                 .filter(AssistantSkill.name == s.name)
                 .first()
             )
             if not existing:
-                # 构建 kb_config
-                kb_config_data = None
-                if getattr(s, "kb", None) is not None:
-                    kb_config_data = {"enabled": bool(s.kb.enabled)}
-
                 skill = AssistantSkill(
                     name=s.name,
                     description=s.description,
                     intent_examples=s.intent_examples,
                     tools=s.tools,
                     mode="langgraph",
-                    langgraph_pattern=getattr(s, "langgraph_pattern", None),
+                    langgraph_pattern="workflow_dag" if target_type == "workflow" else "agent_loop",
                     system_prompt=s.system_prompt,
                     kb_config=kb_config_data,
                     is_system=True,
                     enabled=True,
                 )
-                # Persist workflow nodes/edges for workflow_dag skills
-                if getattr(s, "workflow_nodes", None):
-                    skill.nodes = [
-                        AssistantSkillNode(
-                            node_id=n.node_id, node_type=n.node_type, label=n.label,
-                            position_x=n.position_x, position_y=n.position_y, config=n.config,
-                        )
-                        for n in s.workflow_nodes
-                    ]
-                if getattr(s, "workflow_edges", None):
-                    skill.edges = [
-                        AssistantSkillEdge(
-                            edge_id=e.edge_id, source_node_id=e.source_node_id,
-                            target_node_id=e.target_node_id, source_handle=e.source_handle,
-                            target_handle=e.target_handle, condition_type=e.condition_type,
-                            condition_expr=e.condition_expr.model_dump() if e.condition_expr else None,
-                            label=e.label,
-                        )
-                        for e in s.workflow_edges
-                    ]
                 self.db.add(skill)
+                self.db.flush()
+
+                if target_type == "workflow":
+                    workflow_input = self._build_default_workflow_input()
+                    if getattr(s, "workflow_nodes", None):
+                        workflow_input = WorkflowInput.model_validate(
+                            {
+                                "nodes": [
+                                    {
+                                        "node_id": n.node_id,
+                                        "node_type": n.node_type,
+                                        "label": n.label,
+                                        "position_x": n.position_x,
+                                        "position_y": n.position_y,
+                                        "config": n.config,
+                                    }
+                                    for n in s.workflow_nodes
+                                ],
+                                "edges": [
+                                    {
+                                        "edge_id": e.edge_id,
+                                        "source_node_id": e.source_node_id,
+                                        "target_node_id": e.target_node_id,
+                                        "source_handle": e.source_handle,
+                                        "target_handle": e.target_handle,
+                                        "condition_type": e.condition_type,
+                                        "condition_expr": e.condition_expr.model_dump() if e.condition_expr else None,
+                                        "label": e.label,
+                                    }
+                                    for e in (getattr(s, "workflow_edges", None) or [])
+                                ],
+                                "viewport": getattr(s, "workflow_viewport", None),
+                            }
+                        )
+                    self._bind_skill_to_workflow(
+                        skill=skill,
+                        workflow_id=None,
+                        request_workflow=workflow_input,
+                        default_name=s.name,
+                        description=s.description,
+                        enabled=True,
+                        is_system=True,
+                    )
+                else:
+                    self._bind_skill_to_agent_profile(
+                        skill=skill,
+                        agent_profile_id=None,
+                        request_system_prompt=s.system_prompt,
+                        request_tools=s.tools,
+                        request_kb_config=kb_config_data,
+                        default_name=s.name,
+                        description=s.description,
+                        enabled=True,
+                        is_system=True,
+                    )
             else:
-                # 不覆盖已存在记录的配置，只确保 is_system 标记正确
+                # 不覆盖已存在记录的执行体配置（含工作流坐标），只确保系统标记与绑定语义正确
                 existing.is_system = True
                 existing.mode = "langgraph"
 
@@ -293,23 +1432,69 @@ class AssistantConfigService:
                 if existing.name == DEFAULT_SKILL_NAME and not existing.enabled:
                     existing.enabled = True
 
-                # 缺失或非法 pattern 时，从系统定义补齐
-                if (
-                    getattr(existing, "langgraph_pattern", None) not in {"agent_loop", "workflow_dag"}
-                    and getattr(s, "langgraph_pattern", None)
-                ):
-                    existing.langgraph_pattern = s.langgraph_pattern
-
-                # 兼容修复：旧系统 workflow 里 tool_x.text → tool_x.result
-                # （工具节点已产品化为 result + output params，不再暴露 text）
-                if (
-                    existing.is_system
-                    and existing.mode == "langgraph"
-                    and getattr(existing, "langgraph_pattern", None) == "workflow_dag"
-                ):
-                    if self._requires_system_workflow_output_migration(existing):
-                        self._replace_workflow_with_default(existing, s)
-                    self._migrate_workflow_tool_text_refs(existing)
+                if target_type == "workflow":
+                    if existing.workflow_id is None:
+                        fallback_workflow = self._build_default_workflow_input()
+                        if existing.nodes:
+                            fallback_workflow = WorkflowInput.model_validate(
+                                {
+                                    "nodes": [
+                                        {
+                                            "node_id": n.node_id,
+                                            "node_type": n.node_type,
+                                            "label": n.label,
+                                            "position_x": n.position_x,
+                                            "position_y": n.position_y,
+                                            "config": n.config,
+                                        }
+                                        for n in existing.nodes
+                                    ],
+                                    "edges": [
+                                        {
+                                            "edge_id": e.edge_id,
+                                            "source_node_id": e.source_node_id,
+                                            "target_node_id": e.target_node_id,
+                                            "source_handle": e.source_handle,
+                                            "target_handle": e.target_handle,
+                                            "condition_type": e.condition_type,
+                                            "condition_expr": e.condition_expr,
+                                            "label": e.label,
+                                        }
+                                        for e in (existing.edges or [])
+                                    ],
+                                    "viewport": existing.workflow_viewport,
+                                }
+                            )
+                        self._bind_skill_to_workflow(
+                            skill=existing,
+                            workflow_id=None,
+                            request_workflow=fallback_workflow,
+                            default_name=existing.name,
+                            description=existing.description,
+                            enabled=bool(existing.enabled),
+                            is_system=True,
+                        )
+                    existing.langgraph_pattern = "workflow_dag"
+                    existing.system_prompt = None
+                    existing.kb_config = {"enabled": False}
+                else:
+                    if existing.agent_profile_id is None:
+                        self._bind_skill_to_agent_profile(
+                            skill=existing,
+                            agent_profile_id=None,
+                            request_system_prompt=existing.system_prompt or s.system_prompt,
+                            request_tools=existing.tools or s.tools,
+                            request_kb_config=existing.kb_config or kb_config_data,
+                            default_name=existing.name,
+                            description=existing.description,
+                            enabled=bool(existing.enabled),
+                            is_system=True,
+                        )
+                    existing.langgraph_pattern = "agent_loop"
+                    if existing.agent_profile is not None:
+                        existing.system_prompt = existing.agent_profile.system_prompt
+                        existing.kb_config = existing.agent_profile.kb_config
+                        existing.tools = existing.agent_profile.tools
 
         try:
             self.db.commit()
@@ -638,13 +1823,32 @@ class AssistantConfigService:
     def list_skills(self, sync_system: bool = True, include_disabled: bool = False) -> list[AssistantSkill]:
         if sync_system:
             self.sync_system_skills()
-        q = self.db.query(AssistantSkill).order_by(AssistantSkill.created_at.desc())
+        q = (
+            self.db.query(AssistantSkill)
+            .options(
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.nodes),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.skills),
+                joinedload(AssistantSkill.agent_profile).joinedload(AssistantAgentProfile.skills),
+            )
+            .order_by(AssistantSkill.created_at.desc())
+        )
         if not include_disabled:
             q = q.filter(AssistantSkill.enabled.is_(True))
         return q.all()
 
     def get_skill(self, id: UUID) -> AssistantSkill:
-        skill = self.db.query(AssistantSkill).filter(AssistantSkill.id == id).first()
+        skill = (
+            self.db.query(AssistantSkill)
+            .options(
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.nodes),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.skills),
+                joinedload(AssistantSkill.agent_profile).joinedload(AssistantAgentProfile.skills),
+            )
+            .filter(AssistantSkill.id == id)
+            .first()
+        )
         if not skill:
             raise ApiException(status_code=404, code=40411, message=f"Skill not found: {id}")
         return skill
@@ -660,31 +1864,66 @@ class AssistantConfigService:
             name=request.name,
             description=request.description,
             intent_examples=request.intent_examples,
-            tools=request.tools,
+            tools=request.tools or [],
             mode="langgraph",
-            langgraph_pattern=request.langgraph_pattern,
+            langgraph_pattern=request.langgraph_pattern or "agent_loop",
             system_prompt=request.system_prompt,
-            kb_config=request.kb_config,
+            kb_config=request.kb_config if isinstance(request.kb_config, dict) else {"enabled": False},
             is_system=False,
             enabled=request.enabled,
         )
-        # Persist workflow DAG data
-        if request.workflow is not None:
-            self._apply_workflow_to_skill(skill, request.workflow)
-        elif request.langgraph_pattern == "workflow_dag":
-            self._apply_workflow_to_skill(skill, self._build_default_workflow_input())
         self.db.add(skill)
+        self.db.flush()
+
+        target_type = self._derive_target_type(
+            target_type=request.target_type,
+            workflow_id=request.workflow_id,
+            agent_profile_id=request.agent_profile_id,
+            langgraph_pattern=request.langgraph_pattern,
+        )
+        if target_type == "workflow":
+            if request.workflow_id is not None and request.workflow is not None:
+                raise ApiException(
+                    status_code=422,
+                    code=42208,
+                    message="Cannot provide workflow payload when binding an existing workflow",
+                )
+            self._bind_skill_to_workflow(
+                skill=skill,
+                workflow_id=request.workflow_id,
+                request_workflow=request.workflow,
+                default_name=request.name,
+                description=request.description,
+                enabled=bool(request.enabled),
+                is_system=False,
+            )
+        else:
+            self._bind_skill_to_agent_profile(
+                skill=skill,
+                agent_profile_id=request.agent_profile_id,
+                request_system_prompt=request.system_prompt,
+                request_tools=request.tools,
+                request_kb_config=request.kb_config,
+                default_name=request.name,
+                description=request.description,
+                enabled=bool(request.enabled),
+                is_system=False,
+            )
+
         try:
             self.db.commit()
         except IntegrityError as exc:
             self.db.rollback()
             raise ApiException(status_code=409, code=40920, message="Create skill failed") from exc
-        self.db.refresh(skill)
-        return skill
+        return self.get_skill(skill.id)
 
     def update_skill(self, id: UUID, request: AssistantSkillUpdateRequest) -> AssistantSkill:
         skill = self.get_skill(id)
-        previous_langgraph_pattern = skill.langgraph_pattern
+        previous_target_type = self._derive_target_type(
+            workflow_id=skill.workflow_id,
+            agent_profile_id=skill.agent_profile_id,
+            langgraph_pattern=skill.langgraph_pattern,
+        )
 
         if skill.is_system:
             # 系统技能允许编辑内容，但禁止改名
@@ -698,53 +1937,81 @@ class AssistantConfigService:
             skill.description = request.description
         if request.intent_examples is not None:
             skill.intent_examples = request.intent_examples
-        if request.tools is not None:
-            skill.tools = request.tools
         if request.mode is not None and request.mode != "langgraph":
             raise ApiException(status_code=422, code=42204, message="mode must be langgraph")
         skill.mode = "langgraph"
-        if request.langgraph_pattern is not None:
-            skill.langgraph_pattern = request.langgraph_pattern
-        if request.system_prompt is not None:
-            skill.system_prompt = request.system_prompt
-        if request.kb_config is not None:
-            skill.kb_config = request.kb_config
         if request.enabled is not None:
             # 阻止禁用默认 Skill
             if skill.name == DEFAULT_SKILL_NAME and request.enabled is False:
                 raise ApiException(status_code=400, code=40025, message="General chat skill cannot be disabled")
             skill.enabled = request.enabled
 
-        # Persist workflow DAG data (applies to both system and non-system skills)
-        if request.workflow is not None:
-            self._apply_workflow_to_skill(skill, request.workflow)
-        elif (
-            request.langgraph_pattern == "workflow_dag"
-            and previous_langgraph_pattern != "workflow_dag"
-            and not (getattr(skill, "nodes", None) or getattr(skill, "edges", None))
-        ):
-            self._apply_workflow_to_skill(skill, self._build_default_workflow_input())
+        requested_target_type = self._derive_target_type(
+            target_type=request.target_type,
+            workflow_id=request.workflow_id,
+            agent_profile_id=request.agent_profile_id,
+            langgraph_pattern=request.langgraph_pattern or skill.langgraph_pattern,
+        )
+        target_changed = requested_target_type != previous_target_type
 
-        if skill.langgraph_pattern not in {"agent_loop", "workflow_dag"}:
-            raise ApiException(
-                status_code=422,
-                code=42205,
-                message="langgraph_pattern must be one of: agent_loop, workflow_dag",
+        if requested_target_type == "workflow":
+            if request.workflow_id is not None and request.workflow is not None:
+                raise ApiException(
+                    status_code=422,
+                    code=42208,
+                    message="Cannot provide workflow payload when binding an existing workflow",
+                )
+            workflow_id = request.workflow_id
+            if workflow_id is None and not target_changed:
+                workflow_id = skill.workflow_id
+            self._bind_skill_to_workflow(
+                skill=skill,
+                workflow_id=workflow_id,
+                request_workflow=request.workflow,
+                default_name=skill.name,
+                description=skill.description,
+                enabled=bool(skill.enabled),
+                is_system=bool(skill.is_system),
             )
-        if skill.langgraph_pattern == "agent_loop" and not (skill.system_prompt or "").strip():
-            raise ApiException(
-                status_code=422,
-                code=42206,
-                message="agent_loop requires non-empty system_prompt",
+        else:
+            agent_profile_id = request.agent_profile_id
+            if agent_profile_id is None and not target_changed:
+                agent_profile_id = skill.agent_profile_id
+            self._bind_skill_to_agent_profile(
+                skill=skill,
+                agent_profile_id=agent_profile_id,
+                request_system_prompt=request.system_prompt,
+                request_tools=request.tools,
+                request_kb_config=request.kb_config,
+                default_name=skill.name,
+                description=skill.description,
+                enabled=bool(skill.enabled),
+                is_system=bool(skill.is_system),
             )
+            if request.system_prompt is not None and skill.agent_profile is not None:
+                skill.agent_profile.system_prompt = request.system_prompt
+            if request.kb_config is not None and skill.agent_profile is not None:
+                skill.agent_profile.kb_config = self._normalize_agent_kb_config(
+                    kb_config=request.kb_config,
+                    model_source=None,
+                    model_id=None,
+                    existing_kb_config=(
+                        skill.agent_profile.kb_config
+                        if isinstance(skill.agent_profile.kb_config, dict)
+                        else {"enabled": False}
+                    ),
+                )
+                skill.kb_config = skill.agent_profile.kb_config
+            if request.tools is not None and skill.agent_profile is not None:
+                skill.agent_profile.tools = request.tools
+                skill.tools = list(request.tools)
 
         try:
             self.db.commit()
         except IntegrityError as exc:
             self.db.rollback()
             raise ApiException(status_code=409, code=40921, message="Update skill failed") from exc
-        self.db.refresh(skill)
-        return skill
+        return self.get_skill(skill.id)
 
     def reset_skill(self, id: UUID, confirm: bool) -> AssistantSkill:
         """复位系统技能到默认配置"""
@@ -810,11 +2077,7 @@ class AssistantConfigService:
                     reset_count += 1
                     affected.append({"name": skill.name, "id": str(skill.id), "action": "reset"})
             else:
-                # 已下线的系统技能，删除
-                for old_node in list(getattr(skill, "nodes", None) or []):
-                    self.db.delete(old_node)
-                for old_edge in list(getattr(skill, "edges", None) or []):
-                    self.db.delete(old_edge)
+                # 已下线的系统技能，删除（保留执行体实体，若后续仍被引用可复用）
                 self.db.delete(skill)
                 deleted_count += 1
                 affected.append({"name": skill.name, "id": str(skill.id), "action": "deleted"})
@@ -823,43 +2086,20 @@ class AssistantConfigService:
         existing_names = {s.name for s in db_system_skills}
         for s in SKILLS:
             if s.name not in existing_names:
-                kb_config_data = None
-                if getattr(s, "kb", None) is not None:
-                    kb_config_data = {"enabled": bool(s.kb.enabled)}
-
                 skill = AssistantSkill(
                     name=s.name,
                     description=s.description,
                     intent_examples=s.intent_examples,
-                    tools=s.tools,
+                    tools=list(s.tools or []),
                     mode="langgraph",
-                    langgraph_pattern=getattr(s, "langgraph_pattern", None),
+                    langgraph_pattern="workflow_dag",
                     system_prompt=s.system_prompt,
-                    kb_config=kb_config_data,
+                    kb_config=self._skill_default_kb_config(s),
                     is_system=True,
                     enabled=True,
                 )
-                # Persist workflow nodes/edges for workflow_dag skills
-                if getattr(s, "workflow_nodes", None):
-                    skill.nodes = [
-                        AssistantSkillNode(
-                            node_id=n.node_id, node_type=n.node_type, label=n.label,
-                            position_x=n.position_x, position_y=n.position_y, config=n.config,
-                        )
-                        for n in s.workflow_nodes
-                    ]
-                if getattr(s, "workflow_edges", None):
-                    skill.edges = [
-                        AssistantSkillEdge(
-                            edge_id=e.edge_id, source_node_id=e.source_node_id,
-                            target_node_id=e.target_node_id, source_handle=e.source_handle,
-                            target_handle=e.target_handle, condition_type=e.condition_type,
-                            condition_expr=e.condition_expr.model_dump() if e.condition_expr else None,
-                            label=e.label,
-                        )
-                        for e in s.workflow_edges
-                    ]
                 self.db.add(skill)
+                self._reset_skill_to_default(skill, s)
                 created_count += 1
                 affected.append({"name": s.name, "id": None, "action": "created"})
 
@@ -877,122 +2117,117 @@ class AssistantConfigService:
         }
 
     def _reset_skill_to_default(self, skill: AssistantSkill, default) -> None:
-        """内部方法：将技能重置到默认配置"""
+        """内部方法：将技能重置到默认配置。
+
+        对 workflow_dag 系统技能，reset 会按 JSON 默认定义（system_defaults）的节点坐标重建草稿并发布，
+        因此会恢复到“系统默认布局基线”。
+        """
         # 保留 enabled 状态（general_chat 强制启用）
         enabled = skill.enabled
         if skill.name == DEFAULT_SKILL_NAME:
             enabled = True
 
-        skill.description = default.description
-        skill.intent_examples = default.intent_examples
-        skill.tools = default.tools
+        skill.description = default.description or ""
+        skill.intent_examples = list(default.intent_examples or [])
         skill.mode = "langgraph"
-        skill.langgraph_pattern = default.langgraph_pattern
-        skill.system_prompt = default.system_prompt
+        target_type = self._derive_target_type(langgraph_pattern=getattr(default, "langgraph_pattern", None))
+        kb_config_data = self._skill_default_kb_config(default)
 
-        # 重置 kb_config
-        if getattr(default, "kb", None) is not None:
-            skill.kb_config = {"enabled": bool(default.kb.enabled)}
-        else:
+        if target_type == "workflow":
+            workflow_input = self._workflow_input_from_skill_default(default)
+            workflow_model = self._resolve_or_create_system_workflow_for_reset(
+                skill=skill,
+                default=default,
+                enabled=bool(enabled),
+            )
+            self._enforce_workflow_structured_input_constraints(
+                workflow=workflow_model,
+                workflow_input=workflow_input,
+                raise_error=True,
+            )
+            workflow_tool_names = self._apply_workflow_to_workflow_entity(workflow_model, workflow_input, persist=True)
+            published = self._create_workflow_version(
+                workflow=workflow_model,
+                workflow_input=workflow_input,
+                version_source="publish",
+                version_name=None,
+            )
+            self._keep_only_workflow_version(workflow_model, published.id)
+            skill.workflow_id = workflow_model.id
+            skill.agent_profile_id = None
+            skill.langgraph_pattern = "workflow_dag"
+            skill.system_prompt = None
             skill.kb_config = {"enabled": False}
-
-        # 删除旧 workflow nodes/edges
-        for old_node in list(getattr(skill, "nodes", None) or []):
-            self.db.delete(old_node)
-        for old_edge in list(getattr(skill, "edges", None) or []):
-            self.db.delete(old_edge)
-        self.db.flush()
-
-        # 创建新 workflow nodes/edges
-        if getattr(default, "workflow_nodes", None):
-            skill.nodes = [
-                AssistantSkillNode(
-                    node_id=n.node_id, node_type=n.node_type, label=n.label,
-                    position_x=n.position_x, position_y=n.position_y, config=n.config,
-                )
-                for n in default.workflow_nodes
-            ]
+            skill.tools = sorted(workflow_tool_names)
         else:
-            skill.nodes = []
-        if getattr(default, "workflow_edges", None):
-            skill.edges = [
-                AssistantSkillEdge(
-                    edge_id=e.edge_id, source_node_id=e.source_node_id,
-                    target_node_id=e.target_node_id, source_handle=e.source_handle,
-                    target_handle=e.target_handle, condition_type=e.condition_type,
-                    condition_expr=e.condition_expr.model_dump() if e.condition_expr else None,
-                    label=e.label,
-                )
-                for e in default.workflow_edges
-            ]
-        else:
-            skill.edges = []
+            agent_profile = self._resolve_or_create_system_agent_profile_for_reset(
+                skill=skill,
+                default=default,
+                enabled=bool(enabled),
+            )
+            draft = self._agent_draft_from_skill_default(default)
+            normalized_kb = self._normalize_agent_kb_config(
+                kb_config=draft.kb_config,
+                model_source=draft.model_source,
+                model_id=draft.model_id,
+                existing_kb_config=draft.kb_config if isinstance(draft.kb_config, dict) else {"enabled": False},
+            )
+            self._validate_agent_tool_names(draft.tools)
+            agent_profile.system_prompt = draft.system_prompt
+            agent_profile.tools = list(draft.tools or [])
+            agent_profile.kb_config = normalized_kb
+            published = self._create_agent_profile_version(
+                agent_profile=agent_profile,
+                draft=AgentPublishDraftInput.model_validate(
+                    {
+                        "system_prompt": agent_profile.system_prompt,
+                        "tools": agent_profile.tools or [],
+                        "kb_config": agent_profile.kb_config,
+                        "model_source": draft.model_source,
+                        "model_id": draft.model_id,
+                    }
+                ),
+                version_source="publish",
+                version_name=None,
+            )
+            self._keep_only_agent_version(agent_profile, published.id)
+
+            for linked_skill in agent_profile.skills or []:
+                linked_skill.system_prompt = agent_profile.system_prompt
+                linked_skill.kb_config = agent_profile.kb_config
+                linked_skill.tools = list(agent_profile.tools or [])
+
+            skill.workflow_id = None
+            skill.agent_profile_id = agent_profile.id
+            skill.langgraph_pattern = "agent_loop"
+            skill.system_prompt = agent_profile.system_prompt
+            skill.kb_config = agent_profile.kb_config if isinstance(agent_profile.kb_config, dict) else kb_config_data
+            skill.tools = list(agent_profile.tools or [])
 
         skill.enabled = enabled
 
     def _apply_workflow_to_skill(self, skill: AssistantSkill, workflow) -> None:
-        """Replace workflow nodes and edges on a skill, with topology validation."""
-        from app.assistant.skills.workflow_validator import validate_workflow, validate_parallel_branches
-
-        # Validate topology before persisting
-        nodes_raw = [
-            {
-                "node_id": n.node_id,
-                "node_type": n.node_type,
-                "label": (getattr(n, "label", "") or getattr(n, "node_id", "")),
-                "config": n.config,
-            }
-            for n in workflow.nodes
-        ]
-        edges_raw = [{"source_node_id": e.source_node_id, "target_node_id": e.target_node_id, "source_handle": e.source_handle} for e in workflow.edges]
-
-        result = validate_workflow(nodes_raw, edges_raw)
-        if not result.valid:
-            msgs = "; ".join(e.message for e in result.errors[:5])
-            raise ApiException(status_code=422, code=42201, message=f"Invalid workflow topology: {msgs}")
-
-        par_result = validate_parallel_branches(nodes_raw, edges_raw)
-        if not par_result.valid:
-            msgs = "; ".join(e.message for e in par_result.errors[:5])
-            raise ApiException(status_code=422, code=42202, message=f"Invalid parallel branches: {msgs}")
-
-        workflow_tool_names = self.validate_workflow_dependencies(workflow)
-
-        for old_node in list(getattr(skill, "nodes", None) or []):
-            self.db.delete(old_node)
-        for old_edge in list(getattr(skill, "edges", None) or []):
-            self.db.delete(old_edge)
-        self.db.flush()
-
-        skill.nodes = [
-            AssistantSkillNode(
-                node_id=n.node_id,
-                node_type=n.node_type,
-                label=n.label,
-                position_x=n.position_x,
-                position_y=n.position_y,
-                config=n.config,
+        """Compatibility helper: apply workflow onto a skill's bound workflow target."""
+        workflow_model = skill.workflow
+        if workflow_model is None:
+            workflow_model = AssistantWorkflow(
+                name=f"{skill.name}__workflow",
+                description=skill.description or "",
+                workflow_version=0,
+                workflow_viewport=None,
+                is_system=bool(skill.is_system),
+                enabled=bool(skill.enabled),
             )
-            for n in workflow.nodes
-        ]
-        skill.edges = [
-            AssistantSkillEdge(
-                edge_id=e.edge_id,
-                source_node_id=e.source_node_id,
-                target_node_id=e.target_node_id,
-                source_handle=e.source_handle,
-                target_handle=e.target_handle,
-                condition_type=e.condition_type,
-                condition_expr=e.condition_expr.model_dump() if e.condition_expr else None,
-                label=e.label,
-            )
-            for e in workflow.edges
-        ]
-        if workflow.viewport is not None:
-            skill.workflow_viewport = workflow.viewport
-        skill.workflow_version = (skill.workflow_version or 0) + 1
-        # 工作流保存时自动同步 skill.tools，避免 DAG 执行期 tool_map 缺失。
+            self.db.add(workflow_model)
+            self.db.flush()
+            skill.workflow_id = workflow_model.id
+            skill.agent_profile_id = None
+
+        workflow_tool_names = self._apply_workflow_to_workflow_entity(workflow_model, workflow)
+        skill.langgraph_pattern = "workflow_dag"
         skill.tools = sorted(workflow_tool_names)
+        skill.workflow_viewport = workflow_model.workflow_viewport
+        skill.workflow_version = workflow_model.workflow_version
 
     def validate_workflow_dependencies(self, workflow) -> set[str]:
         """Validate workflow external dependencies (tools/models) before persistence."""
@@ -1133,19 +2368,697 @@ class AssistantConfigService:
                 message=f"Workflow references invalid node models ({'; '.join(parts)})",
             )
 
-    def update_workflow(self, skill_id, workflow) -> AssistantSkill:
-        """Update only the workflow DAG for a skill."""
-        from uuid import UUID as _UUID
-        skill = self.get_skill(
-            _UUID(str(skill_id)) if not isinstance(skill_id, _UUID) else skill_id
+    def _validate_agent_tool_names(self, tool_names: list[str] | None) -> None:
+        requested = {str(item).strip() for item in (tool_names or []) if str(item).strip()}
+        if not requested:
+            return
+
+        system_names = {
+            t.name
+            for t in ToolRegistry.list_system_tools()
+            if getattr(t, "name", None)
+        }
+        enabled_remote_names = {
+            name
+            for name, in self.db.query(AssistantTool.name).filter(
+                AssistantTool.kind == "remote",
+                AssistantTool.enabled.is_(True),
+            ).all()
+            if name
+        }
+        disabled_names = {
+            name
+            for name, in self.db.query(AssistantTool.name).filter(AssistantTool.enabled.is_(False)).all()
+            if name
+        }
+
+        unavailable: list[str] = []
+        for tool_name in sorted(requested):
+            if tool_name in disabled_names:
+                unavailable.append(f"{tool_name} (disabled)")
+                continue
+            if tool_name in system_names or tool_name in enabled_remote_names:
+                continue
+            unavailable.append(f"{tool_name} (not found)")
+
+        if unavailable:
+            raise ApiException(
+                status_code=422,
+                code=42246,
+                message=f"Agent references unavailable tools: {', '.join(unavailable)}",
+            )
+
+    # -------------------------
+    # Workflows CRUD
+    # -------------------------
+    def list_workflows(self, include_disabled: bool = False) -> list[AssistantWorkflow]:
+        q = (
+            self.db.query(AssistantWorkflow)
+            .options(
+                joinedload(AssistantWorkflow.nodes),
+                joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantWorkflow.skills),
+            )
+            .order_by(AssistantWorkflow.created_at.desc())
         )
-        self._apply_workflow_to_skill(skill, workflow)
+        if not include_disabled:
+            q = q.filter(AssistantWorkflow.enabled.is_(True))
+        return q.all()
+
+    def get_workflow(self, workflow_id: UUID) -> AssistantWorkflow:
+        workflow = (
+            self.db.query(AssistantWorkflow)
+            .options(
+                joinedload(AssistantWorkflow.nodes),
+                joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantWorkflow.skills),
+            )
+            .filter(AssistantWorkflow.id == workflow_id)
+            .first()
+        )
+        if workflow is None:
+            raise ApiException(status_code=404, code=40430, message=f"Workflow not found: {workflow_id}")
+        return workflow
+
+    def create_workflow(self, request: AssistantWorkflowCreateRequest) -> AssistantWorkflow:
+        existing = self.db.query(AssistantWorkflow).filter(AssistantWorkflow.name.ilike(request.name)).first()
+        if existing:
+            raise ApiException(status_code=400, code=40030, message=f"Workflow name exists: {request.name}")
+
+        workflow_input = request.workflow or self._build_default_workflow_input()
+        workflow = AssistantWorkflow(
+            name=request.name,
+            description=request.description or "",
+            workflow_version=0,
+            workflow_viewport=None,
+            is_system=False,
+            enabled=request.enabled,
+        )
+        self.db.add(workflow)
+        self.db.flush()
+        self._apply_workflow_to_workflow_entity(workflow, workflow_input)
+        published = self._create_workflow_version(
+            workflow=workflow,
+            workflow_input=workflow_input,
+            version_source="publish",
+            version_name=None,
+        )
+        workflow.draft_version_id = published.id
+        workflow.published_version_id = published.id
+        self._trim_workflow_versions(workflow)
+
         try:
             self.db.commit()
         except IntegrityError as exc:
             self.db.rollback()
+            raise ApiException(status_code=409, code=40930, message="Create workflow failed") from exc
+        return self.get_workflow(workflow.id)
+
+    def update_workflow_entity(self, workflow_id: UUID, request: AssistantWorkflowUpdateRequest) -> AssistantWorkflow:
+        workflow = self.get_workflow(workflow_id)
+        if request.name is not None:
+            workflow.name = request.name
+        if request.description is not None:
+            workflow.description = request.description
+        if request.enabled is not None:
+            workflow.enabled = request.enabled
+        if request.workflow is not None:
+            self._enforce_workflow_structured_input_constraints(
+                workflow=workflow,
+                workflow_input=request.workflow,
+                raise_error=True,
+            )
+            self._apply_workflow_to_workflow_entity(workflow, request.workflow, persist=False)
+            saved = self._create_workflow_version(
+                workflow=workflow,
+                workflow_input=request.workflow,
+                version_source="save",
+                version_name=None,
+            )
+            workflow.draft_version_id = saved.id
+            self._trim_workflow_versions(workflow)
+
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40931, message="Update workflow failed") from exc
+        return self.get_workflow(workflow.id)
+
+    def list_workflow_versions(self, workflow_id: UUID) -> WorkflowVersionListResponse:
+        workflow = self.get_workflow(workflow_id)
+        versions = (
+            self.db.query(AssistantWorkflowVersion)
+            .filter(AssistantWorkflowVersion.workflow_id == workflow.id)
+            .order_by(AssistantWorkflowVersion.sequence_no.desc())
+            .all()
+        )
+        return WorkflowVersionListResponse.model_validate(
+            {
+                "workflow_id": workflow.id,
+                "draft_version_id": workflow.draft_version_id,
+                "published_version_id": workflow.published_version_id,
+                "versions": [
+                    TargetVersionResponse.model_validate(v).model_dump()
+                    for v in versions
+                ],
+            }
+        )
+
+    def publish_workflow(self, workflow_id: UUID, request: WorkflowPublishRequest) -> AssistantWorkflow:
+        workflow = self.get_workflow(workflow_id)
+        if request.description is not None:
+            workflow.description = request.description
+        self._enforce_workflow_structured_input_constraints(
+            workflow=workflow,
+            workflow_input=request.workflow,
+            raise_error=True,
+        )
+        try:
+            self._apply_workflow_to_workflow_entity(workflow, request.workflow, persist=True)
+        except ApiException as exc:
+            if exc.status_code == 422:
+                raise ApiException(
+                    status_code=422,
+                    code=42209,
+                    message=f"Workflow publish blocked by validation: {exc.message}",
+                ) from exc
+            raise
+        published = self._create_workflow_version(
+            workflow=workflow,
+            workflow_input=request.workflow,
+            version_source="publish",
+            version_name=request.version_name,
+        )
+        workflow.draft_version_id = published.id
+        workflow.published_version_id = published.id
+        self._trim_workflow_versions(workflow)
+
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40937, message="Publish workflow failed") from exc
+        return self.get_workflow(workflow.id)
+
+    def rollback_workflow_version(self, workflow_id: UUID, version_id: UUID) -> RollbackVersionResponse:
+        workflow = self.get_workflow(workflow_id)
+        version = (
+            self.db.query(AssistantWorkflowVersion)
+            .filter(
+                AssistantWorkflowVersion.id == version_id,
+                AssistantWorkflowVersion.workflow_id == workflow.id,
+            )
+            .first()
+        )
+        if version is None:
+            raise ApiException(status_code=404, code=40432, message=f"Workflow version not found: {version_id}")
+
+        draft_input: WorkflowInput | None = None
+        if workflow.is_system:
+            baseline_version_id = self._get_workflow_system_baseline_version_id(workflow.id)
+            if baseline_version_id is not None and baseline_version_id == version.id:
+                canonical_baseline = self._resolve_system_workflow_baseline_input(workflow)
+                if canonical_baseline is not None:
+                    draft_input = canonical_baseline
+                    version.snapshot = self._workflow_input_to_snapshot(canonical_baseline)
+
+        try:
+            if draft_input is None:
+                draft_input = self._workflow_input_from_snapshot(
+                    version.snapshot if isinstance(version.snapshot, dict) else {}
+                )
+        except Exception as exc:
+            raise ApiException(status_code=422, code=42208, message="Invalid workflow version snapshot") from exc
+        workflow.draft_version_id = version.id
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40938, message="Rollback workflow version failed") from exc
+        return RollbackVersionResponse.model_validate(
+            {
+                "draft_version_id": workflow.draft_version_id,
+                "published_version_id": workflow.published_version_id,
+                "workflow": draft_input.model_dump(),
+            }
+        )
+
+    def delete_workflow_version(self, workflow_id: UUID, version_id: UUID) -> DeleteVersionResponse:
+        workflow = self.get_workflow(workflow_id)
+        version = (
+            self.db.query(AssistantWorkflowVersion)
+            .filter(
+                AssistantWorkflowVersion.id == version_id,
+                AssistantWorkflowVersion.workflow_id == workflow.id,
+            )
+            .first()
+        )
+        if version is None:
+            raise ApiException(status_code=404, code=40434, message=f"Workflow version not found: {version_id}")
+
+        protected_ids = self._get_workflow_protected_version_ids(workflow)
+        if version.id in protected_ids:
             raise ApiException(
-                status_code=409, code=40924, message="Update workflow failed"
-            ) from exc
-        self.db.refresh(skill)
-        return skill
+                status_code=409,
+                code=40941,
+                message="Protected workflow version cannot be deleted",
+            )
+
+        self.db.delete(version)
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40942, message="Delete workflow version failed") from exc
+
+        return DeleteVersionResponse.model_validate(
+            {
+                "deleted_version_id": version_id,
+                "draft_version_id": workflow.draft_version_id,
+                "published_version_id": workflow.published_version_id,
+            }
+        )
+
+    def clear_workflow_versions(self, workflow_id: UUID) -> ClearVersionsResponse:
+        workflow = self.get_workflow(workflow_id)
+        versions = (
+            self.db.query(AssistantWorkflowVersion)
+            .filter(AssistantWorkflowVersion.workflow_id == workflow.id)
+            .order_by(AssistantWorkflowVersion.sequence_no.desc())
+            .all()
+        )
+        latest_version_id = versions[0].id if versions else None
+        protected_ids = self._get_workflow_protected_version_ids(workflow)
+        deleted_count = 0
+
+        for version in versions:
+            if latest_version_id is not None and version.id == latest_version_id:
+                continue
+            if version.version_source != "save":
+                continue
+            if version.id in protected_ids:
+                continue
+            self.db.delete(version)
+            deleted_count += 1
+
+        if deleted_count > 0:
+            try:
+                self.db.commit()
+            except IntegrityError as exc:
+                self.db.rollback()
+                raise ApiException(status_code=409, code=40943, message="Clear workflow versions failed") from exc
+
+        return ClearVersionsResponse.model_validate(
+            {
+                "deleted_count": deleted_count,
+                "kept_latest_version_id": latest_version_id,
+                "draft_version_id": workflow.draft_version_id,
+                "published_version_id": workflow.published_version_id,
+            }
+        )
+
+    def delete_workflow(self, workflow_id: UUID) -> None:
+        workflow = self.get_workflow(workflow_id)
+        if workflow.is_system:
+            raise ApiException(status_code=400, code=40031, message="System workflow cannot be deleted")
+        if workflow.skills:
+            skill_names = ", ".join(sorted(s.name for s in workflow.skills))
+            raise ApiException(
+                status_code=409,
+                code=40932,
+                message=f"Workflow is referenced by skills: {skill_names}",
+            )
+        self.db.delete(workflow)
+        self.db.commit()
+
+    def update_workflow_by_id(self, workflow_id: UUID, workflow: WorkflowInput) -> AssistantWorkflow:
+        workflow_model = self.get_workflow(workflow_id)
+        self.update_workflow_entity(
+            workflow_model.id,
+            AssistantWorkflowUpdateRequest(workflow=workflow),
+        )
+        return self.get_workflow(workflow_model.id)
+
+    # -------------------------
+    # Agent Profiles CRUD
+    # -------------------------
+    def list_agent_profiles(self, include_disabled: bool = False) -> list[AssistantAgentProfile]:
+        q = (
+            self.db.query(AssistantAgentProfile)
+            .options(joinedload(AssistantAgentProfile.skills))
+            .order_by(AssistantAgentProfile.created_at.desc())
+        )
+        if not include_disabled:
+            q = q.filter(AssistantAgentProfile.enabled.is_(True))
+        return q.all()
+
+    def get_agent_profile(self, agent_profile_id: UUID) -> AssistantAgentProfile:
+        profile = (
+            self.db.query(AssistantAgentProfile)
+            .options(joinedload(AssistantAgentProfile.skills))
+            .filter(AssistantAgentProfile.id == agent_profile_id)
+            .first()
+        )
+        if profile is None:
+            raise ApiException(status_code=404, code=40431, message=f"Agent profile not found: {agent_profile_id}")
+        return profile
+
+    def create_agent_profile(self, request: AssistantAgentProfileCreateRequest) -> AssistantAgentProfile:
+        existing = self.db.query(AssistantAgentProfile).filter(AssistantAgentProfile.name.ilike(request.name)).first()
+        if existing:
+            raise ApiException(status_code=400, code=40032, message=f"Agent profile name exists: {request.name}")
+        normalized_kb_config = self._normalize_agent_kb_config(
+            kb_config=request.kb_config,
+            model_source=request.model_source,
+            model_id=request.model_id,
+            existing_kb_config={"enabled": False},
+        )
+        self._validate_agent_tool_names(request.tools)
+        profile = AssistantAgentProfile(
+            name=request.name,
+            description=request.description or "",
+            system_prompt=request.system_prompt,
+            tools=request.tools or [],
+            kb_config=normalized_kb_config,
+            is_system=False,
+            enabled=request.enabled,
+        )
+        self.db.add(profile)
+        self.db.flush()
+        publish_draft = AgentPublishDraftInput.model_validate(
+            {
+                "system_prompt": request.system_prompt,
+                "tools": request.tools or [],
+                "kb_config": normalized_kb_config,
+                "model_source": request.model_source,
+                "model_id": request.model_id,
+            }
+        )
+        published = self._create_agent_profile_version(
+            agent_profile=profile,
+            draft=publish_draft,
+            version_source="publish",
+            version_name=None,
+        )
+        profile.draft_version_id = published.id
+        profile.published_version_id = published.id
+        self._trim_agent_versions(profile)
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40933, message="Create agent profile failed") from exc
+        return self.get_agent_profile(profile.id)
+
+    def update_agent_profile(self, agent_profile_id: UUID, request: AssistantAgentProfileUpdateRequest) -> AssistantAgentProfile:
+        profile = self.get_agent_profile(agent_profile_id)
+        if request.name is not None:
+            profile.name = request.name
+        if request.description is not None:
+            profile.description = request.description
+        if request.enabled is not None:
+            profile.enabled = request.enabled
+
+        has_runtime_update = any(
+            value is not None
+            for value in (request.system_prompt, request.tools, request.kb_config, request.model_source, request.model_id)
+        )
+        if has_runtime_update:
+            current_draft = self._get_agent_profile_draft(profile)
+            draft_payload = {
+                "system_prompt": request.system_prompt if request.system_prompt is not None else current_draft.system_prompt,
+                "tools": request.tools if request.tools is not None else current_draft.tools,
+                "kb_config": request.kb_config if request.kb_config is not None else current_draft.kb_config,
+                "model_source": request.model_source if request.model_source is not None else current_draft.model_source,
+                "model_id": request.model_id if request.model_source is not None or request.model_id is not None else current_draft.model_id,
+            }
+            next_draft = AgentPublishDraftInput.model_validate(draft_payload)
+            normalized_kb = self._normalize_agent_kb_config(
+                kb_config=next_draft.kb_config,
+                model_source=next_draft.model_source,
+                model_id=next_draft.model_id,
+                existing_kb_config=next_draft.kb_config if isinstance(next_draft.kb_config, dict) else {"enabled": False},
+            )
+            next_draft = AgentPublishDraftInput.model_validate(
+                {
+                    "system_prompt": next_draft.system_prompt,
+                    "tools": next_draft.tools,
+                    "kb_config": normalized_kb,
+                    "model_source": next_draft.model_source,
+                    "model_id": next_draft.model_id,
+                }
+            )
+            self._validate_agent_tool_names(next_draft.tools)
+            saved = self._create_agent_profile_version(
+                agent_profile=profile,
+                draft=next_draft,
+                version_source="save",
+                version_name=None,
+            )
+            profile.draft_version_id = saved.id
+            self._trim_agent_versions(profile)
+
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40934, message="Update agent profile failed") from exc
+        return self.get_agent_profile(profile.id)
+
+    def list_agent_profile_versions(self, agent_profile_id: UUID) -> AgentVersionListResponse:
+        profile = self.get_agent_profile(agent_profile_id)
+        versions = (
+            self.db.query(AssistantAgentProfileVersion)
+            .filter(AssistantAgentProfileVersion.agent_profile_id == profile.id)
+            .order_by(AssistantAgentProfileVersion.sequence_no.desc())
+            .all()
+        )
+        return AgentVersionListResponse.model_validate(
+            {
+                "agent_profile_id": profile.id,
+                "draft_version_id": profile.draft_version_id,
+                "published_version_id": profile.published_version_id,
+                "versions": [
+                    TargetVersionResponse.model_validate(v).model_dump()
+                    for v in versions
+                ],
+            }
+        )
+
+    def publish_agent_profile(self, agent_profile_id: UUID, request: AgentPublishRequest) -> AssistantAgentProfile:
+        profile = self.get_agent_profile(agent_profile_id)
+        normalized_kb = self._normalize_agent_kb_config(
+            kb_config=request.draft.kb_config,
+            model_source=request.draft.model_source,
+            model_id=request.draft.model_id,
+            existing_kb_config=request.draft.kb_config if isinstance(request.draft.kb_config, dict) else {"enabled": False},
+        )
+        self._validate_agent_tool_names(request.draft.tools)
+        profile.system_prompt = request.draft.system_prompt
+        profile.tools = list(request.draft.tools or [])
+        profile.kb_config = normalized_kb
+        for skill in profile.skills or []:
+            if skill.agent_profile_id == profile.id:
+                skill.system_prompt = profile.system_prompt
+                skill.kb_config = profile.kb_config
+                skill.tools = profile.tools or []
+
+        publish_draft = AgentPublishDraftInput.model_validate(
+            {
+                "system_prompt": profile.system_prompt,
+                "tools": profile.tools or [],
+                "kb_config": profile.kb_config,
+                "model_source": request.draft.model_source,
+                "model_id": request.draft.model_id,
+            }
+        )
+        published = self._create_agent_profile_version(
+            agent_profile=profile,
+            draft=publish_draft,
+            version_source="publish",
+            version_name=request.version_name,
+        )
+        profile.draft_version_id = published.id
+        profile.published_version_id = published.id
+        self._trim_agent_versions(profile)
+
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40939, message="Publish agent profile failed") from exc
+        return self.get_agent_profile(profile.id)
+
+    def rollback_agent_profile_version(self, agent_profile_id: UUID, version_id: UUID) -> RollbackVersionResponse:
+        profile = self.get_agent_profile(agent_profile_id)
+        version = (
+            self.db.query(AssistantAgentProfileVersion)
+            .filter(
+                AssistantAgentProfileVersion.id == version_id,
+                AssistantAgentProfileVersion.agent_profile_id == profile.id,
+            )
+            .first()
+        )
+        if version is None:
+            raise ApiException(status_code=404, code=40433, message=f"Agent version not found: {version_id}")
+
+        draft: AgentPublishDraftInput | None = None
+        if profile.is_system:
+            baseline_version_id = self._get_agent_system_baseline_version_id(profile.id)
+            if baseline_version_id is not None and baseline_version_id == version.id:
+                canonical_baseline = self._resolve_system_agent_baseline_draft(profile)
+                if canonical_baseline is not None:
+                    draft = canonical_baseline
+                    normalized_kb = self._normalize_agent_kb_config(
+                        kb_config=canonical_baseline.kb_config,
+                        model_source=canonical_baseline.model_source,
+                        model_id=canonical_baseline.model_id,
+                        existing_kb_config=(
+                            canonical_baseline.kb_config
+                            if isinstance(canonical_baseline.kb_config, dict)
+                            else {"enabled": False}
+                        ),
+                    )
+                    version.snapshot = self._agent_snapshot_from_fields(
+                        system_prompt=canonical_baseline.system_prompt,
+                        tools=canonical_baseline.tools,
+                        kb_config=normalized_kb,
+                        model_source=canonical_baseline.model_source,
+                        model_id=canonical_baseline.model_id,
+                    )
+
+        try:
+            if draft is None:
+                draft = self._agent_draft_from_snapshot(version.snapshot if isinstance(version.snapshot, dict) else {})
+        except Exception as exc:
+            raise ApiException(status_code=422, code=42247, message="Invalid agent version snapshot") from exc
+        profile.draft_version_id = version.id
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40940, message="Rollback agent profile version failed") from exc
+        return RollbackVersionResponse.model_validate(
+            {
+                "draft_version_id": profile.draft_version_id,
+                "published_version_id": profile.published_version_id,
+                "agent_draft": draft.model_dump(),
+            }
+        )
+
+    def delete_agent_profile_version(self, agent_profile_id: UUID, version_id: UUID) -> DeleteVersionResponse:
+        profile = self.get_agent_profile(agent_profile_id)
+        version = (
+            self.db.query(AssistantAgentProfileVersion)
+            .filter(
+                AssistantAgentProfileVersion.id == version_id,
+                AssistantAgentProfileVersion.agent_profile_id == profile.id,
+            )
+            .first()
+        )
+        if version is None:
+            raise ApiException(status_code=404, code=40435, message=f"Agent version not found: {version_id}")
+
+        protected_ids = self._get_agent_protected_version_ids(profile)
+        if version.id in protected_ids:
+            raise ApiException(
+                status_code=409,
+                code=40944,
+                message="Protected agent version cannot be deleted",
+            )
+
+        self.db.delete(version)
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40945, message="Delete agent version failed") from exc
+
+        return DeleteVersionResponse.model_validate(
+            {
+                "deleted_version_id": version_id,
+                "draft_version_id": profile.draft_version_id,
+                "published_version_id": profile.published_version_id,
+            }
+        )
+
+    def clear_agent_profile_versions(self, agent_profile_id: UUID) -> ClearVersionsResponse:
+        profile = self.get_agent_profile(agent_profile_id)
+        versions = (
+            self.db.query(AssistantAgentProfileVersion)
+            .filter(AssistantAgentProfileVersion.agent_profile_id == profile.id)
+            .order_by(AssistantAgentProfileVersion.sequence_no.desc())
+            .all()
+        )
+        latest_version_id = versions[0].id if versions else None
+        protected_ids = self._get_agent_protected_version_ids(profile)
+        deleted_count = 0
+
+        for version in versions:
+            if latest_version_id is not None and version.id == latest_version_id:
+                continue
+            if version.version_source != "save":
+                continue
+            if version.id in protected_ids:
+                continue
+            self.db.delete(version)
+            deleted_count += 1
+
+        if deleted_count > 0:
+            try:
+                self.db.commit()
+            except IntegrityError as exc:
+                self.db.rollback()
+                raise ApiException(status_code=409, code=40946, message="Clear agent versions failed") from exc
+
+        return ClearVersionsResponse.model_validate(
+            {
+                "deleted_count": deleted_count,
+                "kept_latest_version_id": latest_version_id,
+                "draft_version_id": profile.draft_version_id,
+                "published_version_id": profile.published_version_id,
+            }
+        )
+
+    def delete_agent_profile(self, agent_profile_id: UUID) -> None:
+        profile = self.get_agent_profile(agent_profile_id)
+        if profile.is_system:
+            raise ApiException(status_code=400, code=40033, message="System agent profile cannot be deleted")
+        if profile.skills:
+            skill_names = ", ".join(sorted(s.name for s in profile.skills))
+            raise ApiException(
+                status_code=409,
+                code=40935,
+                message=f"Agent profile is referenced by skills: {skill_names}",
+            )
+        self.db.delete(profile)
+        self.db.commit()
+
+    # -------------------------
+    # Compatibility workflow methods on skill routes
+    # -------------------------
+    def get_skill_workflow(self, skill_id: UUID) -> AssistantWorkflow:
+        skill = self.get_skill(skill_id)
+        if skill.workflow_id is None:
+            raise ApiException(
+                status_code=409,
+                code=40936,
+                message=f"Skill '{skill.name}' is bound to an agent, not a workflow",
+            )
+        return self.get_workflow(skill.workflow_id)
+
+    def update_workflow(self, skill_id, workflow) -> AssistantSkill:
+        """Compatibility API: update workflow by skill id."""
+        from uuid import UUID as _UUID
+
+        skill_uuid = _UUID(str(skill_id)) if not isinstance(skill_id, _UUID) else skill_id
+        skill = self.get_skill(skill_uuid)
+        if skill.workflow_id is None:
+            raise ApiException(
+                status_code=409,
+                code=40936,
+                message=f"Skill '{skill.name}' is bound to an agent, not a workflow",
+            )
+        self.update_workflow_by_id(skill.workflow_id, workflow)
+        return self.get_skill(skill_uuid)

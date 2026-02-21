@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { Handle, Position, useUpdateNodeInternals, type NodeProps } from '@xyflow/react'
+import { useTranslation } from 'react-i18next'
 import {
   Play,
   Brain,
@@ -23,15 +24,15 @@ import type { WorkflowToolDefinition } from './types'
 import { QuickAddPopover, type QuickAddPayload } from './QuickAddPopover'
 
 const NODE_STYLES: Record<NodeType, { header: string; icon: typeof Play; iconColor: string }> = {
-  start: { header: 'bg-green-50 border-b border-green-100', icon: Play, iconColor: 'text-green-600' },
-  llm: { header: 'bg-purple-50 border-b border-purple-100', icon: Brain, iconColor: 'text-purple-600' },
-  tool: { header: 'bg-sky-50 border-b border-sky-100', icon: Wrench, iconColor: 'text-sky-600' },
-  if_else: { header: 'bg-yellow-50 border-b border-yellow-100', icon: GitBranch, iconColor: 'text-yellow-600' },
-  parameter_extractor: { header: 'bg-pink-50 border-b border-pink-100', icon: ScanSearch, iconColor: 'text-pink-600' },
-  knowledge_retrieval: { header: 'bg-teal-50 border-b border-teal-100', icon: BookOpen, iconColor: 'text-teal-600' },
-  iteration: { header: 'bg-cyan-50 border-b border-cyan-100', icon: RefreshCw, iconColor: 'text-cyan-600' },
-  loop: { header: 'bg-blue-50 border-b border-blue-100', icon: Infinity, iconColor: 'text-blue-600' },
-  output: { header: 'bg-indigo-50 border-b border-indigo-100', icon: SendHorizontal, iconColor: 'text-indigo-600' },
+  start: { header: 'bg-gradient-to-r from-emerald-100/90 to-green-100/90 border-b border-emerald-200', icon: Play, iconColor: 'text-emerald-700' },
+  llm: { header: 'bg-gradient-to-r from-violet-100/90 to-purple-100/90 border-b border-violet-200', icon: Brain, iconColor: 'text-violet-700' },
+  tool: { header: 'bg-gradient-to-r from-sky-100/90 to-blue-100/90 border-b border-sky-200', icon: Wrench, iconColor: 'text-sky-700' },
+  if_else: { header: 'bg-gradient-to-r from-amber-100/90 to-yellow-100/90 border-b border-amber-200', icon: GitBranch, iconColor: 'text-amber-700' },
+  parameter_extractor: { header: 'bg-gradient-to-r from-fuchsia-100/90 to-pink-100/90 border-b border-fuchsia-200', icon: ScanSearch, iconColor: 'text-fuchsia-700' },
+  knowledge_retrieval: { header: 'bg-gradient-to-r from-teal-100/90 to-emerald-100/90 border-b border-teal-200', icon: BookOpen, iconColor: 'text-teal-700' },
+  iteration: { header: 'bg-gradient-to-r from-cyan-100/90 to-sky-100/90 border-b border-cyan-200', icon: RefreshCw, iconColor: 'text-cyan-700' },
+  loop: { header: 'bg-gradient-to-r from-indigo-100/90 to-blue-100/90 border-b border-indigo-200', icon: Infinity, iconColor: 'text-indigo-700' },
+  output: { header: 'bg-gradient-to-r from-rose-100/90 to-orange-100/90 border-b border-rose-200', icon: SendHorizontal, iconColor: 'text-rose-700' },
 }
 const HANDLE_TOP_OFFSET = 28
 const CONTAINER_HANDLE_TOP = 20
@@ -172,6 +173,10 @@ function normalizeContainerBodyEdges(config: Record<string, unknown>): Container
 function getPreview(data: WfNodeData): string {
   const cfg = (data.config ?? {}) as Record<string, unknown>
   switch (data.nodeType) {
+    case 'start': {
+      const desc = data.workflowDescription as string | undefined
+      return desc ? truncate(desc, 120) : ''
+    }
     case 'llm':
       return truncate(cfg.systemPrompt as string, 50)
     case 'tool':
@@ -213,7 +218,7 @@ function getPreview(data: WfNodeData): string {
     case 'output': {
       const mode = String(cfg.outputMode ?? 'text').trim().toLowerCase() === 'structured' ? 'structured' : 'text'
       if (mode === 'text') {
-        return truncate(String(cfg.textTemplate ?? ''), 50)
+        return truncate(formatTemplatePreview(cfg.textTemplate), 50)
       }
       const fields = (Array.isArray(cfg.outputFields) ? cfg.outputFields : [])
         .map((item) => (item && typeof item === 'object' ? String((item as Record<string, unknown>).name ?? '').trim() : ''))
@@ -237,6 +242,23 @@ function formatKnowledgeQuery(raw: unknown): string {
     .trim()
 
   if (!normalized) return 'Start input'
+  if (normalized === 'start.user_input') return 'Start input'
+  return normalized
+}
+
+function formatTemplatePreview(raw: unknown): string {
+  const text = String(raw ?? '').trim()
+  if (!text) return ''
+
+  return text
+    .replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_, expr: string) => formatTemplateExpression(expr))
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function formatTemplateExpression(expr: string): string {
+  const normalized = expr.trim()
+  if (!normalized) return ''
   if (normalized === 'start.user_input') return 'Start input'
   return normalized
 }
@@ -288,6 +310,7 @@ function buildContainerBodySignature(
 }
 
 function WorkflowNodeInner({ id, data }: NodeProps) {
+  const { t } = useTranslation()
   const nodeData = data as unknown as WfNodeData
   const selectedNodeId = useWorkflowEditorStore((s) => s.selectedNodeId)
   const updateNodeConfig = useWorkflowEditorStore((s) => s.updateNodeConfig)
@@ -418,7 +441,7 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
         }}
         anchor={(
           <div
-            className="pointer-events-none absolute z-[15] flex h-6 w-6 items-center justify-center rounded-full border-2 border-white bg-blue-600 text-white shadow-md opacity-0 group-hover/workflow-node:opacity-100 transition-opacity"
+            className="pointer-events-none absolute z-[15] flex h-6 w-6 items-center justify-center rounded-full border border-white/90 bg-blue-600 text-white ring-2 ring-white shadow-[0_2px_8px_rgba(37,99,235,0.22)] opacity-0 group-hover/workflow-node:opacity-100 transition-opacity duration-150"
             style={anchorStyle}
           >
             <Plus className="h-3 w-3" />
@@ -431,8 +454,8 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
   return (
     <div
       className={`
-        group/workflow-node relative ${isContainer ? '' : 'w-[240px]'} rounded-xl bg-white shadow-sm border transaction-all duration-200
-        ${isSelected ? 'ring-2 ring-primary border-primary shadow-md' : runtimeCardClass || 'border-border hover:shadow-md'}
+        group/workflow-node relative ${isContainer ? '' : 'w-[260px]'} rounded-xl bg-white shadow-sm border transition-all duration-200
+        ${isSelected ? 'ring-2 ring-primary border-primary shadow-md' : runtimeCardClass || 'border-border hover:shadow-md hover:border-primary/30'}
       `}
       style={{
         width: isContainer && containerSize ? `${containerSize.width}px` : undefined,
@@ -444,32 +467,33 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
       }}
     >
       {/* Header */}
-      <div className={`flex items-center gap-2 px-3 py-2 rounded-t-xl ${style.header}`}>
-        <div className={`p-1 rounded-md bg-white/80 ${style.iconColor}`}>
+      <div className={`flex items-center gap-2 px-3 py-1.5 rounded-t-xl ${style.header}`}>
+        <div className={`p-1 rounded-md bg-white/80 shadow-sm ${style.iconColor}`}>
           <Icon className="w-3.5 h-3.5" />
         </div>
-        <span className="text-xs font-semibold text-foreground/80 truncate flex-1">
-          {nodeData.label || nodeData.nodeType}
+        <span className="text-xs font-semibold text-foreground/90 truncate flex-1">
+          {isStart ? t('settings.skills.nodeTypes.start') : (nodeData.label || nodeData.nodeType)}
         </span>
         {runtimeStatus && (
           <span
-            className={`inline-flex h-2.5 w-2.5 rounded-full ${
-              runtimeStatus === 'running'
-                ? 'bg-amber-500'
-                : runtimeStatus === 'success'
-                  ? 'bg-emerald-500'
-                  : 'bg-red-500'
-            }`}
+            className={`inline-flex h-2.5 w-2.5 rounded-full ${runtimeStatus === 'running'
+              ? 'bg-amber-500'
+              : runtimeStatus === 'success'
+                ? 'bg-emerald-500'
+                : 'bg-red-500'
+              }`}
             title={`runtime-${runtimeStatus}`}
           />
         )}
       </div>
 
       {!isContainer && (
-        <div className="px-3 py-3 min-h-[50px]">
-          <p className={`text-[11px] leading-relaxed text-muted-foreground line-clamp-3 ${preview ? '' : 'italic opacity-50'}`}>
-            {previewText || 'No configuration'}
-          </p>
+        <div className="px-3 py-3 min-h-[50px] flex flex-col justify-center">
+          <div className="bg-slate-50 border border-slate-100 rounded-md p-2 w-full">
+            <p className={`text-[12px] leading-relaxed text-muted-foreground break-all whitespace-pre-wrap line-clamp-3 ${preview ? '' : 'italic opacity-50'}`}>
+              {previewText || 'No configuration'}
+            </p>
+          </div>
         </div>
       )}
 
@@ -494,8 +518,8 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
             type="target"
             position={Position.Left}
             id={inputHandleId}
-            style={{ top: `${nodeHandleTop}px` }}
-            className="!w-2.5 !h-2.5 !bg-white !border-2 !border-muted-foreground/50 hover:!border-primary transition-colors"
+            style={{ top: `${nodeHandleTop}px`, left: '-5px' }}
+            className="!w-2.5 !h-2.5 !bg-background !border !border-slate-300/90 hover:!border-blue-500 hover:!bg-blue-50 transition-colors duration-150 z-10"
             onPointerDown={(event) => handleHandlePointerDown('input', event)}
             onPointerUp={(event) => handleHandlePointerUp('input', event)}
             onPointerCancel={handleHandlePointerCancel}
@@ -515,8 +539,8 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
             type="source"
             position={Position.Right}
             id={outputHandleId}
-            style={{ top: `${nodeHandleTop}px` }}
-            className="!w-2.5 !h-2.5 !bg-white !border-2 !border-muted-foreground/50 hover:!border-primary transition-colors"
+            style={{ top: `${nodeHandleTop}px`, right: '-5px' }}
+            className="!w-2.5 !h-2.5 !bg-background !border !border-slate-300/90 hover:!border-blue-500 hover:!bg-blue-50 transition-colors duration-150 z-10"
             onPointerDown={(event) => handleHandlePointerDown('output', event)}
             onPointerUp={(event) => handleHandlePointerUp('output', event)}
             onPointerCancel={handleHandlePointerCancel}
@@ -539,13 +563,13 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
             handles.push(normalized.elseHandle || 'else')
 
             return handles.map((handle) => (
-              <div key={handle} className="relative flex items-center justify-center w-2.5 h-2.5">
+              <div key={handle} className="relative flex items-center justify-center w-3 h-3">
                 <Handle
                   type="source"
                   position={Position.Right}
                   id={handle}
                   style={{ position: 'static', transform: 'none' }}
-                  className={`!w-2.5 !h-2.5 !bg-white !border-2 ${handle === (normalized.elseHandle || 'else') ? '!border-stone-400' : '!border-green-500'} hover:!scale-125 transition-all`}
+                  className={`!w-2.5 !h-2.5 !bg-background !border ${handle === (normalized.elseHandle || 'else') ? '!border-stone-400' : '!border-green-500'} hover:!border-blue-500 hover:!bg-blue-50 transition-colors duration-150 z-10`}
                   onPointerDown={(event) => handleHandlePointerDown(handle, event)}
                   onPointerUp={(event) => handleHandlePointerUp(handle, event)}
                   onPointerCancel={handleHandlePointerCancel}

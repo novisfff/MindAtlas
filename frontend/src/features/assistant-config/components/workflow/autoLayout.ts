@@ -26,6 +26,32 @@ const SUBFLOW_NODE_SIZE: Record<string, { width: number; height: number }> = {
   knowledge_retrieval: { width: 240, height: 112 },
 }
 
+const HORIZONTAL_ALIGN_MAX_CENTER_DELTA = 96
+const HORIZONTAL_ALIGN_COLLISION_PADDING = 20
+const MAIN_NODE_HANDLE_TOP = 28
+const MAIN_CONTAINER_NODE_HANDLE_TOP = 20
+const SUBFLOW_NODE_HANDLE_TOP = 20
+
+type LinearLayoutNode = {
+  id: string
+  nodeType: string
+  width: number
+  height: number
+  linearHandleTop: number
+}
+
+type LinearLayoutEdge = {
+  sourceId: string
+  targetId: string
+}
+
+type NodeBounds = {
+  left: number
+  right: number
+  top: number
+  bottom: number
+}
+
 function getNodeSize(node: Node<WfNodeData>): { width: number; height: number } {
   if ((node.data.nodeType === 'iteration' || node.data.nodeType === 'loop') && node.data.config) {
     const dynamic = estimateContainerNodeSizeFromConfig(node.data.config)
@@ -48,6 +74,157 @@ function getSubflowNodeSize(node: ContainerBodyNode): { width: number; height: n
     width: fallback.width,
     height: Math.max(fallback.height, ifElseHeight),
   }
+}
+
+function boundsFromPosition(
+  position: { x: number; y: number },
+  node: LinearLayoutNode,
+): NodeBounds {
+  return {
+    left: position.x,
+    right: position.x + node.width,
+    top: position.y,
+    bottom: position.y + node.height,
+  }
+}
+
+function hasBoundsCollision(
+  a: NodeBounds,
+  b: NodeBounds,
+  padding: number,
+): boolean {
+  return (
+    a.left < b.right + padding &&
+    a.right > b.left - padding &&
+    a.top < b.bottom + padding &&
+    a.bottom > b.top - padding
+  )
+}
+
+function alignHorizontalLinearChains(
+  nodesById: Map<string, LinearLayoutNode>,
+  edges: LinearLayoutEdge[],
+  basePositions: Map<string, { x: number; y: number }>,
+): Map<string, { x: number; y: number }> {
+  if (nodesById.size === 0 || edges.length === 0) return basePositions
+
+  const positions = new Map(basePositions)
+  const validEdges = edges.filter((edge) => (
+    edge.sourceId !== edge.targetId &&
+    nodesById.has(edge.sourceId) &&
+    nodesById.has(edge.targetId)
+  ))
+  if (validEdges.length === 0) return positions
+
+  const outDegree = new Map<string, number>()
+  const inDegree = new Map<string, number>()
+  validEdges.forEach((edge) => {
+    outDegree.set(edge.sourceId, (outDegree.get(edge.sourceId) ?? 0) + 1)
+    inDegree.set(edge.targetId, (inDegree.get(edge.targetId) ?? 0) + 1)
+  })
+
+  const eligibleOut = new Map<string, string>()
+  const eligibleIn = new Map<string, string>()
+  validEdges.forEach((edge) => {
+    const sourceNode = nodesById.get(edge.sourceId)
+    const targetNode = nodesById.get(edge.targetId)
+    if (!sourceNode || !targetNode) return
+    if (sourceNode.nodeType === 'if_else' || targetNode.nodeType === 'if_else') return
+    if ((outDegree.get(edge.sourceId) ?? 0) !== 1) return
+    if ((inDegree.get(edge.targetId) ?? 0) !== 1) return
+
+    const sourcePos = positions.get(edge.sourceId)
+    const targetPos = positions.get(edge.targetId)
+    if (!sourcePos || !targetPos) return
+
+    const sourceCenterX = sourcePos.x + sourceNode.width / 2
+    const targetCenterX = targetPos.x + targetNode.width / 2
+    if (targetCenterX <= sourceCenterX) return
+
+    const sourceHandleY = sourcePos.y + sourceNode.linearHandleTop
+    const targetHandleY = targetPos.y + targetNode.linearHandleTop
+    if (Math.abs(sourceHandleY - targetHandleY) > HORIZONTAL_ALIGN_MAX_CENTER_DELTA) return
+
+    eligibleOut.set(edge.sourceId, edge.targetId)
+    eligibleIn.set(edge.targetId, edge.sourceId)
+  })
+  if (eligibleOut.size === 0) return positions
+
+  const chainHeads = Array.from(eligibleOut.keys())
+    .filter((nodeId) => !eligibleIn.has(nodeId))
+    .sort((a, b) => {
+      const ax = positions.get(a)?.x ?? 0
+      const bx = positions.get(b)?.x ?? 0
+      if (ax !== bx) return ax - bx
+      return a.localeCompare(b)
+    })
+
+  const applyChainAlignment = (chain: string[]): void => {
+    if (chain.length < 2) return
+    const firstNode = nodesById.get(chain[0])
+    const firstPos = positions.get(chain[0])
+    if (!firstNode || !firstPos) return
+
+    const targetHandleY = firstPos.y + firstNode.linearHandleTop
+    const chainSet = new Set(chain)
+    const proposedBounds = new Map<string, NodeBounds>()
+
+    for (const nodeId of chain) {
+      const nodeMeta = nodesById.get(nodeId)
+      const nodePos = positions.get(nodeId)
+      if (!nodeMeta || !nodePos) return
+      const nextY = Math.round(targetHandleY - nodeMeta.linearHandleTop)
+      proposedBounds.set(nodeId, boundsFromPosition({ x: nodePos.x, y: nextY }, nodeMeta))
+    }
+
+    for (const [otherId, otherMeta] of nodesById) {
+      if (chainSet.has(otherId)) continue
+      const otherPos = positions.get(otherId)
+      if (!otherPos) continue
+      const otherBounds = boundsFromPosition(otherPos, otherMeta)
+      for (const nodeId of chain) {
+        const nextBounds = proposedBounds.get(nodeId)
+        if (!nextBounds) continue
+        if (hasBoundsCollision(nextBounds, otherBounds, HORIZONTAL_ALIGN_COLLISION_PADDING)) {
+          return
+        }
+      }
+    }
+
+    for (const nodeId of chain) {
+      const nodeMeta = nodesById.get(nodeId)
+      const nodePos = positions.get(nodeId)
+      if (!nodeMeta || !nodePos) continue
+      positions.set(nodeId, {
+        x: nodePos.x,
+        y: Math.round(targetHandleY - nodeMeta.linearHandleTop),
+      })
+    }
+  }
+
+  for (const headId of chainHeads) {
+    const chain: string[] = []
+    const localVisited = new Set<string>()
+    let currentId: string | undefined = headId
+    while (currentId && !localVisited.has(currentId)) {
+      chain.push(currentId)
+      localVisited.add(currentId)
+      const nextId = eligibleOut.get(currentId)
+      if (!nextId) break
+      if (eligibleIn.get(nextId) !== currentId) break
+      currentId = nextId
+    }
+    applyChainAlignment(chain)
+  }
+
+  return positions
+}
+
+function resolveMainLinearHandleTop(nodeType: WfNodeData['nodeType']): number {
+  if (nodeType === 'iteration' || nodeType === 'loop') {
+    return MAIN_CONTAINER_NODE_HANDLE_TOP
+  }
+  return MAIN_NODE_HANDLE_TOP
 }
 
 function autoLayoutMainGraphNodes(
@@ -101,7 +278,23 @@ function autoLayoutMainGraphNodes(
       y: Math.round(dagreNode.y - size.height / 2 + offsetY),
     })
   })
-  return positionMap
+
+  const layoutNodes = new Map<string, LinearLayoutNode>()
+  nodes.forEach((node) => {
+    const size = getNodeSize(node)
+    layoutNodes.set(node.id, {
+      id: node.id,
+      nodeType: node.data.nodeType,
+      width: size.width,
+      height: size.height,
+      linearHandleTop: resolveMainLinearHandleTop(node.data.nodeType),
+    })
+  })
+  const layoutEdges = edges.map((edge) => ({
+    sourceId: edge.source,
+    targetId: edge.target,
+  }))
+  return alignHorizontalLinearChains(layoutNodes, layoutEdges, positionMap)
 }
 
 export function autoLayoutWorkflowNodes(
@@ -170,14 +363,47 @@ export function autoLayoutContainerBodyNodes(
   const offsetX = anchorCurrent.x - anchorLaidOut.x
   const offsetY = anchorCurrent.y - anchorLaidOut.y
 
-  return normalizedNodes.map((node) => {
+  const positionMap = new Map<string, { x: number; y: number }>()
+  normalizedNodes.forEach((node) => {
     const dagreNode = graph.node(node.nodeId) as { x: number; y: number } | undefined
-    if (!dagreNode) return node
+    if (!dagreNode) {
+      positionMap.set(node.nodeId, {
+        x: Math.round(Number(node.positionX ?? 0)),
+        y: Math.round(Number(node.positionY ?? 0)),
+      })
+      return
+    }
     const size = getSubflowNodeSize(node)
+    positionMap.set(node.nodeId, {
+      x: Math.round(dagreNode.x - size.width / 2 + offsetX),
+      y: Math.round(dagreNode.y - size.height / 2 + offsetY),
+    })
+  })
+
+  const layoutNodes = new Map<string, LinearLayoutNode>()
+  normalizedNodes.forEach((node) => {
+    const size = getSubflowNodeSize(node)
+    layoutNodes.set(node.nodeId, {
+      id: node.nodeId,
+      nodeType: node.nodeType,
+      width: size.width,
+      height: size.height,
+      linearHandleTop: SUBFLOW_NODE_HANDLE_TOP,
+    })
+  })
+  const layoutEdges = bodyEdges.map((edge) => ({
+    sourceId: edge.sourceNodeId,
+    targetId: edge.targetNodeId,
+  }))
+  const alignedPositionMap = alignHorizontalLinearChains(layoutNodes, layoutEdges, positionMap)
+
+  return normalizedNodes.map((node) => {
+    const nextPosition = alignedPositionMap.get(node.nodeId)
+    if (!nextPosition) return node
     return {
       ...node,
-      positionX: Math.round(dagreNode.x - size.width / 2 + offsetX),
-      positionY: Math.round(dagreNode.y - size.height / 2 + offsetY),
+      positionX: nextPosition.x,
+      positionY: nextPosition.y,
     }
   })
 }

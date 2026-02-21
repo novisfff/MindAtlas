@@ -23,7 +23,7 @@ export const FlowControls = memo(function FlowControls({
     const { t } = useTranslation()
 
     return (
-        <div className="absolute bottom-4 left-4 z-10 flex flex-row gap-1 bg-white/80 backdrop-blur-md border shadow-sm rounded-lg p-1">
+        <div className="absolute bottom-4 left-4 z-10 flex flex-row gap-1 bg-white/80 backdrop-blur-md border shadow-sm rounded-2xl p-1.5">
             <ControlButton
                 onClick={() => zoomIn()}
                 icon={Plus}

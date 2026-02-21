@@ -408,7 +408,7 @@ function SubflowNodeCard({ id, data, selected }: SubflowNodeComponentProps) {
         }}
         anchor={(
           <div
-            className="pointer-events-none absolute z-[15] flex h-6 w-6 items-center justify-center rounded-full border-2 border-white bg-blue-600 text-white shadow-md opacity-0 group-hover/subflow-node:opacity-100 transition-opacity"
+            className="pointer-events-none absolute z-[15] flex h-6 w-6 items-center justify-center rounded-full border border-white/90 bg-blue-600 text-white ring-2 ring-white shadow-[0_2px_8px_rgba(37,99,235,0.22)] opacity-0 group-hover/subflow-node:opacity-100 transition-opacity duration-150"
             style={anchorStyle}
           >
             <Plus className="h-3 w-3" />
@@ -444,7 +444,7 @@ function SubflowNodeCard({ id, data, selected }: SubflowNodeComponentProps) {
             position={Position.Left}
             id="input"
             style={{ top: `${SUBFLOW_NODE_HANDLE_TOP}px` }}
-            className="!w-2.5 !h-2.5 !bg-white !border-2 !border-muted-foreground/50 hover:!border-primary transition-colors"
+            className="!w-2.5 !h-2.5 !bg-background !border !border-slate-300/90 hover:!border-blue-500 hover:!bg-blue-50 transition-colors duration-150"
             onPointerDown={(event) => handleHandlePointerDown('input', event)}
             onPointerUp={(event) => handleHandlePointerUp('input', event)}
             onPointerCancel={handleHandlePointerCancel}
@@ -464,7 +464,7 @@ function SubflowNodeCard({ id, data, selected }: SubflowNodeComponentProps) {
             position={Position.Right}
             id="output"
             style={{ top: `${SUBFLOW_NODE_HANDLE_TOP}px` }}
-            className="!w-2.5 !h-2.5 !bg-white !border-2 !border-muted-foreground/50 hover:!border-primary transition-colors"
+            className="!w-2.5 !h-2.5 !bg-background !border !border-slate-300/90 hover:!border-blue-500 hover:!bg-blue-50 transition-colors duration-150"
             onPointerDown={(event) => handleHandlePointerDown('output', event)}
             onPointerUp={(event) => handleHandlePointerUp('output', event)}
             onPointerCancel={handleHandlePointerCancel}
@@ -491,7 +491,7 @@ function SubflowNodeCard({ id, data, selected }: SubflowNodeComponentProps) {
                     top: `${handleTop}px`,
                     right: `${IF_ELSE_HANDLE_RIGHT_OFFSET}px`,
                   }}
-                  className={`!w-2.5 !h-2.5 !bg-white !border-2 ${handle === elseHandleId ? '!border-stone-400' : '!border-green-500'} hover:!scale-125 transition-all`}
+                  className={`!w-2.5 !h-2.5 !bg-background !border ${handle === elseHandleId ? '!border-stone-400' : '!border-green-500'} hover:!border-blue-500 hover:!bg-blue-50 transition-colors duration-150`}
                   onPointerDown={(event) => handleHandlePointerDown(handle, event)}
                   onPointerUp={(event) => handleHandlePointerUp(handle, event)}
                   onPointerCancel={handleHandlePointerCancel}

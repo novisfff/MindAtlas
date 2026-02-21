@@ -6,7 +6,12 @@ from typing import Any, get_args, get_origin
 
 from sqlalchemy.orm import Session, joinedload
 
-from app.assistant_config.models import AssistantSkill, AssistantTool
+from app.assistant_config.models import (
+    AssistantAgentProfile,
+    AssistantSkill,
+    AssistantTool,
+    AssistantWorkflow,
+)
 from app.assistant_config.remote_tool import RemoteTool
 
 
@@ -548,6 +553,9 @@ class SkillRegistry(_BaseRegistry):
             query = query.filter(AssistantSkill.enabled.is_(True))
         if include_workflow:
             query = query.options(
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.nodes),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantSkill.agent_profile),
                 joinedload(AssistantSkill.nodes),
                 joinedload(AssistantSkill.edges),
             )
@@ -591,6 +599,9 @@ class SkillRegistry(_BaseRegistry):
         query = self.db.query(AssistantSkill)
         if include_workflow:
             query = query.options(
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.nodes),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantSkill.agent_profile).joinedload(AssistantAgentProfile.skills),
                 joinedload(AssistantSkill.nodes),
                 joinedload(AssistantSkill.edges),
             )
@@ -634,11 +645,30 @@ class SkillRegistry(_BaseRegistry):
         if not isinstance(raw_intent_examples, list):
             raw_intent_examples = []
 
+        target_pattern = (
+            "workflow_dag"
+            if getattr(skill, "workflow_id", None) is not None
+            else "agent_loop"
+            if getattr(skill, "agent_profile_id", None) is not None
+            else getattr(skill, "langgraph_pattern", None)
+        )
         raw_tools = getattr(skill, "tools", None)
+        if (
+            target_pattern == "agent_loop"
+            and getattr(skill, "agent_profile", None) is not None
+            and isinstance(getattr(skill.agent_profile, "tools", None), list)
+        ):
+            raw_tools = skill.agent_profile.tools
         if not isinstance(raw_tools, list):
             raw_tools = []
 
         raw_kb = getattr(skill, "kb_config", None)
+        if (
+            target_pattern == "agent_loop"
+            and getattr(skill, "agent_profile", None) is not None
+            and isinstance(getattr(skill.agent_profile, "kb_config", None), dict)
+        ):
+            raw_kb = skill.agent_profile.kb_config
         kb_config = raw_kb if isinstance(raw_kb, dict) else None
         if kb_config is None:
             kb = getattr(skill, "kb", None)
@@ -651,6 +681,9 @@ class SkillRegistry(_BaseRegistry):
         if include_workflow:
             raw_nodes = getattr(skill, "nodes", None) or []
             raw_edges = getattr(skill, "edges", None) or []
+            if getattr(skill, "workflow", None) is not None:
+                raw_nodes = getattr(skill.workflow, "nodes", None) or raw_nodes
+                raw_edges = getattr(skill.workflow, "edges", None) or raw_edges
             if raw_nodes:
                 workflow_nodes = [
                     SkillRegistry._serialize_workflow_node(n) for n in raw_nodes
@@ -666,14 +699,26 @@ class SkillRegistry(_BaseRegistry):
             intent_examples=[str(item) for item in raw_intent_examples if item is not None],
             tools=[str(item) for item in raw_tools if item is not None],
             mode=(getattr(skill, "mode", "langgraph") or "langgraph"),
-            langgraph_pattern=getattr(skill, "langgraph_pattern", None),
-            system_prompt=getattr(skill, "system_prompt", None),
+            langgraph_pattern=target_pattern,
+            system_prompt=(
+                getattr(skill.agent_profile, "system_prompt", None)
+                if target_pattern == "agent_loop" and getattr(skill, "agent_profile", None) is not None
+                else getattr(skill, "system_prompt", None)
+            ),
             kb_config=kb_config,
             hidden=bool(getattr(skill, "hidden", False)),
             workflow_nodes=workflow_nodes,
             workflow_edges=workflow_edges,
-            workflow_version=getattr(skill, "workflow_version", 1) or 1,
-            workflow_viewport=getattr(skill, "workflow_viewport", None),
+            workflow_version=(
+                getattr(skill.workflow, "workflow_version", None)
+                if getattr(skill, "workflow", None) is not None
+                else getattr(skill, "workflow_version", 1)
+            ) or 1,
+            workflow_viewport=(
+                getattr(skill.workflow, "workflow_viewport", None)
+                if getattr(skill, "workflow", None) is not None
+                else getattr(skill, "workflow_viewport", None)
+            ),
         )
 
     @staticmethod

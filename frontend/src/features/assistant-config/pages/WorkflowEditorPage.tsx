@@ -3,10 +3,20 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ReactFlowProvider } from '@xyflow/react'
-import { ArrowLeft, Save, Undo2, Redo2, Loader2, LayoutTemplate, Play, ListChecks, AlertCircle } from 'lucide-react'
+import { ArrowLeft, Save, Undo2, Redo2, Loader2, LayoutTemplate, Play, ListChecks, AlertCircle, Send, History } from 'lucide-react'
 import { toast } from 'sonner'
-import { getSkill } from '../api/skills'
-import { saveWorkflow, validateWorkflow, type WorkflowInput } from '../api/workflow'
+import { isApiError } from '@/lib/api/client'
+import {
+  clearWorkflowVersions,
+  deleteWorkflowVersion,
+  getWorkflow,
+  listWorkflowVersions,
+  publishWorkflow,
+  rollbackWorkflowVersion,
+  saveWorkflowById,
+  validateWorkflowById,
+} from '../api/workflows'
+import type { WorkflowInput } from '../api/workflow'
 import { getSystemToolDefinitions, getToolsWithParams } from '../api/tools'
 import { useWorkflowEditorStore } from '../stores/workflow-editor-store'
 import { useWorkflowTestRunStore } from '../stores/workflow-test-run-store'
@@ -15,7 +25,9 @@ import { NodePalette } from '../components/workflow/NodePalette'
 import { PropertyPanel } from '../components/workflow/PropertyPanel'
 import { WorkflowTestRunPanel } from '../components/workflow/WorkflowTestRunPanel'
 import { WorkflowValidationChecklistPanel } from '../components/workflow/WorkflowValidationChecklistPanel'
-import { serializeToWorkflowInput, deserializeFromSkill } from '../components/workflow/serialization'
+import { serializeToWorkflowInput, deserializeFromWorkflow } from '../components/workflow/serialization'
+import { PublishVersionDialog } from '../components/versioning/PublishVersionDialog'
+import { TargetVersionPanel } from '../components/versioning/TargetVersionPanel'
 import {
   buildValidationSignature,
   computeDeadEndWarnings,
@@ -24,6 +36,7 @@ import {
 } from '../components/workflow/workflowValidation'
 import type { WorkflowToolDefinition } from '../components/workflow/types'
 import { autoLayoutWorkflowWithSubflows } from '../components/workflow/autoLayout'
+import { normalizeStartNodeConfig } from '../components/workflow/startNodeConfig'
 
 
 import { Tooltip } from '../../../components/ui/Tooltip'
@@ -36,7 +49,7 @@ import {
 import '@xyflow/react/dist/style.css'
 
 export default function WorkflowEditorPage() {
-  const { skillId } = useParams<{ skillId: string }>()
+  const { workflowId } = useParams<{ workflowId: string }>()
   const navigate = useNavigate()
   const { t } = useTranslation()
   const qc = useQueryClient()
@@ -51,15 +64,28 @@ export default function WorkflowEditorPage() {
   const [validationWarnings, setValidationWarnings] = useState<WorkflowValidationIssue[]>([])
   const [validationRequestError, setValidationRequestError] = useState<string | null>(null)
   const [lastValidatedAt, setLastValidatedAt] = useState<number | null>(null)
+  const [workflowDescriptionDraft, setWorkflowDescriptionDraft] = useState('')
+  const [versionPanelOpen, setVersionPanelOpen] = useState(false)
+  const [publishDialogOpen, setPublishDialogOpen] = useState(false)
   const validationSeqRef = useRef(0)
   const debounceTimerRef = useRef<number | null>(null)
   const latestSignatureRef = useRef('')
   const workflowSnapshotRef = useRef<WorkflowInput | null>(null)
 
-  const { data: skill, isLoading } = useQuery({
-    queryKey: ['assistant-skill', skillId],
-    queryFn: () => getSkill(skillId!),
-    enabled: !!skillId,
+  const { data: workflowEntity, isLoading } = useQuery({
+    queryKey: ['assistant-workflow', workflowId],
+    queryFn: () => getWorkflow(workflowId!),
+    enabled: !!workflowId,
+  })
+  const {
+    data: workflowVersions,
+    isFetching: versionsLoading,
+    error: versionsError,
+    refetch: refetchVersions,
+  } = useQuery({
+    queryKey: ['assistant-workflow-versions', workflowId],
+    queryFn: () => listWorkflowVersions(workflowId!),
+    enabled: !!workflowId && versionPanelOpen,
   })
   const { data: systemToolDefs = [] } = useQuery({
     queryKey: ['assistant-system-tool-definitions-workflow'],
@@ -99,9 +125,21 @@ export default function WorkflowEditorPage() {
     () => serializeToWorkflowInput(store.nodes, store.edges, store.viewport),
     [store.edges, store.nodes, store.viewport],
   )
+  const defaultPublishVersionName = useMemo(
+    () => new Date().toLocaleString(),
+    [publishDialogOpen],
+  )
   const validationSignature = useMemo(
     () => buildValidationSignature(workflowInput),
     [workflowInput],
+  )
+  const startInputMode = useMemo(() => {
+    const startNode = store.nodes.find((node) => node.data.nodeType === 'start')
+    return normalizeStartNodeConfig(startNode?.data.config ?? null).inputMode
+  }, [store.nodes])
+  const hasUnsavedChanges = useMemo(
+    () => store.isDirty || workflowDescriptionDraft !== (workflowEntity?.description ?? ''),
+    [store.isDirty, workflowDescriptionDraft, workflowEntity?.description],
   )
 
 
@@ -110,12 +148,19 @@ export default function WorkflowEditorPage() {
 
   // Load workflow data into store on first fetch
   useEffect(() => {
-    if (skill && !initialized.current) {
+    if (workflowEntity && !initialized.current) {
       initialized.current = true
-      const { nodes, edges, viewport } = deserializeFromSkill(skill)
+      const { nodes, edges, viewport } = deserializeFromWorkflow(workflowEntity)
       store.loadWorkflow(nodes, edges, viewport)
+      setWorkflowDescriptionDraft(workflowEntity.description ?? '')
     }
-  }, [skill])
+  }, [workflowEntity])
+
+  useEffect(() => {
+    if (!workflowEntity) return
+    if (store.isDirty) return
+    setWorkflowDescriptionDraft(workflowEntity.description ?? '')
+  }, [workflowEntity?.id, workflowEntity?.description, store.isDirty])
 
   useEffect(() => {
     setValidationErrors([])
@@ -131,11 +176,11 @@ export default function WorkflowEditorPage() {
       window.clearTimeout(debounceTimerRef.current)
       debounceTimerRef.current = null
     }
-  }, [skillId])
+  }, [workflowId])
 
   const runWorkflowValidation = useCallback(
     async (input: WorkflowInput, signature: string, force = false) => {
-      if (!skillId) return
+      if (!workflowId) return
       if (!initialized.current) return
       if (!force && signature === latestSignatureRef.current) return
 
@@ -152,7 +197,7 @@ export default function WorkflowEditorPage() {
       setValidationRequestError(null)
 
       try {
-        const validation = await validateWorkflow(skillId, input)
+        const validation = await validateWorkflowById(workflowId, input)
         if (seq !== validationSeqRef.current) return
 
         const warningMessage = t('settings.skills.workflowValidationDeadEndWarning')
@@ -175,11 +220,11 @@ export default function WorkflowEditorPage() {
         }
       }
     },
-    [skillId, t],
+    [workflowId, t],
   )
 
   useEffect(() => {
-    if (!skillId) return
+    if (!workflowId) return
     if (!initialized.current) return
     if (validationSignature === latestSignatureRef.current) return
     if (debounceTimerRef.current) {
@@ -195,7 +240,7 @@ export default function WorkflowEditorPage() {
         debounceTimerRef.current = null
       }
     }
-  }, [skillId, runWorkflowValidation, validationSignature, workflowInput])
+  }, [workflowId, runWorkflowValidation, validationSignature, workflowInput])
 
   const handleValidateNow = useCallback(() => {
     setValidationPanelOpen((prev) => !prev)
@@ -222,15 +267,20 @@ export default function WorkflowEditorPage() {
   const saveMutation = useMutation({
     mutationFn: async () => {
       const input = serializeToWorkflowInput(store.nodes, store.edges, store.viewport)
-      const validation = await validateWorkflow(skillId!, input)
+      const validation = await validateWorkflowById(workflowId!, input)
       if (!validation.valid) {
         const msg = validation.errors.map((e) => e.message).slice(0, 3).join('; ')
         throw new Error(msg || t('settings.skills.workflowValidationFailed'))
       }
-      return saveWorkflow(skillId!, input)
+      return saveWorkflowById(workflowId!, {
+        workflow: input,
+        description: workflowDescriptionDraft,
+      })
     },
     onSuccess: () => {
       store.resetDirty()
+      qc.invalidateQueries({ queryKey: ['assistant-workflow', workflowId] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
       qc.invalidateQueries({ queryKey: ['assistant-skills'] })
       toast.success(t('settings.skills.workflowSaved'))
     },
@@ -240,14 +290,128 @@ export default function WorkflowEditorPage() {
     },
   })
 
+  const publishMutation = useMutation({
+    mutationFn: async (versionName: string) => {
+      const input = serializeToWorkflowInput(store.nodes, store.edges, store.viewport)
+      const validation = await validateWorkflowById(workflowId!, input)
+      if (!validation.valid) {
+        const msg = validation.errors.map((e) => e.message).slice(0, 3).join('; ')
+        throw new Error(msg || t('settings.skills.workflowValidationFailed'))
+      }
+      return publishWorkflow(workflowId!, {
+        workflow: input,
+        description: workflowDescriptionDraft,
+        versionName: versionName.trim() || undefined,
+      })
+    },
+    onSuccess: () => {
+      store.resetDirty()
+      setPublishDialogOpen(false)
+      qc.invalidateQueries({ queryKey: ['assistant-workflow', workflowId] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflow-versions', workflowId] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-skills'] })
+      toast.success(t('settings.skills.versioning.publishSuccess'))
+    },
+    onError: (err) => {
+      const message = isApiError(err) && err.code === 42209
+        ? t('settings.skills.versioning.publishBlockedByValidation')
+        : (err instanceof Error ? err.message : t('settings.skills.workflowSaveError'))
+      toast.error(message)
+    },
+  })
+
+  const rollbackMutation = useMutation({
+    mutationFn: async (versionId: string) => rollbackWorkflowVersion(workflowId!, versionId),
+    onSuccess: (payload) => {
+      if (payload.workflow) {
+        const restored = deserializeFromWorkflow({
+          id: workflowId!,
+          name: workflowEntity?.name ?? '',
+          description: workflowEntity?.description ?? '',
+          isSystem: Boolean(workflowEntity?.isSystem),
+          enabled: true,
+          workflowVersion: workflowEntity?.workflowVersion ?? 1,
+          workflowViewport: payload.workflow.viewport ?? null,
+          nodes: (payload.workflow.nodes ?? []) as any,
+          edges: (payload.workflow.edges ?? []) as any,
+          draftVersionId: payload.draftVersionId,
+          publishedVersionId: payload.publishedVersionId,
+          referencedSkillIds: workflowEntity?.referencedSkillIds ?? [],
+          referenceCount: workflowEntity?.referenceCount ?? 0,
+          createdAt: workflowEntity?.createdAt ?? new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        } as any)
+        store.loadWorkflow(restored.nodes, restored.edges, restored.viewport)
+        store.resetDirty()
+      }
+      qc.invalidateQueries({ queryKey: ['assistant-workflow', workflowId] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflow-versions', workflowId] })
+      toast.success(t('settings.skills.versioning.restoreSuccess'))
+    },
+    onError: (err) => {
+      const message = err instanceof Error ? err.message : t('messages.error')
+      toast.error(message)
+    },
+  })
+
+  const deleteVersionMutation = useMutation({
+    mutationFn: async (versionId: string) => deleteWorkflowVersion(workflowId!, versionId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assistant-workflow', workflowId] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflow-versions', workflowId] })
+      toast.success(t('settings.skills.versioning.deleteSuccess'))
+    },
+    onError: (err) => {
+      const message = isApiError(err) && err.code === 40941
+        ? t('settings.skills.versioning.protectedVersionDeleteBlocked')
+        : (err instanceof Error ? err.message : t('messages.error'))
+      toast.error(message)
+    },
+  })
+
+  const clearVersionsMutation = useMutation({
+    mutationFn: async () => clearWorkflowVersions(workflowId!),
+    onSuccess: (payload) => {
+      qc.invalidateQueries({ queryKey: ['assistant-workflow', workflowId] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflow-versions', workflowId] })
+      if (payload.deletedCount > 0) {
+        toast.success(t('settings.skills.versioning.clearSuccess', { count: payload.deletedCount }))
+      } else {
+        toast(t('settings.skills.versioning.clearNoop'))
+      }
+    },
+    onError: (err) => {
+      const message = err instanceof Error ? err.message : t('messages.error')
+      toast.error(message)
+    },
+  })
+
   const handleSave = useCallback(() => {
     saveMutation.mutate()
   }, [saveMutation])
 
+  const handlePublish = useCallback((versionName: string) => {
+    publishMutation.mutate(versionName)
+  }, [publishMutation])
+
+  const handleDeleteVersion = useCallback((versionId: string) => {
+    if (!window.confirm(t('settings.skills.versioning.deleteConfirm'))) return
+    deleteVersionMutation.mutate(versionId)
+  }, [deleteVersionMutation, t])
+
+  const handleClearVersions = useCallback(() => {
+    clearVersionsMutation.mutate()
+  }, [clearVersionsMutation])
+
+  const handleOpenVersionPanel = useCallback(() => {
+    setVersionPanelOpen((prev) => !prev)
+  }, [])
+
   const handleBack = useCallback(() => {
-    if (store.isDirty && !window.confirm(t('settings.skills.unsavedChanges'))) return
-    navigate('/settings/assistant-skills')
-  }, [store.isDirty, navigate, t])
+    if (hasUnsavedChanges && !window.confirm(t('settings.skills.unsavedChanges'))) return
+    navigate('/settings/assistant-targets')
+  }, [hasUnsavedChanges, navigate, t])
 
   const handleAutoLayout = useCallback(() => {
     if (store.nodes.length <= 1) return
@@ -280,14 +444,14 @@ export default function WorkflowEditorPage() {
   // Warn on page unload
   useEffect(() => {
     const handler = (e: BeforeUnloadEvent) => {
-      if (store.isDirty) {
+      if (hasUnsavedChanges) {
         e.preventDefault()
         e.returnValue = ''
       }
     }
     window.addEventListener('beforeunload', handler)
     return () => window.removeEventListener('beforeunload', handler)
-  }, [store.isDirty])
+  }, [hasUnsavedChanges])
 
   // Mutual exclusion: Close test run panel when property panel opens (node selected)
   useEffect(() => {
@@ -298,8 +462,9 @@ export default function WorkflowEditorPage() {
 
   if (isLoading) {
     return (
-      <div className="flex h-screen items-center justify-center">
+      <div className="flex h-screen items-center justify-center gap-2 text-sm text-muted-foreground">
         <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+        <span>{t('messages.loading')}</span>
       </div>
     )
   }
@@ -309,51 +474,54 @@ export default function WorkflowEditorPage() {
       <div className="relative w-screen h-screen bg-slate-50 overflow-hidden">
         {/* Full Screen Canvas */}
         <div className="absolute inset-0 z-0">
-          <FlowCanvas tools={workflowTools} />
+          <FlowCanvas
+            tools={workflowTools}
+            workflowDescription={workflowDescriptionDraft}
+          />
         </div>
 
         {/* Floating Header */}
         <div className="absolute top-4 left-4 right-4 z-10 flex justify-between items-start pointer-events-none">
           {/* Left: Title & Back */}
-          <div className="pointer-events-auto bg-white/90 backdrop-blur-sm shadow-sm border rounded-xl p-2 flex items-center gap-3 pr-4">
+          <div className="pointer-events-auto bg-white/70 backdrop-blur-md shadow-sm border border-white/50 rounded-2xl p-2 flex items-center gap-3 pr-4">
             <button
               onClick={handleBack}
-              className="p-2 rounded-lg hover:bg-muted transition-colors"
+              className="p-2 rounded-xl hover:bg-white/60 transition-colors"
               title={t('settings.skills.workflowActions.back')}
             >
-              <ArrowLeft className="w-4 h-4" />
+              <ArrowLeft className="w-4 h-4 text-foreground/80" />
             </button>
             <div className="flex flex-col">
-              <h1 className="text-sm font-semibold leading-none">{skill?.name ?? ''}</h1>
+              <h1 className="text-sm font-semibold leading-none">{workflowEntity?.name ?? ''}</h1>
               <span className="text-[10px] text-muted-foreground mt-0.5">{t('settings.skills.workflowEditor')}</span>
             </div>
           </div>
 
           {/* Right: Actions */}
-          <div className="pointer-events-auto bg-white/90 backdrop-blur-sm shadow-sm border rounded-xl p-2 flex items-center gap-1">
+          <div className="pointer-events-auto bg-white/70 backdrop-blur-md shadow-sm border border-white/50 rounded-2xl p-2 flex items-center gap-1.5">
             <button
               onClick={() => store.undo()}
               disabled={!store.canUndo()}
-              className="p-2 rounded-lg hover:bg-muted disabled:opacity-30 transition-colors"
+              className="p-2 rounded-xl hover:bg-white/60 disabled:opacity-30 transition-colors"
               title={t('settings.skills.workflowActions.undo')}
             >
-              <Undo2 className="w-4 h-4" />
+              <Undo2 className="w-4 h-4 text-foreground/80" />
             </button>
             <button
               onClick={() => store.redo()}
               disabled={!store.canRedo()}
-              className="p-2 rounded-lg hover:bg-muted disabled:opacity-30 transition-colors"
+              className="p-2 rounded-xl hover:bg-white/60 disabled:opacity-30 transition-colors"
               title={t('settings.skills.workflowActions.redo')}
             >
-              <Redo2 className="w-4 h-4" />
+              <Redo2 className="w-4 h-4 text-foreground/80" />
             </button>
             <button
               onClick={handleAutoLayout}
               disabled={store.nodes.length <= 1}
-              className="p-2 rounded-lg hover:bg-muted disabled:opacity-30 transition-colors"
+              className="p-2 rounded-xl hover:bg-white/60 disabled:opacity-30 transition-colors"
               title={t('settings.skills.workflowActions.autoLayout')}
             >
-              <LayoutTemplate className="w-4 h-4" />
+              <LayoutTemplate className="w-4 h-4 text-foreground/80" />
             </button>
             <button
               onClick={() => {
@@ -364,10 +532,10 @@ export default function WorkflowEditorPage() {
                 setTestRunPanelOpen(!testRunPanelOpen)
               }}
               className={`
-                flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all
+                flex items-center gap-2 px-3 py-1.5 rounded-xl text-sm font-medium transition-all shadow-sm
                 ${testRunPanelOpen
-                  ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
-                  : 'bg-white hover:bg-slate-100 text-slate-700 border border-slate-200'
+                  ? 'bg-blue-100 text-blue-700 hover:bg-blue-200 border border-blue-200'
+                  : 'bg-white/90 hover:bg-white text-slate-700 border border-slate-200 hover:border-slate-300'
                 }
               `}
               title={t('settings.skills.workflowActions.testRun')}
@@ -380,10 +548,10 @@ export default function WorkflowEditorPage() {
                 <button
                   onClick={handleValidateNow}
                   className={`
-                    relative flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all
+                    relative flex items-center gap-2 px-3 py-1.5 rounded-xl text-sm font-medium transition-all shadow-sm
                     ${validationPanelOpen
-                      ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
-                      : 'bg-white hover:bg-slate-100 text-slate-700 border border-slate-200'
+                      ? 'bg-blue-100 text-blue-700 hover:bg-blue-200 border border-blue-200'
+                      : 'bg-white/90 hover:bg-white text-slate-700 border border-slate-200 hover:border-slate-300'
                     }
                   `}
                 >
@@ -456,15 +624,42 @@ export default function WorkflowEditorPage() {
                 </div>
               </HoverCardContent>
             </HoverCard>
-            <div className="w-px h-4 bg-border mx-2" />
+            <div className="w-px h-5 bg-border mx-1" />
+            <button
+              onClick={handleOpenVersionPanel}
+              className={`
+                flex items-center gap-2 px-3 py-1.5 rounded-xl text-sm font-medium transition-all shadow-sm
+                ${versionPanelOpen
+                  ? 'bg-blue-100 text-blue-700 hover:bg-blue-200 border border-blue-200'
+                  : 'bg-white/90 hover:bg-white text-slate-700 border border-slate-200 hover:border-slate-300'
+                }
+              `}
+              title={t('settings.skills.workflowActions.versionHistory')}
+            >
+              <History className="w-3.5 h-3.5" />
+              {t('settings.skills.workflowActions.versionHistory')}
+            </button>
+            <button
+              onClick={() => setPublishDialogOpen(true)}
+              disabled={publishMutation.isPending}
+              className="flex items-center gap-2 px-4 py-1.5 rounded-xl text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 border border-blue-700 disabled:opacity-50 transition-all shadow-sm"
+              title={t('settings.skills.workflowActions.saveAndPublish')}
+            >
+              {publishMutation.isPending ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Send className="w-3.5 h-3.5" />
+              )}
+              {t('settings.skills.workflowActions.saveAndPublish')}
+            </button>
             <button
               onClick={() => saveMutation.mutate()}
-              disabled={saveMutation.isPending || !store.isDirty}
+              disabled={saveMutation.isPending || !hasUnsavedChanges}
               className={`
-                flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all
-                ${store.isDirty
-                  ? 'bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm'
-                  : 'bg-muted text-muted-foreground hover:bg-muted/80'
+                flex items-center gap-2 px-4 py-1.5 rounded-xl text-sm font-medium transition-all shadow-sm
+                ${hasUnsavedChanges
+                  ? 'bg-primary text-primary-foreground hover:bg-primary/90 border border-primary'
+                  : 'bg-white/50 text-muted-foreground hover:bg-white/60 border border-slate-200'
                 }
               `}
             >
@@ -488,7 +683,11 @@ export default function WorkflowEditorPage() {
         {/* Floating Property Panel (Right) */}
         <div className="absolute right-4 top-24 bottom-4 z-10 pointer-events-none flex flex-col items-end justify-start">
           <div className="pointer-events-auto h-full flex flex-col">
-            <PropertyPanel tools={workflowTools} />
+            <PropertyPanel
+              tools={workflowTools}
+              workflowDescription={workflowDescriptionDraft}
+              onWorkflowDescriptionChange={setWorkflowDescriptionDraft}
+            />
           </div>
         </div>
 
@@ -504,7 +703,33 @@ export default function WorkflowEditorPage() {
           onRefresh={handleValidationRefresh}
         />
 
-        {skillId && <WorkflowTestRunPanel skillId={skillId} />}
+        {workflowId && <WorkflowTestRunPanel workflowId={workflowId} startInputMode={startInputMode} />}
+
+        <TargetVersionPanel
+          open={versionPanelOpen}
+          loading={versionsLoading}
+          loadError={versionsError instanceof Error ? versionsError.message : null}
+          isSystemTarget={Boolean(workflowEntity?.isSystem)}
+          draftVersionId={workflowVersions?.draftVersionId}
+          publishedVersionId={workflowVersions?.publishedVersionId}
+          versions={workflowVersions?.versions ?? []}
+          clearing={clearVersionsMutation.isPending}
+          deletingVersionId={deleteVersionMutation.isPending ? deleteVersionMutation.variables : null}
+          restoringVersionId={rollbackMutation.isPending ? rollbackMutation.variables : null}
+          onClose={() => setVersionPanelOpen(false)}
+          onRefresh={() => { void refetchVersions() }}
+          onClear={handleClearVersions}
+          onDelete={handleDeleteVersion}
+          onRestore={(versionId) => rollbackMutation.mutate(versionId)}
+        />
+
+        <PublishVersionDialog
+          open={publishDialogOpen}
+          defaultName={defaultPublishVersionName}
+          submitting={publishMutation.isPending}
+          onOpenChange={setPublishDialogOpen}
+          onConfirm={handlePublish}
+        />
       </div>
     </ReactFlowProvider>
   )

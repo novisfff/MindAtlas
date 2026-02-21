@@ -2,6 +2,7 @@ import type { Edge, Node } from '@xyflow/react'
 import type { InputParam } from '../../api/tools'
 import type { WfNodeData } from '../../stores/workflow-editor-store'
 import type { WorkflowToolDefinition } from './types'
+import { isValidStartStructuredFieldName, normalizeStartNodeConfig } from './startNodeConfig'
 
 const SYS_REFERENCE_PARAMS: InputParam[] = [
   {
@@ -82,7 +83,15 @@ function buildNodeOutputFields(
   toolByName: Map<string, WorkflowToolDefinition>,
 ): string[] {
   const cfg = (node.data.config ?? {}) as Record<string, unknown>
-  if (node.data.nodeType === 'start') return ['user_input']
+  if (node.data.nodeType === 'start') {
+    const normalized = normalizeStartNodeConfig(cfg)
+    if (normalized.inputMode === 'structured') {
+      return normalized.structuredFields
+        .map((field) => field.name.trim())
+        .filter((name) => isValidStartStructuredFieldName(name))
+    }
+    return ['user_input']
+  }
 
   if (node.data.nodeType === 'llm') {
     const mode = normalizeOutputMode(cfg.outputMode)

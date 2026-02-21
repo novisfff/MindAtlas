@@ -14,6 +14,13 @@ export function createDefaultNodeConfig(
   nodeType: NodeType | ContainerBodyNodeType,
   options?: { toolName?: string; toolDef?: WorkflowToolDefinition },
 ): NodeConfig | null {
+  if (nodeType === 'start') {
+    return {
+      inputMode: 'text',
+      structuredFields: [],
+    }
+  }
+
   if (nodeType === 'llm') {
     return {
       outputMode: 'text',

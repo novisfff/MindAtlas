@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { FileType, Tags, ChevronRight, Bot, Wrench, BrainCircuit } from 'lucide-react'
+import { FileType, Tags, ChevronRight, Bot, Wrench, BrainCircuit, Network } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 export function SettingsPage() {
@@ -51,6 +51,15 @@ export function SettingsPage() {
       path: '/settings/assistant-skills',
       color: 'text-purple-500',
       bgColor: 'bg-purple-500/10'
+    },
+    {
+      id: 'assistant-targets',
+      titleKey: 'pages.settings.assistantTargets',
+      descKey: 'pages.settings.assistantTargetsDesc',
+      icon: Network,
+      path: '/settings/assistant-targets',
+      color: 'text-cyan-500',
+      bgColor: 'bg-cyan-500/10'
     }
   ]
 

@@ -1,167 +1,29 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Loader2, Plus, Power, Pencil, Trash2, ChevronDown, ChevronRight, RotateCcw } from 'lucide-react'
+import { Loader2, Plus, RotateCcw } from 'lucide-react'
 import { toast } from 'sonner'
 import {
-  useSkillsQuery,
-  useToolsQuery,
-  useSystemToolDefinitionsQuery,
+  useAgentProfilesQuery,
   useCreateSkillMutation,
-  useUpdateSkillMutation,
   useDeleteSkillMutation,
-  useResetSkillMutation,
   useResetAllSkillsMutation,
+  useResetSkillMutation,
+  useSkillsQuery,
+  useUpdateSkillMutation,
+  useWorkflowsQuery,
 } from '../queries'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { ResetDangerConfirmDialog } from './ResetDangerConfirmDialog'
 import { SkillRow } from './SkillRow'
+import { SkillCard } from './SkillCard'
 import type { AssistantSkill, CreateSkillRequest, UpdateSkillRequest } from '../api/skills'
-
-interface SkillItemProps {
-  skill: AssistantSkill
-  onEdit: () => void
-  onDelete: () => void
-  onToggle: () => void
-  isToggling: boolean
-}
-
-function SkillItem({ skill, onEdit, onDelete, onToggle, isToggling }: SkillItemProps) {
-  const { t } = useTranslation()
-  const [expanded, setExpanded] = useState(false)
-  const isWorkflowMode = skill.langgraphPattern === 'workflow_dag'
-  const modeLabel = isWorkflowMode
-    ? t('settings.skills.modeWorkflow')
-    : t('settings.skills.modeAgentLoop')
-
-  return (
-    <div
-      className={`rounded-lg border transition-colors ${skill.enabled
-        ? 'border-purple-500 bg-purple-50 dark:bg-purple-950/20'
-        : 'hover:bg-muted/50'
-        }`}
-    >
-      <div className="flex items-center gap-4 p-4">
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="p-1 rounded hover:bg-muted"
-        >
-          {expanded ? (
-            <ChevronDown className="w-4 h-4" />
-          ) : (
-            <ChevronRight className="w-4 h-4" />
-          )}
-        </button>
-
-        <button
-          onClick={onToggle}
-          disabled={isToggling || skill.name === 'general_chat'}
-          title={
-            skill.name === 'general_chat'
-              ? t('settings.skills.cannotDisable', { defaultValue: 'This skill cannot be disabled' })
-              : skill.enabled
-                ? t('settings.skills.disable')
-                : t('settings.skills.enable')
-          }
-          className={`p-2 rounded-lg transition-colors ${skill.enabled
-            ? 'bg-purple-100 text-purple-600 dark:bg-purple-900 dark:text-purple-400'
-            : 'bg-muted text-muted-foreground hover:bg-primary/10 hover:text-primary'
-            } ${skill.name === 'general_chat' ? 'opacity-50 cursor-not-allowed' : ''}`}
-        >
-          <Power className={`w-5 h-5 ${isToggling ? 'animate-pulse' : ''}`} />
-        </button>
-
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <h4 className="font-medium truncate">{skill.name}</h4>
-            {skill.isSystem ? (
-              <span className="text-xs px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300">
-                {t('settings.skills.system')}
-              </span>
-            ) : (
-              <span className="text-xs px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300">
-                {t('settings.skills.custom')}
-              </span>
-            )}
-            <span
-              className={`text-xs px-1.5 py-0.5 rounded ${
-                isWorkflowMode
-                  ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300'
-                  : 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
-              }`}
-            >
-              {modeLabel}
-            </span>
-          </div>
-          <p className="text-sm text-muted-foreground truncate">{skill.description}</p>
-        </div>
-
-        <div className="flex items-center gap-1">
-          <button
-            onClick={onEdit}
-            title={t('common.edit')}
-            className="p-2 rounded hover:bg-muted"
-          >
-            <Pencil className="w-4 h-4 text-muted-foreground" />
-          </button>
-          {!skill.isSystem && (
-            <button
-              onClick={onDelete}
-              title={t('common.delete')}
-              className="p-2 rounded hover:bg-red-100 text-red-500"
-            >
-              <Trash2 className="w-4 h-4" />
-            </button>
-          )}
-        </div>
-      </div>
-
-      {expanded && (
-        <div className="px-4 pb-4 pt-0 border-t mx-4 mt-2">
-          {skill.intentExamples && skill.intentExamples.length > 0 && (
-            <div className="mt-3">
-              <p className="text-xs font-medium text-muted-foreground mb-1">
-                {t('settings.skills.intentExamples')}
-              </p>
-              <div className="flex flex-wrap gap-1">
-                {skill.intentExamples.map((ex, i) => (
-                  <span
-                    key={i}
-                    className="text-xs px-2 py-0.5 rounded bg-muted"
-                  >
-                    {ex}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {skill.tools && skill.tools.length > 0 && (
-            <div className="mt-3">
-              <p className="text-xs font-medium text-muted-foreground mb-1">
-                {t('settings.skills.tools')}
-              </p>
-              <div className="flex flex-wrap gap-1">
-                {skill.tools.map((tool, i) => (
-                  <span
-                    key={i}
-                    className="text-xs px-2 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300"
-                  >
-                    {tool}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
+import { buildSkillBindingTargets } from './skillTargetOptions'
 
 export function SkillManager() {
   const { t } = useTranslation()
   const { data: skills = [], isLoading } = useSkillsQuery()
-  const { data: tools = [] } = useToolsQuery()
-  const { data: systemToolDefs = [] } = useSystemToolDefinitionsQuery()
+  const { data: workflows = [] } = useWorkflowsQuery()
+  const { data: agents = [] } = useAgentProfilesQuery()
   const createMutation = useCreateSkillMutation()
   const updateMutation = useUpdateSkillMutation()
   const deleteMutation = useDeleteSkillMutation()
@@ -170,52 +32,32 @@ export function SkillManager() {
 
   const [editingId, setEditingId] = useState<string | null>(null)
   const [isAdding, setIsAdding] = useState(false)
+  const [createPlacement, setCreatePlacement] = useState<'header' | 'custom'>('header')
   const [deleteId, setDeleteId] = useState<string | null>(null)
   const [resetId, setResetId] = useState<string | null>(null)
-
-  const availableTools = useMemo(() => {
-    const systemAsTools = systemToolDefs.map((d) => ({
-      id: `system:${d.name}`,
-      name: d.name,
-      description: d.description,
-      kind: d.kind,
-      isSystem: true,
-      enabled: d.enabled,
-      inputParams: d.inputParams ?? null,
-      endpointUrl: null,
-      httpMethod: null,
-      headers: null,
-      queryParams: null,
-      bodyType: null,
-      bodyContent: null,
-      authType: null,
-      authHeaderName: null,
-      authScheme: null,
-      apiKeyHint: null,
-      timeoutSeconds: null,
-      payloadWrapper: null,
-      createdAt: '',
-      updatedAt: '',
-    }))
-
-    const merged = [...systemAsTools, ...tools]
-    const seen = new Set<string>()
-    return merged.filter((t) => {
-      if (!t?.name) return false
-      if (seen.has(t.name)) return false
-      seen.add(t.name)
-      return true
-    })
-  }, [systemToolDefs, tools])
-
   const [showResetAllConfirm, setShowResetAllConfirm] = useState(false)
+  const [expandedSkillId, setExpandedSkillId] = useState<string | null>(null)
+
+  const systemDefaultSkill = skills.find((item) => item.name === 'general_chat')
+  const defaultTargetType = systemDefaultSkill?.targetType ?? null
+  const defaultTargetId = defaultTargetType === 'workflow'
+    ? (systemDefaultSkill?.workflowId ?? null)
+    : (systemDefaultSkill?.agentProfileId ?? null)
+  const availableTargets = buildSkillBindingTargets(
+    workflows,
+    agents,
+    {
+      defaultTargetType,
+      defaultTargetId,
+    },
+  )
 
   const handleResetAll = async () => {
     try {
       await resetAllMutation.mutateAsync()
       toast.success(t('settings.skills.resetAllSuccess'))
       setShowResetAllConfirm(false)
-    } catch (error) {
+    } catch {
       toast.error(t('settings.skills.resetAllError'))
     }
   }
@@ -231,6 +73,11 @@ export function SkillManager() {
     createMutation.mutate(data as CreateSkillRequest, { onSuccess: () => setIsAdding(false) })
   }
 
+  const handleOpenCreate = (placement: 'header' | 'custom') => {
+    setCreatePlacement(placement)
+    setIsAdding(true)
+  }
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-8">
@@ -241,73 +88,82 @@ export function SkillManager() {
 
   const systemSkills = skills.filter((s) => s.isSystem)
   const customSkills = skills.filter((s) => !s.isSystem)
+  const resettingSkill = resetId ? skills.find((item) => item.id === resetId) : null
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
+      {/* Header Actions */}
       <div className="flex items-center justify-between">
-        <h3 className="font-semibold">{t('settings.skills.title')}</h3>
+        <div className="space-y-1">
+          <h3 className="font-semibold text-lg">{t('settings.skills.title')}</h3>
+          <p className="text-sm text-muted-foreground">{t('settings.skills.description')}</p>
+        </div>
         <button
-          onClick={() => setIsAdding(true)}
+          onClick={() => handleOpenCreate('header')}
           disabled={isAdding}
-          className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+          className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-xl bg-primary text-primary-foreground shadow-sm hover:bg-primary/90 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50"
         >
           <Plus className="w-4 h-4" /> {t('settings.skills.addSkill')}
         </button>
       </div>
 
-      {isAdding && (
-        <SkillRow
-          isNew
-          availableTools={availableTools}
-          onCancel={() => setIsAdding(false)}
-          onSave={handleSave}
-          isSaving={createMutation.isPending}
-        />
+      {isAdding && createPlacement === 'header' && (
+        <div className="animate-in fade-in slide-in-from-top-4 duration-300">
+          <SkillRow
+            isNew
+            availableTargets={availableTargets}
+            onCancel={() => setIsAdding(false)}
+            onSave={handleSave}
+            isSaving={createMutation.isPending}
+          />
+        </div>
       )}
 
-      {/* System Skills */}
+      {/* System Skills Section */}
       {systemSkills.length > 0 && (
-        <div className="space-y-2">
-          <div className="flex items-center gap-2">
-            <h4 className="text-sm font-medium text-muted-foreground">
-              {t('settings.skills.systemSkills')} ({systemSkills.length})
+        <div className="space-y-4">
+          <div className="flex items-center justify-between pb-2 border-b">
+            <h4 className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+              {t('settings.skills.systemSkills')}
+              <span className="px-1.5 py-0.5 rounded-full bg-muted text-xs">{systemSkills.length}</span>
             </h4>
             <button
               onClick={() => setShowResetAllConfirm(true)}
-              className="p-1 hover:bg-muted rounded-md text-muted-foreground hover:text-foreground transition-colors"
+              className="group flex items-center gap-1.5 px-2 py-1 text-xs font-medium text-muted-foreground hover:text-orange-600 transition-colors"
               title={t('settings.skills.reset')}
             >
-              <RotateCcw className="w-3.5 h-3.5" />
+              <RotateCcw className="w-3.5 h-3.5 group-hover:rotate-180 transition-transform duration-500" />
+              {t('settings.skills.resetAll')}
             </button>
           </div>
-          <div className="space-y-2">
+
+          <div className="grid gap-4">
             {systemSkills.map((skill) => (
-              <div key={skill.id}>
+              <div key={skill.id} className="transition-all duration-200">
                 {editingId === skill.id ? (
                   <SkillRow
                     skill={skill}
                     isEditing
-                    availableTools={availableTools}
+                    availableTargets={availableTargets}
                     onCancel={() => setEditingId(null)}
                     onSave={(data) => {
                       updateMutation.mutate(
                         { id: skill.id, data },
-                        { onSuccess: () => setEditingId(null) }
+                        { onSuccess: () => setEditingId(null) },
                       )
                     }}
                     onReset={() => setResetId(skill.id)}
                     isSaving={updateMutation.isPending}
                   />
                 ) : (
-                  <SkillItem
+                  <SkillCard
                     skill={skill}
+                    isExpanded={expandedSkillId === skill.id}
+                    onToggleExpand={() => setExpandedSkillId(expandedSkillId === skill.id ? null : skill.id)}
                     onEdit={() => setEditingId(skill.id)}
                     onDelete={() => { }}
-                    onToggle={() => handleToggle(skill)}
-                    isToggling={
-                      updateMutation.isPending &&
-                      updateMutation.variables?.id === skill.id
-                    }
+                    onToggleEnabled={() => handleToggle(skill)}
+                    isToggling={updateMutation.isPending && updateMutation.variables?.id === skill.id}
                   />
                 )}
               </div>
@@ -316,43 +172,65 @@ export function SkillManager() {
         </div>
       )}
 
-      {/* Custom Skills */}
-      <div className="space-y-2">
-        <h4 className="text-sm font-medium text-muted-foreground">
-          {t('settings.skills.customSkills')} ({customSkills.length})
-        </h4>
+      {/* Custom Skills Section */}
+      <div className="space-y-4">
+        <div className="flex items-center justify-between pb-2 border-b">
+          <h4 className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+            {t('settings.skills.customSkills')}
+            <span className="px-1.5 py-0.5 rounded-full bg-muted text-xs">{customSkills.length}</span>
+          </h4>
+        </div>
+
+        {isAdding && createPlacement === 'custom' && (
+          <div className="animate-in fade-in slide-in-from-top-4 duration-300">
+            <SkillRow
+              isNew
+              availableTargets={availableTargets}
+              onCancel={() => setIsAdding(false)}
+              onSave={handleSave}
+              isSaving={createMutation.isPending}
+            />
+          </div>
+        )}
+
         {customSkills.length === 0 && !isAdding ? (
-          <p className="text-sm text-muted-foreground py-4 text-center">
-            {t('settings.skills.noCustomSkills')}
-          </p>
+          <button
+            type="button"
+            onClick={() => handleOpenCreate('custom')}
+            className="w-full py-12 border rounded-xl border-dashed bg-muted/10 flex flex-col items-center justify-center text-center gap-2 transition-colors hover:bg-muted/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          >
+            <div className="p-3 rounded-full bg-muted/20">
+              <Plus className="w-6 h-6 text-muted-foreground/70" />
+            </div>
+            <p className="text-sm text-muted-foreground max-w-xs">{t('settings.skills.noCustomSkills')}</p>
+          </button>
         ) : (
-          <div className="space-y-2">
+          <div className="grid gap-4">
             {customSkills.map((skill) => (
-              <div key={skill.id}>
+              <div key={skill.id} className="transition-all duration-200">
                 {editingId === skill.id ? (
-              <SkillRow
-                skill={skill}
-                isEditing
-                availableTools={availableTools}
-                onCancel={() => setEditingId(null)}
-                onSave={(data) => {
-                  updateMutation.mutate(
-                    { id: skill.id, data },
-                    { onSuccess: () => setEditingId(null) }
+                  <SkillRow
+                    skill={skill}
+                    isEditing
+                    availableTargets={availableTargets}
+                    onCancel={() => setEditingId(null)}
+                    onSave={(data) => {
+                      updateMutation.mutate(
+                        { id: skill.id, data },
+                        { onSuccess: () => setEditingId(null) },
                       )
                     }}
                     isSaving={updateMutation.isPending}
                   />
                 ) : (
-                  <SkillItem
+                  <SkillCard
                     skill={skill}
+                    isExpanded={expandedSkillId === skill.id}
+                    onToggleExpand={() => setExpandedSkillId(expandedSkillId === skill.id ? null : skill.id)}
                     onEdit={() => setEditingId(skill.id)}
                     onDelete={() => setDeleteId(skill.id)}
-                    onToggle={() => handleToggle(skill)}
-                    isToggling={
-                      updateMutation.isPending &&
-                      updateMutation.variables?.id === skill.id
-                    }
+                    onToggleEnabled={() => handleToggle(skill)}
+                    isToggling={updateMutation.isPending && updateMutation.variables?.id === skill.id}
                   />
                 )}
               </div>
@@ -365,48 +243,45 @@ export function SkillManager() {
         isOpen={!!deleteId}
         title={t('settings.skills.deleteTitle')}
         description={t('settings.skills.deleteDescription')}
-        confirmText={t('common.delete')}
-        variant="destructive"
-        onConfirm={() =>
-          deleteId &&
-          deleteMutation.mutate(deleteId, { onSuccess: () => setDeleteId(null) })
-        }
         onCancel={() => setDeleteId(null)}
+        onConfirm={() => {
+          if (!deleteId) return
+          deleteMutation.mutate(deleteId, {
+            onSuccess: () => setDeleteId(null),
+          })
+        }}
+        isLoading={deleteMutation.isPending}
       />
 
-      <ConfirmDialog
-        isOpen={!!resetId}
-        title={t('settings.skills.resetTitle')}
-        description={t('settings.skills.resetDescription')}
-        confirmText={t('settings.skills.reset')}
-        cancelText={t('common.cancel')}
-        variant="default"
-        isLoading={resetMutation.isPending}
-        onConfirm={() =>
-          resetId &&
+      <ResetDangerConfirmDialog
+        open={!!resetId}
+        mode="single"
+        targetName={resettingSkill?.name}
+        loading={resetMutation.isPending}
+        onOpenChange={(open) => {
+          if (!open) {
+            setResetId(null)
+          }
+        }}
+        onConfirm={() => {
+          if (!resetId) return
           resetMutation.mutate(resetId, {
             onSuccess: () => {
               setResetId(null)
-              if (editingId === resetId) setEditingId(null)
-              toast.success(t('settings.skills.resetSuccess', { defaultValue: 'Skill reset successfully' }))
+              toast.success(t('settings.skills.resetSuccess'))
             },
-            onError: () => {
-              toast.error(t('settings.skills.resetError', { defaultValue: 'Failed to reset skill' }))
-            }
+            onError: () => toast.error(t('settings.skills.resetError')),
           })
-        }
-        onCancel={() => setResetId(null)}
+        }}
       />
 
-      <ConfirmDialog
-        isOpen={showResetAllConfirm}
-        title={t('settings.skills.resetTitle')}
-        description={t('settings.skills.resetDescription')}
-        confirmText={t('settings.skills.reset')}
-        cancelText={t('common.cancel')}
-        variant="destructive"
+      <ResetDangerConfirmDialog
+        open={showResetAllConfirm}
+        mode="all"
+        affectedCount={systemSkills.length}
+        loading={resetAllMutation.isPending}
+        onOpenChange={setShowResetAllConfirm}
         onConfirm={handleResetAll}
-        onCancel={() => setShowResetAllConfirm(false)}
       />
     </div>
   )

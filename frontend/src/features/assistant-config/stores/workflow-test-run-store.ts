@@ -60,6 +60,7 @@ interface WorkflowTestRunState {
   panelOpen: boolean
   status: WorkflowTestRunStatus
   input: string
+  structuredInput: Record<string, unknown>
   streamOutput: boolean
   activeRunId: string | null
   activeRunStartedAt: string | null
@@ -73,6 +74,8 @@ interface WorkflowTestRunState {
 
   setPanelOpen: (open: boolean) => void
   setInput: (input: string) => void
+  setStructuredInput: (value: Record<string, unknown>) => void
+  setStructuredInputField: (field: string, value: unknown) => void
   setStreamOutput: (streamOutput: boolean) => void
   beginRun: (abortController: AbortController) => void
   cancelRun: () => void
@@ -128,6 +131,7 @@ export const useWorkflowTestRunStore = create<WorkflowTestRunState>()((set, get)
   panelOpen: false,
   status: 'idle',
   input: '',
+  structuredInput: {},
   streamOutput: true,
   activeRunId: null,
   activeRunStartedAt: null,
@@ -141,6 +145,13 @@ export const useWorkflowTestRunStore = create<WorkflowTestRunState>()((set, get)
 
   setPanelOpen: (panelOpen) => set({ panelOpen }),
   setInput: (input) => set({ input }),
+  setStructuredInput: (value) => set({ structuredInput: value }),
+  setStructuredInputField: (field, value) => set((state) => ({
+    structuredInput: {
+      ...state.structuredInput,
+      [field]: value,
+    },
+  })),
   setStreamOutput: (streamOutput) => set({ streamOutput }),
 
   beginRun: (abortController) => {
@@ -382,6 +393,7 @@ export const useWorkflowTestRunStore = create<WorkflowTestRunState>()((set, get)
     set({
       status: 'idle',
       input: '',
+      structuredInput: {},
       activeRunId: null,
       activeRunStartedAt: null,
       result: EMPTY_RESULT,

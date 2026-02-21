@@ -16,7 +16,10 @@ AuthType = Literal["none", "bearer", "basic", "api-key"]
 BodyType = Literal["none", "form-data", "x-www-form-urlencoded", "json", "xml", "raw"]
 SkillMode = Literal["langgraph"]
 LanggraphPattern = Literal["agent_loop", "workflow_dag"]
+TargetType = Literal["workflow", "agent"]
+AgentModelSource = Literal["default", "custom"]
 OutputFieldType = Literal["string", "number", "integer", "boolean", "object", "array"]
+VersionSource = Literal["save", "publish"]
 
 # 允许的 URL scheme
 ALLOWED_URL_SCHEMES = {"http", "https"}
@@ -270,9 +273,66 @@ class WorkflowInput(CamelModel):
     viewport: dict | None = None
 
 
+def _resolve_workflow_start_input_mode(workflow: WorkflowInput | None) -> str:
+    if workflow is None:
+        return "text"
+    for node in workflow.nodes:
+        if node.node_type != "start":
+            continue
+        cfg = node.config if isinstance(node.config, dict) else {}
+        raw_mode = str(cfg.get("input_mode", cfg.get("inputMode", "text")) or "text").strip().lower()
+        if raw_mode == "structured":
+            return "structured"
+        return "text"
+    return "text"
+
+
 class WorkflowTestRunRequest(CamelModel):
     """工作流测试运行请求（仅运行草稿，不持久化）。"""
     workflow: WorkflowInput
+    user_input: str | None = Field(default=None, max_length=8000)
+    structured_input: dict | None = None
+    stream_output: bool = True
+
+    @model_validator(mode="after")
+    def _validate(self) -> "WorkflowTestRunRequest":
+        mode = _resolve_workflow_start_input_mode(self.workflow)
+        if mode == "structured":
+            if not isinstance(self.structured_input, dict):
+                raise ValueError("structured_input is required when start inputMode=structured")
+            if self.user_input is not None and str(self.user_input).strip():
+                raise ValueError("user_input is not allowed when start inputMode=structured")
+            return self
+
+        if self.structured_input is not None:
+            raise ValueError("structured_input is only allowed when start inputMode=structured")
+        if self.user_input is None or not str(self.user_input).strip():
+            raise ValueError("user_input is required when start inputMode=text")
+        return self
+
+
+class AgentTestRunDraftInput(CamelModel):
+    """Agent 测试运行草稿配置（不持久化）。"""
+    system_prompt: str = Field(..., min_length=1, max_length=4096)
+    tools: list[str] = []
+    kb_config: dict | None = None
+    model_source: AgentModelSource = "default"
+    model_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "AgentTestRunDraftInput":
+        if not self.system_prompt.strip():
+            raise ValueError("system_prompt is required")
+        if self.model_source == "custom" and self.model_id is None:
+            raise ValueError("custom model_source requires model_id")
+        if self.model_source == "default":
+            self.model_id = None
+        return self
+
+
+class AgentTestRunRequest(CamelModel):
+    """Agent 测试运行请求（仅运行草稿，不持久化）。"""
+    draft: AgentTestRunDraftInput
     user_input: str = Field(..., min_length=1, max_length=8000)
     stream_output: bool = True
 
@@ -289,12 +349,100 @@ class WorkflowValidationResponse(CamelModel):
     errors: list[WorkflowValidationError] = Field(default_factory=list)
 
 
+class AssistantWorkflowCreateRequest(CamelModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    description: str = Field(default="", max_length=512)
+    enabled: bool = True
+    workflow: WorkflowInput | None = None
+
+
+class AssistantWorkflowUpdateRequest(CamelModel):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+    enabled: bool | None = None
+    workflow: WorkflowInput | None = None
+
+
+class WorkflowPublishRequest(CamelModel):
+    workflow: WorkflowInput
+    version_name: str | None = Field(default=None, max_length=255)
+    description: str | None = Field(default=None, max_length=512)
+
+
+class AssistantAgentProfileCreateRequest(CamelModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    description: str = Field(default="", max_length=512)
+    system_prompt: str = Field(..., min_length=1, max_length=4096)
+    tools: list[str] = []
+    kb_config: dict | None = None
+    model_source: AgentModelSource = "default"
+    model_id: UUID | None = None
+    enabled: bool = True
+
+    @model_validator(mode="after")
+    def _validate(self) -> "AssistantAgentProfileCreateRequest":
+        if not self.system_prompt.strip():
+            raise ValueError("system_prompt is required")
+        if self.model_source == "custom" and self.model_id is None:
+            raise ValueError("custom model_source requires model_id")
+        if self.model_source == "default":
+            self.model_id = None
+        return self
+
+
+class AssistantAgentProfileUpdateRequest(CamelModel):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+    system_prompt: str | None = Field(default=None, max_length=4096)
+    tools: list[str] | None = None
+    kb_config: dict | None = None
+    model_source: AgentModelSource | None = None
+    model_id: UUID | None = None
+    enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "AssistantAgentProfileUpdateRequest":
+        if self.system_prompt is not None and not self.system_prompt.strip():
+            raise ValueError("system_prompt is required")
+        if self.model_source == "custom" and self.model_id is None:
+            raise ValueError("custom model_source requires model_id")
+        if self.model_source == "default":
+            self.model_id = None
+        return self
+
+
+class AgentPublishDraftInput(CamelModel):
+    system_prompt: str = Field(..., min_length=1, max_length=4096)
+    tools: list[str] = []
+    kb_config: dict | None = None
+    model_source: AgentModelSource = "default"
+    model_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "AgentPublishDraftInput":
+        if not self.system_prompt.strip():
+            raise ValueError("system_prompt is required")
+        if self.model_source == "custom" and self.model_id is None:
+            raise ValueError("custom model_source requires model_id")
+        if self.model_source == "default":
+            self.model_id = None
+        return self
+
+
+class AgentPublishRequest(CamelModel):
+    draft: AgentPublishDraftInput
+    version_name: str | None = Field(default=None, max_length=255)
+
+
 class AssistantSkillCreateRequest(CamelModel):
     name: str = Field(..., min_length=1, max_length=128)
     description: str = Field(..., min_length=1, max_length=512)
     intent_examples: list[str] = []
     tools: list[str] = []
     mode: SkillMode = "langgraph"
+    target_type: TargetType | None = None
+    workflow_id: UUID | None = None
+    agent_profile_id: UUID | None = None
     langgraph_pattern: LanggraphPattern | None = None
     system_prompt: str | None = Field(default=None, max_length=4096)
     enabled: bool = True
@@ -303,9 +451,18 @@ class AssistantSkillCreateRequest(CamelModel):
 
     @model_validator(mode="after")
     def _validate(self) -> "AssistantSkillCreateRequest":
-        if self.langgraph_pattern is None:
-            raise ValueError("langgraph_pattern is required")
-        if self.langgraph_pattern == "agent_loop" and not (self.system_prompt or "").strip():
+        if self.mode != "langgraph":
+            raise ValueError("mode must be langgraph")
+        if self.workflow_id and self.agent_profile_id:
+            raise ValueError("workflow_id and agent_profile_id are mutually exclusive")
+        if self.target_type == "workflow" and self.agent_profile_id:
+            raise ValueError("target_type=workflow cannot set agent_profile_id")
+        if self.target_type == "agent" and self.workflow_id:
+            raise ValueError("target_type=agent cannot set workflow_id")
+        has_new_target = bool(self.target_type or self.workflow_id or self.agent_profile_id)
+        if not has_new_target and self.langgraph_pattern is None:
+            raise ValueError("target_type or langgraph_pattern is required")
+        if self.langgraph_pattern == "agent_loop" and not self.agent_profile_id and not (self.system_prompt or "").strip():
             raise ValueError("agent_loop requires system_prompt")
         return self
 
@@ -316,6 +473,9 @@ class AssistantSkillUpdateRequest(CamelModel):
     intent_examples: list[str] | None = None
     tools: list[str] | None = None
     mode: SkillMode | None = None
+    target_type: TargetType | None = None
+    workflow_id: UUID | None = None
+    agent_profile_id: UUID | None = None
     langgraph_pattern: LanggraphPattern | None = None
     system_prompt: str | None = Field(default=None, max_length=4096)
     enabled: bool | None = None
@@ -326,6 +486,12 @@ class AssistantSkillUpdateRequest(CamelModel):
     def _validate(self) -> "AssistantSkillUpdateRequest":
         if self.mode is not None and self.mode != "langgraph":
             raise ValueError("mode must be langgraph")
+        if self.workflow_id and self.agent_profile_id:
+            raise ValueError("workflow_id and agent_profile_id are mutually exclusive")
+        if self.target_type == "workflow" and self.agent_profile_id:
+            raise ValueError("target_type=workflow cannot set agent_profile_id")
+        if self.target_type == "agent" and self.workflow_id:
+            raise ValueError("target_type=agent cannot set workflow_id")
         if self.langgraph_pattern == "agent_loop" and self.system_prompt is not None:
             if not self.system_prompt.strip():
                 raise ValueError("agent_loop requires system_prompt")
@@ -372,6 +538,92 @@ class WorkflowEdgeResponse(OrmModel):
     updated_at: datetime
 
 
+class AssistantWorkflowResponse(OrmModel):
+    id: UUID
+    name: str
+    description: str
+    is_system: bool
+    enabled: bool
+    workflow_version: int = 1
+    workflow_viewport: dict | None = None
+    nodes: list[WorkflowNodeResponse] = []
+    edges: list[WorkflowEdgeResponse] = []
+    draft_version_id: UUID | None = None
+    published_version_id: UUID | None = None
+    referenced_skill_ids: list[UUID] = []
+    reference_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class AssistantAgentProfileResponse(OrmModel):
+    id: UUID
+    name: str
+    description: str
+    system_prompt: str | None
+    tools: list[str] | None
+    kb_config: dict | None
+    model_source: AgentModelSource = "default"
+    model_id: UUID | None = None
+    is_system: bool
+    enabled: bool
+    draft_version_id: UUID | None = None
+    published_version_id: UUID | None = None
+    referenced_skill_ids: list[UUID] = []
+    reference_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class TargetVersionResponse(OrmModel):
+    id: UUID
+    sequence_no: int
+    version_name: str
+    version_source: VersionSource
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkflowVersionListResponse(CamelModel):
+    workflow_id: UUID
+    draft_version_id: UUID | None = None
+    published_version_id: UUID | None = None
+    versions: list[TargetVersionResponse] = []
+
+
+class AgentVersionListResponse(CamelModel):
+    agent_profile_id: UUID
+    draft_version_id: UUID | None = None
+    published_version_id: UUID | None = None
+    versions: list[TargetVersionResponse] = []
+
+
+class DeleteVersionResponse(CamelModel):
+    deleted_version_id: UUID
+    draft_version_id: UUID | None = None
+    published_version_id: UUID | None = None
+
+
+class ClearVersionsResponse(CamelModel):
+    deleted_count: int = 0
+    kept_latest_version_id: UUID | None = None
+    draft_version_id: UUID | None = None
+    published_version_id: UUID | None = None
+
+
+class RollbackVersionResponse(CamelModel):
+    draft_version_id: UUID | None = None
+    published_version_id: UUID | None = None
+    workflow: WorkflowInput | None = None
+    agent_draft: AgentPublishDraftInput | None = None
+
+
+class SkillTargetSummary(CamelModel):
+    id: UUID
+    name: str
+    enabled: bool
+
+
 class AssistantSkillResponse(OrmModel):
     id: UUID
     name: str
@@ -379,6 +631,10 @@ class AssistantSkillResponse(OrmModel):
     intent_examples: list[str] | None
     tools: list[str] | None
     mode: str
+    target_type: TargetType | None = None
+    workflow_id: UUID | None = None
+    agent_profile_id: UUID | None = None
+    target_summary: SkillTargetSummary | None = None
     langgraph_pattern: str | None = None
     system_prompt: str | None
     is_system: bool

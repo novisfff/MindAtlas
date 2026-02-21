@@ -6,6 +6,13 @@ export interface SkillKBConfig {
 
 export type SkillMode = 'langgraph'
 export type LanggraphPattern = 'agent_loop' | 'workflow_dag'
+export type SkillTargetType = 'workflow' | 'agent'
+
+export interface SkillTargetSummary {
+  id: string
+  name: string
+  enabled: boolean
+}
 
 export interface AssistantSkill {
   id: string
@@ -14,6 +21,10 @@ export interface AssistantSkill {
   intentExamples: string[] | null
   tools: string[] | null
   mode: SkillMode
+  targetType: SkillTargetType | null
+  workflowId: string | null
+  agentProfileId: string | null
+  targetSummary?: SkillTargetSummary | null
   langgraphPattern: LanggraphPattern | null
   systemPrompt: string | null
   isSystem: boolean
@@ -54,6 +65,9 @@ export interface CreateSkillRequest {
   description: string
   intentExamples?: string[]
   tools?: string[]
+  targetType?: SkillTargetType
+  workflowId?: string
+  agentProfileId?: string
   mode?: SkillMode
   langgraphPattern?: LanggraphPattern
   systemPrompt?: string
@@ -66,6 +80,9 @@ export interface UpdateSkillRequest {
   description?: string
   intentExamples?: string[]
   tools?: string[]
+  targetType?: SkillTargetType
+  workflowId?: string
+  agentProfileId?: string
   mode?: SkillMode
   langgraphPattern?: LanggraphPattern
   systemPrompt?: string

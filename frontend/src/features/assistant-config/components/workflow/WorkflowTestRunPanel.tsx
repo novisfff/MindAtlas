@@ -16,15 +16,20 @@ import {
   Keyboard,
 } from 'lucide-react'
 import { toast } from 'sonner'
+import { useTranslation } from 'react-i18next'
 import { Switch } from '@/components/ui/switch'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { useWorkflowEditorStore } from '../../stores/workflow-editor-store'
 import { useWorkflowTestRunStore } from '../../stores/workflow-test-run-store'
-import { runWorkflowTestStream, validateWorkflow, type WorkflowRunEvent } from '../../api/workflow'
+import { runWorkflowTestStreamById, validateWorkflowById } from '../../api/workflows'
+import type { WorkflowRunEvent } from '../../api/workflow'
 import { serializeToWorkflowInput } from './serialization'
+import { isValidStartStructuredFieldName, normalizeStartNodeConfig } from './startNodeConfig'
+import type { StartStructuredField } from '../../api/workflow'
 
 interface WorkflowTestRunPanelProps {
-  skillId: string
+  workflowId: string
+  startInputMode: 'text' | 'structured'
 }
 
 type PanelTab = 'input' | 'result' | 'trace' | 'raw'
@@ -99,7 +104,36 @@ function splitScopedNodeId(scoped: string): { containerId: string; nodeId: strin
   }
 }
 
-export function WorkflowTestRunPanel({ skillId }: WorkflowTestRunPanelProps) {
+function parseStructuredValue(
+  field: StartStructuredField,
+  rawValue: unknown,
+): { ok: true; value: unknown } | { ok: false; missing: boolean } {
+  if (rawValue === undefined || rawValue === null || rawValue === '') {
+    return { ok: false, missing: true }
+  }
+  if (field.type === 'string') {
+    return { ok: true, value: String(rawValue) }
+  }
+  if (field.type === 'number') {
+    const parsed = Number(rawValue)
+    if (Number.isFinite(parsed)) return { ok: true, value: parsed }
+    return { ok: false, missing: false }
+  }
+  if (field.type === 'integer') {
+    const parsed = Number(rawValue)
+    if (Number.isInteger(parsed)) return { ok: true, value: parsed }
+    return { ok: false, missing: false }
+  }
+  if (field.type === 'boolean') {
+    if (rawValue === true || rawValue === 'true') return { ok: true, value: true }
+    if (rawValue === false || rawValue === 'false') return { ok: true, value: false }
+    return { ok: false, missing: false }
+  }
+  return { ok: false, missing: false }
+}
+
+export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTestRunPanelProps) {
+  const { t } = useTranslation()
   const [activeTab, setActiveTab] = useState<PanelTab>('input')
   const [expandedNodeIo, setExpandedNodeIo] = useState<Record<string, boolean>>({})
   const [expandedNodeIoFull, setExpandedNodeIoFull] = useState<Record<string, boolean>>({})
@@ -109,6 +143,7 @@ export function WorkflowTestRunPanel({ skillId }: WorkflowTestRunPanelProps) {
     panelOpen,
     status,
     input,
+    structuredInput,
     streamOutput,
     result,
     deltaSummary,
@@ -118,6 +153,7 @@ export function WorkflowTestRunPanel({ skillId }: WorkflowTestRunPanelProps) {
     sessionRuns,
     setPanelOpen,
     setInput,
+    setStructuredInputField,
     setStreamOutput,
     beginRun,
     cancelRun,
@@ -125,6 +161,11 @@ export function WorkflowTestRunPanel({ skillId }: WorkflowTestRunPanelProps) {
     markRunError,
     reset,
   } = useWorkflowTestRunStore()
+  const startStructuredFields = useMemo(() => {
+    const startNode = wfStore.nodes.find((node) => node.data.nodeType === 'start')
+    return normalizeStartNodeConfig(startNode?.data.config ?? null).structuredFields
+      .filter((field) => isValidStartStructuredFieldName(field.name))
+  }, [wfStore.nodes])
 
   const orderedTrace = useMemo(() => [...traceEvents].reverse(), [traceEvents])
   const traceNodes = useMemo(() => Object.values(nodeTraceMap), [nodeTraceMap])
@@ -158,11 +199,11 @@ export function WorkflowTestRunPanel({ skillId }: WorkflowTestRunPanelProps) {
   }
 
   const handleRun = async () => {
-    if (!skillId) return
+    if (!workflowId) return
     const workflow = serializeToWorkflowInput(wfStore.nodes, wfStore.edges, wfStore.viewport)
     let validation
     try {
-      validation = await validateWorkflow(skillId, workflow)
+      validation = await validateWorkflowById(workflowId, workflow)
     } catch (error) {
       const message = error instanceof Error ? error.message : '校验失败'
       toast.error(message)
@@ -176,10 +217,41 @@ export function WorkflowTestRunPanel({ skillId }: WorkflowTestRunPanelProps) {
       return
     }
 
-    const userInput = input.trim()
-    if (!userInput) {
-      toast.error('请输入测试输入')
-      return
+    const payload: {
+      workflow: ReturnType<typeof serializeToWorkflowInput>
+      userInput?: string
+      structuredInput?: Record<string, unknown>
+      streamOutput: boolean
+    } = {
+      workflow,
+      streamOutput,
+    }
+
+    if (startInputMode === 'structured') {
+      const structuredPayload: Record<string, unknown> = {}
+      for (const field of startStructuredFields) {
+        const parsed = parseStructuredValue(field, structuredInput[field.name])
+        if (!parsed.ok) {
+          if (parsed.missing) {
+            if (field.required) {
+              toast.error(t('settings.skills.structuredInputInvalid'))
+              return
+            }
+            continue
+          }
+          toast.error(t('settings.skills.structuredInputInvalid'))
+          return
+        }
+        structuredPayload[field.name] = parsed.value
+      }
+      payload.structuredInput = structuredPayload
+    } else {
+      const userInput = input.trim()
+      if (!userInput) {
+        toast.error('请输入测试输入')
+        return
+      }
+      payload.userInput = userInput
     }
 
     const controller = new AbortController()
@@ -188,13 +260,9 @@ export function WorkflowTestRunPanel({ skillId }: WorkflowTestRunPanelProps) {
     setActiveTab('trace')
 
     try {
-      await runWorkflowTestStream(
-        skillId,
-        {
-          workflow,
-          userInput,
-          streamOutput,
-        },
+      await runWorkflowTestStreamById(
+        workflowId,
+        payload,
         {
           signal: controller.signal,
           onEvent: (event) => {
@@ -295,18 +363,58 @@ export function WorkflowTestRunPanel({ skillId }: WorkflowTestRunPanelProps) {
               <div className="flex-1 flex flex-col gap-2 min-h-0">
                 <div className="flex items-center justify-between shrink-0">
                   <label className="text-xs font-medium text-foreground">
-                    测试输入
+                    {startInputMode === 'structured' ? t('settings.skills.structuredInputRunPanelTitle') : '测试输入'}
                   </label>
-                  <span className="text-[10px] text-muted-foreground">
-                    {input.length} chars
-                  </span>
+                  {startInputMode === 'text' && (
+                    <span className="text-[10px] text-muted-foreground">
+                      {input.length} chars
+                    </span>
+                  )}
                 </div>
-                <textarea
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  placeholder="输入测试内容..."
-                  className="flex-1 w-full resize-none rounded-lg border bg-white px-4 py-3 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/50 transition-all font-mono"
-                />
+                {startInputMode === 'structured' ? (
+                  <div className="flex-1 overflow-auto space-y-2 rounded-lg border bg-white px-3 py-3">
+                    {startStructuredFields.length === 0 && (
+                      <div className="text-xs text-muted-foreground">{t('settings.skills.structuredInputInvalid')}</div>
+                    )}
+                    {startStructuredFields.map((field) => (
+                      <div key={field.name} className="space-y-1">
+                        <label className="text-[11px] font-medium text-foreground/80">
+                          {field.name}
+                          {field.required ? ' *' : ''}
+                        </label>
+                        {field.type === 'boolean' ? (
+                          <select
+                            value={structuredInput[field.name] === true ? 'true' : structuredInput[field.name] === false ? 'false' : ''}
+                            onChange={(e) => {
+                              const value = e.target.value
+                              setStructuredInputField(field.name, value === '' ? '' : value === 'true')
+                            }}
+                            className="w-full px-2 py-1.5 text-xs rounded border bg-background"
+                          >
+                            <option value="">-</option>
+                            <option value="true">true</option>
+                            <option value="false">false</option>
+                          </select>
+                        ) : (
+                          <input
+                            type={field.type === 'number' || field.type === 'integer' ? 'number' : 'text'}
+                            step={field.type === 'integer' ? '1' : 'any'}
+                            value={String(structuredInput[field.name] ?? '')}
+                            onChange={(e) => setStructuredInputField(field.name, e.target.value)}
+                            className="w-full px-2 py-1.5 text-xs rounded border bg-background"
+                          />
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <textarea
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    placeholder="输入测试内容..."
+                    className="flex-1 w-full resize-none rounded-lg border bg-white px-4 py-3 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/50 transition-all font-mono"
+                  />
+                )}
               </div>
 
               {/* Controls */}
@@ -348,7 +456,7 @@ export function WorkflowTestRunPanel({ skillId }: WorkflowTestRunPanelProps) {
                   ) : (
                     <button
                       onClick={() => void handleRun()}
-                      disabled={!input.trim()}
+                      disabled={startInputMode === 'text' ? !input.trim() : false}
                       className="flex items-center gap-2 px-6 py-2 bg-primary text-primary-foreground hover:bg-primary/90 rounded-lg text-xs font-medium shadow-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed active:scale-95"
                     >
                       <Play className="w-3.5 h-3.5 fill-current" />

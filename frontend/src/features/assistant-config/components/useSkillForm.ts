@@ -1,54 +1,65 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type {
   AssistantSkill,
   CreateSkillRequest,
   UpdateSkillRequest,
-  LanggraphPattern,
-  SkillKBConfig,
 } from '../api/skills'
+import type { AssistantExecutableTarget } from './skillTargetOptions'
+import { resolveSkillTargetKey } from './skillTargetOptions'
 
 export interface UseSkillFormOptions {
   skill?: AssistantSkill
+  availableTargets: AssistantExecutableTarget[]
 }
 
 export interface SkillFormState {
   name: string
   description: string
-  langgraphPattern: LanggraphPattern
-  systemPrompt: string
+  selectedTargetKey: string
   intentExamples: string[]
-  agentTools: string[]
-  kbConfig: SkillKBConfig
   newIntent: string
 }
 
 export interface SkillFormActions {
   setName: (name: string) => void
   setDescription: (description: string) => void
-  setLanggraphPattern: (pattern: LanggraphPattern) => void
-  setSystemPrompt: (prompt: string) => void
+  setSelectedTargetKey: (key: string) => void
   setNewIntent: (intent: string) => void
-  setKbConfig: (config: SkillKBConfig) => void
-  setAgentTools: (tools: string[]) => void
   addIntent: () => void
   removeIntent: (index: number) => void
 }
 
-export function useSkillForm({ skill }: UseSkillFormOptions) {
+export function useSkillForm({ skill, availableTargets }: UseSkillFormOptions) {
+  const firstBindableTarget = availableTargets.find((item) => item.bindable) ?? availableTargets[0]
+  const initialTargetKey =
+    resolveSkillTargetKey(skill, availableTargets) ??
+    firstBindableTarget?.key ??
+    ''
+
   const [name, setName] = useState(skill?.name || '')
   const [description, setDescription] = useState(skill?.description || '')
-  const [langgraphPattern, setLanggraphPattern] = useState<LanggraphPattern>(
-    skill?.langgraphPattern === 'workflow_dag' ? 'workflow_dag' : 'agent_loop'
-  )
-  const [systemPrompt, setSystemPrompt] = useState(skill?.systemPrompt || '')
-  const [intentExamples, setIntentExamples] = useState<string[]>(
-    skill?.intentExamples || []
-  )
-  const [agentTools, setAgentTools] = useState<string[]>(skill?.tools || [])
-  const [kbConfig, setKbConfig] = useState<SkillKBConfig>(
-    skill?.kbConfig || { enabled: false }
-  )
+  const [selectedTargetKey, setSelectedTargetKey] = useState<string>(initialTargetKey)
+  const [intentExamples, setIntentExamples] = useState<string[]>(skill?.intentExamples || [])
   const [newIntent, setNewIntent] = useState('')
+
+  const selectedTarget = useMemo(
+    () => availableTargets.find((item) => item.key === selectedTargetKey) || null,
+    [availableTargets, selectedTargetKey],
+  )
+
+  useEffect(() => {
+    if (availableTargets.length === 0) return
+    const fallback = availableTargets.find((item) => item.bindable) ?? availableTargets[0]
+    if (!selectedTargetKey) {
+      if (fallback) setSelectedTargetKey(fallback.key)
+      return
+    }
+    const exists = availableTargets.some((item) => item.key === selectedTargetKey)
+    const selected = availableTargets.find((item) => item.key === selectedTargetKey)
+    if (!exists || (selected && !selected.bindable)) {
+      if (fallback) setSelectedTargetKey(fallback.key)
+    }
+  }, [availableTargets, selectedTargetKey])
 
   const addIntent = () => {
     if (newIntent.trim()) {
@@ -61,45 +72,49 @@ export function useSkillForm({ skill }: UseSkillFormOptions) {
     setIntentExamples(intentExamples.filter((_, i) => i !== index))
   }
 
-  const buildSubmitData = (): CreateSkillRequest | UpdateSkillRequest => ({
-    name,
-    description,
-    intentExamples: intentExamples.length > 0 ? intentExamples : undefined,
-    mode: 'langgraph',
-    langgraphPattern,
-    tools: agentTools.length > 0 ? agentTools : undefined,
-    systemPrompt: langgraphPattern === 'agent_loop' ? (systemPrompt || undefined) : undefined,
-    kbConfig: langgraphPattern === 'agent_loop' ? kbConfig : undefined,
-  })
+  const hasTarget = !!selectedTarget && selectedTarget.bindable
 
-  const isValid =
-    !!name &&
-    !!description &&
-    (langgraphPattern !== 'agent_loop' || !!systemPrompt.trim())
+  const buildSubmitData = (): CreateSkillRequest | UpdateSkillRequest => {
+    const payload: CreateSkillRequest | UpdateSkillRequest = {
+      name,
+      description,
+      intentExamples: intentExamples.length > 0 ? intentExamples : undefined,
+      mode: 'langgraph',
+      targetType: selectedTarget?.type,
+      workflowId: undefined,
+      agentProfileId: undefined,
+    }
+
+    if (selectedTarget?.bindable && selectedTarget.type === 'workflow') {
+      payload.workflowId = selectedTarget.id
+    }
+    if (selectedTarget?.bindable && selectedTarget.type === 'agent') {
+      payload.agentProfileId = selectedTarget.id
+    }
+
+    return payload
+  }
+
+  const isValid = !!name && !!description && hasTarget
 
   return {
     state: {
       name,
       description,
-      langgraphPattern,
-      systemPrompt,
+      selectedTargetKey,
       intentExamples,
-      agentTools,
-      kbConfig,
       newIntent,
     },
+    selectedTarget,
     isValid,
     actions: {
       setName,
       setDescription,
-      setLanggraphPattern,
-      setSystemPrompt,
+      setSelectedTargetKey,
       setNewIntent,
-      setKbConfig,
-      setAgentTools,
       addIntent,
       removeIntent,
-    },
+    } satisfies SkillFormActions,
     buildSubmitData,
   }
 }

@@ -1,0 +1,322 @@
+{
+  "nodes": [
+    {
+      "nodeId": "start",
+      "nodeType": "start",
+      "label": "Start",
+      "positionX": 80.0,
+      "positionY": 320.0,
+      "config": {
+        "inputMode": "text",
+        "structuredFields": []
+      }
+    },
+    {
+      "nodeId": "tool_types",
+      "nodeType": "tool",
+      "label": "获取类型列表",
+      "positionX": 490.0,
+      "positionY": 245.0,
+      "config": {
+        "toolName": "list_entry_types",
+        "inputBindings": {}
+      }
+    },
+    {
+      "nodeId": "tool_tags",
+      "nodeType": "tool",
+      "label": "获取标签列表",
+      "positionX": 490.0,
+      "positionY": 396.0,
+      "config": {
+        "toolName": "list_tags",
+        "inputBindings": {}
+      }
+    },
+    {
+      "nodeId": "llm_title",
+      "nodeType": "llm",
+      "label": "生成标题",
+      "positionX": 900.0,
+      "positionY": 306.0,
+      "config": {
+        "systemPrompt": "你是 MindAtlas 的“智能创建记录”技能，正在做结构化入库前的字段生成。\n当前任务：基于用户原始内容生成 title（标题），用于最终写入数据库。\n规范：title 简洁准确，不超过 30 个字。",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "title"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "llm_summary",
+      "nodeType": "llm",
+      "label": "生成摘要",
+      "positionX": 1310.0,
+      "positionY": 306.0,
+      "config": {
+        "systemPrompt": "你是 MindAtlas 的“智能创建记录”技能，正在做结构化入库前的字段生成。\n当前任务：基于用户原始内容生成 summary（摘要），用于最终写入数据库。\n规范：summary 为 50-150 字的一段话概括核心内容。",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "summary"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "llm_content",
+      "nodeType": "llm",
+      "label": "生成正文",
+      "positionX": 1720.0,
+      "positionY": 306.0,
+      "config": {
+        "systemPrompt": "你是 MindAtlas 的“智能创建记录”技能，正在做结构化入库前的字段生成。\n当前任务：基于用户原始内容生成 content（正文），用于最终写入数据库。\n规范：content 可用 Markdown；禁止一级标题（#）；不扩写/不编造用户未提供的事实细节。",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "content"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "llm_type",
+      "nodeType": "llm",
+      "label": "选择类型",
+      "positionX": 2130.0,
+      "positionY": 306.0,
+      "config": {
+        "systemPrompt": "你是 MindAtlas 的“智能创建记录”技能，正在为入库选择类型。\n当前任务：选择 type_code（类型编码），用于最终写入数据库。\n约束：type_code 必须且只能从 {{tool_types.result}} 的 code 中选择（JSON 数组，字段含 code/name）。无法判断时选择第一个可用 code。",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "type_code"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "llm_tags",
+      "nodeType": "llm",
+      "label": "生成标签",
+      "positionX": 2540.0,
+      "positionY": 306.0,
+      "config": {
+        "systemPrompt": "你是 MindAtlas 的“智能创建记录”技能，正在为入库生成标签。\n当前任务：生成 tags（标签名数组），用于最终写入数据库。\n约束：优先复用 {{tool_tags.result}} 中的 name（大小写不敏感匹配；输出尽量返回列表中的原始写法）；最多新增 5 个新标签；宁缺毋滥，不要为了凑数而编造标签；tags 元素为纯标签名字符串（不要带 # 前缀），去重。",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "tags",
+            "type": "array",
+            "itemsType": "string"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "llm_time",
+      "nodeType": "llm",
+      "label": "识别时间",
+      "positionX": 2950.0,
+      "positionY": 306.0,
+      "config": {
+        "systemPrompt": "你是 MindAtlas 的“智能创建记录”技能，正在为入库识别时间字段。\n当前任务：识别时间信息并输出 time_mode + 对应日期字段，用于最终写入数据库。\n规则：\n- 无明确时间信息：默认 time_mode=POINT 且 time_at=今天（YYYY-MM-DD）。\n- POINT：填写 time_at（YYYY-MM-DD），time_from/time_to 为 null。\n- RANGE：填写 time_from/time_to（YYYY-MM-DD，且起止都不为空，且 time_from<=time_to），time_at 为 null。",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "time_mode",
+            "enum": [
+              "POINT",
+              "RANGE"
+            ]
+          },
+          {
+            "name": "time_at",
+            "nullable": true
+          },
+          {
+            "name": "time_from",
+            "nullable": true
+          },
+          {
+            "name": "time_to",
+            "nullable": true
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_create",
+      "nodeType": "tool",
+      "label": "创建记录",
+      "positionX": 3360.0,
+      "positionY": 306.0,
+      "config": {
+        "toolName": "create_entry",
+        "inputBindings": {
+          "title": "{{llm_title.title}}",
+          "summary": "{{llm_summary.summary}}",
+          "content": "{{llm_content.content}}",
+          "type_code": "{{llm_type.type_code}}",
+          "tags": "{{llm_tags.tags}}",
+          "time_mode": "{{llm_time.time_mode}}",
+          "time_at": "{{llm_time.time_at}}",
+          "time_from": "{{llm_time.time_from}}",
+          "time_to": "{{llm_time.time_to}}"
+        }
+      }
+    },
+    {
+      "nodeId": "llm_output",
+      "nodeType": "llm",
+      "label": "创建结果",
+      "positionX": 3770.0,
+      "positionY": 306.0,
+      "config": {
+        "systemPrompt": "告知用户记录已创建，展示标题、类型与时间信息，并给出可继续补充/修改的提示。",
+        "userInput": "{{tool_create.result}}",
+        "outputMode": "text"
+      }
+    },
+    {
+      "nodeId": "output_final",
+      "nodeType": "output",
+      "label": "输出",
+      "positionX": 4180.0,
+      "positionY": 306.0,
+      "config": {
+        "outputMode": "text",
+        "textTemplate": "{{llm_output.response}}"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edgeId": "e_start_types",
+      "sourceNodeId": "start",
+      "targetNodeId": "tool_types",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_start_tags",
+      "sourceNodeId": "start",
+      "targetNodeId": "tool_tags",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_types_title",
+      "sourceNodeId": "tool_types",
+      "targetNodeId": "llm_title",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_tags_title",
+      "sourceNodeId": "tool_tags",
+      "targetNodeId": "llm_title",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_title_summary",
+      "sourceNodeId": "llm_title",
+      "targetNodeId": "llm_summary",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_summary_content",
+      "sourceNodeId": "llm_summary",
+      "targetNodeId": "llm_content",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_content_type",
+      "sourceNodeId": "llm_content",
+      "targetNodeId": "llm_type",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_type_tags",
+      "sourceNodeId": "llm_type",
+      "targetNodeId": "llm_tags",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_tags_time",
+      "sourceNodeId": "llm_tags",
+      "targetNodeId": "llm_time",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_time_create",
+      "sourceNodeId": "llm_time",
+      "targetNodeId": "tool_create",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_create_output",
+      "sourceNodeId": "tool_create",
+      "targetNodeId": "llm_output",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_output_final",
+      "sourceNodeId": "llm_output",
+      "targetNodeId": "output_final",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  }
+}

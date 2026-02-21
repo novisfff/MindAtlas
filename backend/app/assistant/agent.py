@@ -8,6 +8,7 @@ from typing import Callable, Iterator
 from langchain_openai import ChatOpenAI
 from sqlalchemy.orm import Session
 
+from app.ai_registry.runtime import resolve_openai_compat_config_by_model_id
 from app.assistant.openai_compat import build_openai_compat_client_headers
 from app.assistant.skills.base import DEFAULT_SKILL_NAME
 from app.assistant.skills.langgraph_engine import LangGraphEngine
@@ -87,7 +88,25 @@ class AssistantAgent:
                 raise ValueError(f"Skill not found or disabled: {skill_name}")
 
             logger.debug("agent skill %s mode=langgraph", skill_name)
-            yield from self.langgraph_engine.execute(
+            engine = self.langgraph_engine
+            model_source = str(getattr(skill_def, "model_source", "default") or "default").strip().lower()
+            selected_model_id = str(getattr(skill_def, "model_id", "") or "").strip()
+            if (
+                self.db is not None
+                and getattr(skill_def, "langgraph_pattern", None) == "agent_loop"
+                and model_source == "custom"
+                and selected_model_id
+            ):
+                cfg = resolve_openai_compat_config_by_model_id(
+                    self.db,
+                    model_id=selected_model_id,
+                    model_type="llm",
+                )
+                if cfg is None:
+                    raise ValueError(f"Skill {skill_name} references unavailable llm model: {selected_model_id}")
+                engine = LangGraphEngine(cfg.api_key, cfg.base_url, cfg.model, self.db)
+
+            yield from engine.execute(
                 skill=skill_def,
                 user_input=user_input,
                 history=history,

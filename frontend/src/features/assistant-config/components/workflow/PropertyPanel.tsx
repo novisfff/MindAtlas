@@ -11,6 +11,7 @@ import type {
 } from '../../api/workflow'
 import { buildWorkflowReferenceParams } from './variableReferences'
 import { NodeHeader } from './property-panel/NodeHeader'
+import { StartNodeSettings } from './property-panel/nodes/StartNodeSettings'
 import { LlmNodeSettings } from './property-panel/nodes/LlmNodeSettings'
 import { ToolNodeSettings } from './property-panel/nodes/ToolNodeSettings'
 import { IfElseNodeSettings } from './property-panel/nodes/IfElseNodeSettings'
@@ -29,6 +30,8 @@ import type { WorkflowToolDefinition } from './types'
 
 interface PropertyPanelProps {
   tools: WorkflowToolDefinition[]
+  workflowDescription: string
+  onWorkflowDescriptionChange: (value: string) => void
 }
 
 type ConfigEditSessionRef = {
@@ -290,7 +293,7 @@ function resolveSelectionContext(
   }
 }
 
-export function PropertyPanel({ tools }: PropertyPanelProps) {
+export function PropertyPanel({ tools, workflowDescription, onWorkflowDescriptionChange }: PropertyPanelProps) {
   const { t } = useTranslation()
   const selectedNodeId = useWorkflowEditorStore((s) => s.selectedNodeId)
   const selectedSubflowContainerId = useWorkflowEditorStore((s) => s.selectedSubflowContainerId)
@@ -565,6 +568,16 @@ export function PropertyPanel({ tools }: PropertyPanelProps) {
     }
 
     switch (nodeType) {
+      case 'start':
+        return (
+          <StartNodeSettings
+            config={config}
+            onUpdate={handleConfigUpdate}
+            workflowDescription={workflowDescription}
+            onWorkflowDescriptionChange={onWorkflowDescriptionChange}
+            isSubflowNode={selectionContext.mode === 'subflow'}
+          />
+        )
       case 'llm':
         return (
           <LlmNodeSettings

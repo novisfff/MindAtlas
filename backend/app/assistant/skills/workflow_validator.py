@@ -287,6 +287,9 @@ _IF_ELSE_LEGACY_OPERATOR_MAP = {
     "not_equals": "is_not",
 }
 _SYS_FIELDS = {"date", "datetime", "conversation_id"}
+_START_INPUT_MODES = {"text", "structured"}
+_START_INPUT_FIELD_TYPES = {"string", "number", "integer", "boolean"}
+_START_INPUT_FIELD_NAME_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 _OUTPUT_FIELD_NAME_RE = re.compile(r"[a-zA-Z0-9_]+")
 _OUTPUT_FIELD_TYPES = {"string", "number", "integer", "boolean", "object", "array"}
 _SUPPORTED_NODE_TYPES = {
@@ -313,6 +316,57 @@ _REMOVED_NODE_TYPE_MESSAGES = {
     "template": "Node type 'template' has been removed. Please refactor with supported nodes.",
     "variable_aggregator": "Node type 'variable_aggregator' has been removed. Please refactor with supported nodes.",
 }
+
+
+def _resolve_start_input_contract(cfg: dict) -> tuple[str, set[str], list[str]]:
+    errors: list[str] = []
+    raw_mode = _cfg_get(cfg, "input_mode", "inputMode", default="text")
+    mode = str(raw_mode or "text").strip().lower()
+    if mode not in _START_INPUT_MODES:
+        errors.append(f"start inputMode is invalid: {raw_mode}")
+        mode = "text"
+
+    if mode == "text":
+        return mode, {"user_input"}, errors
+
+    structured_fields_raw = _cfg_get(cfg, "structured_fields", "structuredFields", default=None)
+    if not isinstance(structured_fields_raw, list) or not structured_fields_raw:
+        errors.append("start structured mode requires at least one structured field")
+        return mode, set(), errors
+
+    field_names: set[str] = set()
+    for idx, raw_field in enumerate(structured_fields_raw, start=1):
+        if not isinstance(raw_field, dict):
+            errors.append(f"start structured field #{idx} must be an object")
+            continue
+        field_name = str(raw_field.get("name", "") or "").strip()
+        if not field_name:
+            errors.append(f"start structured field #{idx} requires name")
+            continue
+        if field_name == "user_input":
+            errors.append("start structured field name 'user_input' is reserved")
+            continue
+        if not _START_INPUT_FIELD_NAME_RE.fullmatch(field_name):
+            errors.append(f"start structured field name is invalid: {field_name}")
+            continue
+        if field_name in field_names:
+            errors.append(f"start structured field duplicated: {field_name}")
+            continue
+
+        field_type_raw = raw_field.get("type", "string")
+        field_type = str(field_type_raw or "string").strip().lower()
+        if field_type not in _START_INPUT_FIELD_TYPES:
+            errors.append(
+                f"start structured field '{field_name}' has invalid type: {field_type_raw}"
+            )
+
+        required = raw_field.get("required", False)
+        if not isinstance(required, bool):
+            errors.append(f"start structured field '{field_name}' required must be boolean")
+
+        field_names.add(field_name)
+
+    return mode, field_names, errors
 
 
 def _normalize_if_else_operator(raw: object) -> str:
@@ -478,6 +532,16 @@ def validate_workflow(
         for nid in start_nodes[1:]:
             errors.append(ValidationError(node_id=nid, message="Multiple start nodes found"))
 
+    start_allowed_fields: set[str] = {"user_input"}
+    if len(start_nodes) == 1:
+        start_node_id = start_nodes[0]
+        start_cfg = config_map.get(start_node_id, {})
+        if not isinstance(start_cfg, dict):
+            start_cfg = {}
+        _, start_allowed_fields, start_contract_errors = _resolve_start_input_contract(start_cfg)
+        for message in start_contract_errors:
+            errors.append(ValidationError(node_id=start_node_id, message=message))
+
     # Rule 2: removed / unknown node types are rejected explicitly
     for nid, ntype in type_map.items():
         if ntype in _REMOVED_NODE_TYPE_MESSAGES:
@@ -592,6 +656,15 @@ def validate_workflow(
                             node_id=nid,
                             message=f"Template references unsupported sys variable: sys.{ref_field}",
                         ))
+                    continue
+                if ref_node == "start":
+                    if ref_field not in start_allowed_fields:
+                        errors.append(
+                            ValidationError(
+                                node_id=nid,
+                                message=f"Template references unsupported start field: start.{ref_field}",
+                            )
+                        )
                     continue
                 if ref_node == "container" and type_map.get(nid) in {"iteration", "loop"}:
                     continue
@@ -1141,6 +1214,18 @@ def validate_workflow(
                                     )
                                 )
                             continue
+                        if ref_node == "start":
+                            if ref_field != "user_input":
+                                errors.append(
+                                    ValidationError(
+                                        node_id=nid,
+                                        message=(
+                                            f"iteration body node '{body_node_id}' references unsupported start field: "
+                                            f"start.{ref_field}"
+                                        ),
+                                    )
+                                )
+                            continue
                         if ref_node == "container":
                             continue
                         if ref_node not in body_node_map:
@@ -1305,6 +1390,18 @@ def validate_workflow(
                                     ValidationError(
                                         node_id=nid,
                                         message=f"loop body node '{body_node_id}' references unsupported sys variable: sys.{ref_field}",
+                                    )
+                                )
+                            continue
+                        if ref_node == "start":
+                            if ref_field != "user_input":
+                                errors.append(
+                                    ValidationError(
+                                        node_id=nid,
+                                        message=(
+                                            f"loop body node '{body_node_id}' references unsupported start field: "
+                                            f"start.{ref_field}"
+                                        ),
                                     )
                                 )
                             continue

@@ -1,6 +1,18 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { QueryClient, useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import * as toolsApi from './api/tools'
 import * as skillsApi from './api/skills'
+import * as workflowsApi from './api/workflows'
+import * as agentsApi from './api/agents'
+
+const invalidateAfterSkillReset = (qc: QueryClient) => {
+  qc.invalidateQueries({ queryKey: ['assistant-skills'] })
+  qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+  qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+  qc.invalidateQueries({ queryKey: ['assistant-workflow'] })
+  qc.invalidateQueries({ queryKey: ['assistant-agent-profile'] })
+  qc.invalidateQueries({ queryKey: ['assistant-workflow-versions'] })
+  qc.invalidateQueries({ queryKey: ['assistant-agent-versions'] })
+}
 
 // ==================== Tools ====================
 
@@ -91,7 +103,7 @@ export const useResetSkillMutation = () => {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: skillsApi.resetSkill,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['assistant-skills'] }),
+    onSuccess: () => invalidateAfterSkillReset(qc),
   })
 }
 
@@ -99,6 +111,81 @@ export const useResetAllSkillsMutation = () => {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: skillsApi.resetAllSkills,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['assistant-skills'] }),
+    onSuccess: () => invalidateAfterSkillReset(qc),
+  })
+}
+
+// ==================== Workflows ====================
+
+export const useWorkflowsQuery = () =>
+  useQuery({
+    queryKey: ['assistant-workflows'],
+    queryFn: workflowsApi.getWorkflows,
+  })
+
+export const useCreateWorkflowMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: workflowsApi.createWorkflow,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['assistant-workflows'] }),
+  })
+}
+
+export const useUpdateWorkflowMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: workflowsApi.UpdateWorkflowRequest }) =>
+      workflowsApi.updateWorkflowEntity(id, data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['assistant-workflows'] }),
+  })
+}
+
+export const useDeleteWorkflowMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: workflowsApi.deleteWorkflow,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-skills'] })
+    },
+  })
+}
+
+// ==================== Agents ====================
+
+export const useAgentProfilesQuery = () =>
+  useQuery({
+    queryKey: ['assistant-agents'],
+    queryFn: agentsApi.getAgentProfiles,
+  })
+
+export const useCreateAgentProfileMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: agentsApi.createAgentProfile,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['assistant-agents'] }),
+  })
+}
+
+export const useUpdateAgentProfileMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: agentsApi.UpdateAgentProfileRequest }) =>
+      agentsApi.updateAgentProfile(id, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+      qc.invalidateQueries({ queryKey: ['assistant-skills'] })
+    },
+  })
+}
+
+export const useDeleteAgentProfileMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: agentsApi.deleteAgentProfile,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+      qc.invalidateQueries({ queryKey: ['assistant-skills'] })
+    },
   })
 }

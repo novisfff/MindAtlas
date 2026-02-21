@@ -1,0 +1,152 @@
+{
+  "nodes": [
+    {
+      "nodeId": "start",
+      "nodeType": "start",
+      "label": "Start",
+      "positionX": 120.0,
+      "positionY": 320.0,
+      "config": {
+        "inputMode": "text",
+        "structuredFields": []
+      }
+    },
+    {
+      "nodeId": "llm_dates",
+      "nodeType": "llm",
+      "label": "解析时间范围",
+      "positionX": 530.0,
+      "positionY": 320.0,
+      "config": {
+        "systemPrompt": "理解用户希望回顾/分析的时间范围，输出结构化检索参数。\n规则：\n- start_date/end_date 格式为 YYYY-MM-DD，且 start_date<=end_date。\n- 用户未明确给出具体日期时，结合用户说法（如上周/本月/今年等）推断。",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "start_date"
+          },
+          {
+            "name": "end_date"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_entries",
+      "nodeType": "tool",
+      "label": "获取记录",
+      "positionX": 940.0,
+      "positionY": 245.0,
+      "config": {
+        "toolName": "get_entries_by_time_range",
+        "inputBindings": {
+          "start_date": "{{llm_dates.start_date}}",
+          "end_date": "{{llm_dates.end_date}}"
+        }
+      }
+    },
+    {
+      "nodeId": "tool_activity",
+      "nodeType": "tool",
+      "label": "分析活动",
+      "positionX": 940.0,
+      "positionY": 396.0,
+      "config": {
+        "toolName": "analyze_activity",
+        "inputBindings": {
+          "start_date": "{{llm_dates.start_date}}",
+          "end_date": "{{llm_dates.end_date}}"
+        }
+      }
+    },
+    {
+      "nodeId": "llm_output",
+      "nodeType": "llm",
+      "label": "生成报告",
+      "positionX": 1350.0,
+      "positionY": 315.0,
+      "config": {
+        "systemPrompt": "生成结构化的回顾报告，包含关键成就、活动分布和洞察。",
+        "userInput": "{{tool_entries.result}}\n\n{{tool_activity.result}}",
+        "outputMode": "text"
+      }
+    },
+    {
+      "nodeId": "output_final",
+      "nodeType": "output",
+      "label": "输出",
+      "positionX": 1760.0,
+      "positionY": 315.0,
+      "config": {
+        "outputMode": "text",
+        "textTemplate": "{{llm_output.response}}"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edgeId": "e_start_dates",
+      "sourceNodeId": "start",
+      "targetNodeId": "llm_dates",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_dates_entries",
+      "sourceNodeId": "llm_dates",
+      "targetNodeId": "tool_entries",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_dates_activity",
+      "sourceNodeId": "llm_dates",
+      "targetNodeId": "tool_activity",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_entries_output",
+      "sourceNodeId": "tool_entries",
+      "targetNodeId": "llm_output",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_activity_output",
+      "sourceNodeId": "tool_activity",
+      "targetNodeId": "llm_output",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_output_final",
+      "sourceNodeId": "llm_output",
+      "targetNodeId": "output_final",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  }
+}

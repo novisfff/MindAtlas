@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any, TYPE_CHECKING
+from uuid import UUID
 
 from app.assistant.skills.base import (
     ConditionExpression,
@@ -28,6 +29,32 @@ def _parse_skill_kb_config(raw: Any) -> SkillKBConfig | None:
     return SkillKBConfig(enabled=bool(raw.get("enabled", False)))
 
 
+def _parse_agent_model_config(raw: Any) -> tuple[str, str | None]:
+    if not isinstance(raw, dict):
+        return ("default", None)
+
+    source_raw = raw.get("model_source", raw.get("modelSource", "default"))
+    source = str(source_raw or "default").strip().lower()
+    if source not in {"default", "custom"}:
+        source = "default"
+
+    model_raw = raw.get("model_id", raw.get("modelId"))
+    model_id = str(model_raw).strip() if model_raw is not None else ""
+    if not model_id:
+        model_id = None
+    else:
+        try:
+            model_id = str(UUID(model_id))
+        except Exception:
+            model_id = None
+
+    if source == "default":
+        return ("default", None)
+    if model_id is None:
+        return ("default", None)
+    return ("custom", model_id)
+
+
 def db_skill_to_definition_light(skill: AssistantSkill) -> SkillDefinition:
     """轻量级转换 - 用于路由阶段，不加载 nodes/edges 详情。"""
     raw_intent_examples = skill.intent_examples or []
@@ -36,6 +63,8 @@ def db_skill_to_definition_light(skill: AssistantSkill) -> SkillDefinition:
     intent_examples = [str(x) for x in raw_intent_examples]
 
     raw_tools = skill.tools or []
+    if getattr(skill, "agent_profile", None) is not None and isinstance(getattr(skill.agent_profile, "tools", None), list):
+        raw_tools = skill.agent_profile.tools
     if not isinstance(raw_tools, list):
         raw_tools = []
     tools = [str(x) for x in raw_tools]
@@ -45,12 +74,23 @@ def db_skill_to_definition_light(skill: AssistantSkill) -> SkillDefinition:
             f"Skill '{skill.name}' uses legacy mode '{skill.mode}'. "
             "Only langgraph mode is supported."
         )
-    pattern = getattr(skill, "langgraph_pattern", None)
+    pattern = "workflow_dag" if getattr(skill, "workflow_id", None) else "agent_loop" if getattr(skill, "agent_profile_id", None) else getattr(skill, "langgraph_pattern", None)
     if pattern not in ("agent_loop", "workflow_dag"):
         raise ValueError(
             f"Skill '{skill.name}' has invalid langgraph_pattern '{pattern}'. "
             "Supported patterns: agent_loop, workflow_dag."
         )
+
+    system_prompt = skill.system_prompt
+    kb_config_raw = getattr(skill, "kb_config", None)
+    model_source = "default"
+    model_id = None
+    if pattern == "agent_loop" and getattr(skill, "agent_profile", None) is not None:
+        system_prompt = skill.agent_profile.system_prompt
+        if isinstance(getattr(skill.agent_profile, "kb_config", None), dict):
+            kb_config_raw = skill.agent_profile.kb_config
+    if pattern == "agent_loop":
+        model_source, model_id = _parse_agent_model_config(kb_config_raw)
 
     return SkillDefinition(
         name=skill.name,
@@ -59,8 +99,10 @@ def db_skill_to_definition_light(skill: AssistantSkill) -> SkillDefinition:
         tools=tools,
         mode="langgraph",
         langgraph_pattern=pattern,
-        system_prompt=skill.system_prompt,
-        kb=_parse_skill_kb_config(getattr(skill, "kb_config", None)),
+        model_source=model_source,
+        model_id=model_id,
+        system_prompt=system_prompt,
+        kb=_parse_skill_kb_config(kb_config_raw),
         workflow_nodes=[],
         workflow_edges=[],
     )
@@ -78,7 +120,7 @@ def db_skill_to_definition(skill: AssistantSkill) -> SkillDefinition:
             f"Skill '{skill.name}' uses legacy mode '{skill.mode}'. "
             "Only langgraph mode is supported."
         )
-    pattern = getattr(skill, "langgraph_pattern", None)
+    pattern = "workflow_dag" if getattr(skill, "workflow_id", None) else "agent_loop" if getattr(skill, "agent_profile_id", None) else getattr(skill, "langgraph_pattern", None)
     if pattern not in ("agent_loop", "workflow_dag"):
         raise ValueError(
             f"Skill '{skill.name}' has invalid langgraph_pattern '{pattern}'. "
@@ -86,9 +128,28 @@ def db_skill_to_definition(skill: AssistantSkill) -> SkillDefinition:
         )
 
     raw_tools = skill.tools or []
+    if getattr(skill, "agent_profile", None) is not None and isinstance(getattr(skill.agent_profile, "tools", None), list):
+        raw_tools = skill.agent_profile.tools
     if not isinstance(raw_tools, list):
         raw_tools = []
     tools = [str(x) for x in raw_tools]
+
+    workflow_nodes_src = getattr(skill, "nodes", None) or []
+    workflow_edges_src = getattr(skill, "edges", None) or []
+    if getattr(skill, "workflow", None) is not None:
+        workflow_nodes_src = getattr(skill.workflow, "nodes", None) or workflow_nodes_src
+        workflow_edges_src = getattr(skill.workflow, "edges", None) or workflow_edges_src
+
+    system_prompt = skill.system_prompt
+    kb_config_raw = getattr(skill, "kb_config", None)
+    model_source = "default"
+    model_id = None
+    if pattern == "agent_loop" and getattr(skill, "agent_profile", None) is not None:
+        system_prompt = skill.agent_profile.system_prompt
+        if isinstance(getattr(skill.agent_profile, "kb_config", None), dict):
+            kb_config_raw = skill.agent_profile.kb_config
+    if pattern == "agent_loop":
+        model_source, model_id = _parse_agent_model_config(kb_config_raw)
 
     return SkillDefinition(
         name=skill.name,
@@ -97,10 +158,12 @@ def db_skill_to_definition(skill: AssistantSkill) -> SkillDefinition:
         tools=tools,
         mode="langgraph",
         langgraph_pattern=pattern,
-        system_prompt=skill.system_prompt,
-        kb=_parse_skill_kb_config(getattr(skill, "kb_config", None)),
-        workflow_nodes=db_nodes_to_definitions(getattr(skill, "nodes", None) or []),
-        workflow_edges=db_edges_to_definitions(getattr(skill, "edges", None) or []),
+        model_source=model_source,
+        model_id=model_id,
+        system_prompt=system_prompt,
+        kb=_parse_skill_kb_config(kb_config_raw),
+        workflow_nodes=db_nodes_to_definitions(workflow_nodes_src if pattern == "workflow_dag" else []),
+        workflow_edges=db_edges_to_definitions(workflow_edges_src if pattern == "workflow_dag" else []),
     )
 
 
@@ -146,3 +209,52 @@ def db_edges_to_definitions(edges: list[AssistantSkillEdge]) -> list[WorkflowEdg
             label=e.label,
         ))
     return result
+
+
+def db_workflow_to_skill_definition(
+    *,
+    name: str,
+    description: str,
+    tools: list[str] | None,
+    workflow_nodes: list[AssistantSkillNode],
+    workflow_edges: list[AssistantSkillEdge],
+) -> SkillDefinition:
+    raw_tools = tools or []
+    return SkillDefinition(
+        name=name,
+        description=description,
+        intent_examples=[],
+        tools=[str(x) for x in raw_tools],
+        mode="langgraph",
+        langgraph_pattern="workflow_dag",
+        system_prompt=None,
+        kb=_parse_skill_kb_config({"enabled": False}),
+        workflow_nodes=db_nodes_to_definitions(workflow_nodes),
+        workflow_edges=db_edges_to_definitions(workflow_edges),
+    )
+
+
+def db_agent_profile_to_skill_definition(
+    *,
+    name: str,
+    description: str,
+    tools: list[str] | None,
+    system_prompt: str | None,
+    kb_config: dict | None,
+) -> SkillDefinition:
+    raw_tools = tools or []
+    model_source, model_id = _parse_agent_model_config(kb_config)
+    return SkillDefinition(
+        name=name,
+        description=description,
+        intent_examples=[],
+        tools=[str(x) for x in raw_tools],
+        mode="langgraph",
+        langgraph_pattern="agent_loop",
+        model_source=model_source,
+        model_id=model_id,
+        system_prompt=system_prompt,
+        kb=_parse_skill_kb_config(kb_config),
+        workflow_nodes=[],
+        workflow_edges=[],
+    )

@@ -215,6 +215,7 @@ function createWorkflowEdge(params: {
 
 interface FlowCanvasProps {
   tools: WorkflowToolDefinition[]
+  workflowDescription?: string
 }
 
 type RuntimeNodeStatus = 'running' | 'success' | 'error'
@@ -225,7 +226,7 @@ const RUNTIME_STATUS_PRIORITY: Record<RuntimeNodeStatus, number> = {
   success: 1,
 }
 
-export function FlowCanvas({ tools }: FlowCanvasProps) {
+export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
   const reactFlowWrapper = useRef<HTMLDivElement>(null)
   const { screenToFlowPosition, setCenter } = useReactFlow()
   const store = useWorkflowEditorStore()
@@ -392,13 +393,14 @@ export function FlowCanvas({ tools }: FlowCanvasProps) {
         ...node,
         data: {
           ...node.data,
+          workflowDescription,
           runtimeStatus: runtimeStatusByNodeId[node.id],
           quickAddHandles: quickAddHandleMap.get(node.id) ?? [],
           onQuickAdd: handleQuickAdd,
           quickAddTools: tools,
         },
       })),
-    [handleQuickAdd, quickAddHandleMap, runtimeStatusByNodeId, store.nodes, tools],
+    [handleQuickAdd, quickAddHandleMap, runtimeStatusByNodeId, store.nodes, tools, workflowDescription],
   )
 
   const onEdgeClick = useCallback(
@@ -601,7 +603,7 @@ export function FlowCanvas({ tools }: FlowCanvasProps) {
           nodeStrokeWidth={3}
           zoomable
           pannable
-          className="!bg-card !border"
+          className="!bg-card !border !rounded-2xl !shadow-sm !overflow-hidden"
         />
       </ReactFlow>
     </div>

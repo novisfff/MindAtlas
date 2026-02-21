@@ -12,7 +12,8 @@ import {
 } from '@xyflow/react'
 import { ArrowRight, Workflow } from 'lucide-react'
 import type { AssistantSkill } from '../../api/skills'
-import { deserializeFromSkill } from './serialization'
+import type { AssistantWorkflow } from '../../api/workflows'
+import { deserializeFromSkill, deserializeFromWorkflow } from './serialization'
 import '@xyflow/react/dist/style.css'
 
 type PreviewNodeData = {
@@ -21,13 +22,19 @@ type PreviewNodeData = {
 }
 
 type WorkflowReadonlyPreviewProps = {
-  skill: AssistantSkill
+  skill?: AssistantSkill
+  workflow?: AssistantWorkflow
   onOpenEditor: () => void
 }
 
 function PreviewNode({ data }: NodeProps<Node<PreviewNodeData>>) {
   const nodeData = data as PreviewNodeData
   const isOutputNode = nodeData.nodeType === 'output'
+  const { t } = useTranslation()
+  const displayLabel = nodeData.nodeType === 'start'
+    ? t('settings.skills.nodeTypes.start')
+    : nodeData.label
+
   return (
     <div className="relative min-w-[96px] max-w-[132px] rounded-md border bg-background/95 px-2 py-1 shadow-sm">
       <Handle
@@ -37,7 +44,7 @@ function PreviewNode({ data }: NodeProps<Node<PreviewNodeData>>) {
         className="!h-2 !w-2 !opacity-0 !pointer-events-none"
       />
       <div className="text-[9px] text-muted-foreground uppercase tracking-wide">{nodeData.nodeType}</div>
-      <div className="text-[11px] font-medium truncate">{nodeData.label}</div>
+      <div className="text-[11px] font-medium truncate">{displayLabel}</div>
       {!isOutputNode && (
         <Handle
           type="source"
@@ -50,12 +57,17 @@ function PreviewNode({ data }: NodeProps<Node<PreviewNodeData>>) {
   )
 }
 
-function WorkflowReadonlyPreviewInner({ skill, onOpenEditor }: WorkflowReadonlyPreviewProps) {
+function WorkflowReadonlyPreviewInner({ skill, workflow, onOpenEditor }: WorkflowReadonlyPreviewProps) {
   const { t } = useTranslation()
 
   const { nodes, edges } = useMemo(() => {
+    if (!skill && !workflow) {
+      return { nodes: [] as Node<PreviewNodeData>[], edges: [] as Edge[] }
+    }
     try {
-      const parsed = deserializeFromSkill(skill)
+      const parsed = workflow
+        ? deserializeFromWorkflow(workflow)
+        : deserializeFromSkill(skill as AssistantSkill)
       const minX = parsed.nodes.reduce((acc, n) => Math.min(acc, n.position.x), Number.POSITIVE_INFINITY)
       const minY = parsed.nodes.reduce((acc, n) => Math.min(acc, n.position.y), Number.POSITIVE_INFINITY)
       const scaleX = 0.62

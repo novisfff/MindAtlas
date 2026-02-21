@@ -8,9 +8,11 @@ import type {
   ConditionExpression,
 } from '../../api/workflow'
 import type { AssistantSkill } from '../../api/skills'
+import type { AssistantWorkflow } from '../../api/workflows'
 import { normalizeIfElseConfig } from './ifElseConfig'
 import { buildLabelMaps, ensureWorkflowUniqueLabels, defaultLabelForNodeType } from './labelUtils'
 import { toDisplayReferencesFromStored, toStoredReferencesFromDisplay } from './referenceTransform'
+import { normalizeStartNodeConfig } from './startNodeConfig'
 
 type EdgeConditionType = 'expression' | 'default' | null | undefined
 
@@ -137,8 +139,54 @@ export function deserializeFromSkill(skill: AssistantSkill): {
   edges: Edge[]
   viewport?: Viewport
 } {
-  const apiNodes = skill.nodes ?? []
-  const apiEdges = skill.edges ?? []
+  return deserializeFromWorkflowLike({
+    nodes: skill.nodes,
+    edges: skill.edges,
+    workflowViewport: skill.workflowViewport,
+  })
+}
+
+export function deserializeFromWorkflow(workflow: AssistantWorkflow): {
+  nodes: Node<WfNodeData>[]
+  edges: Edge[]
+  viewport?: Viewport
+} {
+  return deserializeFromWorkflowLike({
+    nodes: workflow.nodes,
+    edges: workflow.edges,
+    workflowViewport: workflow.workflowViewport,
+  })
+}
+
+type WorkflowLike = {
+  nodes?: Array<{
+    nodeId: string
+    nodeType: string
+    label: string
+    positionX: number
+    positionY: number
+    config: unknown
+  }>
+  edges?: Array<{
+    edgeId: string
+    sourceNodeId: string
+    targetNodeId: string
+    sourceHandle: string
+    targetHandle: string
+    conditionType: string | null
+    conditionExpr: unknown
+    label: string | null
+  }>
+  workflowViewport?: { x: number; y: number; zoom: number } | null
+}
+
+function deserializeFromWorkflowLike(source: WorkflowLike): {
+  nodes: Node<WfNodeData>[]
+  edges: Edge[]
+  viewport?: Viewport
+} {
+  const apiNodes = source.nodes ?? []
+  const apiEdges = source.edges ?? []
   const nodeById = new Map(apiNodes.map((node) => [node.nodeId, node]))
 
   type SkillNode = (typeof apiNodes)[number]
@@ -153,13 +201,21 @@ export function deserializeFromSkill(skill: AssistantSkill): {
             config: normalizeIfElseConfig((n.config as Record<string, unknown>) ?? null),
           },
         }
-      : {
-          data: {
-            nodeType: n.nodeType as NodeType,
-            label: n.label || '',
-            config: (n.config as Record<string, unknown>) ?? null,
-          },
-        }),
+      : n.nodeType === 'start'
+        ? {
+            data: {
+              nodeType: n.nodeType as NodeType,
+              label: n.label || '',
+              config: normalizeStartNodeConfig(n.config),
+            },
+          }
+        : {
+            data: {
+              nodeType: n.nodeType as NodeType,
+              label: n.label || '',
+              config: (n.config as Record<string, unknown>) ?? null,
+            },
+          }),
     id: n.nodeId,
     type: n.nodeType,
     position: { x: n.positionX, y: n.positionY },
@@ -195,8 +251,8 @@ export function deserializeFromSkill(skill: AssistantSkill): {
     },
   }))
 
-  const viewport = skill.workflowViewport
-    ? { x: skill.workflowViewport.x, y: skill.workflowViewport.y, zoom: skill.workflowViewport.zoom }
+  const viewport = source.workflowViewport
+    ? { x: source.workflowViewport.x, y: source.workflowViewport.y, zoom: source.workflowViewport.zoom }
     : undefined
 
   // If no nodes exist, create a default start -> llm -> output layout.
@@ -206,7 +262,11 @@ export function deserializeFromSkill(skill: AssistantSkill): {
         id: 'start',
         type: 'start',
         position: { x: 120, y: 220 },
-        data: { nodeType: 'start', label: defaultLabelForNodeType('start'), config: null },
+        data: {
+          nodeType: 'start',
+          label: defaultLabelForNodeType('start'),
+          config: normalizeStartNodeConfig(null),
+        },
       },
       {
         id: 'llm_1',

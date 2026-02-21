@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 _TEMPLATE_VAR_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
 _OUTPUT_SINGLE_VAR_RE = re.compile(r"^\s*\{\{\s*([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\s*\}\}\s*$")
+_START_STRUCTURED_FIELD_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 _NODE_SNAPSHOT_STRING_LIMIT = 64 * 1024
 _NODE_SNAPSHOT_TEXT_PREVIEW_LIMIT = 4000
 
@@ -549,6 +550,7 @@ class WorkflowState(TypedDict, total=False):
     node_llms: dict[str, Any]
     stream_output_enabled: bool
     output_stream_source_node_id: str
+    structured_input: dict[str, Any]
 
 
 def _cfg_bool_value(cfg: dict[str, Any], *keys: str, default: bool = False) -> bool:
@@ -601,6 +603,47 @@ def _cfg_string_list(cfg: dict[str, Any], *keys: str) -> list[str]:
         if text:
             result.append(text)
     return result
+
+
+def _coerce_start_structured_field_value(field_name: str, field_type_raw: Any, value: Any) -> Any:
+    field_type = str(field_type_raw or "string").strip().lower() or "string"
+    if field_type == "string":
+        if isinstance(value, str):
+            return value
+        raise ValueError(f"start structured field '{field_name}' must be string")
+    if field_type == "number":
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        raise ValueError(f"start structured field '{field_name}' must be number")
+    if field_type == "integer":
+        if isinstance(value, int) and not isinstance(value, bool):
+            return int(value)
+        raise ValueError(f"start structured field '{field_name}' must be integer")
+    if field_type == "boolean":
+        if isinstance(value, bool):
+            return value
+        raise ValueError(f"start structured field '{field_name}' must be boolean")
+    raise ValueError(f"start structured field '{field_name}' has unsupported type: {field_type_raw}")
+
+
+def _resolve_start_input_mode(node_cfg: dict[str, Any]) -> str:
+    raw_mode = str(node_cfg.get("input_mode", "text") or "text").strip().lower()
+    return "structured" if raw_mode == "structured" else "text"
+
+
+def _resolve_start_structured_fields(node_cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_fields = node_cfg.get("structured_fields")
+    if not isinstance(raw_fields, list):
+        return []
+    fields: list[dict[str, Any]] = []
+    for item in raw_fields:
+        if not isinstance(item, dict):
+            continue
+        field_name = str(item.get("name", "") or "").strip()
+        if not field_name:
+            continue
+        fields.append(item)
+    return fields
 
 
 def _resolve_node_template_vars(
@@ -822,8 +865,11 @@ def _build_node_snapshot_input(
     sys_vars = state.get("sys_vars", {}) or {}
 
     if node_type == "start":
+        input_mode = _resolve_start_input_mode(node_cfg)
         return {
-            "user_input": state.get("user_input", ""),
+            "inputMode": input_mode,
+            "user_input": state.get("user_input", "") if input_mode == "text" else None,
+            "structuredInput": state.get("structured_input", {}) if input_mode == "structured" else None,
             "sys_vars": sys_vars,
         }
 
@@ -1443,8 +1489,55 @@ def _build_start_node(
     node_cfg: dict,
 ) -> Callable[[WorkflowState], dict]:
     def start_node(state: WorkflowState) -> dict:
+        input_mode = _resolve_start_input_mode(node_cfg)
         user_input = state.get("user_input", "")
+        structured_input = state.get("structured_input")
         sys_vars = state.get("sys_vars", {}) or {}
+        if input_mode == "structured":
+            if not isinstance(structured_input, dict):
+                raise RuntimeError("start node requires structured_input when inputMode=structured")
+            structured_fields = _resolve_start_structured_fields(node_cfg)
+            if not structured_fields:
+                raise RuntimeError("start node structured mode requires structuredFields")
+            allowed_fields: set[str] = set()
+            resolved_fields: dict[str, Any] = {}
+            for field in structured_fields:
+                field_name = str(field.get("name", "") or "").strip()
+                if not field_name:
+                    continue
+                if field_name == "user_input" or not _START_STRUCTURED_FIELD_NAME_RE.fullmatch(field_name):
+                    raise RuntimeError(f"start node has invalid structured field name: {field_name}")
+                if field_name in allowed_fields:
+                    raise RuntimeError(f"start node has duplicated structured field: {field_name}")
+                allowed_fields.add(field_name)
+                field_required = bool(field.get("required", False))
+                if field_name not in structured_input:
+                    if field_required:
+                        raise RuntimeError(f"missing required structured input field: {field_name}")
+                    continue
+                resolved_fields[field_name] = _coerce_start_structured_field_value(
+                    field_name,
+                    field.get("type", "string"),
+                    structured_input.get(field_name),
+                )
+
+            unknown_fields = set(str(key) for key in structured_input.keys()) - allowed_fields
+            if unknown_fields:
+                unknown_text = ", ".join(sorted(unknown_fields))
+                raise RuntimeError(f"structured_input contains unknown fields: {unknown_text}")
+
+            return {
+                "node_outputs": {
+                    "start": NodeOutput(
+                        status="ok",
+                        text=json.dumps(resolved_fields, ensure_ascii=False),
+                        raw=resolved_fields,
+                        json_fields=resolved_fields,
+                    ),
+                },
+                "execution_trace": ["start"],
+            }
+
         return {
             "node_outputs": {
                 "start": NodeOutput(
@@ -3106,6 +3199,12 @@ class LangGraphEngine:
             stream_output_enabled = _parse_output_boolean(raw_stream_output)
         except Exception:
             stream_output_enabled = True
+        raw_structured_input = context.get("structured_input", context.get("structuredInput"))
+        structured_input: dict[str, Any] | None
+        if isinstance(raw_structured_input, dict):
+            structured_input = raw_structured_input
+        else:
+            structured_input = None
         conversation_id = str(context.get("conversation_id") or "")
         sys_vars = {
             "date": now.date().isoformat(),
@@ -3287,6 +3386,7 @@ class LangGraphEngine:
                 "node_llms": node_llms,
                 "stream_output_enabled": stream_output_enabled,
                 "output_stream_source_node_id": output_stream_source_node_id,
+                "structured_input": structured_input,
             }
         else:
             initial_state: dict = {

@@ -48,6 +48,18 @@ export interface ConditionClause {
   value: string | null
 }
 
+export interface StartStructuredField {
+  name: string
+  type: 'string' | 'number' | 'integer' | 'boolean'
+  required?: boolean
+  description?: string
+}
+
+export interface StartNodeConfig {
+  inputMode?: 'text' | 'structured'
+  structuredFields?: StartStructuredField[]
+}
+
 export interface IfElseBranch {
   id: string
   label: string
@@ -170,6 +182,7 @@ export interface LoopNodeConfig {
 }
 
 export type NodeConfig =
+  | StartNodeConfig
   | LLMNodeConfig
   | OutputNodeConfig
   | ToolNodeConfig
@@ -248,7 +261,8 @@ export interface WorkflowValidationResponse {
 
 export interface WorkflowTestRunRequest {
   workflow: WorkflowInput
-  userInput: string
+  userInput?: string
+  structuredInput?: Record<string, unknown>
   streamOutput?: boolean
 }
 
@@ -366,6 +380,7 @@ export type WorkflowRunEvent =
 export interface WorkflowTestStreamOptions {
   signal?: AbortSignal
   onEvent?: (event: WorkflowRunEvent) => void
+  path?: string
 }
 
 export interface NodeTypeDefinition {
@@ -393,7 +408,8 @@ export const runWorkflowTestStream = async (
   payload: WorkflowTestRunRequest,
   options: WorkflowTestStreamOptions = {},
 ) => {
-  const response = await fetch(`/api/assistant-config/skills/${skillId}/workflow/test-run`, {
+  const targetPath = options.path || `/api/assistant-config/skills/${skillId}/workflow/test-run`
+  const response = await fetch(targetPath, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

@@ -23,6 +23,7 @@ from app.assistant.skills.workflow_validator import (
     validate_parallel_branches,
     validate_workflow,
 )
+from app.assistant_config.models import AssistantWorkflow
 from app.assistant_config.schemas import WorkflowInput, WorkflowTestRunRequest
 from app.assistant_config.service import AssistantConfigService
 from app.common.exceptions import ApiException
@@ -35,10 +36,13 @@ DELTA_FLUSH_CHAR_THRESHOLD = 96
 
 @dataclass(frozen=True)
 class PreparedWorkflowTestRun:
-    skill_id: UUID
-    skill_name: str
+    skill_id: UUID | None
+    workflow_id: UUID
+    display_name: str
     workflow: WorkflowInput
-    user_input: str
+    user_input: str | None
+    structured_input: dict[str, Any] | None
+    start_input_mode: str
     stream_output: bool
     skill_definition: SkillDefinition
 
@@ -72,17 +76,78 @@ class WorkflowTestRunService:
         payload = json.dumps(data, ensure_ascii=False, default=str)
         return f"event: {event}\ndata: {payload}\n\n".encode("utf-8")
 
-    def prepare(self, skill_id: UUID, request: WorkflowTestRunRequest) -> PreparedWorkflowTestRun:
-        """Validate request and build an in-memory workflow skill for test execution."""
-        skill = self.config_service.get_skill(skill_id)
-        if skill.langgraph_pattern != "workflow_dag":
-            raise ApiException(
-                status_code=422,
-                code=42231,
-                message="Workflow test run only supports workflow_dag skills",
-            )
-
+    def _prepare_internal(
+        self,
+        *,
+        scope_skill_id: UUID | None,
+        scope_workflow_id: UUID,
+        display_name: str,
+        description: str,
+        kb_enabled: bool,
+        request: WorkflowTestRunRequest,
+    ) -> PreparedWorkflowTestRun:
         workflow = request.workflow
+        start_input_mode = "text"
+        start_structured_fields: list[dict[str, Any]] = []
+        for node in workflow.nodes:
+            if node.node_type != "start":
+                continue
+            cfg = node.config if isinstance(node.config, dict) else {}
+            raw_mode = str(cfg.get("input_mode", cfg.get("inputMode", "text")) or "text").strip().lower()
+            start_input_mode = "structured" if raw_mode == "structured" else "text"
+            raw_fields = cfg.get("structured_fields", cfg.get("structuredFields"))
+            if isinstance(raw_fields, list):
+                start_structured_fields = [item for item in raw_fields if isinstance(item, dict)]
+            break
+
+        if start_input_mode == "structured":
+            provided_input = request.structured_input
+            if not isinstance(provided_input, dict):
+                raise ApiException(
+                    status_code=422,
+                    code=42210,
+                    message="structured_input is required when start inputMode=structured",
+                )
+            field_map: dict[str, dict[str, Any]] = {}
+            for field in start_structured_fields:
+                field_name = str(field.get("name", "") or "").strip()
+                if not field_name:
+                    continue
+                field_map[field_name] = field
+
+            unknown_fields = sorted(set(str(key) for key in provided_input.keys()) - set(field_map.keys()))
+            if unknown_fields:
+                raise ApiException(
+                    status_code=422,
+                    code=42211,
+                    message=f"structured_input contains unknown fields: {', '.join(unknown_fields)}",
+                )
+
+            for field_name, field in field_map.items():
+                required = bool(field.get("required", False))
+                if required and field_name not in provided_input:
+                    raise ApiException(
+                        status_code=422,
+                        code=42212,
+                        message=f"missing required structured input field: {field_name}",
+                    )
+                if field_name not in provided_input:
+                    continue
+                value = provided_input[field_name]
+                field_type = str(field.get("type", "string") or "string").strip().lower()
+                if field_type == "string" and not isinstance(value, str):
+                    raise ApiException(status_code=422, code=42213, message=f"field '{field_name}' must be string")
+                if field_type == "number" and (
+                    not isinstance(value, (int, float)) or isinstance(value, bool)
+                ):
+                    raise ApiException(status_code=422, code=42213, message=f"field '{field_name}' must be number")
+                if field_type == "integer" and (
+                    not isinstance(value, int) or isinstance(value, bool)
+                ):
+                    raise ApiException(status_code=422, code=42213, message=f"field '{field_name}' must be integer")
+                if field_type == "boolean" and not isinstance(value, bool):
+                    raise ApiException(status_code=422, code=42213, message=f"field '{field_name}' must be boolean")
+
         nodes_raw = [
             {
                 "node_id": node.node_id,
@@ -112,9 +177,6 @@ class WorkflowTestRunService:
             raise ApiException(status_code=422, code=42202, message=f"Invalid parallel branches: {msg}")
 
         workflow_tool_names = self.config_service.validate_workflow_dependencies(workflow)
-
-        kb_cfg_raw = getattr(skill, "kb_config", None)
-        kb_enabled = bool(kb_cfg_raw.get("enabled", False)) if isinstance(kb_cfg_raw, dict) else False
 
         workflow_nodes = [
             WorkflowNodeDefinition(
@@ -153,8 +215,8 @@ class WorkflowTestRunService:
             )
 
         skill_definition = SkillDefinition(
-            name=f"{skill.name}__workflow_test",
-            description=skill.description or "",
+            name=f"{display_name}__workflow_test",
+            description=description or "",
             intent_examples=[],
             tools=sorted(workflow_tool_names),
             mode="langgraph",
@@ -166,12 +228,46 @@ class WorkflowTestRunService:
         )
 
         return PreparedWorkflowTestRun(
-            skill_id=skill_id,
-            skill_name=skill.name,
+            skill_id=scope_skill_id,
+            workflow_id=scope_workflow_id,
+            display_name=display_name,
             workflow=workflow,
-            user_input=request.user_input,
+            user_input=request.user_input if start_input_mode == "text" else None,
+            structured_input=request.structured_input if start_input_mode == "structured" else None,
+            start_input_mode=start_input_mode,
             stream_output=bool(request.stream_output),
             skill_definition=skill_definition,
+        )
+
+    def prepare(self, skill_id: UUID, request: WorkflowTestRunRequest) -> PreparedWorkflowTestRun:
+        """Compatibility route: prepare test-run by skill id."""
+        skill = self.config_service.get_skill(skill_id)
+        if skill.workflow_id is None:
+            raise ApiException(
+                status_code=409,
+                code=42231,
+                message=f"Skill '{skill.name}' is bound to an agent, not a workflow",
+            )
+        kb_cfg_raw = getattr(skill, "kb_config", None)
+        kb_enabled = bool(kb_cfg_raw.get("enabled", False)) if isinstance(kb_cfg_raw, dict) else False
+        return self._prepare_internal(
+            scope_skill_id=skill.id,
+            scope_workflow_id=skill.workflow_id,
+            display_name=skill.name,
+            description=skill.description or "",
+            kb_enabled=kb_enabled,
+            request=request,
+        )
+
+    def prepare_for_workflow(self, workflow_id: UUID, request: WorkflowTestRunRequest) -> PreparedWorkflowTestRun:
+        workflow: AssistantWorkflow = self.config_service.get_workflow(workflow_id)
+        return self._prepare_internal(
+            scope_skill_id=None,
+            scope_workflow_id=workflow.id,
+            display_name=workflow.name,
+            description=workflow.description or "",
+            kb_enabled=False,
+            request=request,
         )
 
     def _build_engine(self, *, api_key: str, base_url: str, model: str):
@@ -258,7 +354,7 @@ class WorkflowTestRunService:
         enqueue(
             "run_start",
             runId=run_id,
-            skillId=str(prepared.skill_id),
+            skillId=str(prepared.skill_id or prepared.workflow_id),
             streamOutput=prepared.stream_output,
             startedAt=started_at,
         )
@@ -296,8 +392,8 @@ class WorkflowTestRunService:
             raise
         except Exception as exc:
             logger.exception(
-                "workflow test run bootstrap failed skill_id=%s run_id=%s",
-                prepared.skill_id,
+                "workflow test run bootstrap failed scope=%s run_id=%s",
+                prepared.display_name,
                 run_id,
             )
             duration_ms = int((time.perf_counter() - started_perf) * 1000)
@@ -405,11 +501,12 @@ class WorkflowTestRunService:
 
             for delta in engine.execute(
                 skill=prepared.skill_definition,
-                user_input=prepared.user_input,
+                user_input=prepared.user_input or "",
                 history=[],
                 runtime_context={
                     "stream_output": prepared.stream_output,
                     "conversation_id": f"workflow_test:{run_id}",
+                    "structured_input": prepared.structured_input,
                 },
                 on_tool_call_start=on_tool_call_start,
                 on_tool_call_end=on_tool_call_end,
@@ -450,7 +547,7 @@ class WorkflowTestRunService:
         except GeneratorExit:
             raise
         except Exception as exc:
-            logger.exception("workflow test run failed skill_id=%s run_id=%s", prepared.skill_id, run_id)
+            logger.exception("workflow test run failed scope=%s run_id=%s", prepared.display_name, run_id)
             duration_ms = int((time.perf_counter() - started_perf) * 1000)
             final_text = "".join(final_parts)
             flush_pending_delta(force=True)
