@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ReactFlowProvider } from '@xyflow/react'
-import { ArrowLeft, Save, Undo2, Redo2, Loader2, LayoutTemplate, Play, ListChecks, AlertCircle, Send, History } from 'lucide-react'
+import { ArrowLeft, Save, Undo2, Redo2, Loader2, LayoutTemplate, Play, ListChecks, AlertCircle, Send, History, SlidersHorizontal } from 'lucide-react'
 import { toast } from 'sonner'
 import { isApiError } from '@/lib/api/client'
 import {
@@ -16,7 +16,7 @@ import {
   saveWorkflowById,
   validateWorkflowById,
 } from '../api/workflows'
-import type { WorkflowInput } from '../api/workflow'
+import type { NodeConfig, WorkflowInput } from '../api/workflow'
 import { getSystemToolDefinitions, getToolsWithParams } from '../api/tools'
 import { useWorkflowEditorStore } from '../stores/workflow-editor-store'
 import { useWorkflowTestRunStore } from '../stores/workflow-test-run-store'
@@ -25,6 +25,7 @@ import { NodePalette } from '../components/workflow/NodePalette'
 import { PropertyPanel } from '../components/workflow/PropertyPanel'
 import { WorkflowTestRunPanel } from '../components/workflow/WorkflowTestRunPanel'
 import { WorkflowValidationChecklistPanel } from '../components/workflow/WorkflowValidationChecklistPanel'
+import { WorkflowEnvVarPanel } from '../components/workflow/WorkflowEnvVarPanel'
 import { serializeToWorkflowInput, deserializeFromWorkflow } from '../components/workflow/serialization'
 import { PublishVersionDialog } from '../components/versioning/PublishVersionDialog'
 import { TargetVersionPanel } from '../components/versioning/TargetVersionPanel'
@@ -37,6 +38,7 @@ import {
 import type { WorkflowToolDefinition } from '../components/workflow/types'
 import { autoLayoutWorkflowWithSubflows } from '../components/workflow/autoLayout'
 import { normalizeStartNodeConfig } from '../components/workflow/startNodeConfig'
+import { getStartNodeFromNodes, getWorkflowEnvVarsFromNodes, toStartConfigWithEnvVars } from '../components/workflow/workflowEnvVars'
 
 
 import { Tooltip } from '../../../components/ui/Tooltip'
@@ -66,6 +68,7 @@ export default function WorkflowEditorPage() {
   const [lastValidatedAt, setLastValidatedAt] = useState<number | null>(null)
   const [workflowDescriptionDraft, setWorkflowDescriptionDraft] = useState('')
   const [versionPanelOpen, setVersionPanelOpen] = useState(false)
+  const [envPanelOpen, setEnvPanelOpen] = useState(false)
   const [publishDialogOpen, setPublishDialogOpen] = useState(false)
   const validationSeqRef = useRef(0)
   const debounceTimerRef = useRef<number | null>(null)
@@ -137,6 +140,10 @@ export default function WorkflowEditorPage() {
     const startNode = store.nodes.find((node) => node.data.nodeType === 'start')
     return normalizeStartNodeConfig(startNode?.data.config ?? null).inputMode
   }, [store.nodes])
+  const workflowEnvVars = useMemo(
+    () => getWorkflowEnvVarsFromNodes(store.nodes),
+    [store.nodes],
+  )
   const hasUnsavedChanges = useMemo(
     () => store.isDirty || workflowDescriptionDraft !== (workflowEntity?.description ?? ''),
     [store.isDirty, workflowDescriptionDraft, workflowEntity?.description],
@@ -408,6 +415,19 @@ export default function WorkflowEditorPage() {
     setVersionPanelOpen((prev) => !prev)
   }, [])
 
+  const handleWorkflowEnvVarsChange = useCallback((nextVars: typeof workflowEnvVars) => {
+    const startNode = getStartNodeFromNodes(store.nodes)
+    if (!startNode) {
+      toast.error(t('settings.skills.envVars.startNodeMissing'))
+      return
+    }
+    const nextConfig = toStartConfigWithEnvVars(
+      (startNode.data.config ?? null) as Record<string, unknown> | null,
+      nextVars,
+    )
+    store.updateNodeConfig(startNode.id, nextConfig as NodeConfig, { pushHistory: true })
+  }, [store, t, workflowEnvVars])
+
   const handleBack = useCallback(() => {
     if (hasUnsavedChanges && !window.confirm(t('settings.skills.unsavedChanges'))) return
     navigate('/settings/assistant-targets')
@@ -640,6 +660,20 @@ export default function WorkflowEditorPage() {
               {t('settings.skills.workflowActions.versionHistory')}
             </button>
             <button
+              onClick={() => setEnvPanelOpen((prev) => !prev)}
+              className={`
+                flex items-center gap-2 px-3 py-1.5 rounded-xl text-sm font-medium transition-all shadow-sm
+                ${envPanelOpen
+                  ? 'bg-blue-100 text-blue-700 hover:bg-blue-200 border border-blue-200'
+                  : 'bg-white/90 hover:bg-white text-slate-700 border border-slate-200 hover:border-slate-300'
+                }
+              `}
+              title={t('settings.skills.workflowActions.env')}
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5" />
+              {t('settings.skills.workflowActions.env')}
+            </button>
+            <button
               onClick={() => setPublishDialogOpen(true)}
               disabled={publishMutation.isPending}
               className="flex items-center gap-2 px-4 py-1.5 rounded-xl text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 border border-blue-700 disabled:opacity-50 transition-all shadow-sm"
@@ -721,6 +755,13 @@ export default function WorkflowEditorPage() {
           onClear={handleClearVersions}
           onDelete={handleDeleteVersion}
           onRestore={(versionId) => rollbackMutation.mutate(versionId)}
+        />
+
+        <WorkflowEnvVarPanel
+          open={envPanelOpen}
+          envVars={workflowEnvVars}
+          onClose={() => setEnvPanelOpen(false)}
+          onChange={handleWorkflowEnvVarsChange}
         />
 
         <PublishVersionDialog

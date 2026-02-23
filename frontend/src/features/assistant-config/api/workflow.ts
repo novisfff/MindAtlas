@@ -12,6 +12,8 @@ export type NodeType =
   | 'knowledge_retrieval'
   | 'iteration'
   | 'loop'
+  | 'code_executor'
+  | 'variable_assign'
   | 'output'
 
 export type ConditionOperator =
@@ -55,9 +57,19 @@ export interface StartStructuredField {
   description?: string
 }
 
+export type WorkflowEnvVarType = 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array'
+
+export interface WorkflowSessionVar {
+  name: string
+  type: WorkflowEnvVarType
+  defaultValue?: unknown
+  description?: string
+}
+
 export interface StartNodeConfig {
   inputMode?: 'text' | 'structured'
   structuredFields?: StartStructuredField[]
+  sessionVars?: WorkflowSessionVar[]
 }
 
 export interface IfElseBranch {
@@ -132,6 +144,27 @@ export interface KnowledgeRetrievalNodeConfig {
   topK?: number
 }
 
+export interface CodeExecutorNodeConfig {
+  language?: 'python' | 'javascript'
+  code?: string
+  entrypoint?: string
+  timeoutMs?: number
+  inputBindings?: Record<string, string>
+  outputFields?: Array<{
+    name: string
+    type?: string
+    nullable?: boolean
+    itemsType?: string
+    enum?: string[]
+  }>
+}
+
+export interface VariableAssignNodeConfig {
+  variableName?: string
+  operation?: 'set' | 'increment' | 'append' | 'clear'
+  valueTemplate?: string
+}
+
 export type ContainerBodyNodeType =
   | 'start'
   | 'llm'
@@ -139,6 +172,8 @@ export type ContainerBodyNodeType =
   | 'if_else'
   | 'parameter_extractor'
   | 'knowledge_retrieval'
+  | 'code_executor'
+  | 'variable_assign'
 
 export interface ContainerBodyNode {
   nodeId: string
@@ -189,6 +224,8 @@ export type NodeConfig =
   | IfElseNodeConfig
   | ParameterExtractorNodeConfig
   | KnowledgeRetrievalNodeConfig
+  | CodeExecutorNodeConfig
+  | VariableAssignNodeConfig
   | IterationNodeConfig
   | LoopNodeConfig
   | Record<string, unknown>

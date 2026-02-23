@@ -12,6 +12,8 @@ const DEFAULT_LABEL_BY_TYPE: Record<NodeType, string> = {
   knowledge_retrieval: 'Knowledge Retrieval',
   iteration: 'Iteration',
   loop: 'Loop',
+  code_executor: 'Code Executor',
+  variable_assign: 'Variable Assign',
   output: 'Output',
 }
 
@@ -24,6 +26,8 @@ const NODE_TYPE_LABEL_KEY: Record<NodeType, string> = {
   knowledge_retrieval: 'settings.skills.nodeTypes.knowledge_retrieval',
   iteration: 'settings.skills.nodeTypes.iteration',
   loop: 'settings.skills.nodeTypes.loop',
+  code_executor: 'settings.skills.nodeTypes.code_executor',
+  variable_assign: 'settings.skills.nodeTypes.variable_assign',
   output: 'settings.skills.nodeTypes.output',
 }
 

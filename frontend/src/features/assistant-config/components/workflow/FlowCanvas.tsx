@@ -34,6 +34,8 @@ const nodeTypes: NodeTypes = {
   knowledge_retrieval: WorkflowNode,
   iteration: WorkflowNode,
   loop: WorkflowNode,
+  code_executor: WorkflowNode,
+  variable_assign: WorkflowNode,
   output: WorkflowNode,
 }
 
@@ -597,7 +599,7 @@ export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
         nodesConnectable={isInteractive}
         elementsSelectable={isInteractive}
       >
-        <Background gap={16} size={1} />
+        <Background gap={16} size={1} color="#94a3b8" className="opacity-40" />
         <FlowControls isInteractive={isInteractive} onLockChange={setIsInteractive} />
         <MiniMap
           nodeStrokeWidth={3}

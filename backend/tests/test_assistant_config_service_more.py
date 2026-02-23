@@ -115,8 +115,12 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
             )
         )
 
-        node_by_id = {node.node_id: node for node in (created.nodes or [])}
-        edge_pairs = {(edge.source_node_id, edge.target_node_id) for edge in (created.edges or [])}
+        self.assertIsNotNone(created.workflow)
+        node_by_id = {node.node_id: node for node in ((created.workflow.nodes if created.workflow else []) or [])}
+        edge_pairs = {
+            (edge.source_node_id, edge.target_node_id)
+            for edge in ((created.workflow.edges if created.workflow else []) or [])
+        }
 
         self.assertSetEqual(set(node_by_id.keys()), {"start", "llm_1", "output_1"})
         self.assertEqual(node_by_id["output_1"].node_type, "output")
@@ -149,8 +153,12 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
             ),
         )
 
-        node_by_id = {node.node_id: node for node in (updated.nodes or [])}
-        edge_pairs = {(edge.source_node_id, edge.target_node_id) for edge in (updated.edges or [])}
+        self.assertIsNotNone(updated.workflow)
+        node_by_id = {node.node_id: node for node in ((updated.workflow.nodes if updated.workflow else []) or [])}
+        edge_pairs = {
+            (edge.source_node_id, edge.target_node_id)
+            for edge in ((updated.workflow.edges if updated.workflow else []) or [])
+        }
 
         self.assertSetEqual(set(node_by_id.keys()), {"start", "llm_1", "output_1"})
         self.assertEqual(node_by_id["output_1"].node_type, "output")
@@ -159,26 +167,24 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertIn(("llm_1", "output_1"), edge_pairs)
 
     def test_update_skill_rejects_non_langgraph_mode(self) -> None:
-        from app.assistant_config.models import AssistantSkill  # noqa: E402
-        from app.assistant_config.schemas import AssistantSkillUpdateRequest  # noqa: E402
+        from app.assistant_config.schemas import AssistantSkillCreateRequest, AssistantSkillUpdateRequest  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
-        skill = AssistantSkill(
-            name="lg2",
-            description="d",
-            intent_examples=[],
-            tools=[],
-            mode="langgraph",
-            langgraph_pattern="agent_loop",
-            system_prompt="sys",
-            is_system=False,
-            enabled=True,
-        )
-        self.db.add(skill)
-        self.db.commit()
-
         svc = AssistantConfigService(self.db)
-        updated = svc.update_skill(skill.id, AssistantSkillUpdateRequest(langgraph_pattern="agent_loop"))
+        created = svc.create_skill(
+            AssistantSkillCreateRequest(
+                name="lg2",
+                description="d",
+                intent_examples=[],
+                tools=[],
+                mode="langgraph",
+                langgraph_pattern="agent_loop",
+                system_prompt="sys",
+                enabled=True,
+            )
+        )
+
+        updated = svc.update_skill(created.id, AssistantSkillUpdateRequest(langgraph_pattern="agent_loop"))
         self.assertEqual(updated.langgraph_pattern, "agent_loop")
 
         with self.assertRaises(ValidationError):

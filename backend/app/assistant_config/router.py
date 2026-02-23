@@ -564,6 +564,8 @@ _NODE_TYPE_LABELS = {
     "knowledge_retrieval": "Knowledge Retrieval",
     "iteration": "Iteration",
     "loop": "Loop",
+    "code_executor": "Code Executor",
+    "variable_assign": "Variable Assign",
     "output": "Output",
 }
 
@@ -576,5 +578,7 @@ _NODE_TYPE_DESCRIPTIONS = {
     "knowledge_retrieval": "Search knowledge base with optional mode/topK overrides",
     "iteration": "Iterate over an array and execute inner subflow per item",
     "loop": "Repeat inner subflow until termination conditions are met",
+    "code_executor": "Run sandboxed Python or JavaScript code with structured inputs and outputs",
+    "variable_assign": "Assign or update workflow env variable values",
     "output": "Workflow terminal node that formats and emits final response",
 }

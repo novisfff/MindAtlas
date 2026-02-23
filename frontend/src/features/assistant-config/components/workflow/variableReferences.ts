@@ -125,6 +125,19 @@ function buildNodeOutputFields(
     return ['result', 'query', 'mode', 'references', 'references_count']
   }
 
+  if (node.data.nodeType === 'code_executor') {
+    const fields = Array.isArray(cfg.outputFields)
+      ? cfg.outputFields
+        .map((item) => (item && typeof item === 'object' ? String((item as Record<string, unknown>).name ?? '').trim() : ''))
+        .filter((name) => !!name)
+      : []
+    return fields
+  }
+
+  if (node.data.nodeType === 'variable_assign') {
+    return []
+  }
+
   if (node.data.nodeType === 'iteration') {
     const outputVariable = String(cfg.outputVariable ?? '').trim() || 'results'
     return [outputVariable, 'count', 'errors']
@@ -156,10 +169,66 @@ function buildNodeOutputFields(
 
 function inferFieldType(field: string): InputParam['paramType'] {
   if (field === 'result' || field === 'references') return 'object'
+  if (field === 'before' || field === 'after') return 'object'
   if (field === 'references_count') return 'number'
   if (field === 'count' || field === 'iterations') return 'number'
   if (field === 'errors') return 'array'
   return 'string'
+}
+
+function inferCodeExecutorFieldType(
+  node: Node<WfNodeData>,
+  field: string,
+): InputParam['paramType'] {
+  const cfg = (node.data.config ?? {}) as Record<string, unknown>
+  const fields = Array.isArray(cfg.outputFields) ? cfg.outputFields : []
+  const matched = fields.find((item) => {
+    if (!item || typeof item !== 'object') return false
+    return String((item as Record<string, unknown>).name ?? '').trim() === field
+  }) as Record<string, unknown> | undefined
+  const rawType = String(matched?.type ?? 'string').trim().toLowerCase()
+  if (rawType === 'number' || rawType === 'integer') return 'number'
+  if (rawType === 'boolean') return 'boolean'
+  if (rawType === 'object') return 'object'
+  if (rawType === 'array') return 'array'
+  return 'string'
+}
+
+function inferEnvFieldType(rawType: unknown): InputParam['paramType'] {
+  const envType = String(rawType ?? 'string').trim().toLowerCase()
+  if (envType === 'number' || envType === 'integer') return 'number'
+  if (envType === 'boolean') return 'boolean'
+  if (envType === 'object') return 'object'
+  if (envType === 'array') return 'array'
+  return 'string'
+}
+
+function buildEnvironmentReferenceParams(nodes: Node<WfNodeData>[]): InputParam[] {
+  const startNode = nodes.find((item) => item.data.nodeType === 'start')
+  if (!startNode) return []
+  const startConfig = (startNode.data.config ?? {}) as Record<string, unknown>
+  const rawSessionVars = Array.isArray(startConfig.sessionVars)
+    ? startConfig.sessionVars
+    : (Array.isArray(startConfig.session_vars) ? startConfig.session_vars : [])
+
+  return rawSessionVars
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item))
+    .map((item) => {
+      const name = String(item.name ?? '').trim()
+      if (!name) return null
+      const path = `env.${name}`
+      return {
+        name: path,
+        referencePath: path,
+        groupKey: 'env',
+        groupLabel: 'Environment Variables',
+        itemLabel: name,
+        paramType: inferEnvFieldType(item.type),
+        required: false,
+        description: String(item.description ?? `Environment variable: ${name}`),
+      } as InputParam
+    })
+    .filter((item): item is InputParam => item !== null)
 }
 
 function nodeDisplayLabel(node: Node<WfNodeData>): string {
@@ -194,7 +263,9 @@ export function buildWorkflowReferenceParams(
         groupKey,
         groupLabel,
         itemLabel: field,
-        paramType: inferFieldType(field),
+        paramType: node.data.nodeType === 'code_executor'
+          ? inferCodeExecutorFieldType(node, field)
+          : inferFieldType(field),
         required: false,
         description: `${groupLabel}.${field}`,
       })
@@ -202,6 +273,13 @@ export function buildWorkflowReferenceParams(
   })
 
   SYS_REFERENCE_PARAMS.forEach((param) => {
+    const path = param.referencePath || param.name
+    if (seen.has(path)) return
+    seen.add(path)
+    params.push(param)
+  })
+
+  buildEnvironmentReferenceParams(nodes).forEach((param) => {
     const path = param.referencePath || param.name
     if (seen.has(path)) return
     seen.add(path)

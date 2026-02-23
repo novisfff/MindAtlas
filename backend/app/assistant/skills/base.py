@@ -23,7 +23,7 @@ OutputFieldType = Literal["string", "number", "integer", "boolean", "object", "a
 NodeType = Literal[
     "start", "llm", "tool", "if_else",
     "parameter_extractor", "knowledge_retrieval",
-    "iteration", "loop", "output",
+    "iteration", "loop", "code_executor", "variable_assign", "output",
 ]
 
 # 条件运算符

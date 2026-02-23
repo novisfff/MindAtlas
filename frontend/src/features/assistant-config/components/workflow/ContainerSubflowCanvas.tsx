@@ -9,6 +9,8 @@ import {
   RefreshCw,
   ScanSearch,
   Wrench,
+  FileCode2,
+  Equal,
 } from 'lucide-react'
 import {
   Background,
@@ -47,6 +49,8 @@ const NODE_STYLES: Record<ContainerBodyNodeType, { header: string; icon: typeof 
   if_else: { header: 'bg-yellow-50 border-b border-yellow-100', icon: GitBranch, iconColor: 'text-yellow-600' },
   parameter_extractor: { header: 'bg-pink-50 border-b border-pink-100', icon: ScanSearch, iconColor: 'text-pink-600' },
   knowledge_retrieval: { header: 'bg-teal-50 border-b border-teal-100', icon: BookOpen, iconColor: 'text-teal-600' },
+  code_executor: { header: 'bg-slate-50 border-b border-slate-100', icon: FileCode2, iconColor: 'text-slate-600' },
+  variable_assign: { header: 'bg-lime-50 border-b border-lime-100', icon: Equal, iconColor: 'text-lime-600' },
 }
 
 const PREVIEW_MAX = 50
@@ -57,6 +61,8 @@ const NODE_ICON_MAP: Record<ContainerBodyNodeType, typeof Play> = {
   if_else: GitBranch,
   parameter_extractor: ScanSearch,
   knowledge_retrieval: BookOpen,
+  code_executor: FileCode2,
+  variable_assign: Equal,
 }
 
 const SUBFLOW_NODE_HANDLE_TOP = 20
@@ -125,6 +131,21 @@ function getSubflowPreview(nodeType: ContainerBodyNodeType, config: Record<strin
       ].filter(Boolean)
       if (metaParts.length === 0) return query
       return `${query} · ${metaParts.join(' · ')}`
+    }
+    case 'code_executor': {
+      const language = String(cfg.language ?? 'python').toLowerCase()
+      const outputFields = (Array.isArray(cfg.outputFields) ? cfg.outputFields : Array.isArray(cfg.output_fields) ? cfg.output_fields : [])
+        .map((item) => (item && typeof item === 'object' ? String((item as Record<string, unknown>).name ?? '').trim() : ''))
+        .filter(Boolean)
+      if (outputFields.length === 0) return `${language} · script`
+      const brief = outputFields.slice(0, 3).join(', ')
+      return `${language} · ${brief}${outputFields.length > 3 ? ` +${outputFields.length - 3}` : ''}`
+    }
+    case 'variable_assign': {
+      const variableName = String(cfg.variableName ?? cfg.variable_name ?? '').trim()
+      const operation = String(cfg.operation ?? 'set').trim().toLowerCase() || 'set'
+      if (!variableName) return operation
+      return `${operation} ${variableName}`
     }
     default:
       return ''
@@ -800,7 +821,7 @@ export function ContainerSubflowCanvas({
       const position = resolveNonOverlappingPosition(initial, currentBodyNodes)
 
       const nextNodeType = payload.kind === 'tool' ? 'tool' : (payload.nodeType as ContainerBodyNodeType)
-      if (!['llm', 'tool', 'if_else', 'parameter_extractor', 'knowledge_retrieval'].includes(nextNodeType)) {
+      if (!['llm', 'tool', 'if_else', 'parameter_extractor', 'knowledge_retrieval', 'code_executor', 'variable_assign'].includes(nextNodeType)) {
         return
       }
       const nodeId = createBodyNodeId(nextNodeType)

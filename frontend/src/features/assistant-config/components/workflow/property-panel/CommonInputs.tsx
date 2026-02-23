@@ -69,6 +69,7 @@ interface CommonSelectProps {
     options: { label: string; value: string }[]
     placeholder?: string
     required?: boolean
+    disabled?: boolean
     className?: string
 }
 
@@ -79,6 +80,7 @@ export function CommonSelect({
     options,
     placeholder,
     required,
+    disabled = false,
     className = '',
 }: CommonSelectProps) {
     return (
@@ -87,7 +89,11 @@ export function CommonSelect({
             <select
                 value={value}
                 onChange={(e) => onChange(e.target.value)}
-                className="w-full px-2.5 py-2 text-xs rounded-md border bg-background hover:bg-accent/5 focus:ring-1 focus:ring-primary/20 focus:border-primary/50 outline-none transition-all appearance-none cursor-pointer"
+                disabled={disabled}
+                className={`w-full px-2.5 py-2 text-xs rounded-md border bg-background outline-none transition-all appearance-none ${disabled
+                    ? 'cursor-not-allowed opacity-60'
+                    : 'hover:bg-accent/5 focus:ring-1 focus:ring-primary/20 focus:border-primary/50 cursor-pointer'
+                    }`}
                 style={{
                     backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
                     backgroundPosition: 'right 0.5rem center',

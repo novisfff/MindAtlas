@@ -21,6 +21,8 @@ import {
   IterationNodeSettings,
   LoopNodeSettings,
 } from './property-panel/nodes/OtherNodeSettings'
+import { CodeExecutorNodeSettings } from './property-panel/nodes/CodeExecutorNodeSettings'
+import { VariableAssignNodeSettings } from './property-panel/nodes/VariableAssignNodeSettings'
 import { OutputNodeSettings } from './property-panel/nodes/OutputNodeSettings'
 import { useModelsQuery } from '../../../ai-providers/queries'
 import { X } from 'lucide-react'
@@ -473,9 +475,9 @@ export function PropertyPanel({ tools, workflowDescription, onWorkflowDescriptio
     const nextBodyNodes = snapshot.bodyNodes.map((node) => (
       node.nodeId === selectionContext.node.nodeId
         ? {
-            ...node,
-            config: nextNodeConfig,
-          }
+          ...node,
+          config: nextNodeConfig,
+        }
         : node
     ))
 
@@ -507,9 +509,9 @@ export function PropertyPanel({ tools, workflowDescription, onWorkflowDescriptio
     const nextBodyNodes = snapshot.bodyNodes.map((node) => (
       node.nodeId === selectionContext.node.nodeId
         ? {
-            ...node,
-            label: normalizedLabel,
-          }
+          ...node,
+          label: normalizedLabel,
+        }
         : node
     ))
 
@@ -595,6 +597,10 @@ export function PropertyPanel({ tools, workflowDescription, onWorkflowDescriptio
         return <ParameterExtractorNodeSettings {...commonProps} modelOptions={nodeModelOptions} />
       case 'knowledge_retrieval':
         return <KnowledgeRetrievalNodeSettings {...commonProps} />
+      case 'code_executor':
+        return <CodeExecutorNodeSettings {...commonProps} />
+      case 'variable_assign':
+        return <VariableAssignNodeSettings {...commonProps} />
       case 'iteration':
         return <IterationNodeSettings {...commonProps} />
       case 'loop':
@@ -607,8 +613,8 @@ export function PropertyPanel({ tools, workflowDescription, onWorkflowDescriptio
   }
 
   return (
-    <div className="w-[360px] h-full flex flex-col bg-white border-l shadow-xl z-20">
-      <div className="shrink-0 p-4 border-b border-border/40">
+    <div className="w-[400px] h-full flex flex-col bg-slate-50 border-l border-slate-200 shadow-2xl z-20">
+      <div className="shrink-0 p-5 bg-white/60 backdrop-blur-sm border-b border-border/40">
         <div className="flex items-center justify-between">
           <div className="flex-1">
             <NodeHeader
@@ -633,7 +639,7 @@ export function PropertyPanel({ tools, workflowDescription, onWorkflowDescriptio
       </div>
 
       <div
-        className="flex-1 overflow-y-auto custom-scrollbar p-5"
+        className="flex-1 overflow-y-auto custom-scrollbar p-6 bg-white"
         onBlurCapture={(event) => {
           const nextTarget = event.relatedTarget
           if (isTextEditableElement(nextTarget)) return

@@ -294,6 +294,8 @@ const CONTAINER_NODE_TYPES: Array<{ value: NodeType; labelKey: string }> = [
     { value: 'if_else', labelKey: 'settings.skills.nodeTypes.if_else' },
     { value: 'parameter_extractor', labelKey: 'settings.skills.nodeTypes.parameter_extractor' },
     { value: 'knowledge_retrieval', labelKey: 'settings.skills.nodeTypes.knowledge_retrieval' },
+    { value: 'code_executor', labelKey: 'settings.skills.nodeTypes.code_executor' },
+    { value: 'variable_assign', labelKey: 'settings.skills.nodeTypes.variable_assign' },
 ]
 
 function normalizeBodyNodes(config: Record<string, unknown>): ContainerBodyNode[] {

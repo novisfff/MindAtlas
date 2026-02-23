@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { NodeType } from '../../../api/workflow'
-import { Brain, GitBranch, ScanSearch, BookOpen, Wrench, Play, RefreshCw, Infinity, SendHorizontal } from 'lucide-react'
+import { Brain, GitBranch, ScanSearch, BookOpen, Wrench, Play, RefreshCw, Infinity, SendHorizontal, FileCode2, Equal } from 'lucide-react'
 
 interface NodeHeaderProps {
     nodeType: NodeType
@@ -19,19 +19,23 @@ const NODE_ICONS: Record<string, React.ElementType> = {
     start: Play,
     iteration: RefreshCw,
     loop: Infinity,
+    code_executor: FileCode2,
+    variable_assign: Equal,
     output: SendHorizontal,
 }
 
 const NODE_COLORS: Record<string, string> = {
-    llm: 'text-purple-600 bg-purple-50 border-purple-100',
-    if_else: 'text-orange-600 bg-orange-50 border-orange-100',
-    parameter_extractor: 'text-cyan-600 bg-cyan-50 border-cyan-100',
-    knowledge_retrieval: 'text-green-600 bg-green-50 border-green-100',
-    tool: 'text-sky-600 bg-sky-50 border-sky-100',
-    start: 'text-emerald-600 bg-emerald-50 border-emerald-100',
-    iteration: 'text-cyan-600 bg-cyan-50 border-cyan-100',
-    loop: 'text-blue-600 bg-blue-50 border-blue-100',
-    output: 'text-indigo-600 bg-indigo-50 border-indigo-100',
+    start: 'bg-gradient-to-r from-emerald-100/90 to-green-100/90 border-emerald-200 text-emerald-700',
+    llm: 'bg-gradient-to-r from-violet-100/90 to-purple-100/90 border-violet-200 text-violet-700',
+    tool: 'bg-gradient-to-r from-sky-100/90 to-blue-100/90 border-sky-200 text-sky-700',
+    if_else: 'bg-gradient-to-r from-amber-100/90 to-yellow-100/90 border-amber-200 text-amber-700',
+    parameter_extractor: 'bg-gradient-to-r from-fuchsia-100/90 to-pink-100/90 border-fuchsia-200 text-fuchsia-700',
+    knowledge_retrieval: 'bg-gradient-to-r from-teal-100/90 to-emerald-100/90 border-teal-200 text-teal-700',
+    iteration: 'bg-gradient-to-r from-cyan-100/90 to-sky-100/90 border-cyan-200 text-cyan-700',
+    loop: 'bg-gradient-to-r from-indigo-100/90 to-blue-100/90 border-indigo-200 text-indigo-700',
+    code_executor: 'bg-gradient-to-r from-orange-100/90 to-amber-100/90 border-orange-200 text-orange-700',
+    variable_assign: 'bg-gradient-to-r from-lime-100/90 to-emerald-100/90 border-lime-200 text-lime-700',
+    output: 'bg-gradient-to-r from-rose-100/90 to-orange-100/90 border-rose-200 text-rose-700',
 }
 
 export function NodeHeader({ nodeType, label, onLabelChange }: NodeHeaderProps) {
@@ -63,7 +67,7 @@ export function NodeHeader({ nodeType, label, onLabelChange }: NodeHeaderProps) 
     return (
         <div className="flex items-center gap-3">
             <div className={`p-2.5 rounded-xl border ${colorClass} shadow-sm`}>
-                <Icon className="w-5 h-5" />
+                <Icon className="w-5 h-5 flex-shrink-0" />
             </div>
 
             <div className="flex-1 min-w-0">

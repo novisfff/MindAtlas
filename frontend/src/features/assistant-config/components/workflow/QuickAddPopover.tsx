@@ -29,6 +29,8 @@ const CONTAINER_ALLOWED_TYPES = new Set<ContainerBodyNodeType>([
   'if_else',
   'parameter_extractor',
   'knowledge_retrieval',
+  'code_executor',
+  'variable_assign',
 ])
 
 export function QuickAddPopover({

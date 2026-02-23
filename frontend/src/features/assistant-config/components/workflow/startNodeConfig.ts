@@ -1,9 +1,17 @@
-import type { StartStructuredField, WorkflowInput } from '../../api/workflow'
+import type { StartStructuredField, WorkflowInput, WorkflowSessionVar, WorkflowEnvVarType } from '../../api/workflow'
 
 export type StartInputMode = 'text' | 'structured'
 
 const FIELD_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/
 const ALLOWED_FIELD_TYPES = new Set(['string', 'number', 'integer', 'boolean'])
+const ALLOWED_ENV_TYPES = new Set<WorkflowEnvVarType>([
+  'string',
+  'number',
+  'integer',
+  'boolean',
+  'object',
+  'array',
+])
 
 export const START_FIELD_TYPE_OPTIONS: Array<{ label: string; value: StartStructuredField['type'] }> = [
   { label: 'String', value: 'string' },
@@ -15,12 +23,14 @@ export const START_FIELD_TYPE_OPTIONS: Array<{ label: string; value: StartStruct
 export interface NormalizedStartNodeConfig {
   inputMode: StartInputMode
   structuredFields: StartStructuredField[]
+  sessionVars: WorkflowSessionVar[]
 }
 
 export function buildDefaultStartNodeConfig(): NormalizedStartNodeConfig {
   return {
     inputMode: 'text',
     structuredFields: [],
+    sessionVars: [],
   }
 }
 
@@ -36,6 +46,29 @@ function normalizeStructuredField(raw: unknown): StartStructuredField | null {
     name,
     type: fieldType as StartStructuredField['type'],
     required,
+    description: description || undefined,
+  }
+}
+
+function normalizeSessionVar(raw: unknown): WorkflowSessionVar | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const value = raw as Record<string, unknown>
+  const name = String(value.name ?? '').trim()
+  if (!name) return null
+  const rawType = String(value.type ?? 'string').trim().toLowerCase()
+  const type = ALLOWED_ENV_TYPES.has(rawType as WorkflowEnvVarType)
+    ? (rawType as WorkflowEnvVarType)
+    : 'string'
+  const description = String(value.description ?? '').trim()
+  const hasDefault = Object.prototype.hasOwnProperty.call(value, 'defaultValue') ||
+    Object.prototype.hasOwnProperty.call(value, 'default_value')
+  const defaultValue = hasDefault
+    ? (value.defaultValue ?? value.default_value)
+    : undefined
+  return {
+    name,
+    type,
+    defaultValue,
     description: description || undefined,
   }
 }
@@ -57,9 +90,16 @@ export function normalizeStartNodeConfig(rawConfig: unknown): NormalizedStartNod
       .map((item) => normalizeStructuredField(item))
       .filter((item): item is StartStructuredField => Boolean(item))
     : []
+  const rawSessionVars = (cfg.sessionVars ?? cfg.session_vars) as unknown
+  const sessionVars = Array.isArray(rawSessionVars)
+    ? rawSessionVars
+      .map((item) => normalizeSessionVar(item))
+      .filter((item): item is WorkflowSessionVar => Boolean(item))
+    : []
   return {
     inputMode,
     structuredFields,
+    sessionVars,
   }
 }
 

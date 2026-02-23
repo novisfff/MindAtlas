@@ -194,6 +194,53 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         self.assertEqual(snapshot_payload["input"], {"userInput": "hello"})
         self.assertEqual(snapshot_payload["output"], {"response": "AB"})
 
+    def test_stream_emits_env_snapshot_payload(self) -> None:
+        from app.assistant_config.workflow_test_service import WorkflowTestRunService
+
+        skill = self._create_workflow_skill()
+        service = WorkflowTestRunService(self.db)
+        prepared = service.prepare(skill.id, self._valid_request(stream_output=False))
+
+        class _FakeEngine:
+            def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                kwargs["on_node_start"]("start", "start")
+                kwargs["on_node_end"]("start", "ok")
+                kwargs["on_node_snapshot"](
+                    "assign_1",
+                    "variable_assign",
+                    "ok",
+                    {
+                        "variableName": "counter",
+                        "operation": "increment",
+                        "resolvedValuePreview": "2",
+                        "currentEnvValue": 1,
+                    },
+                    {
+                        "variable": "counter",
+                        "operation": "increment",
+                        "before": 1,
+                        "after": 3,
+                    },
+                    None,
+                    False,
+                )
+                yield ""
+
+        with patch(
+            "app.assistant_config.workflow_test_service.resolve_openai_compat_config",
+            return_value=SimpleNamespace(api_key="k", base_url="https://api.example.com", model="gpt-test"),
+        ), patch(
+            "app.assistant_config.workflow_test_service.WorkflowTestRunService._build_engine",
+            return_value=_FakeEngine(),
+        ):
+            chunks = list(service.stream(prepared))
+
+        events = _parse_sse_events(chunks)
+        snapshot_payload = next(payload for name, payload in events if name == "node_snapshot")
+        self.assertEqual(snapshot_payload["nodeType"], "variable_assign")
+        self.assertEqual(snapshot_payload["input"]["variableName"], "counter")
+        self.assertEqual(snapshot_payload["output"]["after"], 3)
+
     def test_stream_aggregates_high_frequency_delta_events(self) -> None:
         from app.assistant_config.workflow_test_service import WorkflowTestRunService
 

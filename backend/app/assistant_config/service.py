@@ -923,6 +923,10 @@ class AssistantConfigService:
                 enabled=enabled,
             )
             self.db.add(workflow_model)
+            # skill has a DB constraint that requires binding exactly one target;
+            # bind relation before flush so pending inserts remain valid.
+            skill.workflow = workflow_model
+            skill.agent_profile = None
             self.db.flush()
 
         should_update_workflow_graph = request_workflow is not None or workflow_id is None
@@ -982,6 +986,10 @@ class AssistantConfigService:
                 enabled=enabled,
             )
             self.db.add(agent_profile)
+            # skill has a DB constraint that requires binding exactly one target;
+            # bind relation before flush so pending inserts remain valid.
+            skill.agent_profile = agent_profile
+            skill.workflow = None
             self.db.flush()
             initial_draft = AgentPublishDraftInput.model_validate(
                 {
@@ -1368,7 +1376,6 @@ class AssistantConfigService:
                     enabled=True,
                 )
                 self.db.add(skill)
-                self.db.flush()
 
                 if target_type == "workflow":
                     workflow_input = self._build_default_workflow_input()
@@ -1873,7 +1880,6 @@ class AssistantConfigService:
             enabled=request.enabled,
         )
         self.db.add(skill)
-        self.db.flush()
 
         target_type = self._derive_target_type(
             target_type=request.target_type,

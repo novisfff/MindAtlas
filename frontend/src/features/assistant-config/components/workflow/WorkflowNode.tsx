@@ -12,6 +12,8 @@ import {
   Infinity,
   Plus,
   SendHorizontal,
+  FileCode2,
+  Equal,
 } from 'lucide-react'
 import type { WfNodeData } from '../../stores/workflow-editor-store'
 import { useWorkflowEditorStore } from '../../stores/workflow-editor-store'
@@ -32,6 +34,8 @@ const NODE_STYLES: Record<NodeType, { header: string; icon: typeof Play; iconCol
   knowledge_retrieval: { header: 'bg-gradient-to-r from-teal-100/90 to-emerald-100/90 border-b border-teal-200', icon: BookOpen, iconColor: 'text-teal-700' },
   iteration: { header: 'bg-gradient-to-r from-cyan-100/90 to-sky-100/90 border-b border-cyan-200', icon: RefreshCw, iconColor: 'text-cyan-700' },
   loop: { header: 'bg-gradient-to-r from-indigo-100/90 to-blue-100/90 border-b border-indigo-200', icon: Infinity, iconColor: 'text-indigo-700' },
+  code_executor: { header: 'bg-gradient-to-r from-orange-100/90 to-amber-100/90 border-b border-orange-200', icon: FileCode2, iconColor: 'text-orange-700' },
+  variable_assign: { header: 'bg-gradient-to-r from-lime-100/90 to-emerald-100/90 border-b border-lime-200', icon: Equal, iconColor: 'text-lime-700' },
   output: { header: 'bg-gradient-to-r from-rose-100/90 to-orange-100/90 border-b border-rose-200', icon: SendHorizontal, iconColor: 'text-rose-700' },
 }
 const HANDLE_TOP_OFFSET = 28
@@ -214,6 +218,21 @@ function getPreview(data: WfNodeData): string {
     case 'loop': {
       const maxIterations = Number.isFinite(Number(cfg.maxIterations)) ? String(cfg.maxIterations) : '10'
       return `最大循环 ${maxIterations} 次`
+    }
+    case 'code_executor': {
+      const language = String(cfg.language ?? 'python').toLowerCase()
+      const outputFields = (Array.isArray(cfg.outputFields) ? cfg.outputFields : Array.isArray(cfg.output_fields) ? cfg.output_fields : [])
+        .map((item) => (item && typeof item === 'object' ? String((item as Record<string, unknown>).name ?? '').trim() : ''))
+        .filter(Boolean)
+      if (outputFields.length === 0) return `${language} · script`
+      const brief = outputFields.slice(0, 3).join(', ')
+      return `${language} · ${brief}${outputFields.length > 3 ? ` +${outputFields.length - 3}` : ''}`
+    }
+    case 'variable_assign': {
+      const variableName = String(cfg.variableName ?? cfg.variable_name ?? '').trim()
+      const operation = String(cfg.operation ?? 'set').trim().toLowerCase() || 'set'
+      if (!variableName) return operation
+      return `${operation} ${variableName}`
     }
     case 'output': {
       const mode = String(cfg.outputMode ?? 'text').trim().toLowerCase() === 'structured' ? 'structured' : 'text'
@@ -455,7 +474,7 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
     <div
       className={`
         group/workflow-node relative ${isContainer ? '' : 'w-[260px]'} rounded-xl bg-white shadow-sm border transition-all duration-200
-        ${isSelected ? 'ring-2 ring-primary border-primary shadow-md' : runtimeCardClass || 'border-border hover:shadow-md hover:border-primary/30'}
+        ${isSelected ? 'ring-2 ring-indigo-500 border-indigo-500 shadow-lg shadow-indigo-500/20 z-10' : runtimeCardClass || 'border-border hover:shadow-md hover:border-indigo-500/30'}
       `}
       style={{
         width: isContainer && containerSize ? `${containerSize.width}px` : undefined,

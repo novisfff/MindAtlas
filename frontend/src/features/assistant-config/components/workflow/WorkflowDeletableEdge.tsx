@@ -23,8 +23,8 @@ type WorkflowDeletableEdgeData = {
   anchorOverride?: WorkflowEdgeAnchorOverride
 }
 
-const BASE_STROKE = 'hsl(var(--muted-foreground) / 0.55)'
-const ACTIVE_STROKE = 'hsl(var(--primary) / 0.75)'
+const BASE_STROKE = '#94a3b8' // slate-400
+const ACTIVE_STROKE = '#6366f1' // indigo-500
 
 function isValidAnchorOverride(
   override: WorkflowEdgeAnchorOverride | null | undefined,

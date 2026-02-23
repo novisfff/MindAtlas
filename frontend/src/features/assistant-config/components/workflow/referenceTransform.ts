@@ -78,7 +78,7 @@ function transformBodyNodes(
     if (!node || typeof node !== 'object' || Array.isArray(node)) return node
     const nodeRecord = { ...(node as Record<string, unknown>) }
     nodeRecord.config = transformConfig(nodeRecord.config, (head, field) => {
-      if (head === 'sys' || head === 'container') return head
+      if (head === 'sys' || head === 'container' || head === 'env') return head
       if (localIds.has(head)) return head
       const local = localLabelToId.get(head.trim().toLocaleLowerCase())
       if (local) return local
@@ -186,7 +186,7 @@ export function toDisplayReferencesFromStored(
   idToLabel: Map<string, string>,
 ): unknown {
   return transformConfig(config, (head) => {
-    if (head === 'sys' || head === 'container') return head
+    if (head === 'sys' || head === 'container' || head === 'env') return head
     return idToLabel.get(head) ?? null
   })
 }
@@ -197,7 +197,7 @@ export function toStoredReferencesFromDisplay(
   nodeIds: Set<string>,
 ): unknown {
   return transformConfig(config, (head) => {
-    if (head === 'sys' || head === 'container') return head
+    if (head === 'sys' || head === 'container' || head === 'env') return head
     return resolveLabelToId(head, labelToId, nodeIds)
   })
 }

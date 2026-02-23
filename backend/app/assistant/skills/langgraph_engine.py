@@ -21,6 +21,14 @@ from typing_extensions import Annotated, TypedDict
 from app.ai_registry.runtime import resolve_openai_compat_config_by_model_id
 from app.assistant.openai_compat import build_openai_compat_client_headers
 from app.assistant.skills.base import SkillDefinition
+from app.assistant.skills.code_executor import CodeExecutionError, execute_code
+from app.assistant.skills.workflow_env_vars import (
+    WorkflowEnvVarSpec,
+    apply_env_var_operation,
+    build_initial_env_vars,
+    parse_env_var_specs,
+    serialize_env_specs,
+)
 from app.assistant.tools._context import reset_current_db, set_current_db
 
 logger = logging.getLogger(__name__)
@@ -551,6 +559,8 @@ class WorkflowState(TypedDict, total=False):
     stream_output_enabled: bool
     output_stream_source_node_id: str
     structured_input: dict[str, Any]
+    env_vars: dict[str, Any]
+    env_specs: dict[str, dict[str, Any]]
 
 
 def _cfg_bool_value(cfg: dict[str, Any], *keys: str, default: bool = False) -> bool:
@@ -646,18 +656,28 @@ def _resolve_start_structured_fields(node_cfg: dict[str, Any]) -> list[dict[str,
     return fields
 
 
+def _resolve_start_env_specs(node_cfg: dict[str, Any]) -> list[WorkflowEnvVarSpec]:
+    raw_session_vars = node_cfg.get("session_vars", node_cfg.get("sessionVars"))
+    specs, errors = parse_env_var_specs(raw_session_vars)
+    if errors:
+        raise RuntimeError(f"start node sessionVars invalid: {'; '.join(errors)}")
+    return specs
+
+
 def _resolve_node_template_vars(
     template: str,
     node_outputs: dict[str, NodeOutput],
     start_inputs: dict[str, Any],
     sys_vars: dict[str, str] | None = None,
     container_fields: dict[str, Any] | None = None,
+    env_vars: dict[str, Any] | None = None,
 ) -> str:
     """Resolve {{node_id.field}} template variables from DAG node outputs."""
     if not template:
         return ""
     sys_ctx = sys_vars or {}
     container_ctx = container_fields or {}
+    env_ctx = env_vars or {}
 
     def _repl(match: re.Match) -> str:
         node_id = match.group(1)
@@ -673,6 +693,12 @@ def _resolve_node_template_vars(
             container_out = node_outputs.get("container", {})
             container_json = container_out.get("json_fields", {}) if isinstance(container_out, dict) else {}
             return _truncate(container_json.get(field, ""))
+        if node_id == "env":
+            if field not in env_ctx:
+                logger.warning("Template references unknown env variable: env.%s", field)
+                return ""
+            value = env_ctx.get(field)
+            return _truncate(_stringify(value) if not isinstance(value, str) else value)
 
         out = node_outputs.get(node_id)
         if not out:
@@ -863,6 +889,8 @@ def _build_node_snapshot_input(
     node_outputs = dict(state.get("node_outputs", {}))
     start_inputs = _get_start_inputs(node_outputs)
     sys_vars = state.get("sys_vars", {}) or {}
+    env_vars = state.get("env_vars", {}) or {}
+    env_specs = state.get("env_specs", {}) or {}
 
     if node_type == "start":
         input_mode = _resolve_start_input_mode(node_cfg)
@@ -871,6 +899,8 @@ def _build_node_snapshot_input(
             "user_input": state.get("user_input", "") if input_mode == "text" else None,
             "structuredInput": state.get("structured_input", {}) if input_mode == "structured" else None,
             "sys_vars": sys_vars,
+            "envVars": env_vars,
+            "envSpecs": env_specs,
         }
 
     if node_type == "llm":
@@ -878,13 +908,13 @@ def _build_node_snapshot_input(
         if not isinstance(user_input_template, str):
             user_input_template = "{{start.user_input}}"
         rendered_user_input = _resolve_node_template_vars(
-            user_input_template, node_outputs, start_inputs, sys_vars,
+            user_input_template, node_outputs, start_inputs, sys_vars, env_vars=env_vars,
         )
         system_prompt_template = node_cfg.get("system_prompt", "")
         if not isinstance(system_prompt_template, str):
             system_prompt_template = ""
         rendered_system_prompt = _resolve_node_template_vars(
-            system_prompt_template, node_outputs, start_inputs, sys_vars,
+            system_prompt_template, node_outputs, start_inputs, sys_vars, env_vars=env_vars,
         )
         raw_output_mode = str(node_cfg.get("output_mode", "text") or "text").strip().lower()
         output_mode = "structured" if raw_output_mode == "json" else raw_output_mode
@@ -922,7 +952,7 @@ def _build_node_snapshot_input(
         }
 
     if node_type == "tool":
-        input_bindings = node_cfg.get("input_bindings")
+        input_bindings = node_cfg.get("input_bindings", node_cfg.get("inputBindings"))
         resolved_args: dict[str, Any] = {}
         if isinstance(input_bindings, dict):
             for key, raw_tpl in input_bindings.items():
@@ -930,7 +960,9 @@ def _build_node_snapshot_input(
                 if not key_text:
                     continue
                 if isinstance(raw_tpl, str):
-                    resolved_args[key_text] = _resolve_node_template_vars(raw_tpl, node_outputs, start_inputs, sys_vars)
+                    resolved_args[key_text] = _resolve_node_template_vars(
+                        raw_tpl, node_outputs, start_inputs, sys_vars, env_vars=env_vars
+                    )
                 elif raw_tpl is None:
                     resolved_args[key_text] = ""
                 else:
@@ -938,6 +970,34 @@ def _build_node_snapshot_input(
         return {
             "toolName": node_cfg.get("tool_name", ""),
             "resolvedArgs": resolved_args,
+        }
+
+    if node_type == "code_executor":
+        input_bindings = node_cfg.get("input_bindings", node_cfg.get("inputBindings"))
+        resolved_inputs: dict[str, Any] = {}
+        if isinstance(input_bindings, dict):
+            for key, raw_tpl in input_bindings.items():
+                binding_key = str(key or "").strip()
+                if not binding_key:
+                    continue
+                if isinstance(raw_tpl, str):
+                    resolved_inputs[binding_key] = _resolve_node_template_vars(
+                        raw_tpl,
+                        node_outputs,
+                        start_inputs,
+                        sys_vars,
+                        env_vars=env_vars,
+                    )
+                elif raw_tpl is None:
+                    resolved_inputs[binding_key] = ""
+                else:
+                    resolved_inputs[binding_key] = raw_tpl
+        return {
+            "language": str(node_cfg.get("language", "python") or "python").strip().lower(),
+            "entrypoint": str(node_cfg.get("entrypoint", "main") or "main").strip() or "main",
+            "timeoutMs": node_cfg.get("timeout_ms", node_cfg.get("timeoutMs")),
+            "resolvedInputs": resolved_inputs,
+            "outputFields": node_cfg.get("output_fields", node_cfg.get("outputFields", [])),
         }
 
     if node_type == "if_else":
@@ -955,7 +1015,9 @@ def _build_node_snapshot_input(
                         continue
                     value_template = cond.get("value")
                     rhs_template = "" if value_template is None else str(value_template)
-                    rhs_value = _resolve_node_template_vars(rhs_template, node_outputs, start_inputs, sys_vars)
+                    rhs_value = _resolve_node_template_vars(
+                        rhs_template, node_outputs, start_inputs, sys_vars, env_vars=env_vars
+                    )
                     summarized_conditions.append(
                         {
                             "variable": str(cond.get("variable", "") or ""),
@@ -988,8 +1050,12 @@ def _build_node_snapshot_input(
         if not isinstance(output_fields, list):
             output_fields = []
         return {
-            "inputContent": _resolve_node_template_vars(input_content_template, node_outputs, start_inputs, sys_vars),
-            "instruction": _resolve_node_template_vars(instruction_template, node_outputs, start_inputs, sys_vars),
+            "inputContent": _resolve_node_template_vars(
+                input_content_template, node_outputs, start_inputs, sys_vars, env_vars=env_vars
+            ),
+            "instruction": _resolve_node_template_vars(
+                instruction_template, node_outputs, start_inputs, sys_vars, env_vars=env_vars
+            ),
             "outputFields": output_fields,
         }
 
@@ -1005,14 +1071,18 @@ def _build_node_snapshot_input(
             except Exception:
                 top_k = None
         return {
-            "query": _resolve_node_template_vars(query_template, node_outputs, start_inputs, sys_vars),
+            "query": _resolve_node_template_vars(
+                query_template, node_outputs, start_inputs, sys_vars, env_vars=env_vars
+            ),
             "mode": node_cfg.get("mode"),
             "topK": top_k,
         }
 
     if node_type == "iteration":
         input_source_tpl = str(node_cfg.get("input_source", node_cfg.get("inputSource", "")) or "")
-        rendered_input = _resolve_node_template_vars(input_source_tpl, node_outputs, start_inputs, sys_vars)
+        rendered_input = _resolve_node_template_vars(
+            input_source_tpl, node_outputs, start_inputs, sys_vars, env_vars=env_vars
+        )
         return {
             "inputSource": input_source_tpl,
             "resolvedInput": _truncate(rendered_input, _NODE_SNAPSHOT_TEXT_PREVIEW_LIMIT),
@@ -1033,6 +1103,26 @@ def _build_node_snapshot_input(
                 node_cfg, "max_iterations", "maxIterations", default=10, min_value=1, max_value=1000
             ),
         }
+
+    if node_type == "variable_assign":
+        operation = str(node_cfg.get("operation", "set") or "set").strip().lower()
+        value_template = str(
+            node_cfg.get("value_template", node_cfg.get("valueTemplate", "")) or ""
+        )
+        variable_name = str(
+            node_cfg.get("variable_name", node_cfg.get("variableName", "")) or ""
+        ).strip()
+        payload: dict[str, Any] = {
+            "variableName": variable_name,
+            "operation": operation,
+            "currentEnvValue": env_vars.get(variable_name),
+        }
+        if operation != "clear":
+            payload["valueTemplate"] = value_template
+            payload["resolvedValuePreview"] = _resolve_node_template_vars(
+                value_template, node_outputs, start_inputs, sys_vars, env_vars=env_vars
+            )
+        return payload
 
     return {
         "config": node_cfg,
@@ -1369,6 +1459,9 @@ def _execute_container_body(
     else:
         runtime_node_llms = {}
     scoped_node_llms: dict[str, Any] = dict(node_llms or {})
+    env_vars_local = dict(parent_state.get("env_vars", {}) or {})
+    env_specs_raw = parent_state.get("env_specs", {}) or {}
+    env_specs_local = dict(env_specs_raw) if isinstance(env_specs_raw, dict) else {}
 
     container_ctx = dict(container_fields or {})
     start_result = _build_container_start_node(container_input, container_ctx)({})
@@ -1414,6 +1507,8 @@ def _execute_container_body(
             "sys_vars": sys_vars,
             "workflow_node_types": body_type_map,
             "node_llms": runtime_node_llms,
+            "env_vars": env_vars_local,
+            "env_specs": env_specs_local,
         }
 
         if node_type == "llm":
@@ -1426,6 +1521,10 @@ def _execute_container_body(
             node_fn = _build_param_extractor_node(current, cfg, llm, node_llms=scoped_node_llms)
         elif node_type == "knowledge_retrieval":
             node_fn = _build_kr_node(current, cfg, tool_map, db_bind)
+        elif node_type == "code_executor":
+            node_fn = _build_code_executor_node(current, cfg)
+        elif node_type == "variable_assign":
+            node_fn = _build_variable_assign_node(current, cfg)
         elif node_type == "start":
             node_fn = _build_container_start_node(container_input, container_ctx)
         else:
@@ -1441,6 +1540,10 @@ def _execute_container_body(
             execution_trace.extend([str(item) for item in result["execution_trace"]])
         if isinstance(result.get("branch_decisions"), dict):
             branch_decisions.update({str(k): str(v) for k, v in result["branch_decisions"].items()})
+        if isinstance(result.get("env_vars"), dict):
+            env_vars_local = dict(result["env_vars"])
+        if isinstance(result.get("env_specs"), dict):
+            env_specs_local = dict(result["env_specs"])
 
         executed_nodes.add(current)
 
@@ -1479,6 +1582,8 @@ def _execute_container_body(
         "all_node_outputs": node_outputs_local,
         "last_node_id": last_terminal,
         "execution_trace": execution_trace,
+        "env_vars": env_vars_local,
+        "env_specs": env_specs_local,
     }
 
 
@@ -1488,11 +1593,15 @@ def _execute_container_body(
 def _build_start_node(
     node_cfg: dict,
 ) -> Callable[[WorkflowState], dict]:
+    env_specs = _resolve_start_env_specs(node_cfg)
+    serialized_env_specs = serialize_env_specs(env_specs)
+
     def start_node(state: WorkflowState) -> dict:
         input_mode = _resolve_start_input_mode(node_cfg)
         user_input = state.get("user_input", "")
         structured_input = state.get("structured_input")
         sys_vars = state.get("sys_vars", {}) or {}
+        env_vars = build_initial_env_vars(env_specs)
         if input_mode == "structured":
             if not isinstance(structured_input, dict):
                 raise RuntimeError("start node requires structured_input when inputMode=structured")
@@ -1536,6 +1645,8 @@ def _build_start_node(
                     ),
                 },
                 "execution_trace": ["start"],
+                "env_vars": env_vars,
+                "env_specs": serialized_env_specs,
             }
 
         return {
@@ -1553,6 +1664,8 @@ def _build_start_node(
                 ),
             },
             "execution_trace": ["start"],
+            "env_vars": env_vars,
+            "env_specs": serialized_env_specs,
         }
     return start_node
 
@@ -1568,6 +1681,7 @@ def _build_dag_llm_node(
         node_outputs = dict(state.get("node_outputs", {}))
         start_inputs = _get_start_inputs(node_outputs)
         sys_vars = state.get("sys_vars", {}) or {}
+        env_vars = state.get("env_vars", {}) or {}
         workflow_node_types = state.get("workflow_node_types", {}) or {}
         runtime_node_llms = state.get("node_llms", {}) or {}
         if not isinstance(runtime_node_llms, dict):
@@ -1582,7 +1696,7 @@ def _build_dag_llm_node(
         if not isinstance(system_prompt_raw, str):
             system_prompt_raw = ""
         system_prompt = _resolve_node_template_vars(
-            system_prompt_raw, node_outputs, start_inputs, sys_vars,
+            system_prompt_raw, node_outputs, start_inputs, sys_vars, env_vars=env_vars
         )
         output_mode = str(node_cfg.get("output_mode", "text") or "text").strip().lower()
         if output_mode == "json":
@@ -1594,7 +1708,7 @@ def _build_dag_llm_node(
         if not isinstance(user_input_template, str):
             user_input_template = "{{start.user_input}}"
         user_input_rendered = _resolve_node_template_vars(
-            user_input_template, node_outputs, start_inputs, sys_vars,
+            user_input_template, node_outputs, start_inputs, sys_vars, env_vars=env_vars
         )
         if not user_input_rendered.strip():
             user_input_rendered = start_inputs.get("user_input", "") or state.get("user_input", "")
@@ -1801,6 +1915,7 @@ def _build_output_node(
         node_outputs = dict(state.get("node_outputs", {}))
         start_inputs = _get_start_inputs(node_outputs)
         sys_vars = state.get("sys_vars", {}) or {}
+        env_vars = state.get("env_vars", {}) or {}
         workflow_node_types = state.get("workflow_node_types", {}) or {}
         stream_output_enabled = bool(state.get("stream_output_enabled", True))
         output_stream_source_node_id = str(state.get("output_stream_source_node_id", "") or "")
@@ -1821,7 +1936,7 @@ def _build_output_node(
                 )
 
             rendered_text = _resolve_node_template_vars(
-                text_template, node_outputs, start_inputs, sys_vars,
+                text_template, node_outputs, start_inputs, sys_vars, env_vars=env_vars
             )
             node_out: NodeOutput = {
                 "status": "ok",
@@ -1869,7 +1984,7 @@ def _build_output_node(
                     f"DAG output node {node_id}: output field '{field_name}' requires string value"
                 )
             rendered_value = _resolve_node_template_vars(
-                value_template, node_outputs, start_inputs, sys_vars,
+                value_template, node_outputs, start_inputs, sys_vars, env_vars=env_vars
             )
             try:
                 coerced = _coerce_output_field_value(field_name, rendered_value, raw_field)
@@ -1912,6 +2027,7 @@ def _build_dag_tool_node(
         node_outputs = dict(state.get("node_outputs", {}))
         start_inputs = _get_start_inputs(node_outputs)
         sys_vars = state.get("sys_vars", {}) or {}
+        env_vars = state.get("env_vars", {}) or {}
         tool_name = node_cfg.get("tool_name", "")
         tool_call_id = f"tool_{uuid.uuid4().hex[:8]}"
 
@@ -1930,7 +2046,9 @@ def _build_dag_tool_node(
             if not key:
                 continue
             if isinstance(raw_tpl, str):
-                args[key] = _resolve_node_template_vars(raw_tpl, node_outputs, start_inputs, sys_vars)
+                args[key] = _resolve_node_template_vars(
+                    raw_tpl, node_outputs, start_inputs, sys_vars, env_vars=env_vars
+                )
             elif raw_tpl is None:
                 args[key] = ""
             else:
@@ -1984,6 +2102,192 @@ def _build_dag_tool_node(
     return dag_tool_node
 
 
+def _build_code_executor_node(
+    node_id: str,
+    node_cfg: dict,
+) -> Callable[[WorkflowState], dict]:
+    def code_executor_node(state: WorkflowState) -> dict:
+        metadata = state.get("metadata", {})
+        node_outputs = dict(state.get("node_outputs", {}))
+        start_inputs = _get_start_inputs(node_outputs)
+        sys_vars = state.get("sys_vars", {}) or {}
+        env_vars = state.get("env_vars", {}) or {}
+
+        language = str(node_cfg.get("language", "python") or "python").strip().lower()
+        code_text = node_cfg.get("code")
+        if not isinstance(code_text, str) or not code_text.strip():
+            raise RuntimeError(f"DAG code_executor node {node_id}: code is required")
+        entrypoint = str(node_cfg.get("entrypoint", "main") or "main").strip() or "main"
+        timeout_raw = node_cfg.get("timeout_ms", node_cfg.get("timeoutMs"))
+        timeout_ms: int | None = None
+        if timeout_raw is not None and str(timeout_raw).strip():
+            try:
+                timeout_ms = int(timeout_raw)
+            except Exception:
+                timeout_ms = None
+
+        input_bindings = node_cfg.get("input_bindings", node_cfg.get("inputBindings"))
+        if not isinstance(input_bindings, dict):
+            raise RuntimeError(
+                f"DAG code_executor node {node_id} requires inputBindings object"
+            )
+        resolved_inputs: dict[str, Any] = {}
+        for key, raw_tpl in input_bindings.items():
+            binding_key = str(key or "").strip()
+            if not binding_key:
+                continue
+            if isinstance(raw_tpl, str):
+                rendered = _resolve_node_template_vars(
+                    raw_tpl,
+                    node_outputs,
+                    start_inputs,
+                    sys_vars,
+                    env_vars=env_vars,
+                )
+                resolved_inputs[binding_key] = _parse_loose_json_value(rendered)
+            elif raw_tpl is None:
+                resolved_inputs[binding_key] = ""
+            else:
+                resolved_inputs[binding_key] = raw_tpl
+
+        output_fields = node_cfg.get("output_fields", node_cfg.get("outputFields"))
+        if not isinstance(output_fields, list) or not output_fields:
+            raise RuntimeError(
+                f"DAG code_executor node {node_id} requires outputFields list"
+            )
+        normalized_output_fields = [field for field in output_fields if isinstance(field, dict)]
+        if not normalized_output_fields:
+            raise RuntimeError(
+                f"DAG code_executor node {node_id} requires valid outputFields items"
+            )
+
+        _emit(metadata, "on_node_start", node_id=node_id, node_type="code_executor")
+        try:
+            executed = execute_code(
+                language=language,
+                code=code_text,
+                entrypoint=entrypoint,
+                inputs=resolved_inputs,
+                output_fields=normalized_output_fields,
+                timeout_ms=timeout_ms,
+            )
+        except CodeExecutionError as exc:
+            _emit(metadata, "on_node_end", node_id=node_id, status="error")
+            raise RuntimeError(f"DAG code_executor node {node_id} failed: {exc}") from exc
+
+        payload = dict(executed.output)
+        json_text = json.dumps(payload, ensure_ascii=False)
+        json_fields: dict[str, Any] = dict(payload)
+        json_fields["response"] = json_text
+        if executed.stdout:
+            json_fields["_stdout"] = executed.stdout
+        if executed.stderr:
+            json_fields["_stderr"] = executed.stderr
+
+        node_out: NodeOutput = {
+            "status": "ok",
+            "text": json_text,
+            "raw": payload,
+            "json_fields": json_fields,
+        }
+        _emit(metadata, "on_node_end", node_id=node_id, status="ok")
+        return {
+            "node_outputs": {node_id: node_out},
+            "execution_trace": [node_id],
+        }
+
+    return code_executor_node
+
+
+def _build_variable_assign_node(
+    node_id: str,
+    node_cfg: dict,
+) -> Callable[[WorkflowState], dict]:
+    def variable_assign_node(state: WorkflowState) -> dict:
+        metadata = state.get("metadata", {})
+        node_outputs = dict(state.get("node_outputs", {}))
+        start_inputs = _get_start_inputs(node_outputs)
+        sys_vars = state.get("sys_vars", {}) or {}
+        env_vars = dict(state.get("env_vars", {}) or {})
+        raw_env_specs = state.get("env_specs", {}) or {}
+        if not isinstance(raw_env_specs, dict):
+            raw_env_specs = {}
+
+        env_specs: dict[str, WorkflowEnvVarSpec] = {}
+        for key, raw_spec in raw_env_specs.items():
+            spec = raw_spec if isinstance(raw_spec, dict) else {}
+            spec_name = str(spec.get("name", key) or key).strip()
+            if not spec_name:
+                continue
+            spec_type = str(spec.get("type", "string") or "string").strip().lower() or "string"
+            default_value = spec.get("defaultValue", spec.get("default_value"))
+            description = str(spec.get("description", "") or "")
+            env_specs[spec_name] = WorkflowEnvVarSpec(
+                name=spec_name,
+                type=spec_type,  # type: ignore[arg-type]
+                default_value=default_value,
+                description=description,
+            )
+
+        variable_name = str(
+            node_cfg.get("variable_name", node_cfg.get("variableName", ""))
+            or ""
+        ).strip()
+        operation = str(node_cfg.get("operation", "set") or "set").strip().lower()
+        value_template = str(
+            node_cfg.get("value_template", node_cfg.get("valueTemplate", ""))
+            or ""
+        )
+        operand: Any = None
+        if operation != "clear":
+            rendered_value = _resolve_node_template_vars(
+                value_template,
+                node_outputs,
+                start_inputs,
+                sys_vars,
+                env_vars=env_vars,
+            )
+            operand = _parse_loose_json_value(rendered_value)
+
+        _emit(metadata, "on_node_start", node_id=node_id, node_type="variable_assign")
+        try:
+            updated_env_vars, before_value, after_value = apply_env_var_operation(
+                env_vars,
+                env_specs,
+                variable_name=variable_name,
+                operation=operation,
+                operand=operand,
+            )
+        except Exception as exc:
+            _emit(metadata, "on_node_end", node_id=node_id, status="error")
+            raise RuntimeError(f"DAG variable_assign node {node_id} failed: {exc}") from exc
+
+        payload = {
+            "variable": variable_name,
+            "operation": operation,
+            "before": before_value,
+            "after": after_value,
+        }
+        json_text = json.dumps(payload, ensure_ascii=False)
+        node_out: NodeOutput = {
+            "status": "ok",
+            "text": json_text,
+            "raw": payload,
+            "json_fields": {
+                **payload,
+                "response": json_text,
+            },
+        }
+        _emit(metadata, "on_node_end", node_id=node_id, status="ok")
+        return {
+            "node_outputs": {node_id: node_out},
+            "execution_trace": [node_id],
+            "env_vars": updated_env_vars,
+        }
+
+    return variable_assign_node
+
+
 def _build_if_else_node(
     node_id: str,
     node_cfg: dict,
@@ -1993,6 +2297,7 @@ def _build_if_else_node(
         node_outputs = dict(state.get("node_outputs", {}))
         start_inputs = _get_start_inputs(node_outputs)
         sys_vars = state.get("sys_vars", {}) or {}
+        env_vars = state.get("env_vars", {}) or {}
         normalized_cfg = _normalize_if_else_config(node_cfg)
         branches = normalized_cfg.get("branches", [])
         else_handle = str(normalized_cfg.get("else_handle") or "else")
@@ -2021,12 +2326,18 @@ def _build_if_else_node(
                 operator = _normalize_if_else_operator(cond.get("operator"))
                 value_template = cond.get("value")
                 rhs_template = "" if value_template is None else str(value_template)
-                rhs_value = _resolve_node_template_vars(rhs_template, node_outputs, start_inputs, sys_vars)
+                rhs_value = _resolve_node_template_vars(
+                    rhs_template, node_outputs, start_inputs, sys_vars, env_vars=env_vars
+                )
 
                 actual_value = ""
                 if variable.startswith("sys."):
                     sys_key = variable.split(".", 1)[1] if "." in variable else ""
                     actual_value = str(sys_vars.get(sys_key, "") or "")
+                elif variable.startswith("env."):
+                    env_key = variable.split(".", 1)[1] if "." in variable else ""
+                    actual = env_vars.get(env_key, "")
+                    actual_value = str(actual) if actual is not None else ""
                 else:
                     parts = variable.split(".", 1)
                     ref_node = parts[0]
@@ -2107,6 +2418,7 @@ def _build_param_extractor_node(
         node_outputs = dict(state.get("node_outputs", {}))
         start_inputs = _get_start_inputs(node_outputs)
         sys_vars = state.get("sys_vars", {}) or {}
+        env_vars = state.get("env_vars", {}) or {}
         runtime_node_llms = state.get("node_llms", {}) or {}
         if not isinstance(runtime_node_llms, dict):
             runtime_node_llms = {}
@@ -2122,14 +2434,14 @@ def _build_param_extractor_node(
         if not isinstance(input_content_template, str):
             input_content_template = ""
         input_content = _resolve_node_template_vars(
-            input_content_template, node_outputs, start_inputs, sys_vars,
+            input_content_template, node_outputs, start_inputs, sys_vars, env_vars=env_vars
         )
 
         instruction_template = node_cfg.get("instruction", "")
         if not isinstance(instruction_template, str):
             instruction_template = ""
         instruction = _resolve_node_template_vars(
-            instruction_template, node_outputs, start_inputs, sys_vars,
+            instruction_template, node_outputs, start_inputs, sys_vars, env_vars=env_vars
         )
 
         output_fields = node_cfg.get("output_fields")
@@ -2234,12 +2546,13 @@ def _build_kr_node(
         node_outputs = dict(state.get("node_outputs", {}))
         start_inputs = _get_start_inputs(node_outputs)
         sys_vars = state.get("sys_vars", {}) or {}
+        env_vars = state.get("env_vars", {}) or {}
 
         query_template = node_cfg.get("query", "{{start.user_input}}")
         if not isinstance(query_template, str):
             query_template = "{{start.user_input}}"
         query = _resolve_node_template_vars(
-            query_template, node_outputs, start_inputs, sys_vars,
+            query_template, node_outputs, start_inputs, sys_vars, env_vars=env_vars
         )
         raw_mode = node_cfg.get("mode")
         mode = raw_mode.strip() if isinstance(raw_mode, str) and raw_mode.strip() else None
@@ -2329,6 +2642,7 @@ def _build_iteration_node(
         node_outputs = dict(state.get("node_outputs", {}))
         start_inputs = _get_start_inputs(node_outputs)
         sys_vars = state.get("sys_vars", {}) or {}
+        env_vars = dict(state.get("env_vars", {}) or {})
 
         input_source_tpl = str(node_cfg.get("input_source", node_cfg.get("inputSource", "")) or "").strip()
         if not input_source_tpl:
@@ -2338,6 +2652,7 @@ def _build_iteration_node(
             node_outputs,
             start_inputs,
             sys_vars,
+            env_vars=env_vars,
         )
         items = _coerce_array_input(_parse_loose_json_value(rendered_input))
         output_variable = str(node_cfg.get("output_variable", node_cfg.get("outputVariable", "results")) or "results").strip() or "results"
@@ -2351,13 +2666,19 @@ def _build_iteration_node(
         aggregated: list[Any] = []
         errors_payload: list[dict[str, Any]] = []
 
-        def _run_single(index: int, item: Any) -> tuple[int, Any, dict[str, Any] | None]:
+        def _run_single(
+            index: int,
+            item: Any,
+            env_snapshot: dict[str, Any],
+        ) -> tuple[int, Any, dict[str, Any], dict[str, Any]]:
             container_fields = {"item": item, "index": index}
+            parent_state_for_item: WorkflowState = dict(state)
+            parent_state_for_item["env_vars"] = dict(env_snapshot)
             body_result = _execute_container_body(
                 container_node_id=node_id,
                 container_node_type="iteration",
                 node_cfg=node_cfg,
-                parent_state=state,
+                parent_state=parent_state_for_item,
                 llm=llm,
                 args_llm=args_llm,
                 tool_map=tool_map,
@@ -2366,28 +2687,39 @@ def _build_iteration_node(
                 container_input=item,
                 container_fields=container_fields,
             )
+            next_env_vars = dict(body_result.get("env_vars", env_snapshot) or env_snapshot)
             selected_text = _resolve_node_template_vars(
                 output_selector_tpl,
                 body_result.get("all_node_outputs", {}),
                 {"user_input": item, "item": item, "index": index},
                 sys_vars,
                 container_fields=container_fields,
+                env_vars=next_env_vars,
             )
             selected_value = _parse_loose_json_value(selected_text)
-            return index, selected_value, None
+            updates: dict[str, Any] = {}
+            for key, value in next_env_vars.items():
+                if env_snapshot.get(key) != value:
+                    updates[key] = value
+            return index, selected_value, next_env_vars, updates
+
+        current_env_vars = dict(env_vars)
 
         if parallel_mode and len(items) > 1:
             with ThreadPoolExecutor(max_workers=min(8, len(items))) as executor:
+                base_env_snapshot = dict(current_env_vars)
                 futures = {
-                    executor.submit(_run_single, index, item): (index, item)
+                    executor.submit(_run_single, index, item, base_env_snapshot): (index, item)
                     for index, item in enumerate(items)
                 }
                 results_by_index: dict[int, Any] = {}
+                env_updates_by_index: dict[int, dict[str, Any]] = {}
                 for future in as_completed(futures):
                     index, item = futures[future]
                     try:
-                        _, value, _ = future.result()
+                        _, value, _, updates = future.result()
                         results_by_index[index] = value
+                        env_updates_by_index[index] = updates
                     except Exception as exc:
                         err_item = {"index": index, "item": item, "error": str(exc)}
                         if error_strategy == "skip_item":
@@ -2397,11 +2729,14 @@ def _build_iteration_node(
                 for index in range(len(items)):
                     if index in results_by_index:
                         aggregated.append(results_by_index[index])
+                    if index in env_updates_by_index:
+                        current_env_vars.update(env_updates_by_index[index])
         else:
             for index, item in enumerate(items):
                 try:
-                    _, value, _ = _run_single(index, item)
+                    _, value, next_env_vars, _ = _run_single(index, item, current_env_vars)
                     aggregated.append(value)
+                    current_env_vars = next_env_vars
                 except Exception as exc:
                     err_item = {"index": index, "item": item, "error": str(exc)}
                     if error_strategy == "skip_item":
@@ -2438,6 +2773,7 @@ def _build_iteration_node(
         return {
             "node_outputs": {node_id: node_out},
             "execution_trace": [node_id],
+            "env_vars": current_env_vars,
         }
 
     return iteration_node
@@ -2457,6 +2793,7 @@ def _build_loop_node(
         node_outputs = dict(state.get("node_outputs", {}))
         start_inputs = _get_start_inputs(node_outputs)
         sys_vars = state.get("sys_vars", {}) or {}
+        env_vars = dict(state.get("env_vars", {}) or {})
 
         initial_vars = _cfg_list_value(node_cfg, "initial_vars", "initialVars")
         update_mappings = _cfg_list_value(node_cfg, "update_mappings", "updateMappings")
@@ -2487,6 +2824,7 @@ def _build_loop_node(
                 start_inputs,
                 sys_vars,
                 container_fields=loop_vars,
+                env_vars=env_vars,
             )
             loop_vars[name] = _parse_loose_json_value(rendered)
 
@@ -2503,7 +2841,10 @@ def _build_loop_node(
                 container_node_id=node_id,
                 container_node_type="loop",
                 node_cfg=node_cfg,
-                parent_state=state,
+                parent_state={
+                    **state,
+                    "env_vars": env_vars,
+                },
                 llm=llm,
                 args_llm=args_llm,
                 tool_map=tool_map,
@@ -2512,6 +2853,7 @@ def _build_loop_node(
                 container_input=start_inputs.get("user_input", state.get("user_input", "")),
                 container_fields=container_fields,
             )
+            env_vars = dict(body_result.get("env_vars", env_vars) or env_vars)
             iteration_outputs.append(body_result.get("node_outputs", {}))
             last_node_id = str(body_result.get("last_node_id", "") or "")
             last_out = (body_result.get("all_node_outputs", {}) or {}).get(last_node_id, {})
@@ -2530,6 +2872,7 @@ def _build_loop_node(
                     {"user_input": start_inputs.get("user_input", state.get("user_input", ""))},
                     sys_vars,
                     container_fields={"index": iteration_count, **loop_vars},
+                    env_vars=env_vars,
                 )
                 loop_vars[name] = _parse_loose_json_value(rendered)
 
@@ -2547,6 +2890,7 @@ def _build_loop_node(
                         {"user_input": start_inputs.get("user_input", state.get("user_input", ""))},
                         sys_vars,
                         container_fields={"index": iteration_count, **loop_vars},
+                        env_vars=env_vars,
                     )
 
                     actual_value = ""
@@ -2556,6 +2900,10 @@ def _build_loop_node(
                     elif variable.startswith("container."):
                         var_key = variable.split(".", 1)[1] if "." in variable else ""
                         actual_value = str(loop_vars.get(var_key, ""))
+                    elif variable.startswith("env."):
+                        env_key = variable.split(".", 1)[1] if "." in variable else ""
+                        actual = env_vars.get(env_key, "")
+                        actual_value = str(actual) if actual is not None else ""
                     else:
                         parts = variable.split(".", 1)
                         ref_node = parts[0]
@@ -2598,6 +2946,7 @@ def _build_loop_node(
         return {
             "node_outputs": {node_id: node_out},
             "execution_trace": [node_id],
+            "env_vars": env_vars,
         }
 
     return loop_node
@@ -2616,6 +2965,8 @@ NODE_BUILDERS: dict[str, str] = {
     "llm": "_build_dag_llm_node",
     "output": "_build_output_node",
     "tool": "_build_dag_tool_node",
+    "code_executor": "_build_code_executor_node",
+    "variable_assign": "_build_variable_assign_node",
     "if_else": "_build_if_else_node",
     "parameter_extractor": "_build_param_extractor_node",
     "knowledge_retrieval": "_build_kr_node",
@@ -2703,6 +3054,10 @@ def build_workflow_dag_subgraph(
             node_fn = _build_output_node(nid, cfg)
         elif ntype == "tool":
             node_fn = _build_dag_tool_node(nid, cfg, tool_map, args_llm, db_bind)
+        elif ntype == "code_executor":
+            node_fn = _build_code_executor_node(nid, cfg)
+        elif ntype == "variable_assign":
+            node_fn = _build_variable_assign_node(nid, cfg)
         elif ntype == "if_else":
             node_fn = _build_if_else_node(nid, cfg)
         elif ntype == "parameter_extractor":

@@ -4,6 +4,7 @@ import type { WfNodeData } from '../../stores/workflow-editor-store'
 import type { WorkflowToolDefinition } from './types'
 import { createDefaultIfElseConfig } from './ifElseConfig'
 import { defaultLabelForNodeType } from './labelUtils'
+import { getDefaultCodeTemplate } from './property-panel/nodes/codeExecutorTemplates'
 
 function buildToolInputBindings(toolDef?: WorkflowToolDefinition): Record<string, string> {
   if (!toolDef) return {}
@@ -18,6 +19,7 @@ export function createDefaultNodeConfig(
     return {
       inputMode: 'text',
       structuredFields: [],
+      sessionVars: [],
     }
   }
 
@@ -57,6 +59,29 @@ export function createDefaultNodeConfig(
 
   if (nodeType === 'knowledge_retrieval') {
     return { query: '{{start.user_input}}' }
+  }
+
+  if (nodeType === 'code_executor') {
+    return {
+      language: 'python',
+      entrypoint: 'main',
+      inputBindings: {
+        arg1: '',
+        arg2: '',
+      },
+      outputFields: [
+        { name: 'result', type: 'string', nullable: false },
+      ],
+      code: getDefaultCodeTemplate('python'),
+    }
+  }
+
+  if (nodeType === 'variable_assign') {
+    return {
+      variableName: '',
+      operation: 'set',
+      valueTemplate: '',
+    }
   }
 
   if (nodeType === 'iteration') {

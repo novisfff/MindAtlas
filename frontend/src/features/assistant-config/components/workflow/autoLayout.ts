@@ -12,6 +12,8 @@ const DEFAULT_NODE_SIZE: Record<string, { width: number; height: number }> = {
   if_else: { width: 300, height: 160 },
   parameter_extractor: { width: 260, height: 96 },
   knowledge_retrieval: { width: 260, height: 96 },
+  code_executor: { width: 260, height: 128 },
+  variable_assign: { width: 260, height: 112 },
   iteration: { width: 320, height: 220 },
   loop: { width: 320, height: 220 },
   output: { width: 260, height: 112 },
@@ -24,6 +26,8 @@ const SUBFLOW_NODE_SIZE: Record<string, { width: number; height: number }> = {
   if_else: { width: 240, height: 160 },
   parameter_extractor: { width: 240, height: 112 },
   knowledge_retrieval: { width: 240, height: 112 },
+  code_executor: { width: 240, height: 128 },
+  variable_assign: { width: 240, height: 112 },
 }
 
 const HORIZONTAL_ALIGN_MAX_CENTER_DELTA = 96
