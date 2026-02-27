@@ -30,7 +30,7 @@ class WorkflowHumanInLoopValidatorTests(unittest.TestCase):
         }
 
     def test_human_in_loop_with_approved_rejected_edges_is_valid(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -56,7 +56,7 @@ class WorkflowHumanInLoopValidatorTests(unittest.TestCase):
         self.assertTrue(result.valid, [e.message for e in result.errors])
 
     def test_human_in_loop_missing_rejected_edge_is_invalid(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -80,7 +80,7 @@ class WorkflowHumanInLoopValidatorTests(unittest.TestCase):
         self.assertTrue(any("handle 'rejected' must map to exactly one outgoing edge" in e.message for e in result.errors))
 
     def test_iteration_body_human_in_loop_requires_dual_branches(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -128,7 +128,7 @@ class WorkflowHumanInLoopValidatorTests(unittest.TestCase):
         self.assertTrue(any("handle 'rejected' must map to exactly one outgoing edge" in e.message for e in result.errors))
 
     def test_human_in_loop_select_requires_options(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         node = self._human_node()
         node["config"]["fields"] = [
@@ -160,7 +160,7 @@ class WorkflowHumanInLoopValidatorTests(unittest.TestCase):
         self.assertTrue(any("options or optionsTemplate are required for select" in e.message for e in result.errors))
 
     def test_human_in_loop_tag_selector_requires_array_type(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         node = self._human_node()
         node["config"]["fields"] = [
@@ -191,7 +191,7 @@ class WorkflowHumanInLoopValidatorTests(unittest.TestCase):
         self.assertTrue(any("widget 'tag_selector' is incompatible with type 'string'" in e.message for e in result.errors))
 
     def test_human_in_loop_non_option_widgets_ignore_empty_option_keys(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         node = self._human_node()
         node["config"]["fields"] = [
@@ -224,7 +224,7 @@ class WorkflowHumanInLoopValidatorTests(unittest.TestCase):
         self.assertTrue(result.valid, [e.message for e in result.errors])
 
     def test_human_in_loop_non_option_widgets_reject_non_empty_option_key(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         node = self._human_node()
         node["config"]["fields"] = [

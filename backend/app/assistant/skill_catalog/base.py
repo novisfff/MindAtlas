@@ -171,7 +171,7 @@ class WorkflowNodeDefinition(BaseModel):
 
 class WorkflowEdgeDefinition(BaseModel):
     """工作流 DAG 边定义"""
-    edge_id: str
+    edge_id: str = ""
     source_node_id: str
     target_node_id: str
     source_handle: str = "output"

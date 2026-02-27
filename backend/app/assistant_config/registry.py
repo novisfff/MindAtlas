@@ -519,7 +519,7 @@ class SkillRegistry(_BaseRegistry):
 
     @staticmethod
     def list_system_skills() -> list[Any]:
-        from app.assistant.skills.definitions import SKILLS
+        from app.assistant.skill_catalog.definitions import SKILLS
         return list(SKILLS)
 
     @staticmethod
@@ -533,7 +533,7 @@ class SkillRegistry(_BaseRegistry):
     @staticmethod
     def resolve_system_skill(skill_name: str) -> Any | None:
         """解析系统 Skill。"""
-        from app.assistant.skills.definitions import get_skill_by_name
+        from app.assistant.skill_catalog.definitions import get_skill_by_name
 
         return get_skill_by_name(skill_name)
 
@@ -594,7 +594,7 @@ class SkillRegistry(_BaseRegistry):
             skill_name: Skill 名称。
             include_workflow: 是否加载 workflow nodes/edges 并进行完整转换。
         """
-        from app.assistant.skills.base import DEFAULT_SKILL_NAME
+        from app.assistant.skill_catalog.base import DEFAULT_SKILL_NAME
 
         query = self.db.query(AssistantSkill)
         if include_workflow:
@@ -614,7 +614,7 @@ class SkillRegistry(_BaseRegistry):
                     return self.resolve_system_skill(skill_name)
                 return None
 
-            from app.assistant.skills.converters import (
+            from app.assistant.skill_catalog.converters import (
                 db_skill_to_definition,
                 db_skill_to_definition_light,
             )

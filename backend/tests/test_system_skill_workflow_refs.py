@@ -14,7 +14,7 @@ _VAR_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\s*\}\}")
 
 class SystemSkillWorkflowReferenceTests(unittest.TestCase):
     def test_system_default_workflows_are_horizontal_layout(self) -> None:
-        from app.assistant.skills.definitions import PERIODIC_REVIEW, QUICK_STATS, SMART_CAPTURE
+        from app.assistant.skill_catalog.definitions import PERIODIC_REVIEW, QUICK_STATS, SMART_CAPTURE
 
         for skill in (QUICK_STATS, SMART_CAPTURE, PERIODIC_REVIEW):
             node_map = {n.node_id: n for n in (skill.workflow_nodes or [])}
@@ -36,7 +36,7 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
         self._assert_branch_targets_have_y_offset(PERIODIC_REVIEW, "llm_dates")
 
     def test_smart_capture_human_in_loop_topology_and_bindings(self) -> None:
-        from app.assistant.skills.definitions import SMART_CAPTURE
+        from app.assistant.skill_catalog.definitions import SMART_CAPTURE
 
         node_map = {n.node_id: n for n in (SMART_CAPTURE.workflow_nodes or [])}
         edges = list(SMART_CAPTURE.workflow_edges or [])
@@ -86,7 +86,7 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
             self.assertEqual(input_bindings.get(field_name), f"{{{{human_confirm.{field_name}}}}}")
 
     def test_system_workflow_references_match_node_output_contracts(self) -> None:
-        from app.assistant.skills.definitions import SKILLS
+        from app.assistant.skill_catalog.definitions import SKILLS
         from app.assistant_config.registry import ToolRegistry
 
         output_map = ToolRegistry.SYSTEM_TOOL_OUTPUT_PARAMS

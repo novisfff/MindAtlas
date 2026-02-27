@@ -10,7 +10,7 @@ bootstrap_backend_imports()
 
 class WorkflowCodeExecutorRuntimeTests(unittest.TestCase):
     def test_execute_code_python_success_with_custom_binding_key(self) -> None:
-        from app.assistant.skills.code_executor import execute_code
+        from app.assistant.workflow.code_executor import execute_code
 
         result = execute_code(
             language="python",
@@ -26,7 +26,7 @@ class WorkflowCodeExecutorRuntimeTests(unittest.TestCase):
         self.assertEqual(result.output, {"result": "MINDATLAS"})
 
     def test_execute_code_javascript_success_with_multiple_custom_keys(self) -> None:
-        from app.assistant.skills.code_executor import execute_code
+        from app.assistant.workflow.code_executor import execute_code
 
         result = execute_code(
             language="javascript",
@@ -43,7 +43,7 @@ class WorkflowCodeExecutorRuntimeTests(unittest.TestCase):
         self.assertEqual(result.output, {"result": "MINDATLAS"})
 
     def test_execute_code_rejects_schema_mismatch(self) -> None:
-        from app.assistant.skills.code_executor import CodeExecutionError, execute_code
+        from app.assistant.workflow.code_executor import CodeExecutionError, execute_code
 
         with self.assertRaises(CodeExecutionError) as ctx:
             execute_code(
@@ -57,7 +57,7 @@ class WorkflowCodeExecutorRuntimeTests(unittest.TestCase):
         self.assertIn("unexpected fields", str(ctx.exception))
 
     def test_execute_code_timeout_fails_fast(self) -> None:
-        from app.assistant.skills.code_executor import CodeExecutionError, execute_code
+        from app.assistant.workflow.code_executor import CodeExecutionError, execute_code
 
         with self.assertRaises(CodeExecutionError) as ctx:
             execute_code(
@@ -76,7 +76,7 @@ class WorkflowCodeExecutorRuntimeTests(unittest.TestCase):
         self.assertIn("timed out", str(ctx.exception).lower())
 
     def test_container_body_supports_code_executor_node(self) -> None:
-        from app.assistant.skills.langgraph_engine import _execute_container_body
+        from app.assistant.workflow.engine.engine import _execute_container_body
 
         container_result = _execute_container_body(
             container_node_id="iter_1",

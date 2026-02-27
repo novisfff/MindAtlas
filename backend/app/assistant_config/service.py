@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from app.assistant.skills.base import DEFAULT_SKILL_NAME
+from app.assistant.skill_catalog.base import DEFAULT_SKILL_NAME
 
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
@@ -485,7 +485,7 @@ class AssistantConfigService:
         if not workflow.is_system:
             return None
 
-        from app.assistant.skills.defaults_loader import get_system_workflow_baseline
+        from app.assistant.skill_catalog.defaults_loader import get_system_workflow_baseline
 
         for linked_skill in (workflow.skills or []):
             if not bool(getattr(linked_skill, "is_system", False)):
@@ -502,7 +502,7 @@ class AssistantConfigService:
         if not agent_profile.is_system:
             return None
 
-        from app.assistant.skills.defaults_loader import get_system_agent_baseline
+        from app.assistant.skill_catalog.defaults_loader import get_system_agent_baseline
 
         for linked_skill in (agent_profile.skills or []):
             if not bool(getattr(linked_skill, "is_system", False)):
@@ -816,7 +816,7 @@ class AssistantConfigService:
         persist: bool = True,
     ) -> set[str]:
         """Validate workflow and optionally persist nodes/edges onto workflow entity."""
-        from app.assistant.skills.workflow_validator import validate_workflow, validate_parallel_branches
+        from app.assistant.workflow.validation.validator import validate_workflow, validate_parallel_branches
 
         nodes_raw = [
             {
@@ -1441,6 +1441,11 @@ class AssistantConfigService:
 
                 if target_type == "workflow":
                     if existing.workflow_id is None:
+                        # Legacy system skills may still carry graph data on AssistantSkill nodes/edges.
+                        # Normalize old references before binding the graph into AssistantWorkflow.
+                        self._migrate_workflow_tool_text_refs(existing)
+                        if self._requires_system_workflow_output_migration(existing):
+                            self._replace_workflow_with_default(existing, s)
                         fallback_workflow = self._build_default_workflow_input()
                         if existing.nodes:
                             fallback_workflow = WorkflowInput.model_validate(
@@ -2028,7 +2033,7 @@ class AssistantConfigService:
         if not skill.is_system:
             raise ApiException(status_code=400, code=40024, message="Only system skill can be reset")
 
-        from app.assistant.skills.definitions import get_skill_by_name
+        from app.assistant.skill_catalog.definitions import get_skill_by_name
 
         default = get_skill_by_name(skill.name)
         if not default:
@@ -2056,7 +2061,7 @@ class AssistantConfigService:
         if not confirm:
             raise ApiException(status_code=400, code=40023, message="confirm=true required")
 
-        from app.assistant.skills.definitions import SKILLS, get_skill_by_name
+        from app.assistant.skill_catalog.definitions import SKILLS, get_skill_by_name
 
         # 获取代码侧系统技能名称集合
         default_names = {s.name for s in SKILLS}

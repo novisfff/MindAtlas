@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 from uuid import UUID
 
-from app.assistant.skills.base import (
+from app.assistant.skill_catalog.base import (
     ConditionExpression,
     SkillDefinition,
     SkillKBConfig,

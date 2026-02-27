@@ -1,8 +1,8 @@
 """System skill definitions loaded from JSON defaults."""
 from __future__ import annotations
 
-from app.assistant.skills.base import DEFAULT_SKILL_NAME, SkillDefinition
-from app.assistant.skills.defaults_loader import (
+from app.assistant.skill_catalog.base import DEFAULT_SKILL_NAME, SkillDefinition
+from app.assistant.skill_catalog.defaults_loader import (
     get_system_skill_default,
     load_system_skill_defaults,
 )

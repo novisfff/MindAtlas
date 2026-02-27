@@ -15,7 +15,7 @@ from app.ai_registry.runtime import (
     resolve_openai_compat_config,
     resolve_openai_compat_config_by_model_id,
 )
-from app.assistant.skills.base import SkillDefinition, SkillKBConfig
+from app.assistant.skill_catalog.base import SkillDefinition, SkillKBConfig
 from app.assistant_config.models import AssistantTool
 from app.assistant_config.registry import ToolRegistry
 from app.assistant_config.schemas import AgentTestRunRequest
@@ -138,7 +138,7 @@ class AgentTestRunService:
         )
 
     def _build_engine(self, *, api_key: str, base_url: str, model: str):
-        from app.assistant.skills.langgraph_engine import LangGraphEngine
+        from app.assistant.workflow.engine.engine import LangGraphEngine
 
         return LangGraphEngine(
             api_key=api_key,

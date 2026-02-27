@@ -42,7 +42,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         return next_nodes, next_edges
 
     def test_answer_node_is_rejected(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -57,7 +57,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("no longer supported" in e.message for e in result.errors))
 
     def test_removed_node_types_are_rejected(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -74,7 +74,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("template" in e.message and "removed" in e.message for e in result.errors))
 
     def test_missing_output_node_is_rejected(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -89,7 +89,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("exactly one output node" in e.message for e in result.errors))
 
     def test_valid_workflow_passes(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -109,7 +109,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(result.valid, [e.message for e in result.errors])
 
     def test_tool_node_requires_tool_name(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -127,7 +127,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("requires toolName" in e.message for e in result.errors))
 
     def test_tool_input_bindings_must_be_object(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -150,7 +150,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("inputBindings must be an object" in e.message for e in result.errors))
 
     def test_tool_input_bindings_required(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -173,7 +173,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("requires inputBindings" in e.message for e in result.errors))
 
     def test_if_else_with_branches_and_else_edge_is_valid(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -214,7 +214,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(result.valid, [e.message for e in result.errors])
 
     def test_if_else_missing_else_edge_is_rejected(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -254,7 +254,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("exactly one 'else' outgoing edge" in e.message for e in result.errors))
 
     def test_if_else_operator_value_requirement_and_sys_var_validation(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -298,7 +298,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("requires value" in m for m in messages))
 
     def test_duplicate_label_case_insensitive_is_rejected(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -316,7 +316,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("Duplicate node label" in e.message for e in result.errors))
 
     def test_label_with_dot_is_rejected(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -332,7 +332,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("must not contain '.'" in e.message for e in result.errors))
 
     def test_empty_label_is_rejected(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -348,7 +348,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("label is required" in e.message for e in result.errors))
 
     def test_llm_knowledge_source_must_be_kr_node(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -379,7 +379,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("knowledge_retrieval" in e.message for e in result.errors))
 
     def test_llm_knowledge_source_must_be_upstream(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -410,7 +410,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("upstream" in e.message for e in result.errors))
 
     def test_node_model_source_custom_requires_model_id(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -433,7 +433,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("requires modelId" in e.message for e in result.errors))
 
     def test_node_model_id_uuid_and_default_conflict_validation(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -459,7 +459,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("must be UUID" in m for m in messages))
 
     def test_parameter_extractor_requires_non_empty_output_fields(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -485,7 +485,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("outputFields must be a non-empty list" in e.message for e in result.errors))
 
     def test_parameter_extractor_input_content_must_be_string(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -511,7 +511,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("inputContent must be a string" in e.message for e in result.errors))
 
     def test_parameter_extractor_output_field_schema_validation(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -546,7 +546,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("enum must be string array" in m for m in messages))
 
     def test_parameter_extractor_input_content_template_must_reference_upstream(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -572,7 +572,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("non-upstream node: llm_1" in e.message for e in result.errors))
 
     def test_iteration_node_requires_input_output_config(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -603,7 +603,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("iteration outputSelector is required" in m for m in messages))
 
     def test_container_body_disallows_nested_container_nodes(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
@@ -636,7 +636,7 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertTrue(any("must not nest iteration/loop" in e.message for e in result.errors))
 
     def test_loop_node_max_iterations_range_validation(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes = [
             {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},

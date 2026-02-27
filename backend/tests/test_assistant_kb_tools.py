@@ -32,7 +32,7 @@ class AssistantKnowledgeBaseToolsTests(unittest.TestCase):
         self.assertNotIn("kb_graph_recall", names)
 
     def test_general_chat_includes_kb_tools(self) -> None:
-        from app.assistant.skills.definitions import GENERAL_CHAT  # noqa: E402
+        from app.assistant.skill_catalog.definitions import GENERAL_CHAT  # noqa: E402
 
         # kb_search is internally prefetched when skill.kb.enabled=true, not exposed as a visible tool name.
         self.assertNotIn("kb_search", GENERAL_CHAT.tools)

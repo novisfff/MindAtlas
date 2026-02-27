@@ -12,14 +12,14 @@ from uuid import UUID, uuid4
 from sqlalchemy.orm import Session
 
 from app.ai_registry.runtime import resolve_openai_compat_config
-from app.assistant.skills.base import (
+from app.assistant.skill_catalog.base import (
     ConditionExpression,
     SkillDefinition,
     SkillKBConfig,
     WorkflowEdgeDefinition,
     WorkflowNodeDefinition,
 )
-from app.assistant.skills.workflow_validator import (
+from app.assistant.workflow.validation.validator import (
     validate_parallel_branches,
     validate_workflow,
 )
@@ -272,7 +272,7 @@ class WorkflowTestRunService:
 
     def _build_engine(self, *, api_key: str, base_url: str, model: str):
         # Lazy import keeps workflow test service importable in lightweight unit-test envs.
-        from app.assistant.skills.langgraph_engine import LangGraphEngine
+        from app.assistant.workflow.engine.engine import LangGraphEngine
 
         return LangGraphEngine(
             api_key=api_key,

@@ -40,7 +40,7 @@ from app.assistant_config.agent_test_service import AgentTestRunService
 from app.assistant_config.service import AssistantConfigService
 from app.common.exceptions import ApiException
 from app.common.responses import ApiResponse
-from app.assistant.skills.human_loop_runtime import submit_human_approval_decision
+from app.assistant.workflow.human_approval_runtime import submit_human_approval_decision
 from app.database import get_db
 
 router = APIRouter(prefix="/api/assistant-config", tags=["assistant-config"])
@@ -320,7 +320,7 @@ def test_run_agent_profile(
 @router.get("/workflow/node-types", response_model=ApiResponse)
 def list_node_types() -> ApiResponse:
     """获取支持的工作流节点类型目录"""
-    from app.assistant.skills.base import NodeType
+    from app.assistant.skill_catalog.base import NodeType
     from typing import get_args
 
     node_types = []
@@ -445,7 +445,7 @@ def _validate_workflow_payload(
     *,
     workflow=None,
 ) -> WorkflowValidationResponse:
-    from app.assistant.skills.workflow_validator import (
+    from app.assistant.workflow.validation.validator import (
         validate_parallel_branches,
         validate_workflow as _validate_workflow,
     )

@@ -14,17 +14,17 @@ reset_caches()
 
 class SystemDefaultsLoaderTests(unittest.TestCase):
     def setUp(self) -> None:
-        from app.assistant.skills.defaults_loader import clear_system_defaults_cache  # noqa: E402
+        from app.assistant.skill_catalog.defaults_loader import clear_system_defaults_cache  # noqa: E402
 
         clear_system_defaults_cache()
 
     def tearDown(self) -> None:
-        from app.assistant.skills.defaults_loader import clear_system_defaults_cache  # noqa: E402
+        from app.assistant.skill_catalog.defaults_loader import clear_system_defaults_cache  # noqa: E402
 
         clear_system_defaults_cache()
 
     def test_load_system_defaults_success(self) -> None:
-        from app.assistant.skills.defaults_loader import load_system_skill_defaults  # noqa: E402
+        from app.assistant.skill_catalog.defaults_loader import load_system_skill_defaults  # noqa: E402
 
         defaults = load_system_skill_defaults()
         names = {item.name for item in defaults}
@@ -34,7 +34,7 @@ class SystemDefaultsLoaderTests(unittest.TestCase):
         self.assertIn("general_chat", names)
 
     def test_get_system_baselines_success(self) -> None:
-        from app.assistant.skills.defaults_loader import (  # noqa: E402
+        from app.assistant.skill_catalog.defaults_loader import (  # noqa: E402
             get_system_agent_baseline,
             get_system_workflow_baseline,
         )
@@ -49,7 +49,7 @@ class SystemDefaultsLoaderTests(unittest.TestCase):
         self.assertTrue(bool((agent.kb_config or {}).get("enabled", False)))
 
     def test_smart_capture_baseline_contains_human_confirm_branches(self) -> None:
-        from app.assistant.skills.defaults_loader import get_system_workflow_baseline  # noqa: E402
+        from app.assistant.skill_catalog.defaults_loader import get_system_workflow_baseline  # noqa: E402
 
         workflow = get_system_workflow_baseline("smart_capture")
         self.assertIsNotNone(workflow)
@@ -73,7 +73,7 @@ class SystemDefaultsLoaderTests(unittest.TestCase):
         self.assertEqual(len(rejected_targets), 1)
 
     def test_fail_fast_when_preset_file_missing(self) -> None:
-        from app.assistant.skills.defaults_loader import _load_system_skill_defaults_from_dir  # noqa: E402
+        from app.assistant.skill_catalog.defaults_loader import _load_system_skill_defaults_from_dir  # noqa: E402
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import json
-import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,24 +10,20 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.assistant.workflow.human_fields import (
+    HUMAN_FIELD_TYPES,
+    coerce_human_field_value_by_type,
+    normalize_human_field_options,
+    normalize_human_field_type,
+    normalize_human_field_widget,
+    validate_human_field_date_value,
+    validate_human_field_time_value,
+)
 from app.assistant_config.models import AssistantHumanApproval
 
 
 ApprovalDecision = Literal["approved", "rejected"]
 ApprovalStatus = Literal["pending", "approved", "rejected", "cancelled"]
-_HUMAN_FIELD_TYPES = {"string", "number", "integer", "boolean", "array"}
-_HUMAN_FIELD_WIDGET_ALLOWED_TYPES: dict[str, set[str]] = {
-    "input": {"string", "number", "integer"},
-    "textarea": {"string"},
-    "switch": {"boolean"},
-    "select": {"string", "number", "integer"},
-    "radio": {"string", "number", "integer"},
-    "tag_selector": {"array"},
-    "date": {"string"},
-    "time": {"string"},
-}
-_HUMAN_FIELD_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_HUMAN_FIELD_TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 
 def utcnow() -> datetime:
@@ -42,127 +37,25 @@ def _normalize_decision(raw: Any) -> ApprovalDecision:
     return decision  # type: ignore[return-value]
 
 
-def _default_widget(field_type: str) -> str:
-    return "switch" if field_type == "boolean" else "input"
-
-
 def _normalize_widget(field_type: str, field_schema: dict[str, Any]) -> str:
-    raw_widget = field_schema.get("widget")
-    widget = str(raw_widget or "").strip().lower() or _default_widget(field_type)
-    if widget not in _HUMAN_FIELD_WIDGET_ALLOWED_TYPES:
-        return _default_widget(field_type)
-    if field_type not in _HUMAN_FIELD_WIDGET_ALLOWED_TYPES.get(widget, set()):
-        return _default_widget(field_type)
-    return widget
+    return normalize_human_field_widget(field_type, field_schema.get("widget"))
 
 
 def _normalize_options(raw: Any) -> list[str]:
-    if not isinstance(raw, list):
-        return []
-    options: list[str] = []
-    for item in raw:
-        if not isinstance(item, str):
-            continue
-        text = item.strip()
-        if text:
-            options.append(text)
-    return list(dict.fromkeys(options))
+    return normalize_human_field_options(raw)
 
 
 def _coerce_field_value(field_schema: dict[str, Any], value: Any, *, field_name: str) -> Any:
-    normalized = str(field_schema.get("type", "string") or "string").strip().lower()
-    if normalized not in _HUMAN_FIELD_TYPES:
-        normalized = "string"
+    normalized = normalize_human_field_type(field_schema.get("type", "string"))
 
     widget = _normalize_widget(normalized, field_schema)
-    coerced: Any
-
-    if normalized == "string":
-        if value is None:
-            coerced = ""
-        elif isinstance(value, str):
-            coerced = value
-        elif isinstance(value, (dict, list)):
-            coerced = json.dumps(value, ensure_ascii=False)
-        else:
-            coerced = str(value)
-    elif normalized == "number":
-        if isinstance(value, bool):
-            raise ValueError(f"field '{field_name}' expects number")
-        if isinstance(value, (int, float)):
-            coerced = float(value)
-        else:
-            text = str(value).strip()
-            if not text:
-                raise ValueError(f"field '{field_name}' expects number")
-            coerced = float(text)
-    elif normalized == "integer":
-        if isinstance(value, bool):
-            raise ValueError(f"field '{field_name}' expects integer")
-        if isinstance(value, int):
-            coerced = int(value)
-        elif isinstance(value, float):
-            if not value.is_integer():
-                raise ValueError(f"field '{field_name}' expects integer")
-            coerced = int(value)
-        else:
-            text = str(value).strip()
-            if not text:
-                raise ValueError(f"field '{field_name}' expects integer")
-            if text.startswith(("+", "-")):
-                sign = text[0]
-                body = text[1:]
-            else:
-                sign = ""
-                body = text
-            if not body.isdigit():
-                raise ValueError(f"field '{field_name}' expects integer")
-            coerced = int(f"{sign}{body}")
-    elif normalized == "boolean":
-        if isinstance(value, bool):
-            coerced = value
-        else:
-            text = str(value).strip().lower()
-            if text in {"1", "true", "yes", "y", "on"}:
-                coerced = True
-            elif text in {"0", "false", "no", "n", "off"}:
-                coerced = False
-            else:
-                raise ValueError(f"field '{field_name}' expects boolean")
-    elif normalized == "array":
-        if value is None:
-            raw_items: list[Any] = []
-        elif isinstance(value, list):
-            raw_items = value
-        elif isinstance(value, str):
-            text = value.strip()
-            if not text:
-                raw_items = []
-            else:
-                parsed: Any = None
-                if text.startswith("[") and text.endswith("]"):
-                    try:
-                        parsed = json.loads(text)
-                    except Exception:
-                        parsed = None
-                if isinstance(parsed, list):
-                    raw_items = parsed
-                else:
-                    raw_items = [segment.strip() for segment in text.split(",")]
-        else:
-            raise ValueError(f"field '{field_name}' expects string array")
-
-        normalized_items: list[str] = []
-        for item in raw_items:
-            if item is None:
-                continue
-            item_text = item if isinstance(item, str) else str(item)
-            cleaned = item_text.strip()
-            if cleaned:
-                normalized_items.append(cleaned)
-        coerced = normalized_items
-    else:
-        raise ValueError(f"field '{field_name}' has unsupported type: {normalized}")
+    coerced = coerce_human_field_value_by_type(
+        field_name=field_name,
+        field_type=normalized,
+        value=value,
+        error_cls=ValueError,
+        subject="field",
+    )
 
     options = _normalize_options(field_schema.get("options"))
 
@@ -187,24 +80,20 @@ def _coerce_field_value(field_schema: dict[str, Any], value: Any, *, field_name:
                 raise ValueError(f"field '{field_name}' contains unsupported tag values")
 
     if widget == "date":
-        text = str(coerced).strip()
-        if not text:
-            return ""
-        if not _HUMAN_FIELD_DATE_RE.fullmatch(text):
-            raise ValueError(f"field '{field_name}' expects date format YYYY-MM-DD")
-        try:
-            datetime.strptime(text, "%Y-%m-%d")
-        except ValueError as exc:
-            raise ValueError(f"field '{field_name}' expects date format YYYY-MM-DD") from exc
-        coerced = text
+        coerced = validate_human_field_date_value(
+            field_name=field_name,
+            value=coerced,
+            error_cls=ValueError,
+            subject="field",
+        )
 
     if widget == "time":
-        text = str(coerced).strip()
-        if not text:
-            return ""
-        if not _HUMAN_FIELD_TIME_RE.fullmatch(text):
-            raise ValueError(f"field '{field_name}' expects time format HH:mm")
-        coerced = text
+        coerced = validate_human_field_time_value(
+            field_name=field_name,
+            value=coerced,
+            error_cls=ValueError,
+            subject="field",
+        )
 
     return coerced
 

@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 
-from app.assistant.skills.base import (
+from app.assistant.skill_catalog.base import (
     DEFAULT_SKILL_NAME,
     SkillDefinition,
     SkillKBConfig,

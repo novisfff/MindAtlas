@@ -127,7 +127,7 @@ class SystemWorkflowLayoutPresetTests(unittest.TestCase):
         return svc, skill.id
 
     def test_system_workflow_definitions_use_optimized_layout_presets(self) -> None:
-        from app.assistant.skills.definitions import PERIODIC_REVIEW, QUICK_STATS, SMART_CAPTURE  # noqa: E402
+        from app.assistant.skill_catalog.definitions import PERIODIC_REVIEW, QUICK_STATS, SMART_CAPTURE  # noqa: E402
 
         definitions = {
             QUICK_STATS.name: QUICK_STATS,
@@ -144,7 +144,7 @@ class SystemWorkflowLayoutPresetTests(unittest.TestCase):
                 self.assertEqual(position_map.get(node_id), expected, f"{skill_name}.{node_id} position mismatch")
 
     def test_reset_skill_restores_system_workflow_layout_preset(self) -> None:
-        from app.assistant.skills.definitions import QUICK_STATS  # noqa: E402
+        from app.assistant.skill_catalog.definitions import QUICK_STATS  # noqa: E402
         from app.assistant_config.models import AssistantSkill  # noqa: E402
 
         svc, skill_id = self._create_system_skill_with_workflow(QUICK_STATS)
@@ -168,7 +168,7 @@ class SystemWorkflowLayoutPresetTests(unittest.TestCase):
         )
 
     def test_sync_does_not_override_existing_system_workflow_positions(self) -> None:
-        from app.assistant.skills.definitions import QUICK_STATS  # noqa: E402
+        from app.assistant.skill_catalog.definitions import QUICK_STATS  # noqa: E402
         from app.assistant_config.models import AssistantSkill  # noqa: E402
 
         svc, skill_id = self._create_system_skill_with_workflow(QUICK_STATS)

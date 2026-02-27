@@ -11,7 +11,7 @@ bootstrap_backend_imports()
 
 class WorkflowEnvVarsRuntimeTests(unittest.TestCase):
     def test_workflow_runtime_updates_env_vars_and_renders_output(self) -> None:
-        from app.assistant.skills.langgraph_engine import build_workflow_dag_subgraph
+        from app.assistant.workflow.engine.engine import build_workflow_dag_subgraph
 
         nodes = [
             {
@@ -90,7 +90,7 @@ class WorkflowEnvVarsRuntimeTests(unittest.TestCase):
         self.assertEqual(result.get('env_vars', {}).get('message'), 'A-B')
 
     def test_container_body_variable_assign_updates_parent_env_state(self) -> None:
-        from app.assistant.skills.langgraph_engine import _execute_container_body
+        from app.assistant.workflow.engine.engine import _execute_container_body
 
         container_result = _execute_container_body(
             container_node_id='iter_1',
@@ -143,7 +143,7 @@ class WorkflowEnvVarsRuntimeTests(unittest.TestCase):
         self.assertEqual(assign_output.get('json_fields', {}).get('after'), 6)
 
     def test_clear_operation_resets_to_type_empty_values(self) -> None:
-        from app.assistant.skills.langgraph_engine import build_workflow_dag_subgraph
+        from app.assistant.workflow.engine.engine import build_workflow_dag_subgraph
 
         nodes = [
             {

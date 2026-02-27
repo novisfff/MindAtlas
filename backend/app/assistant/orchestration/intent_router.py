@@ -8,8 +8,8 @@ from datetime import date
 from sqlalchemy.orm import Session
 
 from app.assistant.openai_compat import build_openai_compat_client_headers
-from app.assistant.skills.base import SkillDefinition, DEFAULT_SKILL_NAME, is_default_skill
-from app.assistant.skills.converters import db_skill_to_definition_light
+from app.assistant.skill_catalog.base import SkillDefinition, DEFAULT_SKILL_NAME, is_default_skill
+from app.assistant.skill_catalog.converters import db_skill_to_definition_light
 from app.assistant_config.registry import SkillRegistry
 
 logger = logging.getLogger(__name__)

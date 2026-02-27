@@ -17,8 +17,8 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         reset_caches()
 
     def test_agent_node_streaming_emits_content_without_invoke(self) -> None:
-        from app.assistant.skills.base import SkillDefinition
-        from app.assistant.skills.langgraph_engine import _build_agent_node
+        from app.assistant.skill_catalog.base import SkillDefinition
+        from app.assistant.workflow.engine.engine import _build_agent_node
 
         skill = SkillDefinition(
             name="s",
@@ -64,8 +64,8 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(out["messages"][0].content, "你好")
 
     def test_execute_stream_forwards_runtime_content_delta_immediately(self) -> None:
-        from app.assistant.skills.base import SkillDefinition
-        from app.assistant.skills.langgraph_engine import LangGraphEngine
+        from app.assistant.skill_catalog.base import SkillDefinition
+        from app.assistant.workflow.engine.engine import LangGraphEngine
 
         class _FakeChunk:
             def __init__(self, content: str) -> None:
@@ -94,11 +94,11 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             system_prompt="sys",
         )
 
-        with patch("app.assistant.skills.langgraph_engine.ChatOpenAI", return_value=_FakeLLM()):
+        with patch("app.assistant.workflow.engine.engine.ChatOpenAI", return_value=_FakeLLM()):
             engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=None)
 
         with patch(
-            "app.assistant.skills.langgraph_engine._get_or_compile_graph",
+            "app.assistant.workflow.engine.engine._get_or_compile_graph",
             return_value=_FakeCompiled(),
         ):
             out = list(engine.execute(skill=skill, user_input="u", history=[]))
@@ -109,7 +109,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(tokens[1], "B")
 
     def test_workflow_llm_node_without_stream_passthrough_does_not_emit_content_delta(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_dag_llm_node
+        from app.assistant.workflow.engine.engine import _build_dag_llm_node
 
         class _Chunk:
             def __init__(self, content: str) -> None:
@@ -154,7 +154,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(out["node_outputs"]["llm_1"]["json_fields"]["response"], "AB")
 
     def test_workflow_llm_node_with_stream_passthrough_emits_content_delta(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_dag_llm_node
+        from app.assistant.workflow.engine.engine import _build_dag_llm_node
 
         class _Chunk:
             def __init__(self, content: str) -> None:
@@ -194,7 +194,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(content_emitted, ["A", "B"])
 
     def test_output_node_text_single_ref_skips_duplicate_emit_when_passthrough(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_output_node
+        from app.assistant.workflow.engine.engine import _build_output_node
 
         content_emitted: list[str] = []
         node = _build_output_node(
@@ -223,7 +223,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(out["node_outputs"]["output_1"]["json_fields"]["response"], "AB")
 
     def test_output_node_text_non_passthrough_emits_once(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_output_node
+        from app.assistant.workflow.engine.engine import _build_output_node
 
         content_emitted: list[str] = []
         node = _build_output_node(
@@ -251,7 +251,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(out["node_outputs"]["output_1"]["text"], "Result: AB")
 
     def test_output_node_structured_emits_json_once(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_output_node
+        from app.assistant.workflow.engine.engine import _build_output_node
 
         content_emitted: list[str] = []
         node = _build_output_node(
@@ -285,7 +285,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(out["node_outputs"]["output_1"]["json_fields"]["count"], 2)
 
     def test_output_field_integer_array_rejects_boolean_items(self) -> None:
-        from app.assistant.skills.langgraph_engine import _coerce_output_field_value
+        from app.assistant.workflow.engine.engine import _coerce_output_field_value
 
         with self.assertRaises(ValueError):
             _coerce_output_field_value(
@@ -295,7 +295,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             )
 
     def test_workflow_llm_structured_retry_success(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_dag_llm_node
+        from app.assistant.workflow.engine.engine import _build_dag_llm_node
 
         class _Chunk:
             def __init__(self, content: str) -> None:
@@ -344,7 +344,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(content_emitted, ['{"title": "ok"}'])
 
     def test_workflow_llm_structured_retry_failure_raises(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_dag_llm_node
+        from app.assistant.workflow.engine.engine import _build_dag_llm_node
 
         class _Chunk:
             def __init__(self, content: str) -> None:
@@ -377,7 +377,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             )
 
     def test_workflow_tool_input_bindings_override_legacy_args(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_dag_tool_node
+        from app.assistant.workflow.engine.engine import _build_dag_tool_node
 
         captured_args: dict[str, str] = {}
 
@@ -390,10 +390,10 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
                 return {"echo": kwargs.get("question"), "ok": True}
 
         with patch(
-            "app.assistant.skills.langgraph_engine._wrap_tool_with_db",
+            "app.assistant.workflow.engine.engine._wrap_tool_with_db",
             side_effect=lambda tool, _db_bind: (lambda **kwargs: tool.func(**kwargs)),
         ), patch(
-            "app.assistant.skills.langgraph_engine._resolve_tool_output_param_names",
+            "app.assistant.workflow.engine.engine._resolve_tool_output_param_names",
             return_value=["echo"],
         ):
             node = _build_dag_tool_node(
@@ -429,7 +429,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(tool_out["json_fields"]["result"]["echo"], "Q: hello")
 
     def test_workflow_tool_without_declared_output_only_has_result(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_dag_tool_node
+        from app.assistant.workflow.engine.engine import _build_dag_tool_node
 
         class _Tool:
             name = "fake_tool"
@@ -439,10 +439,10 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
                 return {"foo": "bar"}
 
         with patch(
-            "app.assistant.skills.langgraph_engine._wrap_tool_with_db",
+            "app.assistant.workflow.engine.engine._wrap_tool_with_db",
             side_effect=lambda tool, _db_bind: (lambda **kwargs: tool.func(**kwargs)),
         ), patch(
-            "app.assistant.skills.langgraph_engine._resolve_tool_output_param_names",
+            "app.assistant.workflow.engine.engine._resolve_tool_output_param_names",
             return_value=[],
         ):
             node = _build_dag_tool_node(
@@ -464,7 +464,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(set(out["node_outputs"]["tool_1"]["json_fields"].keys()), {"result"})
 
     def test_if_else_branch_logic_and_order_with_sys_vars(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_if_else_node
+        from app.assistant.workflow.engine.engine import _build_if_else_node
 
         node = _build_if_else_node(
             "if_1",
@@ -547,7 +547,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(out_else["branch_decisions"]["if_1"], "else")
 
     def test_if_else_condition_value_template_supports_node_and_sys_vars(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_if_else_node
+        from app.assistant.workflow.engine.engine import _build_if_else_node
 
         node = _build_if_else_node(
             "if_1",
@@ -583,8 +583,8 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(out["branch_decisions"]["if_1"], "if_main")
 
     def test_execute_passes_runtime_context_into_workflow_sys_vars(self) -> None:
-        from app.assistant.skills.base import SkillDefinition
-        from app.assistant.skills.langgraph_engine import LangGraphEngine
+        from app.assistant.skill_catalog.base import SkillDefinition
+        from app.assistant.workflow.engine.engine import LangGraphEngine
 
         class _FakeChunk:
             def __init__(self, content: str) -> None:
@@ -615,11 +615,11 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             workflow_edges=[],
         )
 
-        with patch("app.assistant.skills.langgraph_engine.ChatOpenAI", return_value=_FakeLLM()):
+        with patch("app.assistant.workflow.engine.engine.ChatOpenAI", return_value=_FakeLLM()):
             engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=None)
 
         with patch(
-            "app.assistant.skills.langgraph_engine._get_or_compile_graph",
+            "app.assistant.workflow.engine.engine._get_or_compile_graph",
             return_value=_FakeCompiled(),
         ):
             _ = list(
@@ -638,8 +638,8 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertTrue(sys_vars.get("datetime"))
 
     def test_execute_output_passthrough_source_skips_structured_llm(self) -> None:
-        from app.assistant.skills.base import SkillDefinition
-        from app.assistant.skills.langgraph_engine import LangGraphEngine
+        from app.assistant.skill_catalog.base import SkillDefinition
+        from app.assistant.workflow.engine.engine import LangGraphEngine
 
         class _FakeChunk:
             def __init__(self, content: str) -> None:
@@ -691,11 +691,11 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             ],
         )
 
-        with patch("app.assistant.skills.langgraph_engine.ChatOpenAI", return_value=_FakeLLM()):
+        with patch("app.assistant.workflow.engine.engine.ChatOpenAI", return_value=_FakeLLM()):
             engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=None)
 
         with patch(
-            "app.assistant.skills.langgraph_engine._get_or_compile_graph",
+            "app.assistant.workflow.engine.engine._get_or_compile_graph",
             return_value=_FakeCompiled(),
         ):
             _ = list(
@@ -710,12 +710,12 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(captured_state.get("output_stream_source_node_id"), "")
 
     def test_workflow_parallel_branches_no_current_node_conflict(self) -> None:
-        from app.assistant.skills.base import (
+        from app.assistant.skill_catalog.base import (
             SkillDefinition,
             WorkflowEdgeDefinition,
             WorkflowNodeDefinition,
         )
-        from app.assistant.skills.langgraph_engine import build_workflow_dag_subgraph
+        from app.assistant.workflow.engine.engine import build_workflow_dag_subgraph
 
         class _Chunk:
             def __init__(self, content: str) -> None:
@@ -780,7 +780,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         ]
 
         with patch(
-            "app.assistant.skills.langgraph_engine._wrap_tool_with_db",
+            "app.assistant.workflow.engine.engine._wrap_tool_with_db",
             side_effect=lambda tool, _db_bind: (lambda **kwargs: tool.func(**kwargs)),
         ):
             compiled = build_workflow_dag_subgraph(
@@ -810,7 +810,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertGreaterEqual(len(events), 1)
 
     def test_kr_node_uses_override_params_and_outputs_structured_fields(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_kr_node
+        from app.assistant.workflow.engine.engine import _build_kr_node
 
         captured_args: dict[str, object] = {}
 
@@ -830,7 +830,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
                 )
 
         with patch(
-            "app.assistant.skills.langgraph_engine._wrap_tool_with_db",
+            "app.assistant.workflow.engine.engine._wrap_tool_with_db",
             side_effect=lambda tool, _db_bind: (lambda **kwargs: tool.func(**kwargs)),
         ):
             node = _build_kr_node(
@@ -858,7 +858,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(kr_out["json_fields"]["references_count"], 2)
 
     def test_llm_knowledge_injection_references_only(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_dag_llm_node
+        from app.assistant.workflow.engine.engine import _build_dag_llm_node
 
         class _Chunk:
             def __init__(self, content: str) -> None:
@@ -924,7 +924,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertNotIn("result", payload["sources"][0])
 
     def test_llm_knowledge_injection_full_payload(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_dag_llm_node
+        from app.assistant.workflow.engine.engine import _build_dag_llm_node
 
         class _Chunk:
             def __init__(self, content: str) -> None:
@@ -982,7 +982,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(payload["sources"][0]["result"], "KR")
 
     def test_workflow_llm_node_uses_runtime_node_llm_override(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_dag_llm_node
+        from app.assistant.workflow.engine.engine import _build_dag_llm_node
 
         class _Chunk:
             def __init__(self, content: str) -> None:
@@ -1020,7 +1020,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(out["node_outputs"]["llm_1"]["text"], "custom")
 
     def test_parameter_extractor_node_uses_runtime_node_llm_override(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_param_extractor_node
+        from app.assistant.workflow.engine.engine import _build_param_extractor_node
 
         class _Chunk:
             def __init__(self, content: str) -> None:
@@ -1057,7 +1057,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(out["node_outputs"]["extract_1"]["json_fields"]["city"], "shanghai")
 
     def test_parameter_extractor_node_structured_output_success(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_param_extractor_node
+        from app.assistant.workflow.engine.engine import _build_param_extractor_node
 
         class _Chunk:
             def __init__(self, content: str) -> None:
@@ -1101,7 +1101,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertIn("用户输入=上海天气；日期=2026-02-13", llm.calls[0][1]["content"])
 
     def test_parameter_extractor_node_invalid_json_raises(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_param_extractor_node
+        from app.assistant.workflow.engine.engine import _build_param_extractor_node
 
         class _Chunk:
             def __init__(self, content: str) -> None:
@@ -1132,7 +1132,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             )
 
     def test_parameter_extractor_node_missing_output_field_raises(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_param_extractor_node
+        from app.assistant.workflow.engine.engine import _build_param_extractor_node
 
         class _Chunk:
             def __init__(self, content: str) -> None:
@@ -1163,7 +1163,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             )
 
     def test_custom_model_llm_client_is_cached_by_model_id(self) -> None:
-        from app.assistant.skills.langgraph_engine import LangGraphEngine
+        from app.assistant.workflow.engine.engine import LangGraphEngine
 
         class _FakeLLM:
             def stream(self, _messages):
@@ -1176,10 +1176,10 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
                 self.model = "gpt-4.1-mini"
                 self.model_id = uuid4()
 
-        with patch("app.assistant.skills.langgraph_engine.ChatOpenAI", return_value=_FakeLLM()) as mocked_chat:
+        with patch("app.assistant.workflow.engine.engine.ChatOpenAI", return_value=_FakeLLM()) as mocked_chat:
             engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=object())
             with patch(
-                "app.assistant.skills.langgraph_engine.resolve_openai_compat_config_by_model_id",
+                "app.assistant.workflow.engine.engine.resolve_openai_compat_config_by_model_id",
                 return_value=_Cfg(),
             ):
                 llm_a = engine._resolve_node_custom_llm("model-1", node_id="llm_1")
@@ -1190,8 +1190,8 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(mocked_chat.call_count, 3)
 
     def test_resolve_workflow_node_llms_raises_when_custom_model_unavailable(self) -> None:
-        from app.assistant.skills.base import SkillDefinition
-        from app.assistant.skills.langgraph_engine import LangGraphEngine
+        from app.assistant.skill_catalog.base import SkillDefinition
+        from app.assistant.workflow.engine.engine import LangGraphEngine
 
         class _FakeLLM:
             def stream(self, _messages):
@@ -1232,18 +1232,18 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             ],
         )
 
-        with patch("app.assistant.skills.langgraph_engine.ChatOpenAI", return_value=_FakeLLM()):
+        with patch("app.assistant.workflow.engine.engine.ChatOpenAI", return_value=_FakeLLM()):
             engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=object())
         with patch(
-            "app.assistant.skills.langgraph_engine.resolve_openai_compat_config_by_model_id",
+            "app.assistant.workflow.engine.engine.resolve_openai_compat_config_by_model_id",
             return_value=None,
         ):
             with self.assertRaises(RuntimeError):
                 engine._resolve_workflow_node_llms(skill)
 
     def test_resolve_workflow_node_llms_supports_container_body_custom_model(self) -> None:
-        from app.assistant.skills.base import SkillDefinition
-        from app.assistant.skills.langgraph_engine import LangGraphEngine
+        from app.assistant.skill_catalog.base import SkillDefinition
+        from app.assistant.workflow.engine.engine import LangGraphEngine
 
         class _FakeLLM:
             def stream(self, _messages):
@@ -1309,10 +1309,10 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             ],
         )
 
-        with patch("app.assistant.skills.langgraph_engine.ChatOpenAI", return_value=_FakeLLM()):
+        with patch("app.assistant.workflow.engine.engine.ChatOpenAI", return_value=_FakeLLM()):
             engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=object())
         with patch(
-            "app.assistant.skills.langgraph_engine.resolve_openai_compat_config_by_model_id",
+            "app.assistant.workflow.engine.engine.resolve_openai_compat_config_by_model_id",
             return_value=_Cfg(),
         ):
             node_llms = engine._resolve_workflow_node_llms(skill)
@@ -1320,7 +1320,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertIn("iter_1::llm_body", node_llms)
 
     def test_iteration_node_aggregates_body_outputs(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_iteration_node
+        from app.assistant.workflow.engine.engine import _build_iteration_node
 
         class _Chunk:
             def __init__(self, content: str) -> None:
@@ -1383,7 +1383,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(len(node_out["json_fields"]["items"]), 2)
 
     def test_loop_node_terminates_by_container_condition(self) -> None:
-        from app.assistant.skills.langgraph_engine import _build_loop_node
+        from app.assistant.workflow.engine.engine import _build_loop_node
 
         class _LLM:
             def stream(self, _messages):

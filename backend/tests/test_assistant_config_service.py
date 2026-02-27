@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from unittest.mock import patch
+from uuid import uuid4
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 from tests._db import make_session
@@ -27,6 +28,50 @@ class AssistantConfigServiceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.db.close()
 
+    def _create_workflow_target(self):
+        from app.assistant_config.models import AssistantWorkflow  # noqa: E402
+
+        workflow = AssistantWorkflow(
+            name=f"wf_target_{uuid4().hex[:10]}",
+            description="test workflow target",
+            enabled=True,
+        )
+        self.db.add(workflow)
+        self.db.flush()
+        return workflow
+
+    def _create_agent_target(self):
+        from app.assistant_config.models import AssistantAgentProfile  # noqa: E402
+
+        profile = AssistantAgentProfile(
+            name=f"agent_target_{uuid4().hex[:10]}",
+            description="test agent target",
+            system_prompt="",
+            tools=[],
+            kb_config={"enabled": False},
+            enabled=True,
+        )
+        self.db.add(profile)
+        self.db.flush()
+        return profile
+
+    def _new_skill_with_binding(self, **kwargs):
+        from app.assistant_config.models import AssistantSkill  # noqa: E402
+
+        has_workflow = kwargs.get("workflow_id") is not None
+        has_agent = kwargs.get("agent_profile_id") is not None
+        if not has_workflow and not has_agent:
+            pattern = str(kwargs.get("langgraph_pattern") or "agent_loop")
+            if pattern == "workflow_dag":
+                workflow = self._create_workflow_target()
+                kwargs["workflow_id"] = workflow.id
+                kwargs["agent_profile_id"] = None
+            else:
+                profile = self._create_agent_target()
+                kwargs["workflow_id"] = None
+                kwargs["agent_profile_id"] = profile.id
+        return AssistantSkill(**kwargs)
+
     def test_sync_system_tools_does_not_seed_records(self) -> None:
         from app.assistant_config.models import AssistantTool  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -45,7 +90,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         # Pre-existing system tool that no longer exists in code
         self.db.add(AssistantTool(name="old_tool", description="d", kind="local", is_system=True, enabled=True))
         self.db.add(
-            AssistantSkill(
+            self._new_skill_with_binding(
                 name="s1",
                 description="d",
                 intent_examples=[],
@@ -118,7 +163,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
             workflow_edges = []
 
         # existing record should be normalized to langgraph
-        existing = AssistantSkill(
+        existing = self._new_skill_with_binding(
             name="s1",
             description="old",
             intent_examples=[],
@@ -158,7 +203,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
             workflow_nodes = []
             workflow_edges = []
 
-        existing = AssistantSkill(
+        existing = self._new_skill_with_binding(
             name="smart_capture",
             description="old",
             intent_examples=[],
@@ -182,7 +227,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertEqual(skill.langgraph_pattern, "workflow_dag")
 
     def test_sync_system_skills_migrates_tool_text_refs_to_result(self) -> None:
-        from app.assistant_config.models import AssistantSkill, AssistantSkillNode  # noqa: E402
+        from app.assistant_config.models import AssistantSkill, AssistantSkillEdge, AssistantSkillNode  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
         class FakeSkill:
@@ -197,7 +242,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
             workflow_nodes = []
             workflow_edges = []
 
-        existing = AssistantSkill(
+        existing = self._new_skill_with_binding(
             name="smart_capture",
             description="old",
             intent_examples=[],
@@ -207,8 +252,18 @@ class AssistantConfigServiceTests(unittest.TestCase):
             system_prompt=None,
             is_system=True,
             enabled=True,
+            workflow_id=None,
+            agent_profile_id=self._create_agent_target().id,
         )
         existing.nodes = [
+            AssistantSkillNode(
+                node_id="start",
+                node_type="start",
+                label="start",
+                position_x=0,
+                position_y=0,
+                config={},
+            ),
             AssistantSkillNode(
                 node_id="tool_create",
                 node_type="tool",
@@ -228,6 +283,40 @@ class AssistantConfigServiceTests(unittest.TestCase):
                     "systemPrompt": "summary {{tool_create.text}}",
                 },
             ),
+            AssistantSkillNode(
+                node_id="output_final",
+                node_type="output",
+                label="output",
+                position_x=0,
+                position_y=0,
+                config={
+                    "outputMode": "text",
+                    "textTemplate": "{{llm_output.response}}",
+                },
+            ),
+        ]
+        existing.edges = [
+            AssistantSkillEdge(
+                edge_id="e0",
+                source_node_id="start",
+                target_node_id="tool_create",
+                source_handle="output",
+                target_handle="input",
+            ),
+            AssistantSkillEdge(
+                edge_id="e1",
+                source_node_id="tool_create",
+                target_node_id="llm_output",
+                source_handle="output",
+                target_handle="input",
+            ),
+            AssistantSkillEdge(
+                edge_id="e2",
+                source_node_id="llm_output",
+                target_node_id="output_final",
+                source_handle="output",
+                target_handle="input",
+            ),
         ]
         self.db.add(existing)
         self.db.commit()
@@ -238,11 +327,13 @@ class AssistantConfigServiceTests(unittest.TestCase):
 
         skill = self.db.query(AssistantSkill).filter(AssistantSkill.name == "smart_capture").first()
         self.assertIsNotNone(skill)
-        self.assertEqual(skill.nodes[1].config.get("userInput"), "{{tool_create.result}}")
-        self.assertIn("{{tool_create.result}}", skill.nodes[1].config.get("systemPrompt", ""))
+        llm_node = next((node for node in (skill.nodes or []) if node.node_id == "llm_output"), None)
+        self.assertIsNotNone(llm_node)
+        self.assertEqual(llm_node.config.get("userInput"), "{{tool_create.result}}")
+        self.assertIn("{{tool_create.result}}", llm_node.config.get("systemPrompt", ""))
 
     def test_sync_system_skills_migrates_legacy_workflow_output_to_output_node(self) -> None:
-        from app.assistant.skills.base import WorkflowEdgeDefinition, WorkflowNodeDefinition  # noqa: E402
+        from app.assistant.skill_catalog.base import WorkflowEdgeDefinition, WorkflowNodeDefinition  # noqa: E402
         from app.assistant_config.models import AssistantSkill, AssistantSkillEdge, AssistantSkillNode  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
@@ -286,7 +377,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
                 WorkflowEdgeDefinition(edge_id="e2", source_node_id="llm_output", target_node_id="output_final"),
             ]
 
-        existing = AssistantSkill(
+        existing = self._new_skill_with_binding(
             name="smart_capture",
             description="old",
             intent_examples=[],
@@ -296,6 +387,8 @@ class AssistantConfigServiceTests(unittest.TestCase):
             system_prompt=None,
             is_system=True,
             enabled=True,
+            workflow_id=None,
+            agent_profile_id=self._create_agent_target().id,
         )
         existing.nodes = [
             AssistantSkillNode(
@@ -358,7 +451,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
             workflow_nodes = []
             workflow_edges = []
 
-        skill = AssistantSkill(
+        skill = self._new_skill_with_binding(
             name="smart_capture",
             description="old",
             intent_examples=[],
@@ -373,7 +466,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.db.commit()
 
         svc = AssistantConfigService(self.db)
-        with patch("app.assistant.skills.definitions.get_skill_by_name", return_value=DefaultSkill()):
+        with patch("app.assistant.skill_catalog.definitions.get_skill_by_name", return_value=DefaultSkill()):
             out = svc.reset_skill(skill.id, confirm=True)
 
         self.assertEqual(out.mode, "langgraph")
@@ -453,7 +546,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         from app.assistant_config.models import AssistantSkill  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
-        skill = AssistantSkill(
+        skill = self._new_skill_with_binding(
             name="s",
             description="d",
             is_system=False,
@@ -479,7 +572,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         from app.assistant_config.models import AssistantSkill  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
-        skill = AssistantSkill(
+        skill = self._new_skill_with_binding(
             name="s",
             description="d",
             is_system=True,
@@ -493,7 +586,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
 
         svc = AssistantConfigService(self.db)
 
-        with patch("app.assistant.skills.definitions.get_skill_by_name", return_value=None):
+        with patch("app.assistant.skill_catalog.definitions.get_skill_by_name", return_value=None):
             with self.assertRaises(ApiException) as ctx:
                 svc.reset_skill(skill.id, confirm=True)
         self.assertEqual(ctx.exception.status_code, 404)
@@ -546,7 +639,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.db.add(skill)
         self.db.commit()
 
-        with patch("app.assistant.skills.definitions.get_skill_by_name", return_value=WorkflowDefaultSkill()):
+        with patch("app.assistant.skill_catalog.definitions.get_skill_by_name", return_value=WorkflowDefaultSkill()):
             svc.reset_skill(skill.id, confirm=True)
 
         out_skill = svc.get_skill(skill.id)
@@ -630,7 +723,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.db.add(skill)
         self.db.commit()
 
-        with patch("app.assistant.skills.definitions.get_skill_by_name", return_value=AgentDefaultSkill()):
+        with patch("app.assistant.skill_catalog.definitions.get_skill_by_name", return_value=AgentDefaultSkill()):
             svc.reset_skill(skill.id, confirm=True)
 
         out_skill = svc.get_skill(skill.id)
@@ -723,8 +816,8 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.db.commit()
 
         with (
-            patch("app.assistant.skills.definitions.SKILLS", [WorkflowDefaultSkill()]),
-            patch("app.assistant.skills.definitions.get_skill_by_name", return_value=WorkflowDefaultSkill()),
+            patch("app.assistant.skill_catalog.definitions.SKILLS", [WorkflowDefaultSkill()]),
+            patch("app.assistant.skill_catalog.definitions.get_skill_by_name", return_value=WorkflowDefaultSkill()),
         ):
             result = svc.reset_all_system_skills(confirm=True)
 
@@ -754,7 +847,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         from app.assistant_config.schemas import AssistantSkillUpdateRequest  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
-        skill = AssistantSkill(
+        skill = self._new_skill_with_binding(
             name="s",
             description="d",
             is_system=True,
@@ -776,7 +869,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         from app.assistant_config.models import AssistantSkill  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
-        skill = AssistantSkill(
+        skill = self._new_skill_with_binding(
             name="s",
             description="d",
             is_system=True,

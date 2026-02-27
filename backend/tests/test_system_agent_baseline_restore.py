@@ -54,7 +54,7 @@ class SystemAgentBaselineRestoreTests(unittest.TestCase):
         return svc, profile.id
 
     def test_rollback_system_agent_baseline_uses_json_default(self) -> None:
-        from app.assistant.skills.defaults_loader import get_system_agent_baseline  # noqa: E402
+        from app.assistant.skill_catalog.defaults_loader import get_system_agent_baseline  # noqa: E402
         from app.assistant_config.models import AssistantAgentProfileVersion  # noqa: E402
 
         svc, profile_id = self._create_system_agent_with_legacy_baseline()

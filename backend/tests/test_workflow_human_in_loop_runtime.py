@@ -48,7 +48,7 @@ class WorkflowHumanInLoopRuntimeTests(unittest.TestCase):
         return row
 
     def test_submit_human_approval_decision_updates_row(self) -> None:
-        from app.assistant.skills.human_loop_runtime import submit_human_approval_decision
+        from app.assistant.workflow.human_approval_runtime import submit_human_approval_decision
 
         row = self._create_pending_approval()
         payload = submit_human_approval_decision(
@@ -67,7 +67,7 @@ class WorkflowHumanInLoopRuntimeTests(unittest.TestCase):
         self.assertEqual(payload['comment'], 'looks good')
 
     def test_reject_requires_comment_when_configured(self) -> None:
-        from app.assistant.skills.human_loop_runtime import submit_human_approval_decision
+        from app.assistant.workflow.human_approval_runtime import submit_human_approval_decision
 
         row = self._create_pending_approval()
 
@@ -86,7 +86,7 @@ class WorkflowHumanInLoopRuntimeTests(unittest.TestCase):
     def test_list_pending_approvals_for_conversation(self) -> None:
         from app.assistant.models import Conversation
         from app.assistant_config.models import AssistantHumanApproval
-        from app.assistant.skills.human_loop_runtime import list_pending_approvals_for_conversation
+        from app.assistant.workflow.human_approval_runtime import list_pending_approvals_for_conversation
 
         conversation = Conversation(title='hitl')
         self.db.add(conversation)
@@ -113,7 +113,7 @@ class WorkflowHumanInLoopRuntimeTests(unittest.TestCase):
         self.assertEqual(pending[0]['status'], 'pending')
 
     def test_submit_select_rejects_unknown_option(self) -> None:
-        from app.assistant.skills.human_loop_runtime import submit_human_approval_decision
+        from app.assistant.workflow.human_approval_runtime import submit_human_approval_decision
 
         row = self._create_pending_approval(
             field_schema=[
@@ -133,7 +133,7 @@ class WorkflowHumanInLoopRuntimeTests(unittest.TestCase):
         self.assertIn('configured options', str(ctx.exception))
 
     def test_submit_tag_selector_allows_custom_when_enabled(self) -> None:
-        from app.assistant.skills.human_loop_runtime import submit_human_approval_decision
+        from app.assistant.workflow.human_approval_runtime import submit_human_approval_decision
 
         row = self._create_pending_approval(
             field_schema=[
@@ -159,7 +159,7 @@ class WorkflowHumanInLoopRuntimeTests(unittest.TestCase):
         self.assertEqual(payload['submittedValues']['tags'], ['work', 'custom-tag'])
 
     def test_submit_date_and_time_format_validation(self) -> None:
-        from app.assistant.skills.human_loop_runtime import submit_human_approval_decision
+        from app.assistant.workflow.human_approval_runtime import submit_human_approval_decision
 
         row = self._create_pending_approval(
             field_schema=[
@@ -198,7 +198,7 @@ class WorkflowHumanInLoopRuntimeTests(unittest.TestCase):
         self.assertIn('HH:mm', str(time_ctx.exception))
 
     def test_submit_optional_date_time_can_be_cleared(self) -> None:
-        from app.assistant.skills.human_loop_runtime import submit_human_approval_decision
+        from app.assistant.workflow.human_approval_runtime import submit_human_approval_decision
 
         row = self._create_pending_approval(
             field_schema=[

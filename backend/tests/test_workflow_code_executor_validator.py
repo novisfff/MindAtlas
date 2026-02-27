@@ -65,7 +65,7 @@ class WorkflowCodeExecutorValidatorTests(unittest.TestCase):
         return nodes, edges
 
     def test_code_executor_python_workflow_is_valid(self) -> None:
-        from app.assistant.skills.workflow_validator import (
+        from app.assistant.workflow.validation.validator import (
             validate_workflow,
             validate_workflow_compile,
         )
@@ -85,7 +85,7 @@ class WorkflowCodeExecutorValidatorTests(unittest.TestCase):
         self.assertTrue(compile_validation.valid, [item.message for item in compile_validation.errors])
 
     def test_code_executor_python_workflow_with_custom_binding_is_valid(self) -> None:
-        from app.assistant.skills.workflow_validator import (
+        from app.assistant.workflow.validation.validator import (
             validate_workflow,
             validate_workflow_compile,
         )
@@ -106,7 +106,7 @@ class WorkflowCodeExecutorValidatorTests(unittest.TestCase):
         self.assertTrue(compile_validation.valid, [item.message for item in compile_validation.errors])
 
     def test_code_executor_rejects_signature_binding_mismatch(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes, edges = self._build_workflow_nodes_edges(
             code=(
@@ -123,7 +123,7 @@ class WorkflowCodeExecutorValidatorTests(unittest.TestCase):
         )
 
     def test_code_executor_rejects_invalid_input_binding_key(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes, edges = self._build_workflow_nodes_edges(
             code="def main(valid_key: str):\n    return {'result': valid_key}\n",
@@ -138,7 +138,7 @@ class WorkflowCodeExecutorValidatorTests(unittest.TestCase):
         )
 
     def test_code_executor_allows_empty_input_bindings_with_main_no_args(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes, edges = self._build_workflow_nodes_edges(
             code="def main():\n    return {'result': 'ok'}\n",
@@ -149,7 +149,7 @@ class WorkflowCodeExecutorValidatorTests(unittest.TestCase):
         self.assertTrue(validation.valid, [item.message for item in validation.errors])
 
     def test_code_executor_rejects_disallowed_python_import(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes, edges = self._build_workflow_nodes_edges(
             code=(
@@ -168,7 +168,7 @@ class WorkflowCodeExecutorValidatorTests(unittest.TestCase):
         )
 
     def test_code_executor_rejects_dynamic_javascript_import(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes, edges = self._build_workflow_nodes_edges(
             code=(
@@ -188,7 +188,7 @@ class WorkflowCodeExecutorValidatorTests(unittest.TestCase):
         )
 
     def test_iteration_body_allows_code_executor_node(self) -> None:
-        from app.assistant.skills.workflow_validator import (
+        from app.assistant.workflow.validation.validator import (
             validate_workflow,
             validate_workflow_compile,
         )

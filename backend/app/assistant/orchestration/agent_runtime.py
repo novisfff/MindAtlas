@@ -10,9 +10,9 @@ from sqlalchemy.orm import Session
 
 from app.ai_registry.runtime import resolve_openai_compat_config_by_model_id
 from app.assistant.openai_compat import build_openai_compat_client_headers
-from app.assistant.skills.base import DEFAULT_SKILL_NAME
-from app.assistant.skills.langgraph_engine import LangGraphEngine
-from app.assistant.skills.router import SkillRouter
+from app.assistant.skill_catalog.base import DEFAULT_SKILL_NAME
+from app.assistant.workflow.engine.engine import LangGraphEngine
+from app.assistant.orchestration.intent_router import SkillRouter
 from app.assistant_config.registry import SkillRegistry
 
 logger = logging.getLogger(__name__)

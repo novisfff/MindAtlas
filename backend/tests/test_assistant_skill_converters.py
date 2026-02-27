@@ -14,7 +14,7 @@ class AssistantSkillConvertersTests(unittest.TestCase):
         reset_caches()
 
     def test_db_skill_to_definition_maps_kb_config(self) -> None:
-        from app.assistant.skills.converters import db_skill_to_definition  # noqa: E402
+        from app.assistant.skill_catalog.converters import db_skill_to_definition  # noqa: E402
 
         skill = type("Skill", (), {})()
         skill.name = "general_chat"
@@ -33,7 +33,7 @@ class AssistantSkillConvertersTests(unittest.TestCase):
         self.assertTrue(definition.kb.enabled)
 
     def test_db_skill_to_definition_light_maps_kb_config(self) -> None:
-        from app.assistant.skills.converters import db_skill_to_definition_light  # noqa: E402
+        from app.assistant.skill_catalog.converters import db_skill_to_definition_light  # noqa: E402
 
         skill = type("Skill", (), {})()
         skill.name = "general_chat"
@@ -50,7 +50,7 @@ class AssistantSkillConvertersTests(unittest.TestCase):
         self.assertTrue(definition.kb.enabled)
 
     def test_db_skill_to_definition_ignores_invalid_kb_config(self) -> None:
-        from app.assistant.skills.converters import db_skill_to_definition  # noqa: E402
+        from app.assistant.skill_catalog.converters import db_skill_to_definition  # noqa: E402
 
         skill = type("Skill", (), {})()
         skill.name = "general_chat"
@@ -68,7 +68,7 @@ class AssistantSkillConvertersTests(unittest.TestCase):
         self.assertIsNone(definition.kb)
 
     def test_db_skill_to_definition_rejects_legacy_mode(self) -> None:
-        from app.assistant.skills.converters import db_skill_to_definition  # noqa: E402
+        from app.assistant.skill_catalog.converters import db_skill_to_definition  # noqa: E402
 
         skill = type("Skill", (), {})()
         skill.name = "legacy"

@@ -62,7 +62,7 @@ class WorkflowEnvVarsValidatorTests(unittest.TestCase):
         return nodes, edges
 
     def test_validate_workflow_accepts_env_and_variable_assign(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow, validate_workflow_compile
+        from app.assistant.workflow.validation.validator import validate_workflow, validate_workflow_compile
 
         nodes, edges = self._base_nodes_edges(output_template='{{env.counter}}')
 
@@ -73,7 +73,7 @@ class WorkflowEnvVarsValidatorTests(unittest.TestCase):
         self.assertTrue(compile_validation.valid, [item.message for item in compile_validation.errors])
 
     def test_validate_workflow_rejects_unknown_env_reference(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes, edges = self._base_nodes_edges(output_template='{{env.missing_var}}')
 
@@ -85,7 +85,7 @@ class WorkflowEnvVarsValidatorTests(unittest.TestCase):
         )
 
     def test_validate_workflow_rejects_variable_assign_unknown_variable(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes, edges = self._base_nodes_edges(variable_assign_config={
             'variableName': 'not_defined',
@@ -101,7 +101,7 @@ class WorkflowEnvVarsValidatorTests(unittest.TestCase):
         )
 
     def test_validate_workflow_rejects_append_on_non_appendable_type(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes, edges = self._base_nodes_edges(
             start_session_vars=[{'name': 'counter', 'type': 'integer', 'defaultValue': 0}],
@@ -120,7 +120,7 @@ class WorkflowEnvVarsValidatorTests(unittest.TestCase):
         )
 
     def test_validate_workflow_accepts_clear_without_value_template(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow
+        from app.assistant.workflow.validation.validator import validate_workflow
 
         nodes, edges = self._base_nodes_edges(
             variable_assign_config={
@@ -133,7 +133,7 @@ class WorkflowEnvVarsValidatorTests(unittest.TestCase):
         self.assertTrue(validation.valid, [item.message for item in validation.errors])
 
     def test_iteration_body_supports_variable_assign(self) -> None:
-        from app.assistant.skills.workflow_validator import validate_workflow, validate_workflow_compile
+        from app.assistant.workflow.validation.validator import validate_workflow, validate_workflow_compile
 
         nodes = [
             {
