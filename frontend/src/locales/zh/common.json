@@ -587,6 +587,15 @@
         "fieldsEmpty": "请至少添加一个确认字段。",
         "fieldName": "字段标识",
         "fieldLabel": "显示名称",
+        "type": "字段类型",
+        "widget": "控件类型",
+        "types": {
+          "string": "文本",
+          "number": "数字",
+          "integer": "整数",
+          "boolean": "布尔",
+          "array": "数组"
+        },
         "fieldPlaceholder": "占位提示（可选）",
         "fieldRequired": "必填",
         "widgets": {

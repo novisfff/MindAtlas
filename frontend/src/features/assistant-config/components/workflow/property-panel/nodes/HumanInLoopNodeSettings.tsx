@@ -65,6 +65,14 @@ const WIDGET_LABEL_KEYS: Record<HumanFieldWidget, string> = {
   time: 'settings.skills.humanInLoop.widgets.time',
 }
 
+const TYPE_LABEL_KEYS: Record<HumanFieldType, string> = {
+  string: 'settings.skills.humanInLoop.types.string',
+  number: 'settings.skills.humanInLoop.types.number',
+  integer: 'settings.skills.humanInLoop.types.integer',
+  boolean: 'settings.skills.humanInLoop.types.boolean',
+  array: 'settings.skills.humanInLoop.types.array',
+}
+
 function defaultWidgetForType(type: HumanFieldType): HumanFieldWidget {
   if (type === 'boolean') return 'switch'
   if (type === 'array') return 'tag_selector'
@@ -427,21 +435,21 @@ export function HumanInLoopNodeSettings({ config, onUpdate, mentionParams }: Nod
                           />
                         </div>
                         <div className="space-y-1.5">
-                          <label className="text-[11px] font-medium text-slate-500">{t('settings.skills.humanInLoop.type') || 'Type'}</label>
+                          <label className="text-[11px] font-medium text-slate-500">{t('settings.skills.humanInLoop.type')}</label>
                           <select
                             value={field.type}
                             onChange={(e) => handleFieldUpdate(index, { type: e.target.value as HumanFieldType })}
                             className="w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-xs outline-none transition-all hover:border-slate-300 focus:border-primary/50 focus:ring-1 focus:ring-primary/20"
                           >
-                            <option value="string">string</option>
-                            <option value="number">number</option>
-                            <option value="integer">integer</option>
-                            <option value="boolean">boolean</option>
-                            <option value="array">array</option>
+                            <option value="string">{t(TYPE_LABEL_KEYS.string)}</option>
+                            <option value="number">{t(TYPE_LABEL_KEYS.number)}</option>
+                            <option value="integer">{t(TYPE_LABEL_KEYS.integer)}</option>
+                            <option value="boolean">{t(TYPE_LABEL_KEYS.boolean)}</option>
+                            <option value="array">{t(TYPE_LABEL_KEYS.array)}</option>
                           </select>
                         </div>
                         <div className="space-y-1.5">
-                          <label className="text-[11px] font-medium text-slate-500">{t('settings.skills.humanInLoop.widget') || 'Widget'}</label>
+                          <label className="text-[11px] font-medium text-slate-500">{t('settings.skills.humanInLoop.widget')}</label>
                           <select
                             value={field.widget}
                             onChange={(e) => handleFieldUpdate(index, { widget: e.target.value as HumanFieldWidget })}

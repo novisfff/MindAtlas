@@ -589,6 +589,15 @@
         "fieldsEmpty": "Add at least one approval field.",
         "fieldName": "Field Name",
         "fieldLabel": "Field Label",
+        "type": "Field Type",
+        "widget": "Widget",
+        "types": {
+          "string": "String",
+          "number": "Number",
+          "integer": "Integer",
+          "boolean": "Boolean",
+          "array": "Array"
+        },
         "fieldPlaceholder": "Placeholder (optional)",
         "fieldRequired": "Required",
         "widgets": {
