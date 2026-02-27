@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { NodeType } from '../../../api/workflow'
-import { Brain, GitBranch, ScanSearch, BookOpen, Wrench, Play, RefreshCw, Infinity, SendHorizontal, FileCode2, Equal } from 'lucide-react'
+import { Brain, GitBranch, ScanSearch, BookOpen, Wrench, Play, RefreshCw, Infinity, SendHorizontal, FileCode2, Equal, UserCheck } from 'lucide-react'
 
 interface NodeHeaderProps {
     nodeType: NodeType
@@ -21,6 +21,7 @@ const NODE_ICONS: Record<string, React.ElementType> = {
     loop: Infinity,
     code_executor: FileCode2,
     variable_assign: Equal,
+    human_in_loop: UserCheck,
     output: SendHorizontal,
 }
 
@@ -35,6 +36,7 @@ const NODE_COLORS: Record<string, string> = {
     loop: 'bg-gradient-to-r from-indigo-100/90 to-blue-100/90 border-indigo-200 text-indigo-700',
     code_executor: 'bg-gradient-to-r from-orange-100/90 to-amber-100/90 border-orange-200 text-orange-700',
     variable_assign: 'bg-gradient-to-r from-lime-100/90 to-emerald-100/90 border-lime-200 text-lime-700',
+    human_in_loop: 'bg-gradient-to-r from-blue-100/90 to-cyan-100/90 border-blue-200 text-blue-700',
     output: 'bg-gradient-to-r from-rose-100/90 to-orange-100/90 border-rose-200 text-rose-700',
 }
 

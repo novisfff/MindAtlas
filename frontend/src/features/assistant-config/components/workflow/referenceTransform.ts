@@ -119,6 +119,34 @@ function transformConfig(
     }
   }
 
+  if (Array.isArray(next.fields)) {
+    next.fields = next.fields.map((field) => {
+      if (!field || typeof field !== 'object' || Array.isArray(field)) return field
+      const fieldRecord = { ...(field as Record<string, unknown>) }
+      const templateValue = fieldRecord.valueTemplate ?? fieldRecord.value_template
+      if (typeof templateValue === 'string') {
+        const rewritten = rewriteTemplateRefs(templateValue, resolver)
+        if ('valueTemplate' in fieldRecord || !('value_template' in fieldRecord)) {
+          fieldRecord.valueTemplate = rewritten
+        }
+        if ('value_template' in fieldRecord) {
+          fieldRecord.value_template = rewritten
+        }
+      }
+      const optionsTemplate = fieldRecord.optionsTemplate ?? fieldRecord.options_template
+      if (typeof optionsTemplate === 'string') {
+        const rewritten = rewriteTemplateRefs(optionsTemplate, resolver)
+        if ('optionsTemplate' in fieldRecord || !('options_template' in fieldRecord)) {
+          fieldRecord.optionsTemplate = rewritten
+        }
+        if ('options_template' in fieldRecord) {
+          fieldRecord.options_template = rewritten
+        }
+      }
+      return fieldRecord
+    })
+  }
+
   const rewriteBranchCondition = (condition: unknown): unknown => {
     if (!condition || typeof condition !== 'object' || Array.isArray(condition)) return condition
     const conditionRecord = { ...(condition as Record<string, unknown>) }

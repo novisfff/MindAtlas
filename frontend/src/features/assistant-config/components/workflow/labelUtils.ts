@@ -14,6 +14,7 @@ const DEFAULT_LABEL_BY_TYPE: Record<NodeType, string> = {
   loop: 'Loop',
   code_executor: 'Code Executor',
   variable_assign: 'Variable Assign',
+  human_in_loop: 'Human In Loop',
   output: 'Output',
 }
 
@@ -28,6 +29,7 @@ const NODE_TYPE_LABEL_KEY: Record<NodeType, string> = {
   loop: 'settings.skills.nodeTypes.loop',
   code_executor: 'settings.skills.nodeTypes.code_executor',
   variable_assign: 'settings.skills.nodeTypes.variable_assign',
+  human_in_loop: 'settings.skills.nodeTypes.human_in_loop',
   output: 'settings.skills.nodeTypes.output',
 }
 

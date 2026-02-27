@@ -499,6 +499,22 @@ class WorkflowTestRunService:
                     ts=_utc_iso_now(),
                 )
 
+            def on_human_approval_requested(payload: dict[str, Any]) -> None:
+                _queue_key_event(
+                    "human_approval_requested",
+                    runId=run_id,
+                    approval=payload,
+                    ts=_utc_iso_now(),
+                )
+
+            def on_human_approval_resolved(payload: dict[str, Any]) -> None:
+                _queue_key_event(
+                    "human_approval_resolved",
+                    runId=run_id,
+                    approval=payload,
+                    ts=_utc_iso_now(),
+                )
+
             for delta in engine.execute(
                 skill=prepared.skill_definition,
                 user_input=prepared.user_input or "",
@@ -507,6 +523,10 @@ class WorkflowTestRunService:
                     "stream_output": prepared.stream_output,
                     "conversation_id": f"workflow_test:{run_id}",
                     "structured_input": prepared.structured_input,
+                    "run_id": run_id,
+                    "channel_type": "workflow_test",
+                    "workflow_id": str(prepared.workflow_id),
+                    "skill_id": str(prepared.skill_id) if prepared.skill_id else None,
                 },
                 on_tool_call_start=on_tool_call_start,
                 on_tool_call_end=on_tool_call_end,
@@ -515,6 +535,8 @@ class WorkflowTestRunService:
                 on_node_end=on_node_end,
                 on_branch_decision=on_branch_decision,
                 on_node_snapshot=on_node_snapshot,
+                on_human_approval_requested=on_human_approval_requested,
+                on_human_approval_resolved=on_human_approval_resolved,
             ):
                 yield from flush()
                 if not delta:

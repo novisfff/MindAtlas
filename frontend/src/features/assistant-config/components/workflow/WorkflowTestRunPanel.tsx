@@ -19,9 +19,10 @@ import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
 import { Switch } from '@/components/ui/switch'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { HumanApprovalCard } from '@/features/shared/hitl'
 import { useWorkflowEditorStore } from '../../stores/workflow-editor-store'
 import { useWorkflowTestRunStore } from '../../stores/workflow-test-run-store'
-import { runWorkflowTestStreamById, validateWorkflowById } from '../../api/workflows'
+import { runWorkflowTestStreamById, submitWorkflowRunApprovalDecision, validateWorkflowById } from '../../api/workflows'
 import type { WorkflowRunEvent } from '../../api/workflow'
 import { serializeToWorkflowInput } from './serialization'
 import { isValidStartStructuredFieldName, normalizeStartNodeConfig } from './startNodeConfig'
@@ -79,6 +80,10 @@ function formatEventTitle(event: WorkflowRunEvent): string {
       return '[output] content delta(merged)'
     case 'node_snapshot':
       return `[node] snapshot ${event.data.nodeId} (${event.data.status})`
+    case 'human_approval_requested':
+      return `[hitl] requested ${event.data.approval.nodeId}`
+    case 'human_approval_resolved':
+      return `[hitl] resolved ${event.data.approval.nodeId} (${event.data.approval.status})`
   }
   return 'unknown-event'
 }
@@ -138,6 +143,7 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
   const [expandedNodeIo, setExpandedNodeIo] = useState<Record<string, boolean>>({})
   const [expandedNodeIoFull, setExpandedNodeIoFull] = useState<Record<string, boolean>>({})
   const [resetDialogOpen, setResetDialogOpen] = useState(false)
+  const [submittingApprovalId, setSubmittingApprovalId] = useState<string | null>(null)
   const wfStore = useWorkflowEditorStore()
   const {
     panelOpen,
@@ -148,9 +154,11 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
     result,
     deltaSummary,
     traceEvents,
+    pendingApprovals,
     nodeSnapshots,
     nodeTraceMap,
     sessionRuns,
+    activeRunId,
     setPanelOpen,
     setInput,
     setStructuredInputField,
@@ -186,6 +194,34 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
       || Boolean(result.errorMessage),
     [result.durationMs, result.errorMessage, result.finalJson, result.finalText, sessionRuns.length, status],
   )
+
+  const handleSubmitApprovalDecision = async (
+    approvalId: string,
+    payload: { decision: 'approved' | 'rejected'; values: Record<string, unknown>; comment?: string },
+  ) => {
+    if (!activeRunId) {
+      toast.error(t('settings.skills.humanApproval.noActiveRun'))
+      return
+    }
+    setSubmittingApprovalId(approvalId)
+    try {
+      const approval = await submitWorkflowRunApprovalDecision(activeRunId, approvalId, payload)
+      ingestEvent({
+        event: 'human_approval_resolved',
+        data: {
+          runId: activeRunId,
+          approval,
+          ts: new Date().toISOString(),
+        },
+      })
+      toast.success(t('settings.skills.humanApproval.submitted'))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t('settings.skills.humanApproval.submitFailed')
+      toast.error(message)
+    } finally {
+      setSubmittingApprovalId(null)
+    }
+  }
 
   const selectNodeFromTrace = (nodeId: string) => {
     const scoped = splitScopedNodeId(nodeId)
@@ -530,6 +566,24 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
 
           {activeTab === 'trace' && (
             <div className="space-y-4">
+              {pendingApprovals.length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-xs font-semibold text-foreground">
+                    {t('settings.skills.humanApproval.pendingTitle')}
+                  </div>
+                  <div className="space-y-2">
+                    {pendingApprovals.map((approval) => (
+                      <HumanApprovalCard
+                        key={approval.id}
+                        approval={approval}
+                        submitting={submittingApprovalId === approval.id}
+                        onSubmit={(payload) => handleSubmitApprovalDecision(approval.id, payload)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Node Execution Status */}
               <div className="space-y-2">
                 {traceNodes.length === 0 && (

@@ -252,6 +252,19 @@ def _iter_config_template_texts(cfg: dict) -> list[str]:
                 if isinstance(value, str):
                     texts.append(value)
 
+    for key in ("fields",):
+        items = cfg.get(key)
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                value = item.get("value_template", item.get("valueTemplate"))
+                if isinstance(value, str):
+                    texts.append(value)
+                options_template = item.get("options_template", item.get("optionsTemplate"))
+                if isinstance(options_template, str):
+                    texts.append(options_template)
+
     for key in ("conditions", "terminationConditions"):
         conds = cfg.get(key)
         if isinstance(conds, list):
@@ -304,6 +317,18 @@ _OUTPUT_FIELD_TYPES = {"string", "number", "integer", "boolean", "object", "arra
 _CODE_EXECUTOR_LANGUAGES = {"python", "javascript"}
 _CODE_EXECUTOR_ENTRYPOINT_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 _CODE_EXECUTOR_INPUT_KEY_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
+_HUMAN_FIELD_TYPES = {"string", "number", "integer", "boolean", "array"}
+_HUMAN_FIELD_WIDGETS = {"input", "textarea", "switch", "select", "radio", "tag_selector", "date", "time"}
+_HUMAN_FIELD_WIDGET_ALLOWED_TYPES: dict[str, set[str]] = {
+    "input": {"string", "number", "integer"},
+    "textarea": {"string"},
+    "switch": {"boolean"},
+    "select": {"string", "number", "integer"},
+    "radio": {"string", "number", "integer"},
+    "tag_selector": {"array"},
+    "date": {"string"},
+    "time": {"string"},
+}
 _ENV_VAR_PATH_RE = re.compile(r"env\\.([a-zA-Z_][a-zA-Z0-9_]*)$")
 _SUPPORTED_NODE_TYPES = {
     "start",
@@ -316,6 +341,7 @@ _SUPPORTED_NODE_TYPES = {
     "loop",
     "code_executor",
     "variable_assign",
+    "human_in_loop",
     "output",
 }
 _CONTAINER_BODY_ALLOWED_NODE_TYPES = {
@@ -327,6 +353,7 @@ _CONTAINER_BODY_ALLOWED_NODE_TYPES = {
     "knowledge_retrieval",
     "code_executor",
     "variable_assign",
+    "human_in_loop",
 }
 _REMOVED_NODE_TYPE_MESSAGES = {
     "answer": "Node type 'answer' is no longer supported. Use the output node instead.",
@@ -878,6 +905,264 @@ def _validate_variable_assign_node_config(
         )
 
 
+def _validate_human_in_loop_node_config(
+    *,
+    node_id: str,
+    cfg: dict,
+    errors: list[ValidationError],
+    subject: str,
+) -> None:
+    instruction = _cfg_get(cfg, "instruction", default=None)
+    if not isinstance(instruction, str) or not instruction.strip():
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=f"{subject} instruction is required",
+            )
+        )
+
+    title = _cfg_get(cfg, "title", default=None)
+    if title is not None and not isinstance(title, str):
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=f"{subject} title must be a string",
+            )
+        )
+
+    approve_label = _cfg_get(cfg, "approve_label", "approveLabel", default=None)
+    if approve_label is not None and not isinstance(approve_label, str):
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=f"{subject} approveLabel must be a string",
+            )
+        )
+
+    reject_label = _cfg_get(cfg, "reject_label", "rejectLabel", default=None)
+    if reject_label is not None and not isinstance(reject_label, str):
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=f"{subject} rejectLabel must be a string",
+            )
+        )
+
+    require_reject_comment = _cfg_get(cfg, "require_reject_comment", "requireRejectComment", default=True)
+    if not isinstance(require_reject_comment, bool):
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=f"{subject} requireRejectComment must be boolean",
+            )
+        )
+
+    fields_raw = _cfg_get(cfg, "fields", default=None)
+    if not isinstance(fields_raw, list) or not fields_raw:
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=f"{subject} fields must be a non-empty list",
+            )
+        )
+        return
+
+    seen_names: set[str] = set()
+    for idx, item in enumerate(fields_raw, start=1):
+        if not isinstance(item, dict):
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} field #{idx} must be an object",
+                )
+            )
+            continue
+        field_name = str(item.get("name", "") or "").strip()
+        if not field_name:
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} field #{idx} requires name",
+                )
+            )
+            continue
+        if not _START_INPUT_FIELD_NAME_RE.fullmatch(field_name):
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} field name is invalid: {field_name}",
+                )
+            )
+            continue
+        if field_name in seen_names:
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} field name duplicated: {field_name}",
+                )
+            )
+            continue
+        seen_names.add(field_name)
+
+        field_type_raw = item.get("type", "string")
+        field_type = str(field_type_raw or "string").strip().lower() or "string"
+        if field_type not in _HUMAN_FIELD_TYPES:
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} field '{field_name}' has invalid type: {field_type_raw}",
+                )
+            )
+            field_type = "string"
+
+        raw_widget = item.get("widget", None)
+        if raw_widget is None:
+            widget = "switch" if field_type == "boolean" else "input"
+        else:
+            widget = str(raw_widget or "").strip().lower()
+            if not widget:
+                widget = "switch" if field_type == "boolean" else "input"
+        if widget not in _HUMAN_FIELD_WIDGETS:
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} field '{field_name}' has invalid widget: {raw_widget}",
+                )
+            )
+        else:
+            allowed_types = _HUMAN_FIELD_WIDGET_ALLOWED_TYPES.get(widget, set())
+            if field_type not in allowed_types:
+                errors.append(
+                    ValidationError(
+                        node_id=node_id,
+                        message=(
+                            f"{subject} field '{field_name}' widget '{widget}' is incompatible "
+                            f"with type '{field_type}'"
+                        ),
+                    )
+                )
+
+        required = item.get("required", False)
+        if not isinstance(required, bool):
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} field '{field_name}' required must be boolean",
+                )
+            )
+
+        label = item.get("label")
+        if label is not None and not isinstance(label, str):
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} field '{field_name}' label must be a string",
+                )
+            )
+
+        placeholder = item.get("placeholder")
+        if placeholder is not None and not isinstance(placeholder, str):
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} field '{field_name}' placeholder must be a string",
+                )
+            )
+
+        options = item.get("options")
+        options_template = item.get("options_template", item.get("optionsTemplate"))
+        has_options_template = isinstance(options_template, str) and bool(options_template.strip())
+        if options_template is not None and not isinstance(options_template, str):
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} field '{field_name}' optionsTemplate must be a string",
+                )
+            )
+
+        raw_option_value_key = item.get("option_value_key", item.get("optionValueKey", None))
+        option_value_key = ""
+        if raw_option_value_key is not None and not isinstance(raw_option_value_key, str):
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} field '{field_name}' optionValueKey must be a string",
+                )
+            )
+        elif isinstance(raw_option_value_key, str):
+            option_value_key = raw_option_value_key.strip()
+
+        if option_value_key and widget not in {"select", "radio", "tag_selector"}:
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} field '{field_name}' optionValueKey is only supported for select/radio/tag_selector",
+                )
+            )
+
+        if options is not None:
+            if not isinstance(options, list):
+                errors.append(
+                    ValidationError(
+                        node_id=node_id,
+                        message=f"{subject} field '{field_name}' options must be a string list",
+                    )
+                )
+            else:
+                normalized_options = [
+                    str(opt).strip()
+                    for opt in options
+                    if isinstance(opt, str) and str(opt).strip()
+                ]
+                if len(normalized_options) != len(options):
+                    errors.append(
+                        ValidationError(
+                            node_id=node_id,
+                            message=f"{subject} field '{field_name}' options must be non-empty strings",
+                        )
+                    )
+                deduped_options = list(dict.fromkeys(normalized_options))
+                if widget in {"select", "radio"} and not deduped_options:
+                    errors.append(
+                        ValidationError(
+                            node_id=node_id,
+                            message=f"{subject} field '{field_name}' options must be non-empty for {widget}",
+                        )
+                    )
+        elif widget in {"select", "radio"} and not has_options_template:
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} field '{field_name}' options or optionsTemplate are required for {widget}",
+                )
+            )
+
+        allow_custom = item.get("allow_custom", item.get("allowCustom", None))
+        if allow_custom is not None and not isinstance(allow_custom, bool):
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} field '{field_name}' allowCustom must be boolean",
+                )
+            )
+        if widget != "tag_selector" and allow_custom is True:
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} field '{field_name}' allowCustom is only supported for tag_selector",
+                )
+            )
+
+        value_template = item.get("value_template", item.get("valueTemplate", ""))
+        if value_template is not None and not isinstance(value_template, str):
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} field '{field_name}' valueTemplate must be a string",
+                )
+            )
+
+
 def _normalize_if_else_operator(raw: object) -> str:
     op = str(raw or "is").strip().lower()
     if not op:
@@ -1360,6 +1645,36 @@ def validate_workflow(
                         message=f"if_else has unknown outgoing handle: {handle}",
                     ))
 
+        if type_map.get(nid) == "human_in_loop":
+            _validate_human_in_loop_node_config(
+                node_id=nid,
+                cfg=cfg,
+                errors=errors,
+                subject="human_in_loop",
+            )
+            normalized_out_handles = [
+                str(handle or "").strip().lower()
+                for handle in out_handles.get(nid, [])
+            ]
+            expected_handles = {"approved", "rejected"}
+            for handle in expected_handles:
+                count = normalized_out_handles.count(handle)
+                if count != 1:
+                    errors.append(
+                        ValidationError(
+                            node_id=nid,
+                            message=f"human_in_loop handle '{handle}' must map to exactly one outgoing edge",
+                        )
+                    )
+            for handle in normalized_out_handles:
+                if handle not in expected_handles:
+                    errors.append(
+                        ValidationError(
+                            node_id=nid,
+                            message=f"human_in_loop has unknown outgoing handle: {handle}",
+                        )
+                    )
+
         # Rule 13: output node config validation (save-time)
         if type_map.get(nid) == "output":
             output_mode_raw = _cfg_get(cfg, "output_mode", "outputMode", default="text")
@@ -1651,6 +1966,15 @@ def validate_workflow(
                 nid, "iteration", body_nodes, body_edges, errors
             )
             body_topo_index = {node_id: index for index, node_id in enumerate(body_topo)}
+            body_out_handles: dict[str, list[str]] = defaultdict(list)
+            for raw_edge in body_edges:
+                if not isinstance(raw_edge, dict):
+                    continue
+                source = str(raw_edge.get("source_node_id", raw_edge.get("sourceNodeId", "")) or "").strip()
+                if source not in body_node_map:
+                    continue
+                handle = str(raw_edge.get("source_handle", raw_edge.get("sourceHandle", "output")) or "output").strip().lower()
+                body_out_handles[source].append(handle)
             for body_node_id, raw_body_node in body_node_map.items():
                 body_type = str(
                     raw_body_node.get("node_type", raw_body_node.get("nodeType", "")) or ""
@@ -1674,6 +1998,38 @@ def validate_workflow(
                         errors=errors,
                         subject=f"iteration body node '{body_node_id}' variable_assign",
                     )
+                if body_type == "human_in_loop":
+                    _validate_human_in_loop_node_config(
+                        node_id=nid,
+                        cfg=body_cfg,
+                        errors=errors,
+                        subject=f"iteration body node '{body_node_id}' human_in_loop",
+                    )
+                    normalized_body_handles = body_out_handles.get(body_node_id, [])
+                    expected_handles = {"approved", "rejected"}
+                    for handle in expected_handles:
+                        count = normalized_body_handles.count(handle)
+                        if count != 1:
+                            errors.append(
+                                ValidationError(
+                                    node_id=nid,
+                                    message=(
+                                        f"iteration body node '{body_node_id}' "
+                                        f"handle '{handle}' must map to exactly one outgoing edge"
+                                    ),
+                                )
+                            )
+                    for handle in normalized_body_handles:
+                        if handle not in expected_handles:
+                            errors.append(
+                                ValidationError(
+                                    node_id=nid,
+                                    message=(
+                                        f"iteration body node '{body_node_id}' has unknown "
+                                        f"outgoing handle: {handle}"
+                                    ),
+                                )
+                            )
                 for text in _iter_config_template_texts(body_cfg):
                     for m in _VAR_RE.finditer(text):
                         ref_node = m.group(1)
@@ -1880,6 +2236,15 @@ def validate_workflow(
                 nid, "loop", body_nodes, body_edges, errors
             )
             body_topo_index = {node_id: index for index, node_id in enumerate(body_topo)}
+            body_out_handles: dict[str, list[str]] = defaultdict(list)
+            for raw_edge in body_edges:
+                if not isinstance(raw_edge, dict):
+                    continue
+                source = str(raw_edge.get("source_node_id", raw_edge.get("sourceNodeId", "")) or "").strip()
+                if source not in body_node_map:
+                    continue
+                handle = str(raw_edge.get("source_handle", raw_edge.get("sourceHandle", "output")) or "output").strip().lower()
+                body_out_handles[source].append(handle)
             for body_node_id, raw_body_node in body_node_map.items():
                 body_type = str(
                     raw_body_node.get("node_type", raw_body_node.get("nodeType", "")) or ""
@@ -1903,6 +2268,37 @@ def validate_workflow(
                         errors=errors,
                         subject=f"loop body node '{body_node_id}' variable_assign",
                     )
+                if body_type == "human_in_loop":
+                    _validate_human_in_loop_node_config(
+                        node_id=nid,
+                        cfg=body_cfg,
+                        errors=errors,
+                        subject=f"loop body node '{body_node_id}' human_in_loop",
+                    )
+                    normalized_body_handles = body_out_handles.get(body_node_id, [])
+                    expected_handles = {"approved", "rejected"}
+                    for handle in expected_handles:
+                        count = normalized_body_handles.count(handle)
+                        if count != 1:
+                            errors.append(
+                                ValidationError(
+                                    node_id=nid,
+                                    message=(
+                                        f"loop body node '{body_node_id}' handle '{handle}' "
+                                        "must map to exactly one outgoing edge"
+                                    ),
+                                )
+                            )
+                    for handle in normalized_body_handles:
+                        if handle not in expected_handles:
+                            errors.append(
+                                ValidationError(
+                                    node_id=nid,
+                                    message=(
+                                        f"loop body node '{body_node_id}' has unknown outgoing handle: {handle}"
+                                    ),
+                                )
+                            )
                 for text in _iter_config_template_texts(body_cfg):
                     for m in _VAR_RE.finditer(text):
                         ref_node = m.group(1)
@@ -2152,6 +2548,13 @@ def validate_workflow_compile(
                 errors=errors,
                 subject="variable_assign",
             )
+        if ntype == "human_in_loop":
+            _validate_human_in_loop_node_config(
+                node_id=nid,
+                cfg=cfg,
+                errors=errors,
+                subject="human_in_loop",
+            )
 
         # iteration/loop body nodes: compile-time checks
         if ntype in {"iteration", "loop"}:
@@ -2274,6 +2677,13 @@ def validate_workflow_compile(
                         env_var_types=start_env_var_types,
                         errors=errors,
                         subject=f"{ntype} body node '{body_node_id}' variable_assign",
+                    )
+                if body_type == "human_in_loop":
+                    _validate_human_in_loop_node_config(
+                        node_id=nid,
+                        cfg=body_cfg,
+                        errors=errors,
+                        subject=f"{ntype} body node '{body_node_id}' human_in_loop",
                     )
 
     return ValidationResult(valid=len(errors) == 0, errors=errors)

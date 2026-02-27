@@ -22,6 +22,7 @@ from app.ai_registry.runtime import resolve_openai_compat_config_by_model_id
 from app.assistant.openai_compat import build_openai_compat_client_headers
 from app.assistant.skills.base import SkillDefinition
 from app.assistant.skills.code_executor import CodeExecutionError, execute_code
+from app.assistant.skills.human_loop_runtime import HumanLoopContext, HumanLoopRuntime
 from app.assistant.skills.workflow_env_vars import (
     WorkflowEnvVarSpec,
     apply_env_var_operation,
@@ -36,6 +37,19 @@ logger = logging.getLogger(__name__)
 _TEMPLATE_VAR_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
 _OUTPUT_SINGLE_VAR_RE = re.compile(r"^\s*\{\{\s*([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\s*\}\}\s*$")
 _START_STRUCTURED_FIELD_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+_HUMAN_FIELD_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_HUMAN_FIELD_TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+_HUMAN_FIELD_TYPES = {"string", "number", "integer", "boolean", "array"}
+_HUMAN_FIELD_WIDGET_ALLOWED_TYPES: dict[str, set[str]] = {
+    "input": {"string", "number", "integer"},
+    "textarea": {"string"},
+    "switch": {"boolean"},
+    "select": {"string", "number", "integer"},
+    "radio": {"string", "number", "integer"},
+    "tag_selector": {"array"},
+    "date": {"string"},
+    "time": {"string"},
+}
 _NODE_SNAPSHOT_STRING_LIMIT = 64 * 1024
 _NODE_SNAPSHOT_TEXT_PREVIEW_LIMIT = 4000
 
@@ -881,6 +895,213 @@ def _cfg_list_value(cfg: dict[str, Any], *keys: str) -> list[Any]:
     return []
 
 
+def _normalize_human_in_loop_fields(node_cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_fields = node_cfg.get("fields")
+    if not isinstance(raw_fields, list):
+        return []
+    fields: list[dict[str, Any]] = []
+    for item in raw_fields:
+        if not isinstance(item, dict):
+            continue
+        field_name = str(item.get("name", "") or "").strip()
+        if not field_name:
+            continue
+        field_type = str(item.get("type", "string") or "string").strip().lower() or "string"
+        if field_type not in _HUMAN_FIELD_TYPES:
+            field_type = "string"
+        raw_widget = str(item.get("widget", "") or "").strip().lower()
+        widget = raw_widget or ("switch" if field_type == "boolean" else "input")
+        if field_type not in _HUMAN_FIELD_WIDGET_ALLOWED_TYPES.get(widget, set()):
+            widget = "switch" if field_type == "boolean" else "input"
+        raw_options = item.get("options")
+        options: list[str] = []
+        if isinstance(raw_options, list):
+            for option in raw_options:
+                if not isinstance(option, str):
+                    continue
+                text = option.strip()
+                if text:
+                    options.append(text)
+            options = list(dict.fromkeys(options))
+        if widget in {"select", "radio"} and not options:
+            options = []
+        raw_allow_custom = item.get("allow_custom", item.get("allowCustom", None))
+        allow_custom = bool(raw_allow_custom) if isinstance(raw_allow_custom, bool) else True
+        if widget != "tag_selector":
+            allow_custom = False
+        options_template = str(item.get("options_template", item.get("optionsTemplate", "")) or "")
+        option_value_key = str(item.get("option_value_key", item.get("optionValueKey", "")) or "").strip()
+        fields.append(
+            {
+                "name": field_name,
+                "label": str(item.get("label", "") or ""),
+                "type": field_type,
+                "widget": widget,
+                "options": options,
+                "options_template": options_template,
+                "option_value_key": option_value_key,
+                "allow_custom": allow_custom,
+                "placeholder": str(item.get("placeholder", "") or ""),
+                "required": bool(item.get("required", False)),
+                "value_template": str(item.get("value_template", item.get("valueTemplate", "")) or ""),
+            }
+        )
+    return fields
+
+
+def _parse_human_field_options_from_rendered(
+    *,
+    rendered: str,
+    field_name: str,
+    option_value_key: str = "",
+) -> list[str]:
+    parsed = _parse_loose_json_value(rendered)
+    candidate_items: list[Any]
+    if isinstance(parsed, list):
+        candidate_items = parsed
+    elif isinstance(parsed, dict):
+        nested = None
+        for key in ("result", "items", "data", "list"):
+            value = parsed.get(key)
+            if isinstance(value, list):
+                nested = value
+                break
+        candidate_items = nested if isinstance(nested, list) else []
+    elif isinstance(parsed, str):
+        text = parsed.strip()
+        if not text:
+            candidate_items = []
+        else:
+            candidate_items = [segment.strip() for segment in re.split(r"[,;\n，；]+", text)]
+    else:
+        candidate_items = []
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in candidate_items:
+        value_text = ""
+        if isinstance(item, str):
+            value_text = item.strip()
+        elif isinstance(item, (int, float, bool)):
+            value_text = str(item).strip()
+        elif isinstance(item, dict):
+            if option_value_key:
+                raw = item.get(option_value_key)
+                if raw is not None:
+                    value_text = str(raw).strip()
+            if not value_text:
+                for key in ("value", "code", "name", "label", "id", "type"):
+                    raw = item.get(key)
+                    if raw is None:
+                        continue
+                    candidate = str(raw).strip()
+                    if candidate:
+                        value_text = candidate
+                        break
+        if not value_text or value_text in seen:
+            continue
+        seen.add(value_text)
+        normalized.append(value_text)
+
+    if rendered.strip() and not normalized:
+        logger.warning(
+            "human_in_loop field '%s' failed to parse options from template result",
+            field_name,
+        )
+    return normalized
+
+
+def _coerce_human_field_value(field_name: str, field_type: str, value: Any) -> Any:
+    normalized_type = str(field_type or "string").strip().lower() or "string"
+
+    if normalized_type == "string":
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
+
+    if normalized_type == "number":
+        if isinstance(value, bool):
+            raise RuntimeError(f"human_in_loop field '{field_name}' expects number")
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value or "").strip()
+        if not text:
+            raise RuntimeError(f"human_in_loop field '{field_name}' expects number")
+        return float(text)
+
+    if normalized_type == "integer":
+        if isinstance(value, bool):
+            raise RuntimeError(f"human_in_loop field '{field_name}' expects integer")
+        if isinstance(value, int):
+            return int(value)
+        if isinstance(value, float):
+            if not value.is_integer():
+                raise RuntimeError(f"human_in_loop field '{field_name}' expects integer")
+            return int(value)
+        text = str(value or "").strip()
+        if not text:
+            raise RuntimeError(f"human_in_loop field '{field_name}' expects integer")
+        if text.startswith(("+", "-")):
+            sign = text[0]
+            body = text[1:]
+        else:
+            sign = ""
+            body = text
+        if not body.isdigit():
+            raise RuntimeError(f"human_in_loop field '{field_name}' expects integer")
+        return int(f"{sign}{body}")
+
+    if normalized_type == "boolean":
+        if isinstance(value, bool):
+            return value
+        text = str(value or "").strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off"}:
+            return False
+        raise RuntimeError(f"human_in_loop field '{field_name}' expects boolean")
+
+    if normalized_type == "array":
+        if value is None:
+            return []
+
+        raw_items: list[Any]
+        if isinstance(value, list):
+            raw_items = value
+        elif isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+            parsed: Any = None
+            if text.startswith("[") and text.endswith("]"):
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    parsed = None
+            if isinstance(parsed, list):
+                raw_items = parsed
+            else:
+                raw_items = [segment.strip() for segment in text.split(",")]
+        else:
+            raise RuntimeError(f"human_in_loop field '{field_name}' expects array")
+
+        normalized_items: list[str] = []
+        for item in raw_items:
+            if item is None:
+                continue
+            text = item if isinstance(item, str) else _stringify(item)
+            cleaned = str(text).strip()
+            if cleaned:
+                normalized_items.append(cleaned)
+        return normalized_items
+
+    raise RuntimeError(f"human_in_loop field '{field_name}' has unsupported type: {field_type}")
+
+
 def _build_node_snapshot_input(
     node_type: str,
     node_cfg: dict[str, Any],
@@ -1124,6 +1345,52 @@ def _build_node_snapshot_input(
             )
         return payload
 
+    if node_type == "human_in_loop":
+        fields = _normalize_human_in_loop_fields(node_cfg)
+        resolved_initial_values: dict[str, Any] = {}
+        for field in fields:
+            value_template = str(field.get("value_template", "") or "")
+            rendered = _resolve_node_template_vars(
+                value_template, node_outputs, start_inputs, sys_vars, env_vars=env_vars
+            )
+            parsed = _parse_loose_json_value(rendered)
+            try:
+                resolved_initial_values[str(field.get("name", ""))] = _coerce_human_field_value(
+                    str(field.get("name", "")),
+                    str(field.get("type", "string")),
+                    parsed,
+                )
+            except Exception:
+                resolved_initial_values[str(field.get("name", ""))] = rendered
+        return {
+            "title": str(node_cfg.get("title", "") or ""),
+            "instruction": str(node_cfg.get("instruction", "") or ""),
+            "approveLabel": str(node_cfg.get("approve_label", node_cfg.get("approveLabel", "")) or ""),
+            "rejectLabel": str(node_cfg.get("reject_label", node_cfg.get("rejectLabel", "")) or ""),
+            "requireRejectComment": _cfg_bool_value(
+                node_cfg,
+                "require_reject_comment",
+                "requireRejectComment",
+                default=True,
+            ),
+            "fields": [
+                {
+                    "name": str(field.get("name", "") or ""),
+                    "label": str(field.get("label", "") or ""),
+                    "type": str(field.get("type", "string") or "string"),
+                    "widget": str(field.get("widget", "") or ""),
+                    "options": list(field.get("options", []) or []),
+                    "optionsTemplate": str(field.get("options_template", "") or ""),
+                    "optionValueKey": str(field.get("option_value_key", "") or ""),
+                    "allowCustom": bool(field.get("allow_custom", False)),
+                    "placeholder": str(field.get("placeholder", "") or ""),
+                    "required": bool(field.get("required", False)),
+                }
+                for field in fields
+            ],
+            "initialValues": resolved_initial_values,
+        }
+
     return {
         "config": node_cfg,
     }
@@ -1163,6 +1430,16 @@ def _build_node_snapshot_output(
                 "terminated": raw_payload.get("terminated"),
                 "lastItemPreview": _truncate(_stringify(raw_payload.get("last_item")), _NODE_SNAPSHOT_TEXT_PREVIEW_LIMIT),
                 "vars": raw_payload.get("vars"),
+            }
+
+    if node_type == "human_in_loop":
+        raw_payload = node_out.get("raw")
+        if isinstance(raw_payload, dict):
+            return {
+                "decision": raw_payload.get("decision"),
+                "comment": raw_payload.get("comment"),
+                "values": raw_payload.get("values"),
+                "approvalId": raw_payload.get("approval_id"),
             }
 
     raw_payload = node_out.get("raw")
@@ -1412,6 +1689,26 @@ def _build_container_scoped_metadata(
             )
         scoped["on_node_snapshot"] = _wrapped_node_snapshot
 
+    on_human_approval_requested = raw_metadata.get("on_human_approval_requested")
+    if callable(on_human_approval_requested):
+        def _wrapped_human_approval_requested(*, payload: dict[str, Any], _cb=on_human_approval_requested) -> None:
+            next_payload = dict(payload) if isinstance(payload, dict) else {}
+            node_id = str(next_payload.get("nodeId", "") or "")
+            if node_id:
+                next_payload["nodeId"] = _scoped_node_id(node_id)
+            _cb(payload=next_payload)
+        scoped["on_human_approval_requested"] = _wrapped_human_approval_requested
+
+    on_human_approval_resolved = raw_metadata.get("on_human_approval_resolved")
+    if callable(on_human_approval_resolved):
+        def _wrapped_human_approval_resolved(*, payload: dict[str, Any], _cb=on_human_approval_resolved) -> None:
+            next_payload = dict(payload) if isinstance(payload, dict) else {}
+            node_id = str(next_payload.get("nodeId", "") or "")
+            if node_id:
+                next_payload["nodeId"] = _scoped_node_id(node_id)
+            _cb(payload=next_payload)
+        scoped["on_human_approval_resolved"] = _wrapped_human_approval_resolved
+
     return scoped
 
 
@@ -1494,6 +1791,8 @@ def _execute_container_body(
             continue
         node_type = body_type_map.get(current, "")
         cfg = node_meta.get("config") if isinstance(node_meta.get("config"), dict) else {}
+        cfg = dict(cfg)
+        cfg.setdefault("__node_label", str(node_meta.get("label", "") or current))
         scoped_model_key = f"{container_node_id}::{current}"
         if scoped_model_key in runtime_node_llms:
             runtime_node_llms[current] = runtime_node_llms[scoped_model_key]
@@ -1525,6 +1824,8 @@ def _execute_container_body(
             node_fn = _build_code_executor_node(current, cfg)
         elif node_type == "variable_assign":
             node_fn = _build_variable_assign_node(current, cfg)
+        elif node_type == "human_in_loop":
+            node_fn = _build_human_in_loop_node(current, cfg)
         elif node_type == "start":
             node_fn = _build_container_start_node(container_input, container_ctx)
         else:
@@ -1550,7 +1851,7 @@ def _execute_container_body(
         outgoing = out_edges.get(current, [])
         if not outgoing:
             continue
-        if node_type == "if_else":
+        if node_type in {"if_else", "human_in_loop"}:
             chosen = branch_decisions.get(current)
             for target, handle in outgoing:
                 normalized_handle = "else" if handle == "default" else handle
@@ -2040,15 +2341,45 @@ def _build_dag_tool_node(
             raise RuntimeError(
                 f"DAG tool node {node_id} requires inputBindings object; legacy argsFrom/argsTemplate are no longer supported"
             )
+
+        def _resolve_binding_value(raw_template: str) -> Any:
+            single_ref = _extract_single_template_reference(raw_template)
+            if single_ref is None:
+                return _resolve_node_template_vars(
+                    raw_template, node_outputs, start_inputs, sys_vars, env_vars=env_vars
+                )
+
+            ref_node_id, ref_field = single_ref
+            if ref_node_id == "start":
+                return start_inputs.get(ref_field, "")
+            if ref_node_id == "sys":
+                return sys_vars.get(ref_field, "")
+            if ref_node_id == "env":
+                return env_vars.get(ref_field, "")
+            if ref_node_id == "container":
+                container_out = node_outputs.get("container", {}) if isinstance(node_outputs.get("container", {}), dict) else {}
+                container_json = container_out.get("json_fields", {}) if isinstance(container_out.get("json_fields"), dict) else {}
+                return container_json.get(ref_field, container_out.get("text", ""))
+
+            out = node_outputs.get(ref_node_id)
+            if not isinstance(out, dict):
+                return ""
+            if ref_field == "text":
+                return out.get("text", "")
+            if ref_field == "raw":
+                return out.get("raw")
+            json_fields = out.get("json_fields", {})
+            if isinstance(json_fields, dict) and ref_field in json_fields:
+                return json_fields.get(ref_field)
+            return out.get("text", "")
+
         args: dict[str, Any] = {}
         for k, raw_tpl in input_bindings.items():
             key = str(k).strip() if isinstance(k, str) else ""
             if not key:
                 continue
             if isinstance(raw_tpl, str):
-                args[key] = _resolve_node_template_vars(
-                    raw_tpl, node_outputs, start_inputs, sys_vars, env_vars=env_vars
-                )
+                args[key] = _resolve_binding_value(raw_tpl)
             elif raw_tpl is None:
                 args[key] = ""
             else:
@@ -2286,6 +2617,160 @@ def _build_variable_assign_node(
         }
 
     return variable_assign_node
+
+
+def _build_human_in_loop_node(
+    node_id: str,
+    node_cfg: dict[str, Any],
+) -> Callable[[WorkflowState], dict]:
+    def human_in_loop_node(state: WorkflowState) -> dict:
+        metadata = state.get("metadata", {})
+        runtime = metadata.get("human_loop_runtime")
+        if not isinstance(runtime, HumanLoopRuntime):
+            raise RuntimeError(
+                f"DAG human_in_loop node {node_id}: human loop runtime is unavailable"
+            )
+
+        node_outputs = dict(state.get("node_outputs", {}))
+        start_inputs = _get_start_inputs(node_outputs)
+        sys_vars = state.get("sys_vars", {}) or {}
+        env_vars = state.get("env_vars", {}) or {}
+
+        instruction = str(node_cfg.get("instruction", "") or "").strip()
+        if not instruction:
+            raise RuntimeError(f"DAG human_in_loop node {node_id}: instruction is required")
+
+        fields = _normalize_human_in_loop_fields(node_cfg)
+        if not fields:
+            raise RuntimeError(f"DAG human_in_loop node {node_id}: fields are required")
+
+        initial_values: dict[str, Any] = {}
+        field_schema: list[dict[str, Any]] = []
+        for field in fields:
+            field_name = str(field.get("name", "") or "").strip()
+            if not field_name:
+                continue
+            field_type = str(field.get("type", "string") or "string").strip().lower() or "string"
+            field_widget = str(field.get("widget", "") or "").strip().lower() or ("switch" if field_type == "boolean" else "input")
+            value_template = str(field.get("value_template", "") or "")
+            rendered = _resolve_node_template_vars(
+                value_template,
+                node_outputs,
+                start_inputs,
+                sys_vars,
+                env_vars=env_vars,
+            )
+            parsed = _parse_loose_json_value(rendered)
+            try:
+                initial_values[field_name] = _coerce_human_field_value(field_name, field_type, parsed)
+            except Exception:
+                initial_values[field_name] = rendered
+
+            resolved_options = list(field.get("options", []) or [])
+            options_template = str(field.get("options_template", "") or "")
+            if options_template.strip():
+                rendered_options = _resolve_node_template_vars(
+                    options_template,
+                    node_outputs,
+                    start_inputs,
+                    sys_vars,
+                    env_vars=env_vars,
+                )
+                parsed_options = _parse_human_field_options_from_rendered(
+                    rendered=rendered_options,
+                    field_name=field_name,
+                    option_value_key=str(field.get("option_value_key", "") or ""),
+                )
+                if parsed_options:
+                    resolved_options = parsed_options
+
+            if field_widget in {"select", "radio"} and not resolved_options:
+                raise RuntimeError(
+                    f"DAG human_in_loop node {node_id}: field '{field_name}' has no options after template resolution"
+                )
+
+            field_schema.append(
+                {
+                    "name": field_name,
+                    "label": str(field.get("label", "") or ""),
+                    "type": field_type,
+                    "widget": field_widget,
+                    "options": resolved_options,
+                    "allowCustom": bool(field.get("allow_custom", False)),
+                    "placeholder": str(field.get("placeholder", "") or ""),
+                    "required": bool(field.get("required", False)),
+                }
+            )
+
+        request_payload = {
+            "title": str(node_cfg.get("title", "") or ""),
+            "instruction": instruction,
+            "approveLabel": str(node_cfg.get("approve_label", node_cfg.get("approveLabel", "")) or ""),
+            "rejectLabel": str(node_cfg.get("reject_label", node_cfg.get("rejectLabel", "")) or ""),
+            "requireRejectComment": _cfg_bool_value(
+                node_cfg,
+                "require_reject_comment",
+                "requireRejectComment",
+                default=True,
+            ),
+        }
+
+        _emit(metadata, "on_node_start", node_id=node_id, node_type="human_in_loop")
+        approval_payload = runtime.create_and_wait(
+            node_id=node_id,
+            node_label=str(node_cfg.get("__node_label", "") or node_id),
+            request_payload=request_payload,
+            field_schema=field_schema,
+            initial_values=initial_values,
+        )
+
+        decision = str(approval_payload.get("decision", "") or "").strip().lower()
+        if decision not in {"approved", "rejected"}:
+            _emit(metadata, "on_node_end", node_id=node_id, status="error")
+            raise RuntimeError(
+                f"DAG human_in_loop node {node_id}: invalid approval decision: {decision or '<empty>'}"
+            )
+
+        submitted_values = approval_payload.get("submittedValues", {})
+        if not isinstance(submitted_values, dict):
+            submitted_values = {}
+        final_values = dict(initial_values)
+        final_values.update(submitted_values)
+        comment = approval_payload.get("comment")
+        comment_text = str(comment) if comment is not None else ""
+        approval_id = str(approval_payload.get("id", "") or "")
+
+        node_raw = {
+            "decision": decision,
+            "comment": comment_text,
+            "values": final_values,
+            "approval_id": approval_id,
+            "submitted_values": submitted_values,
+        }
+        json_text = json.dumps(node_raw, ensure_ascii=False)
+        node_json_fields: dict[str, Any] = {
+            "decision": decision,
+            "comment": comment_text,
+            **final_values,
+            "response": json_text,
+        }
+
+        _emit(metadata, "on_branch_decision", node_id=node_id, handle=decision)
+        _emit(metadata, "on_node_end", node_id=node_id, status="ok")
+        return {
+            "node_outputs": {
+                node_id: NodeOutput(
+                    status="ok",
+                    text=json_text,
+                    raw=node_raw,
+                    json_fields=node_json_fields,
+                )
+            },
+            "branch_decisions": {node_id: decision},
+            "execution_trace": [node_id],
+        }
+
+    return human_in_loop_node
 
 
 def _build_if_else_node(
@@ -2967,6 +3452,7 @@ NODE_BUILDERS: dict[str, str] = {
     "tool": "_build_dag_tool_node",
     "code_executor": "_build_code_executor_node",
     "variable_assign": "_build_variable_assign_node",
+    "human_in_loop": "_build_human_in_loop_node",
     "if_else": "_build_if_else_node",
     "parameter_extractor": "_build_param_extractor_node",
     "knowledge_retrieval": "_build_kr_node",
@@ -3002,7 +3488,9 @@ def build_workflow_dag_subgraph(
         ntype = getattr(n, "node_type", None) or (n.get("node_type") if isinstance(n, dict) else None)
         label = getattr(n, "label", None) or (n.get("label") if isinstance(n, dict) else None) or nid
         cfg = getattr(n, "config", None) or (n.get("config") if isinstance(n, dict) else None)
-        node_map[nid] = _normalize_config(cfg) if isinstance(cfg, dict) else {}
+        normalized_cfg = _normalize_config(cfg) if isinstance(cfg, dict) else {}
+        normalized_cfg.setdefault("__node_label", str(label or nid))
+        node_map[nid] = normalized_cfg
         type_map[nid] = ntype or ""
         nodes_raw.append({"node_id": nid, "node_type": ntype, "label": label, "config": node_map[nid]})
 
@@ -3058,6 +3546,8 @@ def build_workflow_dag_subgraph(
             node_fn = _build_code_executor_node(nid, cfg)
         elif ntype == "variable_assign":
             node_fn = _build_variable_assign_node(nid, cfg)
+        elif ntype == "human_in_loop":
+            node_fn = _build_human_in_loop_node(nid, cfg)
         elif ntype == "if_else":
             node_fn = _build_if_else_node(nid, cfg)
         elif ntype == "parameter_extractor":
@@ -3109,14 +3599,14 @@ def build_workflow_dag_subgraph(
             graph.add_edge(src_nid, END)
             continue
 
-        if type_map[src_nid] == "if_else":
+        if type_map[src_nid] in {"if_else", "human_in_loop"}:
             # Conditional edges: route based on branch_decisions
             handle_to_target: dict[str, str] = {}
             for tgt, handle, _ in targets:
                 normalized_handle = "else" if handle == "default" else handle
                 handle_to_target[normalized_handle] = tgt
 
-            def _make_if_else_router(nid: str, h2t: dict[str, str]):
+            def _make_branch_router(nid: str, h2t: dict[str, str]):
                 def router(state: WorkflowState) -> str:
                     decisions = state.get("branch_decisions", {})
                     chosen = decisions.get(nid, "else")
@@ -3127,7 +3617,7 @@ def build_workflow_dag_subgraph(
 
             graph.add_conditional_edges(
                 src_nid,
-                _make_if_else_router(src_nid, handle_to_target),
+                _make_branch_router(src_nid, handle_to_target),
                 {tgt: tgt for tgt, _, _ in targets},
             )
         elif len(targets) == 1:
@@ -3538,6 +4028,8 @@ class LangGraphEngine:
         on_node_end: Callable | None = None,
         on_branch_decision: Callable | None = None,
         on_node_snapshot: Callable | None = None,
+        on_human_approval_requested: Callable[[dict[str, Any]], None] | None = None,
+        on_human_approval_resolved: Callable[[dict[str, Any]], None] | None = None,
     ) -> Iterator[str]:
         """执行 LangGraph skill，yield 流式内容。"""
         logger.info("LangGraphEngine.execute: skill=%s pattern=%s",
@@ -3560,7 +4052,31 @@ class LangGraphEngine:
             structured_input = raw_structured_input
         else:
             structured_input = None
+        run_id = str(context.get("run_id", context.get("runId", "")) or "").strip()
+        if not run_id:
+            run_id = uuid.uuid4().hex
+        channel_type = str(context.get("channel_type", context.get("channelType", "")) or "").strip()
+        if not channel_type:
+            channel_type = "assistant_chat"
+
+        def _parse_uuid_context(value: Any) -> uuid.UUID | None:
+            if value is None:
+                return None
+            if isinstance(value, uuid.UUID):
+                return value
+            text = str(value).strip()
+            if not text:
+                return None
+            try:
+                return uuid.UUID(text)
+            except Exception:
+                return None
+
         conversation_id = str(context.get("conversation_id") or "")
+        conversation_id_uuid = _parse_uuid_context(context.get("conversation_id", context.get("conversationId")))
+        message_id_uuid = _parse_uuid_context(context.get("message_id", context.get("messageId")))
+        workflow_id_uuid = _parse_uuid_context(context.get("workflow_id", context.get("workflowId")))
+        skill_id_uuid = _parse_uuid_context(context.get("skill_id", context.get("skillId")))
         sys_vars = {
             "date": now.date().isoformat(),
             "datetime": now.replace(microsecond=0).isoformat(),
@@ -3635,6 +4151,33 @@ class LangGraphEngine:
                     hard_truncated=hard_truncated,
                 )
             )
+        if on_human_approval_requested:
+            metadata["on_human_approval_requested"] = lambda payload: (
+                _push_runtime_event("human_approval_requested", approval=payload)
+            )
+        if on_human_approval_resolved:
+            metadata["on_human_approval_resolved"] = lambda payload: (
+                _push_runtime_event("human_approval_resolved", approval=payload)
+            )
+
+        human_loop_runtime: HumanLoopRuntime | None = None
+        if self.db is not None:
+            session_factory = sessionmaker(bind=db_bind)
+            human_loop_runtime = HumanLoopRuntime(
+                session_factory,
+                context=HumanLoopContext(
+                    run_id=run_id,
+                    channel_type=channel_type,
+                    conversation_id=conversation_id_uuid,
+                    workflow_id=workflow_id_uuid,
+                    skill_id=skill_id_uuid,
+                    message_id=message_id_uuid,
+                ),
+                on_requested=(lambda payload: _emit(metadata, "on_human_approval_requested", payload=payload)),
+                on_resolved=(lambda payload: _emit(metadata, "on_human_approval_resolved", payload=payload)),
+            )
+        if human_loop_runtime is not None:
+            metadata["human_loop_runtime"] = human_loop_runtime
 
         # 构建初始消息
         messages: list[BaseMessage] = [SystemMessage(content="")]
@@ -3857,6 +4400,16 @@ class LangGraphEngine:
                         payload.get("error_message"),
                         bool(payload.get("hard_truncated", False)),
                     )
+                    yield ""
+                    continue
+
+                if event_name == "human_approval_requested" and on_human_approval_requested:
+                    on_human_approval_requested(payload.get("approval", {}))
+                    yield ""
+                    continue
+
+                if event_name == "human_approval_resolved" and on_human_approval_resolved:
+                    on_human_approval_resolved(payload.get("approval", {}))
                     yield ""
                     continue
 

@@ -11,6 +11,7 @@ import {
   Wrench,
   FileCode2,
   Equal,
+  UserCheck,
 } from 'lucide-react'
 import {
   Background,
@@ -51,6 +52,7 @@ const NODE_STYLES: Record<ContainerBodyNodeType, { header: string; icon: typeof 
   knowledge_retrieval: { header: 'bg-teal-50 border-b border-teal-100', icon: BookOpen, iconColor: 'text-teal-600' },
   code_executor: { header: 'bg-slate-50 border-b border-slate-100', icon: FileCode2, iconColor: 'text-slate-600' },
   variable_assign: { header: 'bg-lime-50 border-b border-lime-100', icon: Equal, iconColor: 'text-lime-600' },
+  human_in_loop: { header: 'bg-blue-50 border-b border-blue-100', icon: UserCheck, iconColor: 'text-blue-600' },
 }
 
 const PREVIEW_MAX = 50
@@ -63,6 +65,7 @@ const NODE_ICON_MAP: Record<ContainerBodyNodeType, typeof Play> = {
   knowledge_retrieval: BookOpen,
   code_executor: FileCode2,
   variable_assign: Equal,
+  human_in_loop: UserCheck,
 }
 
 const SUBFLOW_NODE_HANDLE_TOP = 20
@@ -147,6 +150,12 @@ function getSubflowPreview(nodeType: ContainerBodyNodeType, config: Record<strin
       if (!variableName) return operation
       return `${operation} ${variableName}`
     }
+    case 'human_in_loop': {
+      const instruction = String(cfg.instruction ?? '').trim()
+      const fields = Array.isArray(cfg.fields) ? cfg.fields.length : 0
+      if (!instruction) return `fields ${fields}`
+      return `${truncate(instruction, 36)} · ${fields} fields`
+    }
     default:
       return ''
   }
@@ -176,11 +185,14 @@ type SubflowNodeExtent = [[number, number], [number, number]]
 type SubflowFitReason = 'structure' | 'delete-node'
 
 function sourceHandlesForNode(nodeType: ContainerBodyNodeType, config?: Record<string, unknown> | null): string[] {
-  if (nodeType !== 'if_else') {
-    return ['output']
+  if (nodeType === 'if_else') {
+    const normalized = normalizeIfElseConfig(config ?? {})
+    return [...normalized.branches.map((item) => item.id), normalized.elseHandle || 'else']
   }
-  const normalized = normalizeIfElseConfig(config ?? {})
-  return [...normalized.branches.map((item) => item.id), normalized.elseHandle || 'else']
+  if (nodeType === 'human_in_loop') {
+    return ['approved', 'rejected']
+  }
+  return ['output']
 }
 
 function normalizeSubflowSourceHandle(
@@ -188,12 +200,15 @@ function normalizeSubflowSourceHandle(
   rawSourceHandle: string | null | undefined,
 ): string {
   const sourceHandle = String(rawSourceHandle ?? '').trim()
-  if (!sourceNode || sourceNode.nodeType !== 'if_else') {
+  if (!sourceNode) {
     if (!sourceHandle || sourceHandle === CONTAINER_OUTPUT_HANDLE_ID) return 'output'
     return sourceHandle
   }
   const handles = sourceHandlesForNode(sourceNode.nodeType, sourceNode.config ?? null)
-  if (sourceHandle && sourceHandle !== 'output' && sourceHandle !== CONTAINER_OUTPUT_HANDLE_ID && handles.includes(sourceHandle)) {
+  if (!sourceHandle || sourceHandle === CONTAINER_OUTPUT_HANDLE_ID || sourceHandle === 'output') {
+    return handles[0] ?? 'output'
+  }
+  if (handles.includes(sourceHandle)) {
     return sourceHandle
   }
   return handles[0] ?? 'else'
@@ -219,7 +234,7 @@ function resolveSubflowHandleTop(
   if (handleId === 'input') {
     return SUBFLOW_NODE_HANDLE_TOP
   }
-  if (nodeType !== 'if_else') {
+  if (nodeType !== 'if_else' && nodeType !== 'human_in_loop') {
     return SUBFLOW_NODE_HANDLE_TOP
   }
   const handles = sourceHandlesForNode(nodeType, config)
@@ -362,18 +377,23 @@ function SubflowNodeCard({ id, data, selected }: SubflowNodeComponentProps) {
   const Icon = NODE_ICON_MAP[data.nodeType] ?? Play
   const isStart = data.nodeType === 'start'
   const isIfElse = data.nodeType === 'if_else'
+  const isHumanInLoop = data.nodeType === 'human_in_loop'
   const preview = getSubflowPreview(data.nodeType, data.config)
   const previewText = preview || '\u00A0'
   const ifElseConfig = isIfElse ? normalizeIfElseConfig((data.config ?? {}) as Record<string, unknown>) : null
-  const branchHandles = ifElseConfig
-    ? [...ifElseConfig.branches.map((item) => item.id), ifElseConfig.elseHandle || 'else']
-    : []
+  const branchHandles = isIfElse
+    ? (ifElseConfig
+      ? [...ifElseConfig.branches.map((item) => item.id), ifElseConfig.elseHandle || 'else']
+      : [])
+    : isHumanInLoop
+      ? ['approved', 'rejected']
+      : []
   const elseHandleId = ifElseConfig?.elseHandle || 'else'
   const quickAddHandleSet = new Set(data.quickAddHandles ?? [])
   const [openQuickAddHandle, setOpenQuickAddHandle] = useState<string | null>(null)
   const pointerDownRef = useRef<{ handleId: string; x: number; y: number } | null>(null)
   const ifElseHandleStartTop = resolveSubflowHandleTop(data.nodeType, data.config ?? null, branchHandles[0] ?? elseHandleId)
-  const ifElseMinHeight = isIfElse
+  const ifElseMinHeight = (isIfElse || isHumanInLoop)
     ? Math.max(126, ifElseHandleStartTop + Math.max(1, branchHandles.length) * IF_ELSE_HANDLE_STEP + 24)
     : null
 
@@ -478,7 +498,7 @@ function SubflowNodeCard({ id, data, selected }: SubflowNodeComponentProps) {
         </>
       )}
 
-      {!isIfElse && (
+      {!isIfElse && !isHumanInLoop && (
         <>
           <Handle
             type="source"
@@ -498,10 +518,15 @@ function SubflowNodeCard({ id, data, selected }: SubflowNodeComponentProps) {
         </>
       )}
 
-      {isIfElse && (
+      {(isIfElse || isHumanInLoop) && (
         <>
           {branchHandles.map((handle) => {
             const handleTop = resolveSubflowHandleTop(data.nodeType, data.config ?? null, handle)
+            const isElse = handle === elseHandleId
+            const isApproved = handle === 'approved'
+            const handleBorderClass = isIfElse
+              ? (isElse ? '!border-stone-400' : '!border-green-500')
+              : (isApproved ? '!border-green-500' : '!border-rose-500')
             return (
               <Fragment key={handle}>
                 <Handle
@@ -512,7 +537,7 @@ function SubflowNodeCard({ id, data, selected }: SubflowNodeComponentProps) {
                     top: `${handleTop}px`,
                     right: `${IF_ELSE_HANDLE_RIGHT_OFFSET}px`,
                   }}
-                  className={`!w-2.5 !h-2.5 !bg-background !border ${handle === elseHandleId ? '!border-stone-400' : '!border-green-500'} hover:!border-blue-500 hover:!bg-blue-50 transition-colors duration-150`}
+                  className={`!w-2.5 !h-2.5 !bg-background !border ${handleBorderClass} hover:!border-blue-500 hover:!bg-blue-50 transition-colors duration-150`}
                   onPointerDown={(event) => handleHandlePointerDown(handle, event)}
                   onPointerUp={(event) => handleHandlePointerUp(handle, event)}
                   onPointerCancel={handleHandlePointerCancel}
@@ -821,7 +846,7 @@ export function ContainerSubflowCanvas({
       const position = resolveNonOverlappingPosition(initial, currentBodyNodes)
 
       const nextNodeType = payload.kind === 'tool' ? 'tool' : (payload.nodeType as ContainerBodyNodeType)
-      if (!['llm', 'tool', 'if_else', 'parameter_extractor', 'knowledge_retrieval', 'code_executor', 'variable_assign'].includes(nextNodeType)) {
+      if (!['llm', 'tool', 'if_else', 'parameter_extractor', 'knowledge_retrieval', 'code_executor', 'variable_assign', 'human_in_loop'].includes(nextNodeType)) {
         return
       }
       const nodeId = createBodyNodeId(nextNodeType)

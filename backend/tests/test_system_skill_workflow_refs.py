@@ -32,7 +32,58 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
                 )
 
         self._assert_branch_targets_have_y_offset(SMART_CAPTURE, "start")
+        self._assert_branch_targets_have_y_offset(SMART_CAPTURE, "human_confirm")
         self._assert_branch_targets_have_y_offset(PERIODIC_REVIEW, "llm_dates")
+
+    def test_smart_capture_human_in_loop_topology_and_bindings(self) -> None:
+        from app.assistant.skills.definitions import SMART_CAPTURE
+
+        node_map = {n.node_id: n for n in (SMART_CAPTURE.workflow_nodes or [])}
+        edges = list(SMART_CAPTURE.workflow_edges or [])
+
+        self.assertIn("human_confirm", node_map)
+        self.assertEqual(node_map["human_confirm"].node_type, "human_in_loop")
+
+        llm_time_targets = {
+            edge.target_node_id
+            for edge in edges
+            if edge.source_node_id == "llm_time"
+        }
+        self.assertEqual(llm_time_targets, {"human_confirm"})
+
+        approved_targets = [
+            edge.target_node_id
+            for edge in edges
+            if edge.source_node_id == "human_confirm" and str(edge.source_handle or "").strip().lower() == "approved"
+        ]
+        rejected_targets = [
+            edge.target_node_id
+            for edge in edges
+            if edge.source_node_id == "human_confirm" and str(edge.source_handle or "").strip().lower() == "rejected"
+        ]
+        self.assertEqual(approved_targets, ["tool_create"])
+        self.assertEqual(len(rejected_targets), 1)
+        self.assertNotEqual(rejected_targets[0], "tool_create")
+
+        tool_create = node_map.get("tool_create")
+        self.assertIsNotNone(tool_create)
+        cfg = tool_create.config if isinstance(tool_create.config, dict) else {}
+        input_bindings = cfg.get("inputBindings")
+        self.assertIsInstance(input_bindings, dict)
+        expected_fields = {
+            "title",
+            "summary",
+            "content",
+            "type_code",
+            "tags",
+            "time_mode",
+            "time_at",
+            "time_from",
+            "time_to",
+        }
+        self.assertEqual(set(input_bindings.keys()), expected_fields)
+        for field_name in expected_fields:
+            self.assertEqual(input_bindings.get(field_name), f"{{{{human_confirm.{field_name}}}}}")
 
     def test_system_workflow_references_match_node_output_contracts(self) -> None:
         from app.assistant.skills.definitions import SKILLS
@@ -134,8 +185,28 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
             names.add("result")
             return names
 
+        if node_type == "code_executor":
+            fields = {"response"}
+            for item in (cfg.get("outputFields") or []):
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).strip()
+                if name:
+                    fields.add(name)
+            return fields
+
         if node_type == "if_else":
             return {"handle"}
+
+        if node_type == "human_in_loop":
+            fields = {"response", "decision", "comment"}
+            for item in (cfg.get("fields") or []):
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).strip()
+                if name:
+                    fields.add(name)
+            return fields
 
         if node_type == "parameter_extractor":
             names = {

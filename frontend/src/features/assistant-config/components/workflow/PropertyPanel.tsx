@@ -23,6 +23,7 @@ import {
 } from './property-panel/nodes/OtherNodeSettings'
 import { CodeExecutorNodeSettings } from './property-panel/nodes/CodeExecutorNodeSettings'
 import { VariableAssignNodeSettings } from './property-panel/nodes/VariableAssignNodeSettings'
+import { HumanInLoopNodeSettings } from './property-panel/nodes/HumanInLoopNodeSettings'
 import { OutputNodeSettings } from './property-panel/nodes/OutputNodeSettings'
 import { useModelsQuery } from '../../../ai-providers/queries'
 import { X } from 'lucide-react'
@@ -123,9 +124,14 @@ function sourceHandlesForSubflowNode(
   nodeType: ContainerBodyNodeType,
   config?: Record<string, unknown> | null,
 ): string[] {
-  if (nodeType !== 'if_else') return ['output']
-  const normalized = normalizeIfElseConfig(config ?? {})
-  return [...normalized.branches.map((item) => item.id), normalized.elseHandle || 'else']
+  if (nodeType === 'if_else') {
+    const normalized = normalizeIfElseConfig(config ?? {})
+    return [...normalized.branches.map((item) => item.id), normalized.elseHandle || 'else']
+  }
+  if (nodeType === 'human_in_loop') {
+    return ['approved', 'rejected']
+  }
+  return ['output']
 }
 
 function normalizeSubflowSourceHandle(
@@ -133,12 +139,13 @@ function normalizeSubflowSourceHandle(
   rawSourceHandle: string | null | undefined,
 ): string {
   const sourceHandle = String(rawSourceHandle ?? '').trim()
-  if (!sourceNode || sourceNode.nodeType !== 'if_else') {
+  if (!sourceNode) {
     if (!sourceHandle) return 'output'
     return sourceHandle
   }
   const handles = sourceHandlesForSubflowNode(sourceNode.nodeType, sourceNode.config ?? null)
-  if (sourceHandle && handles.includes(sourceHandle)) return sourceHandle
+  if (!sourceHandle || sourceHandle === 'output') return handles[0] ?? 'output'
+  if (handles.includes(sourceHandle)) return sourceHandle
   return handles[0] ?? 'else'
 }
 
@@ -601,6 +608,8 @@ export function PropertyPanel({ tools, workflowDescription, onWorkflowDescriptio
         return <CodeExecutorNodeSettings {...commonProps} />
       case 'variable_assign':
         return <VariableAssignNodeSettings {...commonProps} />
+      case 'human_in_loop':
+        return <HumanInLoopNodeSettings {...commonProps} />
       case 'iteration':
         return <IterationNodeSettings {...commonProps} />
       case 'loop':

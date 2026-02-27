@@ -31,6 +31,7 @@ const CONTAINER_ALLOWED_TYPES = new Set<ContainerBodyNodeType>([
   'knowledge_retrieval',
   'code_executor',
   'variable_assign',
+  'human_in_loop',
 ])
 
 export function QuickAddPopover({

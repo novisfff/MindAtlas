@@ -1,6 +1,7 @@
 import { apiClient } from '@/lib/api/client'
 import type {
   WorkflowEdge,
+  WorkflowHumanApproval,
   WorkflowInput,
   WorkflowNode,
   WorkflowTestRunRequest,
@@ -61,6 +62,12 @@ export interface WorkflowPublishRequest {
   workflow: WorkflowInput
   versionName?: string | null
   description?: string
+}
+
+export interface WorkflowApprovalDecisionRequest {
+  decision: 'approved' | 'rejected'
+  values: Record<string, unknown>
+  comment?: string
 }
 
 export interface WorkflowRollbackResponse {
@@ -139,3 +146,13 @@ export const runWorkflowTestStreamById = (
     path: `/api/assistant-config/workflows/${workflowId}/test-run`,
   },
 )
+
+export const submitWorkflowRunApprovalDecision = (
+  runId: string,
+  approvalId: string,
+  payload: WorkflowApprovalDecisionRequest,
+) =>
+  apiClient.post<WorkflowHumanApproval>(
+    `/api/assistant-config/runs/${runId}/approvals/${approvalId}/decision`,
+    { body: payload },
+  )

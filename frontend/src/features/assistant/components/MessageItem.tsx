@@ -1,14 +1,19 @@
+import { useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { remarkCitation } from './remark-citation'
 import { Bot, User, Loader2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
-import { ToolCall, SkillCall, Analysis } from '../types'
+import { ToolCall, SkillCall, Analysis, HumanApproval } from '../types'
+import { submitApprovalDecision } from '../api'
+import { useChatStore } from '../stores/chat-store'
 import { ToolCallDisplay } from './ToolCallDisplay'
 import { SkillCallDisplay } from './SkillCallDisplay'
 import { AnalysisDisplay } from './AnalysisDisplay'
 import { CitationProvider, CitationMarker, ReferenceList } from './citation'
+import { HumanApprovalCard } from '@/features/shared/hitl'
 
 interface MessageItemProps {
   message: {
@@ -18,6 +23,7 @@ interface MessageItemProps {
     toolCalls?: ToolCall[]
     skillCalls?: SkillCall[]
     analysisSteps?: Analysis[]
+    humanApprovals?: HumanApproval[]
     createdAt: number
   }
   variant?: 'default' | 'compact'
@@ -26,6 +32,11 @@ interface MessageItemProps {
 
 export function MessageItem({ message, variant = 'default', isStreaming }: MessageItemProps) {
   const { t } = useTranslation()
+  const { currentConversationId, upsertHumanApproval } = useChatStore((state) => ({
+    currentConversationId: state.currentConversationId,
+    upsertHumanApproval: state.upsertHumanApproval,
+  }))
+  const [submittingApprovalId, setSubmittingApprovalId] = useState<string | null>(null)
   const isUser = message.role === 'user'
   const isCompact = variant === 'compact'
 
@@ -39,6 +50,27 @@ export function MessageItem({ message, variant = 'default', isStreaming }: Messa
   // 2. 流式输出中 + 内容为空（等待 AI 生成）
   const showKbSearching = activeHiddenTools && activeHiddenTools.length > 0
   const showGenerating = isStreaming && !message.content && !showKbSearching
+
+  const handleSubmitApproval = async (
+    approvalId: string,
+    payload: { decision: 'approved' | 'rejected'; values: Record<string, unknown>; comment?: string },
+  ) => {
+    if (!currentConversationId) {
+      toast.error(t('settings.skills.humanApproval.noConversation'))
+      return
+    }
+    setSubmittingApprovalId(approvalId)
+    try {
+      const approval = await submitApprovalDecision(currentConversationId, approvalId, payload)
+      upsertHumanApproval(approval)
+      toast.success(t('settings.skills.humanApproval.submitted'))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t('settings.skills.humanApproval.submitFailed')
+      toast.error(message)
+    } finally {
+      setSubmittingApprovalId(null)
+    }
+  }
 
   return (
     <div className={cn(
@@ -82,6 +114,18 @@ export function MessageItem({ message, variant = 'default', isStreaming }: Messa
           )}
           {message.analysisSteps && message.analysisSteps.length > 0 && (
             <AnalysisDisplay steps={message.analysisSteps} />
+          )}
+          {message.humanApprovals && message.humanApprovals.length > 0 && (
+            <div className="my-2 space-y-2">
+              {message.humanApprovals.map((approval) => (
+                <HumanApprovalCard
+                  key={approval.id}
+                  approval={approval}
+                  submitting={submittingApprovalId === approval.id}
+                  onSubmit={(payload) => handleSubmitApproval(approval.id, payload)}
+                />
+              ))}
+            </div>
           )}
           {/* KB 搜索状态提示 */}
           {showKbSearching && (
@@ -131,4 +175,3 @@ export function MessageItem({ message, variant = 'default', isStreaming }: Messa
     </div>
   )
 }
-

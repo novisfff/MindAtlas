@@ -36,6 +36,7 @@ const nodeTypes: NodeTypes = {
   loop: WorkflowNode,
   code_executor: WorkflowNode,
   variable_assign: WorkflowNode,
+  human_in_loop: WorkflowNode,
   output: WorkflowNode,
 }
 
@@ -74,7 +75,11 @@ function normalizeConnectionSourceHandle(
 ): string {
   const raw = String(sourceHandle ?? '').trim()
   if (!sourceNode) return raw || 'output'
-  if (sourceNode.data.nodeType === 'if_else') return raw
+  if (sourceNode.data.nodeType === 'if_else' || sourceNode.data.nodeType === 'human_in_loop') {
+    const handles = sourceHandlesForNode(sourceNode)
+    if (raw && handles.includes(raw)) return raw
+    return handles[0] ?? raw ?? 'output'
+  }
   if (isContainerNodeType(sourceNode.data.nodeType)) {
     if (!raw || raw === 'output' || raw === CONTAINER_OUTPUT_HANDLE_ID) return 'output'
     return raw
@@ -99,7 +104,9 @@ function normalizeConnectionTargetHandle(
 
 function resolveRenderSourceHandle(edge: Edge, sourceNode: Node<WfNodeData> | undefined): string | undefined {
   if (!sourceNode) return edge.sourceHandle ?? 'output'
-  if (sourceNode.data.nodeType === 'if_else') return edge.sourceHandle ?? undefined
+  if (sourceNode.data.nodeType === 'if_else' || sourceNode.data.nodeType === 'human_in_loop') {
+    return edge.sourceHandle ?? undefined
+  }
   if (sourceNode.data.nodeType === 'output') return undefined
   if (isContainerNodeType(sourceNode.data.nodeType)) return CONTAINER_OUTPUT_HANDLE_ID
   return edge.sourceHandle ?? 'output'
@@ -116,11 +123,14 @@ function sourceHandlesForNode(node: Node<WfNodeData>): string[] {
   if (node.data.nodeType === 'output') {
     return []
   }
-  if (node.data.nodeType !== 'if_else') {
-    return ['output']
+  if (node.data.nodeType === 'if_else') {
+    const normalized = normalizeIfElseConfig((node.data.config ?? {}) as Record<string, unknown>)
+    return [...normalized.branches.map((branch) => branch.id), normalized.elseHandle || 'else']
   }
-  const normalized = normalizeIfElseConfig((node.data.config ?? {}) as Record<string, unknown>)
-  return [...normalized.branches.map((branch) => branch.id), normalized.elseHandle || 'else']
+  if (node.data.nodeType === 'human_in_loop') {
+    return ['approved', 'rejected']
+  }
+  return ['output']
 }
 
 function resolveHandleRelativeTop(node: Node<WfNodeData>, sourceHandle: string): number {
@@ -129,7 +139,7 @@ function resolveHandleRelativeTop(node: Node<WfNodeData>, sourceHandle: string):
       ? CONTAINER_HANDLE_TOP
       : HANDLE_TOP_OFFSET
   }
-  if (node.data.nodeType !== 'if_else') {
+  if (node.data.nodeType !== 'if_else' && node.data.nodeType !== 'human_in_loop') {
     return node.data.nodeType === 'iteration' || node.data.nodeType === 'loop'
       ? CONTAINER_HANDLE_TOP
       : HANDLE_TOP_OFFSET
@@ -159,6 +169,9 @@ function estimateMainNodeSize(node: Node<WfNodeData>): { width: number; height: 
     const normalized = normalizeIfElseConfig((node.data.config ?? {}) as Record<string, unknown>)
     const height = 50 + ((normalized.branches.length + 1) * 28) + 12
     return { width: DEFAULT_NODE_WIDTH, height }
+  }
+  if (node.data.nodeType === 'human_in_loop') {
+    return { width: DEFAULT_NODE_WIDTH, height: 152 }
   }
   if (node.data.nodeType === 'start') {
     return { width: DEFAULT_NODE_WIDTH, height: 96 }

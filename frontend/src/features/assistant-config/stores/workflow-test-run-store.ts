@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { WorkflowRunEvent } from '../api/workflow'
+import type { WorkflowHumanApproval, WorkflowRunEvent } from '../api/workflow'
 
 export type WorkflowTestRunStatus = 'idle' | 'running' | 'completed' | 'error' | 'cancelled'
 const TRACE_EVENT_LIMIT = 300
@@ -67,6 +67,7 @@ interface WorkflowTestRunState {
   result: WorkflowTestRunResult
   deltaSummary: WorkflowDeltaSummary
   traceEvents: WorkflowRunEvent[]
+  pendingApprovals: WorkflowHumanApproval[]
   nodeSnapshots: Record<string, WorkflowNodeSnapshot>
   nodeTraceMap: Record<string, WorkflowTestNodeTrace>
   sessionRuns: WorkflowSessionRunSummary[]
@@ -127,6 +128,14 @@ function upsertNodeDeltaSummary(
   return nextNodes
 }
 
+function upsertPendingApproval(
+  approvals: WorkflowHumanApproval[],
+  approval: WorkflowHumanApproval,
+): WorkflowHumanApproval[] {
+  const next = approvals.filter((item) => item.id !== approval.id)
+  return [...next, approval]
+}
+
 export const useWorkflowTestRunStore = create<WorkflowTestRunState>()((set, get) => ({
   panelOpen: false,
   status: 'idle',
@@ -138,6 +147,7 @@ export const useWorkflowTestRunStore = create<WorkflowTestRunState>()((set, get)
   result: EMPTY_RESULT,
   deltaSummary: EMPTY_DELTA_SUMMARY,
   traceEvents: [],
+  pendingApprovals: [],
   nodeSnapshots: {},
   nodeTraceMap: {},
   sessionRuns: [],
@@ -164,6 +174,7 @@ export const useWorkflowTestRunStore = create<WorkflowTestRunState>()((set, get)
       result: EMPTY_RESULT,
       deltaSummary: EMPTY_DELTA_SUMMARY,
       traceEvents: [],
+      pendingApprovals: [],
       nodeSnapshots: {},
       nodeTraceMap: {},
       abortController,
@@ -177,6 +188,7 @@ export const useWorkflowTestRunStore = create<WorkflowTestRunState>()((set, get)
       abortController: null,
       activeRunId: null,
       activeRunStartedAt: null,
+      pendingApprovals: [],
       status: state.status === 'running' ? 'cancelled' : state.status,
     }))
   },
@@ -194,6 +206,7 @@ export const useWorkflowTestRunStore = create<WorkflowTestRunState>()((set, get)
           result: EMPTY_RESULT,
           deltaSummary: EMPTY_DELTA_SUMMARY,
           nodeSnapshots: {},
+          pendingApprovals: [],
           nodeTraceMap: {},
         }
       }
@@ -333,6 +346,24 @@ export const useWorkflowTestRunStore = create<WorkflowTestRunState>()((set, get)
         }
       }
 
+      if (event.event === 'human_approval_requested') {
+        const traceEvents = capTraceEvents([...state.traceEvents, event])
+        return {
+          ...state,
+          traceEvents,
+          pendingApprovals: upsertPendingApproval(state.pendingApprovals, event.data.approval),
+        }
+      }
+
+      if (event.event === 'human_approval_resolved') {
+        const traceEvents = capTraceEvents([...state.traceEvents, event])
+        return {
+          ...state,
+          traceEvents,
+          pendingApprovals: state.pendingApprovals.filter((item) => item.id !== event.data.approval.id),
+        }
+      }
+
       if (event.event === 'run_end') {
         const traceEvents = capTraceEvents([...state.traceEvents, event])
         const status = event.data.status === 'completed'
@@ -380,6 +411,7 @@ export const useWorkflowTestRunStore = create<WorkflowTestRunState>()((set, get)
       activeRunId: null,
       activeRunStartedAt: null,
       abortController: null,
+      pendingApprovals: [],
       result: {
         ...state.result,
         errorMessage: message,
@@ -399,6 +431,7 @@ export const useWorkflowTestRunStore = create<WorkflowTestRunState>()((set, get)
       result: EMPTY_RESULT,
       deltaSummary: EMPTY_DELTA_SUMMARY,
       traceEvents: [],
+      pendingApprovals: [],
       nodeSnapshots: {},
       nodeTraceMap: {},
       abortController: null,

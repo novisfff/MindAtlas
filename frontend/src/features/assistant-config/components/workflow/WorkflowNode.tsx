@@ -14,6 +14,7 @@ import {
   SendHorizontal,
   FileCode2,
   Equal,
+  UserCheck,
 } from 'lucide-react'
 import type { WfNodeData } from '../../stores/workflow-editor-store'
 import { useWorkflowEditorStore } from '../../stores/workflow-editor-store'
@@ -36,6 +37,7 @@ const NODE_STYLES: Record<NodeType, { header: string; icon: typeof Play; iconCol
   loop: { header: 'bg-gradient-to-r from-indigo-100/90 to-blue-100/90 border-b border-indigo-200', icon: Infinity, iconColor: 'text-indigo-700' },
   code_executor: { header: 'bg-gradient-to-r from-orange-100/90 to-amber-100/90 border-b border-orange-200', icon: FileCode2, iconColor: 'text-orange-700' },
   variable_assign: { header: 'bg-gradient-to-r from-lime-100/90 to-emerald-100/90 border-b border-lime-200', icon: Equal, iconColor: 'text-lime-700' },
+  human_in_loop: { header: 'bg-gradient-to-r from-blue-100/90 to-cyan-100/90 border-b border-blue-200', icon: UserCheck, iconColor: 'text-blue-700' },
   output: { header: 'bg-gradient-to-r from-rose-100/90 to-orange-100/90 border-b border-rose-200', icon: SendHorizontal, iconColor: 'text-rose-700' },
 }
 const HANDLE_TOP_OFFSET = 28
@@ -234,6 +236,12 @@ function getPreview(data: WfNodeData): string {
       if (!variableName) return operation
       return `${operation} ${variableName}`
     }
+    case 'human_in_loop': {
+      const instruction = String(cfg.instruction ?? '').trim()
+      const fields = Array.isArray(cfg.fields) ? cfg.fields : []
+      if (!instruction) return `fields ${fields.length}`
+      return `${truncate(instruction, 40)} · ${fields.length} fields`
+    }
     case 'output': {
       const mode = String(cfg.outputMode ?? 'text').trim().toLowerCase() === 'structured' ? 'structured' : 'text'
       if (mode === 'text') {
@@ -346,6 +354,7 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
   const previewText = preview || '\u00A0'
   const isStart = nodeData.nodeType === 'start'
   const isIfElse = nodeData.nodeType === 'if_else'
+  const isHumanInLoop = nodeData.nodeType === 'human_in_loop'
   const isOutputNode = nodeData.nodeType === 'output'
   const isContainer = nodeData.nodeType === 'iteration' || nodeData.nodeType === 'loop'
   const containerConfig = ((nodeData.config ?? {}) as Record<string, unknown>)
@@ -387,6 +396,7 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
     id,
     ifElseHandleCount,
     isContainer,
+    isHumanInLoop,
     nodeHandleTop,
     updateNodeInternals,
     containerSize?.height,
@@ -552,7 +562,7 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
       )}
 
       {/* Output handle(s) */}
-      {!isIfElse && !isOutputNode && (
+      {!isIfElse && !isHumanInLoop && !isOutputNode && (
         <>
           <Handle
             type="source"
@@ -601,6 +611,31 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
               </div>
             ))
           })()}
+        </div>
+      )}
+
+      {/* Human-in-loop: approved/rejected output handles */}
+      {isHumanInLoop && (
+        <div className="absolute -right-[5px] top-[50px] flex flex-col gap-3 py-1">
+          {(['approved', 'rejected'] as const).map((handle) => (
+            <div key={handle} className="relative flex items-center justify-center w-3 h-3">
+              <Handle
+                type="source"
+                position={Position.Right}
+                id={handle}
+                style={{ position: 'static', transform: 'none' }}
+                className={`!w-2.5 !h-2.5 !bg-background !border ${handle === 'approved' ? '!border-green-500' : '!border-rose-500'} hover:!border-blue-500 hover:!bg-blue-50 transition-colors duration-150 z-10`}
+                onPointerDown={(event) => handleHandlePointerDown(handle, event)}
+                onPointerUp={(event) => handleHandlePointerUp(handle, event)}
+                onPointerCancel={handleHandlePointerCancel}
+              />
+              {renderQuickAddPopover(handle, 'right', {
+                left: '50%',
+                top: '50%',
+                transform: 'translate(-50%, -50%)',
+              })}
+            </div>
+          ))}
         </div>
       )}
     </div>

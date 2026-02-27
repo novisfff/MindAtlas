@@ -104,13 +104,11 @@
       "positionX": 2540.0,
       "positionY": 306.0,
       "config": {
-        "systemPrompt": "你是 MindAtlas 的“智能创建记录”技能，正在为入库生成标签。\n当前任务：生成 tags（标签名数组），用于最终写入数据库。\n约束：优先复用 {{tool_tags.result}} 中的 name（大小写不敏感匹配；输出尽量返回列表中的原始写法）；最多新增 5 个新标签；宁缺毋滥，不要为了凑数而编造标签；tags 元素为纯标签名字符串（不要带 # 前缀），去重。",
+        "systemPrompt": "你是 MindAtlas 的“智能创建记录”技能，正在为入库生成标签。\n当前任务：生成 tags（逗号分隔的标签文本），用于最终写入数据库。\n约束：优先复用 {{tool_tags.result}} 中的 name（大小写不敏感匹配；输出尽量返回列表中的原始写法）；最多新增 5 个新标签；宁缺毋滥，不要为了凑数而编造标签；不要带 # 前缀；去重。",
         "outputMode": "structured",
         "outputFields": [
           {
-            "name": "tags",
-            "type": "array",
-            "itemsType": "string"
+            "name": "tags"
           }
         ]
       }
@@ -148,32 +146,140 @@
       }
     },
     {
-      "nodeId": "tool_create",
-      "nodeType": "tool",
-      "label": "创建记录",
+      "nodeId": "human_confirm",
+      "nodeType": "human_in_loop",
+      "label": "人工确认",
       "positionX": 3360.0,
       "positionY": 306.0,
       "config": {
+        "title": "确认创建记录",
+        "instruction": "请确认以下信息，批准后创建，拒绝则取消本次创建。",
+        "approveLabel": "确认创建",
+        "rejectLabel": "取消创建",
+        "requireRejectComment": false,
+        "fields": [
+          {
+            "name": "title",
+            "label": "标题",
+            "type": "string",
+            "widget": "input",
+            "required": false,
+            "valueTemplate": "{{llm_title.title}}"
+          },
+          {
+            "name": "summary",
+            "label": "摘要",
+            "type": "string",
+            "widget": "textarea",
+            "required": false,
+            "valueTemplate": "{{llm_summary.summary}}"
+          },
+          {
+            "name": "content",
+            "label": "正文",
+            "type": "string",
+            "widget": "textarea",
+            "required": true,
+            "valueTemplate": "{{llm_content.content}}"
+          },
+          {
+            "name": "type_code",
+            "label": "类型编码",
+            "type": "string",
+            "widget": "select",
+            "optionsTemplate": "{{tool_types.result}}",
+            "optionValueKey": "code",
+            "required": false,
+            "valueTemplate": "{{llm_type.type_code}}"
+          },
+          {
+            "name": "tags",
+            "label": "标签",
+            "type": "array",
+            "widget": "tag_selector",
+            "optionsTemplate": "{{tool_tags.result}}",
+            "optionValueKey": "name",
+            "allowCustom": true,
+            "required": false,
+            "valueTemplate": "{{llm_tags.tags}}"
+          },
+          {
+            "name": "time_mode",
+            "label": "时间模式",
+            "type": "string",
+            "widget": "radio",
+            "options": [
+              "POINT",
+              "RANGE"
+            ],
+            "required": false,
+            "valueTemplate": "{{llm_time.time_mode}}"
+          },
+          {
+            "name": "time_at",
+            "label": "时间点",
+            "type": "string",
+            "widget": "date",
+            "required": false,
+            "valueTemplate": "{{llm_time.time_at}}"
+          },
+          {
+            "name": "time_from",
+            "label": "起始日期",
+            "type": "string",
+            "widget": "date",
+            "required": false,
+            "valueTemplate": "{{llm_time.time_from}}"
+          },
+          {
+            "name": "time_to",
+            "label": "结束日期",
+            "type": "string",
+            "widget": "date",
+            "required": false,
+            "valueTemplate": "{{llm_time.time_to}}"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_create",
+      "nodeType": "tool",
+      "label": "创建记录",
+      "positionX": 3770.0,
+      "positionY": 245.0,
+      "config": {
         "toolName": "create_entry",
         "inputBindings": {
-          "title": "{{llm_title.title}}",
-          "summary": "{{llm_summary.summary}}",
-          "content": "{{llm_content.content}}",
-          "type_code": "{{llm_type.type_code}}",
-          "tags": "{{llm_tags.tags}}",
-          "time_mode": "{{llm_time.time_mode}}",
-          "time_at": "{{llm_time.time_at}}",
-          "time_from": "{{llm_time.time_from}}",
-          "time_to": "{{llm_time.time_to}}"
+          "title": "{{human_confirm.title}}",
+          "summary": "{{human_confirm.summary}}",
+          "content": "{{human_confirm.content}}",
+          "type_code": "{{human_confirm.type_code}}",
+          "tags": "{{human_confirm.tags}}",
+          "time_mode": "{{human_confirm.time_mode}}",
+          "time_at": "{{human_confirm.time_at}}",
+          "time_from": "{{human_confirm.time_from}}",
+          "time_to": "{{human_confirm.time_to}}"
         }
+      }
+    },
+    {
+      "nodeId": "llm_cancel",
+      "nodeType": "llm",
+      "label": "取消提示",
+      "positionX": 3770.0,
+      "positionY": 396.0,
+      "config": {
+        "systemPrompt": "用户拒绝了创建请求。请明确告知：本次记录创建已取消，不会写入数据库；如需继续可修改信息后再次确认。",
+        "outputMode": "text"
       }
     },
     {
       "nodeId": "llm_output",
       "nodeType": "llm",
       "label": "创建结果",
-      "positionX": 3770.0,
-      "positionY": 306.0,
+      "positionX": 4180.0,
+      "positionY": 245.0,
       "config": {
         "systemPrompt": "告知用户记录已创建，展示标题、类型与时间信息，并给出可继续补充/修改的提示。",
         "userInput": "{{tool_create.result}}",
@@ -184,11 +290,11 @@
       "nodeId": "output_final",
       "nodeType": "output",
       "label": "输出",
-      "positionX": 4180.0,
-      "positionY": 306.0,
+      "positionX": 4590.0,
+      "positionY": 320.0,
       "config": {
         "outputMode": "text",
-        "textTemplate": "{{llm_output.response}}"
+        "textTemplate": "{{llm_output.response}}{{llm_cancel.response}}"
       }
     }
   ],
@@ -284,10 +390,30 @@
       "label": null
     },
     {
-      "edgeId": "e_time_create",
+      "edgeId": "e_time_confirm",
       "sourceNodeId": "llm_time",
-      "targetNodeId": "tool_create",
+      "targetNodeId": "human_confirm",
       "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_confirm_approved",
+      "sourceNodeId": "human_confirm",
+      "targetNodeId": "tool_create",
+      "sourceHandle": "approved",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_confirm_rejected",
+      "sourceNodeId": "human_confirm",
+      "targetNodeId": "llm_cancel",
+      "sourceHandle": "rejected",
       "targetHandle": "input",
       "conditionType": null,
       "conditionExpr": null,
@@ -306,6 +432,16 @@
     {
       "edgeId": "e_output_final",
       "sourceNodeId": "llm_output",
+      "targetNodeId": "output_final",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_cancel_final",
+      "sourceNodeId": "llm_cancel",
       "targetNodeId": "output_final",
       "sourceHandle": "output",
       "targetHandle": "input",

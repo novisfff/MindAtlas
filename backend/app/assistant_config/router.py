@@ -33,12 +33,14 @@ from app.assistant_config.schemas import (
     WorkflowTestRunRequest,
     WorkflowVersionListResponse,
     WorkflowValidationResponse,
+    HumanApprovalDecisionRequest,
 )
 from app.assistant_config.workflow_test_service import WorkflowTestRunService
 from app.assistant_config.agent_test_service import AgentTestRunService
 from app.assistant_config.service import AssistantConfigService
 from app.common.exceptions import ApiException
 from app.common.responses import ApiResponse
+from app.assistant.skills.human_loop_runtime import submit_human_approval_decision
 from app.database import get_db
 
 router = APIRouter(prefix="/api/assistant-config", tags=["assistant-config"])
@@ -505,6 +507,31 @@ def test_run_workflow_by_id(
     )
 
 
+@router.post("/runs/{run_id}/approvals/{approval_id}/decision", response_model=ApiResponse)
+def submit_run_approval_decision(
+    run_id: str,
+    approval_id: UUID,
+    request: HumanApprovalDecisionRequest,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    try:
+        payload = submit_human_approval_decision(
+            db,
+            approval_id=approval_id,
+            decision=request.decision,
+            values=request.values,
+            comment=request.comment,
+            expected_run_id=run_id,
+        )
+    except ValueError as exc:
+        raise ApiException(
+            status_code=400,
+            code=42252,
+            message=str(exc),
+        ) from exc
+    return ApiResponse.ok(payload)
+
+
 # ==================== Compatibility Skill Workflow Routes ====================
 
 @router.put("/skills/{id}/workflow", response_model=ApiResponse)
@@ -566,6 +593,7 @@ _NODE_TYPE_LABELS = {
     "loop": "Loop",
     "code_executor": "Code Executor",
     "variable_assign": "Variable Assign",
+    "human_in_loop": "Human In Loop",
     "output": "Output",
 }
 
@@ -580,5 +608,6 @@ _NODE_TYPE_DESCRIPTIONS = {
     "loop": "Repeat inner subflow until termination conditions are met",
     "code_executor": "Run sandboxed Python or JavaScript code with structured inputs and outputs",
     "variable_assign": "Assign or update workflow env variable values",
+    "human_in_loop": "Pause workflow and wait for human approval with editable fields",
     "output": "Workflow terminal node that formats and emits final response",
 }

@@ -241,6 +241,60 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         self.assertEqual(snapshot_payload["input"]["variableName"], "counter")
         self.assertEqual(snapshot_payload["output"]["after"], 3)
 
+    def test_stream_emits_human_approval_events(self) -> None:
+        from app.assistant_config.workflow_test_service import WorkflowTestRunService
+
+        skill = self._create_workflow_skill()
+        service = WorkflowTestRunService(self.db)
+        prepared = service.prepare(skill.id, self._valid_request(stream_output=False))
+
+        class _FakeEngine:
+            def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                approval = {
+                    "id": "approval_1",
+                    "runId": kwargs["runtime_context"]["run_id"],
+                    "channelType": "workflow_test",
+                    "conversationId": None,
+                    "messageId": None,
+                    "workflowId": kwargs["runtime_context"]["workflow_id"],
+                    "skillId": kwargs["runtime_context"]["skill_id"],
+                    "nodeId": "hitl_1",
+                    "nodeLabel": "Confirm",
+                    "status": "pending",
+                    "requestPayload": {"instruction": "confirm"},
+                    "fieldSchema": [{"name": "title", "type": "string", "required": True}],
+                    "initialValues": {"title": "draft"},
+                    "submittedValues": {},
+                    "decision": None,
+                    "comment": None,
+                    "resolvedAt": None,
+                    "createdAt": "2026-01-01T00:00:00+00:00",
+                    "updatedAt": "2026-01-01T00:00:00+00:00",
+                }
+                kwargs["on_human_approval_requested"](approval)
+                resolved = {**approval, "status": "approved", "decision": "approved", "submittedValues": {"title": "ok"}}
+                kwargs["on_human_approval_resolved"](resolved)
+                yield ""
+
+        with patch(
+            "app.assistant_config.workflow_test_service.resolve_openai_compat_config",
+            return_value=SimpleNamespace(api_key="k", base_url="https://api.example.com", model="gpt-test"),
+        ), patch(
+            "app.assistant_config.workflow_test_service.WorkflowTestRunService._build_engine",
+            return_value=_FakeEngine(),
+        ):
+            chunks = list(service.stream(prepared))
+
+        events = _parse_sse_events(chunks)
+        event_names = [name for name, _ in events]
+        self.assertIn("human_approval_requested", event_names)
+        self.assertIn("human_approval_resolved", event_names)
+
+        requested = next(payload for name, payload in events if name == "human_approval_requested")
+        resolved = next(payload for name, payload in events if name == "human_approval_resolved")
+        self.assertEqual(requested["approval"]["status"], "pending")
+        self.assertEqual(resolved["approval"]["status"], "approved")
+
     def test_stream_aggregates_high_frequency_delta_events(self) -> None:
         from app.assistant_config.workflow_test_service import WorkflowTestRunService
 

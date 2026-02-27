@@ -14,6 +14,7 @@ export type NodeType =
   | 'loop'
   | 'code_executor'
   | 'variable_assign'
+  | 'human_in_loop'
   | 'output'
 
 export type ConditionOperator =
@@ -165,6 +166,40 @@ export interface VariableAssignNodeConfig {
   valueTemplate?: string
 }
 
+export type HumanInLoopFieldType = 'string' | 'number' | 'integer' | 'boolean' | 'array'
+export type HumanInLoopFieldWidget =
+  | 'input'
+  | 'textarea'
+  | 'switch'
+  | 'select'
+  | 'radio'
+  | 'tag_selector'
+  | 'date'
+  | 'time'
+
+export interface HumanInLoopFieldConfig {
+  name: string
+  label?: string
+  type: HumanInLoopFieldType
+  widget?: HumanInLoopFieldWidget
+  options?: string[]
+  optionsTemplate?: string
+  optionValueKey?: string
+  allowCustom?: boolean
+  placeholder?: string
+  required?: boolean
+  valueTemplate?: string
+}
+
+export interface HumanInLoopNodeConfig {
+  title?: string
+  instruction?: string
+  fields?: HumanInLoopFieldConfig[]
+  approveLabel?: string
+  rejectLabel?: string
+  requireRejectComment?: boolean
+}
+
 export type ContainerBodyNodeType =
   | 'start'
   | 'llm'
@@ -174,6 +209,7 @@ export type ContainerBodyNodeType =
   | 'knowledge_retrieval'
   | 'code_executor'
   | 'variable_assign'
+  | 'human_in_loop'
 
 export interface ContainerBodyNode {
   nodeId: string
@@ -226,9 +262,41 @@ export type NodeConfig =
   | KnowledgeRetrievalNodeConfig
   | CodeExecutorNodeConfig
   | VariableAssignNodeConfig
+  | HumanInLoopNodeConfig
   | IterationNodeConfig
   | LoopNodeConfig
   | Record<string, unknown>
+
+export interface WorkflowHumanApproval {
+  id: string
+  runId: string
+  channelType: string
+  conversationId: string | null
+  messageId: string | null
+  workflowId: string | null
+  skillId: string | null
+  nodeId: string
+  nodeLabel: string | null
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled'
+  requestPayload: Record<string, unknown>
+  fieldSchema: Array<{
+    name: string
+    label?: string
+    type: HumanInLoopFieldType
+    widget?: HumanInLoopFieldWidget
+    options?: string[]
+    allowCustom?: boolean
+    placeholder?: string
+    required?: boolean
+  }>
+  initialValues: Record<string, unknown>
+  submittedValues: Record<string, unknown>
+  decision: 'approved' | 'rejected' | null
+  comment: string | null
+  resolvedAt: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}
 
 // ==================== Workflow Data ====================
 
@@ -410,6 +478,22 @@ export type WorkflowRunEvent =
         runId: string
         message: string
         stage: 'bootstrap' | 'runtime' | 'unknown'
+        ts: string
+      }
+    }
+  | {
+      event: 'human_approval_requested'
+      data: {
+        runId: string
+        approval: WorkflowHumanApproval
+        ts: string
+      }
+    }
+  | {
+      event: 'human_approval_resolved'
+      data: {
+        runId: string
+        approval: WorkflowHumanApproval
         ts: string
       }
     }

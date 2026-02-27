@@ -53,6 +53,8 @@ class AssistantAgent:
         on_analysis_start: Callable[[str], None] | None = None,
         on_analysis_delta: Callable[[str, str], None] | None = None,
         on_analysis_end: Callable[[str], None] | None = None,
+        on_human_approval_requested: Callable[[dict], None] | None = None,
+        on_human_approval_resolved: Callable[[dict], None] | None = None,
     ) -> Iterator[str]:
         """流式生成回复 - 基于 Skill 机制"""
         logger.debug("agent.stream start")
@@ -116,6 +118,8 @@ class AssistantAgent:
                 on_analysis_start=on_analysis_start,
                 on_analysis_delta=on_analysis_delta,
                 on_analysis_end=on_analysis_end,
+                on_human_approval_requested=on_human_approval_requested,
+                on_human_approval_resolved=on_human_approval_resolved,
             )
             logger.debug("agent skill %s execution end", skill_name)
             # 通知 Skill 完成

@@ -14,10 +14,12 @@ export function useChat() {
     currentConversationId,
     addMessage,
     updateLastMessage,
+    setLastMessageId,
     addToolCall,
     updateToolCall,
     addSkillCall,
     updateSkillCall,
+    upsertHumanApproval,
     startAnalysis,
     updateAnalysis,
     endAnalysis,
@@ -102,7 +104,12 @@ export function useChat() {
         const events = sseParser.parse(chunk)
 
         for (const evt of events) {
-          if (evt.event === 'content_delta') {
+          if (evt.event === 'message_start') {
+            const messageId = evt.data.messageId as string | undefined
+            if (messageId) {
+              setLastMessageId(messageId)
+            }
+          } else if (evt.event === 'content_delta') {
             const delta = evt.data.delta as string
             if (delta) {
               fullContent += delta
@@ -147,6 +154,11 @@ export function useChat() {
             updateAnalysis(evt.data.id as string, evt.data.delta as string)
           } else if (evt.event === 'analysis_end') {
             endAnalysis(evt.data.id as string)
+          } else if (evt.event === 'human_approval_requested' || evt.event === 'human_approval_resolved') {
+            const approval = evt.data.approval as any
+            if (approval && typeof approval === 'object' && typeof approval.id === 'string') {
+              upsertHumanApproval(approval)
+            }
           }
         }
       }
@@ -163,10 +175,12 @@ export function useChat() {
     currentConversationId,
     addMessage,
     updateLastMessage,
+    setLastMessageId,
     addToolCall,
     updateToolCall,
     addSkillCall,
     updateSkillCall,
+    upsertHumanApproval,
     startAnalysis,
     updateAnalysis,
     endAnalysis,

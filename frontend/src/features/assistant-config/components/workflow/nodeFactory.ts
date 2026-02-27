@@ -84,6 +84,25 @@ export function createDefaultNodeConfig(
     }
   }
 
+  if (nodeType === 'human_in_loop') {
+    return {
+      title: '',
+      instruction: '',
+      fields: [
+        {
+          name: 'value',
+          label: 'Value',
+          type: 'string',
+          required: true,
+          valueTemplate: '',
+        },
+      ],
+      approveLabel: '',
+      rejectLabel: '',
+      requireRejectComment: true,
+    }
+  }
+
   if (nodeType === 'iteration') {
     return {
       inputSource: '',

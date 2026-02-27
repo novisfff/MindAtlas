@@ -10,6 +10,7 @@ const BODY_NODE_SIZE: Record<ContainerBodyNodeType, { width: number; height: num
   knowledge_retrieval: { width: 240, height: 112 },
   code_executor: { width: 240, height: 128 },
   variable_assign: { width: 240, height: 112 },
+  human_in_loop: { width: 240, height: 152 },
 }
 
 const MIN_WIDTH = 420

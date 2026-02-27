@@ -138,6 +138,15 @@ function buildNodeOutputFields(
     return []
   }
 
+  if (node.data.nodeType === 'human_in_loop') {
+    const fields = Array.isArray(cfg.fields)
+      ? cfg.fields
+        .map((item) => (item && typeof item === 'object' ? String((item as Record<string, unknown>).name ?? '').trim() : ''))
+        .filter(Boolean)
+      : []
+    return ['decision', 'comment', ...fields]
+  }
+
   if (node.data.nodeType === 'iteration') {
     const outputVariable = String(cfg.outputVariable ?? '').trim() || 'results'
     return [outputVariable, 'count', 'errors']
@@ -168,6 +177,8 @@ function buildNodeOutputFields(
 }
 
 function inferFieldType(field: string): InputParam['paramType'] {
+  if (field === 'decision') return 'string'
+  if (field === 'comment') return 'string'
   if (field === 'result' || field === 'references') return 'object'
   if (field === 'before' || field === 'after') return 'object'
   if (field === 'references_count') return 'number'
@@ -190,6 +201,24 @@ function inferCodeExecutorFieldType(
   if (rawType === 'number' || rawType === 'integer') return 'number'
   if (rawType === 'boolean') return 'boolean'
   if (rawType === 'object') return 'object'
+  if (rawType === 'array') return 'array'
+  return 'string'
+}
+
+function inferHumanInLoopFieldType(
+  node: Node<WfNodeData>,
+  field: string,
+): InputParam['paramType'] {
+  if (field === 'decision' || field === 'comment') return 'string'
+  const cfg = (node.data.config ?? {}) as Record<string, unknown>
+  const fields = Array.isArray(cfg.fields) ? cfg.fields : []
+  const matched = fields.find((item) => {
+    if (!item || typeof item !== 'object') return false
+    return String((item as Record<string, unknown>).name ?? '').trim() === field
+  }) as Record<string, unknown> | undefined
+  const rawType = String(matched?.type ?? 'string').trim().toLowerCase()
+  if (rawType === 'number' || rawType === 'integer') return 'number'
+  if (rawType === 'boolean') return 'boolean'
   if (rawType === 'array') return 'array'
   return 'string'
 }
@@ -265,6 +294,8 @@ export function buildWorkflowReferenceParams(
         itemLabel: field,
         paramType: node.data.nodeType === 'code_executor'
           ? inferCodeExecutorFieldType(node, field)
+          : node.data.nodeType === 'human_in_loop'
+            ? inferHumanInLoopFieldType(node, field)
           : inferFieldType(field),
         required: false,
         description: `${groupLabel}.${field}`,

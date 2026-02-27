@@ -14,6 +14,10 @@ from sqlalchemy.orm import Session, selectinload
 from app.ai_registry.runtime import resolve_openai_compat_config
 from app.assistant.models import Conversation, Message
 from app.assistant.openai_compat import build_openai_compat_request_headers
+from app.assistant.skills.human_loop_runtime import (
+    list_pending_approvals_for_conversation,
+    submit_human_approval_decision,
+)
 from app.common.exceptions import ApiException
 from app.common.time import utcnow
 
@@ -93,6 +97,12 @@ class ChatEventAdapter:
         step["status"] = "completed"
         self._emit("analysis_end", {"id": analysis_id})
 
+    def on_human_approval_requested(self, approval: dict) -> None:
+        self._emit("human_approval_requested", {"approval": approval})
+
+    def on_human_approval_resolved(self, approval: dict) -> None:
+        self._emit("human_approval_resolved", {"approval": approval})
+
 
 class AssistantService:
     def __init__(self, db: Session):
@@ -141,6 +151,36 @@ class AssistantService:
             )
         return conversation
 
+    def list_pending_approvals(self, conversation_id: UUID) -> list[dict]:
+        self.get_conversation_basic(conversation_id)
+        return list_pending_approvals_for_conversation(self.db, conversation_id)
+
+    def submit_approval_decision(
+        self,
+        *,
+        conversation_id: UUID,
+        approval_id: UUID,
+        decision: str,
+        values: dict | None,
+        comment: str | None,
+    ) -> dict:
+        self.get_conversation_basic(conversation_id)
+        try:
+            return submit_human_approval_decision(
+                self.db,
+                approval_id=approval_id,
+                decision=decision,
+                values=values or {},
+                comment=comment,
+                expected_conversation_id=conversation_id,
+            )
+        except ValueError as exc:
+            raise ApiException(
+                status_code=400,
+                code=42251,
+                message=str(exc),
+            ) from exc
+
     def delete_conversation(self, conversation_id: UUID) -> None:
         conversation = self.get_conversation_basic(conversation_id)
         self.db.delete(conversation)
@@ -176,6 +216,7 @@ class AssistantService:
             content_parts: list[str] = []
             for delta in self._generate_response(
                 conversation.id,
+                message_id=assistant_msg.id,
                 stream_output=stream_output,
                 on_tool_call_start=event_adapter.on_tool_call_start,
                 on_tool_call_end=event_adapter.on_tool_call_end,
@@ -184,6 +225,8 @@ class AssistantService:
                 on_analysis_start=event_adapter.on_analysis_start,
                 on_analysis_delta=event_adapter.on_analysis_delta,
                 on_analysis_end=event_adapter.on_analysis_end,
+                on_human_approval_requested=event_adapter.on_human_approval_requested,
+                on_human_approval_resolved=event_adapter.on_human_approval_resolved,
             ):
                 while tool_events:
                     yield tool_events.popleft()
@@ -220,6 +263,7 @@ class AssistantService:
     def _generate_response(
         self,
         conversation_id: UUID,
+        message_id: UUID | None = None,
         stream_output: bool = True,
         on_tool_call_start: Callable[[str, str, dict], None] | None = None,
         on_tool_call_end: Callable[[str, str, str], None] | None = None,
@@ -228,6 +272,8 @@ class AssistantService:
         on_analysis_start: Callable[[str], None] | None = None,
         on_analysis_delta: Callable[[str, str], None] | None = None,
         on_analysis_end: Callable[[str], None] | None = None,
+        on_human_approval_requested: Callable[[dict], None] | None = None,
+        on_human_approval_resolved: Callable[[dict], None] | None = None,
     ) -> Iterator[str]:
         """生成 AI 回复，优先使用 LangChain Agent"""
         logger.debug("assistant._generate_response start conversation_id=%s", conversation_id)
@@ -254,6 +300,9 @@ class AssistantService:
                 runtime_context={
                     "conversation_id": str(conversation_id),
                     "stream_output": bool(stream_output),
+                    "run_id": str(message_id) if message_id else None,
+                    "channel_type": "assistant_chat",
+                    "message_id": str(message_id) if message_id else None,
                 },
                 on_tool_call_start=on_tool_call_start,
                 on_tool_call_end=on_tool_call_end,
@@ -262,6 +311,8 @@ class AssistantService:
                 on_analysis_start=on_analysis_start,
                 on_analysis_delta=on_analysis_delta,
                 on_analysis_end=on_analysis_end,
+                on_human_approval_requested=on_human_approval_requested,
+                on_human_approval_resolved=on_human_approval_resolved,
             ):
                 yield delta
             logger.debug("assistant._generate_response end (agent completed)")

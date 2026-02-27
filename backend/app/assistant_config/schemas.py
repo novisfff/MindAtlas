@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -219,7 +219,7 @@ class OutputFieldSpecInput(CamelModel):
 NodeType = Literal[
     "start", "llm", "tool", "if_else",
     "parameter_extractor", "knowledge_retrieval",
-    "iteration", "loop", "code_executor", "variable_assign", "output",
+    "iteration", "loop", "code_executor", "variable_assign", "human_in_loop", "output",
 ]
 ConditionOperator = Literal[
     "contains", "not_contains", "starts_with", "ends_with",
@@ -309,6 +309,12 @@ class WorkflowTestRunRequest(CamelModel):
         if self.user_input is None or not str(self.user_input).strip():
             raise ValueError("user_input is required when start inputMode=text")
         return self
+
+
+class HumanApprovalDecisionRequest(CamelModel):
+    decision: Literal["approved", "rejected"]
+    values: dict[str, Any] = Field(default_factory=dict)
+    comment: str | None = Field(default=None, max_length=2000)
 
 
 class AgentTestRunDraftInput(CamelModel):
