@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import UUID
 
 from pydantic import Field
@@ -11,6 +11,13 @@ from app.common.schemas import CamelModel, OrmModel
 
 class ChatRequest(CamelModel):
     message: str = Field(..., min_length=1, max_length=8000)
+    stream_output: bool = True
+
+
+class HumanApprovalDecisionRequest(CamelModel):
+    decision: Literal["approved", "rejected"]
+    values: dict[str, Any] = Field(default_factory=dict)
+    comment: str | None = Field(default=None, max_length=2000)
 
 
 class ConversationCreateRequest(CamelModel):

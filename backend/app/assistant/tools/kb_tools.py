@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, TypeVar
 from uuid import UUID
 
@@ -164,92 +165,81 @@ def _build_references(
     return references
 
 
-@tool
-def kb_search(
-    query: str,
-) -> str:
-    """使用 LightRAG 进行知识库检索，返回证据片段与图谱上下文。
+@dataclass(frozen=True)
+class _KbSearchConfig:
+    mode: str
+    top_k: int
+    chunk_top_k: int
+    max_entries: int
+    max_chunk_chars: int
+    min_score: float
+    max_tokens: int
 
-    该工具仅负责检索，助手应基于返回内容自行总结与组织输出。
-    返回结果包含：按 Entry 聚合的证据片段，以及相关的知识图谱实体与关系。
 
-    Args:
-        query: 用户查询文本。
-
-    Returns:
-        JSON 字符串（对象）：
-          {
-            "references": [
-              {"index": 1, "type": "entry", "entryId": "...", "title": "...", "summary": "...", "content": "..."},
-              {"index": 2, "type": "entry", "entryId": "...", "title": "...", "summary": "...", "content": "..."},
-              {"index": 3, "type": "attachment", "attachmentId": "...", "entryId": "...", "filename": "...", "content": "..."},
-              {"index": 4, "type": "attachment", "attachmentId": "...", "entryId": "...", "filename": "...", "content": "..."},
-              {"index": 5, "type": "entity", "name": "...", "entityType": "...", "description": "...", "entryId": "..."},
-              {"index": 6, "type": "rel", "source": "...", "target": "...", "description": "...", "keywords": "...", "entryId": "..."}
-            ]
-          }
-    """
-
-    # 注意:
-    # 检索参数通过 Settings（env/.env）配置，不作为工具入参：
-    # - ASSISTANT_KB_GRAPH_RECALL_MODE
-    # - ASSISTANT_KB_GRAPH_RECALL_TOP_K
-    # - ASSISTANT_KB_GRAPH_RECALL_CHUNK_TOP_K
-    # - ASSISTANT_KB_GRAPH_RECALL_MAX_ENTRIES
-    # - ASSISTANT_KB_GRAPH_RECALL_MAX_CHUNK_CHARS
-    # - ASSISTANT_KB_GRAPH_RECALL_MIN_SCORE
-    # - ASSISTANT_KB_GRAPH_RECALL_MAX_TOKENS
-    
-    q = (query or "").strip()
-    if not q:
-        raise ValueError("query is required")
-
+def _resolve_kb_search_config(mode: str | None, top_k: int | None) -> _KbSearchConfig:
     from app.config import get_settings
 
     settings = get_settings()
-    m = _normalize_mode(getattr(settings, "assistant_kb_graph_recall_mode", "mix"))
-    k = _clamp_int(getattr(settings, "assistant_kb_graph_recall_top_k", 10), default=10, min_value=1, max_value=50)
-    ck = _clamp_int(
-        getattr(settings, "assistant_kb_graph_recall_chunk_top_k", 20),
-        default=max(k, 1),
+    mode_setting = getattr(settings, "assistant_kb_graph_recall_mode", "mix")
+    resolved_mode = _normalize_mode(mode if mode is not None else mode_setting)
+    resolved_top_k = _clamp_int(
+        top_k if top_k is not None else getattr(settings, "assistant_kb_graph_recall_top_k", 10),
+        default=10,
         min_value=1,
         max_value=50,
     )
-    me = _clamp_int(
+    chunk_top_k = _clamp_int(
+        getattr(settings, "assistant_kb_graph_recall_chunk_top_k", 20),
+        default=max(resolved_top_k, 1),
+        min_value=1,
+        max_value=50,
+    )
+    max_entries = _clamp_int(
         getattr(settings, "assistant_kb_graph_recall_max_entries", 10),
         default=10,
         min_value=1,
         max_value=50,
     )
-    mcc = _clamp_int(
+    max_chunk_chars = _clamp_int(
         getattr(settings, "assistant_kb_graph_recall_max_chunk_chars", 600),
         default=600,
         min_value=50,
         max_value=2000,
     )
-    threshold = _clamp_float(
+    min_score = _clamp_float(
         getattr(settings, "assistant_kb_graph_recall_min_score", 0.0),
         default=0.0,
         min_value=0.0,
         max_value=1.0,
     )
-    mt = _clamp_int(
+    max_tokens = _clamp_int(
         getattr(settings, "assistant_kb_graph_recall_max_tokens", 8),
         default=8,
         min_value=1,
         max_value=64,
     )
+    return _KbSearchConfig(
+        mode=resolved_mode,
+        top_k=resolved_top_k,
+        chunk_top_k=chunk_top_k,
+        max_entries=max_entries,
+        max_chunk_chars=max_chunk_chars,
+        min_score=min_score,
+        max_tokens=max_tokens,
+    )
 
+
+def _recall_graph_data(query: str, cfg: _KbSearchConfig) -> dict[str, Any]:
     from app.lightrag.service import LightRagService
 
     try:
-        graph_data = _run_async(
+        return _run_async(
             lambda: LightRagService().graph_recall_with_context(
-                query=q,
-                mode=m,
-                top_k=k,
-                chunk_top_k=ck,
-                max_tokens=mt,
+                query=query,
+                mode=cfg.mode,
+                top_k=cfg.top_k,
+                chunk_top_k=cfg.chunk_top_k,
+                max_tokens=cfg.max_tokens,
             )
         )
     except ApiException as exc:
@@ -257,19 +247,18 @@ def kb_search(
             raise ValueError("LightRAG is not enabled") from exc
         raise
 
-    # Extract chunks from graph_data
-    chunks = graph_data.get("chunks") or []
 
+def _collect_chunk_buckets(
+    *,
+    chunks: list[Any],
+    threshold: float,
+    max_chunk_chars: int,
+    parse_attachment_id_from_attachment_file_path: Callable[[str], str | None],
+    parse_entry_id_from_attachment_file_path: Callable[[str], str | None],
+) -> tuple[set[UUID], dict[UUID, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
     title_cache: dict[str, UUID] = {}
     title_db = None
 
-    # Import helper once outside the loop for performance
-    from app.lightrag.source_ids import (
-        parse_attachment_id_from_attachment_file_path,
-        parse_entry_id_from_attachment_file_path,
-    )
-
-    # Normalize chunks and group by entry_id, keeping multiple chunks per same id.
     attachment_ids: set[UUID] = set()
     chunks_by_entry: dict[UUID, list[dict[str, Any]]] = {}
     chunks_by_attachment: dict[str, list[dict[str, Any]]] = {}
@@ -286,7 +275,6 @@ def kb_search(
         if doc_id.startswith("attachment:"):
             kind = "attachment"
             attachment_id = doc_id.split(":", 1)[1].strip() or None
-        # Some recall paths may lose attachment doc_id; recover from composite file_path when possible.
         if kind != "attachment" and "/attachments/" in file_path:
             kind = "attachment"
             attachment_id = parse_attachment_id_from_attachment_file_path(file_path) or None
@@ -298,8 +286,6 @@ def kb_search(
             except Exception:
                 entry_uuid = None
 
-        # For attachment chunks, use source_ids helper to parse entry_id from file_path
-        # Supports both old (UUID-only) and new (composite) formats
         if entry_uuid is None and file_path:
             if kind == "attachment":
                 parsed_entry_id = parse_entry_id_from_attachment_file_path(file_path)
@@ -309,13 +295,11 @@ def kb_search(
                     except Exception:
                         pass
             else:
-                # For entry chunks, file_path should be a UUID
                 try:
                     entry_uuid = UUID(file_path)
                 except Exception:
                     entry_uuid = None
 
-        # Backward compat: try to map to Entry by parsing the rendered "Title:" line.
         if entry_uuid is None:
             title = _parse_entry_title_from_chunk(raw_chunk)
             if title:
@@ -338,7 +322,6 @@ def kb_search(
         if entry_uuid is None and not (kind == "attachment" and attachment_id):
             continue
 
-        # Filter by threshold: treat None as 0 to avoid low-quality/noise references
         effective_score = score if score is not None else 0.0
         if effective_score < threshold:
             continue
@@ -356,10 +339,9 @@ def kb_search(
             "entryId": str(entry_uuid) if entry_uuid is not None else None,
             "attachmentId": attachment_id,
             "score": score,
-            "content": _truncate(raw_chunk, mcc),
+            "content": _truncate(raw_chunk, max_chunk_chars),
         }
         if not (chunk.get("content") or "").strip():
-            # Filter empty chunks early
             continue
 
         if entry_uuid is not None:
@@ -367,19 +349,16 @@ def kb_search(
         if kind == "attachment" and attachment_id:
             chunks_by_attachment.setdefault(attachment_id, []).append(chunk)
 
-    # Collect unique Entry UUIDs from chunks
-    entry_best_score: dict[UUID, float] = {}
-    for entry_id, entry_chunks in chunks_by_entry.items():
-        best = 0.0
-        for c in entry_chunks:
-            s = c.get("score")
-            if isinstance(s, (int, float)) and float(s) > best:
-                best = float(s)
-        entry_best_score[entry_id] = best
+    return attachment_ids, chunks_by_entry, chunks_by_attachment
 
-    ranked_entry_ids = sorted(entry_best_score.keys(), key=lambda eid: entry_best_score.get(eid, 0.0), reverse=True)
 
-    # Build graphContext from entities and relationships
+def _build_graph_context(
+    *,
+    chunks: list[Any],
+    graph_data: dict[str, Any],
+    parse_attachment_id_from_attachment_file_path: Callable[[str], str | None],
+    parse_entry_id_from_attachment_file_path: Callable[[str], str | None],
+) -> dict[str, Any]:
     graph_context: dict[str, Any] = {
         "entities": [],
         "relationships": [],
@@ -390,9 +369,7 @@ def kb_search(
             continue
         fp = (src.get("file_path") or "").strip()
         aid = (src.get("doc_id") or "").strip()
-        if not fp:
-            continue
-        if not aid.startswith("attachment:"):
+        if not fp or not aid.startswith("attachment:"):
             continue
         chunk_entry_id = ""
         try:
@@ -439,107 +416,223 @@ def kb_search(
             "entryId": entry_id,
             "attachmentId": attachment_id or None,
         })
+    return graph_context
 
-    db = get_current_db()
-    selected_entry_ids = ranked_entry_ids[:me]
-    entries = db.query(Entry).filter(Entry.id.in_(list(selected_entry_ids))).all()
-    entry_by_id: dict[UUID, Entry] = {e.id: e for e in entries}
 
+def _rank_entry_ids(chunks_by_entry: dict[UUID, list[dict[str, Any]]]) -> list[UUID]:
+    entry_best_score: dict[UUID, float] = {}
+    for entry_id, entry_chunks in chunks_by_entry.items():
+        best = 0.0
+        for chunk in entry_chunks:
+            score = chunk.get("score")
+            if isinstance(score, (int, float)) and float(score) > best:
+                best = float(score)
+        entry_best_score[entry_id] = best
+    return sorted(entry_best_score.keys(), key=lambda eid: entry_best_score.get(eid, 0.0), reverse=True)
+
+
+def _load_attachment_metadata(db: Any, attachment_ids: set[UUID]) -> tuple[dict[str, str], dict[str, str]]:
     attachment_name_by_id: dict[str, str] = {}
     attachment_entry_by_id: dict[str, str] = {}
-    if attachment_ids:
-        try:
-            from app.attachment.models import Attachment
+    if not attachment_ids:
+        return attachment_name_by_id, attachment_entry_by_id
+    try:
+        from app.attachment.models import Attachment
 
-            rows = (
-                db.query(Attachment.id, Attachment.entry_id, Attachment.original_filename)
-                .filter(Attachment.id.in_(list(attachment_ids)))
-                .all()
-            )
-            for aid, entry_id, name in rows:
-                attachment_name_by_id[str(aid)] = name or ""
-                attachment_entry_by_id[str(aid)] = str(entry_id)
-        except Exception:
-            attachment_name_by_id = {}
-            attachment_entry_by_id = {}
+        rows = (
+            db.query(Attachment.id, Attachment.entry_id, Attachment.original_filename)
+            .filter(Attachment.id.in_(list(attachment_ids)))
+            .all()
+        )
+        for aid, entry_id, name in rows:
+            attachment_name_by_id[str(aid)] = name or ""
+            attachment_entry_by_id[str(aid)] = str(entry_id)
+    except Exception:
+        attachment_name_by_id = {}
+        attachment_entry_by_id = {}
+    return attachment_name_by_id, attachment_entry_by_id
 
+
+def _build_entry_items(
+    *,
+    selected_entry_ids: list[UUID],
+    entry_by_id: dict[UUID, Entry],
+    chunks_by_entry: dict[UUID, list[dict[str, Any]]],
+    max_chunk_chars: int,
+) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    for eid in selected_entry_ids:
-        e = entry_by_id.get(eid)
-        if e is None:
+    for entry_id in selected_entry_ids:
+        entry = entry_by_id.get(entry_id)
+        if entry is None:
             continue
-        entry_chunks = chunks_by_entry.get(eid, [])
+        entry_chunks = chunks_by_entry.get(entry_id, [])
         ranked_entry_chunks = sorted(
             [c for c in entry_chunks if isinstance(c, dict) and c.get("kind") == "entry"],
             key=lambda x: float(x.get("score") or 0.0),
             reverse=True,
         )
-        # Keep all chunks for same entry; do not dedupe.
-        for c in ranked_entry_chunks:
-            content = (c.get("content") or "").strip()
+        for chunk in ranked_entry_chunks:
+            content = (chunk.get("content") or "").strip()
             if not content:
                 continue
             items.append(
                 {
-                    "entryId": str(e.id),
-                    "title": e.title or "",
-                    "summary": e.summary or "",
+                    "entryId": str(entry.id),
+                    "title": entry.title or "",
+                    "summary": entry.summary or "",
                     "content": content,
                 }
             )
 
-        # If no valid entry chunks, fallback to entry content (truncated to avoid prompt explosion)
         if not ranked_entry_chunks:
-            fallback = _truncate(e.content, mcc)
+            fallback = _truncate(entry.content, max_chunk_chars)
             if fallback:
                 items.append(
                     {
-                        "entryId": str(e.id),
-                        "title": e.title or "",
-                        "summary": e.summary or "",
+                        "entryId": str(entry.id),
+                        "title": entry.title or "",
+                        "summary": entry.summary or "",
                         "content": fallback,
                     }
                 )
+    return items
 
-    # Attachments: only include attachments that exist in our system DB
+
+def _build_attachment_items(
+    *,
+    attachment_name_by_id: dict[str, str],
+    attachment_entry_by_id: dict[str, str],
+    chunks_by_attachment: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
     attachments: list[dict[str, Any]] = []
-    if attachment_name_by_id:
-        # Preserve multiple chunks for the same attachment; do not dedupe.
-        def _best_score(chunks: list[dict[str, Any]]) -> float:
-            best = 0.0
-            for c in chunks:
-                s = c.get("score")
-                if isinstance(s, (int, float)) and float(s) > best:
-                    best = float(s)
-            return best
+    if not attachment_name_by_id:
+        return attachments
 
-        ranked_attachment_ids = sorted(
-            attachment_name_by_id.keys(),
-            key=lambda aid: _best_score(chunks_by_attachment.get(aid, [])),
-            reverse=True,
-        )
-        for aid in ranked_attachment_ids:
-            att_chunks = chunks_by_attachment.get(aid, [])
-            ranked_chunks = sorted(att_chunks, key=lambda x: float(x.get("score") or 0.0), reverse=True)
-            for c in ranked_chunks:
-                content = (c.get("content") or "").strip()
-                if not content:
-                    continue
-                attachments.append(
-                    {
-                        "attachmentId": aid,
-                        "entryId": attachment_entry_by_id.get(aid) or "",
-                        "title": attachment_name_by_id.get(aid) or "",
-                        "content": content,
-                    }
-                )
+    def _best_score(chunks: list[dict[str, Any]]) -> float:
+        best = 0.0
+        for chunk in chunks:
+            score = chunk.get("score")
+            if isinstance(score, (int, float)) and float(score) > best:
+                best = float(score)
+        return best
+
+    ranked_attachment_ids = sorted(
+        attachment_name_by_id.keys(),
+        key=lambda aid: _best_score(chunks_by_attachment.get(aid, [])),
+        reverse=True,
+    )
+    for attachment_id in ranked_attachment_ids:
+        attachment_chunks = chunks_by_attachment.get(attachment_id, [])
+        ranked_chunks = sorted(attachment_chunks, key=lambda x: float(x.get("score") or 0.0), reverse=True)
+        for chunk in ranked_chunks:
+            content = (chunk.get("content") or "").strip()
+            if not content:
+                continue
+            attachments.append(
+                {
+                    "attachmentId": attachment_id,
+                    "entryId": attachment_entry_by_id.get(attachment_id) or "",
+                    "title": attachment_name_by_id.get(attachment_id) or "",
+                    "content": content,
+                }
+            )
+    return attachments
+
+
+@tool
+def kb_search(
+    query: str,
+    mode: str | None = None,
+    top_k: int | None = None,
+) -> str:
+    """使用 LightRAG 进行知识库检索，返回证据片段与图谱上下文。
+
+    该工具仅负责检索，助手应基于返回内容自行总结与组织输出。
+    返回结果包含：按 Entry 聚合的证据片段，以及相关的知识图谱实体与关系。
+
+    Args:
+        query: 用户查询文本。
+        mode: 可选检索模式（naive/local/global/hybrid/mix），为空时使用系统默认配置。
+        top_k: 可选召回条数，为空时使用系统默认配置。
+
+    Returns:
+        JSON 字符串（对象）：
+          {
+            "references": [
+              {"index": 1, "type": "entry", "entryId": "...", "title": "...", "summary": "...", "content": "..."},
+              {"index": 2, "type": "entry", "entryId": "...", "title": "...", "summary": "...", "content": "..."},
+              {"index": 3, "type": "attachment", "attachmentId": "...", "entryId": "...", "filename": "...", "content": "..."},
+              {"index": 4, "type": "attachment", "attachmentId": "...", "entryId": "...", "filename": "...", "content": "..."},
+              {"index": 5, "type": "entity", "name": "...", "entityType": "...", "description": "...", "entryId": "..."},
+              {"index": 6, "type": "rel", "source": "...", "target": "...", "description": "...", "keywords": "...", "entryId": "..."}
+            ]
+          }
+    """
+
+    # 注意:
+    # 检索参数通过 Settings（env/.env）配置，不作为工具入参：
+    # - ASSISTANT_KB_GRAPH_RECALL_MODE
+    # - ASSISTANT_KB_GRAPH_RECALL_TOP_K
+    # - ASSISTANT_KB_GRAPH_RECALL_CHUNK_TOP_K
+    # - ASSISTANT_KB_GRAPH_RECALL_MAX_ENTRIES
+    # - ASSISTANT_KB_GRAPH_RECALL_MAX_CHUNK_CHARS
+    # - ASSISTANT_KB_GRAPH_RECALL_MIN_SCORE
+    # - ASSISTANT_KB_GRAPH_RECALL_MAX_TOKENS
+    
+    q = (query or "").strip()
+    if not q:
+        raise ValueError("query is required")
+
+    cfg = _resolve_kb_search_config(mode, top_k)
+    graph_data = _recall_graph_data(q, cfg)
+
+    # Extract chunks from graph_data
+    chunks = graph_data.get("chunks") or []
+
+    # Import helper once outside the loop for performance
+    from app.lightrag.source_ids import (
+        parse_attachment_id_from_attachment_file_path,
+        parse_entry_id_from_attachment_file_path,
+    )
+
+    attachment_ids, chunks_by_entry, chunks_by_attachment = _collect_chunk_buckets(
+        chunks=chunks,
+        threshold=cfg.min_score,
+        max_chunk_chars=cfg.max_chunk_chars,
+        parse_attachment_id_from_attachment_file_path=parse_attachment_id_from_attachment_file_path,
+        parse_entry_id_from_attachment_file_path=parse_entry_id_from_attachment_file_path,
+    )
+    ranked_entry_ids = _rank_entry_ids(chunks_by_entry)
+    graph_context = _build_graph_context(
+        chunks=chunks,
+        graph_data=graph_data,
+        parse_attachment_id_from_attachment_file_path=parse_attachment_id_from_attachment_file_path,
+        parse_entry_id_from_attachment_file_path=parse_entry_id_from_attachment_file_path,
+    )
+
+    db = get_current_db()
+    selected_entry_ids = ranked_entry_ids[: cfg.max_entries]
+    entries = db.query(Entry).filter(Entry.id.in_(list(selected_entry_ids))).all()
+    entry_by_id: dict[UUID, Entry] = {e.id: e for e in entries}
+    attachment_name_by_id, attachment_entry_by_id = _load_attachment_metadata(db, attachment_ids)
+    items = _build_entry_items(
+        selected_entry_ids=selected_entry_ids,
+        entry_by_id=entry_by_id,
+        chunks_by_entry=chunks_by_entry,
+        max_chunk_chars=cfg.max_chunk_chars,
+    )
+    attachments = _build_attachment_items(
+        attachment_name_by_id=attachment_name_by_id,
+        attachment_entry_by_id=attachment_entry_by_id,
+        chunks_by_attachment=chunks_by_attachment,
+    )
 
     # Build numbered references for citation
     references = _build_references(items, attachments, graph_context)
 
     return json.dumps(
         {
-            "mode": m,
+            "mode": cfg.mode,
             "query": q,
             "references": references,
         },

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.assistant.schemas import (
     ChatRequest,
     ConversationCreateRequest,
+    HumanApprovalDecisionRequest,
     ConversationListResponse,
     ConversationResponse,
     ConversationSummaryResponse,
@@ -71,7 +72,7 @@ def chat(
     service = AssistantService(db)
     service.get_conversation_basic(id)  # 验证存在
     return StreamingResponse(
-        service.chat_stream(id, request.message),
+        service.chat_stream(id, request.message, stream_output=request.stream_output),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -79,3 +80,31 @@ def chat(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/conversations/{id}/approvals/pending", response_model=ApiResponse)
+def list_pending_approvals(
+    id: UUID,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = AssistantService(db)
+    items = service.list_pending_approvals(id)
+    return ApiResponse.ok(items)
+
+
+@router.post("/conversations/{id}/approvals/{approval_id}/decision", response_model=ApiResponse)
+def submit_approval_decision(
+    id: UUID,
+    approval_id: UUID,
+    request: HumanApprovalDecisionRequest,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = AssistantService(db)
+    payload = service.submit_approval_decision(
+        conversation_id=id,
+        approval_id=approval_id,
+        decision=request.decision,
+        values=request.values,
+        comment=request.comment,
+    )
+    return ApiResponse.ok(payload)

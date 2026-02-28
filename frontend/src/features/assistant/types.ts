@@ -1,3 +1,5 @@
+import type { HumanApprovalRecord } from '../shared/hitl'
+
 export interface ToolCall {
   id: string
   name: string
@@ -27,10 +29,13 @@ export interface Message {
   toolCalls?: ToolCall[]
   skillCalls?: SkillCall[]
   analysisSteps?: Analysis[]
+  humanApprovals?: HumanApproval[]
   toolResults?: { id: string; status: string; result: string }[]
   createdAt: string
   updatedAt: string
 }
+
+export type HumanApproval = HumanApprovalRecord
 
 export interface Conversation {
   id: string

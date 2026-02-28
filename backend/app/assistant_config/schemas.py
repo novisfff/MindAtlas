@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import json
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -13,13 +12,14 @@ from app.common.schemas import CamelModel, OrmModel
 
 
 ToolKind = Literal["local", "remote"]
-StepType = Literal["analysis", "tool", "summary"]
-ArgsFrom = Literal["context", "previous", "custom", "json"]
-AnalysisOutputMode = Literal["text", "json"]
 AuthType = Literal["none", "bearer", "basic", "api-key"]
 BodyType = Literal["none", "form-data", "x-www-form-urlencoded", "json", "xml", "raw"]
-SkillMode = Literal["steps", "agent"]
+SkillMode = Literal["langgraph"]
+LanggraphPattern = Literal["agent_loop", "workflow_dag"]
+TargetType = Literal["workflow", "agent"]
+AgentModelSource = Literal["default", "custom"]
 OutputFieldType = Literal["string", "number", "integer", "boolean", "object", "array"]
+VersionSource = Literal["save", "publish"]
 
 # 允许的 URL scheme
 ALLOWED_URL_SCHEMES = {"http", "https"}
@@ -52,6 +52,13 @@ class InputParamSchema(CamelModel):
     required: bool = False
 
 
+class OutputParamSchema(CamelModel):
+    """输出参数定义"""
+    name: str = Field(..., min_length=1, max_length=64)
+    description: str | None = None
+    param_type: str = Field(default="string", max_length=32)  # string|number|boolean|array|object
+
+
 class SystemToolDefinitionResponse(CamelModel):
     """系统工具完整定义（代码即真相）。"""
     name: str
@@ -60,6 +67,7 @@ class SystemToolDefinitionResponse(CamelModel):
     is_system: bool = True
     enabled: bool = True
     input_params: list[InputParamSchema] | None = None
+    output_params: list[OutputParamSchema] | None = None
     returns: str | None = None
     json_schema: dict | None = None
 
@@ -77,6 +85,8 @@ class AssistantToolCreateRequest(CamelModel):
 
     # 输入参数
     input_params: list[InputParamSchema] | None = None
+    # 输出参数（暂不持久化，保留接口兼容）
+    output_params: list[OutputParamSchema] | None = None
 
     endpoint_url: str | None = Field(default=None, max_length=2048)
     http_method: str | None = Field(default="POST", max_length=10)
@@ -115,6 +125,8 @@ class AssistantToolUpdateRequest(CamelModel):
 
     # 输入参数
     input_params: list[InputParamSchema] | None = None
+    # 输出参数（暂不持久化，保留接口兼容）
+    output_params: list[OutputParamSchema] | None = None
 
     endpoint_url: str | None = Field(default=None, max_length=2048)
     http_method: str | None = Field(default=None, max_length=10)
@@ -154,6 +166,8 @@ class AssistantToolResponse(OrmModel):
 
     # 输入参数
     input_params: list[dict] | None
+    # 输出参数（当前仅系统工具定义可提供，远程工具默认 None）
+    output_params: list[dict] | None = None
 
     endpoint_url: str | None
     http_method: str | None
@@ -181,9 +195,6 @@ class AssistantToolResponse(OrmModel):
 
 # ==================== Skill Schemas ====================
 
-_TEMPLATE_VAR_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
-
-
 class OutputFieldSpecInput(CamelModel):
     """输出字段规格定义（API 输入）"""
     name: str = Field(..., min_length=1, max_length=64)
@@ -203,165 +214,230 @@ class OutputFieldSpecInput(CamelModel):
         return self
 
 
-def _extract_field_names(output_fields: list[OutputFieldSpecInput] | list[str] | None) -> set[str]:
-    """从 output_fields 提取字段名集合（兼容新旧格式）"""
-    if not output_fields:
-        return set()
-    names: set[str] = set()
-    for f in output_fields:
-        if isinstance(f, OutputFieldSpecInput):
-            names.add(f.name)
-        elif isinstance(f, str) and f.strip():
-            names.add(f.strip())
-        elif isinstance(f, dict):
-            name = f.get("name", "")
-            if isinstance(name, str) and name.strip():
-                names.add(name.strip())
-    return names
+# ==================== Workflow DAG Schemas ====================
+
+NodeType = Literal[
+    "start", "llm", "tool", "if_else",
+    "parameter_extractor", "knowledge_retrieval",
+    "iteration", "loop", "code_executor", "variable_assign", "human_in_loop", "output",
+]
+ConditionOperator = Literal[
+    "contains", "not_contains", "starts_with", "ends_with",
+    "is", "is_not", "is_empty", "is_not_empty",
+    # legacy operators kept for compatibility with old saved workflows
+    "equals", "not_equals", "gt", "lt", "gte", "lte",
+]
 
 
-def _validate_step_template_refs(steps: list["AssistantSkillStepInput"]) -> None:
-    """校验模板变量引用：analysis jsonmode 仅允许引用其 output_fields 白名单。"""
-    allowed_fields_by_step: dict[int, set[str]] = {}
-    for idx, step in enumerate(steps):
-        step_no = idx + 1
-        if step.type == "analysis" and step.output_mode == "json":
-            # 使用新的提取函数，兼容新旧格式
-            allowed_fields_by_step[step_no] = _extract_field_names(step.output_fields)
-
-    base_vars = {"user_input", "history", "last_step_result", "last_step_result_raw"}
-
-    for idx, step in enumerate(steps):
-        current_step_no = idx + 1
-        template = (step.args_template or "").strip()
-        if step.type != "tool":
-            template = ""
-        if step.type == "tool" and step.args_from not in ("custom", "json"):
-            continue
-        if not template:
-            continue
-
-        for m in _TEMPLATE_VAR_RE.finditer(template):
-            var_name = m.group(1)
-            if var_name in base_vars:
-                continue
-            if re.fullmatch(r"step_\d+_result", var_name):
-                continue
-            if re.fullmatch(r"step_\d+_result_raw", var_name):
-                continue
-
-            m2 = re.fullmatch(r"step_(\d+)_([a-zA-Z0-9_]+)", var_name)
-            if not m2:
-                continue
-
-            ref_step_no = int(m2.group(1))
-            field = m2.group(2)
-
-            if ref_step_no >= current_step_no:
-                raise ValueError(f"args_template references future step: {var_name}")
-
-            allowed = allowed_fields_by_step.get(ref_step_no)
-            if not allowed or field not in allowed:
-                raise ValueError(
-                    f"args_template references disallowed field: {var_name}; "
-                    f"step_{ref_step_no} must be analysis jsonmode and include '{field}' in output_fields"
-                )
-
-    # analysis instruction 的变量引用校验（禁止 user_input/history 等用户输入类变量）
-    disallowed_in_instruction = {"user_input", "history"}
-    for idx, step in enumerate(steps):
-        current_step_no = idx + 1
-        if step.type != "analysis":
-            continue
-        instruction = (step.instruction or "").strip()
-        if not instruction:
-            continue
-        for m in _TEMPLATE_VAR_RE.finditer(instruction):
-            var_name = m.group(1)
-            if var_name in disallowed_in_instruction:
-                raise ValueError(f"analysis instruction cannot reference: {var_name}")
-            if var_name in ("last_step_result", "last_step_result_raw"):
-                continue
-            if re.fullmatch(r"step_\d+_result", var_name):
-                continue
-            if re.fullmatch(r"step_\d+_result_raw", var_name):
-                continue
-            m2 = re.fullmatch(r"step_(\d+)_([a-zA-Z0-9_]+)", var_name)
-            if not m2:
-                continue
-            ref_step_no = int(m2.group(1))
-            field = m2.group(2)
-            if ref_step_no >= current_step_no:
-                raise ValueError(f"analysis instruction references future step: {var_name}")
-            allowed = allowed_fields_by_step.get(ref_step_no)
-            if not allowed or field not in allowed:
-                raise ValueError(
-                    f"analysis instruction references disallowed field: {var_name}; "
-                    f"step_{ref_step_no} must be analysis jsonmode and include '{field}' in output_fields"
-                )
+class ConditionExpressionInput(CamelModel):
+    """IF/ELSE 条件表达式"""
+    id: str = Field(..., min_length=1, max_length=64)
+    variable: str = Field(..., min_length=1, max_length=256)
+    operator: ConditionOperator
+    value: str | None = None
+    handle: str = Field(..., min_length=1, max_length=64)
 
 
-class AssistantSkillStepInput(CamelModel):
-    type: StepType
-    instruction: str | None = None
-    tool_name: str | None = None
-    args_from: ArgsFrom | None = None
-    args_template: str | None = Field(default=None, max_length=8000)
-    output_mode: AnalysisOutputMode | None = None
-    output_fields: list[OutputFieldSpecInput] | list[str] | None = None  # 支持新旧格式
-    include_in_summary: bool | None = True
-    kb_config: dict | None = None
+class WorkflowNodeInput(CamelModel):
+    """工作流节点输入"""
+    node_id: str = Field(..., min_length=1, max_length=128)
+    node_type: NodeType
+    label: str = Field(default="", max_length=256)
+    position_x: float = 0.0
+    position_y: float = 0.0
+    config: dict | None = None
 
     @model_validator(mode="after")
-    def _validate(self) -> "AssistantSkillStepInput":
-        if self.type == "tool" and not (self.tool_name or "").strip():
-            raise ValueError("tool_name is required when type=tool")
-        if self.type == "tool" and self.args_from == "custom":
-            if not (self.args_template or "").strip():
-                raise ValueError("args_template is required when args_from=custom")
-        if self.type == "tool" and self.args_from == "json":
-            template = (self.args_template or "").strip()
-            if not template:
-                raise ValueError("args_template is required when args_from=json")
-            # 校验变量名
-            allowed_vars = {"user_input", "history", "last_step_result", "last_step_result_raw"}
-            for m in re.finditer(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}", template):
-                var_name = m.group(1)
-                if var_name in allowed_vars:
-                    continue
-                if re.fullmatch(r"step_\d+_result", var_name):
-                    continue
-                if re.fullmatch(r"step_\d+_result_raw", var_name):
-                    continue
-                # step_N_<field> 由 Skill 级校验（结合 analysis jsonmode 输出字段白名单）进一步限制
-                if re.fullmatch(r"step_\d+_[a-zA-Z0-9_]+", var_name):
-                    continue
-                raise ValueError(f"Unknown variable in args_template: {var_name}")
-            # 校验 JSON 格式（用占位符替换变量后解析）
-            probe = re.sub(r"\{\{\s*[a-zA-Z0-9_]+\s*\}\}", '"__placeholder__"', template)
-            try:
-                obj = json.loads(probe)
-            except Exception:
-                raise ValueError("args_template must be valid JSON when args_from=json")
-            if not isinstance(obj, dict):
-                raise ValueError("args_template must be a JSON object when args_from=json")
-
-        # analysis 输出 JSON 模式校验
-        if self.type == "analysis" and self.output_mode == "json":
-            fields = self.output_fields or []
-            if not isinstance(fields, list) or len(fields) == 0:
-                raise ValueError("output_fields is required when output_mode=json for analysis step")
-
-            # 兼容新旧格式：提取并校验字段名
-            field_names = _extract_field_names(fields)
-            if not field_names:
-                raise ValueError("output_fields is required when output_mode=json for analysis step")
-
-            # 校验字段名格式
-            for name in field_names:
-                if not re.fullmatch(r"[a-zA-Z0-9_]+", name):
-                    raise ValueError(f"Invalid output field name: {name}")
+    def _validate(self) -> "WorkflowNodeInput":
+        if not re.fullmatch(r"[a-zA-Z0-9_]+", self.node_id):
+            raise ValueError(f"Invalid node_id: {self.node_id}")
         return self
+
+
+class WorkflowEdgeInput(CamelModel):
+    """工作流边输入"""
+    edge_id: str = Field(..., min_length=1, max_length=128)
+    source_node_id: str = Field(..., min_length=1, max_length=128)
+    target_node_id: str = Field(..., min_length=1, max_length=128)
+    source_handle: str = Field(default="output", max_length=64)
+    target_handle: str = Field(default="input", max_length=64)
+    condition_type: Literal["expression", "default"] | None = None
+    condition_expr: ConditionExpressionInput | None = None
+    label: str | None = Field(default=None, max_length=256)
+
+
+class WorkflowInput(CamelModel):
+    """工作流 DAG 输入（nodes + edges + viewport）"""
+    nodes: list[WorkflowNodeInput] = Field(..., min_length=1)
+    edges: list[WorkflowEdgeInput] = Field(default_factory=list)
+    viewport: dict | None = None
+
+
+def _resolve_workflow_start_input_mode(workflow: WorkflowInput | None) -> str:
+    if workflow is None:
+        return "text"
+    for node in workflow.nodes:
+        if node.node_type != "start":
+            continue
+        cfg = node.config if isinstance(node.config, dict) else {}
+        raw_mode = str(cfg.get("input_mode", cfg.get("inputMode", "text")) or "text").strip().lower()
+        if raw_mode == "structured":
+            return "structured"
+        return "text"
+    return "text"
+
+
+class WorkflowTestRunRequest(CamelModel):
+    """工作流测试运行请求（仅运行草稿，不持久化）。"""
+    workflow: WorkflowInput
+    user_input: str | None = Field(default=None, max_length=8000)
+    structured_input: dict | None = None
+    stream_output: bool = True
+
+    @model_validator(mode="after")
+    def _validate(self) -> "WorkflowTestRunRequest":
+        mode = _resolve_workflow_start_input_mode(self.workflow)
+        if mode == "structured":
+            if not isinstance(self.structured_input, dict):
+                raise ValueError("structured_input is required when start inputMode=structured")
+            if self.user_input is not None and str(self.user_input).strip():
+                raise ValueError("user_input is not allowed when start inputMode=structured")
+            return self
+
+        if self.structured_input is not None:
+            raise ValueError("structured_input is only allowed when start inputMode=structured")
+        if self.user_input is None or not str(self.user_input).strip():
+            raise ValueError("user_input is required when start inputMode=text")
+        return self
+
+
+class HumanApprovalDecisionRequest(CamelModel):
+    decision: Literal["approved", "rejected"]
+    values: dict[str, Any] = Field(default_factory=dict)
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+class AgentTestRunDraftInput(CamelModel):
+    """Agent 测试运行草稿配置（不持久化）。"""
+    system_prompt: str = Field(..., min_length=1, max_length=4096)
+    tools: list[str] = []
+    kb_config: dict | None = None
+    model_source: AgentModelSource = "default"
+    model_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "AgentTestRunDraftInput":
+        if not self.system_prompt.strip():
+            raise ValueError("system_prompt is required")
+        if self.model_source == "custom" and self.model_id is None:
+            raise ValueError("custom model_source requires model_id")
+        if self.model_source == "default":
+            self.model_id = None
+        return self
+
+
+class AgentTestRunRequest(CamelModel):
+    """Agent 测试运行请求（仅运行草稿，不持久化）。"""
+    draft: AgentTestRunDraftInput
+    user_input: str = Field(..., min_length=1, max_length=8000)
+    stream_output: bool = True
+
+
+class WorkflowValidationError(CamelModel):
+    """工作流验证错误项"""
+    node_id: str | None = None
+    message: str
+
+
+class WorkflowValidationResponse(CamelModel):
+    """工作流拓扑验证响应"""
+    valid: bool
+    errors: list[WorkflowValidationError] = Field(default_factory=list)
+
+
+class AssistantWorkflowCreateRequest(CamelModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    description: str = Field(default="", max_length=512)
+    enabled: bool = True
+    workflow: WorkflowInput | None = None
+
+
+class AssistantWorkflowUpdateRequest(CamelModel):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+    enabled: bool | None = None
+    workflow: WorkflowInput | None = None
+
+
+class WorkflowPublishRequest(CamelModel):
+    workflow: WorkflowInput
+    version_name: str | None = Field(default=None, max_length=255)
+    description: str | None = Field(default=None, max_length=512)
+
+
+class AssistantAgentProfileCreateRequest(CamelModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    description: str = Field(default="", max_length=512)
+    system_prompt: str = Field(..., min_length=1, max_length=4096)
+    tools: list[str] = []
+    kb_config: dict | None = None
+    model_source: AgentModelSource = "default"
+    model_id: UUID | None = None
+    enabled: bool = True
+
+    @model_validator(mode="after")
+    def _validate(self) -> "AssistantAgentProfileCreateRequest":
+        if not self.system_prompt.strip():
+            raise ValueError("system_prompt is required")
+        if self.model_source == "custom" and self.model_id is None:
+            raise ValueError("custom model_source requires model_id")
+        if self.model_source == "default":
+            self.model_id = None
+        return self
+
+
+class AssistantAgentProfileUpdateRequest(CamelModel):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+    system_prompt: str | None = Field(default=None, max_length=4096)
+    tools: list[str] | None = None
+    kb_config: dict | None = None
+    model_source: AgentModelSource | None = None
+    model_id: UUID | None = None
+    enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "AssistantAgentProfileUpdateRequest":
+        if self.system_prompt is not None and not self.system_prompt.strip():
+            raise ValueError("system_prompt is required")
+        if self.model_source == "custom" and self.model_id is None:
+            raise ValueError("custom model_source requires model_id")
+        if self.model_source == "default":
+            self.model_id = None
+        return self
+
+
+class AgentPublishDraftInput(CamelModel):
+    system_prompt: str = Field(..., min_length=1, max_length=4096)
+    tools: list[str] = []
+    kb_config: dict | None = None
+    model_source: AgentModelSource = "default"
+    model_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "AgentPublishDraftInput":
+        if not self.system_prompt.strip():
+            raise ValueError("system_prompt is required")
+        if self.model_source == "custom" and self.model_id is None:
+            raise ValueError("custom model_source requires model_id")
+        if self.model_source == "default":
+            self.model_id = None
+        return self
+
+
+class AgentPublishRequest(CamelModel):
+    draft: AgentPublishDraftInput
+    version_name: str | None = Field(default=None, max_length=255)
 
 
 class AssistantSkillCreateRequest(CamelModel):
@@ -369,20 +445,31 @@ class AssistantSkillCreateRequest(CamelModel):
     description: str = Field(..., min_length=1, max_length=512)
     intent_examples: list[str] = []
     tools: list[str] = []
-    mode: SkillMode = "steps"
+    mode: SkillMode = "langgraph"
+    target_type: TargetType | None = None
+    workflow_id: UUID | None = None
+    agent_profile_id: UUID | None = None
+    langgraph_pattern: LanggraphPattern | None = None
     system_prompt: str | None = Field(default=None, max_length=4096)
-    steps: list[AssistantSkillStepInput] = []
     enabled: bool = True
     kb_config: dict | None = None
+    workflow: WorkflowInput | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> "AssistantSkillCreateRequest":
-        if self.mode == "steps" and len(self.steps) == 0:
-            raise ValueError("steps mode requires at least one step")
-        if self.mode == "agent" and not (self.system_prompt or "").strip():
-            raise ValueError("agent mode requires system_prompt")
-        if self.mode == "steps":
-            _validate_step_template_refs(self.steps or [])
+        if self.mode != "langgraph":
+            raise ValueError("mode must be langgraph")
+        if self.workflow_id and self.agent_profile_id:
+            raise ValueError("workflow_id and agent_profile_id are mutually exclusive")
+        if self.target_type == "workflow" and self.agent_profile_id:
+            raise ValueError("target_type=workflow cannot set agent_profile_id")
+        if self.target_type == "agent" and self.workflow_id:
+            raise ValueError("target_type=agent cannot set workflow_id")
+        has_new_target = bool(self.target_type or self.workflow_id or self.agent_profile_id)
+        if not has_new_target and self.langgraph_pattern is None:
+            raise ValueError("target_type or langgraph_pattern is required")
+        if self.langgraph_pattern == "agent_loop" and not self.agent_profile_id and not (self.system_prompt or "").strip():
+            raise ValueError("agent_loop requires system_prompt")
         return self
 
 
@@ -392,15 +479,28 @@ class AssistantSkillUpdateRequest(CamelModel):
     intent_examples: list[str] | None = None
     tools: list[str] | None = None
     mode: SkillMode | None = None
+    target_type: TargetType | None = None
+    workflow_id: UUID | None = None
+    agent_profile_id: UUID | None = None
+    langgraph_pattern: LanggraphPattern | None = None
     system_prompt: str | None = Field(default=None, max_length=4096)
-    steps: list[AssistantSkillStepInput] | None = None
     enabled: bool | None = None
     kb_config: dict | None = None
+    workflow: WorkflowInput | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> "AssistantSkillUpdateRequest":
-        if self.steps is not None:
-            _validate_step_template_refs(self.steps or [])
+        if self.mode is not None and self.mode != "langgraph":
+            raise ValueError("mode must be langgraph")
+        if self.workflow_id and self.agent_profile_id:
+            raise ValueError("workflow_id and agent_profile_id are mutually exclusive")
+        if self.target_type == "workflow" and self.agent_profile_id:
+            raise ValueError("target_type=workflow cannot set agent_profile_id")
+        if self.target_type == "agent" and self.workflow_id:
+            raise ValueError("target_type=agent cannot set workflow_id")
+        if self.langgraph_pattern == "agent_loop" and self.system_prompt is not None:
+            if not self.system_prompt.strip():
+                raise ValueError("agent_loop requires system_prompt")
         return self
 
 
@@ -416,20 +516,118 @@ class ResetAllSkillsResponse(CamelModel):
     affected: list[dict]
 
 
-class AssistantSkillStepResponse(OrmModel):
+class WorkflowNodeResponse(OrmModel):
+    """工作流节点响应"""
     id: UUID
-    step_order: int
-    type: str
-    instruction: str | None
-    tool_name: str | None
-    args_from: str | None
-    args_template: str | None
-    output_mode: str | None
-    output_fields: list[dict] | list[str] | None  # 支持新旧格式
-    include_in_summary: bool | None
-    kb_config: dict | None
+    node_id: str
+    node_type: str
+    label: str
+    position_x: float
+    position_y: float
+    config: dict | None
     created_at: datetime
     updated_at: datetime
+
+
+class WorkflowEdgeResponse(OrmModel):
+    """工作流边响应"""
+    id: UUID
+    edge_id: str
+    source_node_id: str
+    target_node_id: str
+    source_handle: str
+    target_handle: str
+    condition_type: str | None
+    condition_expr: dict | None
+    label: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AssistantWorkflowResponse(OrmModel):
+    id: UUID
+    name: str
+    description: str
+    is_system: bool
+    enabled: bool
+    workflow_version: int = 1
+    workflow_viewport: dict | None = None
+    nodes: list[WorkflowNodeResponse] = []
+    edges: list[WorkflowEdgeResponse] = []
+    draft_version_id: UUID | None = None
+    published_version_id: UUID | None = None
+    referenced_skill_ids: list[UUID] = []
+    reference_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class AssistantAgentProfileResponse(OrmModel):
+    id: UUID
+    name: str
+    description: str
+    system_prompt: str | None
+    tools: list[str] | None
+    kb_config: dict | None
+    model_source: AgentModelSource = "default"
+    model_id: UUID | None = None
+    is_system: bool
+    enabled: bool
+    draft_version_id: UUID | None = None
+    published_version_id: UUID | None = None
+    referenced_skill_ids: list[UUID] = []
+    reference_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class TargetVersionResponse(OrmModel):
+    id: UUID
+    sequence_no: int
+    version_name: str
+    version_source: VersionSource
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkflowVersionListResponse(CamelModel):
+    workflow_id: UUID
+    draft_version_id: UUID | None = None
+    published_version_id: UUID | None = None
+    versions: list[TargetVersionResponse] = []
+
+
+class AgentVersionListResponse(CamelModel):
+    agent_profile_id: UUID
+    draft_version_id: UUID | None = None
+    published_version_id: UUID | None = None
+    versions: list[TargetVersionResponse] = []
+
+
+class DeleteVersionResponse(CamelModel):
+    deleted_version_id: UUID
+    draft_version_id: UUID | None = None
+    published_version_id: UUID | None = None
+
+
+class ClearVersionsResponse(CamelModel):
+    deleted_count: int = 0
+    kept_latest_version_id: UUID | None = None
+    draft_version_id: UUID | None = None
+    published_version_id: UUID | None = None
+
+
+class RollbackVersionResponse(CamelModel):
+    draft_version_id: UUID | None = None
+    published_version_id: UUID | None = None
+    workflow: WorkflowInput | None = None
+    agent_draft: AgentPublishDraftInput | None = None
+
+
+class SkillTargetSummary(CamelModel):
+    id: UUID
+    name: str
+    enabled: bool
 
 
 class AssistantSkillResponse(OrmModel):
@@ -439,10 +637,18 @@ class AssistantSkillResponse(OrmModel):
     intent_examples: list[str] | None
     tools: list[str] | None
     mode: str
+    target_type: TargetType | None = None
+    workflow_id: UUID | None = None
+    agent_profile_id: UUID | None = None
+    target_summary: SkillTargetSummary | None = None
+    langgraph_pattern: str | None = None
     system_prompt: str | None
     is_system: bool
     enabled: bool
     kb_config: dict | None
-    steps: list[AssistantSkillStepResponse]
+    workflow_version: int = 1
+    workflow_viewport: dict | None = None
+    nodes: list[WorkflowNodeResponse] = []
+    edges: list[WorkflowEdgeResponse] = []
     created_at: datetime
     updated_at: datetime

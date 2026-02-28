@@ -5,13 +5,21 @@ import { ChatWindow } from './components/ChatWindow'
 import { ConversationList } from './components/ConversationList'
 import { ChatStoreProvider } from './components/ChatStoreProvider'
 import { useConversationsQuery, useConversationQuery, useDeleteConversationMutation } from './queries'
+import { listPendingApprovals } from './api'
 import { useChatStore } from './stores/chat-store'
 import { useSearchParams } from 'react-router-dom'
 
 function AssistantPageContent() {
   const { t } = useTranslation()
   const [searchParams, setSearchParams] = useSearchParams()
-  const { currentConversationId, setConversationId, clearMessages, isLoading, setMessages } = useChatStore()
+  const {
+    currentConversationId,
+    setConversationId,
+    clearMessages,
+    isLoading,
+    setMessages,
+    setConversationPendingApprovals,
+  } = useChatStore()
   const [isSheetOpen, setSheetOpen] = useState(false)
 
   // Handle URL query parameter for conversation ID
@@ -117,6 +125,24 @@ function AssistantPageContent() {
       }
     }
   }, [conversation, isLoading, currentConversationId, setMessages])
+
+  useEffect(() => {
+    if (!currentConversationId || isLoading) return
+    if (!conversation || conversation.id !== currentConversationId) return
+    let cancelled = false
+    void listPendingApprovals(currentConversationId)
+      .then((items) => {
+        if (cancelled) return
+        setConversationPendingApprovals(items)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setConversationPendingApprovals([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [conversation, currentConversationId, isLoading, setConversationPendingApprovals])
 
   const handleNewConversation = async () => {
     clearMessages()

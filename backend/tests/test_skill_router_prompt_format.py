@@ -14,8 +14,8 @@ class SkillRouterPromptFormatTests(unittest.TestCase):
         reset_caches()
 
     def test_router_prompt_format_does_not_raise(self) -> None:
-        from app.assistant.skills.router import ROUTER_PROMPT  # noqa: E402
-        from app.assistant.skills.base import DEFAULT_SKILL_NAME  # noqa: E402
+        from app.assistant.orchestration.intent_router import ROUTER_PROMPT  # noqa: E402
+        from app.assistant.skill_catalog.base import DEFAULT_SKILL_NAME  # noqa: E402
 
         rendered = ROUTER_PROMPT.format(
             current_date="2026-01-01",

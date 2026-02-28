@@ -1,95 +1,65 @@
-import { useState, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type {
   AssistantSkill,
   CreateSkillRequest,
   UpdateSkillRequest,
-  SkillStepInput,
-  SkillMode,
-  SkillKBConfig,
-  OutputFieldSpec,
-  OutputFieldType,
 } from '../api/skills'
-
-function normalizeOutputFields(
-  fields: OutputFieldSpec[] | string[] | null | undefined
-): OutputFieldSpec[] {
-  if (!fields || fields.length === 0) return []
-  return fields.map((f) => {
-    if (typeof f === 'string') {
-      return { name: f, type: 'string' as OutputFieldType, nullable: false }
-    }
-    return f as OutputFieldSpec
-  })
-}
+import type { AssistantExecutableTarget } from './skillTargetOptions'
+import { resolveSkillTargetKey } from './skillTargetOptions'
 
 export interface UseSkillFormOptions {
   skill?: AssistantSkill
+  availableTargets: AssistantExecutableTarget[]
 }
 
 export interface SkillFormState {
   name: string
   description: string
-  mode: SkillMode
-  systemPrompt: string
+  selectedTargetKey: string
   intentExamples: string[]
-  agentTools: string[]
-  steps: SkillStepInput[]
-  kbConfig: SkillKBConfig
   newIntent: string
 }
 
 export interface SkillFormActions {
   setName: (name: string) => void
   setDescription: (description: string) => void
-  setMode: (mode: SkillMode) => void
-  setSystemPrompt: (prompt: string) => void
+  setSelectedTargetKey: (key: string) => void
   setNewIntent: (intent: string) => void
-  setKbConfig: (config: SkillKBConfig) => void
-  setAgentTools: (tools: string[]) => void
   addIntent: () => void
   removeIntent: (index: number) => void
-  addStep: () => void
-  removeStep: (index: number) => void
-  updateStep: (index: number, updates: Partial<SkillStepInput>) => void
 }
 
-export function useSkillForm({ skill }: UseSkillFormOptions) {
+export function useSkillForm({ skill, availableTargets }: UseSkillFormOptions) {
+  const firstBindableTarget = availableTargets.find((item) => item.bindable) ?? availableTargets[0]
+  const initialTargetKey =
+    resolveSkillTargetKey(skill, availableTargets) ??
+    firstBindableTarget?.key ??
+    ''
+
   const [name, setName] = useState(skill?.name || '')
   const [description, setDescription] = useState(skill?.description || '')
-  const [mode, setMode] = useState<SkillMode>(skill?.mode || 'steps')
-  const [systemPrompt, setSystemPrompt] = useState(skill?.systemPrompt || '')
-  const [intentExamples, setIntentExamples] = useState<string[]>(
-    skill?.intentExamples || []
-  )
-  const [agentTools, setAgentTools] = useState<string[]>(
-    skill?.mode === 'agent' ? (skill?.tools || []) : []
-  )
-  const [steps, setSteps] = useState<SkillStepInput[]>(
-    skill?.steps?.map((s) => ({
-      type: s.type,
-      instruction: s.instruction || undefined,
-      toolName: s.toolName || undefined,
-      argsFrom: s.argsFrom || undefined,
-      argsTemplate: s.argsTemplate || undefined,
-      outputMode: s.outputMode || undefined,
-      outputFields: normalizeOutputFields(s.outputFields),
-      includeInSummary: s.includeInSummary ?? false,
-    })) || [{ type: 'analysis', instruction: '' }]
-  )
-  const [kbConfig, setKbConfig] = useState<SkillKBConfig>(
-    skill?.kbConfig || { enabled: false }
-  )
+  const [selectedTargetKey, setSelectedTargetKey] = useState<string>(initialTargetKey)
+  const [intentExamples, setIntentExamples] = useState<string[]>(skill?.intentExamples || [])
   const [newIntent, setNewIntent] = useState('')
 
-  const derivedTools = useMemo(() => {
-    const usedTools = new Set<string>()
-    steps.forEach((step) => {
-      if (step.type === 'tool' && step.toolName) {
-        usedTools.add(step.toolName)
-      }
-    })
-    return Array.from(usedTools)
-  }, [steps])
+  const selectedTarget = useMemo(
+    () => availableTargets.find((item) => item.key === selectedTargetKey) || null,
+    [availableTargets, selectedTargetKey],
+  )
+
+  useEffect(() => {
+    if (availableTargets.length === 0) return
+    const fallback = availableTargets.find((item) => item.bindable) ?? availableTargets[0]
+    if (!selectedTargetKey) {
+      if (fallback) setSelectedTargetKey(fallback.key)
+      return
+    }
+    const exists = availableTargets.some((item) => item.key === selectedTargetKey)
+    const selected = availableTargets.find((item) => item.key === selectedTargetKey)
+    if (!exists || (selected && !selected.bindable)) {
+      if (fallback) setSelectedTargetKey(fallback.key)
+    }
+  }, [availableTargets, selectedTargetKey])
 
   const addIntent = () => {
     if (newIntent.trim()) {
@@ -102,71 +72,49 @@ export function useSkillForm({ skill }: UseSkillFormOptions) {
     setIntentExamples(intentExamples.filter((_, i) => i !== index))
   }
 
-  const addStep = () => {
-    setSteps([...steps, { type: 'tool', toolName: '', includeInSummary: false }])
+  const hasTarget = !!selectedTarget && selectedTarget.bindable
+
+  const buildSubmitData = (): CreateSkillRequest | UpdateSkillRequest => {
+    const payload: CreateSkillRequest | UpdateSkillRequest = {
+      name,
+      description,
+      intentExamples: intentExamples.length > 0 ? intentExamples : undefined,
+      mode: 'langgraph',
+      targetType: selectedTarget?.type,
+      workflowId: undefined,
+      agentProfileId: undefined,
+    }
+
+    if (selectedTarget?.bindable && selectedTarget.type === 'workflow') {
+      payload.workflowId = selectedTarget.id
+    }
+    if (selectedTarget?.bindable && selectedTarget.type === 'agent') {
+      payload.agentProfileId = selectedTarget.id
+    }
+
+    return payload
   }
 
-  const removeStep = (index: number) => {
-    setSteps(steps.filter((_, i) => i !== index))
-  }
-
-  const updateStep = (index: number, updates: Partial<SkillStepInput>) => {
-    setSteps(steps.map((s, i) => (i === index ? { ...s, ...updates } : s)))
-  }
-
-  const buildSubmitData = (): CreateSkillRequest | UpdateSkillRequest => ({
-    name,
-    description,
-    intentExamples: intentExamples.length > 0 ? intentExamples : undefined,
-    mode,
-    ...(mode === 'agent'
-      ? {
-          tools: agentTools.length > 0 ? agentTools : undefined,
-          systemPrompt: systemPrompt || undefined,
-          kbConfig,
-          steps: undefined,
-        }
-      : {
-          tools: derivedTools.length > 0 ? derivedTools : undefined,
-          steps,
-          kbConfig,
-          systemPrompt: undefined,
-        }),
-  })
-
-  const isValid =
-    !!name &&
-    !!description &&
-    (mode === 'steps' ? steps.length > 0 : !!systemPrompt.trim())
+  const isValid = !!name && !!description && hasTarget
 
   return {
     state: {
       name,
       description,
-      mode,
-      systemPrompt,
+      selectedTargetKey,
       intentExamples,
-      agentTools,
-      steps,
-      kbConfig,
       newIntent,
     },
-    derivedTools,
+    selectedTarget,
     isValid,
     actions: {
       setName,
       setDescription,
-      setMode,
-      setSystemPrompt,
+      setSelectedTargetKey,
       setNewIntent,
-      setKbConfig,
-      setAgentTools,
       addIntent,
       removeIntent,
-      addStep,
-      removeStep,
-      updateStep,
-    },
+    } satisfies SkillFormActions,
     buildSubmitData,
   }
 }

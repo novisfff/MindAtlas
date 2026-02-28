@@ -4,34 +4,15 @@ export interface SkillKBConfig {
   enabled?: boolean
 }
 
-// Output field type options
-export type OutputFieldType = 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array'
+export type SkillMode = 'langgraph'
+export type LanggraphPattern = 'agent_loop' | 'workflow_dag'
+export type SkillTargetType = 'workflow' | 'agent'
 
-// Output field specification for JSON mode
-export interface OutputFieldSpec {
-  name: string
-  type: OutputFieldType
-  nullable: boolean
-  itemsType?: OutputFieldType
-  enum?: string[]
-}
-
-export interface SkillStep {
+export interface SkillTargetSummary {
   id: string
-  stepOrder: number
-  type: 'analysis' | 'tool' | 'summary'
-  instruction: string | null
-  toolName: string | null
-  argsFrom: 'context' | 'previous' | 'custom' | 'json' | null
-  argsTemplate: string | null
-  outputMode: 'text' | 'json' | null
-  outputFields: OutputFieldSpec[] | string[] | null
-  includeInSummary: boolean | null
-  createdAt: string
-  updatedAt: string
+  name: string
+  enabled: boolean
 }
-
-export type SkillMode = 'steps' | 'agent'
 
 export interface AssistantSkill {
   id: string
@@ -40,24 +21,43 @@ export interface AssistantSkill {
   intentExamples: string[] | null
   tools: string[] | null
   mode: SkillMode
+  targetType: SkillTargetType | null
+  workflowId: string | null
+  agentProfileId: string | null
+  targetSummary?: SkillTargetSummary | null
+  langgraphPattern: LanggraphPattern | null
   systemPrompt: string | null
   isSystem: boolean
   enabled: boolean
   kbConfig: SkillKBConfig | null
-  steps: SkillStep[]
+  workflowVersion?: number
+  workflowViewport?: { x: number; y: number; zoom: number } | null
+  nodes?: Array<{
+    id: string
+    nodeId: string
+    nodeType: string
+    label: string
+    positionX: number
+    positionY: number
+    config: Record<string, unknown> | null
+    createdAt: string
+    updatedAt: string
+  }>
+  edges?: Array<{
+    id: string
+    edgeId: string
+    sourceNodeId: string
+    targetNodeId: string
+    sourceHandle: string
+    targetHandle: string
+    conditionType: string | null
+    conditionExpr: Record<string, unknown> | null
+    label: string | null
+    createdAt: string
+    updatedAt: string
+  }>
   createdAt: string
   updatedAt: string
-}
-
-export interface SkillStepInput {
-  type: 'analysis' | 'tool' | 'summary'
-  instruction?: string
-  toolName?: string
-  argsFrom?: 'context' | 'previous' | 'custom' | 'json'
-  argsTemplate?: string
-  outputMode?: 'text' | 'json'
-  outputFields?: OutputFieldSpec[]
-  includeInSummary?: boolean
 }
 
 export interface CreateSkillRequest {
@@ -65,9 +65,12 @@ export interface CreateSkillRequest {
   description: string
   intentExamples?: string[]
   tools?: string[]
+  targetType?: SkillTargetType
+  workflowId?: string
+  agentProfileId?: string
   mode?: SkillMode
+  langgraphPattern?: LanggraphPattern
   systemPrompt?: string
-  steps?: SkillStepInput[]
   enabled?: boolean
   kbConfig?: SkillKBConfig
 }
@@ -77,9 +80,12 @@ export interface UpdateSkillRequest {
   description?: string
   intentExamples?: string[]
   tools?: string[]
+  targetType?: SkillTargetType
+  workflowId?: string
+  agentProfileId?: string
   mode?: SkillMode
+  langgraphPattern?: LanggraphPattern
   systemPrompt?: string
-  steps?: SkillStepInput[]
   enabled?: boolean
   kbConfig?: SkillKBConfig
 }

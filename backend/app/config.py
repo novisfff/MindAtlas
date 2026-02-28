@@ -152,6 +152,20 @@ class Settings(BaseSettings):
     # Scheduler (optional, for background jobs like weekly report generation)
     scheduler_enabled: bool = Field(default=False, alias="SCHEDULER_ENABLED")
 
+    # Workflow code executor
+    workflow_code_executor_timeout_ms: int = Field(default=5000, alias="WORKFLOW_CODE_EXECUTOR_TIMEOUT_MS")
+    workflow_code_executor_max_timeout_ms: int = Field(default=5000, alias="WORKFLOW_CODE_EXECUTOR_MAX_TIMEOUT_MS")
+    workflow_code_executor_memory_limit_mb: int = Field(default=128, alias="WORKFLOW_CODE_EXECUTOR_MEMORY_LIMIT_MB")
+    workflow_code_executor_max_output_chars: int = Field(default=16000, alias="WORKFLOW_CODE_EXECUTOR_MAX_OUTPUT_CHARS")
+    workflow_code_executor_python_allowed_modules: str = Field(
+        default="json,re,math,datetime,statistics,itertools,functools,decimal,uuid,base64,hashlib,collections",
+        alias="WORKFLOW_CODE_EXECUTOR_PYTHON_ALLOWED_MODULES",
+    )
+    workflow_code_executor_javascript_allowed_modules: str = Field(
+        default="path,url,crypto,util",
+        alias="WORKFLOW_CODE_EXECUTOR_JAVASCRIPT_ALLOWED_MODULES",
+    )
+
     # Server
     host: str = Field(default="0.0.0.0", alias="HOST")
     port: int = Field(default=8000, alias="PORT")

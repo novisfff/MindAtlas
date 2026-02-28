@@ -22,7 +22,7 @@ from app.attachment.models import Attachment  # noqa: E402, F401
 from app.ai_provider.models import AiProvider  # noqa: E402, F401
 from app.ai_registry.models import AiCredential, AiModel, AiComponentBinding  # noqa: E402, F401
 from app.assistant.models import Conversation, Message  # noqa: E402, F401
-from app.assistant_config.models import AssistantTool, AssistantSkill, AssistantSkillStep  # noqa: E402, F401
+from app.assistant_config.models import AssistantTool, AssistantSkill, AssistantSkillNode, AssistantSkillEdge  # noqa: E402, F401
 from app.lightrag.models import EntryIndexOutbox  # noqa: E402, F401
 from app.report.models import WeeklyReport  # noqa: E402, F401
 

@@ -84,8 +84,10 @@ class RemoteTool:
     name: str
     description: str | None
     # 输入参数定义（来自数据库 assistant_tool.input_params）
-    input_params: list[dict[str, Any]] | None
-    endpoint_url: str
+    input_params: list[dict[str, Any]] | None = None
+    # 输出参数定义（当前默认 None；后续 DB 扩展后可持久化）
+    output_params: list[dict[str, Any]] | None = None
+    endpoint_url: str = ""
     http_method: str = "POST"
     headers: dict[str, str] | None = None
     query_params: dict[str, str] | None = None
@@ -104,6 +106,7 @@ class RemoteTool:
             name=tool.name,
             description=tool.description,
             input_params=(tool.input_params or None),
+            output_params=(getattr(tool, "output_params", None) or None),
             endpoint_url=(tool.endpoint_url or "").strip(),
             http_method=(tool.http_method or "POST").strip().upper(),
             headers=(tool.headers or None),

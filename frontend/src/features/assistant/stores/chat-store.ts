@@ -1,6 +1,6 @@
 import { create, useStore, StoreApi, createStore } from 'zustand'
 import { createContext, useContext, useRef } from 'react'
-import { ToolCall, SkillCall, Analysis } from '../types'
+import { ToolCall, SkillCall, Analysis, HumanApproval } from '../types'
 
 interface ChatMessage {
   id: string
@@ -9,6 +9,7 @@ interface ChatMessage {
   toolCalls?: ToolCall[]
   skillCalls?: SkillCall[]
   analysisSteps?: Analysis[]
+  humanApprovals?: HumanApproval[]
   createdAt: number
 }
 
@@ -19,10 +20,13 @@ export interface ChatState {
   currentConversationId: string | null
   addMessage: (message: ChatMessage) => void
   updateLastMessage: (content: string) => void
+  setLastMessageId: (id: string) => void
   addToolCall: (toolCall: ToolCall) => void
   updateToolCall: (id: string, updates: Partial<ToolCall>) => void
   addSkillCall: (skillCall: SkillCall) => void
   updateSkillCall: (id: string, updates: Partial<SkillCall>) => void
+  upsertHumanApproval: (approval: HumanApproval) => void
+  setConversationPendingApprovals: (approvals: HumanApproval[]) => void
   startAnalysis: (id: string) => void
   updateAnalysis: (id: string, delta: string) => void
   endAnalysis: (id: string) => void
@@ -50,6 +54,18 @@ export const createChatLogic = (set: any): Omit<ChatState, 'no-op'> => ({
         messages[messages.length - 1] = {
           ...messages[messages.length - 1],
           content,
+        }
+      }
+      return { messages }
+    }),
+
+  setLastMessageId: (id: string) =>
+    set((state: ChatState) => {
+      const messages = [...state.messages]
+      if (messages.length > 0) {
+        messages[messages.length - 1] = {
+          ...messages[messages.length - 1],
+          id,
         }
       }
       return { messages }
@@ -105,6 +121,48 @@ export const createChatLogic = (set: any): Omit<ChatState, 'no-op'> => ({
         messages[messages.length - 1] = { ...last, skillCalls }
       }
       return { messages }
+    }),
+
+  upsertHumanApproval: (approval: HumanApproval) =>
+    set((state: ChatState) => {
+      const messages = [...state.messages]
+      if (messages.length === 0) return { messages }
+
+      const targetMessageId = approval.messageId ?? messages[messages.length - 1].id
+      const targetIndex = messages.findIndex((item) => item.id === targetMessageId)
+      if (targetIndex < 0) {
+        return { messages }
+      }
+
+      const target = messages[targetIndex]
+      const approvals = target.humanApprovals ?? []
+      const nextApprovals = [...approvals.filter((item) => item.id !== approval.id), approval]
+      messages[targetIndex] = {
+        ...target,
+        humanApprovals: nextApprovals,
+      }
+      return { messages }
+    }),
+
+  setConversationPendingApprovals: (approvals: HumanApproval[]) =>
+    set((state: ChatState) => {
+      if (state.messages.length === 0) return state
+      const nextMessages = state.messages.map((message) => ({
+        ...message,
+        humanApprovals: (message.humanApprovals ?? []).filter((item) => item.status === 'pending'),
+      }))
+
+      approvals.forEach((approval) => {
+        const targetMessageId = approval.messageId
+        if (!targetMessageId) return
+        const targetIndex = nextMessages.findIndex((item) => item.id === targetMessageId)
+        if (targetIndex < 0) return
+        const current = nextMessages[targetIndex]
+        const existing = current.humanApprovals ?? []
+        current.humanApprovals = [...existing.filter((item) => item.id !== approval.id), approval]
+      })
+
+      return { messages: nextMessages }
     }),
 
   startAnalysis: (id: string) =>

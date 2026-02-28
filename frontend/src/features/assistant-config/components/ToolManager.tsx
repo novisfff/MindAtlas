@@ -70,7 +70,11 @@ function SystemToolItem({ tool, onToggle, isToggling }: SystemToolItemProps) {
       </div>
 
       {/* 展开详情 */}
-      {isExpanded && ((tool.inputParams && tool.inputParams.length > 0) || tool.returns) && (
+      {isExpanded && (
+        ((tool.inputParams && tool.inputParams.length > 0)
+          || (tool.outputParams && tool.outputParams.length > 0)
+          || tool.returns)
+      ) && (
         <div className="px-4 pb-4 pt-0 ml-6 border-t border-blue-500/10">
           {tool.inputParams && tool.inputParams.length > 0 && (
             <div className="mt-3">
@@ -100,7 +104,32 @@ function SystemToolItem({ tool, onToggle, isToggling }: SystemToolItemProps) {
               </div>
             </div>
           )}
-          {tool.returns && (
+          {tool.outputParams && tool.outputParams.length > 0 && (
+            <div className="mt-3">
+              <h5 className="text-xs font-medium text-muted-foreground mb-2">
+                {t('settings.tools.outputParams')}
+              </h5>
+              <div className="space-y-1.5">
+                {tool.outputParams.map((param) => (
+                  <div
+                    key={param.name}
+                    className="flex items-start gap-2 text-xs bg-muted/50 rounded px-2 py-1.5"
+                  >
+                    <code className="font-mono text-blue-600 dark:text-blue-400 flex-shrink-0">
+                      {param.name}
+                    </code>
+                    <span className="text-muted-foreground flex-shrink-0">
+                      ({param.paramType})
+                    </span>
+                    {param.description && (
+                      <span className="text-foreground/70">{param.description}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {tool.returns && (!tool.outputParams || tool.outputParams.length === 0) && (
             <div className="mt-3">
               <h5 className="text-xs font-medium text-muted-foreground mb-2">
                 {t('settings.tools.returns')}

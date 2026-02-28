@@ -22,11 +22,11 @@ class AssistantAgentHeaderTests(unittest.TestCase):
                 captured.append(kwargs)
 
         with (
-            patch("app.assistant.agent.ChatOpenAI", new=FakeChatOpenAI),
-            patch("app.assistant.skills.executor.ChatOpenAI", new=FakeChatOpenAI),
+            patch("app.assistant.orchestration.agent_runtime.ChatOpenAI", new=FakeChatOpenAI),
+            patch("app.assistant.workflow.engine.engine.ChatOpenAI", new=FakeChatOpenAI),
             patch("langchain_openai.ChatOpenAI", new=FakeChatOpenAI),
         ):
-            from app.assistant.agent import AssistantAgent  # noqa: E402
+            from app.assistant.orchestration.agent_runtime import AssistantAgent  # noqa: E402
 
             AssistantAgent(
                 api_key=" sk-test-key ",

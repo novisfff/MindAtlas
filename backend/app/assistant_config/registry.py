@@ -6,7 +6,12 @@ from typing import Any, get_args, get_origin
 
 from sqlalchemy.orm import Session, joinedload
 
-from app.assistant_config.models import AssistantSkill, AssistantTool
+from app.assistant_config.models import (
+    AssistantAgentProfile,
+    AssistantSkill,
+    AssistantTool,
+    AssistantWorkflow,
+)
 from app.assistant_config.remote_tool import RemoteTool
 
 
@@ -25,10 +30,18 @@ class SystemToolParamDefinition:
 
 
 @dataclass(frozen=True)
+class SystemToolOutputDefinition:
+    name: str
+    description: str | None
+    param_type: str
+
+
+@dataclass(frozen=True)
 class SystemToolFullDefinition:
     name: str
     description: str
     input_params: list[SystemToolParamDefinition]
+    output_params: list[SystemToolOutputDefinition]
     returns: str | None
     json_schema: dict | None
 
@@ -46,10 +59,14 @@ class SystemSkillFullDefinition:
     intent_examples: list[str]
     tools: list[str]
     mode: str
+    langgraph_pattern: str | None
     system_prompt: str | None
-    steps: list[dict[str, Any]]
     kb_config: dict | None
     hidden: bool
+    workflow_nodes: list[dict[str, Any]] | None = None
+    workflow_edges: list[dict[str, Any]] | None = None
+    workflow_version: int = 1
+    workflow_viewport: dict | None = None
 
 
 class _BaseRegistry:
@@ -64,6 +81,104 @@ class ToolRegistry(_BaseRegistry):
 
     # 内部系统工具：不对外展示，但仍可在运行时被内部逻辑调用
     INTERNAL_TOOL_NAMES: frozenset[str] = frozenset({"kb_search"})
+    SYSTEM_TOOL_OUTPUT_PARAMS: dict[str, list[dict[str, str]]] = {
+        "search_entries": [
+            {
+                "name": "items",
+                "param_type": "array",
+                "description": "记录列表。元素字段：id(string), title(string), type(string), summary(string), tags(array[string])。",
+            },
+        ],
+        "get_entry_detail": [
+            {"name": "id", "param_type": "string", "description": "记录 UUID。"},
+            {"name": "title", "param_type": "string", "description": "记录标题。"},
+            {"name": "content", "param_type": "string", "description": "记录正文。"},
+            {"name": "type", "param_type": "string", "description": "记录类型名称。"},
+            {"name": "type_code", "param_type": "string", "description": "记录类型编码。"},
+            {"name": "summary", "param_type": "string", "description": "记录摘要。"},
+            {"name": "tags", "param_type": "array", "description": "标签名称数组。"},
+            {"name": "created_at", "param_type": "string", "description": "创建时间（ISO8601）。"},
+        ],
+        "create_entry": [
+            {"name": "id", "param_type": "string", "description": "新建记录 UUID。"},
+            {"name": "title", "param_type": "string", "description": "最终写入的标题。"},
+            {"name": "summary", "param_type": "string", "description": "最终写入的摘要。"},
+            {"name": "type", "param_type": "string", "description": "记录类型名称。"},
+            {"name": "type_code", "param_type": "string", "description": "记录类型编码。"},
+            {"name": "tags", "param_type": "array", "description": "标签名称数组。"},
+            {"name": "time_mode", "param_type": "string", "description": "时间模式（POINT/RANGE）。"},
+            {"name": "time_at", "param_type": "string", "description": "POINT 模式日期（YYYY-MM-DD 或 null）。"},
+            {"name": "time_from", "param_type": "string", "description": "RANGE 起始日期（YYYY-MM-DD 或 null）。"},
+            {"name": "time_to", "param_type": "string", "description": "RANGE 结束日期（YYYY-MM-DD 或 null）。"},
+            {"name": "created_at", "param_type": "string", "description": "创建时间（ISO8601）。"},
+        ],
+        "get_statistics": [
+            {"name": "total_entries", "param_type": "number", "description": "记录总数。"},
+            {"name": "total_tags", "param_type": "number", "description": "标签总数。"},
+            {"name": "total_types", "param_type": "number", "description": "类型总数。"},
+            {"name": "entries_by_type", "param_type": "object", "description": "按类型名称聚合计数。"},
+            {"name": "entries_by_tag", "param_type": "object", "description": "按标签名称聚合计数。"},
+        ],
+        "get_entries_by_time_range": [
+            {
+                "name": "items",
+                "param_type": "array",
+                "description": "时间范围内记录列表。元素字段：id(string), title(string), type(string), summary(string), time_mode(string), time_at(string|null), time_from(string|null), time_to(string|null)。",
+            },
+        ],
+        "analyze_activity": [
+            {"name": "start_date", "param_type": "string", "description": "统计开始日期（YYYY-MM-DD）。"},
+            {"name": "end_date", "param_type": "string", "description": "统计结束日期（YYYY-MM-DD）。"},
+            {"name": "days", "param_type": "number", "description": "覆盖天数。"},
+            {"name": "period", "param_type": "string", "description": "请求周期参数（week/month/year）。"},
+            {"name": "entries_created", "param_type": "number", "description": "时间范围内创建记录数。"},
+            {"name": "avg_per_day", "param_type": "number", "description": "日均创建量。"},
+            {"name": "trend_unit", "param_type": "string", "description": "趋势粒度（day/month）。"},
+            {
+                "name": "trend",
+                "param_type": "array",
+                "description": "趋势点列表。元素字段：date(string), count(number)。",
+            },
+        ],
+        "get_tag_statistics": [
+            {"name": "total_tags", "param_type": "number", "description": "标签总数。"},
+            {
+                "name": "tags",
+                "param_type": "array",
+                "description": "标签统计列表。元素字段：id(string), name(string), color(string), entry_count(number)。",
+            },
+        ],
+        "list_entry_types": [
+            {
+                "name": "items",
+                "param_type": "array",
+                "description": "类型列表。元素字段：id(string), code(string), type(string), name(string), color(string)。",
+            },
+        ],
+        "list_tags": [
+            {
+                "name": "items",
+                "param_type": "array",
+                "description": "标签列表。元素字段：id(string), name(string), color(string), entry_count(number)。",
+            },
+        ],
+        "kb_relation_recommendations": [
+            {
+                "name": "items",
+                "param_type": "array",
+                "description": "推荐关联列表。元素字段：targetEntryId(string), relationType(string|null), score(number)。",
+            },
+        ],
+        "kb_search": [
+            {"name": "mode", "param_type": "string", "description": "召回模式。"},
+            {"name": "query", "param_type": "string", "description": "检索原始查询。"},
+            {
+                "name": "references",
+                "param_type": "array",
+                "description": "引用列表。元素字段至少包含 index(number), type(string) 以及各类型对应上下文字段。",
+            },
+        ],
+    }
 
     @staticmethod
     def list_system_tools() -> list[SystemToolDefinition]:
@@ -89,10 +204,15 @@ class ToolRegistry(_BaseRegistry):
         """从代码定义获取系统工具完整信息（名称/描述/参数签名/JSON Schema）。"""
         from app.assistant import tools as assistant_tools
 
+        visible_tool_names = [
+            tool_name
+            for tool_name in getattr(assistant_tools, "__all__", [])
+            if tool_name not in ToolRegistry.INTERNAL_TOOL_NAMES
+        ]
+        ToolRegistry._validate_system_tool_output_contracts(visible_tool_names)
+
         results: list[SystemToolFullDefinition] = []
-        for tool_name in getattr(assistant_tools, "__all__", []):
-            if tool_name in ToolRegistry.INTERNAL_TOOL_NAMES:
-                continue
+        for tool_name in visible_tool_names:
             tool_obj = getattr(assistant_tools, tool_name, None)
             if tool_obj is None:
                 continue
@@ -103,11 +223,14 @@ class ToolRegistry(_BaseRegistry):
                 or ""
             ).strip()
 
-            input_params, returns, json_schema = ToolRegistry._extract_tool_params(tool_obj)
+            input_params, doc_returns, json_schema = ToolRegistry._extract_tool_params(tool_obj)
+            output_params = ToolRegistry._extract_system_tool_output_params(tool_name)
+            returns = ToolRegistry._format_output_contract(output_params) or doc_returns
             results.append(SystemToolFullDefinition(
                 name=tool_name,
                 description=description,
                 input_params=input_params,
+                output_params=output_params,
                 returns=returns,
                 json_schema=json_schema,
             ))
@@ -340,72 +463,124 @@ class ToolRegistry(_BaseRegistry):
 
         return [], doc_returns, None
 
+    @staticmethod
+    def _extract_system_tool_output_params(tool_name: str) -> list[SystemToolOutputDefinition]:
+        definitions = ToolRegistry.SYSTEM_TOOL_OUTPUT_PARAMS.get(tool_name, [])
+        output_params: list[SystemToolOutputDefinition] = []
+        for item in definitions:
+            name = (item.get("name") or "").strip()
+            if not name:
+                continue
+            output_params.append(
+                SystemToolOutputDefinition(
+                    name=name,
+                    description=(item.get("description") or None),
+                    param_type=(item.get("param_type") or "string"),
+                )
+            )
+        return output_params
+
+    @staticmethod
+    def _validate_system_tool_output_contracts(tool_names: list[str]) -> None:
+        missing = [name for name in tool_names if name not in ToolRegistry.SYSTEM_TOOL_OUTPUT_PARAMS]
+        empty = [
+            name
+            for name in tool_names
+            if name in ToolRegistry.SYSTEM_TOOL_OUTPUT_PARAMS
+            and not ToolRegistry.SYSTEM_TOOL_OUTPUT_PARAMS.get(name)
+        ]
+        if not missing and not empty:
+            return
+
+        details: list[str] = []
+        if missing:
+            details.append(f"missing={','.join(sorted(missing))}")
+        if empty:
+            details.append(f"empty={','.join(sorted(empty))}")
+        raise RuntimeError(
+            "System tool output contracts must be declared for every visible tool: " + "; ".join(details)
+        )
+
+    @staticmethod
+    def _format_output_contract(output_params: list[SystemToolOutputDefinition]) -> str | None:
+        if not output_params:
+            return None
+        lines: list[str] = []
+        for p in output_params:
+            line = f"- {p.name} ({p.param_type})"
+            if p.description:
+                line += f": {p.description}"
+            lines.append(line)
+        return "\n".join(lines)
+
 
 class SkillRegistry(_BaseRegistry):
     """技能注册表 - 解析系统技能和数据库自定义技能"""
 
     @staticmethod
     def list_system_skills() -> list[Any]:
-        from app.assistant.skills.definitions import SKILLS
+        from app.assistant.skill_catalog.definitions import SKILLS
         return list(SKILLS)
 
     @staticmethod
     def list_system_skill_definitions() -> list[SystemSkillFullDefinition]:
         """获取系统 Skill 元数据定义。"""
         return [
-            SkillRegistry._to_skill_full_definition(skill, include_steps=True)
+            SkillRegistry._to_skill_full_definition(skill, include_workflow=True)
             for skill in SkillRegistry.list_system_skills()
         ]
 
     @staticmethod
     def resolve_system_skill(skill_name: str) -> Any | None:
         """解析系统 Skill。"""
-        from app.assistant.skills.definitions import get_skill_by_name
+        from app.assistant.skill_catalog.definitions import get_skill_by_name
 
         return get_skill_by_name(skill_name)
 
     def list_db_skills(
         self,
-        include_steps: bool = False,
+        include_workflow: bool = False,
         include_disabled: bool = False,
     ) -> list[AssistantSkill]:
         """获取数据库 Skills。
 
         Args:
-            include_steps: 是否预加载 steps（路由阶段不需要，执行阶段需要）。
+            include_workflow: 是否预加载 workflow nodes/edges。
             include_disabled: 是否包含禁用技能。
         """
         query = self.db.query(AssistantSkill)
         if not include_disabled:
             query = query.filter(AssistantSkill.enabled.is_(True))
-        if include_steps:
-            query = query.options(joinedload(AssistantSkill.steps))
+        if include_workflow:
+            query = query.options(
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.nodes),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantSkill.agent_profile),
+                joinedload(AssistantSkill.nodes),
+                joinedload(AssistantSkill.edges),
+            )
         return query.order_by(AssistantSkill.created_at.desc()).all()
 
     def list_db_skill_definitions(
         self,
-        include_steps: bool = False,
+        include_workflow: bool = False,
         include_disabled: bool = False,
     ) -> list[SystemSkillFullDefinition]:
         """获取数据库 Skill 元数据定义。"""
         skills = self.list_db_skills(
-            include_steps=include_steps,
+            include_workflow=include_workflow,
             include_disabled=include_disabled,
         )
         return [
-            self._to_skill_full_definition(skill, include_steps=include_steps)
+            self._to_skill_full_definition(skill, include_workflow=include_workflow)
             for skill in skills
         ]
 
-    def list_enabled_db_skills(self, include_steps: bool = False) -> list[AssistantSkill]:
-        """获取启用的数据库 Skills
+    def list_enabled_db_skills(self, include_workflow: bool = False) -> list[AssistantSkill]:
+        """获取启用的数据库 Skills。"""
+        return self.list_db_skills(include_workflow=include_workflow, include_disabled=False)
 
-        Args:
-            include_steps: 是否预加载 steps（路由阶段不需要，执行阶段需要）
-        """
-        return self.list_db_skills(include_steps=include_steps, include_disabled=False)
-
-    def resolve(self, skill_name: str, include_steps: bool = True) -> Any | None:
+    def resolve(self, skill_name: str, include_workflow: bool = True) -> Any | None:
         """解析 Skill - 优先从数据库查找，未命中时回退到系统定义。
 
         逻辑:
@@ -417,13 +592,19 @@ class SkillRegistry(_BaseRegistry):
 
         Args:
             skill_name: Skill 名称。
-            include_steps: 解析 DB Skill 时是否包含 steps。
+            include_workflow: 是否加载 workflow nodes/edges 并进行完整转换。
         """
-        from app.assistant.skills.base import DEFAULT_SKILL_NAME
+        from app.assistant.skill_catalog.base import DEFAULT_SKILL_NAME
 
         query = self.db.query(AssistantSkill)
-        if include_steps:
-            query = query.options(joinedload(AssistantSkill.steps))
+        if include_workflow:
+            query = query.options(
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.nodes),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantSkill.agent_profile).joinedload(AssistantAgentProfile.skills),
+                joinedload(AssistantSkill.nodes),
+                joinedload(AssistantSkill.edges),
+            )
         record = query.filter(AssistantSkill.name == skill_name).first()
 
         if record:
@@ -433,80 +614,136 @@ class SkillRegistry(_BaseRegistry):
                     return self.resolve_system_skill(skill_name)
                 return None
 
-            from app.assistant.skills.converters import (
+            from app.assistant.skill_catalog.converters import (
                 db_skill_to_definition,
                 db_skill_to_definition_light,
             )
 
-            if include_steps:
-                return db_skill_to_definition(record)
+            if include_workflow:
+                try:
+                    return db_skill_to_definition(record)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Skill '{record.name}' has an invalid workflow definition: {exc}"
+                    ) from exc
             return db_skill_to_definition_light(record)
 
         return self.resolve_system_skill(skill_name)
 
-    def get_skill_by_name(self, skill_name: str, include_steps: bool = True) -> Any | None:
+    def get_skill_by_name(self, skill_name: str, include_workflow: bool = True) -> Any | None:
         """按名称获取 Skill（先查 DB，再回退系统定义）。
 
         Args:
             skill_name: Skill 名称。
-            include_steps: 解析 DB Skill 时是否包含 steps。
+            include_workflow: 解析 DB Skill 时是否加载 workflow nodes/edges。
         """
-        return self.resolve(skill_name=skill_name, include_steps=include_steps)
+        return self.resolve(skill_name=skill_name, include_workflow=include_workflow)
 
     @staticmethod
-    def _to_skill_full_definition(skill: Any, *, include_steps: bool) -> SystemSkillFullDefinition:
+    def _to_skill_full_definition(skill: Any, *, include_workflow: bool) -> SystemSkillFullDefinition:
         raw_intent_examples = getattr(skill, "intent_examples", None)
         if not isinstance(raw_intent_examples, list):
             raw_intent_examples = []
 
+        target_pattern = (
+            "workflow_dag"
+            if getattr(skill, "workflow_id", None) is not None
+            else "agent_loop"
+            if getattr(skill, "agent_profile_id", None) is not None
+            else getattr(skill, "langgraph_pattern", None)
+        )
         raw_tools = getattr(skill, "tools", None)
+        if (
+            target_pattern == "agent_loop"
+            and getattr(skill, "agent_profile", None) is not None
+            and isinstance(getattr(skill.agent_profile, "tools", None), list)
+        ):
+            raw_tools = skill.agent_profile.tools
         if not isinstance(raw_tools, list):
             raw_tools = []
 
         raw_kb = getattr(skill, "kb_config", None)
+        if (
+            target_pattern == "agent_loop"
+            and getattr(skill, "agent_profile", None) is not None
+            and isinstance(getattr(skill.agent_profile, "kb_config", None), dict)
+        ):
+            raw_kb = skill.agent_profile.kb_config
         kb_config = raw_kb if isinstance(raw_kb, dict) else None
         if kb_config is None:
             kb = getattr(skill, "kb", None)
             if kb is not None:
                 kb_config = {"enabled": bool(getattr(kb, "enabled", False))}
 
-        steps: list[dict[str, Any]] = []
-        if include_steps:
-            steps = [
-                SkillRegistry._serialize_skill_step(step)
-                for step in (getattr(skill, "steps", None) or [])
-            ]
+        # Workflow DAG data
+        workflow_nodes: list[dict[str, Any]] | None = None
+        workflow_edges: list[dict[str, Any]] | None = None
+        if include_workflow:
+            raw_nodes = getattr(skill, "nodes", None) or []
+            raw_edges = getattr(skill, "edges", None) or []
+            if getattr(skill, "workflow", None) is not None:
+                raw_nodes = getattr(skill.workflow, "nodes", None) or raw_nodes
+                raw_edges = getattr(skill.workflow, "edges", None) or raw_edges
+            if raw_nodes:
+                workflow_nodes = [
+                    SkillRegistry._serialize_workflow_node(n) for n in raw_nodes
+                ]
+            if raw_edges:
+                workflow_edges = [
+                    SkillRegistry._serialize_workflow_edge(e) for e in raw_edges
+                ]
 
         return SystemSkillFullDefinition(
             name=getattr(skill, "name", ""),
             description=(getattr(skill, "description", "") or "").strip(),
             intent_examples=[str(item) for item in raw_intent_examples if item is not None],
             tools=[str(item) for item in raw_tools if item is not None],
-            mode=(getattr(skill, "mode", "steps") or "steps"),
-            system_prompt=getattr(skill, "system_prompt", None),
-            steps=steps,
+            mode=(getattr(skill, "mode", "langgraph") or "langgraph"),
+            langgraph_pattern=target_pattern,
+            system_prompt=(
+                getattr(skill.agent_profile, "system_prompt", None)
+                if target_pattern == "agent_loop" and getattr(skill, "agent_profile", None) is not None
+                else getattr(skill, "system_prompt", None)
+            ),
             kb_config=kb_config,
             hidden=bool(getattr(skill, "hidden", False)),
+            workflow_nodes=workflow_nodes,
+            workflow_edges=workflow_edges,
+            workflow_version=(
+                getattr(skill.workflow, "workflow_version", None)
+                if getattr(skill, "workflow", None) is not None
+                else getattr(skill, "workflow_version", 1)
+            ) or 1,
+            workflow_viewport=(
+                getattr(skill.workflow, "workflow_viewport", None)
+                if getattr(skill, "workflow", None) is not None
+                else getattr(skill, "workflow_viewport", None)
+            ),
         )
 
     @staticmethod
-    def _serialize_skill_step(step: Any) -> dict[str, Any]:
-        step_data: dict[str, Any] = {
-            "type": getattr(step, "type", None),
-            "instruction": getattr(step, "instruction", None),
-            "tool_name": getattr(step, "tool_name", None),
-            "args_from": getattr(step, "args_from", None),
-            "args_template": getattr(step, "args_template", None),
-            "output_mode": getattr(step, "output_mode", None),
-            "output_fields": SkillRegistry._normalize_output_fields(
-                getattr(step, "output_fields", None)
-            ),
-            "include_in_summary": getattr(step, "include_in_summary", True),
+    def _serialize_workflow_node(node: Any) -> dict[str, Any]:
+        return {
+            "node_id": getattr(node, "node_id", ""),
+            "node_type": getattr(node, "node_type", ""),
+            "label": getattr(node, "label", ""),
+            "position_x": getattr(node, "position_x", 0.0),
+            "position_y": getattr(node, "position_y", 0.0),
+            "config": getattr(node, "config", None) or {},
         }
-        step_order = getattr(step, "step_order", None)
-        if step_order is not None:
-            step_data["step_order"] = step_order
-        return step_data
+
+    @staticmethod
+    def _serialize_workflow_edge(edge: Any) -> dict[str, Any]:
+        return {
+            "edge_id": getattr(edge, "edge_id", ""),
+            "source_node_id": getattr(edge, "source_node_id", ""),
+            "target_node_id": getattr(edge, "target_node_id", ""),
+            "source_handle": getattr(edge, "source_handle", "output"),
+            "target_handle": getattr(edge, "target_handle", "input"),
+            "condition_type": getattr(edge, "condition_type", None),
+            "condition_expr": getattr(edge, "condition_expr", None),
+            "label": getattr(edge, "label", None),
+        }
 
     @staticmethod
     def _normalize_output_fields(raw: Any) -> list[dict[str, Any]] | list[str] | None:

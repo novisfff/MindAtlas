@@ -1,0 +1,86 @@
+{
+  "nodes": [
+    {
+      "nodeId": "start",
+      "nodeType": "start",
+      "label": "Start",
+      "positionX": 120.0,
+      "positionY": 220.0,
+      "config": {
+        "inputMode": "text",
+        "structuredFields": []
+      }
+    },
+    {
+      "nodeId": "tool_stats",
+      "nodeType": "tool",
+      "label": "获取统计",
+      "positionX": 530.0,
+      "positionY": 220.0,
+      "config": {
+        "toolName": "get_statistics",
+        "inputBindings": {}
+      }
+    },
+    {
+      "nodeId": "llm_output",
+      "nodeType": "llm",
+      "label": "汇报统计",
+      "positionX": 940.0,
+      "positionY": 220.0,
+      "config": {
+        "systemPrompt": "汇报当前的记录总数、最近活动趋势等统计信息，输出简洁清晰。",
+        "userInput": "{{tool_stats.result}}",
+        "outputMode": "text"
+      }
+    },
+    {
+      "nodeId": "output_final",
+      "nodeType": "output",
+      "label": "输出",
+      "positionX": 1350.0,
+      "positionY": 220.0,
+      "config": {
+        "outputMode": "text",
+        "textTemplate": "{{llm_output.response}}"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edgeId": "e_start_tool",
+      "sourceNodeId": "start",
+      "targetNodeId": "tool_stats",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_tool_output",
+      "sourceNodeId": "tool_stats",
+      "targetNodeId": "llm_output",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_llm_output_final",
+      "sourceNodeId": "llm_output",
+      "targetNodeId": "output_final",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  }
+}

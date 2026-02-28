@@ -8,6 +8,17 @@ export interface InputParam {
   description?: string
   paramType: string
   required: boolean
+  // Workflow editor metadata for hierarchical variable picker (optional, frontend-only)
+  groupKey?: string
+  groupLabel?: string
+  itemLabel?: string
+  referencePath?: string
+}
+
+export interface OutputParam {
+  name: string
+  description?: string
+  paramType: string
 }
 
 // 系统工具完整定义（从代码获取）
@@ -18,6 +29,7 @@ export interface SystemToolDefinition {
   isSystem: true
   enabled: boolean
   inputParams: InputParam[] | null
+  outputParams?: OutputParam[] | null
   returns: string | null
   jsonSchema: Record<string, unknown> | null
 }
@@ -30,6 +42,7 @@ export interface AssistantTool {
   isSystem: boolean
   enabled: boolean
   inputParams: InputParam[] | null
+  outputParams?: OutputParam[] | null
   endpointUrl: string | null
   httpMethod: string | null
   headers: Record<string, string> | null
@@ -52,6 +65,7 @@ export interface CreateToolRequest {
   kind?: 'remote'
   enabled?: boolean
   inputParams?: InputParam[]
+  outputParams?: OutputParam[]
   endpointUrl: string
   httpMethod?: string
   headers?: Record<string, string>
@@ -71,6 +85,7 @@ export interface UpdateToolRequest {
   description?: string
   enabled?: boolean
   inputParams?: InputParam[]
+  outputParams?: OutputParam[]
   endpointUrl?: string
   httpMethod?: string
   headers?: Record<string, string>
@@ -87,6 +102,14 @@ export interface UpdateToolRequest {
 
 export const getTools = () =>
   apiClient.get<AssistantTool[]>('/api/assistant-config/tools')
+
+export const getToolsWithParams = (params?: { includeDisabled?: boolean; syncSystem?: boolean }) =>
+  apiClient.get<AssistantTool[]>('/api/assistant-config/tools', {
+    query: {
+      include_disabled: params?.includeDisabled ?? true,
+      sync_system: params?.syncSystem ?? true,
+    },
+  })
 
 export const getTool = (id: string) =>
   apiClient.get<AssistantTool>(`/api/assistant-config/tools/${id}`)

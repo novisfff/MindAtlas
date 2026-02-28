@@ -4,6 +4,9 @@ import { defineConfig } from "vite"
 
 export default defineConfig({
   plugins: [react()],
+  optimizeDeps: {
+    exclude: ["@wasm-fmt/ruff_fmt"],
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

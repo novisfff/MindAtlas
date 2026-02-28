@@ -235,30 +235,28 @@ def create_entry(
     time_at: Optional[str] = None,
     time_from: Optional[str] = None,
     time_to: Optional[str] = None,
-    raw_content: Optional[str] = None,
 ) -> str:
     """创建新的记录（写入数据库）。
 
     Args:
         title: 记录标题（可选；为空时会从内容中推断）
         summary: 摘要（可选；为空时会从内容中截取）
-        content: 正文内容（可选；为空时会使用 raw_content）
+        content: 正文内容（必填）
         type_code: 记录类型编码（可选；为空或无效时使用默认类型）
         tags: 标签名称列表（可选；大小写不敏感复用，最多新建 5 个）
         time_mode: 时间模式，"POINT" 或 "RANGE"（可选；默认 "POINT"）
         time_at: 当 time_mode="POINT" 时的日期 (YYYY-MM-DD)
         time_from: 当 time_mode="RANGE" 时的起始日期 (YYYY-MM-DD)
         time_to: 当 time_mode="RANGE" 时的结束日期 (YYYY-MM-DD)
-        raw_content: 原始输入内容（兼容字段；当 content 为空时使用）
 
     Returns:
         创建成功的记录信息（JSON格式，包含id、标题、类型等）
     """
     db = _get_db()
 
-    raw = ((content or "").strip() or (raw_content or "").strip())
+    raw = (content or "").strip()
     if not raw:
-        raise ValueError("content/raw_content 不能为空")
+        raise ValueError("content 不能为空")
 
     # 获取可用类型
     enabled_types = (
