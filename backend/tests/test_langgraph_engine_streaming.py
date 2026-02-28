@@ -284,6 +284,81 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(parsed["count"], 2)
         self.assertEqual(out["node_outputs"]["output_1"]["json_fields"]["count"], 2)
 
+    def test_stream_runtime_separates_output_segments_by_source_switch(self) -> None:
+        from app.assistant.workflow.engine.stream_runtime import (
+            RuntimeEventHandlers,
+            dispatch_runtime_event,
+        )
+
+        buffered: list[str] = []
+        segment_state = {"last_output_source_node_id": ""}
+        handlers = RuntimeEventHandlers()
+
+        _, out_a = dispatch_runtime_event(
+            event_name="content_delta",
+            payload={
+                "chunk": "A",
+                "source_node_id": "output_a",
+                "source_node_type": "output",
+            },
+            handlers=handlers,
+            stream_output_enabled=True,
+            buffered_content_chunks=buffered,
+            content_segment_state=segment_state,
+        )
+        _, out_b = dispatch_runtime_event(
+            event_name="content_delta",
+            payload={
+                "chunk": "B",
+                "source_node_id": "output_b",
+                "source_node_type": "output",
+            },
+            handlers=handlers,
+            stream_output_enabled=True,
+            buffered_content_chunks=buffered,
+            content_segment_state=segment_state,
+        )
+
+        self.assertEqual(out_a, ["A"])
+        self.assertEqual(out_b, ["\n\n", "B"])
+
+    def test_stream_runtime_buffers_output_separator_when_stream_disabled(self) -> None:
+        from app.assistant.workflow.engine.stream_runtime import (
+            RuntimeEventHandlers,
+            dispatch_runtime_event,
+        )
+
+        buffered: list[str] = []
+        segment_state = {"last_output_source_node_id": ""}
+        handlers = RuntimeEventHandlers()
+
+        dispatch_runtime_event(
+            event_name="content_delta",
+            payload={
+                "chunk": "A",
+                "source_node_id": "output_a",
+                "source_node_type": "output",
+            },
+            handlers=handlers,
+            stream_output_enabled=False,
+            buffered_content_chunks=buffered,
+            content_segment_state=segment_state,
+        )
+        dispatch_runtime_event(
+            event_name="content_delta",
+            payload={
+                "chunk": "B",
+                "source_node_id": "output_b",
+                "source_node_type": "output",
+            },
+            handlers=handlers,
+            stream_output_enabled=False,
+            buffered_content_chunks=buffered,
+            content_segment_state=segment_state,
+        )
+
+        self.assertEqual("".join(buffered), "A\n\nB")
+
     def test_output_field_integer_array_rejects_boolean_items(self) -> None:
         from app.assistant.workflow.engine.engine import _coerce_output_field_value
 

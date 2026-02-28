@@ -333,7 +333,6 @@ export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
         if (payload.kind === 'tool') return `tool_${Date.now()}_${++nodeCounter}`
         const nodeType = payload.nodeType as NodeType
         if (!nodeType || nodeType === 'start') return null
-        if (nodeType === 'output' && store.nodes.some((item) => item.data.nodeType === 'output')) return null
         return `${nodeType}_${Date.now()}_${++nodeCounter}`
       })()
       if (!nextNodeId) return
@@ -525,7 +524,6 @@ export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
 
       const nodeType = e.dataTransfer.getData('application/workflow-node-type') as NodeType
       if (!nodeType) return
-      if (nodeType === 'output' && store.nodes.some((node) => node.data.nodeType === 'output')) return
       const nodeId = `${nodeType}_${Date.now()}_${++nodeCounter}`
 
       store.addNode(createMainFlowNode({ id: nodeId, nodeType, position }))

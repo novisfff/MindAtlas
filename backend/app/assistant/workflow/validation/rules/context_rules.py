@@ -128,17 +128,9 @@ def build_validation_context(
         errors.append(
             ValidationError(
                 node_id=None,
-                message="Must have exactly one output node",
+                message="Must have at least one output node",
             )
         )
-    elif len(output_nodes) > 1:
-        for nid in output_nodes:
-            errors.append(
-                ValidationError(
-                    node_id=nid,
-                    message="Only one output node is allowed",
-                )
-            )
 
     out_edges: dict[str, list[str]] = defaultdict(list)
     out_handles: dict[str, list[str]] = defaultdict(list)

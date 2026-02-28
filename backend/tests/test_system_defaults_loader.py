@@ -72,6 +72,22 @@ class SystemDefaultsLoaderTests(unittest.TestCase):
         self.assertEqual(approved_targets, ["tool_create"])
         self.assertEqual(len(rejected_targets), 1)
 
+        output_nodes = [str(node.node_id) for node in (workflow.nodes or []) if str(node.node_type) == "output"]
+        self.assertCountEqual(output_nodes, ["output_created", "output_cancelled"])
+
+        llm_output_targets = [
+            str(edge.target_node_id)
+            for edge in edges
+            if str(edge.source_node_id) == "llm_output"
+        ]
+        llm_cancel_targets = [
+            str(edge.target_node_id)
+            for edge in edges
+            if str(edge.source_node_id) == "llm_cancel"
+        ]
+        self.assertEqual(llm_output_targets, ["output_created"])
+        self.assertEqual(llm_cancel_targets, ["output_cancelled"])
+
     def test_fail_fast_when_preset_file_missing(self) -> None:
         from app.assistant.skill_catalog.defaults_loader import _load_system_skill_defaults_from_dir  # noqa: E402
 

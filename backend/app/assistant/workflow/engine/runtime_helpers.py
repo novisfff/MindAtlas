@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import logging
 import re
 from functools import lru_cache
@@ -158,8 +159,42 @@ def coerce_output_field_value(field_name: str, rendered_value: str, field_spec: 
 
 def emit(metadata: dict[str, Any], event: str, **kwargs: Any) -> None:
     cb = metadata.get(event)
-    if callable(cb):
+    if not callable(cb):
+        return
+    try:
         cb(**kwargs)
+        return
+    except TypeError:
+        # Backward compatibility for callbacks that only accept a subset of fields.
+        try:
+            sig = inspect.signature(cb)
+        except Exception:
+            raise
+
+        accepts_var_kwargs = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+        )
+        if accepts_var_kwargs:
+            raise
+
+        accepted_kwargs: dict[str, Any] = {}
+        for name, param in sig.parameters.items():
+            if param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+                if name in kwargs:
+                    accepted_kwargs[name] = kwargs[name]
+
+        unknown_keys = [k for k in kwargs if k not in accepted_kwargs]
+        if not unknown_keys:
+            raise
+
+        if accepted_kwargs:
+            cb(**accepted_kwargs)
+            return
+
+        if len(kwargs) == 1:
+            cb(next(iter(kwargs.values())))
+            return
+        raise
 
 
 def wrap_tool_with_db(tool: Any, db_bind: Any) -> Callable:

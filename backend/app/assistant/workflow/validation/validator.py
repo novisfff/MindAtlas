@@ -48,7 +48,8 @@ def validate_workflow_compile(
         errors = [
             err
             for err in errors
-            if err.message != "Must have exactly one output node"
+            if err.message != "Must have at least one output node"
+            and err.message != "Must have exactly one output node"
             and err.message != "Only one output node is allowed"
         ]
     start_env_var_types = _resolve_compile_start_env_var_types(nodes)

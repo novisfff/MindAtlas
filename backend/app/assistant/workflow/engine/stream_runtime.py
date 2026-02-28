@@ -5,6 +5,8 @@ from queue import Empty, Queue
 from threading import Thread
 from typing import Any, Callable, Iterator
 
+_OUTPUT_SEGMENT_SEPARATOR = "\n\n"
+
 
 @dataclass(frozen=True)
 class RuntimeEventHandlers:
@@ -30,8 +32,11 @@ def build_runtime_metadata(
     def push_runtime_event(event_name: str, **payload: Any) -> None:
         runtime_events.put((event_name, payload))
 
+    def _on_content_delta(chunk: Any, **extra: Any) -> None:
+        push_runtime_event("content_delta", chunk=chunk, **extra)
+
     metadata: dict[str, Any] = {
-        "on_content_delta": lambda chunk: push_runtime_event("content_delta", chunk=chunk),
+        "on_content_delta": _on_content_delta,
     }
     if handlers.on_tool_call_start:
         metadata["on_tool_call_start"] = lambda tool_call_id, tool_name, args: (
@@ -113,17 +118,28 @@ def dispatch_runtime_event(
     handlers: RuntimeEventHandlers,
     stream_output_enabled: bool,
     buffered_content_chunks: list[str],
+    content_segment_state: dict[str, Any],
 ) -> tuple[bool, list[str]]:
     yielded: list[str] = []
     graph_done = False
 
     if event_name == "content_delta":
-        chunk = payload.get("chunk", "")
+        chunk = str(payload.get("chunk", "") or "")
         if chunk:
+            source_node_id = str(payload.get("source_node_id", "") or "")
+            source_node_type = str(payload.get("source_node_type", "") or "").strip().lower()
+            if source_node_type == "output" and source_node_id:
+                last_output_source = str(content_segment_state.get("last_output_source_node_id", "") or "")
+                if last_output_source and last_output_source != source_node_id:
+                    if stream_output_enabled:
+                        yielded.append(_OUTPUT_SEGMENT_SEPARATOR)
+                    else:
+                        buffered_content_chunks.append(_OUTPUT_SEGMENT_SEPARATOR)
+                content_segment_state["last_output_source_node_id"] = source_node_id
             if stream_output_enabled:
-                yielded.append(str(chunk))
+                yielded.append(chunk)
             else:
-                buffered_content_chunks.append(str(chunk))
+                buffered_content_chunks.append(chunk)
         return graph_done, yielded
 
     if event_name == "tool_call_start" and handlers.on_tool_call_start:
@@ -242,6 +258,9 @@ def run_graph_stream(
 
     graph_done = False
     buffered_content_chunks: list[str] = []
+    content_segment_state: dict[str, Any] = {
+        "last_output_source_node_id": "",
+    }
     while not graph_done or not runtime_events.empty():
         try:
             event_name, payload = runtime_events.get(timeout=event_poll_timeout)
@@ -255,6 +274,7 @@ def run_graph_stream(
             handlers=handlers,
             stream_output_enabled=stream_output_enabled,
             buffered_content_chunks=buffered_content_chunks,
+            content_segment_state=content_segment_state,
         )
         if done:
             graph_done = True

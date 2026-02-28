@@ -86,7 +86,37 @@ class WorkflowValidatorTests(unittest.TestCase):
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
-        self.assertTrue(any("exactly one output node" in e.message for e in result.errors))
+        self.assertTrue(any("at least one output node" in e.message for e in result.errors))
+
+    def test_multiple_output_nodes_are_allowed_when_terminal(self) -> None:
+        from app.assistant.workflow.validation.validator import validate_workflow
+
+        nodes = [
+            {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
+            {"node_id": "llm_a", "node_type": "llm", "label": "Branch A", "config": {}},
+            {"node_id": "llm_b", "node_type": "llm", "label": "Branch B", "config": {}},
+            {
+                "node_id": "output_a",
+                "node_type": "output",
+                "label": "Output A",
+                "config": {"outputMode": "text", "textTemplate": "{{llm_a.response}}"},
+            },
+            {
+                "node_id": "output_b",
+                "node_type": "output",
+                "label": "Output B",
+                "config": {"outputMode": "text", "textTemplate": "{{llm_b.response}}"},
+            },
+        ]
+        edges = [
+            {"source_node_id": "start", "target_node_id": "llm_a", "source_handle": "output"},
+            {"source_node_id": "start", "target_node_id": "llm_b", "source_handle": "output"},
+            {"source_node_id": "llm_a", "target_node_id": "output_a", "source_handle": "output"},
+            {"source_node_id": "llm_b", "target_node_id": "output_b", "source_handle": "output"},
+        ]
+
+        result = validate_workflow(nodes, edges)
+        self.assertTrue(result.valid, [e.message for e in result.errors])
 
     def test_valid_workflow_passes(self) -> None:
         from app.assistant.workflow.validation.validator import validate_workflow

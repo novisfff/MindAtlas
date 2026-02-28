@@ -88,7 +88,7 @@ export function computeDeadEndWarnings(
   warningMessage: string,
 ): WorkflowValidationIssue[] {
   const outputNodes = workflow.nodes.filter((node) => node.nodeType === 'output')
-  if (outputNodes.length !== 1) return []
+  if (outputNodes.length < 1) return []
 
   const nodeIds = new Set(workflow.nodes.map((node) => node.nodeId))
   const reverseAdj = new Map<string, string[]>()
@@ -101,7 +101,7 @@ export function computeDeadEndWarnings(
   })
 
   const reachable = new Set<string>()
-  const queue: string[] = [outputNodes[0].nodeId]
+  const queue: string[] = outputNodes.map((node) => node.nodeId)
 
   while (queue.length > 0) {
     const current = queue.shift()

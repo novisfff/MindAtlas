@@ -32,7 +32,8 @@ EXPECTED_WORKFLOW_POSITIONS: dict[str, dict[str, tuple[int, int]]] = {
         "tool_create": (3770, 245),
         "llm_cancel": (3770, 396),
         "llm_output": (4180, 245),
-        "output_final": (4590, 320),
+        "output_created": (4590, 245),
+        "output_cancelled": (4590, 396),
     },
     "periodic_review": {
         "start": (120, 320),

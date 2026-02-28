@@ -46,29 +46,32 @@ def resolve_workflow_runtime_context(
 
     output_stream_source_node_id = ""
     output_node_ids = [node_id for node_id, node_type in workflow_node_types.items() if node_type == "output"]
-    if len(output_node_ids) == 1:
-        output_node_cfg = workflow_node_configs.get(output_node_ids[0], {})
-        output_mode = str(output_node_cfg.get("output_mode", "text") or "text").strip().lower()
-        if output_mode == "json":
-            output_mode = "structured"
-        if output_mode == "text":
-            text_template = output_node_cfg.get("text_template", "")
-            if isinstance(text_template, str):
-                single_ref = extract_single_template_reference(text_template)
-                if single_ref is not None:
-                    ref_node_id, ref_field = single_ref
-                    ref_node_cfg = workflow_node_configs.get(ref_node_id, {})
-                    ref_output_mode = str(
-                        ref_node_cfg.get("output_mode", "text") or "text"
-                    ).strip().lower()
-                    if ref_output_mode == "json":
-                        ref_output_mode = "structured"
-                    if (
-                        workflow_node_types.get(ref_node_id) == "llm"
-                        and ref_output_mode == "text"
-                        and ref_field in {"response", "text"}
-                    ):
-                        output_stream_source_node_id = ref_node_id
+    if len(output_node_ids) != 1:
+        # Keep passthrough optimization only for the single-output topology.
+        return node_llms, workflow_node_types, output_stream_source_node_id
+
+    output_node_cfg = workflow_node_configs.get(output_node_ids[0], {})
+    output_mode = str(output_node_cfg.get("output_mode", "text") or "text").strip().lower()
+    if output_mode == "json":
+        output_mode = "structured"
+    if output_mode == "text":
+        text_template = output_node_cfg.get("text_template", "")
+        if isinstance(text_template, str):
+            single_ref = extract_single_template_reference(text_template)
+            if single_ref is not None:
+                ref_node_id, ref_field = single_ref
+                ref_node_cfg = workflow_node_configs.get(ref_node_id, {})
+                ref_output_mode = str(
+                    ref_node_cfg.get("output_mode", "text") or "text"
+                ).strip().lower()
+                if ref_output_mode == "json":
+                    ref_output_mode = "structured"
+                if (
+                    workflow_node_types.get(ref_node_id) == "llm"
+                    and ref_output_mode == "text"
+                    and ref_field in {"response", "text"}
+                ):
+                    output_stream_source_node_id = ref_node_id
 
     return node_llms, workflow_node_types, output_stream_source_node_id
 

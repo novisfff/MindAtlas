@@ -61,7 +61,13 @@ def build_output_node(
                 and single_ref[1] in {"response", "text"}
             )
             if not should_skip_final_emit and rendered_text:
-                emit(metadata, "on_content_delta", chunk=rendered_text)
+                emit(
+                    metadata,
+                    "on_content_delta",
+                    chunk=rendered_text,
+                    source_node_id=node_id,
+                    source_node_type="output",
+                )
 
             emit(metadata, "on_node_end", node_id=node_id, status="ok")
             return {
@@ -110,7 +116,13 @@ def build_output_node(
             json_fields=json_fields,
         )
         if json_text:
-            emit(metadata, "on_content_delta", chunk=json_text)
+            emit(
+                metadata,
+                "on_content_delta",
+                chunk=json_text,
+                source_node_id=node_id,
+                source_node_type="output",
+            )
 
         emit(metadata, "on_node_end", node_id=node_id, status="ok")
         return {

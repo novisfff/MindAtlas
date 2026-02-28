@@ -287,14 +287,25 @@
       }
     },
     {
-      "nodeId": "output_final",
+      "nodeId": "output_created",
       "nodeType": "output",
-      "label": "输出",
+      "label": "创建成功输出",
       "positionX": 4590.0,
-      "positionY": 320.0,
+      "positionY": 245.0,
       "config": {
         "outputMode": "text",
-        "textTemplate": "{{llm_output.response}}{{llm_cancel.response}}"
+        "textTemplate": "{{llm_output.response}}"
+      }
+    },
+    {
+      "nodeId": "output_cancelled",
+      "nodeType": "output",
+      "label": "取消创建输出",
+      "positionX": 4590.0,
+      "positionY": 396.0,
+      "config": {
+        "outputMode": "text",
+        "textTemplate": "{{llm_cancel.response}}"
       }
     }
   ],
@@ -430,9 +441,9 @@
       "label": null
     },
     {
-      "edgeId": "e_output_final",
+      "edgeId": "e_output_created",
       "sourceNodeId": "llm_output",
-      "targetNodeId": "output_final",
+      "targetNodeId": "output_created",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
@@ -440,9 +451,9 @@
       "label": null
     },
     {
-      "edgeId": "e_cancel_final",
+      "edgeId": "e_cancel_output",
       "sourceNodeId": "llm_cancel",
-      "targetNodeId": "output_final",
+      "targetNodeId": "output_cancelled",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
