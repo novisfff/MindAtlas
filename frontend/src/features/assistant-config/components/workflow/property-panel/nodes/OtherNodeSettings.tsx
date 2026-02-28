@@ -1,4 +1,4 @@
-import { Plus, Trash2 } from 'lucide-react'
+import { Plus, Trash2, Cpu, FileText, Terminal, List, MessageSquare, Search, Settings2, Box, Hash } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { CommonOutputList, CommonRichInput, CommonSelect, CommonSwitch, Label } from '../CommonInputs'
 import { NodeSettingsProps } from './ToolNodeSettings'
@@ -84,8 +84,9 @@ export function ParameterExtractorNodeSettings({ config, onUpdate, mentionParams
     }
 
     return (
-        <div className="space-y-6">
+        <div className="space-y-4">
             <CommonSelect
+                icon={<Cpu className="w-4 h-4" />}
                 label={t('settings.skills.nodeModel')}
                 value={modelSelectValue}
                 onChange={(val) => {
@@ -99,6 +100,7 @@ export function ParameterExtractorNodeSettings({ config, onUpdate, mentionParams
             />
 
             <CommonRichInput
+                icon={<FileText className="w-4 h-4" />}
                 label={t('settings.skills.extractionInputContent')}
                 value={(config.inputContent as string) ?? ''}
                 onChange={(val) => onUpdate({ inputContent: val })}
@@ -108,6 +110,7 @@ export function ParameterExtractorNodeSettings({ config, onUpdate, mentionParams
             />
 
             <CommonRichInput
+                icon={<Terminal className="w-4 h-4" />}
                 label={t('settings.skills.extractionInstructions')}
                 value={(config.instruction as string) ?? ''}
                 onChange={(val) => onUpdate({ instruction: val })}
@@ -120,90 +123,113 @@ export function ParameterExtractorNodeSettings({ config, onUpdate, mentionParams
                 {t('settings.skills.extractionBuiltinPromptHint')}
             </p>
 
-            <div className="space-y-3">
+            <div className="space-y-2.5">
                 <div className="flex items-center justify-between">
-                    <Label>{t('settings.skills.extractionOutputConfiguration')}</Label>
+                    <Label icon={<List className="w-4 h-4" />}>{t('settings.skills.extractionOutputConfiguration')}</Label>
                     <button
                         onClick={addOutputField}
-                        className="flex items-center gap-1 text-[10px] bg-primary/10 text-primary hover:bg-primary/20 px-2 py-1 rounded transition-colors"
+                        className="flex items-center gap-1.5 text-xs font-semibold bg-primary/5 text-primary hover:bg-primary/10 px-2 py-1.5 rounded-lg transition-colors border border-primary/10"
                     >
-                        <Plus className="w-3 h-3" />
+                        <Plus className="w-3.5 h-3.5" />
                         {t('actions.add')}
                     </button>
                 </div>
 
-                <div className="space-y-2">
+                <div className="space-y-2.5">
                     {outputFields.map((field, index) => (
-                        <div key={index} className="space-y-2 p-2 rounded-md border bg-card/50">
-                            <div className="flex gap-2">
+                        <div key={index} className="relative group flex flex-col gap-2.5 p-3 rounded-xl border border-slate-200/80 bg-slate-50/50 hover:bg-slate-50 transition-all shadow-sm">
+                            <div className="flex items-start gap-2.5 w-full pr-8">
                                 <input
                                     type="text"
                                     value={field.name}
                                     onChange={(e) => updateOutputField(index, { name: e.target.value })}
-                                    className="flex-1 px-2 py-1 text-xs rounded border bg-background"
+                                    className="flex-1 px-3 py-2 text-sm rounded-lg border border-slate-200/60 bg-slate-50 hover:bg-slate-100/60 focus:bg-white focus:ring-[3px] focus:ring-primary/10 focus:border-primary/30 outline-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] text-slate-700 font-mono"
                                     placeholder={t('settings.skills.jsonFieldsPlaceholder')}
                                 />
-                                <button
-                                    onClick={() => removeOutputField(index)}
-                                    className="text-muted-foreground hover:text-red-500 p-1 rounded hover:bg-red-50 transition-colors"
-                                >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                </button>
                             </div>
 
-                            <div className="flex gap-2">
-                                <select
-                                    value={field.type}
-                                    onChange={(e) => updateOutputField(index, { type: e.target.value })}
-                                    className="flex-1 px-2 py-1 text-xs rounded border bg-background"
-                                >
-                                    {FIELD_TYPES.map((item) => (
-                                        <option key={item.value} value={item.value}>
-                                            {item.label}
-                                        </option>
-                                    ))}
-                                </select>
-
-                                {field.type === 'array' && (
+                            <div className="flex gap-2.5 w-full pr-8">
+                                <div className="relative flex-1">
                                     <select
-                                        value={field.itemsType ?? 'string'}
-                                        onChange={(e) => updateOutputField(index, { itemsType: e.target.value })}
-                                        className="flex-1 px-2 py-1 text-xs rounded border bg-background"
+                                        value={field.type}
+                                        onChange={(e) => updateOutputField(index, { type: e.target.value })}
+                                        className="w-full px-2.5 py-1.5 text-sm rounded-lg border border-slate-200 bg-white focus:ring-2 focus:ring-primary/20 focus:border-primary/50 outline-none transition-all shadow-sm appearance-none cursor-pointer"
+                                        style={{
+                                            backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
+                                            backgroundPosition: 'right 0.5rem center',
+                                            backgroundRepeat: 'no-repeat',
+                                            backgroundSize: '1.5em 1.5em',
+                                            paddingRight: '2.5rem'
+                                        }}
                                     >
-                                        {ARRAY_ITEM_TYPES.map((item) => (
+                                        {FIELD_TYPES.map((item) => (
                                             <option key={item.value} value={item.value}>
                                                 {item.label}
                                             </option>
                                         ))}
                                     </select>
+                                </div>
+
+                                {field.type === 'array' && (
+                                    <div className="relative flex-1">
+                                        <select
+                                            value={field.itemsType ?? 'string'}
+                                            onChange={(e) => updateOutputField(index, { itemsType: e.target.value })}
+                                            className="w-full px-2.5 py-1.5 text-sm rounded-lg border border-slate-200 bg-white focus:ring-2 focus:ring-primary/20 focus:border-primary/50 outline-none transition-all shadow-sm appearance-none cursor-pointer"
+                                            style={{
+                                                backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
+                                                backgroundPosition: 'right 0.5rem center',
+                                                backgroundRepeat: 'no-repeat',
+                                                backgroundSize: '1.5em 1.5em',
+                                                paddingRight: '2.5rem'
+                                            }}
+                                        >
+                                            {ARRAY_ITEM_TYPES.map((item) => (
+                                                <option key={item.value} value={item.value}>
+                                                    {item.label}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </div>
                                 )}
                             </div>
 
-                            <input
-                                type="text"
-                                value={Array.isArray(field.enum) ? field.enum.join(', ') : ''}
-                                onChange={(e) =>
-                                    updateOutputField(index, {
-                                        enum: e.target.value
-                                            .split(',')
-                                            .map((item) => item.trim())
-                                            .filter(Boolean),
-                                    })
-                                }
-                                className="w-full px-2 py-1 text-xs rounded border bg-background"
-                                placeholder="enum1, enum2 (optional)"
-                            />
+                            <div className="w-full pr-8">
+                                <input
+                                    type="text"
+                                    value={Array.isArray(field.enum) ? field.enum.join(', ') : ''}
+                                    onChange={(e) =>
+                                        updateOutputField(index, {
+                                            enum: e.target.value
+                                                .split(',')
+                                                .map((item) => item.trim())
+                                                .filter(Boolean),
+                                        })
+                                    }
+                                    className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200/60 bg-slate-50 hover:bg-slate-100/60 focus:bg-white focus:ring-[3px] focus:ring-primary/10 focus:border-primary/30 outline-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] text-slate-700"
+                                    placeholder="enum1, enum2 (optional)"
+                                />
+                            </div>
 
-                            <CommonSwitch
-                                label="Nullable"
-                                checked={Boolean(field.nullable)}
-                                onChange={(checked) => updateOutputField(index, { nullable: checked })}
-                            />
+                            <div className="w-full pr-8">
+                                <CommonSwitch
+                                    label="Nullable"
+                                    checked={Boolean(field.nullable)}
+                                    onChange={(checked) => updateOutputField(index, { nullable: checked })}
+                                />
+                            </div>
+
+                            <button
+                                onClick={() => removeOutputField(index)}
+                                className="absolute right-3 top-4 p-1.5 text-slate-400 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100"
+                            >
+                                <Trash2 className="w-4 h-4" />
+                            </button>
                         </div>
                     ))}
 
                     {outputFields.length === 0 && (
-                        <div className="text-center py-4 text-xs text-muted-foreground border border-dashed rounded-md">
+                        <div className="text-center py-5 text-sm text-slate-500 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50/50">
                             {t('settings.skills.noParams')}
                         </div>
                     )}
@@ -211,6 +237,7 @@ export function ParameterExtractorNodeSettings({ config, onUpdate, mentionParams
             </div>
 
             <CommonOutputList
+                icon={<MessageSquare className="w-4 h-4" />}
                 label={t('settings.skills.extractionOutputFields')}
                 outputs={outputNames}
             />
@@ -224,8 +251,9 @@ export function KnowledgeRetrievalNodeSettings({ config, onUpdate, mentionParams
     const topKValue = typeof rawTopK === 'number' ? String(rawTopK) : ''
 
     return (
-        <div className="space-y-4">
+        <div className="space-y-3">
             <CommonRichInput
+                icon={<Search className="w-4 h-4" />}
                 label={t('settings.skills.retrievalQuery')}
                 value={(config.query as string) ?? '{{start.user_input}}'}
                 onChange={(val) => onUpdate({ query: val })}
@@ -235,6 +263,7 @@ export function KnowledgeRetrievalNodeSettings({ config, onUpdate, mentionParams
             />
 
             <CommonSelect
+                icon={<Settings2 className="w-4 h-4" />}
                 label={t('settings.skills.retrievalMode')}
                 value={(config.mode as string) ?? ''}
                 onChange={(val) => onUpdate({ mode: val || undefined })}
@@ -249,7 +278,7 @@ export function KnowledgeRetrievalNodeSettings({ config, onUpdate, mentionParams
             />
 
             <div className="space-y-1.5">
-                <Label>{t('settings.skills.retrievalTopK')}</Label>
+                <Label icon={<Settings2 className="w-4 h-4" />}>{t('settings.skills.retrievalTopK')}</Label>
                 <input
                     type="number"
                     value={topKValue}
@@ -263,7 +292,7 @@ export function KnowledgeRetrievalNodeSettings({ config, onUpdate, mentionParams
                         if (Number.isNaN(parsed)) return
                         onUpdate({ topK: Math.max(1, Math.min(50, parsed)) })
                     }}
-                    className="w-full px-3 py-2 text-xs rounded-md border bg-background/50 focus:ring-1 focus:ring-primary/20 focus:border-primary/50 outline-none"
+                    className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200/60 bg-slate-50 hover:bg-slate-100/60 focus:bg-white focus:ring-[3px] focus:ring-primary/10 focus:border-primary/30 outline-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] text-slate-700"
                     min={1}
                     max={50}
                     placeholder={t('settings.skills.retrievalTopKFallback')}
@@ -388,35 +417,35 @@ function ContainerBodyEditor({
     const { bodyNodes, addNode, removeNode } = useContainerBodyEditor(config, onUpdate)
     const userNodes = bodyNodes.filter((node) => node.nodeType !== 'start')
     return (
-        <div className="space-y-2 pt-1">
-            <Label>{t('settings.skills.containerBodyFlow')}</Label>
-            <div className="space-y-2 rounded-md border bg-card/40 p-2.5">
+        <div className="space-y-2.5 pt-1.5">
+            <Label icon={<Box className="w-4 h-4" />}>{t('settings.skills.containerBodyFlow')}</Label>
+            <div className="space-y-2.5 rounded-xl border border-slate-200 bg-slate-50/50 p-3 shadow-sm">
                 {userNodes.map((node) => (
-                    <div key={node.nodeId} className="flex items-center justify-between rounded border bg-background px-2 py-1.5 text-xs">
-                        <span className="truncate">{node.label || node.nodeType}</span>
+                    <div key={node.nodeId} className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm shadow-sm">
+                        <span className="truncate font-medium text-slate-700">{node.label || node.nodeType}</span>
                         <button
                             type="button"
                             onClick={() => removeNode(node.nodeId)}
-                            className="text-muted-foreground hover:text-destructive"
+                            className="text-slate-400 hover:text-red-500 transition-colors p-1 hover:bg-red-50 rounded"
                         >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-4 h-4" />
                         </button>
                     </div>
                 ))}
                 {userNodes.length === 0 && (
-                    <div className="text-[11px] text-muted-foreground py-2 text-center border border-dashed rounded">
+                    <div className="text-sm text-slate-500 py-3 text-center border-2 border-dashed border-slate-200 rounded-xl bg-white/50">
                         {t('settings.skills.containerBodyEmpty')}
                     </div>
                 )}
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-2 gap-2 mt-2">
                     {CONTAINER_NODE_TYPES.map((item) => (
                         <button
                             key={item.value}
                             type="button"
-                            className="text-[11px] border rounded px-2 py-1.5 hover:bg-accent/40 text-left"
+                            className="text-xs font-medium text-slate-600 border border-slate-200 bg-white rounded-lg px-3 py-2 hover:bg-primary/5 hover:border-primary/20 hover:text-primary transition-all shadow-sm text-left flex items-center gap-1.5"
                             onClick={() => addNode(item.value, t(item.labelKey))}
                         >
-                            + {t(item.labelKey)}
+                            <Plus className="w-3.5 h-3.5" /> {t(item.labelKey)}
                         </button>
                     ))}
                 </div>
@@ -430,8 +459,9 @@ export function IterationNodeSettings({ config, onUpdate, mentionParams }: NodeS
     const outputVariable = String(config.outputVariable ?? 'results')
     const outputs = [outputVariable, 'count', 'errors']
     return (
-        <div className="space-y-5">
+        <div className="space-y-4">
             <CommonRichInput
+                icon={<FileText className="w-4 h-4" />}
                 label={t('settings.skills.iterationInputSource')}
                 value={String(config.inputSource ?? '')}
                 onChange={(val) => onUpdate({ inputSource: val })}
@@ -442,17 +472,18 @@ export function IterationNodeSettings({ config, onUpdate, mentionParams }: NodeS
             />
 
             <div className="space-y-1.5">
-                <Label required>{t('settings.skills.iterationOutputVariable')}</Label>
+                <Label icon={<Box className="w-4 h-4" />} required>{t('settings.skills.iterationOutputVariable')}</Label>
                 <input
                     type="text"
                     value={outputVariable}
                     onChange={(e) => onUpdate({ outputVariable: e.target.value })}
-                    className="w-full px-3 py-2 text-xs rounded-md border bg-background/50"
+                    className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200/60 bg-slate-50 hover:bg-slate-100/60 focus:bg-white focus:ring-[3px] focus:ring-primary/10 focus:border-primary/30 outline-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] text-slate-700"
                     placeholder="results"
                 />
             </div>
 
             <CommonRichInput
+                icon={<Settings2 className="w-4 h-4" />}
                 label={t('settings.skills.iterationOutputSelector')}
                 value={String(config.outputSelector ?? '{{container.item}}')}
                 onChange={(val) => onUpdate({ outputSelector: val })}
@@ -463,12 +494,14 @@ export function IterationNodeSettings({ config, onUpdate, mentionParams }: NodeS
             />
 
             <CommonSwitch
+                icon={<Settings2 className="w-4 h-4" />}
                 label={t('settings.skills.iterationParallelMode')}
                 checked={Boolean(config.parallelMode)}
                 onChange={(checked) => onUpdate({ parallelMode: checked })}
             />
 
             <CommonSelect
+                icon={<Settings2 className="w-4 h-4" />}
                 label={t('settings.skills.iterationErrorStrategy')}
                 value={String(config.errorStrategy ?? 'fail_fast')}
                 onChange={(val) => onUpdate({ errorStrategy: val || 'fail_fast' })}
@@ -479,6 +512,7 @@ export function IterationNodeSettings({ config, onUpdate, mentionParams }: NodeS
             />
 
             <CommonSwitch
+                icon={<Settings2 className="w-4 h-4" />}
                 label={t('settings.skills.iterationFlattenOutput')}
                 checked={config.flattenOutput !== false}
                 onChange={(checked) => onUpdate({ flattenOutput: checked })}
@@ -486,7 +520,7 @@ export function IterationNodeSettings({ config, onUpdate, mentionParams }: NodeS
 
             <ContainerBodyEditor config={config} onUpdate={onUpdate} />
 
-            <CommonOutputList label={t('settings.skills.workflowOutputList')} outputs={outputs} />
+            <CommonOutputList icon={<MessageSquare className="w-4 h-4" />} label={t('settings.skills.workflowOutputList')} outputs={outputs} />
         </div>
     )
 }
@@ -513,8 +547,9 @@ export function LoopNodeSettings({ config, onUpdate, mentionParams }: NodeSettin
     }
 
     return (
-        <div className="space-y-5">
+        <div className="space-y-4">
             <CommonSelect
+                icon={<Settings2 className="w-4 h-4" />}
                 label={t('settings.skills.loopTerminationLogic')}
                 value={String(config.terminationLogic ?? 'and')}
                 onChange={(val) => onUpdate({ terminationLogic: val || 'and' })}
@@ -524,142 +559,180 @@ export function LoopNodeSettings({ config, onUpdate, mentionParams }: NodeSettin
                 ]}
             />
 
-            <div className="space-y-2">
-                <Label>{t('settings.skills.loopMaxIterations')}</Label>
+            <div className="space-y-1.5">
+                <Label icon={<Hash className="w-4 h-4" />}>{t('settings.skills.loopMaxIterations')}</Label>
                 <input
                     type="number"
                     value={Number.isFinite(maxIterations) ? maxIterations : 10}
                     min={1}
                     max={1000}
                     onChange={(e) => onUpdate({ maxIterations: Math.max(1, Math.min(1000, Number(e.target.value || 10))) })}
-                    className="w-full px-3 py-2 text-xs rounded-md border bg-background/50"
+                    className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200/60 bg-slate-50 hover:bg-slate-100/60 focus:bg-white focus:ring-[3px] focus:ring-primary/10 focus:border-primary/30 outline-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] text-slate-700"
                 />
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-2.5">
                 <div className="flex items-center justify-between">
-                    <Label>{t('settings.skills.loopInitialVars')}</Label>
+                    <Label icon={<List className="w-4 h-4" />}>{t('settings.skills.loopInitialVars')}</Label>
                     <button
                         type="button"
-                        className="text-xs text-primary"
+                        className="flex items-center gap-1.5 text-xs font-semibold bg-primary/5 text-primary hover:bg-primary/10 px-2 py-1.5 rounded-lg transition-colors border border-primary/10"
                         onClick={() => onUpdate({ initialVars: [...initialVars, { name: '', value: '' }] })}
                     >
-                        + {t('actions.add')}
+                        <Plus className="w-3.5 h-3.5" />
+                        {t('actions.add')}
                     </button>
                 </div>
-                {initialVars.map((item, index) => (
-                    <div key={index} className="grid grid-cols-2 gap-2">
-                        <input
-                            type="text"
-                            value={String((item as Record<string, unknown>)?.name ?? '')}
-                            onChange={(e) => updateInitialVar(index, { name: e.target.value })}
-                            className="px-2 py-1.5 text-xs rounded border bg-background"
-                            placeholder="name"
-                        />
-                        <input
-                            type="text"
-                            value={String((item as Record<string, unknown>)?.value ?? '')}
-                            onChange={(e) => updateInitialVar(index, { value: e.target.value })}
-                            className="px-2 py-1.5 text-xs rounded border bg-background"
-                            placeholder="value"
-                        />
-                    </div>
-                ))}
+                <div className="space-y-2.5">
+                    {initialVars.map((item, index) => (
+                        <div key={index} className="flex gap-2.5 items-center">
+                            <input
+                                type="text"
+                                value={String((item as Record<string, unknown>)?.name ?? '')}
+                                onChange={(e) => updateInitialVar(index, { name: e.target.value })}
+                                className="flex-1 px-3 py-2 text-sm rounded-lg border border-slate-200/60 bg-slate-50 hover:bg-slate-100/60 focus:bg-white focus:ring-[3px] focus:ring-primary/10 focus:border-primary/30 outline-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] text-slate-700 font-mono"
+                                placeholder="name"
+                            />
+                            <input
+                                type="text"
+                                value={String((item as Record<string, unknown>)?.value ?? '')}
+                                onChange={(e) => updateInitialVar(index, { value: e.target.value })}
+                                className="flex-1 px-3 py-2 text-sm rounded-lg border border-slate-200/60 bg-slate-50 hover:bg-slate-100/60 focus:bg-white focus:ring-[3px] focus:ring-primary/10 focus:border-primary/30 outline-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] text-slate-700 font-mono"
+                                placeholder="value"
+                            />
+                        </div>
+                    ))}
+                    {initialVars.length === 0 && (
+                        <div className="text-center py-3 text-sm text-slate-500 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50/50">
+                            No initial variables defined
+                        </div>
+                    )}
+                </div>
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-2.5">
                 <div className="flex items-center justify-between">
-                    <Label>{t('settings.skills.loopUpdateMappings')}</Label>
+                    <Label icon={<List className="w-4 h-4" />}>{t('settings.skills.loopUpdateMappings')}</Label>
                     <button
                         type="button"
-                        className="text-xs text-primary"
+                        className="flex items-center gap-1.5 text-xs font-semibold bg-primary/5 text-primary hover:bg-primary/10 px-2 py-1.5 rounded-lg transition-colors border border-primary/10"
                         onClick={() => onUpdate({ updateMappings: [...updateMappings, { name: '', value: '' }] })}
                     >
-                        + {t('actions.add')}
+                        <Plus className="w-3.5 h-3.5" />
+                        {t('actions.add')}
                     </button>
                 </div>
-                {updateMappings.map((item, index) => (
-                    <div key={index} className="grid grid-cols-2 gap-2">
-                        <input
-                            type="text"
-                            value={String((item as Record<string, unknown>)?.name ?? '')}
-                            onChange={(e) => updateMapping(index, { name: e.target.value })}
-                            className="px-2 py-1.5 text-xs rounded border bg-background"
-                            placeholder="name"
-                        />
-                        <CommonRichInput
-                            value={String((item as Record<string, unknown>)?.value ?? '')}
-                            onChange={(val) => updateMapping(index, { value: val })}
-                            mentionParams={mentionParams}
-                            rows={2}
-                        />
-                    </div>
-                ))}
+                <div className="space-y-2.5">
+                    {updateMappings.map((item, index) => (
+                        <div key={index} className="grid grid-cols-[1fr_2fr] gap-2.5 items-start">
+                            <input
+                                type="text"
+                                value={String((item as Record<string, unknown>)?.name ?? '')}
+                                onChange={(e) => updateMapping(index, { name: e.target.value })}
+                                className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200/60 bg-slate-50 hover:bg-slate-100/60 focus:bg-white focus:ring-[3px] focus:ring-primary/10 focus:border-primary/30 outline-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] text-slate-700 font-mono"
+                                placeholder="name"
+                            />
+                            <div className="w-full">
+                                <CommonRichInput
+                                    value={String((item as Record<string, unknown>)?.value ?? '')}
+                                    onChange={(val) => updateMapping(index, { value: val })}
+                                    mentionParams={mentionParams}
+                                    rows={2}
+                                />
+                            </div>
+                        </div>
+                    ))}
+                    {updateMappings.length === 0 && (
+                        <div className="text-center py-3 text-sm text-slate-500 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50/50">
+                            No update mappings defined
+                        </div>
+                    )}
+                </div>
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-2.5">
                 <div className="flex items-center justify-between">
-                    <Label>{t('settings.skills.loopTerminationConditions')}</Label>
+                    <Label icon={<List className="w-4 h-4" />}>{t('settings.skills.loopTerminationConditions')}</Label>
                     <button
                         type="button"
-                        className="text-xs text-primary"
+                        className="flex items-center gap-1.5 text-xs font-semibold bg-primary/5 text-primary hover:bg-primary/10 px-2 py-1.5 rounded-lg transition-colors border border-primary/10"
                         onClick={() => onUpdate({ terminationConditions: [...terminationConditions, { id: `cond_${Date.now()}`, variable: '', operator: 'is', value: '' }] })}
                     >
-                        + {t('settings.skills.ifElseAddCondition')}
+                        <Plus className="w-3.5 h-3.5" />
+                        {t('settings.skills.ifElseAddCondition')}
                     </button>
                 </div>
-                {terminationConditions.map((cond, index) => (
-                    <div key={String((cond as Record<string, unknown>)?.id ?? index)} className="space-y-2 rounded border p-2">
-                        <CommonRichInput
-                            label={t('settings.skills.ifElseVariable')}
-                            value={String((cond as Record<string, unknown>)?.variable ?? '')}
-                            onChange={(val) => {
-                                const next = [...terminationConditions]
-                                next[index] = { ...(cond as Record<string, unknown>), variable: val }
-                                onUpdate({ terminationConditions: next })
-                            }}
-                            mentionParams={mentionParams}
-                            rows={2}
-                        />
-                        <CommonSelect
-                            label={t('settings.skills.ifElseOperator')}
-                            value={String((cond as Record<string, unknown>)?.operator ?? 'is')}
-                            onChange={(val) => {
-                                const next = [...terminationConditions]
-                                next[index] = { ...(cond as Record<string, unknown>), operator: val }
-                                onUpdate({ terminationConditions: next })
-                            }}
-                            options={[
-                                { label: t('settings.skills.operators.is'), value: 'is' },
-                                { label: t('settings.skills.operators.is_not'), value: 'is_not' },
-                                { label: t('settings.skills.operators.contains'), value: 'contains' },
-                                { label: t('settings.skills.operators.not_contains'), value: 'not_contains' },
-                                { label: t('settings.skills.operators.is_empty'), value: 'is_empty' },
-                                { label: t('settings.skills.operators.is_not_empty'), value: 'is_not_empty' },
-                                { label: t('settings.skills.operators.gt'), value: 'gt' },
-                                { label: t('settings.skills.operators.lt'), value: 'lt' },
-                                { label: t('settings.skills.operators.gte'), value: 'gte' },
-                                { label: t('settings.skills.operators.lte'), value: 'lte' },
-                            ]}
-                        />
-                        <CommonRichInput
-                            label={t('settings.skills.ifElseValue')}
-                            value={String((cond as Record<string, unknown>)?.value ?? '')}
-                            onChange={(val) => {
-                                const next = [...terminationConditions]
-                                next[index] = { ...(cond as Record<string, unknown>), value: val }
-                                onUpdate({ terminationConditions: next })
-                            }}
-                            mentionParams={mentionParams}
-                            rows={2}
-                        />
-                    </div>
-                ))}
+                <div className="space-y-2.5">
+                    {terminationConditions.map((cond, index) => (
+                        <div key={String((cond as Record<string, unknown>)?.id ?? index)} className="space-y-3 rounded-xl border border-slate-200/80 bg-slate-50/50 p-3 shadow-sm relative group">
+                            <CommonRichInput
+                                label={t('settings.skills.ifElseVariable')}
+                                value={String((cond as Record<string, unknown>)?.variable ?? '')}
+                                onChange={(val) => {
+                                    const next = [...terminationConditions]
+                                    next[index] = { ...(cond as Record<string, unknown>), variable: val }
+                                    onUpdate({ terminationConditions: next })
+                                }}
+                                mentionParams={mentionParams}
+                                rows={2}
+                            />
+                            <CommonSelect
+                                label={t('settings.skills.ifElseOperator')}
+                                value={String((cond as Record<string, unknown>)?.operator ?? 'is')}
+                                onChange={(val) => {
+                                    const next = [...terminationConditions]
+                                    next[index] = { ...(cond as Record<string, unknown>), operator: val }
+                                    onUpdate({ terminationConditions: next })
+                                }}
+                                options={[
+                                    { label: t('settings.skills.operators.is'), value: 'is' },
+                                    { label: t('settings.skills.operators.is_not'), value: 'is_not' },
+                                    { label: t('settings.skills.operators.contains'), value: 'contains' },
+                                    { label: t('settings.skills.operators.not_contains'), value: 'not_contains' },
+                                    { label: t('settings.skills.operators.is_empty'), value: 'is_empty' },
+                                    { label: t('settings.skills.operators.is_not_empty'), value: 'is_not_empty' },
+                                    { label: t('settings.skills.operators.gt'), value: 'gt' },
+                                    { label: t('settings.skills.operators.lt'), value: 'lt' },
+                                    { label: t('settings.skills.operators.gte'), value: 'gte' },
+                                    { label: t('settings.skills.operators.lte'), value: 'lte' },
+                                ]}
+                            />
+                            <CommonRichInput
+                                label={t('settings.skills.ifElseValue')}
+                                value={String((cond as Record<string, unknown>)?.value ?? '')}
+                                onChange={(val) => {
+                                    const next = [...terminationConditions]
+                                    next[index] = { ...(cond as Record<string, unknown>), value: val }
+                                    onUpdate({ terminationConditions: next })
+                                }}
+                                mentionParams={mentionParams}
+                                rows={2}
+                            />
+                            <button
+                                onClick={() => {
+                                    const next = [...terminationConditions]
+                                    next.splice(index, 1)
+                                    onUpdate({ terminationConditions: next })
+                                }}
+                                className="absolute right-3 top-3 opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-500 transition-all p-1.5 hover:bg-red-50 rounded-lg"
+                                title={t('actions.remove')}
+                            >
+                                <Trash2 className="w-4 h-4" />
+                            </button>
+                        </div>
+                    ))}
+                    {terminationConditions.length === 0 && (
+                        <div className="text-center py-3 text-sm text-slate-500 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50/50">
+                            No termination conditions defined
+                        </div>
+                    )}
+                </div>
             </div>
 
             <ContainerBodyEditor config={config} onUpdate={onUpdate} />
 
             <CommonOutputList
+                icon={<MessageSquare className="w-4 h-4" />}
                 label={t('settings.skills.workflowOutputList')}
                 outputs={['iterations', 'terminated', 'last_item']}
             />

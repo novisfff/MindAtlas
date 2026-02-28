@@ -1,4 +1,4 @@
-import { Plus, Trash2 } from 'lucide-react'
+import { Plus, Trash2, Settings2, FileText, List, MessageSquare } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { CommonOutputList, CommonRichInput, CommonSegmentedControl, CommonSelect, CommonSwitch, Label } from '../CommonInputs'
 import type { NodeSettingsProps } from './ToolNodeSettings'
@@ -89,8 +89,9 @@ export function OutputNodeSettings({ config, onUpdate, mentionParams }: NodeSett
     : ['response']
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       <CommonSegmentedControl
+        icon={<Settings2 className="w-4 h-4" />}
         label={t('settings.skills.outputMode')}
         value={outputMode}
         onChange={(value) => onUpdate({ outputMode: value })}
@@ -102,6 +103,7 @@ export function OutputNodeSettings({ config, onUpdate, mentionParams }: NodeSett
 
       {outputMode === 'text' ? (
         <CommonRichInput
+          icon={<FileText className="w-4 h-4" />}
           label={t('settings.skills.outputTextTemplate')}
           value={String(config.textTemplate ?? '')}
           onChange={(value) => onUpdate({ textTemplate: value })}
@@ -110,86 +112,96 @@ export function OutputNodeSettings({ config, onUpdate, mentionParams }: NodeSett
           rows={4}
         />
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-2.5">
           <div className="flex items-center justify-between">
-            <Label>{t('settings.skills.outputStructuredFields')}</Label>
+            <Label icon={<List className="w-4 h-4" />}>{t('settings.skills.outputStructuredFields')}</Label>
             <button
               type="button"
               onClick={addOutputField}
-              className="flex items-center gap-1 text-[10px] bg-primary/10 text-primary hover:bg-primary/20 px-2 py-1 rounded transition-colors"
+              className="flex items-center gap-1.5 text-xs font-semibold bg-primary/5 text-primary hover:bg-primary/10 px-2.5 py-1.5 rounded-lg transition-colors border border-primary/10"
             >
-              <Plus className="w-3 h-3" />
+              <Plus className="w-3.5 h-3.5" />
               {t('actions.add')}
             </button>
           </div>
-          <div className="space-y-2">
+          <div className="space-y-2.5">
             {outputFields.map((field, index) => (
-              <div key={index} className="space-y-2 p-2 rounded-md border bg-card/50">
-                <div className="flex gap-2">
+              <div key={index} className="relative group flex flex-col gap-2.5 p-3 rounded-xl border border-slate-200/80 bg-slate-50/50 hover:bg-slate-50 transition-all shadow-sm">
+                <div className="flex items-start gap-2.5 w-full pr-8">
                   <input
                     type="text"
                     value={field.name}
                     onChange={(event) => updateOutputField(index, { name: event.target.value })}
-                    className="flex-1 px-2 py-1 text-xs rounded border bg-background"
+                    className="flex-1 px-3 py-2 text-sm rounded-lg border border-slate-200/60 bg-slate-50 hover:bg-slate-100/60 focus:bg-white focus:ring-[3px] focus:ring-primary/10 focus:border-primary/30 outline-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] font-mono text-slate-700"
                     placeholder={t('settings.skills.jsonFieldsPlaceholder')}
                   />
-                  <button
-                    type="button"
-                    onClick={() => removeOutputField(index)}
-                    className="text-muted-foreground hover:text-red-500 p-1 rounded hover:bg-red-50 transition-colors"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
                 </div>
 
-                <CommonRichInput
-                  label={t('settings.skills.outputFieldValueTemplate')}
-                  value={field.value}
-                  onChange={(value) => updateOutputField(index, { value })}
-                  mentionParams={mentionParams}
-                  placeholder={t('settings.skills.templatePlaceholder')}
-                  rows={2}
-                />
-
-                <div className="flex gap-2">
-                  <CommonSelect
-                    value={field.type}
-                    onChange={(value) => updateOutputField(index, { type: value })}
-                    options={FIELD_TYPES}
-                    className="flex-1"
+                <div className="w-full pr-8">
+                  <CommonRichInput
+                    icon={<FileText className="w-4 h-4" />}
+                    label={t('settings.skills.outputFieldValueTemplate')}
+                    value={field.value}
+                    onChange={(value) => updateOutputField(index, { value })}
+                    mentionParams={mentionParams}
+                    placeholder={t('settings.skills.templatePlaceholder')}
+                    rows={2}
                   />
-                  {field.type === 'array' && (
+                </div>
+
+                <div className="flex gap-2.5 w-full pr-8">
+                  <div className="flex-1">
                     <CommonSelect
-                      value={field.itemsType ?? 'string'}
-                      onChange={(value) => updateOutputField(index, { itemsType: value })}
-                      options={ARRAY_ITEM_TYPES}
-                      className="flex-1"
+                      value={field.type}
+                      onChange={(value) => updateOutputField(index, { type: value })}
+                      options={FIELD_TYPES}
                     />
+                  </div>
+                  {field.type === 'array' && (
+                    <div className="flex-1">
+                      <CommonSelect
+                        value={field.itemsType ?? 'string'}
+                        onChange={(value) => updateOutputField(index, { itemsType: value })}
+                        options={ARRAY_ITEM_TYPES}
+                      />
+                    </div>
                   )}
                 </div>
 
-                <input
-                  type="text"
-                  value={Array.isArray(field.enum) ? field.enum.join(', ') : ''}
-                  onChange={(event) => updateOutputField(index, {
-                    enum: event.target.value
-                      .split(',')
-                      .map((item) => item.trim())
-                      .filter(Boolean),
-                  })}
-                  className="w-full px-2 py-1 text-xs rounded border bg-background"
-                  placeholder={t('settings.skills.outputEnumPlaceholder')}
-                />
+                <div className="w-full pr-8">
+                  <input
+                    type="text"
+                    value={Array.isArray(field.enum) ? field.enum.join(', ') : ''}
+                    onChange={(event) => updateOutputField(index, {
+                      enum: event.target.value
+                        .split(',')
+                        .map((item) => item.trim())
+                        .filter(Boolean),
+                    })}
+                    className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200/60 bg-slate-50 hover:bg-slate-100/60 focus:bg-white focus:ring-[3px] focus:ring-primary/10 focus:border-primary/30 outline-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] text-slate-700"
+                    placeholder={t('settings.skills.outputEnumPlaceholder')}
+                  />
+                </div>
 
-                <CommonSwitch
-                  label={t('settings.skills.outputNullable')}
-                  checked={Boolean(field.nullable)}
-                  onChange={(checked) => updateOutputField(index, { nullable: checked })}
-                />
+                <div className="w-full pr-8">
+                  <CommonSwitch
+                    label={t('settings.skills.outputNullable')}
+                    checked={Boolean(field.nullable)}
+                    onChange={(checked) => updateOutputField(index, { nullable: checked })}
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => removeOutputField(index)}
+                  className="absolute right-3 top-4 p-1.5 text-slate-400 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
               </div>
             ))}
             {outputFields.length === 0 && (
-              <div className="text-center py-4 text-xs text-muted-foreground border border-dashed rounded-md">
+              <div className="text-center py-5 text-sm text-slate-500 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50/50">
                 {t('settings.skills.noParams')}
               </div>
             )}
@@ -198,6 +210,7 @@ export function OutputNodeSettings({ config, onUpdate, mentionParams }: NodeSett
       )}
 
       <CommonOutputList
+        icon={<MessageSquare className="w-4 h-4" />}
         label={t('settings.skills.toolOutput')}
         outputs={outputNames}
       />

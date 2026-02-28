@@ -10,6 +10,7 @@ interface RichMentionInputProps {
   inputParams: InputParam[]
   placeholder?: string
   className?: string
+  inputClassName?: string
   multiline?: boolean
   rows?: number
 }
@@ -157,6 +158,7 @@ export function RichMentionInput({
   inputParams,
   placeholder,
   className = '',
+  inputClassName,
   multiline = false,
 }: RichMentionInputProps) {
   const { t } = useTranslation()
@@ -303,7 +305,7 @@ export function RichMentionInput({
             insertVariable(first.insertValue)
           }
         }}
-        className={`w-full px-3 py-2 text-sm rounded-lg border bg-background focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all ${multiline ? 'min-h-[56px] whitespace-pre-wrap break-all' : 'min-h-[38px] whitespace-nowrap overflow-x-auto scrolbar-hide'}`}
+        className={inputClassName || `w-full px-3 py-2 text-sm rounded-lg border bg-background focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all ${multiline ? 'min-h-[56px] whitespace-pre-wrap break-all' : 'min-h-[38px] whitespace-nowrap overflow-x-auto scrolbar-hide'}`}
         style={{
           height: 'auto',
           maxHeight: multiline ? '400px' : 'auto',
@@ -313,8 +315,8 @@ export function RichMentionInput({
         aria-multiline={multiline}
       />
 
-      {!value && (
-        <div className="absolute top-2.5 left-3 text-sm text-muted-foreground pointer-events-none select-none">
+      {(!value || value.trim() === '') && placeholder && (
+        <div className="absolute top-2.5 left-3 text-sm text-slate-400 pointer-events-none select-none">
           {placeholder}
         </div>
       )}

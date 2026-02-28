@@ -2,7 +2,7 @@
 import { useTranslation } from 'react-i18next'
 import { CommonRichInput, Label, CommonOutputList } from '../CommonInputs'
 import type { WorkflowToolDefinition } from '../../../../components/workflow/types'
-import { Info } from 'lucide-react'
+import { Info, Wrench, MessageSquare, ArrowRightToLine } from 'lucide-react'
 
 // Redefining the component with better props
 export interface NodeSettingsProps {
@@ -36,22 +36,24 @@ export function ToolNodeSettings({ config, onUpdate, mentionParams, tools = [] }
     }
 
     return (
-        <div className="space-y-6">
+        <div className="space-y-4">
             <div className="space-y-1.5">
-                <Label>{t('settings.skills.workflowToolName') || 'Tool Name'}</Label>
-                <div className="w-full px-2.5 py-2 text-xs rounded-md border bg-muted/30 text-foreground break-all">
+                <Label icon={<Wrench className="w-4 h-4" />}>{t('settings.skills.workflowToolName') || 'Tool Name'}</Label>
+                <div className="w-full px-2.5 py-2 text-sm rounded-xl border border-slate-200 bg-slate-50 text-slate-700 break-all shadow-sm">
                     {selectedToolName || '-'}
                 </div>
             </div>
 
             {selectedTool && (
-                <div className="space-y-4">
-                    <div className="flex items-center gap-2 text-primary/80 bg-primary/5 p-2 rounded-md">
-                        <Info className="w-4 h-4" />
-                        <span className="text-xs font-medium">{t('settings.skills.workflowInputBindings')}</span>
+                <div className="space-y-3 pt-2">
+                    <div className="mb-2">
+                        <div className="h-px bg-slate-100 mb-4" />
+                        <Label icon={<ArrowRightToLine className="w-4 h-4" />}>
+                            {t('settings.skills.workflowInputBindings')}
+                        </Label>
                     </div>
 
-                    <div className="space-y-4">
+                    <div className="space-y-3">
                         {(selectedTool.inputParams ?? []).map((param) => (
                             <CommonRichInput
                                 key={param.name}
@@ -60,13 +62,13 @@ export function ToolNodeSettings({ config, onUpdate, mentionParams, tools = [] }
                                 onChange={(val) => handleBindingChange(param.name, val)}
                                 mentionParams={mentionParams}
                                 placeholder={param.description || `${t('settings.skills.workflowInputBindings')} ${param.name}`}
-                                rows={2}
-                                minHeight="60px"
+                                rows={1}
+                                minHeight="42px"
                             />
                         ))}
 
                         {(selectedTool.inputParams ?? []).length === 0 && (
-                            <div className="text-xs text-muted-foreground italic text-center py-2">
+                            <div className="text-sm text-slate-400 italic text-center py-5 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50/50">
                                 {t('settings.skills.workflowNoToolInputs') || 'This tool has no input parameters.'}
                             </div>
                         )}
@@ -75,12 +77,13 @@ export function ToolNodeSettings({ config, onUpdate, mentionParams, tools = [] }
             )}
 
             {!selectedTool && (
-                <div className="text-xs text-muted-foreground italic text-center py-2 border border-dashed rounded-md">
+                <div className="text-sm text-slate-400 italic text-center py-5 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50/50">
                     {t('settings.skills.workflowNoTools')}
                 </div>
             )}
 
             <CommonOutputList
+                icon={<MessageSquare className="w-4 h-4" />}
                 label={t('settings.skills.toolOutput')}
                 outputs={(selectedTool?.outputParams ?? []).map((item) => item.name).filter(Boolean).length > 0
                     ? (selectedTool?.outputParams ?? []).map((item) => item.name)

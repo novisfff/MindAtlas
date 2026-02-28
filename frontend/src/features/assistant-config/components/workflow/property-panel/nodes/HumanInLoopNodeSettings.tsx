@@ -1,8 +1,10 @@
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { AlertCircle, ChevronDown, ChevronRight, Plus, Trash2 } from 'lucide-react'
+import { AlertCircle, ChevronDown, ChevronRight, Plus, Trash2, Type, FileText, List, CheckCircle, XCircle, MessageSquare } from 'lucide-react'
 import type { InputParam } from '../../../../api/tools'
 import { RichMentionInput } from '../../../RichMentionInput'
+import { Label, CommonSwitch } from '../CommonInputs'
+import { Switch } from '@/components/ui/switch'
 import type { NodeSettingsProps } from './ToolNodeSettings'
 
 type HumanFieldType = 'string' | 'number' | 'integer' | 'boolean' | 'array'
@@ -334,41 +336,41 @@ export function HumanInLoopNodeSettings({ config, onUpdate, mentionParams }: Nod
   )
 
   return (
-    <div className="space-y-6">
-      <div className="space-y-2">
-        <label className="text-sm font-semibold text-slate-700">
+    <div className="space-y-4">
+      <div className="space-y-1.5">
+        <Label icon={<Type className="w-4 h-4" />}>
           {t('settings.skills.humanInLoop.title')}
-        </label>
+        </Label>
         <input
           type="text"
           value={title}
           onChange={(e) => onUpdate({ title: e.target.value })}
-          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none transition-all hover:bg-slate-50 focus:border-primary/50 focus:ring-2 focus:ring-primary/20"
+          className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200/60 bg-slate-50 hover:bg-slate-100/60 focus:bg-white focus:ring-[3px] focus:ring-primary/10 focus:border-primary/30 outline-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] text-slate-700"
           placeholder={t('settings.skills.humanInLoop.titlePlaceholder')}
         />
       </div>
 
-      <div className="space-y-2">
-        <label className="text-sm font-semibold text-slate-700">
+      <div className="space-y-1.5">
+        <Label icon={<FileText className="w-4 h-4" />}>
           {t('settings.skills.humanInLoop.instruction')}
-        </label>
+        </Label>
         <textarea
           value={instruction}
           onChange={(e) => onUpdate({ instruction: e.target.value })}
-          className="min-h-[84px] w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none transition-all hover:bg-slate-50 focus:border-primary/50 focus:ring-2 focus:ring-primary/20"
+          className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200/60 bg-slate-50 hover:bg-slate-100/60 focus:bg-white focus:ring-[3px] focus:ring-primary/10 focus:border-primary/30 outline-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] text-slate-700 min-h-[72px]"
           placeholder={t('settings.skills.humanInLoop.instructionPlaceholder')}
         />
       </div>
 
-      <div className="space-y-3">
+      <div className="space-y-2.5">
         <div className="flex items-center justify-between">
-          <label className="text-sm font-semibold text-slate-700">
+          <Label icon={<List className="w-4 h-4" />}>
             {t('settings.skills.humanInLoop.fields')}
-          </label>
+          </Label>
         </div>
-        <div className="space-y-3">
+        <div className="space-y-2.5">
           {fields.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-3 text-xs text-slate-500 text-center">
+            <div className="rounded-xl border-2 border-dashed border-slate-200 bg-slate-50/50 px-2.5 py-5 text-sm text-slate-500 text-center">
               {t('settings.skills.humanInLoop.fieldsEmpty')}
             </div>
           ) : (
@@ -380,14 +382,14 @@ export function HumanInLoopNodeSettings({ config, onUpdate, mentionParams }: Nod
 
                   {/* Header */}
                   <div
-                    className={`flex items-center justify-between cursor-pointer pl-3 pr-2 py-2.5 transition-colors ${isExpanded ? 'bg-slate-50/50 border-b border-slate-100' : 'hover:bg-slate-50'}`}
+                    className={`flex items-center justify-between cursor-pointer pl-2.5 pr-2 py-2 transition-colors ${isExpanded ? 'bg-slate-50/50 border-b border-slate-100' : 'hover:bg-slate-50'}`}
                     onClick={() => toggleFieldExpand(index)}
                   >
                     <div className="flex items-center gap-2">
                       <button type="button" className="text-slate-400 hover:text-slate-600 transition-colors">
                         {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
                       </button>
-                      <span className="text-xs font-semibold text-slate-700 bg-slate-100 px-2 py-1 rounded-md">
+                      <span className="text-xs font-semibold text-slate-700 bg-slate-100 px-2.5 py-1.5 rounded-lg">
                         #{index + 1} {field.name || t('settings.skills.humanInLoop.fieldPlaceholder')}
                       </span>
                     </div>
@@ -404,7 +406,7 @@ export function HumanInLoopNodeSettings({ config, onUpdate, mentionParams }: Nod
                           e.stopPropagation()
                           handleFieldRemove(index)
                         }}
-                        className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-400 hover:bg-slate-200 hover:text-red-600 transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+                        className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-red-50 hover:text-red-600 transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
                         title={t('actions.delete')}
                       >
                         <Trash2 className="h-3.5 w-3.5" />
@@ -414,32 +416,39 @@ export function HumanInLoopNodeSettings({ config, onUpdate, mentionParams }: Nod
 
                   {/* Content */}
                   {isExpanded && (
-                    <div className="p-4 space-y-4 animate-in fade-in slide-in-from-top-2 bg-white">
+                    <div className="p-3 space-y-3 animate-in fade-in slide-in-from-top-2 bg-white">
                       <div className="grid grid-cols-2 gap-3">
                         <div className="space-y-1.5">
-                          <label className="text-[11px] font-medium text-slate-500">{t('settings.skills.humanInLoop.fieldName')}</label>
+                          <label className="text-xs font-medium text-slate-500">{t('settings.skills.humanInLoop.fieldName')}</label>
                           <input
                             value={field.name}
                             onChange={(e) => handleFieldUpdate(index, { name: e.target.value })}
-                            className="w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-xs outline-none transition-all hover:border-slate-300 focus:border-primary/50 focus:ring-1 focus:ring-primary/20"
+                            className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200/60 bg-slate-50 hover:bg-slate-100/60 focus:bg-white focus:ring-[3px] focus:ring-primary/10 focus:border-primary/30 outline-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] text-slate-700 font-mono"
                             placeholder={t('settings.skills.humanInLoop.fieldName')}
                           />
                         </div>
                         <div className="space-y-1.5">
-                          <label className="text-[11px] font-medium text-slate-500">{t('settings.skills.humanInLoop.fieldLabel')}</label>
+                          <label className="text-xs font-medium text-slate-500">{t('settings.skills.humanInLoop.fieldLabel')}</label>
                           <input
                             value={field.label ?? ''}
                             onChange={(e) => handleFieldUpdate(index, { label: e.target.value })}
-                            className="w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-xs outline-none transition-all hover:border-slate-300 focus:border-primary/50 focus:ring-1 focus:ring-primary/20"
+                            className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200/60 bg-slate-50 hover:bg-slate-100/60 focus:bg-white focus:ring-[3px] focus:ring-primary/10 focus:border-primary/30 outline-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] text-slate-700"
                             placeholder={t('settings.skills.humanInLoop.fieldLabel')}
                           />
                         </div>
                         <div className="space-y-1.5">
-                          <label className="text-[11px] font-medium text-slate-500">{t('settings.skills.humanInLoop.type')}</label>
+                          <label className="text-xs font-medium text-slate-500">{t('settings.skills.humanInLoop.type')}</label>
                           <select
                             value={field.type}
                             onChange={(e) => handleFieldUpdate(index, { type: e.target.value as HumanFieldType })}
-                            className="w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-xs outline-none transition-all hover:border-slate-300 focus:border-primary/50 focus:ring-1 focus:ring-primary/20"
+                            className="w-full rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm outline-none transition-all hover:bg-slate-50 focus:bg-white focus:border-primary/50 focus:ring-2 focus:ring-primary/20 shadow-sm appearance-none cursor-pointer"
+                            style={{
+                              backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
+                              backgroundPosition: 'right 0.5rem center',
+                              backgroundRepeat: 'no-repeat',
+                              backgroundSize: '1.5em 1.5em',
+                              paddingRight: '2.5rem'
+                            }}
                           >
                             <option value="string">{t(TYPE_LABEL_KEYS.string)}</option>
                             <option value="number">{t(TYPE_LABEL_KEYS.number)}</option>
@@ -449,11 +458,18 @@ export function HumanInLoopNodeSettings({ config, onUpdate, mentionParams }: Nod
                           </select>
                         </div>
                         <div className="space-y-1.5">
-                          <label className="text-[11px] font-medium text-slate-500">{t('settings.skills.humanInLoop.widget')}</label>
+                          <label className="text-xs font-medium text-slate-500">{t('settings.skills.humanInLoop.widget')}</label>
                           <select
                             value={field.widget}
                             onChange={(e) => handleFieldUpdate(index, { widget: e.target.value as HumanFieldWidget })}
-                            className="w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-xs outline-none transition-all hover:border-slate-300 focus:border-primary/50 focus:ring-1 focus:ring-primary/20"
+                            className="w-full rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm outline-none transition-all hover:bg-slate-50 focus:bg-white focus:border-primary/50 focus:ring-2 focus:ring-primary/20 shadow-sm appearance-none cursor-pointer"
+                            style={{
+                              backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
+                              backgroundPosition: 'right 0.5rem center',
+                              backgroundRepeat: 'no-repeat',
+                              backgroundSize: '1.5em 1.5em',
+                              paddingRight: '2.5rem'
+                            }}
                           >
                             {WIDGETS_BY_TYPE[field.type].map((widget) => (
                               <option key={widget} value={widget}>
@@ -465,43 +481,41 @@ export function HumanInLoopNodeSettings({ config, onUpdate, mentionParams }: Nod
                       </div>
 
                       <div className="space-y-1.5">
-                        <label className="text-[11px] font-medium text-slate-500">{t('settings.skills.humanInLoop.fieldPlaceholder')}</label>
+                        <label className="text-xs font-medium text-slate-500">{t('settings.skills.humanInLoop.fieldPlaceholder')}</label>
                         <input
                           value={field.placeholder ?? ''}
                           onChange={(e) => handleFieldUpdate(index, { placeholder: e.target.value })}
-                          className="w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-xs outline-none transition-all hover:border-slate-300 focus:border-primary/50 focus:ring-1 focus:ring-primary/20"
+                          className="w-full rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm outline-none transition-all hover:bg-slate-50 focus:bg-white focus:border-primary/50 focus:ring-2 focus:ring-primary/20 shadow-sm"
                           placeholder={t('settings.skills.humanInLoop.fieldPlaceholder')}
                         />
                       </div>
-                      <div className="flex items-center gap-4 rounded-md border border-slate-100 bg-slate-50/50 p-2.5">
-                        <label className="inline-flex items-center gap-2 text-[11px] font-medium text-slate-600 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            className="rounded border-slate-300 text-primary focus:ring-primary/20 cursor-pointer"
+                      <div className="flex items-center gap-6 rounded-lg border border-slate-100 bg-slate-50/50 p-2.5">
+                        <label className="inline-flex items-center gap-2 text-sm font-medium text-slate-600 cursor-pointer">
+                          <Switch
                             checked={Boolean(field.required)}
-                            onChange={(e) => handleFieldUpdate(index, { required: e.target.checked })}
+                            onCheckedChange={(checked) => handleFieldUpdate(index, { required: checked })}
+                            className="scale-90"
                           />
                           {t('settings.skills.humanInLoop.fieldRequired')}
                         </label>
                         {field.widget === 'tag_selector' && (
-                          <label className="inline-flex items-center gap-2 text-[11px] font-medium text-slate-600 cursor-pointer">
-                            <input
-                              type="checkbox"
-                              className="rounded border-slate-300 text-primary focus:ring-primary/20 cursor-pointer"
+                          <label className="inline-flex items-center gap-2 text-sm font-medium text-slate-600 cursor-pointer">
+                            <Switch
                               checked={Boolean(field.allowCustom ?? true)}
-                              onChange={(e) => handleFieldUpdate(index, { allowCustom: e.target.checked })}
+                              onCheckedChange={(checked) => handleFieldUpdate(index, { allowCustom: checked })}
+                              className="scale-90"
                             />
                             {t('settings.skills.humanInLoop.options.allowCustom')}
                           </label>
                         )}
                       </div>
                       {(field.widget === 'select' || field.widget === 'radio' || field.widget === 'tag_selector') && (
-                        <div className="space-y-2 rounded-md border border-slate-200 bg-slate-50/70 p-2">
+                        <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
                           <div className="flex items-center justify-between gap-2">
-                            <span className="text-xs font-medium text-slate-700">
+                            <span className="text-sm font-medium text-slate-700">
                               {t('settings.skills.humanInLoop.options.sourceModeLabel')}
                             </span>
-                            <div className="inline-flex items-center rounded-md border border-slate-200 bg-white p-0.5">
+                            <div className="inline-flex items-center rounded-lg border border-slate-200 bg-white p-0.5">
                               {(['static', 'dynamic'] as const).map((mode) => {
                                 const active = getOptionMode(index, field) === mode
                                 return (
@@ -509,7 +523,7 @@ export function HumanInLoopNodeSettings({ config, onUpdate, mentionParams }: Nod
                                     key={mode}
                                     type="button"
                                     onClick={() => handleOptionModeChange(index, mode)}
-                                    className={`rounded px-2 py-1 text-[11px] transition-colors ${active ? 'bg-primary/10 text-primary' : 'text-slate-600 hover:bg-slate-100'}`}
+                                    className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${active ? 'bg-primary/10 text-primary' : 'text-slate-600 hover:bg-slate-100'}`}
                                   >
                                     {mode === 'static'
                                       ? t('settings.skills.humanInLoop.options.sourceModeStatic')
@@ -521,44 +535,44 @@ export function HumanInLoopNodeSettings({ config, onUpdate, mentionParams }: Nod
                           </div>
 
                           {getOptionMode(index, field) === 'dynamic' ? (
-                            <>
-                              <div className="space-y-1">
-                                <span className="inline-flex items-center gap-1 text-xs font-medium text-slate-700">
+                            <div className="space-y-3">
+                              <div className="space-y-1.5">
+                                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700">
                                   {t('settings.skills.humanInLoop.options.templateLabel')}
                                   {renderHintIcon(t('settings.skills.humanInLoop.options.templateTooltip'))}
                                 </span>
-                                <div className="rounded-md border border-slate-200 bg-white p-1">
+                                <div className="rounded-lg border border-slate-200 bg-white p-1 transition-all hover:border-slate-300 focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/20 shadow-sm">
                                   <RichMentionInput
                                     value={field.optionsTemplate ?? ''}
                                     onChange={(value) => handleFieldOptionsTemplateUpdate(index, value)}
                                     inputParams={normalizedMentionParams}
                                     placeholder={t('settings.skills.humanInLoop.options.templatePlaceholder')}
-                                    className="min-h-[34px]"
+                                    className="min-h-[32px]"
                                   />
                                 </div>
-                                <div className="text-[11px] text-slate-500">
+                                <div className="text-xs text-slate-500">
                                   {t('settings.skills.humanInLoop.options.templateHint')}
                                 </div>
                               </div>
 
-                              <div className="space-y-1">
-                                <span className="inline-flex items-center gap-1 text-xs font-medium text-slate-700">
+                              <div className="space-y-1.5">
+                                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700">
                                   {t('settings.skills.humanInLoop.options.optionValueKeyLabel')}
                                   {renderHintIcon(t('settings.skills.humanInLoop.options.optionValueKeyTooltip'))}
                                 </span>
                                 <input
                                   value={field.optionValueKey ?? ''}
                                   onChange={(e) => handleFieldOptionValueKeyUpdate(index, e.target.value)}
-                                  className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs"
+                                  className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm outline-none transition-all hover:bg-slate-50 focus:bg-white focus:border-primary/50 focus:ring-2 focus:ring-primary/20 shadow-sm"
                                   placeholder={t('settings.skills.humanInLoop.options.optionValueKeyPlaceholder')}
                                 />
-                                <div className="text-[11px] text-slate-500">
+                                <div className="text-xs text-slate-500">
                                   {t('settings.skills.humanInLoop.options.optionValueKeyHint')}
                                 </div>
                               </div>
-                            </>
+                            </div>
                           ) : (
-                            <>
+                            <div className="space-y-2.5">
                               <div className="flex items-center justify-between">
                                 <span className="text-xs font-medium text-slate-700">
                                   {t('settings.skills.humanInLoop.options.staticLabel')}
@@ -566,45 +580,47 @@ export function HumanInLoopNodeSettings({ config, onUpdate, mentionParams }: Nod
                                 <button
                                   type="button"
                                   onClick={() => handleFieldOptionAdd(index)}
-                                  className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700 hover:bg-slate-50"
+                                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-primary transition-colors shadow-sm"
                                 >
-                                  <Plus className="h-3 w-3" />
+                                  <Plus className="h-3.5 w-3.5" />
                                   {t('settings.skills.humanInLoop.options.add')}
                                 </button>
                               </div>
-                              {(field.options ?? []).length === 0 ? (
-                                <div className="text-[11px] text-slate-500">
-                                  {field.widget === 'tag_selector'
-                                    ? t('settings.skills.humanInLoop.options.emptyTagSelector')
-                                    : t('settings.skills.humanInLoop.options.emptySelectRadio')}
-                                </div>
-                              ) : (
-                                (field.options ?? []).map((option, optionIndex) => (
-                                  <div key={`${index}-opt-${optionIndex}`} className="flex items-center gap-2">
-                                    <input
-                                      value={option}
-                                      onChange={(e) => handleFieldOptionUpdate(index, optionIndex, e.target.value)}
-                                      className="flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs"
-                                      placeholder={t('settings.skills.humanInLoop.options.placeholder')}
-                                    />
-                                    <button
-                                      type="button"
-                                      onClick={() => handleFieldOptionRemove(index, optionIndex)}
-                                      className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-slate-200 text-slate-500 hover:bg-red-50 hover:text-red-600"
-                                      title={t('actions.delete')}
-                                    >
-                                      <Trash2 className="h-3.5 w-3.5" />
-                                    </button>
+                              <div className="space-y-2">
+                                {(field.options ?? []).length === 0 ? (
+                                  <div className="text-xs text-slate-500 text-center py-2 border border-dashed border-slate-300 rounded-lg bg-white/50">
+                                    {field.widget === 'tag_selector'
+                                      ? t('settings.skills.humanInLoop.options.emptyTagSelector')
+                                      : t('settings.skills.humanInLoop.options.emptySelectRadio')}
                                   </div>
-                                ))
-                              )}
-                            </>
+                                ) : (
+                                  (field.options ?? []).map((option, optionIndex) => (
+                                    <div key={`${index}-opt-${optionIndex}`} className="flex items-center gap-2">
+                                      <input
+                                        value={option}
+                                        onChange={(e) => handleFieldOptionUpdate(index, optionIndex, e.target.value)}
+                                        className="flex-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm outline-none transition-all hover:bg-slate-50 focus:bg-white focus:border-primary/50 focus:ring-2 focus:ring-primary/20 shadow-sm"
+                                        placeholder={t('settings.skills.humanInLoop.options.placeholder')}
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() => handleFieldOptionRemove(index, optionIndex)}
+                                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-transparent text-slate-400 hover:bg-red-50 hover:text-red-600 hover:border-red-100 transition-colors"
+                                        title={t('actions.delete')}
+                                      >
+                                        <Trash2 className="h-4 w-4" />
+                                      </button>
+                                    </div>
+                                  ))
+                                )}
+                              </div>
+                            </div>
                           )}
                         </div>
                       )}
                       <div className="space-y-1.5">
-                        <label className="text-[11px] font-medium text-slate-500">{t('settings.skills.defaultValueTemplateTitle') || 'Default Value Template'}</label>
-                        <div className="rounded-md border border-slate-200 bg-white p-1 transition-all hover:border-slate-300 focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/20">
+                        <label className="text-xs font-medium text-slate-500">{t('settings.skills.defaultValueTemplateTitle') || 'Default Value Template'}</label>
+                        <div className="rounded-lg border border-slate-200 bg-white p-1 transition-all hover:border-slate-300 focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/20 shadow-sm">
                           <RichMentionInput
                             value={field.valueTemplate ?? ''}
                             onChange={(value) => handleFieldUpdate(index, { valueTemplate: value })}
@@ -623,7 +639,7 @@ export function HumanInLoopNodeSettings({ config, onUpdate, mentionParams }: Nod
           <button
             type="button"
             onClick={handleAddField}
-            className="flex w-full items-center justify-center gap-1.5 rounded-xl border-2 border-dashed border-slate-200 bg-white py-2.5 text-xs font-medium text-slate-500 transition-colors hover:border-primary/50 hover:bg-slate-50 hover:text-primary"
+            className="flex w-full items-center justify-center gap-1.5 rounded-xl border-2 border-dashed border-slate-200 bg-white py-2 text-xs font-medium text-slate-500 transition-colors hover:border-primary/50 hover:bg-slate-50 hover:text-primary"
           >
             <Plus className="h-4 w-4" />
             {t('settings.skills.humanInLoop.addField')}
@@ -631,41 +647,39 @@ export function HumanInLoopNodeSettings({ config, onUpdate, mentionParams }: Nod
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-2">
-          <label className="text-sm font-semibold text-slate-700">
+      <div className="grid grid-cols-2 gap-2.5">
+        <div className="space-y-1.5">
+          <Label icon={<CheckCircle className="w-4 h-4" />}>
             {t('settings.skills.humanInLoop.approveLabel')}
-          </label>
+          </Label>
           <input
             type="text"
             value={approveLabel}
             onChange={(e) => onUpdate({ approveLabel: e.target.value })}
-            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none transition-all hover:bg-slate-50 focus:border-primary/50 focus:ring-2 focus:ring-primary/20"
+            className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200/60 bg-slate-50 hover:bg-slate-100/60 focus:bg-white focus:ring-[3px] focus:ring-primary/10 focus:border-primary/30 outline-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] text-slate-700"
             placeholder={t('settings.skills.humanInLoop.approveLabelPlaceholder')}
           />
         </div>
-        <div className="space-y-2">
-          <label className="text-sm font-semibold text-slate-700">
+        <div className="space-y-1.5">
+          <Label icon={<XCircle className="w-4 h-4" />}>
             {t('settings.skills.humanInLoop.rejectLabel')}
-          </label>
+          </Label>
           <input
             type="text"
             value={rejectLabel}
             onChange={(e) => onUpdate({ rejectLabel: e.target.value })}
-            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none transition-all hover:bg-slate-50 focus:border-primary/50 focus:ring-2 focus:ring-primary/20"
+            className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200/60 bg-slate-50 hover:bg-slate-100/60 focus:bg-white focus:ring-[3px] focus:ring-primary/10 focus:border-primary/30 outline-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] text-slate-700"
             placeholder={t('settings.skills.humanInLoop.rejectLabelPlaceholder')}
           />
         </div>
       </div>
 
-      <label className="inline-flex items-center gap-2 text-sm text-slate-700">
-        <input
-          type="checkbox"
-          checked={requireRejectComment}
-          onChange={(e) => onUpdate({ requireRejectComment: e.target.checked })}
-        />
-        {t('settings.skills.humanInLoop.requireRejectComment')}
-      </label>
+      <CommonSwitch
+        icon={<MessageSquare className="w-4 h-4" />}
+        label={t('settings.skills.humanInLoop.requireRejectComment') || "拒绝时必须填写备注"}
+        checked={requireRejectComment}
+        onChange={(checked) => onUpdate({ requireRejectComment: checked })}
+      />
     </div>
   )
 }

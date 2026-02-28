@@ -2,7 +2,7 @@ import { javascript } from '@codemirror/lang-javascript'
 import { python } from '@codemirror/lang-python'
 import { EditorView, placeholder as codePlaceholder } from '@codemirror/view'
 import CodeMirror from '@uiw/react-codemirror'
-import { Plus, Trash2 } from 'lucide-react'
+import { Plus, Trash2, Clock, Settings2, List, Code, MessageSquare } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -235,9 +235,9 @@ export function CodeExecutorNodeSettings({ config, onUpdate, mentionParams }: No
 
   return (
     <>
-      <div className="space-y-6">
+      <div className="space-y-4">
         <div className="space-y-1.5">
-          <Label>{t('settings.skills.codeExecutor.timeoutMs')}</Label>
+          <Label icon={<Clock className="w-4 h-4" />}>{t('settings.skills.codeExecutor.timeoutMs')}</Label>
           <input
             type="number"
             min={100}
@@ -253,146 +253,185 @@ export function CodeExecutorNodeSettings({ config, onUpdate, mentionParams }: No
               if (Number.isNaN(parsed)) return
               onUpdate({ timeoutMs: Math.max(100, Math.min(5000, parsed)) })
             }}
-            className="w-full px-2.5 py-2 text-xs rounded-md border bg-background/50"
+            className="w-full px-2.5 py-1.5 text-sm rounded-xl border border-slate-200 bg-white hover:bg-slate-50 focus:bg-white focus:ring-2 focus:ring-primary/20 focus:border-primary/50 outline-none shadow-sm transition-all"
             placeholder="5000"
           />
         </div>
 
-        <div className="space-y-2">
+        <div className="space-y-2.5">
           <div className="flex items-center justify-between">
-            <Label>{t('settings.skills.codeExecutor.inputBindings')}</Label>
+            <Label icon={<Settings2 className="w-4 h-4" />}>{t('settings.skills.codeExecutor.inputBindings')}</Label>
             <button
               type="button"
               onClick={addBindingRow}
-              className="flex items-center gap-1 text-[10px] bg-primary/10 text-primary hover:bg-primary/20 px-2 py-1 rounded transition-colors"
+              className="flex items-center gap-1.5 text-xs font-semibold bg-primary/5 text-primary hover:bg-primary/10 px-2.5 py-1.5 rounded-lg transition-colors border border-primary/10"
             >
-              <Plus className="w-3 h-3" />
+              <Plus className="w-3.5 h-3.5" />
               {t('actions.add')}
             </button>
           </div>
-          <p className="text-[11px] text-muted-foreground">{t('settings.skills.codeExecutor.defaultBindingsHint')}</p>
-          <div className="space-y-2">
+          <p className="text-xs text-slate-500">{t('settings.skills.codeExecutor.defaultBindingsHint')}</p>
+          <div className="space-y-4">
             {inputBindingRows.map((item, index) => (
-              <div key={`${index}-${item.key}`} className="grid grid-cols-[120px_1fr_auto] items-center gap-2">
-                <input
-                  type="text"
-                  value={item.key}
-                  onChange={(event) => updateBindingRow(index, { key: event.target.value })}
-                  className="w-full h-8 px-2.5 text-xs rounded-md border bg-background/50 font-mono"
-                  placeholder={t('settings.skills.codeExecutor.inputKeyPlaceholder')}
-                />
-                <RichMentionInput
-                  value={item.value}
-                  onChange={(val) => updateBindingRow(index, { value: val })}
-                  inputParams={normalizedMentionParams}
-                  placeholder={t('settings.skills.argsTemplatePlaceholder')}
-                  className="min-w-0"
-                />
+              <div className="flex items-center gap-2">
+                <div className="flex-[3]">
+                  <input
+                    type="text"
+                    value={item.key}
+                    onChange={(event) => updateBindingRow(index, { key: event.target.value })}
+                    className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200/60 bg-slate-50 hover:bg-slate-100/60 focus:bg-white focus:ring-[3px] focus:ring-primary/10 focus:border-primary/30 outline-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] text-slate-700 font-mono"
+                    placeholder={t('settings.skills.codeExecutor.inputKeyPlaceholder')}
+                  />
+                </div>
+                <div className="flex-[4] rounded-lg border border-slate-200 bg-white shadow-sm focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary/50 transition-all overflow-hidden p-0.5">
+                  <RichMentionInput
+                    value={item.value}
+                    onChange={(val) => updateBindingRow(index, { value: val })}
+                    inputParams={normalizedMentionParams}
+                    placeholder={t('settings.skills.argsTemplatePlaceholder')}
+                    className="min-h-[36px] min-w-0 border-0 focus:ring-0 text-sm flex items-center pt-0 pb-0"
+                  />
+                </div>
                 <button
                   type="button"
                   onClick={() => removeBindingRow(index)}
-                  className="text-muted-foreground hover:text-red-500 p-1 rounded hover:bg-red-50 transition-colors"
+                  className="p-1.5 shrink-0 text-slate-400 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors"
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
+                  <Trash2 className="w-4 h-4" />
                 </button>
               </div>
             ))}
             {inputBindingRows.length === 0 && (
-              <div className="text-[11px] text-muted-foreground">
+              <div className="text-center py-6 text-sm text-slate-500 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50/50">
                 {t('settings.skills.codeExecutor.inputBindingsEmpty')}
               </div>
             )}
           </div>
         </div>
 
-        <div className="space-y-2">
+        <div className="space-y-2.5">
           <div className="flex items-center justify-between">
-            <Label>{t('settings.skills.codeExecutor.outputFields')}</Label>
+            <Label icon={<List className="w-4 h-4" />}>{t('settings.skills.codeExecutor.outputFields')}</Label>
             <button
               type="button"
               onClick={addOutputField}
-              className="flex items-center gap-1 text-[10px] bg-primary/10 text-primary hover:bg-primary/20 px-2 py-1 rounded transition-colors"
+              className="flex items-center gap-1.5 text-xs font-semibold bg-primary/5 text-primary hover:bg-primary/10 px-2.5 py-1.5 rounded-lg transition-colors border border-primary/10"
             >
-              <Plus className="w-3 h-3" />
+              <Plus className="w-3.5 h-3.5" />
               {t('actions.add')}
             </button>
           </div>
 
-          <div className="space-y-2">
+          <div className="space-y-4">
             {outputFields.map((field, index) => (
-              <div key={index} className="flex items-center gap-2 p-2 rounded-md border bg-card/50">
-                <input
-                  type="text"
-                  value={field.name}
-                  onChange={(event) => updateOutputField(index, { name: event.target.value })}
-                  className="flex-1 min-w-0 h-8 px-2.5 text-xs rounded border bg-background"
-                  placeholder={t('settings.skills.jsonFieldsPlaceholder')}
-                />
-                <select
-                  value={field.type}
-                  onChange={(event) => updateOutputField(index, { type: event.target.value })}
-                  className="w-[112px] h-8 px-2 py-1 text-xs rounded border bg-background shrink-0"
-                >
-                  {FIELD_TYPES.map((item) => (
-                    <option key={item.value} value={item.value}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-                {field.type === 'array' && (
-                  <select
-                    value={field.itemsType ?? 'string'}
-                    onChange={(event) => updateOutputField(index, { itemsType: event.target.value })}
-                    className="w-[112px] h-8 px-2 py-1 text-xs rounded border bg-background shrink-0"
-                  >
-                    {ARRAY_ITEM_TYPES.map((item) => (
-                      <option key={item.value} value={item.value}>
-                        {item.label}
-                      </option>
-                    ))}
-                  </select>
-                )}
+              <div key={index} className="flex items-center gap-2">
+                <div className="flex-[3]">
+                  <input
+                    type="text"
+                    value={field.name}
+                    onChange={(event) => updateOutputField(index, { name: event.target.value })}
+                    className="flex-1 px-3 py-2 text-sm rounded-lg border border-slate-200/60 bg-slate-50 hover:bg-slate-100/60 focus:bg-white focus:ring-[3px] focus:ring-primary/10 focus:border-primary/30 outline-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] text-slate-700 font-mono"
+                    placeholder={t('settings.skills.jsonFieldsPlaceholder')}
+                  />
+                </div>
+                <div className="flex-[4] flex items-center gap-2 min-w-0">
+                  <div className={`${field.type === 'array' ? 'flex-1' : 'w-full'} relative`}>
+                    <select
+                      value={field.type}
+                      onChange={(event) => updateOutputField(index, { type: event.target.value })}
+                      className="w-full px-2.5 py-1.5 text-sm rounded-lg border border-slate-200 bg-white hover:bg-slate-50 focus:bg-white focus:ring-2 focus:ring-primary/20 focus:border-primary/50 outline-none transition-all shadow-sm appearance-none cursor-pointer"
+                      style={{
+                        backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
+                        backgroundPosition: 'right 0.5rem center',
+                        backgroundRepeat: 'no-repeat',
+                        backgroundSize: '1.5em 1.5em',
+                        paddingRight: '2.5rem'
+                      }}
+                    >
+                      {FIELD_TYPES.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {field.type === 'array' && (
+                    <div className="relative flex-1">
+                      <select
+                        value={field.itemsType ?? 'string'}
+                        onChange={(event) => updateOutputField(index, { itemsType: event.target.value })}
+                        className="w-full px-2.5 py-1.5 text-sm rounded-lg border border-slate-200 bg-white hover:bg-slate-50 focus:bg-white focus:ring-2 focus:ring-primary/20 focus:border-primary/50 outline-none transition-all shadow-sm appearance-none cursor-pointer"
+                        style={{
+                          backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
+                          backgroundPosition: 'right 0.5rem center',
+                          backgroundRepeat: 'no-repeat',
+                          backgroundSize: '1.5em 1.5em',
+                          paddingRight: '2.5rem'
+                        }}
+                      >
+                        {ARRAY_ITEM_TYPES.map((item) => (
+                          <option key={item.value} value={item.value}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
                 <button
                   type="button"
                   onClick={() => removeOutputField(index)}
-                  className="text-muted-foreground hover:text-red-500 p-1 rounded hover:bg-red-50 transition-colors"
+                  className="p-1.5 shrink-0 text-slate-400 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors"
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
+                  <Trash2 className="w-4 h-4" />
                 </button>
               </div>
             ))}
+            {outputFields.length === 0 && (
+              <div className="text-center py-6 text-sm text-slate-500 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50/50">
+                {t('settings.skills.codeExecutor.outputFieldsEmpty')}
+              </div>
+            )}
           </div>
         </div>
 
-        <div className="space-y-2">
+        <div className="space-y-2.5">
           <div className="flex items-center justify-between">
-            <Label>{t('settings.skills.codeExecutor.script')}</Label>
+            <Label icon={<Code className="w-4 h-4" />}>{t('settings.skills.codeExecutor.script')}</Label>
             <div className="flex items-center gap-2">
-              <span className="text-[11px] text-muted-foreground">{t('settings.skills.codeExecutor.language')}</span>
-              <select
-                value={language}
-                onChange={(event) =>
-                  handleLanguageSwitch(
-                    event.target.value === 'javascript' ? 'javascript' : 'python',
-                  )
-                }
-                className="h-7 rounded-md border bg-background px-2 text-xs"
-              >
-                <option value="python">Python</option>
-                <option value="javascript">JavaScript</option>
-              </select>
+              <span className="text-xs text-slate-500">{t('settings.skills.codeExecutor.language')}</span>
+              <div className="relative">
+                <select
+                  value={language}
+                  onChange={(event) =>
+                    handleLanguageSwitch(
+                      event.target.value === 'javascript' ? 'javascript' : 'python',
+                    )
+                  }
+                  className="h-7 rounded-lg border border-slate-200 bg-white pl-2 pr-6 text-xs shadow-sm focus:ring-2 focus:ring-primary/20 outline-none appearance-none cursor-pointer"
+                  style={{
+                    backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
+                    backgroundPosition: 'right 0.25rem center',
+                    backgroundRepeat: 'no-repeat',
+                    backgroundSize: '1rem 1rem',
+                  }}
+                >
+                  <option value="python">Python</option>
+                  <option value="javascript">JavaScript</option>
+                </select>
+              </div>
               <button
                 type="button"
                 onClick={() => void handleFormat()}
                 disabled={isFormatting}
-                className="text-[10px] bg-primary/10 text-primary hover:bg-primary/20 px-2 py-1 rounded transition-colors disabled:opacity-50"
+                className="h-7 flex items-center justify-center text-xs font-semibold bg-primary/5 text-primary hover:bg-primary/10 px-2.5 rounded-lg transition-colors border border-primary/10 disabled:opacity-50"
               >
                 {isFormatting ? `${t('messages.saving')}` : t('settings.skills.codeExecutor.format')}
               </button>
             </div>
           </div>
-          <p className="text-[11px] text-muted-foreground">{t('settings.skills.codeExecutor.signatureHint')}</p>
-          <div className="rounded-md border bg-background/50 overflow-hidden">
+          <p className="text-xs text-slate-500">{t('settings.skills.codeExecutor.signatureHint')}</p>
+          <div className="rounded-xl border border-slate-200 bg-white overflow-hidden shadow-sm">
             <CodeMirror
               value={codeValue}
               height="240px"
@@ -410,14 +449,11 @@ export function CodeExecutorNodeSettings({ config, onUpdate, mentionParams }: No
 
         {outputNames.length > 0 ? (
           <CommonOutputList
+            icon={<MessageSquare className="w-4 h-4" />}
             label={t('settings.skills.workflowOutputList')}
             outputs={outputNames}
           />
-        ) : (
-          <div className="text-[11px] text-muted-foreground">
-            {t('settings.skills.codeExecutor.outputFieldsEmpty')}
-          </div>
-        )}
+        ) : null}
       </div>
 
       <ConfirmDialog
