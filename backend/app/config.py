@@ -165,6 +165,10 @@ class Settings(BaseSettings):
         default="path,url,crypto,util",
         alias="WORKFLOW_CODE_EXECUTOR_JAVASCRIPT_ALLOWED_MODULES",
     )
+    workflow_http_request_timeout_ms: int = Field(default=15000, alias="WORKFLOW_HTTP_REQUEST_TIMEOUT_MS")
+    workflow_http_request_max_timeout_ms: int = Field(default=60000, alias="WORKFLOW_HTTP_REQUEST_MAX_TIMEOUT_MS")
+    workflow_http_request_max_retries: int = Field(default=5, alias="WORKFLOW_HTTP_REQUEST_MAX_RETRIES")
+    workflow_http_request_max_response_bytes: int = Field(default=524288, alias="WORKFLOW_HTTP_REQUEST_MAX_RESPONSE_BYTES")
 
     # Server
     host: str = Field(default="0.0.0.0", alias="HOST")

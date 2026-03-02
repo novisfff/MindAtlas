@@ -35,6 +35,7 @@ const nodeTypes: NodeTypes = {
   iteration: WorkflowNode,
   loop: WorkflowNode,
   code_executor: WorkflowNode,
+  http_request: WorkflowNode,
   variable_assign: WorkflowNode,
   human_in_loop: WorkflowNode,
   output: WorkflowNode,

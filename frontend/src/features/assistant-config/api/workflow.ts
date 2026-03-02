@@ -13,6 +13,7 @@ export type NodeType =
   | 'iteration'
   | 'loop'
   | 'code_executor'
+  | 'http_request'
   | 'variable_assign'
   | 'human_in_loop'
   | 'output'
@@ -160,6 +161,34 @@ export interface CodeExecutorNodeConfig {
   }>
 }
 
+export interface HttpRequestKeyValueRow {
+  key: string
+  value: string
+  type?: 'text' | 'file'
+  enabled?: boolean
+}
+
+export interface HttpRequestNodeConfig {
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+  url?: string
+  headers?: HttpRequestKeyValueRow[]
+  queryParams?: HttpRequestKeyValueRow[]
+  bodyType?: 'none' | 'json' | 'raw' | 'x-www-form-urlencoded' | 'form-data'
+  jsonBodyTemplate?: string
+  rawBodyTemplate?: string
+  formBody?: HttpRequestKeyValueRow[]
+  authType?: 'none' | 'bearer' | 'api_key'
+  bearerToken?: string
+  apiKeyIn?: 'header' | 'query'
+  apiKeyName?: string
+  apiKeyValue?: string
+  timeoutMs?: number
+  retryEnabled?: boolean
+  maxRetries?: number
+  retryIntervalMs?: number
+  verifySsl?: boolean
+}
+
 export interface VariableAssignNodeConfig {
   variableName?: string
   operation?: 'set' | 'increment' | 'append' | 'clear'
@@ -208,6 +237,7 @@ export type ContainerBodyNodeType =
   | 'parameter_extractor'
   | 'knowledge_retrieval'
   | 'code_executor'
+  | 'http_request'
   | 'variable_assign'
   | 'human_in_loop'
 
@@ -261,6 +291,7 @@ export type NodeConfig =
   | ParameterExtractorNodeConfig
   | KnowledgeRetrievalNodeConfig
   | CodeExecutorNodeConfig
+  | HttpRequestNodeConfig
   | VariableAssignNodeConfig
   | HumanInLoopNodeConfig
   | IterationNodeConfig

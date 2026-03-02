@@ -76,6 +76,29 @@ export function createDefaultNodeConfig(
     }
   }
 
+  if (nodeType === 'http_request') {
+    return {
+      method: 'GET',
+      url: '',
+      headers: [],
+      queryParams: [],
+      bodyType: 'none',
+      jsonBodyTemplate: '',
+      rawBodyTemplate: '',
+      formBody: [],
+      authType: 'none',
+      bearerToken: '',
+      apiKeyIn: 'header',
+      apiKeyName: 'X-API-Key',
+      apiKeyValue: '',
+      timeoutMs: 15000,
+      retryEnabled: false,
+      maxRetries: 2,
+      retryIntervalMs: 200,
+      verifySsl: true,
+    }
+  }
+
   if (nodeType === 'variable_assign') {
     return {
       variableName: '',

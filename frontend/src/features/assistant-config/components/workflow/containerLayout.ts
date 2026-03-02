@@ -9,6 +9,7 @@ const BODY_NODE_SIZE: Record<ContainerBodyNodeType, { width: number; height: num
   parameter_extractor: { width: 240, height: 112 },
   knowledge_retrieval: { width: 240, height: 112 },
   code_executor: { width: 240, height: 128 },
+  http_request: { width: 240, height: 116 },
   variable_assign: { width: 240, height: 112 },
   human_in_loop: { width: 240, height: 152 },
 }

@@ -10,6 +10,7 @@ from app.assistant.workflow.validation.rules.context_rules import (
     validate_template_refs,
 )
 from app.assistant.workflow.validation.rules.human_in_loop_rules import validate_human_in_loop_node_config
+from app.assistant.workflow.validation.rules.http_request_rules import validate_http_request_node_config
 from app.assistant.workflow.validation.rules.if_else_rules import normalize_if_else_config
 from app.assistant.workflow.validation.rules.parallel_rules import validate_parallel_branches
 from app.assistant.workflow.validation.rules.save_rules import validate_node_configs
@@ -24,6 +25,7 @@ __all__ = [
     "validate_parallel_branches",
     "validate_template_refs",
     "validate_code_executor_node_config",
+    "validate_http_request_node_config",
     "validate_human_in_loop_node_config",
     "validate_variable_assign_node_config",
 ]

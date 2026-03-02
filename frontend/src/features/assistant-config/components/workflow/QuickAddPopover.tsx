@@ -30,6 +30,7 @@ const CONTAINER_ALLOWED_TYPES = new Set<ContainerBodyNodeType>([
   'parameter_extractor',
   'knowledge_retrieval',
   'code_executor',
+  'http_request',
   'variable_assign',
   'human_in_loop',
 ])

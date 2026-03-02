@@ -187,6 +187,11 @@ def iter_config_template_texts(cfg: dict) -> list[str]:
         "input_source", "inputSource",
         "output_selector", "outputSelector",
         "value_template", "valueTemplate",
+        "url",
+        "json_body_template", "jsonBodyTemplate",
+        "raw_body_template", "rawBodyTemplate",
+        "bearer_token", "bearerToken",
+        "api_key_value", "apiKeyValue",
     ):
         value = cfg.get(key, "")
         if isinstance(value, str):
@@ -230,6 +235,16 @@ def iter_config_template_texts(cfg: dict) -> list[str]:
                 options_template = item.get("options_template", item.get("optionsTemplate"))
                 if isinstance(options_template, str):
                     texts.append(options_template)
+
+    for key in ("headers", "query_params", "queryParams", "form_body", "formBody"):
+        items = cfg.get(key)
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                value = item.get("value")
+                if isinstance(value, str):
+                    texts.append(value)
 
     for key in ("conditions", "terminationConditions"):
         conds = cfg.get(key)

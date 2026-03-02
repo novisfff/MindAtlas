@@ -22,6 +22,7 @@ import {
   LoopNodeSettings,
 } from './property-panel/nodes/OtherNodeSettings'
 import { CodeExecutorNodeSettings } from './property-panel/nodes/CodeExecutorNodeSettings'
+import { HttpRequestNodeSettings } from './property-panel/nodes/HttpRequestNodeSettings'
 import { VariableAssignNodeSettings } from './property-panel/nodes/VariableAssignNodeSettings'
 import { HumanInLoopNodeSettings } from './property-panel/nodes/HumanInLoopNodeSettings'
 import { OutputNodeSettings } from './property-panel/nodes/OutputNodeSettings'
@@ -606,6 +607,8 @@ export function PropertyPanel({ tools, workflowDescription, onWorkflowDescriptio
         return <KnowledgeRetrievalNodeSettings {...commonProps} />
       case 'code_executor':
         return <CodeExecutorNodeSettings {...commonProps} />
+      case 'http_request':
+        return <HttpRequestNodeSettings {...commonProps} />
       case 'variable_assign':
         return <VariableAssignNodeSettings {...commonProps} />
       case 'human_in_loop':

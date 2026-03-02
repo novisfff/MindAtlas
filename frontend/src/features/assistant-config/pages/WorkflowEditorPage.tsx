@@ -708,8 +708,8 @@ export default function WorkflowEditorPage() {
         </div>
 
         {/* Floating Palette (Left) */}
-        <div className="absolute left-4 top-20 bottom-24 z-10 w-fit pointer-events-none flex flex-col justify-start">
-          <div className="pointer-events-auto">
+        <div className="absolute left-4 top-20 bottom-24 z-10 w-fit pointer-events-none flex flex-col justify-start min-h-0">
+          <div className="pointer-events-auto min-h-0 flex flex-col">
             <NodePalette tools={workflowTools} />
           </div>
         </div>

@@ -324,6 +324,7 @@ const CONTAINER_NODE_TYPES: Array<{ value: NodeType; labelKey: string }> = [
     { value: 'parameter_extractor', labelKey: 'settings.skills.nodeTypes.parameter_extractor' },
     { value: 'knowledge_retrieval', labelKey: 'settings.skills.nodeTypes.knowledge_retrieval' },
     { value: 'code_executor', labelKey: 'settings.skills.nodeTypes.code_executor' },
+    { value: 'http_request', labelKey: 'settings.skills.nodeTypes.http_request' },
     { value: 'variable_assign', labelKey: 'settings.skills.nodeTypes.variable_assign' },
     { value: 'human_in_loop', labelKey: 'settings.skills.nodeTypes.human_in_loop' },
 ]

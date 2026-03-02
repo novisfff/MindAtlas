@@ -219,7 +219,7 @@ class OutputFieldSpecInput(CamelModel):
 NodeType = Literal[
     "start", "llm", "tool", "if_else",
     "parameter_extractor", "knowledge_retrieval",
-    "iteration", "loop", "code_executor", "variable_assign", "human_in_loop", "output",
+    "iteration", "loop", "code_executor", "http_request", "variable_assign", "human_in_loop", "output",
 ]
 ConditionOperator = Literal[
     "contains", "not_contains", "starts_with", "ends_with",

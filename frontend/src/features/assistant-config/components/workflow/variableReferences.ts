@@ -134,6 +134,10 @@ function buildNodeOutputFields(
     return fields
   }
 
+  if (node.data.nodeType === 'http_request') {
+    return ['body', 'status_code', 'headers', 'ok', 'error_message', 'response']
+  }
+
   if (node.data.nodeType === 'variable_assign') {
     return []
   }
@@ -177,6 +181,9 @@ function buildNodeOutputFields(
 }
 
 function inferFieldType(field: string): InputParam['paramType'] {
+  if (field === 'status_code') return 'number'
+  if (field === 'ok') return 'boolean'
+  if (field === 'headers') return 'object'
   if (field === 'decision') return 'string'
   if (field === 'comment') return 'string'
   if (field === 'result' || field === 'references') return 'object'
@@ -220,6 +227,13 @@ function inferHumanInLoopFieldType(
   if (rawType === 'number' || rawType === 'integer') return 'number'
   if (rawType === 'boolean') return 'boolean'
   if (rawType === 'array') return 'array'
+  return 'string'
+}
+
+function inferHttpRequestFieldType(field: string): InputParam['paramType'] {
+  if (field === 'status_code') return 'number'
+  if (field === 'ok') return 'boolean'
+  if (field === 'headers') return 'object'
   return 'string'
 }
 
@@ -296,7 +310,9 @@ export function buildWorkflowReferenceParams(
           ? inferCodeExecutorFieldType(node, field)
           : node.data.nodeType === 'human_in_loop'
             ? inferHumanInLoopFieldType(node, field)
-          : inferFieldType(field),
+            : node.data.nodeType === 'http_request'
+              ? inferHttpRequestFieldType(field)
+              : inferFieldType(field),
         required: false,
         description: `${groupLabel}.${field}`,
       })

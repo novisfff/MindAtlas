@@ -293,6 +293,8 @@ def execute_container_body(
             node_fn = engine_runtime._build_kr_node(current, cfg, tool_map, db_bind)
         elif node_type == "code_executor":
             node_fn = engine_runtime._build_code_executor_node(current, cfg)
+        elif node_type == "http_request":
+            node_fn = engine_runtime._build_http_request_node(current, cfg)
         elif node_type == "variable_assign":
             node_fn = engine_runtime._build_variable_assign_node(current, cfg)
         elif node_type == "human_in_loop":

@@ -15,6 +15,7 @@ import {
   FileCode2,
   Equal,
   UserCheck,
+  Globe,
 } from 'lucide-react'
 import type { WfNodeData } from '../../stores/workflow-editor-store'
 import { useWorkflowEditorStore } from '../../stores/workflow-editor-store'
@@ -36,6 +37,7 @@ const NODE_STYLES: Record<NodeType, { header: string; icon: typeof Play; iconCol
   iteration: { header: 'bg-gradient-to-r from-cyan-100/90 to-sky-100/90 border-b border-cyan-200', icon: RefreshCw, iconColor: 'text-cyan-700' },
   loop: { header: 'bg-gradient-to-r from-indigo-100/90 to-blue-100/90 border-b border-indigo-200', icon: Infinity, iconColor: 'text-indigo-700' },
   code_executor: { header: 'bg-gradient-to-r from-orange-100/90 to-amber-100/90 border-b border-orange-200', icon: FileCode2, iconColor: 'text-orange-700' },
+  http_request: { header: 'bg-gradient-to-r from-blue-100/90 to-indigo-100/90 border-b border-blue-200', icon: Globe, iconColor: 'text-blue-700' },
   variable_assign: { header: 'bg-gradient-to-r from-lime-100/90 to-emerald-100/90 border-b border-lime-200', icon: Equal, iconColor: 'text-lime-700' },
   human_in_loop: { header: 'bg-gradient-to-r from-blue-100/90 to-cyan-100/90 border-b border-blue-200', icon: UserCheck, iconColor: 'text-blue-700' },
   output: { header: 'bg-gradient-to-r from-rose-100/90 to-orange-100/90 border-b border-rose-200', icon: SendHorizontal, iconColor: 'text-rose-700' },
@@ -229,6 +231,12 @@ function getPreview(data: WfNodeData): string {
       if (outputFields.length === 0) return `${language} · script`
       const brief = outputFields.slice(0, 3).join(', ')
       return `${language} · ${brief}${outputFields.length > 3 ? ` +${outputFields.length - 3}` : ''}`
+    }
+    case 'http_request': {
+      const method = String(cfg.method ?? 'GET').trim().toUpperCase() || 'GET'
+      const url = String(cfg.url ?? '').trim()
+      if (!url) return `${method} · URL`
+      return `${method} · ${truncate(url, 42)}`
     }
     case 'variable_assign': {
       const variableName = String(cfg.variableName ?? cfg.variable_name ?? '').trim()

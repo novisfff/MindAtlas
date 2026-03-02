@@ -28,6 +28,10 @@ _OUTPUT_FIELD_TYPES = {"string", "number", "integer", "boolean", "object", "arra
 _CODE_EXECUTOR_LANGUAGES = {"python", "javascript"}
 _CODE_EXECUTOR_ENTRYPOINT_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 _CODE_EXECUTOR_INPUT_KEY_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
+_HTTP_REQUEST_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
+_HTTP_REQUEST_BODY_TYPES = {"none", "json", "raw", "x-www-form-urlencoded", "form-data"}
+_HTTP_REQUEST_AUTH_TYPES = {"none", "bearer", "api_key"}
+_HTTP_REQUEST_API_KEY_IN = {"header", "query"}
 _HUMAN_FIELD_TYPES = {"string", "number", "integer", "boolean", "array"}
 _HUMAN_FIELD_WIDGETS = {"input", "textarea", "switch", "select", "radio", "tag_selector", "date", "time"}
 _HUMAN_FIELD_WIDGET_ALLOWED_TYPES: dict[str, set[str]] = {
@@ -51,6 +55,7 @@ _SUPPORTED_NODE_TYPES = {
     "iteration",
     "loop",
     "code_executor",
+    "http_request",
     "variable_assign",
     "human_in_loop",
     "output",
@@ -63,6 +68,7 @@ _CONTAINER_BODY_ALLOWED_NODE_TYPES = {
     "parameter_extractor",
     "knowledge_retrieval",
     "code_executor",
+    "http_request",
     "variable_assign",
     "human_in_loop",
 }
@@ -71,4 +77,3 @@ _REMOVED_NODE_TYPE_MESSAGES = {
     "template": "Node type 'template' has been removed. Please refactor with supported nodes.",
     "variable_aggregator": "Node type 'variable_aggregator' has been removed. Please refactor with supported nodes.",
 }
-

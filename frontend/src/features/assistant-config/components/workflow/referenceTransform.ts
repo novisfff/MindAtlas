@@ -10,12 +10,21 @@ const TEMPLATE_KEYS = [
   'template',
   'instruction',
   'query',
+  'url',
   'input_source',
   'inputSource',
   'output_selector',
   'outputSelector',
   'args_template',
   'argsTemplate',
+  'json_body_template',
+  'jsonBodyTemplate',
+  'raw_body_template',
+  'rawBodyTemplate',
+  'bearer_token',
+  'bearerToken',
+  'api_key_value',
+  'apiKeyValue',
 ] as const
 
 const TEMPLATE_REF_RE = /\{\{\s*([^{}]+?)\s*\}\}/g
@@ -117,6 +126,34 @@ function transformConfig(
     } else {
       next.input_bindings = mapped
     }
+  }
+
+  const rewriteKvRows = (rawRows: unknown): unknown => {
+    if (!Array.isArray(rawRows)) return rawRows
+    return rawRows.map((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return item
+      const row = { ...(item as Record<string, unknown>) }
+      if (typeof row.value === 'string') {
+        row.value = rewriteTemplateRefs(row.value, resolver)
+      }
+      return row
+    })
+  }
+
+  if (Array.isArray(next.headers)) {
+    next.headers = rewriteKvRows(next.headers)
+  }
+  if (Array.isArray(next.queryParams)) {
+    next.queryParams = rewriteKvRows(next.queryParams)
+  }
+  if (Array.isArray(next.query_params)) {
+    next.query_params = rewriteKvRows(next.query_params)
+  }
+  if (Array.isArray(next.formBody)) {
+    next.formBody = rewriteKvRows(next.formBody)
+  }
+  if (Array.isArray(next.form_body)) {
+    next.form_body = rewriteKvRows(next.form_body)
   }
 
   if (Array.isArray(next.fields)) {

@@ -316,7 +316,7 @@ export function RichMentionInput({
       />
 
       {(!value || value.trim() === '') && placeholder && (
-        <div className="absolute top-2.5 left-3 text-sm text-slate-400 pointer-events-none select-none">
+        <div className={`absolute left-3 text-sm text-slate-400 pointer-events-none select-none pr-3 ${multiline ? 'top-2.5 break-all' : 'top-1/2 -translate-y-1/2 truncate right-0'}`}>
           {placeholder}
         </div>
       )}

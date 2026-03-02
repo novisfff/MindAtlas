@@ -148,6 +148,119 @@ def build_node_snapshot_input(
             "outputFields": node_cfg.get("output_fields", node_cfg.get("outputFields", [])),
         }
 
+    if node_type == "http_request":
+        def _resolve_rows(raw_rows: Any) -> list[dict[str, Any]]:
+            if not isinstance(raw_rows, list):
+                return []
+            resolved: list[dict[str, Any]] = []
+            for item in raw_rows:
+                if not isinstance(item, dict):
+                    continue
+                key = str(item.get("key", "") or "").strip()
+                if not key:
+                    continue
+                enabled = item.get("enabled", True)
+                value_raw = item.get("value")
+                if isinstance(value_raw, str):
+                    value = rt.resolve_node_template_vars(
+                        template=value_raw,
+                        node_outputs=ctx.node_outputs,
+                        start_inputs=ctx.start_inputs,
+                        sys_vars=ctx.sys_vars,
+                        env_vars=ctx.env_vars,
+                    )
+                elif value_raw is None:
+                    value = ""
+                else:
+                    value = str(value_raw)
+                row: dict[str, Any] = {
+                    "key": key,
+                    "value": value,
+                    "enabled": enabled if isinstance(enabled, bool) else True,
+                }
+                row_type = item.get("type")
+                if isinstance(row_type, str):
+                    normalized_type = row_type.strip().lower()
+                    if normalized_type in {"text", "file"}:
+                        row["type"] = normalized_type
+                resolved.append(row)
+            return resolved
+
+        raw_url = node_cfg.get("url", "")
+        resolved_url = rt.resolve_node_template_vars(
+            template=str(raw_url or ""),
+            node_outputs=ctx.node_outputs,
+            start_inputs=ctx.start_inputs,
+            sys_vars=ctx.sys_vars,
+            env_vars=ctx.env_vars,
+        )
+        raw_json_body = node_cfg.get("json_body_template", node_cfg.get("jsonBodyTemplate", ""))
+        raw_raw_body = node_cfg.get("raw_body_template", node_cfg.get("rawBodyTemplate", ""))
+        resolved_json_body = rt.resolve_node_template_vars(
+            template=str(raw_json_body or ""),
+            node_outputs=ctx.node_outputs,
+            start_inputs=ctx.start_inputs,
+            sys_vars=ctx.sys_vars,
+            env_vars=ctx.env_vars,
+        )
+        resolved_raw_body = rt.resolve_node_template_vars(
+            template=str(raw_raw_body or ""),
+            node_outputs=ctx.node_outputs,
+            start_inputs=ctx.start_inputs,
+            sys_vars=ctx.sys_vars,
+            env_vars=ctx.env_vars,
+        )
+        resolved_bearer_token = rt.resolve_node_template_vars(
+            template=str(node_cfg.get("bearer_token", node_cfg.get("bearerToken", "")) or ""),
+            node_outputs=ctx.node_outputs,
+            start_inputs=ctx.start_inputs,
+            sys_vars=ctx.sys_vars,
+            env_vars=ctx.env_vars,
+        )
+        resolved_api_key_value = rt.resolve_node_template_vars(
+            template=str(node_cfg.get("api_key_value", node_cfg.get("apiKeyValue", "")) or ""),
+            node_outputs=ctx.node_outputs,
+            start_inputs=ctx.start_inputs,
+            sys_vars=ctx.sys_vars,
+            env_vars=ctx.env_vars,
+        )
+        body_type = str(node_cfg.get("body_type", node_cfg.get("bodyType", "none")) or "none").strip().lower()
+        body_preview = ""
+        if body_type == "json":
+            body_preview = rt.truncate(resolved_json_body, ctx.text_preview_limit)
+        elif body_type == "raw":
+            body_preview = rt.truncate(resolved_raw_body, ctx.text_preview_limit)
+        elif body_type == "x-www-form-urlencoded":
+            body_preview = rt.truncate(
+                rt.stringify(_resolve_rows(node_cfg.get("form_body", node_cfg.get("formBody")))),
+                ctx.text_preview_limit,
+            )
+        elif body_type == "form-data":
+            body_preview = rt.truncate(
+                rt.stringify(_resolve_rows(node_cfg.get("form_body", node_cfg.get("formBody")))),
+                ctx.text_preview_limit,
+            )
+        return {
+            "method": str(node_cfg.get("method", "GET") or "GET").strip().upper(),
+            "url": resolved_url,
+            "headers": _resolve_rows(node_cfg.get("headers")),
+            "queryParams": _resolve_rows(node_cfg.get("query_params", node_cfg.get("queryParams"))),
+            "bodyType": body_type,
+            "bodyPreview": body_preview,
+            "auth": {
+                "authType": str(node_cfg.get("auth_type", node_cfg.get("authType", "none")) or "none"),
+                "apiKeyIn": str(node_cfg.get("api_key_in", node_cfg.get("apiKeyIn", "header")) or "header"),
+                "apiKeyName": str(node_cfg.get("api_key_name", node_cfg.get("apiKeyName", "X-API-Key")) or "X-API-Key"),
+                "bearerToken": rt.truncate(resolved_bearer_token, 120),
+                "apiKeyValue": rt.truncate(resolved_api_key_value, 120),
+            },
+            "timeoutMs": node_cfg.get("timeout_ms", node_cfg.get("timeoutMs", 15000)),
+            "retryEnabled": rt.cfg_bool_value(node_cfg, "retry_enabled", "retryEnabled", default=False),
+            "maxRetries": node_cfg.get("max_retries", node_cfg.get("maxRetries", 2)),
+            "retryIntervalMs": node_cfg.get("retry_interval_ms", node_cfg.get("retryIntervalMs", 200)),
+            "verifySsl": rt.cfg_bool_value(node_cfg, "verify_ssl", "verifySsl", default=True),
+        }
+
     if node_type == "if_else":
         normalized_cfg = rt.normalize_if_else_config(node_cfg)
         branches = normalized_cfg.get("branches", [])
