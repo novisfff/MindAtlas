@@ -63,8 +63,8 @@ export function CommonRichInput({
                     onChange={onChange}
                     inputParams={mentionParams}
                     placeholder={placeholder}
-                    multiline
-                    inputClassName={`w-full px-3 text-sm border-0 bg-transparent focus:ring-0 focus:outline-none text-slate-700 ${rows === 1 ? 'min-h-[38px] py-2' : 'min-h-[56px] py-2.5'}`}
+                    multiline={rows > 1}
+                    inputClassName={`w-full px-3 text-sm border-0 bg-transparent focus:ring-0 focus:outline-none text-slate-700 ${rows === 1 ? 'min-h-[38px] py-1.5 whitespace-nowrap overflow-x-auto flex items-center' : 'min-h-[56px] py-2.5'}`}
                 />
             </div>
         </div>

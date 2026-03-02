@@ -21,6 +21,7 @@ class WorkflowNodeBuilderDeps:
     build_output_node: Callable[..., Callable[[WorkflowState], dict]]
     build_dag_tool_node: Callable[..., Callable[[WorkflowState], dict]]
     build_code_executor_node: Callable[..., Callable[[WorkflowState], dict]]
+    build_http_request_node: Callable[..., Callable[[WorkflowState], dict]]
     build_variable_assign_node: Callable[..., Callable[[WorkflowState], dict]]
     build_human_in_loop_node: Callable[..., Callable[[WorkflowState], dict]]
     build_if_else_node: Callable[..., Callable[[WorkflowState], dict]]
@@ -47,6 +48,8 @@ def _build_workflow_node_fn(
         return deps.build_dag_tool_node(node_id, node_cfg, deps.tool_map, deps.args_llm, deps.db_bind)
     if node_type == "code_executor":
         return deps.build_code_executor_node(node_id, node_cfg)
+    if node_type == "http_request":
+        return deps.build_http_request_node(node_id, node_cfg)
     if node_type == "variable_assign":
         return deps.build_variable_assign_node(node_id, node_cfg)
     if node_type == "human_in_loop":

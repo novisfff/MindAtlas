@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.assistant.workflow.engine.node_builders.agent_node import build_agent_node
 from app.assistant.workflow.engine.node_builders.agent_tool_node import build_tool_node
 from app.assistant.workflow.engine.node_builders.code_executor_node import build_code_executor_node
+from app.assistant.workflow.engine.node_builders.http_request_node import build_http_request_node
 from app.assistant.workflow.engine.node_builders.human_in_loop_node import build_human_in_loop_node
 from app.assistant.workflow.engine.node_builders.if_else_node import build_if_else_node
 from app.assistant.workflow.engine.node_builders.iteration_node import build_iteration_node
@@ -19,6 +20,7 @@ __all__ = [
     "build_agent_node",
     "build_tool_node",
     "build_code_executor_node",
+    "build_http_request_node",
     "build_human_in_loop_node",
     "build_if_else_node",
     "build_iteration_node",

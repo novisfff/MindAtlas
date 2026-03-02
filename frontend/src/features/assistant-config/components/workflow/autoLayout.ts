@@ -13,6 +13,7 @@ const DEFAULT_NODE_SIZE: Record<string, { width: number; height: number }> = {
   parameter_extractor: { width: 260, height: 96 },
   knowledge_retrieval: { width: 260, height: 96 },
   code_executor: { width: 260, height: 128 },
+  http_request: { width: 260, height: 120 },
   variable_assign: { width: 260, height: 112 },
   human_in_loop: { width: 260, height: 152 },
   iteration: { width: 320, height: 220 },
@@ -28,6 +29,7 @@ const SUBFLOW_NODE_SIZE: Record<string, { width: number; height: number }> = {
   parameter_extractor: { width: 240, height: 112 },
   knowledge_retrieval: { width: 240, height: 112 },
   code_executor: { width: 240, height: 128 },
+  http_request: { width: 240, height: 116 },
   variable_assign: { width: 240, height: 112 },
   human_in_loop: { width: 240, height: 152 },
 }

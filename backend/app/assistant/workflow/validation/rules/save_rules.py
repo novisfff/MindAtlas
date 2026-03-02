@@ -29,6 +29,9 @@ from app.assistant.workflow.validation.rules.context_rules import ValidationCont
 from app.assistant.workflow.validation.rules.human_in_loop_rules import (
     validate_human_in_loop_node_config,
 )
+from app.assistant.workflow.validation.rules.http_request_rules import (
+    validate_http_request_node_config,
+)
 from app.assistant.workflow.validation.rules.if_else_rules import (
     normalize_if_else_config,
     normalize_if_else_handle,
@@ -104,6 +107,13 @@ def _validate_container_body(
                 errors=errors,
                 subject=f"{container_type} body node '{body_node_id}' code_executor",
                 validate_timeout=True,
+            )
+        if body_type == "http_request":
+            validate_http_request_node_config(
+                node_id=node_id,
+                cfg=body_cfg,
+                errors=errors,
+                subject=f"{container_type} body node '{body_node_id}' http_request",
             )
         if body_type == "variable_assign":
             validate_variable_assign_node_config(
@@ -896,6 +906,13 @@ def validate_node_configs(
                 errors=errors,
                 subject="code_executor",
                 validate_timeout=True,
+            )
+        elif node_type == "http_request":
+            validate_http_request_node_config(
+                node_id=nid,
+                cfg=cfg,
+                errors=errors,
+                subject="http_request",
             )
         elif node_type == "variable_assign":
             validate_variable_assign_node_config(

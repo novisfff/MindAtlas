@@ -215,6 +215,12 @@ def _build_code_executor_node(*args, **kwargs):
 
 
 
+def _build_http_request_node(*args, **kwargs):
+    from app.assistant.workflow.engine.node_builders.http_request_node import build_http_request_node
+    return build_http_request_node(*args, **kwargs)
+
+
+
 def _build_variable_assign_node(*args, **kwargs):
     from app.assistant.workflow.engine.node_builders.variable_assign_node import build_variable_assign_node
     return build_variable_assign_node(*args, **kwargs)
@@ -310,6 +316,7 @@ def build_workflow_dag_subgraph(
         build_output_node=_build_output_node,
         build_dag_tool_node=_build_dag_tool_node,
         build_code_executor_node=_build_code_executor_node,
+        build_http_request_node=_build_http_request_node,
         build_variable_assign_node=_build_variable_assign_node,
         build_human_in_loop_node=_build_human_in_loop_node,
         build_if_else_node=_build_if_else_node,

@@ -12,6 +12,7 @@ import {
   FileCode2,
   Equal,
   UserCheck,
+  Globe,
 } from 'lucide-react'
 import {
   Background,
@@ -51,6 +52,7 @@ const NODE_STYLES: Record<ContainerBodyNodeType, { header: string; icon: typeof 
   parameter_extractor: { header: 'bg-pink-50 border-b border-pink-100', icon: ScanSearch, iconColor: 'text-pink-600' },
   knowledge_retrieval: { header: 'bg-teal-50 border-b border-teal-100', icon: BookOpen, iconColor: 'text-teal-600' },
   code_executor: { header: 'bg-slate-50 border-b border-slate-100', icon: FileCode2, iconColor: 'text-slate-600' },
+  http_request: { header: 'bg-blue-50 border-b border-blue-100', icon: Globe, iconColor: 'text-blue-600' },
   variable_assign: { header: 'bg-lime-50 border-b border-lime-100', icon: Equal, iconColor: 'text-lime-600' },
   human_in_loop: { header: 'bg-blue-50 border-b border-blue-100', icon: UserCheck, iconColor: 'text-blue-600' },
 }
@@ -64,6 +66,7 @@ const NODE_ICON_MAP: Record<ContainerBodyNodeType, typeof Play> = {
   parameter_extractor: ScanSearch,
   knowledge_retrieval: BookOpen,
   code_executor: FileCode2,
+  http_request: Globe,
   variable_assign: Equal,
   human_in_loop: UserCheck,
 }
@@ -143,6 +146,12 @@ function getSubflowPreview(nodeType: ContainerBodyNodeType, config: Record<strin
       if (outputFields.length === 0) return `${language} · script`
       const brief = outputFields.slice(0, 3).join(', ')
       return `${language} · ${brief}${outputFields.length > 3 ? ` +${outputFields.length - 3}` : ''}`
+    }
+    case 'http_request': {
+      const method = String(cfg.method ?? 'GET').trim().toUpperCase() || 'GET'
+      const url = String(cfg.url ?? '').trim()
+      if (!url) return `${method} · URL`
+      return `${method} · ${truncate(url, 42)}`
     }
     case 'variable_assign': {
       const variableName = String(cfg.variableName ?? cfg.variable_name ?? '').trim()
@@ -846,7 +855,7 @@ export function ContainerSubflowCanvas({
       const position = resolveNonOverlappingPosition(initial, currentBodyNodes)
 
       const nextNodeType = payload.kind === 'tool' ? 'tool' : (payload.nodeType as ContainerBodyNodeType)
-      if (!['llm', 'tool', 'if_else', 'parameter_extractor', 'knowledge_retrieval', 'code_executor', 'variable_assign', 'human_in_loop'].includes(nextNodeType)) {
+      if (!['llm', 'tool', 'if_else', 'parameter_extractor', 'knowledge_retrieval', 'code_executor', 'http_request', 'variable_assign', 'human_in_loop'].includes(nextNodeType)) {
         return
       }
       const nodeId = createBodyNodeId(nextNodeType)
