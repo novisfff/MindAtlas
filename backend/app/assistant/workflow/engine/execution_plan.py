@@ -83,6 +83,7 @@ def build_initial_state(
     skill_name: str,
     user_input: str,
     kb_enabled: bool,
+    memory_mode: str,
     metadata: dict[str, Any],
     sys_vars: dict[str, str],
     workflow_node_types: dict[str, str],
@@ -90,14 +91,18 @@ def build_initial_state(
     stream_output_enabled: bool,
     output_stream_source_node_id: str,
     structured_input: dict[str, Any] | None,
+    memory_context: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    normalized_memory_context = memory_context if isinstance(memory_context, dict) else {}
     if pattern == "workflow_dag":
         return {
             "messages": messages,
             "skill_name": skill_name,
             "user_input": user_input,
             "kb_enabled": kb_enabled,
+            "memory_mode": memory_mode,
             "metadata": metadata,
+            "memory_context": normalized_memory_context,
             "node_outputs": {},
             "execution_trace": [],
             "branch_decisions": {},
@@ -114,6 +119,8 @@ def build_initial_state(
         "skill_name": skill_name,
         "user_input": user_input,
         "kb_enabled": kb_enabled,
+        "memory_mode": memory_mode,
+        "memory_context": normalized_memory_context,
         "iteration_count": 0,
         "metadata": metadata,
         "current_step": 1,

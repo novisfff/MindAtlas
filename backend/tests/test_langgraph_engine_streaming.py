@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from types import SimpleNamespace
 from uuid import uuid4
 from unittest.mock import patch
 
@@ -715,6 +716,300 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(sys_vars.get("conversation_id"), "conv-abc")
         self.assertTrue(sys_vars.get("date"))
         self.assertTrue(sys_vars.get("datetime"))
+        self.assertIn("memory_context", captured_state)
+        self.assertEqual(captured_state["memory_context"].get("l1_text"), "")
+        self.assertEqual(captured_state["memory_context"].get("l2_text"), "")
+
+    def test_execute_builds_l0_memory_context_from_history(self) -> None:
+        from app.assistant.skill_catalog.base import SkillDefinition
+        from app.assistant.workflow.engine.engine import LangGraphEngine
+
+        class _FakeChunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _FakeLLM:
+            def stream(self, _messages):
+                yield _FakeChunk("x")
+
+        captured_state: dict[str, object] = {}
+
+        class _FakeCompiled:
+            def stream(self, state):
+                captured_state.update(state)
+                cb = state["metadata"].get("on_content_delta")
+                if callable(cb):
+                    cb("ok")
+                yield {"step": 1}
+
+        skill = SkillDefinition(
+            name="wf_skill",
+            description="d",
+            intent_examples=[],
+            tools=[],
+            mode="langgraph",
+            langgraph_pattern="workflow_dag",
+            workflow_nodes=[{"node_id": "start", "node_type": "start", "config": {}}],
+            workflow_edges=[],
+        )
+
+        with patch("app.assistant.workflow.engine.engine.ChatOpenAI", return_value=_FakeLLM()):
+            engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=None)
+
+        with patch(
+            "app.assistant.workflow.engine.engine._get_or_compile_graph",
+            return_value=_FakeCompiled(),
+        ), patch(
+            "app.assistant.workflow.engine.engine.get_settings",
+            return_value=SimpleNamespace(
+                assistant_memory_l0_turns=1,
+                assistant_memory_l0_max_chars=120,
+            ),
+        ):
+            _ = list(
+                engine.execute(
+                    skill=skill,
+                    user_input="repeat me",
+                    history=[
+                        {"role": "system", "content": "sys"},
+                        {"role": "user", "content": "first user"},
+                        {"role": "assistant", "content": "first assistant"},
+                        {"role": "user", "content": "repeat me"},
+                    ],
+                )
+            )
+
+        memory_context = captured_state.get("memory_context", {})
+        self.assertIsInstance(memory_context, dict)
+        self.assertEqual(memory_context.get("l0_source_count"), 2)
+        self.assertIn("User: first user", str(memory_context.get("l0_text", "")))
+        self.assertIn("Assistant: first assistant", str(memory_context.get("l0_text", "")))
+        self.assertNotIn("repeat me", str(memory_context.get("l0_text", "")))
+        self.assertLessEqual(len(str(memory_context.get("l0_text", ""))), 120)
+        self.assertEqual(
+            memory_context.get("l0_messages"),
+            [
+                {"role": "user", "content": "first user"},
+                {"role": "assistant", "content": "first assistant"},
+            ],
+        )
+
+    def test_execute_loads_l1_summary_into_memory_context(self) -> None:
+        from app.assistant.models import AssistantConversationL1Memory, Conversation
+        from app.assistant.skill_catalog.base import SkillDefinition
+        from app.assistant.workflow.engine.engine import LangGraphEngine
+        from tests._db import make_session
+
+        class _FakeChunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _FakeLLM:
+            def stream(self, _messages):
+                yield _FakeChunk("x")
+
+        captured_state: dict[str, object] = {}
+
+        class _FakeCompiled:
+            def stream(self, state):
+                captured_state.update(state)
+                cb = state["metadata"].get("on_content_delta")
+                if callable(cb):
+                    cb("ok")
+                yield {"step": 1}
+
+        skill = SkillDefinition(
+            name="wf_skill",
+            description="d",
+            intent_examples=[],
+            tools=[],
+            mode="langgraph",
+            langgraph_pattern="workflow_dag",
+            workflow_nodes=[{"node_id": "start", "node_type": "start", "config": {}}],
+            workflow_edges=[],
+        )
+
+        db = make_session()
+        try:
+            conv = Conversation(title="l1")
+            db.add(conv)
+            db.commit()
+            db.refresh(conv)
+            db.add(
+                AssistantConversationL1Memory(
+                    conversation_id=conv.id,
+                    summary_text="历史摘要信息",
+                )
+            )
+            db.commit()
+
+            with patch("app.assistant.workflow.engine.engine.ChatOpenAI", return_value=_FakeLLM()):
+                engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=db)
+
+            with patch(
+                "app.assistant.workflow.engine.engine._get_or_compile_graph",
+                return_value=_FakeCompiled(),
+            ):
+                _ = list(
+                    engine.execute(
+                        skill=skill,
+                        user_input="u",
+                        history=[],
+                        runtime_context={"conversation_id": str(conv.id)},
+                    )
+                )
+        finally:
+            db.close()
+
+        memory_context = captured_state.get("memory_context", {})
+        self.assertIsInstance(memory_context, dict)
+        self.assertEqual(memory_context.get("l1_text"), "历史摘要信息")
+
+    def test_execute_loads_l2_text_into_memory_context_by_skill(self) -> None:
+        from app.assistant.models import AssistantConversationSkillL2Memory, Conversation
+        from app.assistant.skill_catalog.base import SkillDefinition
+        from app.assistant.workflow.engine.engine import LangGraphEngine
+        from tests._db import make_session
+
+        class _FakeChunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _FakeLLM:
+            def stream(self, _messages):
+                yield _FakeChunk("x")
+
+        captured_state: dict[str, object] = {}
+
+        class _FakeCompiled:
+            def stream(self, state):
+                captured_state.update(state)
+                cb = state["metadata"].get("on_content_delta")
+                if callable(cb):
+                    cb("ok")
+                yield {"step": 1}
+
+        skill = SkillDefinition(
+            name="smart_capture",
+            description="d",
+            intent_examples=[],
+            tools=[],
+            mode="langgraph",
+            langgraph_pattern="workflow_dag",
+            workflow_nodes=[{"node_id": "start", "node_type": "start", "config": {}}],
+            workflow_edges=[],
+        )
+
+        db = make_session()
+        try:
+            conv = Conversation(title="l2")
+            db.add(conv)
+            db.commit()
+            db.refresh(conv)
+            db.add(
+                AssistantConversationSkillL2Memory(
+                    conversation_id=conv.id,
+                    skill_name="smart_capture",
+                    facts=["事实1", "事实2"],
+                    version=1,
+                )
+            )
+            db.commit()
+
+            with patch("app.assistant.workflow.engine.engine.ChatOpenAI", return_value=_FakeLLM()):
+                engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=db)
+
+            with patch(
+                "app.assistant.workflow.engine.engine._get_or_compile_graph",
+                return_value=_FakeCompiled(),
+            ):
+                _ = list(
+                    engine.execute(
+                        skill=skill,
+                        user_input="u",
+                        history=[],
+                        runtime_context={"conversation_id": str(conv.id)},
+                    )
+                )
+        finally:
+            db.close()
+
+        memory_context = captured_state.get("memory_context", {})
+        self.assertIsInstance(memory_context, dict)
+        self.assertEqual(memory_context.get("l2_text"), "- 事实1\n- 事实2")
+
+    def test_execute_l2_text_empty_when_skill_not_matched(self) -> None:
+        from app.assistant.models import AssistantConversationSkillL2Memory, Conversation
+        from app.assistant.skill_catalog.base import SkillDefinition
+        from app.assistant.workflow.engine.engine import LangGraphEngine
+        from tests._db import make_session
+
+        class _FakeChunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _FakeLLM:
+            def stream(self, _messages):
+                yield _FakeChunk("x")
+
+        captured_state: dict[str, object] = {}
+
+        class _FakeCompiled:
+            def stream(self, state):
+                captured_state.update(state)
+                cb = state["metadata"].get("on_content_delta")
+                if callable(cb):
+                    cb("ok")
+                yield {"step": 1}
+
+        skill = SkillDefinition(
+            name="quick_stats",
+            description="d",
+            intent_examples=[],
+            tools=[],
+            mode="langgraph",
+            langgraph_pattern="workflow_dag",
+            workflow_nodes=[{"node_id": "start", "node_type": "start", "config": {}}],
+            workflow_edges=[],
+        )
+
+        db = make_session()
+        try:
+            conv = Conversation(title="l2-skill-miss")
+            db.add(conv)
+            db.commit()
+            db.refresh(conv)
+            db.add(
+                AssistantConversationSkillL2Memory(
+                    conversation_id=conv.id,
+                    skill_name="smart_capture",
+                    facts=["事实1"],
+                    version=1,
+                )
+            )
+            db.commit()
+
+            with patch("app.assistant.workflow.engine.engine.ChatOpenAI", return_value=_FakeLLM()):
+                engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=db)
+
+            with patch(
+                "app.assistant.workflow.engine.engine._get_or_compile_graph",
+                return_value=_FakeCompiled(),
+            ):
+                _ = list(
+                    engine.execute(
+                        skill=skill,
+                        user_input="u",
+                        history=[],
+                        runtime_context={"conversation_id": str(conv.id)},
+                    )
+                )
+        finally:
+            db.close()
+
+        memory_context = captured_state.get("memory_context", {})
+        self.assertIsInstance(memory_context, dict)
+        self.assertEqual(memory_context.get("l2_text"), "")
 
     def test_execute_output_passthrough_source_skips_structured_llm(self) -> None:
         from app.assistant.skill_catalog.base import SkillDefinition
@@ -991,9 +1286,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
 
         self.assertEqual(len(llm.calls), 1)
         messages = llm.calls[0]
-        context_msg = next(m for m in messages if m.get("content", "").startswith("上下文数据"))
-        context_payload = json.loads(context_msg["content"].split("\n", 1)[1])
-        self.assertNotIn("kr_1", context_payload)
+        self.assertFalse(any(m.get("content", "").startswith("上下文数据") for m in messages))
 
         injected = next(m for m in messages if "\"inject_mode\"" in m.get("content", ""))
         payload = json.loads(injected["content"])

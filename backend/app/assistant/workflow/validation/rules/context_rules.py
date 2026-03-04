@@ -32,6 +32,7 @@ class ValidationContext:
     output_nodes: list[str]
     topo_order: list[str]
     topo_index: dict[str, int]
+    start_memory_mode: str
     start_allowed_fields: set[str]
     start_env_var_types: dict[str, str]
 
@@ -103,6 +104,7 @@ def build_validation_context(
         for nid in start_nodes[1:]:
             errors.append(ValidationError(node_id=nid, message="Multiple start nodes found"))
 
+    start_memory_mode = "auto"
     start_allowed_fields: set[str] = {"user_input"}
     start_env_var_types: dict[str, str] = {}
     if len(start_nodes) == 1:
@@ -110,7 +112,7 @@ def build_validation_context(
         start_cfg = config_map.get(start_node_id, {})
         if not isinstance(start_cfg, dict):
             start_cfg = {}
-        _, start_allowed_fields, start_contract_errors = resolve_start_input_contract(start_cfg)
+        _, start_memory_mode, start_allowed_fields, start_contract_errors = resolve_start_input_contract(start_cfg)
         for message in start_contract_errors:
             errors.append(ValidationError(node_id=start_node_id, message=message))
         start_env_var_types, start_env_contract_errors = resolve_start_env_var_contract(start_cfg)
@@ -214,6 +216,7 @@ def build_validation_context(
         output_nodes=output_nodes,
         topo_order=topo_order,
         topo_index=topo_index,
+        start_memory_mode=start_memory_mode,
         start_allowed_fields=start_allowed_fields,
         start_env_var_types=start_env_var_types,
     )

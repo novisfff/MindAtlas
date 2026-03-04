@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session, selectinload
 
 from app.ai_registry.runtime import resolve_openai_compat_config
+from app.assistant.memory_service import AssistantMemoryService
 from app.assistant.models import AssistantChatRun, Conversation, Message
 from app.assistant.orchestration.chat_events import ChatEventAdapter
 from app.assistant.orchestration.openai_fallback_client import (
@@ -34,6 +35,7 @@ from app.assistant.workflow.human_approval_runtime import (
 )
 from app.common.exceptions import ApiException
 from app.common.time import utcnow
+from app.config import get_settings
 from app.database import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,10 @@ _CHECKPOINT_MIN_CHARS = 128
 _CHECKPOINT_MAX_INTERVAL_SEC = 1.0
 _RUN_EVENT_POLL_SEC = 0.2
 _CANCEL_POLL_SEC = 0.2
+_L1_PROMPT_USER_MAX_CHARS = 2000
+_L1_PROMPT_ASSISTANT_MAX_CHARS = 4000
+_L2_PROMPT_USER_MAX_CHARS = 2000
+_L2_PROMPT_ASSISTANT_MAX_CHARS = 4000
 
 
 class AssistantService:
@@ -347,6 +353,9 @@ class AssistantService:
         self._mark_run_stream_attached(run_key)
         try:
             while True:
+                # Re-open read view on every poll so long-lived streams can observe
+                # status/event updates committed by background threads.
+                self.db.rollback()
                 self.db.expire_all()
                 events = run_svc.list_events_after(run_id=run_id, after_seq=last_seq, limit=200)
                 for event in events:
@@ -580,6 +589,19 @@ class AssistantService:
             _append_event("run_status", {"status": RUN_STATUS_COMPLETED})
             _append_event("message_end", {"finishReason": "stop"})
             _update_checkpoint(checkpoint_seq=latest_event_seq)
+            self._update_l1_summary_after_run(
+                conversation_id=conversation.id,
+                run_id=run_id,
+                user_text=str(user_msg.content or ""),
+                assistant_text=str(assistant_msg.content or ""),
+            )
+            self._update_l2_memory_after_run(
+                conversation_id=conversation.id,
+                run_id=run_id,
+                skill_name=self._resolve_selected_skill_for_l2(event_adapter.skill_calls_data),
+                user_text=str(user_msg.content or ""),
+                assistant_text=str(assistant_msg.content or ""),
+            )
         except AssistantRunCancelled:
             logger.info("assistant background run cancelled run_id=%s", run_id)
             _persist_checkpoint(force=True)
@@ -715,6 +737,253 @@ class AssistantService:
         except Exception as e:
             logger.warning("Failed to generate title: %s", e)
         return None
+
+    @staticmethod
+    def _truncate_l1_prompt_text(text: str, *, max_chars: int) -> str:
+        value = str(text or "").strip()
+        if len(value) <= max_chars:
+            return value
+        return value[:max_chars]
+
+    def _build_l1_incremental_summary_messages(
+        self,
+        *,
+        prev_summary: str,
+        user_text: str,
+        assistant_text: str,
+        max_chars: int,
+    ) -> list[dict[str, str]]:
+        system_prompt = (
+            "你是“会话记忆增量摘要器”。请把现有摘要与本轮对话增量融合为新的短期记忆摘要。"
+            "要求：1) 保留稳定偏好、任务目标、关键约束、未完成事项与重要事实；"
+            "2) 与旧摘要冲突时以本轮新信息为准；3) 严禁编造未出现的信息；"
+            "4) 仅输出纯文本摘要，不要 JSON、不要标题、不要解释；"
+            f"5) 最终摘要不超过 {max_chars} 个字符。"
+        )
+        prev_block = str(prev_summary or "").strip() or "(空)"
+        user_block = self._truncate_l1_prompt_text(user_text, max_chars=_L1_PROMPT_USER_MAX_CHARS)
+        assistant_block = self._truncate_l1_prompt_text(
+            assistant_text,
+            max_chars=_L1_PROMPT_ASSISTANT_MAX_CHARS,
+        )
+        user_prompt = (
+            f"现有摘要：\n{prev_block}\n\n"
+            f"本轮用户输入：\n{user_block}\n\n"
+            f"本轮助手输出：\n{assistant_block}\n\n"
+            "请输出融合后的新摘要："
+        )
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+    def _update_l1_summary_after_run(
+        self,
+        *,
+        conversation_id: UUID,
+        run_id: UUID,
+        user_text: str,
+        assistant_text: str,
+    ) -> None:
+        started = time.monotonic()
+        status = "skipped"
+        prev_chars = 0
+        next_chars = 0
+        try:
+            with SessionLocal() as memory_db:
+                memory_service = AssistantMemoryService(memory_db)
+                prev_summary = memory_service.get_l1_summary(conversation_id)
+                prev_chars = len(prev_summary)
+                settings = get_settings()
+                max_chars = max(1, int(getattr(settings, "assistant_memory_l1_max_chars", 2000) or 2000))
+
+                cfg = self._get_openai_config(memory_db)
+                if not cfg:
+                    next_chars = prev_chars
+                    status = "skipped"
+                    return
+
+                messages = self._build_l1_incremental_summary_messages(
+                    prev_summary=prev_summary,
+                    user_text=user_text,
+                    assistant_text=assistant_text,
+                    max_chars=max_chars,
+                )
+                raw = self._call_openai(cfg, messages)
+                candidate = str(self._parse_openai_content(raw) or "").strip()
+                if not candidate:
+                    next_summary = prev_summary
+                    status = "skipped"
+                else:
+                    next_summary = memory_service.truncate_summary(candidate, max_chars=max_chars)
+                    status = "success"
+                next_chars = len(next_summary)
+                if next_summary != prev_summary:
+                    memory_service.upsert_l1_summary(conversation_id, next_summary)
+        except Exception:
+            status = "failed"
+            logger.exception("assistant l1 summary update failed conversation_id=%s run_id=%s", conversation_id, run_id)
+        finally:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            logger.info(
+                "assistant l1 summary update conversation_id=%s run_id=%s status=%s prev_chars=%s next_chars=%s elapsed_ms=%s",
+                conversation_id,
+                run_id,
+                status,
+                prev_chars,
+                next_chars,
+                elapsed_ms,
+            )
+
+    @staticmethod
+    def _parse_json_object_text(content: str) -> dict[str, Any]:
+        raw = str(content or "").strip()
+        if not raw:
+            return {}
+
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            if len(parts) >= 3:
+                raw = parts[1].strip()
+            raw = raw.strip()
+            if raw.startswith("json"):
+                raw = raw[4:].strip()
+
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if 0 <= start < end:
+                try:
+                    parsed = json.loads(raw[start : end + 1])
+                    return parsed if isinstance(parsed, dict) else {}
+                except Exception:
+                    return {}
+            return {}
+
+    @staticmethod
+    def _resolve_selected_skill_for_l2(skill_calls_data: list[dict[str, Any]] | None) -> str:
+        items = skill_calls_data if isinstance(skill_calls_data, list) else []
+        for item in reversed(items):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if name:
+                return name
+        return ""
+
+    def _build_l2_incremental_facts_messages(
+        self,
+        *,
+        prev_facts: list[str],
+        skill_name: str,
+        user_text: str,
+        assistant_text: str,
+        max_items: int,
+    ) -> list[dict[str, str]]:
+        system_prompt = (
+            "你是“会话+Skill 事实记忆提取器”。请基于已有 facts 和本轮对话，"
+            "输出该 Skill 可复用的稳定事实。要求："
+            "1) 仅保留用户偏好、任务约束、关键背景、未完成事项、重要实体与结论；"
+            "2) 与旧 facts 冲突时以本轮信息优先；3) 严禁编造；"
+            f"4) 必须严格输出 JSON 对象，格式为 {{\"facts\": [\"...\"]}}；5) 最多 {max_items} 条。"
+        )
+        prev_block = json.dumps(prev_facts, ensure_ascii=False)
+        user_block = self._truncate_l1_prompt_text(user_text, max_chars=_L2_PROMPT_USER_MAX_CHARS)
+        assistant_block = self._truncate_l1_prompt_text(
+            assistant_text,
+            max_chars=_L2_PROMPT_ASSISTANT_MAX_CHARS,
+        )
+        user_prompt = (
+            f"skill_name: {skill_name}\n"
+            f"existing_facts: {prev_block}\n"
+            f"user_turn: {user_block}\n"
+            f"assistant_turn: {assistant_block}\n"
+            "请输出新的 JSON："
+        )
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+    def _update_l2_memory_after_run(
+        self,
+        *,
+        conversation_id: UUID,
+        run_id: UUID,
+        skill_name: str,
+        user_text: str,
+        assistant_text: str,
+    ) -> None:
+        started = time.monotonic()
+        status = "skipped"
+        normalized_skill_name = str(skill_name or "").strip()
+        prev_count = 0
+        next_count = 0
+        try:
+            if not normalized_skill_name:
+                return
+            with SessionLocal() as memory_db:
+                memory_service = AssistantMemoryService(memory_db)
+                settings = get_settings()
+                max_items = max(1, int(getattr(settings, "assistant_memory_l2_max_items", 20) or 20))
+                prev_facts = memory_service.get_l2_facts(conversation_id, normalized_skill_name)
+                prev_facts = memory_service.normalize_l2_facts(prev_facts, max_items=max_items)
+                prev_count = len(prev_facts)
+
+                cfg = self._get_openai_config(memory_db)
+                if not cfg:
+                    next_count = prev_count
+                    status = "skipped"
+                    return
+
+                messages = self._build_l2_incremental_facts_messages(
+                    prev_facts=prev_facts,
+                    skill_name=normalized_skill_name,
+                    user_text=user_text,
+                    assistant_text=assistant_text,
+                    max_items=max_items,
+                )
+                raw = self._call_openai(cfg, messages)
+                candidate = str(self._parse_openai_content(raw) or "").strip()
+                parsed = self._parse_json_object_text(candidate)
+                parsed_facts = parsed.get("facts")
+                if not isinstance(parsed_facts, list):
+                    next_facts = prev_facts
+                    status = "skipped"
+                else:
+                    next_facts = memory_service.normalize_l2_facts(parsed_facts, max_items=max_items)
+                    if not next_facts:
+                        next_facts = prev_facts
+                        status = "skipped"
+                    else:
+                        status = "success"
+                next_count = len(next_facts)
+                if next_facts != prev_facts:
+                    memory_service.upsert_l2_facts(conversation_id, normalized_skill_name, next_facts)
+        except Exception:
+            status = "failed"
+            logger.exception(
+                "assistant l2 memory update failed conversation_id=%s run_id=%s skill_name=%s",
+                conversation_id,
+                run_id,
+                normalized_skill_name,
+            )
+        finally:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            logger.info(
+                "assistant l2 memory update conversation_id=%s run_id=%s skill_name=%s status=%s prev_count=%s "
+                "next_count=%s elapsed_ms=%s",
+                conversation_id,
+                run_id,
+                normalized_skill_name,
+                status,
+                prev_count,
+                next_count,
+                elapsed_ms,
+            )
 
     def _get_openai_config(self, db: Session | None = None) -> _OpenAiConfig | None:
         db_session = db or self.db

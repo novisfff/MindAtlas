@@ -70,6 +70,7 @@ export interface WorkflowSessionVar {
 
 export interface StartNodeConfig {
   inputMode?: 'text' | 'structured'
+  memoryMode?: 'auto' | 'off' | 'structured'
   structuredFields?: StartStructuredField[]
   sessionVars?: WorkflowSessionVar[]
 }

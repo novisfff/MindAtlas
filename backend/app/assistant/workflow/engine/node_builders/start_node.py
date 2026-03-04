@@ -6,9 +6,12 @@ from typing import Any, Callable
 from app.assistant.workflow.engine.runtime_helpers import (
     START_STRUCTURED_FIELD_NAME_RE,
     coerce_start_structured_field_value,
+    resolve_start_memory_mode,
     resolve_start_env_specs,
     resolve_start_input_mode,
+    resolve_structured_memory_fields,
     resolve_start_structured_fields,
+    START_MEMORY_RESERVED_FIELD_NAMES,
 )
 from app.assistant.workflow.engine.state import NodeOutput, WorkflowState
 from app.assistant.workflow.env_vars import build_initial_env_vars, serialize_env_specs
@@ -21,9 +24,16 @@ def build_start_node(
 
     def start_node(state: WorkflowState) -> dict:
         input_mode = resolve_start_input_mode(node_cfg)
+        configured_memory_mode = resolve_start_memory_mode(node_cfg)
+        memory_mode = resolve_start_memory_mode(
+            {"memory_mode": state.get("memory_mode")},
+            default_mode=configured_memory_mode,
+        )
         user_input = state.get("user_input", "")
         structured_input = state.get("structured_input")
         sys_vars = state.get("sys_vars", {}) or {}
+        memory_context = state.get("memory_context")
+        memory_fields = resolve_structured_memory_fields(memory_context)
         env_vars = build_initial_env_vars(env_specs)
         if input_mode == "structured":
             if not isinstance(structured_input, dict):
@@ -37,7 +47,11 @@ def build_start_node(
                 field_name = str(field.get("name", "") or "").strip()
                 if not field_name:
                     continue
-                if field_name == "user_input" or not START_STRUCTURED_FIELD_NAME_RE.fullmatch(field_name):
+                if (
+                    field_name == "user_input"
+                    or field_name in START_MEMORY_RESERVED_FIELD_NAMES
+                    or not START_STRUCTURED_FIELD_NAME_RE.fullmatch(field_name)
+                ):
                     raise RuntimeError(f"start node has invalid structured field name: {field_name}")
                 if field_name in allowed_fields:
                     raise RuntimeError(f"start node has duplicated structured field: {field_name}")
@@ -57,6 +71,8 @@ def build_start_node(
             if unknown_fields:
                 unknown_text = ", ".join(sorted(unknown_fields))
                 raise RuntimeError(f"structured_input contains unknown fields: {unknown_text}")
+            if memory_mode == "structured":
+                resolved_fields.update(memory_fields)
 
             return {
                 "node_outputs": {
@@ -83,6 +99,7 @@ def build_start_node(
                         "sys_date": sys_vars.get("date", ""),
                         "sys_datetime": sys_vars.get("datetime", ""),
                         "sys_conversation_id": sys_vars.get("conversation_id", ""),
+                        **(memory_fields if memory_mode == "structured" else {}),
                     },
                 ),
             },

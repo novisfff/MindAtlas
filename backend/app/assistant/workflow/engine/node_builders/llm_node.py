@@ -13,10 +13,13 @@ from app.assistant.workflow.engine.runtime_helpers import (
     emit,
     extract_json_object,
     get_start_inputs,
+    render_memory_injection_block,
     resolve_node_template_vars,
+    resolve_start_memory_mode,
     truncate,
 )
 from app.assistant.workflow.engine.state import NodeOutput, WorkflowState
+from app.config import get_settings
 
 def build_dag_llm_node(
     node_id: str,
@@ -84,6 +87,22 @@ def build_dag_llm_node(
         field_names = [f.get("name", "") if isinstance(f, dict) else str(f) for f in output_fields]
         stream_output_enabled = bool(state.get("stream_output_enabled", True))
         output_stream_source_node_id = str(state.get("output_stream_source_node_id", "") or "")
+        memory_mode = resolve_start_memory_mode(
+            {"memory_mode": state.get("memory_mode")},
+            default_mode="auto",
+        )
+        memory_context = state.get("memory_context") if isinstance(state.get("memory_context"), dict) else {}
+        l0_messages_raw = memory_context.get("l0_messages")
+        l0_messages: list[dict[str, str]] = []
+        if isinstance(l0_messages_raw, list):
+            for item in l0_messages_raw:
+                if not isinstance(item, dict):
+                    continue
+                role = str(item.get("role", "") or "").strip().lower()
+                content = str(item.get("content", "") or "").strip()
+                if role not in {"user", "assistant"} or not content:
+                    continue
+                l0_messages.append({"role": role, "content": content})
 
         structured_mode = output_mode == "structured"
         if structured_mode and field_names:
@@ -107,21 +126,25 @@ def build_dag_llm_node(
             f"## 当前日期\n{today.isoformat()}（{today.strftime('%A')}）\n\n"
             f"## 任务\n{system_prompt}\n\n"
         )
+        if memory_mode == "auto":
+            settings = get_settings()
+            memory_block = render_memory_injection_block(
+                memory_context=memory_context,
+                max_chars=max(
+                    1,
+                    int(getattr(settings, "assistant_memory_injection_max_chars", 30000) or 30000),
+                ),
+            )
+            if memory_block:
+                full_prompt += f"{memory_block}\n\n"
         if constraint:
             full_prompt += f"## {constraint}\n\n"
 
-        context_data: dict[str, str] = {}
-        for nid, out in node_outputs.items():
-            if workflow_node_types.get(nid) == "knowledge_retrieval":
-                # KR 输出只允许通过显式 knowledge binding 注入，避免隐式混入。
-                continue
-            context_data[nid] = truncate(out.get("text", ""), 2000)
-        context_snapshot = json.dumps(context_data, ensure_ascii=False, default=str)[:4000]
-
         msgs = [
             {"role": "system", "content": full_prompt},
-            {"role": "user", "content": f"上下文数据：\n{context_snapshot}"},
         ]
+        if memory_mode == "auto" and l0_messages:
+            msgs.extend(l0_messages)
 
         if knowledge_enabled and knowledge_source_node_ids:
             remaining_refs = knowledge_max_refs

@@ -5,6 +5,7 @@ import logging
 from datetime import date
 from queue import Queue
 from typing import Any, Callable, Iterator
+from uuid import UUID
 
 from langchain_core.messages import SystemMessage
 from langchain_openai import ChatOpenAI
@@ -20,6 +21,7 @@ from app.assistant.workflow.engine import runtime_helpers as _rt
 from app.assistant.workflow.engine import snapshots as _snap
 from app.assistant.workflow.engine import stream_runtime as _stream
 from app.assistant.workflow.engine.state import AssistantState, NodeOutput, WorkflowState
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -537,6 +539,44 @@ class LangGraphEngine:
             resolve_node_custom_llm=lambda model_id, node_id: self._resolve_node_custom_llm(model_id, node_id=node_id),
         )
 
+    def _load_l1_summary(self, *, conversation_id_uuid: UUID | None) -> str:
+        if self.db is None or conversation_id_uuid is None:
+            return ""
+        try:
+            from app.assistant.memory_service import AssistantMemoryService
+
+            settings = get_settings()
+            max_chars = max(1, int(getattr(settings, "assistant_memory_l1_max_chars", 2000) or 2000))
+            memory_service = AssistantMemoryService(self.db)
+            summary = memory_service.get_l1_summary(conversation_id_uuid)
+            return memory_service.truncate_summary(summary, max_chars=max_chars)
+        except Exception:
+            logger.exception("assistant memory l1 load failed conversation_id=%s", conversation_id_uuid)
+            return ""
+
+    def _load_l2_text(self, *, conversation_id_uuid: UUID | None, skill_name: str) -> tuple[str, int]:
+        if self.db is None or conversation_id_uuid is None:
+            return "", 0
+        normalized_skill_name = str(skill_name or "").strip()
+        if not normalized_skill_name:
+            return "", 0
+        try:
+            from app.assistant.memory_service import AssistantMemoryService
+
+            settings = get_settings()
+            max_items = max(1, int(getattr(settings, "assistant_memory_l2_max_items", 20) or 20))
+            memory_service = AssistantMemoryService(self.db)
+            facts = memory_service.get_l2_facts(conversation_id_uuid, normalized_skill_name)
+            normalized = memory_service.normalize_l2_facts(facts, max_items=max_items)
+            return memory_service.render_l2_text(normalized), len(normalized)
+        except Exception:
+            logger.exception(
+                "assistant memory l2 load failed conversation_id=%s skill=%s",
+                conversation_id_uuid,
+                normalized_skill_name,
+            )
+            return "", 0
+
     def execute(
         self,
         skill: SkillDefinition,
@@ -619,6 +659,64 @@ class LangGraphEngine:
             history=history,
             user_input=user_input,
         )
+        settings = get_settings()
+        default_memory_mode = _rt.resolve_start_memory_mode(
+            {},
+            default_mode=str(getattr(settings, "assistant_memory_mode_default", "auto") or "auto"),
+        )
+        l0_turns = max(1, int(getattr(settings, "assistant_memory_l0_turns", 6) or 6))
+        l0_max_chars = max(1, int(getattr(settings, "assistant_memory_l0_max_chars", 25000) or 25000))
+        try:
+            from app.assistant.orchestration.memory_context import build_l0_window
+
+            l0_window = build_l0_window(
+                history=history,
+                user_input=user_input,
+                turns_limit=l0_turns,
+                chars_limit=l0_max_chars,
+            )
+        except Exception:
+            logger.error(
+                "assistant memory l0 build failed conversation_id=%s skill=%s",
+                conversation_id_uuid,
+                skill.name,
+                exc_info=True,
+            )
+            l0_window = {
+                "l0_text": "",
+                "l0_messages": [],
+                "l0_source_count": 0,
+                "l0_trimmed_chars": 0,
+            }
+        l1_text = self._load_l1_summary(conversation_id_uuid=conversation_id_uuid)
+        l2_text, l2_count = self._load_l2_text(
+            conversation_id_uuid=conversation_id_uuid,
+            skill_name=skill.name,
+        )
+        l0_messages = l0_window.get("l0_messages")
+        if not isinstance(l0_messages, list):
+            l0_messages = []
+        memory_context = {
+            "l0_text": str(l0_window.get("l0_text", "") or ""),
+            "l0_messages": l0_messages,
+            "l0_source_count": int(l0_window.get("l0_source_count", 0) or 0),
+            "l0_trimmed_chars": int(l0_window.get("l0_trimmed_chars", 0) or 0),
+            "l1_text": l1_text,
+            "l2_text": l2_text,
+        }
+        logger.info(
+            "assistant memory context prepared conversation_id=%s skill=%s l0_source_count=%s "
+            "l0_message_count=%s l0_trimmed_chars=%s l0_chars=%s l1_chars=%s l2_chars=%s l2_count=%s",
+            conversation_id_uuid,
+            skill.name,
+            memory_context["l0_source_count"],
+            len(memory_context["l0_messages"]),
+            memory_context["l0_trimmed_chars"],
+            len(memory_context["l0_text"]),
+            len(memory_context["l1_text"]),
+            len(memory_context["l2_text"]),
+            l2_count,
+        )
 
         # 根据 pattern 编译/获取图
         cache_key = _make_cache_key(skill, kb_enabled, self.model)
@@ -633,11 +731,22 @@ class LangGraphEngine:
         workflow_node_types: dict[str, str] = {}
         node_llms: dict[str, ChatOpenAI] = {}
         output_stream_source_node_id = ""
+        memory_mode = default_memory_mode
 
         if pattern == "agent_loop":
             # 设置 system prompt
             tool_names = [getattr(t, "name", "") for t in tools]
             sys_prompt = self._build_agent_system_prompt(skill, tool_names)
+            if memory_mode == "auto":
+                memory_block = _rt.render_memory_injection_block(
+                    memory_context=memory_context,
+                    max_chars=max(
+                        1,
+                        int(getattr(settings, "assistant_memory_injection_max_chars", 30000) or 30000),
+                    ),
+                )
+                if memory_block:
+                    sys_prompt = f"{sys_prompt}\n\n{memory_block}"
             messages[0] = SystemMessage(content=sys_prompt)
 
             compiled = _get_or_compile_graph(
@@ -647,6 +756,17 @@ class LangGraphEngine:
         elif pattern == "workflow_dag":
             wf_nodes = getattr(skill, "workflow_nodes", None) or []
             wf_edges = getattr(skill, "workflow_edges", None) or []
+            for raw_node in wf_nodes:
+                node_type = str(getattr(raw_node, "node_type", "") or "").strip().lower()
+                if node_type != "start":
+                    continue
+                raw_cfg = getattr(raw_node, "config", None)
+                normalized_cfg = _normalize_config(raw_cfg) if isinstance(raw_cfg, dict) else {}
+                memory_mode = _rt.resolve_start_memory_mode(
+                    normalized_cfg,
+                    default_mode=default_memory_mode,
+                )
+                break
             node_llms, workflow_node_types, output_stream_source_node_id = (
                 _exec_plan.resolve_workflow_runtime_context(
                     skill_name=skill.name,
@@ -671,6 +791,7 @@ class LangGraphEngine:
             skill_name=skill.name,
             user_input=user_input,
             kb_enabled=kb_enabled,
+            memory_mode=memory_mode,
             metadata=metadata,
             sys_vars=sys_vars,
             workflow_node_types=workflow_node_types,
@@ -678,6 +799,7 @@ class LangGraphEngine:
             stream_output_enabled=stream_output_enabled,
             output_stream_source_node_id=output_stream_source_node_id,
             structured_input=structured_input,
+            memory_context=memory_context,
         )
 
         # 执行图

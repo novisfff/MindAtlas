@@ -77,6 +77,7 @@ def _validate_container_body(
     node_id: str,
     container_type: str,
     cfg: dict,
+    start_allowed_fields: set[str],
     start_env_var_types: dict[str, str],
     errors: list[ValidationError],
 ) -> None:
@@ -150,7 +151,7 @@ def _validate_container_body(
                         )
                     continue
                 if ref_node == "start":
-                    if ref_field != "user_input":
+                    if ref_field not in start_allowed_fields:
                         errors.append(
                             ValidationError(
                                 node_id=node_id,
@@ -194,6 +195,7 @@ def _validate_iteration_node(
     *,
     node_id: str,
     cfg: dict,
+    start_allowed_fields: set[str],
     start_env_var_types: dict[str, str],
     errors: list[ValidationError],
 ) -> None:
@@ -233,6 +235,7 @@ def _validate_iteration_node(
         node_id=node_id,
         container_type="iteration",
         cfg=cfg,
+        start_allowed_fields=start_allowed_fields,
         start_env_var_types=start_env_var_types,
         errors=errors,
     )
@@ -242,6 +245,7 @@ def _validate_loop_node(
     *,
     node_id: str,
     cfg: dict,
+    start_allowed_fields: set[str],
     start_env_var_types: dict[str, str],
     errors: list[ValidationError],
 ) -> None:
@@ -387,6 +391,7 @@ def _validate_loop_node(
         node_id=node_id,
         container_type="loop",
         cfg=cfg,
+        start_allowed_fields=start_allowed_fields,
         start_env_var_types=start_env_var_types,
         errors=errors,
     )
@@ -926,6 +931,7 @@ def validate_node_configs(
             _validate_iteration_node(
                 node_id=nid,
                 cfg=cfg,
+                start_allowed_fields=ctx.start_allowed_fields,
                 start_env_var_types=ctx.start_env_var_types,
                 errors=errors,
             )
@@ -933,6 +939,7 @@ def validate_node_configs(
             _validate_loop_node(
                 node_id=nid,
                 cfg=cfg,
+                start_allowed_fields=ctx.start_allowed_fields,
                 start_env_var_types=ctx.start_env_var_types,
                 errors=errors,
             )

@@ -18,6 +18,7 @@ export function createDefaultNodeConfig(
   if (nodeType === 'start') {
     return {
       inputMode: 'text',
+      memoryMode: 'auto',
       structuredFields: [],
       sessionVars: [],
     }

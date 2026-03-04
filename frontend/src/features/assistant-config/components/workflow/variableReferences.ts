@@ -2,7 +2,11 @@ import type { Edge, Node } from '@xyflow/react'
 import type { InputParam } from '../../api/tools'
 import type { WfNodeData } from '../../stores/workflow-editor-store'
 import type { WorkflowToolDefinition } from './types'
-import { isValidStartStructuredFieldName, normalizeStartNodeConfig } from './startNodeConfig'
+import {
+  START_MEMORY_STRUCTURED_FIELD_NAMES,
+  isValidStartStructuredFieldName,
+  normalizeStartNodeConfig,
+} from './startNodeConfig'
 
 const SYS_REFERENCE_PARAMS: InputParam[] = [
   {
@@ -85,12 +89,16 @@ function buildNodeOutputFields(
   const cfg = (node.data.config ?? {}) as Record<string, unknown>
   if (node.data.nodeType === 'start') {
     const normalized = normalizeStartNodeConfig(cfg)
+    const memoryFields = normalized.memoryMode === 'structured'
+      ? Array.from(START_MEMORY_STRUCTURED_FIELD_NAMES)
+      : []
     if (normalized.inputMode === 'structured') {
-      return normalized.structuredFields
+      const structuredFields = normalized.structuredFields
         .map((field) => field.name.trim())
         .filter((name) => isValidStartStructuredFieldName(name))
+      return [...structuredFields, ...memoryFields]
     }
-    return ['user_input']
+    return ['user_input', ...memoryFields]
   }
 
   if (node.data.nodeType === 'llm') {

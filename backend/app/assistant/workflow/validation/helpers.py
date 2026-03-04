@@ -17,6 +17,9 @@ from app.assistant.workflow.validation.contracts import (
     _CONTAINER_BODY_ALLOWED_NODE_TYPES,
     _OUTPUT_FIELD_NAME_RE,
     _OUTPUT_FIELD_TYPES,
+    _START_MEMORY_RESERVED_FIELDS,
+    _START_MEMORY_MODES,
+    _START_MEMORY_STRUCTURED_FIELDS,
     _START_INPUT_FIELD_NAME_RE,
     _START_INPUT_FIELD_TYPES,
     _START_INPUT_MODES,
@@ -272,21 +275,37 @@ def iter_config_template_texts(cfg: dict) -> list[str]:
     return texts
 
 
-def resolve_start_input_contract(cfg: dict) -> tuple[str, set[str], list[str]]:
+def resolve_start_memory_mode_contract(cfg: dict) -> tuple[str, list[str]]:
+    errors: list[str] = []
+    raw_mode = cfg_get(cfg, "memory_mode", "memoryMode", default="auto")
+    mode = str(raw_mode or "auto").strip().lower() or "auto"
+    if mode not in _START_MEMORY_MODES:
+        errors.append(f"start memoryMode is invalid: {raw_mode}")
+        mode = "auto"
+    return mode, errors
+
+
+def resolve_start_input_contract(cfg: dict) -> tuple[str, str, set[str], list[str]]:
     errors: list[str] = []
     raw_mode = cfg_get(cfg, "input_mode", "inputMode", default="text")
     mode = str(raw_mode or "text").strip().lower()
     if mode not in _START_INPUT_MODES:
         errors.append(f"start inputMode is invalid: {raw_mode}")
         mode = "text"
+    memory_mode, memory_mode_errors = resolve_start_memory_mode_contract(cfg)
+    errors.extend(memory_mode_errors)
 
     if mode == "text":
-        return mode, {"user_input"}, errors
+        allowed = {"user_input"}
+        if memory_mode == "structured":
+            allowed.update(_START_MEMORY_STRUCTURED_FIELDS)
+        return mode, memory_mode, allowed, errors
 
     structured_fields_raw = cfg_get(cfg, "structured_fields", "structuredFields", default=None)
     if not isinstance(structured_fields_raw, list) or not structured_fields_raw:
         errors.append("start structured mode requires at least one structured field")
-        return mode, set(), errors
+        allowed = set(_START_MEMORY_STRUCTURED_FIELDS) if memory_mode == "structured" else set()
+        return mode, memory_mode, allowed, errors
 
     field_names: set[str] = set()
     for idx, raw_field in enumerate(structured_fields_raw, start=1):
@@ -297,8 +316,8 @@ def resolve_start_input_contract(cfg: dict) -> tuple[str, set[str], list[str]]:
         if not field_name:
             errors.append(f"start structured field #{idx} requires name")
             continue
-        if field_name == "user_input":
-            errors.append("start structured field name 'user_input' is reserved")
+        if field_name == "user_input" or field_name in _START_MEMORY_RESERVED_FIELDS:
+            errors.append(f"start structured field name '{field_name}' is reserved")
             continue
         if not _START_INPUT_FIELD_NAME_RE.fullmatch(field_name):
             errors.append(f"start structured field name is invalid: {field_name}")
@@ -320,7 +339,10 @@ def resolve_start_input_contract(cfg: dict) -> tuple[str, set[str], list[str]]:
 
         field_names.add(field_name)
 
-    return mode, field_names, errors
+    allowed_fields = set(field_names)
+    if memory_mode == "structured":
+        allowed_fields.update(_START_MEMORY_STRUCTURED_FIELDS)
+    return mode, memory_mode, allowed_fields, errors
 
 
 def resolve_start_env_var_contract(cfg: dict) -> tuple[dict[str, str], list[str]]:

@@ -232,6 +232,8 @@ export function useChat() {
       }
       if (drainingPromise) await drainingPromise
       setActiveWorkflowSteps([])
+      setLoading(false)
+      clearActiveRun()
       queryClient.invalidateQueries({ queryKey: [...assistantKeys.conversations(), convId] })
       queryClient.invalidateQueries({ queryKey: assistantKeys.conversations() })
     } catch (err) {
@@ -451,6 +453,8 @@ export function useChat() {
 
       if (drainingPromise) await drainingPromise
       setActiveWorkflowSteps([])
+      setLoading(false)
+      clearActiveRun()
       queryClient.invalidateQueries({ queryKey: [...assistantKeys.conversations(), convId] })
       queryClient.invalidateQueries({ queryKey: assistantKeys.conversations() })
     } catch (err) {

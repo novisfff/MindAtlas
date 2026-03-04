@@ -44,6 +44,19 @@ class Conversation(UuidPrimaryKeyMixin, TimestampMixin, Base):
         passive_deletes=True,
         order_by="AssistantChatRun.created_at.asc()",
     )
+    l1_memory = relationship(
+        "AssistantConversationL1Memory",
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        uselist=False,
+    )
+    l2_memories = relationship(
+        "AssistantConversationSkillL2Memory",
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 class Message(UuidPrimaryKeyMixin, TimestampMixin, Base):
@@ -137,4 +150,49 @@ class AssistantChatRunEvent(Base):
 
     __table_args__ = (
         Index("ix_assistant_chat_run_event_run_seq", "run_id", "seq", unique=True),
+    )
+
+
+class AssistantConversationL1Memory(UuidPrimaryKeyMixin, TimestampMixin, Base):
+    """Conversation-level L1 incremental summary memory."""
+
+    __tablename__ = "assistant_conversation_l1_memory"
+
+    conversation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_conversation.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    summary_text = Column(Text, nullable=False, default="")
+
+    conversation = relationship("Conversation", back_populates="l1_memory")
+
+    __table_args__ = (
+        Index("ix_assistant_l1_memory_conversation_id", "conversation_id", unique=True),
+    )
+
+
+class AssistantConversationSkillL2Memory(UuidPrimaryKeyMixin, TimestampMixin, Base):
+    """Conversation+skill scoped L2 facts memory."""
+
+    __tablename__ = "assistant_conversation_skill_l2_memory"
+
+    conversation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_conversation.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    skill_name = Column(String(100), nullable=False)
+    facts = Column(JSON, nullable=False, default=list)
+    version = Column(Integer, nullable=False, default=1)
+
+    conversation = relationship("Conversation", back_populates="l2_memories")
+
+    __table_args__ = (
+        Index(
+            "ix_assistant_l2_memory_conversation_skill",
+            "conversation_id",
+            "skill_name",
+            unique=True,
+        ),
     )

@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
 import types
 import unittest
+
+from sqlalchemy.orm import sessionmaker
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 from tests._db import make_session
@@ -137,6 +141,45 @@ class AssistantChatRunStreamTests(unittest.TestCase):
         events = [_decode_sse(chunk) for chunk in chunks]
         self.assertEqual([name for name, _ in events], ["content_delta", "message_end"])
         self.assertEqual(events[0][1]["seq"], 2)
+
+    def test_stream_run_observes_late_terminal_updates_from_other_session(self) -> None:
+        from app.assistant.run_service import AssistantChatRunService  # noqa: E402
+        _install_fastapi_stubs()
+        from app.assistant.service import AssistantService  # noqa: E402
+
+        run_svc = AssistantChatRunService(self.db)
+        run = run_svc.create_run(
+            conversation=self.conv,
+            user_message=self.user_msg,
+            assistant_message=self.assistant_msg,
+        )
+        run_svc.update_run_status(run_id=run.id, status="running")
+
+        svc = AssistantService(self.db)
+        chunks: list[bytes] = []
+        errors: list[Exception] = []
+
+        def _consume() -> None:
+            try:
+                chunks.extend(list(svc.stream_run(self.conv.id, run_id=run.id, after_seq=0)))
+            except Exception as exc:  # pragma: no cover - assertion will fail
+                errors.append(exc)
+
+        thread = threading.Thread(target=_consume, daemon=True)
+        thread.start()
+        time.sleep(0.2)
+
+        LateSession = sessionmaker(bind=self.db.get_bind(), future=True)
+        with LateSession() as late_db:
+            late_svc = AssistantChatRunService(late_db)
+            late_svc.append_event(run_id=run.id, event_name="message_end", payload={"finishReason": "stop"})
+            late_svc.update_run_status(run_id=run.id, status="completed")
+
+        thread.join(timeout=3)
+        self.assertFalse(thread.is_alive(), "stream_run should exit after terminal update becomes visible")
+        self.assertEqual(errors, [])
+        events = [_decode_sse(chunk) for chunk in chunks]
+        self.assertEqual([name for name, _ in events], ["message_end"])
 
 
 if __name__ == "__main__":

@@ -114,6 +114,15 @@ class Settings(BaseSettings):
         default=True,
         alias="ASSISTANT_ROUTER_INCLUDE_LAST_SKILL_HINT",
     )
+    assistant_memory_l0_turns: int = Field(default=6, alias="ASSISTANT_MEMORY_L0_TURNS")
+    assistant_memory_l0_max_chars: int = Field(default=25000, alias="ASSISTANT_MEMORY_L0_MAX_CHARS")
+    assistant_memory_l1_max_chars: int = Field(default=2000, alias="ASSISTANT_MEMORY_L1_MAX_CHARS")
+    assistant_memory_l2_max_items: int = Field(default=20, alias="ASSISTANT_MEMORY_L2_MAX_ITEMS")
+    assistant_memory_mode_default: str = Field(default="auto", alias="ASSISTANT_MEMORY_MODE_DEFAULT")
+    assistant_memory_injection_max_chars: int = Field(
+        default=30000,
+        alias="ASSISTANT_MEMORY_INJECTION_MAX_CHARS",
+    )
 
     # KB prompt injection budget (executor formats kb_search result into prompt)
     kb_context_max_chars: int = Field(default=16000, alias="KB_CONTEXT_MAX_CHARS")

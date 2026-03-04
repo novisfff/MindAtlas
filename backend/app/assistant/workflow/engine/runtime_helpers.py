@@ -25,6 +25,17 @@ AGENT_MAX_ITERATIONS = 10
 
 MAX_TEXT_LEN = 8000
 START_STRUCTURED_FIELD_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+START_MEMORY_MODES = {"auto", "off", "structured"}
+START_MEMORY_STRUCTURED_FIELD_TO_CONTEXT_KEY: dict[str, str] = {
+    "memory_recent_dialogue": "l0_text",
+    "memory_conversation_summary": "l1_text",
+    "memory_skill_facts": "l2_text",
+}
+START_MEMORY_STRUCTURED_FIELD_NAMES = set(START_MEMORY_STRUCTURED_FIELD_TO_CONTEXT_KEY.keys())
+START_MEMORY_LEGACY_FIELD_NAMES = {"memory_l0", "memory_l1", "memory_l2"}
+START_MEMORY_RESERVED_FIELD_NAMES = (
+    START_MEMORY_STRUCTURED_FIELD_NAMES | START_MEMORY_LEGACY_FIELD_NAMES
+)
 
 _TEMPLATE_VAR_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
 _NODE_VAR_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\s*\}\}")
@@ -457,6 +468,18 @@ def resolve_start_input_mode(node_cfg: dict[str, Any]) -> str:
     return "structured" if raw_mode == "structured" else "text"
 
 
+def resolve_start_memory_mode(node_cfg: dict[str, Any], *, default_mode: str = "auto") -> str:
+    normalized_default = str(default_mode or "auto").strip().lower()
+    if normalized_default not in START_MEMORY_MODES:
+        normalized_default = "auto"
+    raw_mode = str(
+        node_cfg.get("memory_mode", node_cfg.get("memoryMode", normalized_default)) or normalized_default
+    ).strip().lower()
+    if raw_mode not in START_MEMORY_MODES:
+        return normalized_default
+    return raw_mode
+
+
 def resolve_start_structured_fields(node_cfg: dict[str, Any]) -> list[dict[str, Any]]:
     raw_fields = node_cfg.get("structured_fields")
     if not isinstance(raw_fields, list):
@@ -478,6 +501,37 @@ def resolve_start_env_specs(node_cfg: dict[str, Any]) -> list[WorkflowEnvVarSpec
     if errors:
         raise RuntimeError(f"start node sessionVars invalid: {'; '.join(errors)}")
     return specs
+
+
+def resolve_structured_memory_fields(memory_context: dict[str, Any] | None) -> dict[str, str]:
+    ctx = memory_context if isinstance(memory_context, dict) else {}
+    resolved: dict[str, str] = {}
+    for field_name, context_key in START_MEMORY_STRUCTURED_FIELD_TO_CONTEXT_KEY.items():
+        resolved[field_name] = str(ctx.get(context_key, "") or "").strip()
+    return resolved
+
+
+def render_memory_injection_block(
+    *,
+    memory_context: dict[str, Any] | None,
+    max_chars: int,
+) -> str:
+    sections = resolve_structured_memory_fields(memory_context)
+    chunks: list[str] = []
+    if sections.get("memory_conversation_summary"):
+        chunks.append(f"### Conversation Summary\n{sections['memory_conversation_summary']}")
+    if sections.get("memory_skill_facts"):
+        chunks.append(f"### Skill Facts\n{sections['memory_skill_facts']}")
+    if not chunks:
+        return ""
+
+    block = (
+        "## Short-Term Memory\n"
+        "Use this as context only. If it conflicts with current user intent, prioritize current user input.\n\n"
+        + "\n\n".join(chunks)
+    )
+    limit = max(1, int(max_chars or 1))
+    return block if len(block) <= limit else block[:limit]
 
 
 def resolve_node_template_vars(

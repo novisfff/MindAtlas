@@ -23,6 +23,18 @@ _SYS_FIELDS = {"date", "datetime", "conversation_id"}
 _START_INPUT_MODES = {"text", "structured"}
 _START_INPUT_FIELD_TYPES = {"string", "number", "integer", "boolean"}
 _START_INPUT_FIELD_NAME_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
+_START_MEMORY_MODES = {"auto", "off", "structured"}
+_START_MEMORY_STRUCTURED_FIELDS = {
+    "memory_recent_dialogue",
+    "memory_conversation_summary",
+    "memory_skill_facts",
+}
+_START_MEMORY_LEGACY_FIELDS = {
+    "memory_l0",
+    "memory_l1",
+    "memory_l2",
+}
+_START_MEMORY_RESERVED_FIELDS = _START_MEMORY_STRUCTURED_FIELDS | _START_MEMORY_LEGACY_FIELDS
 _OUTPUT_FIELD_NAME_RE = re.compile(r"[a-zA-Z0-9_]+")
 _OUTPUT_FIELD_TYPES = {"string", "number", "integer", "boolean", "object", "array"}
 _CODE_EXECUTOR_LANGUAGES = {"python", "javascript"}
