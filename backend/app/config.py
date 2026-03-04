@@ -104,6 +104,16 @@ class Settings(BaseSettings):
     assistant_kb_graph_recall_max_chunk_chars: int = Field(default=600, alias="ASSISTANT_KB_GRAPH_RECALL_MAX_CHUNK_CHARS")
     assistant_kb_graph_recall_min_score: float = Field(default=0.0, alias="ASSISTANT_KB_GRAPH_RECALL_MIN_SCORE")
     assistant_kb_graph_recall_max_tokens: int = Field(default=8, alias="ASSISTANT_KB_GRAPH_RECALL_MAX_TOKENS")
+    assistant_router_history_turns: int = Field(default=3, alias="ASSISTANT_ROUTER_HISTORY_TURNS")
+    assistant_router_history_max_chars_per_message: int = Field(
+        default=400,
+        alias="ASSISTANT_ROUTER_HISTORY_MAX_CHARS_PER_MESSAGE",
+    )
+    assistant_router_history_max_messages: int = Field(default=6, alias="ASSISTANT_ROUTER_HISTORY_MAX_MESSAGES")
+    assistant_router_include_last_skill_hint: bool = Field(
+        default=True,
+        alias="ASSISTANT_ROUTER_INCLUDE_LAST_SKILL_HINT",
+    )
 
     # KB prompt injection budget (executor formats kb_search result into prompt)
     kb_context_max_chars: int = Field(default=16000, alias="KB_CONTEXT_MAX_CHARS")

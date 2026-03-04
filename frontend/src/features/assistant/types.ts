@@ -22,6 +22,33 @@ export interface Analysis {
   status: 'running' | 'completed'
 }
 
+export interface WorkflowStep {
+  nodeId: string
+  nodeType: string
+  nodeLabel: string
+}
+
+export type AssistantRunStatus =
+  | 'queued'
+  | 'running'
+  | 'waiting_approval'
+  | 'cancelling'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
+export interface AssistantRun {
+  runId: string
+  conversationId: string
+  messageId?: string | null
+  status: AssistantRunStatus | string
+  lastEventSeq: number
+  checkpointSeq: number
+  cancelRequestedAt?: string | null
+  startedAt?: string | null
+  endedAt?: string | null
+}
+
 export interface Message {
   id: string
   role: 'user' | 'assistant' | 'system' | 'tool'

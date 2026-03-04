@@ -4,10 +4,9 @@ import inspect
 from dataclasses import dataclass
 from typing import Any, get_args, get_origin
 
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.assistant_config.models import (
-    AssistantAgentProfile,
     AssistantSkill,
     AssistantTool,
     AssistantWorkflow,
@@ -599,11 +598,13 @@ class SkillRegistry(_BaseRegistry):
         query = self.db.query(AssistantSkill)
         if include_workflow:
             query = query.options(
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.nodes),
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.edges),
-                joinedload(AssistantSkill.agent_profile).joinedload(AssistantAgentProfile.skills),
-                joinedload(AssistantSkill.nodes),
-                joinedload(AssistantSkill.edges),
+                # Avoid joined-loading multiple collection relationships in one query,
+                # which can create large cartesian result sets and stall skill execution.
+                joinedload(AssistantSkill.workflow).selectinload(AssistantWorkflow.nodes),
+                joinedload(AssistantSkill.workflow).selectinload(AssistantWorkflow.edges),
+                joinedload(AssistantSkill.agent_profile),
+                selectinload(AssistantSkill.nodes),
+                selectinload(AssistantSkill.edges),
             )
         record = query.filter(AssistantSkill.name == skill_name).first()
 

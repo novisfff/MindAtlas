@@ -12,6 +12,17 @@ from app.assistant.workflow.engine.runtime_helpers import (
 )
 from app.assistant.workflow.engine.state import NodeOutput, WorkflowState
 
+
+_OUTPUT_STREAM_CHUNK_SIZE = 12
+
+
+def _iter_stream_chunks(text: str) -> list[str]:
+    value = str(text or "")
+    if not value:
+        return []
+    return [value[i:i + _OUTPUT_STREAM_CHUNK_SIZE] for i in range(0, len(value), _OUTPUT_STREAM_CHUNK_SIZE)]
+
+
 def build_output_node(
     node_id: str,
     node_cfg: dict,
@@ -61,13 +72,23 @@ def build_output_node(
                 and single_ref[1] in {"response", "text"}
             )
             if not should_skip_final_emit and rendered_text:
-                emit(
-                    metadata,
-                    "on_content_delta",
-                    chunk=rendered_text,
-                    source_node_id=node_id,
-                    source_node_type="output",
-                )
+                if stream_output_enabled:
+                    for chunk in _iter_stream_chunks(rendered_text):
+                        emit(
+                            metadata,
+                            "on_content_delta",
+                            chunk=chunk,
+                            source_node_id=node_id,
+                            source_node_type="output",
+                        )
+                else:
+                    emit(
+                        metadata,
+                        "on_content_delta",
+                        chunk=rendered_text,
+                        source_node_id=node_id,
+                        source_node_type="output",
+                    )
 
             emit(metadata, "on_node_end", node_id=node_id, status="ok")
             return {
@@ -116,13 +137,23 @@ def build_output_node(
             json_fields=json_fields,
         )
         if json_text:
-            emit(
-                metadata,
-                "on_content_delta",
-                chunk=json_text,
-                source_node_id=node_id,
-                source_node_type="output",
-            )
+            if stream_output_enabled:
+                for chunk in _iter_stream_chunks(json_text):
+                    emit(
+                        metadata,
+                        "on_content_delta",
+                        chunk=chunk,
+                        source_node_id=node_id,
+                        source_node_type="output",
+                    )
+            else:
+                emit(
+                    metadata,
+                    "on_content_delta",
+                    chunk=json_text,
+                    source_node_id=node_id,
+                    source_node_type="output",
+                )
 
         emit(metadata, "on_node_end", node_id=node_id, status="ok")
         return {

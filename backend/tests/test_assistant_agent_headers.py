@@ -22,7 +22,6 @@ class AssistantAgentHeaderTests(unittest.TestCase):
                 captured.append(kwargs)
 
         with (
-            patch("app.assistant.orchestration.agent_runtime.ChatOpenAI", new=FakeChatOpenAI),
             patch("app.assistant.workflow.engine.engine.ChatOpenAI", new=FakeChatOpenAI),
             patch("langchain_openai.ChatOpenAI", new=FakeChatOpenAI),
         ):
@@ -35,7 +34,8 @@ class AssistantAgentHeaderTests(unittest.TestCase):
                 db=None,
             )
 
-        self.assertEqual(len(captured), 4)
+        # Router uses one client; LangGraph engine initializes two clients (stream + args).
+        self.assertEqual(len(captured), 3)
         for kwargs in captured:
             self.assertEqual(kwargs["api_key"], "sk-test-key")
             self.assertEqual(kwargs["base_url"], "https://api.example.com/v1")

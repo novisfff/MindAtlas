@@ -222,10 +222,12 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(out["node_outputs"]["output_1"]["text"], "AB")
         self.assertEqual(out["node_outputs"]["output_1"]["json_fields"]["response"], "AB")
 
-    def test_output_node_text_non_passthrough_emits_once(self) -> None:
+    def test_output_node_text_non_passthrough_emits_chunked(self) -> None:
         from app.assistant.workflow.engine.engine import _build_output_node
 
         content_emitted: list[str] = []
+        llm_response = "A" * 64
+        expected_text = f"Result: {llm_response}"
         node = _build_output_node(
             "output_1",
             {
@@ -238,7 +240,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             {
                 "node_outputs": {
                     "start": {"json_fields": {"user_input": "hello"}, "text": "hello", "status": "ok"},
-                    "llm_1": {"json_fields": {"response": "AB"}, "text": "AB", "status": "ok"},
+                    "llm_1": {"json_fields": {"response": llm_response}, "text": llm_response, "status": "ok"},
                 },
                 "workflow_node_types": {"llm_1": "llm", "output_1": "output"},
                 "stream_output_enabled": True,
@@ -247,13 +249,15 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(content_emitted, ["Result: AB"])
-        self.assertEqual(out["node_outputs"]["output_1"]["text"], "Result: AB")
+        self.assertGreater(len(content_emitted), 1)
+        self.assertEqual("".join(content_emitted), expected_text)
+        self.assertEqual(out["node_outputs"]["output_1"]["text"], expected_text)
 
-    def test_output_node_structured_emits_json_once(self) -> None:
+    def test_output_node_structured_emits_json_chunked(self) -> None:
         from app.assistant.workflow.engine.engine import _build_output_node
 
         content_emitted: list[str] = []
+        llm_response = "B" * 64
         node = _build_output_node(
             "output_1",
             {
@@ -269,7 +273,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             {
                 "node_outputs": {
                     "start": {"json_fields": {"user_input": "hello"}, "text": "hello", "status": "ok"},
-                    "llm_1": {"json_fields": {"response": "AB"}, "text": "AB", "status": "ok"},
+                    "llm_1": {"json_fields": {"response": llm_response}, "text": llm_response, "status": "ok"},
                 },
                 "workflow_node_types": {"llm_1": "llm", "output_1": "output"},
                 "stream_output_enabled": True,
@@ -278,9 +282,9 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(len(content_emitted), 1)
-        parsed = json.loads(content_emitted[0])
-        self.assertEqual(parsed["answer"], "AB")
+        self.assertGreater(len(content_emitted), 1)
+        parsed = json.loads("".join(content_emitted))
+        self.assertEqual(parsed["answer"], llm_response)
         self.assertEqual(parsed["count"], 2)
         self.assertEqual(out["node_outputs"]["output_1"]["json_fields"]["count"], 2)
 

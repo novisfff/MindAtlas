@@ -1,6 +1,6 @@
 import { create, useStore, StoreApi, createStore } from 'zustand'
 import { createContext, useContext, useRef } from 'react'
-import { ToolCall, SkillCall, Analysis, HumanApproval } from '../types'
+import { ToolCall, SkillCall, Analysis, HumanApproval, WorkflowStep } from '../types'
 
 interface ChatMessage {
   id: string
@@ -15,6 +15,10 @@ interface ChatMessage {
 
 export interface ChatState {
   messages: ChatMessage[]
+  activeWorkflowSteps: WorkflowStep[]
+  activeRunId: string | null
+  activeRunStatus: string | null
+  lastEventSeq: number
   isLoading: boolean
   isOpen: boolean
   currentConversationId: string | null
@@ -30,6 +34,11 @@ export interface ChatState {
   startAnalysis: (id: string) => void
   updateAnalysis: (id: string, delta: string) => void
   endAnalysis: (id: string) => void
+  setActiveWorkflowSteps: (steps: WorkflowStep[]) => void
+  setActiveRun: (runId: string | null, status?: string | null, lastEventSeq?: number) => void
+  setActiveRunStatus: (status: string | null) => void
+  setLastEventSeq: (seq: number) => void
+  clearActiveRun: () => void
   setLoading: (loading: boolean) => void
   setOpen: (open: boolean) => void
   toggleOpen: () => void
@@ -40,6 +49,10 @@ export interface ChatState {
 
 export const createChatLogic = (set: any): Omit<ChatState, 'no-op'> => ({
   messages: [],
+  activeWorkflowSteps: [],
+  activeRunId: null,
+  activeRunStatus: null,
+  lastEventSeq: 0,
   isLoading: false,
   isOpen: false,
   currentConversationId: null,
@@ -217,11 +230,38 @@ export const createChatLogic = (set: any): Omit<ChatState, 'no-op'> => ({
       return { messages }
     }),
 
+  setActiveWorkflowSteps: (steps: WorkflowStep[]) =>
+    set({ activeWorkflowSteps: steps }),
+
+  setActiveRun: (runId: string | null, status: string | null = null, lastEventSeq = 0) =>
+    set({
+      activeRunId: runId,
+      activeRunStatus: status,
+      lastEventSeq: Math.max(0, Math.floor(lastEventSeq || 0)),
+    }),
+
+  setActiveRunStatus: (status: string | null) =>
+    set({ activeRunStatus: status }),
+
+  setLastEventSeq: (seq: number) =>
+    set({ lastEventSeq: Math.max(0, Math.floor(seq || 0)) }),
+
+  clearActiveRun: () =>
+    set({ activeRunId: null, activeRunStatus: null, lastEventSeq: 0 }),
+
   setLoading: (isLoading: boolean) => set({ isLoading }),
   setOpen: (isOpen: boolean) => set({ isOpen }),
   toggleOpen: () => set((state: ChatState) => ({ isOpen: !state.isOpen })),
   setConversationId: (id: string | null) => set({ currentConversationId: id }),
-  clearMessages: () => set({ messages: [] }),
+  clearMessages: () =>
+    set({
+      messages: [],
+      activeWorkflowSteps: [],
+      activeRunId: null,
+      activeRunStatus: null,
+      lastEventSeq: 0,
+      isLoading: false,
+    }),
   setMessages: (messages: ChatMessage[]) => set({ messages }),
 })
 

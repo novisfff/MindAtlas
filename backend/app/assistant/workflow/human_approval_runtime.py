@@ -10,6 +10,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.assistant.run_control import AssistantRunCancelled, ensure_not_cancelled
 from app.assistant.workflow.human_fields import (
     HUMAN_FIELD_TYPES,
     coerce_human_field_value_by_type,
@@ -178,6 +179,10 @@ class HumanLoopCoordinator:
             if waiter is not None:
                 waiter.set()
 
+    def has_waiter(self, approval_id: str) -> bool:
+        with self._lock:
+            return approval_id in self._waiters
+
     def wait_once(self, approval_id: str, timeout: float) -> dict[str, Any] | None:
         with self._lock:
             payload = self._payloads.pop(approval_id, None)
@@ -215,11 +220,13 @@ class HumanLoopRuntime:
         context: HumanLoopContext,
         on_requested: Callable[[dict[str, Any]], None] | None = None,
         on_resolved: Callable[[dict[str, Any]], None] | None = None,
+        cancel_checker: Callable[[], bool] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._context = context
         self._on_requested = on_requested
         self._on_resolved = on_resolved
+        self._cancel_checker = cancel_checker
 
     def create_and_wait(
         self,
@@ -257,8 +264,13 @@ class HumanLoopRuntime:
                 self._on_requested(payload)
 
             while True:
+                ensure_not_cancelled(self._cancel_checker, message="assistant run cancelled while waiting human approval")
                 notified = GLOBAL_HUMAN_LOOP_COORDINATOR.wait_once(approval_id, timeout=0.5)
                 if notified is not None:
+                    if str(notified.get("status", "") or "").strip().lower() == "cancelled":
+                        if callable(self._on_resolved):
+                            self._on_resolved(notified)
+                        raise AssistantRunCancelled("assistant run cancelled while waiting human approval")
                     if callable(self._on_resolved):
                         self._on_resolved(notified)
                     return notified
@@ -271,6 +283,8 @@ class HumanLoopRuntime:
                         resolved = serialize_human_approval(refreshed)
                         if callable(self._on_resolved):
                             self._on_resolved(resolved)
+                        if str(refreshed.status or "").strip().lower() == "cancelled":
+                            raise AssistantRunCancelled("assistant run cancelled while waiting human approval")
                         return resolved
         finally:
             GLOBAL_HUMAN_LOOP_COORDINATOR.unregister(approval_id)
@@ -329,6 +343,8 @@ def submit_human_approval_decision(
         raise ValueError("comment is required when rejecting this approval")
 
     resolved_at = utcnow()
+    approval_id_str = str(row.id)
+    runtime_waiting = GLOBAL_HUMAN_LOOP_COORDINATOR.has_waiter(approval_id_str)
     row.submitted_values = validated_values
     row.decision = normalized_decision
     row.status = normalized_decision
@@ -338,5 +354,35 @@ def submit_human_approval_decision(
     db.refresh(row)
 
     payload = serialize_human_approval(row)
-    GLOBAL_HUMAN_LOOP_COORDINATOR.resolve(str(row.id), payload)
+    payload["runtimeWaiting"] = runtime_waiting
+    GLOBAL_HUMAN_LOOP_COORDINATOR.resolve(approval_id_str, payload)
     return payload
+
+
+def cancel_pending_human_approvals_for_run(db: Session, *, run_id: str) -> list[dict[str, Any]]:
+    run_key = str(run_id or "").strip()
+    if not run_key:
+        return []
+    rows = (
+        db.query(AssistantHumanApproval)
+        .filter(
+            AssistantHumanApproval.run_id == run_key,
+            AssistantHumanApproval.status == "pending",
+        )
+        .order_by(AssistantHumanApproval.created_at.asc())
+        .all()
+    )
+    if not rows:
+        return []
+    resolved_rows: list[dict[str, Any]] = []
+    now = utcnow()
+    for row in rows:
+        row.status = "cancelled"
+        row.decision = None
+        row.resolved_at = now
+        approval_payload = serialize_human_approval(row)
+        resolved_rows.append(approval_payload)
+    db.commit()
+    for payload in resolved_rows:
+        GLOBAL_HUMAN_LOOP_COORDINATOR.resolve(str(payload.get("id", "")), payload)
+    return resolved_rows

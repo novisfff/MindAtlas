@@ -224,7 +224,9 @@
       "deleteTitle": "删除对话",
       "deleteConfirm": "确定要删除此对话吗？此操作无法撤销。",
       "searchingKnowledgeBase": "正在检索知识库...",
-      "generatingResponse": "正在生成回复..."
+      "generatingResponse": "正在生成回复...",
+      "workflowRunning": "正在执行：{{step}}",
+      "workflowRunningParallel": "正在并行执行 {{count}} 个步骤"
     }
   },
   "settings": {

@@ -5,6 +5,8 @@ from queue import Empty, Queue
 from threading import Thread
 from typing import Any, Callable, Iterator
 
+from app.assistant.run_control import AssistantRunCancelled, ensure_not_cancelled
+
 _OUTPUT_SEGMENT_SEPARATOR = "\n\n"
 
 
@@ -240,6 +242,7 @@ def run_graph_stream(
     push_runtime_event: Callable[..., None],
     handlers: RuntimeEventHandlers,
     stream_output_enabled: bool,
+    cancel_checker: Callable[[], bool] | None = None,
     event_poll_timeout: float = 0.1,
 ) -> Iterator[str]:
     graph_errors: list[Exception] = []
@@ -261,7 +264,13 @@ def run_graph_stream(
     content_segment_state: dict[str, Any] = {
         "last_output_source_node_id": "",
     }
+    cancel_error: AssistantRunCancelled | None = None
     while not graph_done or not runtime_events.empty():
+        try:
+            ensure_not_cancelled(cancel_checker, message="assistant run cancelled while polling workflow events")
+        except AssistantRunCancelled as exc:
+            cancel_error = exc
+            break
         try:
             event_name, payload = runtime_events.get(timeout=event_poll_timeout)
         except Empty:
@@ -280,6 +289,10 @@ def run_graph_stream(
             graph_done = True
         for out in outputs:
             yield out
+
+    if cancel_error is not None:
+        graph_thread.join(timeout=0.2)
+        raise cancel_error
 
     graph_thread.join()
     if graph_errors:

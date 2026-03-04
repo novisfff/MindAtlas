@@ -20,6 +20,7 @@ def attach_human_loop_runtime(
     skill_id_uuid: UUID | None,
     message_id_uuid: UUID | None,
     emit: Callable[[dict[str, Any], str], None] | Callable[..., None],
+    cancel_checker: Callable[[], bool] | None = None,
 ) -> HumanLoopRuntime | None:
     if db is None:
         return None
@@ -37,6 +38,7 @@ def attach_human_loop_runtime(
         ),
         on_requested=(lambda payload: emit(metadata, "on_human_approval_requested", payload=payload)),
         on_resolved=(lambda payload: emit(metadata, "on_human_approval_resolved", payload=payload)),
+        cancel_checker=cancel_checker,
     )
     metadata["human_loop_runtime"] = human_loop_runtime
     return human_loop_runtime

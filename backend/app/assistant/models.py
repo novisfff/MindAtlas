@@ -1,6 +1,18 @@
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, JSON, String, Text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    String,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -25,6 +37,13 @@ class Conversation(UuidPrimaryKeyMixin, TimestampMixin, Base):
         passive_deletes=True,
         order_by="Message.created_at.asc()",
     )
+    chat_runs = relationship(
+        "AssistantChatRun",
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="AssistantChatRun.created_at.asc()",
+    )
 
 
 class Message(UuidPrimaryKeyMixin, TimestampMixin, Base):
@@ -45,3 +64,77 @@ class Message(UuidPrimaryKeyMixin, TimestampMixin, Base):
     analysis = Column(JSON, nullable=True)  # 分析过程记录
 
     conversation = relationship("Conversation", back_populates="messages")
+
+
+class AssistantChatRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
+    """Assistant 对话运行记录（后台执行生命周期）。"""
+
+    __tablename__ = "assistant_chat_run"
+
+    conversation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_conversation.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_message_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_message.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    assistant_message_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_message.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    status = Column(String(32), nullable=False, default="queued", index=True)
+    error_message = Column(Text, nullable=True)
+    cancel_requested_at = Column(DateTime(timezone=True), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    ended_at = Column(DateTime(timezone=True), nullable=True)
+    last_event_seq = Column(Integer, nullable=False, default=0)
+    checkpoint_seq = Column(Integer, nullable=False, default=0)
+
+    conversation = relationship("Conversation", back_populates="chat_runs")
+    events = relationship(
+        "AssistantChatRunEvent",
+        back_populates="run",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="AssistantChatRunEvent.seq.asc()",
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued','running','waiting_approval','cancelling','completed','failed','cancelled')",
+            name="ck_assistant_chat_run_status",
+        ),
+        Index("ix_assistant_chat_run_conversation_status", "conversation_id", "status"),
+    )
+
+
+class AssistantChatRunEvent(Base):
+    """Assistant 对话运行事件日志（用于回放/追流）。"""
+
+    __tablename__ = "assistant_chat_run_event"
+
+    # BigInteger on PostgreSQL, Integer on sqlite to preserve autoincrement in unit tests.
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    run_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_chat_run.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    seq = Column(Integer, nullable=False)
+    event_name = Column(String(64), nullable=False)
+    payload = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+    run = relationship("AssistantChatRun", back_populates="events")
+
+    __table_args__ = (
+        Index("ix_assistant_chat_run_event_run_seq", "run_id", "seq", unique=True),
+    )

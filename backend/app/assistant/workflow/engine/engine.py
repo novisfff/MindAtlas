@@ -555,6 +555,7 @@ class LangGraphEngine:
         on_node_snapshot: Callable | None = None,
         on_human_approval_requested: Callable[[dict[str, Any]], None] | None = None,
         on_human_approval_resolved: Callable[[dict[str, Any]], None] | None = None,
+        cancel_checker: Callable[[], bool] | None = None,
     ) -> Iterator[str]:
         """执行 LangGraph skill，yield 流式内容。"""
         logger.info("LangGraphEngine.execute: skill=%s pattern=%s",
@@ -610,6 +611,7 @@ class LangGraphEngine:
             skill_id_uuid=skill_id_uuid,
             message_id_uuid=message_id_uuid,
             emit=_emit,
+            cancel_checker=cancel_checker,
         )
 
         # 构建初始消息
@@ -687,6 +689,7 @@ class LangGraphEngine:
                 push_runtime_event=_push_runtime_event,
                 handlers=event_handlers,
                 stream_output_enabled=stream_output_enabled,
+                cancel_checker=cancel_checker,
             )
         except Exception as e:
             logger.error("LangGraph execution failed: skill=%s error=%s",

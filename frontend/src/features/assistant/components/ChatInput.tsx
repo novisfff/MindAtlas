@@ -1,15 +1,17 @@
 import { useState, KeyboardEvent, useEffect, useRef } from 'react'
-import { ArrowUp, Loader2, Plus, Mic } from 'lucide-react'
+import { ArrowUp, Plus, Mic, Square } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 
 interface ChatInputProps {
   onSend: (message: string) => void
+  onStop: () => void
   isLoading: boolean
+  conversationId?: string | null
   variant?: 'default' | 'compact'
 }
 
-export function ChatInput({ onSend, isLoading, variant = 'default' }: ChatInputProps) {
+export function ChatInput({ onSend, onStop, isLoading, conversationId = null, variant = 'default' }: ChatInputProps) {
   const [input, setInput] = useState('')
   const { t } = useTranslation()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -42,6 +44,13 @@ export function ChatInput({ onSend, isLoading, variant = 'default' }: ChatInputP
   useEffect(() => {
     adjustHeight()
   }, [input])
+
+  useEffect(() => {
+    setInput('')
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto'
+    }
+  }, [conversationId])
 
   const isCompact = variant === 'compact'
 
@@ -88,7 +97,7 @@ export function ChatInput({ onSend, isLoading, variant = 'default' }: ChatInputP
         />
 
         {/* Right Action Buttons */}
-        <div className="flex items-center gap-1 mb-0 mr-1">
+        <div className="mr-1 flex self-center items-center gap-1">
           {/* Mic Button (Placeholder) */}
           {!input && (
             <button
@@ -100,21 +109,34 @@ export function ChatInput({ onSend, isLoading, variant = 'default' }: ChatInputP
           )}
 
           <button
-            onClick={handleSend}
-            disabled={!input.trim() || isLoading}
-            aria-label={isLoading ? 'Sending message' : 'Send message'}
+            onClick={isLoading ? onStop : handleSend}
+            disabled={isLoading ? false : !input.trim()}
+            aria-label={isLoading ? 'Stop generation' : 'Send message'}
             className={cn(
-              'flex items-center justify-center rounded-full transition-all duration-200',
+              'relative shrink-0 rounded-full leading-none transition-all duration-200',
+              'flex items-center justify-center',
               isCompact ? 'h-8 w-8' : 'h-10 w-10',
-              input.trim()
-                ? 'bg-primary text-primary-foreground hover:opacity-90 active:scale-95'
-                : 'bg-muted text-muted-foreground cursor-not-allowed opacity-50'
+              isLoading
+                ? 'bg-destructive text-white hover:bg-destructive/90 active:scale-95'
+                : input.trim()
+                  ? 'bg-primary text-primary-foreground hover:opacity-90 active:scale-95'
+                  : 'bg-muted text-muted-foreground cursor-not-allowed opacity-50'
             )}
           >
             {isLoading ? (
-              <Loader2 className={cn("animate-spin", isCompact ? "h-4 w-4" : "h-5 w-5")} />
+              <Square
+                className={cn(
+                  'pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2',
+                  isCompact ? 'h-3.5 w-3.5' : 'h-4 w-4'
+                )}
+              />
             ) : (
-              <ArrowUp className={cn(isCompact ? "h-4 w-4" : "h-5 w-5")} />
+              <ArrowUp
+                className={cn(
+                  'pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2',
+                  isCompact ? 'h-4 w-4' : 'h-5 w-5'
+                )}
+              />
             )}
           </button>
         </div>
@@ -126,4 +148,3 @@ export function ChatInput({ onSend, isLoading, variant = 'default' }: ChatInputP
     </div>
   )
 }
-
