@@ -113,6 +113,10 @@ function buildNodeOutputFields(
     return ['response', ...fields]
   }
 
+  if (node.data.nodeType === 'agent') {
+    return ['response']
+  }
+
   if (node.data.nodeType === 'tool') {
     const toolName = String(cfg.toolName ?? '').trim()
     const tool = toolByName.get(toolName)

@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from collections import deque
+from datetime import datetime, timezone
+import time
 from typing import Callable
+
+
+def _utc_iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class ChatEventAdapter:
@@ -19,6 +25,8 @@ class ChatEventAdapter:
         self._skill_calls_data: list[dict] = []
         self._analysis_steps: list[dict] = []
         self._active_workflow_steps: dict[str, dict[str, str]] = {}
+        self._tool_started_at: dict[str, str] = {}
+        self._tool_started_perf: dict[str, float] = {}
 
     @property
     def tool_calls_data(self) -> list[dict]:
@@ -51,14 +59,133 @@ class ChatEventAdapter:
         self._analysis_steps.append(step)
         return step
 
-    def on_tool_call_start(self, tool_call_id: str, name: str, args: dict, hidden: bool = False) -> None:
+    def on_tool_call_start(
+        self,
+        tool_call_id: str,
+        name: str,
+        args: dict,
+        hidden: bool = False,
+        node_id: str = "",
+        node_type: str = "",
+        node_execution_id: str = "",
+        agent_round: int | None = None,
+        tool_call_index: int | None = None,
+        tool_kind: str = "",
+        started_at: str | None = None,
+    ) -> None:
         hidden = bool(hidden)
-        self._tool_calls_data.append({"id": tool_call_id, "name": name, "args": args, "hidden": hidden})
-        self._emit("tool_call_start", {"toolCallId": tool_call_id, "name": name, "args": args, "hidden": hidden})
+        effective_started_at = started_at or _utc_iso_now()
+        self._tool_started_at[tool_call_id] = effective_started_at
+        self._tool_started_perf[tool_call_id] = time.perf_counter()
 
-    def on_tool_call_end(self, tool_call_id: str, status: str, result: str) -> None:
-        self._tool_results_data.append({"id": tool_call_id, "status": status, "result": result})
-        self._emit("tool_call_end", {"toolCallId": tool_call_id, "status": status, "result": result})
+        payload = {
+            "id": tool_call_id,
+            "name": name,
+            "args": args,
+            "hidden": hidden,
+            "startedAt": effective_started_at,
+        }
+        node_id = str(node_id or "").strip()
+        node_type = str(node_type or "").strip()
+        node_execution_id = str(node_execution_id or "").strip()
+        tool_kind = str(tool_kind or "").strip().lower()
+        if node_id:
+            payload["nodeId"] = node_id
+        if node_type:
+            payload["nodeType"] = node_type
+        if node_execution_id:
+            payload["nodeExecutionId"] = node_execution_id
+        if isinstance(agent_round, int):
+            payload["agentRound"] = agent_round
+        if isinstance(tool_call_index, int):
+            payload["toolCallIndex"] = tool_call_index
+        if tool_kind:
+            payload["toolKind"] = tool_kind
+        self._tool_calls_data.append(payload)
+        self._emit(
+            "tool_call_start",
+            {
+                "toolCallId": tool_call_id,
+                "name": name,
+                "args": args,
+                "hidden": hidden,
+                "startedAt": effective_started_at,
+                **({ "nodeId": node_id } if node_id else {}),
+                **({ "nodeType": node_type } if node_type else {}),
+                **({ "nodeExecutionId": node_execution_id } if node_execution_id else {}),
+                **({ "agentRound": agent_round } if isinstance(agent_round, int) else {}),
+                **({ "toolCallIndex": tool_call_index } if isinstance(tool_call_index, int) else {}),
+                **({ "toolKind": tool_kind } if tool_kind else {}),
+            },
+        )
+
+    def on_tool_call_end(
+        self,
+        tool_call_id: str,
+        status: str,
+        result: str,
+        node_id: str = "",
+        node_type: str = "",
+        node_execution_id: str = "",
+        agent_round: int | None = None,
+        tool_call_index: int | None = None,
+        tool_kind: str = "",
+        started_at: str | None = None,
+        ended_at: str | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
+        effective_started_at = started_at or self._tool_started_at.pop(tool_call_id, None)
+        started_perf = self._tool_started_perf.pop(tool_call_id, None)
+        effective_ended_at = ended_at or _utc_iso_now()
+        effective_duration_ms = duration_ms
+        if not isinstance(effective_duration_ms, int) and isinstance(started_perf, (int, float)):
+            effective_duration_ms = max(0, int((time.perf_counter() - started_perf) * 1000))
+
+        payload = {
+            "id": tool_call_id,
+            "status": status,
+            "result": result,
+        }
+        node_id = str(node_id or "").strip()
+        node_type = str(node_type or "").strip()
+        node_execution_id = str(node_execution_id or "").strip()
+        tool_kind = str(tool_kind or "").strip().lower()
+        if node_id:
+            payload["nodeId"] = node_id
+        if node_type:
+            payload["nodeType"] = node_type
+        if node_execution_id:
+            payload["nodeExecutionId"] = node_execution_id
+        if isinstance(agent_round, int):
+            payload["agentRound"] = agent_round
+        if isinstance(tool_call_index, int):
+            payload["toolCallIndex"] = tool_call_index
+        if tool_kind:
+            payload["toolKind"] = tool_kind
+        if effective_started_at:
+            payload["startedAt"] = effective_started_at
+        if effective_ended_at:
+            payload["endedAt"] = effective_ended_at
+        if isinstance(effective_duration_ms, int):
+            payload["durationMs"] = effective_duration_ms
+        self._tool_results_data.append(payload)
+        self._emit(
+            "tool_call_end",
+            {
+                "toolCallId": tool_call_id,
+                "status": status,
+                "result": result,
+                **({ "nodeId": node_id } if node_id else {}),
+                **({ "nodeType": node_type } if node_type else {}),
+                **({ "nodeExecutionId": node_execution_id } if node_execution_id else {}),
+                **({ "agentRound": agent_round } if isinstance(agent_round, int) else {}),
+                **({ "toolCallIndex": tool_call_index } if isinstance(tool_call_index, int) else {}),
+                **({ "toolKind": tool_kind } if tool_kind else {}),
+                **({ "startedAt": effective_started_at } if effective_started_at else {}),
+                **({ "endedAt": effective_ended_at } if effective_ended_at else {}),
+                **({ "durationMs": effective_duration_ms } if isinstance(effective_duration_ms, int) else {}),
+            },
+        )
 
     def on_skill_start(self, skill_id: str, name: str, hidden: bool) -> None:
         self._skill_calls_data.append({"id": skill_id, "name": name, "status": "running", "hidden": hidden})

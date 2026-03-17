@@ -79,6 +79,56 @@ def build_node_snapshot_input(
             },
         }
 
+    if node_type == "agent":
+        user_input_template = node_cfg.get("user_input", "{{start.user_input}}")
+        if not isinstance(user_input_template, str):
+            user_input_template = "{{start.user_input}}"
+        rendered_user_input = rt.resolve_node_template_vars(
+            template=user_input_template,
+            node_outputs=ctx.node_outputs,
+            start_inputs=ctx.start_inputs,
+            sys_vars=ctx.sys_vars,
+            env_vars=ctx.env_vars,
+        )
+        system_prompt_template = node_cfg.get("system_prompt", "")
+        if not isinstance(system_prompt_template, str):
+            system_prompt_template = ""
+        rendered_system_prompt = rt.resolve_node_template_vars(
+            template=system_prompt_template,
+            node_outputs=ctx.node_outputs,
+            start_inputs=ctx.start_inputs,
+            sys_vars=ctx.sys_vars,
+            env_vars=ctx.env_vars,
+        )
+        raw_top_k = node_cfg.get("knowledge_top_k", node_cfg.get("knowledgeTopK"))
+        knowledge_top_k = None
+        if raw_top_k is not None and str(raw_top_k).strip():
+            try:
+                knowledge_top_k = int(raw_top_k)
+            except Exception:
+                knowledge_top_k = None
+        return {
+            "systemPrompt": rendered_system_prompt,
+            "userInput": rendered_user_input,
+            "toolNames": rt.cfg_string_list(node_cfg, "tool_names", "toolNames"),
+            "maxIterations": rt.cfg_int_value(
+                node_cfg,
+                "max_iterations",
+                "maxIterations",
+                default=12,
+                min_value=1,
+                max_value=20,
+            ),
+            "knowledge": {
+                "enabled": rt.cfg_bool_value(node_cfg, "knowledge_enabled", "knowledgeEnabled", default=False),
+                "mode": (
+                    str(node_cfg.get("knowledge_mode", node_cfg.get("knowledgeMode", "")) or "").strip().lower()
+                    or None
+                ),
+                "topK": knowledge_top_k,
+            },
+        }
+
     if node_type == "output":
         raw_output_mode = str(node_cfg.get("output_mode", "text") or "text").strip().lower()
         output_mode = "structured" if raw_output_mode == "json" else raw_output_mode

@@ -25,6 +25,7 @@ import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card'
+import { ToolCallDisplay } from '@/features/assistant/components/ToolCallDisplay'
 import {
   clearAgentVersions,
   deleteAgentVersion,
@@ -50,6 +51,41 @@ interface ToolOption {
 }
 
 const DEFAULT_MODEL_VALUE = '__system_default_model__'
+
+function buildCompletedConversationHistory(
+  messages: Array<{
+    role: 'user' | 'assistant'
+    content: string
+    status?: 'running' | 'completed' | 'error' | 'cancelled'
+  }>,
+): Array<{ role: 'user' | 'assistant'; content: string }> {
+  const history: Array<{ role: 'user' | 'assistant'; content: string }> = []
+  let pendingUser: { role: 'user'; content: string } | null = null
+
+  for (const message of messages) {
+    const content = message.content.trim()
+    if (!content) continue
+
+    if (message.role === 'user') {
+      pendingUser = { role: 'user', content }
+      continue
+    }
+
+    if (message.status !== 'completed') {
+      pendingUser = null
+      continue
+    }
+
+    if (pendingUser) {
+      history.push(pendingUser)
+      pendingUser = null
+    }
+
+    history.push({ role: 'assistant', content })
+  }
+
+  return history
+}
 
 export default function AgentEditorPage() {
   const { agentProfileId } = useParams<{ agentProfileId: string }>()
@@ -93,6 +129,7 @@ export default function AgentEditorPage() {
     input,
     streamOutput,
     result,
+    messages,
     setInput,
     setStreamOutput,
     beginRun,
@@ -126,6 +163,11 @@ export default function AgentEditorPage() {
     })
     return all
   }, [systemToolDefs, customTools, selectedTools])
+
+  const hasRunContent = useMemo(
+    () => messages.length > 0 || status !== 'idle' || Boolean(result.errorMessage),
+    [messages.length, result.errorMessage, status],
+  )
 
   const modelSelectValue =
     modelSource === 'custom' && modelId ? modelId : DEFAULT_MODEL_VALUE
@@ -281,8 +323,10 @@ export default function AgentEditorPage() {
       toast.error(t('settings.skills.agentModelRequired'))
       return
     }
+    const submittedInput = input.trim()
+    const history = buildCompletedConversationHistory(messages)
     const ctrl = new AbortController()
-    beginRun(ctrl)
+    beginRun(ctrl, submittedInput)
 
     try {
       await runAgentTestStream(
@@ -295,7 +339,8 @@ export default function AgentEditorPage() {
             modelSource,
             modelId: modelSource === 'custom' ? modelId : null,
           },
-          userInput: input,
+          userInput: submittedInput,
+          history,
           streamOutput,
         },
         {
@@ -306,6 +351,9 @@ export default function AgentEditorPage() {
         }
       )
     } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        return
+      }
       console.error(err)
       markRunError(err instanceof Error ? err.message : String(err))
       toast.error(t('settings.skills.agentTestRunFailed'))
@@ -614,7 +662,7 @@ export default function AgentEditorPage() {
         </div>
 
         <ScrollArea className="flex-1 p-4">
-          {status === 'idle' && !result.finalText ? (
+          {!hasRunContent ? (
             <div className="h-full flex flex-col items-center justify-center text-center space-y-6 min-h-[300px] opacity-80 select-none">
               <div className="relative">
                 <div className="absolute inset-0 bg-purple-500/10 blur-xl rounded-full" />
@@ -629,41 +677,70 @@ export default function AgentEditorPage() {
             </div>
           ) : (
             <div className="space-y-6">
-              {/* User Input Bubble */}
-              {(status === 'running' || status === 'completed') && (
-                <div className="flex justify-end">
-                  <div className="bg-primary text-primary-foreground rounded-2xl rounded-tr-[4px] px-4 py-2.5 max-w-[85%] text-sm shadow-sm leading-relaxed">
-                    {input}
-                  </div>
-                </div>
-              )}
-
-              {/* Agent Response Bubble */}
-              <div className="flex gap-3">
-                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-100 to-blue-100 dark:from-purple-900/50 dark:to-blue-900/50 flex items-center justify-center shrink-0 border border-purple-200/50 dark:border-purple-800/50 shadow-sm">
-                  <Sparkles className="w-4 h-4 text-purple-600 dark:text-purple-400" />
-                </div>
-                <div className="flex-1 space-y-1.5">
-                  <div className="text-xs font-medium text-muted-foreground ml-1">Assistant</div>
-                  <div className="bg-background border border-border/50 rounded-2xl rounded-tl-[4px] p-4 shadow-sm text-sm prose prose-sm dark:prose-invert max-w-none leading-relaxed">
-                    {status === 'running' && !result.finalText ? (
-                      <span className="animate-pulse">Thinking...</span>
-                    ) : (
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {result.finalText || ''}
-                      </ReactMarkdown>
-                    )}
-                  </div>
-
-                  {/* Status indicator */}
-                  {status === 'running' && (
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground animate-pulse">
-                      <span className="w-2 h-2 bg-green-500 rounded-full" />
-                      Generating...
+              {messages.map((message) => {
+                if (message.role === 'user') {
+                  return (
+                    <div key={message.id} className="flex justify-end">
+                      <div className="bg-primary text-primary-foreground rounded-2xl rounded-tr-[4px] px-4 py-2.5 max-w-[85%] text-sm shadow-sm leading-relaxed whitespace-pre-wrap">
+                        {message.content}
+                      </div>
                     </div>
-                  )}
-                </div>
-              </div>
+                  )
+                }
+
+                const toolCallDisplayItems = (message.toolCalls ?? []).map((toolCall) => ({
+                  id: toolCall.id,
+                  name: toolCall.name,
+                  args: toolCall.args || {},
+                  result: toolCall.result,
+                  status: toolCall.status,
+                  toolKind: toolCall.toolKind,
+                  agentRound: toolCall.agentRound,
+                  toolCallIndex: toolCall.toolCallIndex,
+                  startedAt: toolCall.startedAt,
+                  endedAt: toolCall.endedAt,
+                  durationMs: toolCall.durationMs ?? undefined,
+                }))
+
+                return (
+                  <div key={message.id} className="flex gap-3">
+                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-100 to-blue-100 dark:from-purple-900/50 dark:to-blue-900/50 flex items-center justify-center shrink-0 border border-purple-200/50 dark:border-purple-800/50 shadow-sm">
+                      <Sparkles className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+                    </div>
+                    <div className="flex-1 space-y-1.5">
+                      <div className="text-xs font-medium text-muted-foreground ml-1">Assistant</div>
+                      {toolCallDisplayItems.length > 0 && (
+                        <div className="space-y-2 pb-1">
+                          <div className="flex items-center gap-2 ml-1">
+                            <Badge variant="secondary" className="text-[10px] font-medium">
+                              Tool Chain
+                            </Badge>
+                            <span className="text-[11px] text-muted-foreground">
+                              {toolCallDisplayItems.length} step{toolCallDisplayItems.length > 1 ? 's' : ''}
+                            </span>
+                          </div>
+                          <ToolCallDisplay toolCalls={toolCallDisplayItems} variant="compact" />
+                        </div>
+                      )}
+                      <div className="bg-background border border-border/50 rounded-2xl rounded-tl-[4px] p-4 shadow-sm text-sm prose prose-sm dark:prose-invert max-w-none leading-relaxed">
+                        {message.status === 'running' && !message.content ? (
+                          <span className="animate-pulse">Thinking...</span>
+                        ) : (
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {message.content || (message.status === 'error' ? result.errorMessage || '' : '')}
+                          </ReactMarkdown>
+                        )}
+                      </div>
+                      {message.status === 'running' && (
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground animate-pulse">
+                          <span className="w-2 h-2 bg-green-500 rounded-full" />
+                          Generating...
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           )}
         </ScrollArea>

@@ -67,7 +67,7 @@ def resolve_workflow_runtime_context(
                 if ref_output_mode == "json":
                     ref_output_mode = "structured"
                 if (
-                    workflow_node_types.get(ref_node_id) == "llm"
+                    workflow_node_types.get(ref_node_id) in {"llm", "agent"}
                     and ref_output_mode == "text"
                     and ref_field in {"response", "text"}
                 ):

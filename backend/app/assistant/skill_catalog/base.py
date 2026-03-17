@@ -21,7 +21,7 @@ OutputFieldType = Literal["string", "number", "integer", "boolean", "object", "a
 
 # DAG 节点类型
 NodeType = Literal[
-    "start", "llm", "tool", "if_else",
+    "start", "llm", "agent", "tool", "if_else",
     "parameter_extractor", "knowledge_retrieval",
     "iteration", "loop", "code_executor", "http_request", "variable_assign", "human_in_loop", "output",
 ]

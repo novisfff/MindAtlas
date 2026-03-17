@@ -60,6 +60,7 @@ _ENV_VAR_PATH_RE = re.compile(r"env\\.([a-zA-Z_][a-zA-Z0-9_]*)$")
 _SUPPORTED_NODE_TYPES = {
     "start",
     "llm",
+    "agent",
     "tool",
     "if_else",
     "parameter_extractor",
@@ -75,6 +76,7 @@ _SUPPORTED_NODE_TYPES = {
 _CONTAINER_BODY_ALLOWED_NODE_TYPES = {
     "start",
     "llm",
+    "agent",
     "tool",
     "if_else",
     "parameter_extractor",

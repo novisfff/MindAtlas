@@ -2266,6 +2266,22 @@ class AssistantConfigService:
                     if isinstance(tool_name, str) and tool_name.strip():
                         tool_names.add(tool_name.strip())
 
+                if node_type == "knowledge_retrieval":
+                    tool_names.add("kb_search")
+
+                if node_type == "agent" and isinstance(cfg, dict):
+                    raw_tool_names = cfg.get("toolNames", cfg.get("tool_names"))
+                    if isinstance(raw_tool_names, list):
+                        for raw_name in raw_tool_names:
+                            if not isinstance(raw_name, str):
+                                continue
+                            tool_name = raw_name.strip()
+                            if tool_name:
+                                tool_names.add(tool_name)
+                    knowledge_enabled = cfg.get("knowledgeEnabled", cfg.get("knowledge_enabled"))
+                    if isinstance(knowledge_enabled, bool) and knowledge_enabled:
+                        tool_names.add("kb_search")
+
                 if node_type in {"iteration", "loop"} and isinstance(cfg, dict):
                     body_nodes = cfg.get("bodyNodes", cfg.get("body_nodes"))
                     if isinstance(body_nodes, list):
@@ -2287,7 +2303,7 @@ class AssistantConfigService:
                     node_type = getattr(node, "node_type", None)
                     cfg = getattr(node, "config", None) or {}
 
-                if node_type in {"llm", "parameter_extractor"} and isinstance(cfg, dict):
+                if node_type in {"llm", "parameter_extractor", "agent"} and isinstance(cfg, dict):
                     model_source_raw = cfg.get("modelSource", cfg.get("model_source", "default"))
                     model_source = str(model_source_raw or "default").strip().lower()
                     if model_source == "custom":
@@ -2319,6 +2335,7 @@ class AssistantConfigService:
             for t in ToolRegistry.list_system_tools()
             if getattr(t, "name", None)
         }
+        system_names |= set(ToolRegistry.INTERNAL_TOOL_NAMES)
         disabled_names = {
             name
             for name, in self.db.query(AssistantTool.name).filter(AssistantTool.enabled.is_(False)).all()
@@ -2389,6 +2406,7 @@ class AssistantConfigService:
             for t in ToolRegistry.list_system_tools()
             if getattr(t, "name", None)
         }
+        system_names |= set(ToolRegistry.INTERNAL_TOOL_NAMES)
         enabled_remote_names = {
             name
             for name, in self.db.query(AssistantTool.name).filter(

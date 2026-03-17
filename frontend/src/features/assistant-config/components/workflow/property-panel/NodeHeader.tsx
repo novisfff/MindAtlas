@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { NodeType } from '../../../api/workflow'
-import { Brain, GitBranch, ScanSearch, BookOpen, Wrench, Play, RefreshCw, Infinity, SendHorizontal, FileCode2, Equal, UserCheck, Globe } from 'lucide-react'
+import { Brain, Bot, GitBranch, ScanSearch, BookOpen, Wrench, Play, RefreshCw, Infinity, SendHorizontal, FileCode2, Equal, UserCheck, Globe } from 'lucide-react'
 
 interface NodeHeaderProps {
     nodeType: NodeType
@@ -12,6 +12,7 @@ interface NodeHeaderProps {
 
 const NODE_ICONS: Record<string, React.ElementType> = {
     llm: Brain,
+    agent: Bot,
     if_else: GitBranch,
     parameter_extractor: ScanSearch,
     knowledge_retrieval: BookOpen,
@@ -29,6 +30,7 @@ const NODE_ICONS: Record<string, React.ElementType> = {
 const NODE_COLORS: Record<string, string> = {
     start: 'bg-gradient-to-r from-emerald-100/90 to-green-100/90 border-emerald-200 text-emerald-700',
     llm: 'bg-gradient-to-r from-violet-100/90 to-purple-100/90 border-violet-200 text-violet-700',
+    agent: 'bg-gradient-to-r from-indigo-100/90 to-sky-100/90 border-indigo-200 text-indigo-700',
     tool: 'bg-gradient-to-r from-sky-100/90 to-blue-100/90 border-sky-200 text-sky-700',
     if_else: 'bg-gradient-to-r from-amber-100/90 to-yellow-100/90 border-amber-200 text-amber-700',
     parameter_extractor: 'bg-gradient-to-r from-fuchsia-100/90 to-pink-100/90 border-fuchsia-200 text-fuchsia-700',

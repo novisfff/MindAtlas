@@ -17,20 +17,46 @@ export interface AgentAnalysisTrace {
   status: 'running' | 'completed'
 }
 
+export interface AgentToolTrace {
+  id: string
+  name: string
+  status: 'running' | 'completed' | 'error'
+  args?: Record<string, unknown>
+  result?: string
+  startedAt?: string
+  endedAt?: string
+  durationMs?: number | null
+  agentRound?: number
+  toolCallIndex?: number
+  toolKind?: 'tool' | 'knowledge'
+}
+
+export interface AgentTestMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  status?: 'running' | 'completed' | 'error' | 'cancelled'
+  toolCalls?: AgentToolTrace[]
+}
+
 interface AgentTestRunState {
   status: AgentTestRunStatus
   input: string
+  submittedInput: string
   streamOutput: boolean
   activeRunId: string | null
   activeRunStartedAt: string | null
   result: AgentTestRunResult
   traceEvents: AgentTestRunEvent[]
   analysisMap: Record<string, AgentAnalysisTrace>
+  toolCalls: AgentToolTrace[]
+  messages: AgentTestMessage[]
+  activeAssistantMessageId: string | null
   abortController: AbortController | null
 
   setInput: (input: string) => void
   setStreamOutput: (streamOutput: boolean) => void
-  beginRun: (abortController: AbortController) => void
+  beginRun: (abortController: AbortController, submittedInput: string) => void
   cancelRun: () => void
   ingestEvent: (event: AgentTestRunEvent) => void
   markRunError: (message: string) => void
@@ -51,30 +77,75 @@ function isTraceEvent(event: AgentTestRunEvent): boolean {
   return event.event !== 'content_delta' && event.event !== 'analysis_delta'
 }
 
+function upsertToolCall(toolCalls: AgentToolTrace[], nextToolCall: AgentToolTrace): AgentToolTrace[] {
+  const next = toolCalls.filter((item) => item.id !== nextToolCall.id)
+  return [...next, nextToolCall]
+}
+
+function updateToolCall(
+  toolCalls: AgentToolTrace[],
+  toolCallId: string,
+  updates: Partial<AgentToolTrace>,
+): AgentToolTrace[] {
+  const existing = toolCalls.find((item) => item.id === toolCallId)
+  if (!existing) {
+    return toolCalls
+  }
+  return toolCalls.map((item) => (
+    item.id === toolCallId ? { ...item, ...updates } : item
+  ))
+}
+
+function updateMessage(
+  messages: AgentTestMessage[],
+  messageId: string | null,
+  updater: (message: AgentTestMessage) => AgentTestMessage,
+): AgentTestMessage[] {
+  if (!messageId) return messages
+  return messages.map((message) => (
+    message.id === messageId ? updater(message) : message
+  ))
+}
+
 export const useAgentTestRunStore = create<AgentTestRunState>()((set, get) => ({
   status: 'idle',
   input: '',
+  submittedInput: '',
   streamOutput: true,
   activeRunId: null,
   activeRunStartedAt: null,
   result: EMPTY_RESULT,
   traceEvents: [],
   analysisMap: {},
+  toolCalls: [],
+  messages: [],
+  activeAssistantMessageId: null,
   abortController: null,
 
   setInput: (input) => set({ input }),
   setStreamOutput: (streamOutput) => set({ streamOutput }),
 
-  beginRun: (abortController) => {
+  beginRun: (abortController, submittedInput) => {
     const currentAbort = get().abortController
     currentAbort?.abort()
+    const turnId = Date.now().toString(36)
+    const assistantMessageId = `assistant_${turnId}`
     set({
       status: 'running',
+      input: '',
+      submittedInput,
       activeRunId: null,
       activeRunStartedAt: null,
       result: EMPTY_RESULT,
       traceEvents: [],
       analysisMap: {},
+      toolCalls: [],
+      messages: [
+        ...get().messages,
+        { id: `user_${turnId}`, role: 'user', content: submittedInput, status: 'completed' },
+        { id: assistantMessageId, role: 'assistant', content: '', status: 'running', toolCalls: [] },
+      ],
+      activeAssistantMessageId: assistantMessageId,
       abortController,
     })
   },
@@ -86,6 +157,12 @@ export const useAgentTestRunStore = create<AgentTestRunState>()((set, get) => ({
       abortController: null,
       activeRunId: null,
       activeRunStartedAt: null,
+      activeAssistantMessageId: null,
+      messages: updateMessage(
+        state.messages,
+        state.activeAssistantMessageId,
+        (message) => ({ ...message, status: 'cancelled' }),
+      ),
       status: state.status === 'running' ? 'cancelled' : state.status,
     }))
   },
@@ -102,6 +179,7 @@ export const useAgentTestRunStore = create<AgentTestRunState>()((set, get) => ({
           status: 'running',
           result: EMPTY_RESULT,
           analysisMap: {},
+          toolCalls: [],
         }
       }
 
@@ -123,6 +201,14 @@ export const useAgentTestRunStore = create<AgentTestRunState>()((set, get) => ({
             ...state.result,
             finalText: `${state.result.finalText}${deltaText}`,
           },
+          messages: updateMessage(
+            state.messages,
+            state.activeAssistantMessageId,
+            (message) => ({
+              ...message,
+              content: `${message.content}${deltaText}`,
+            }),
+          ),
         }
       }
 
@@ -199,20 +285,121 @@ export const useAgentTestRunStore = create<AgentTestRunState>()((set, get) => ({
         }
       }
 
-      if (event.event === 'run_end') {
+      if (event.event === 'tool_call_start') {
         const traceEvents = capTraceEvents([...state.traceEvents, event])
         return {
           ...state,
           traceEvents,
-          status: event.data.status === 'error' ? 'error' : event.data.status,
+          toolCalls: upsertToolCall(state.toolCalls, {
+            id: event.data.toolCallId,
+            name: event.data.name,
+            status: 'running',
+            args: event.data.args,
+            startedAt: event.data.startedAt ?? event.data.ts,
+            agentRound: event.data.agentRound,
+            toolCallIndex: event.data.toolCallIndex,
+            toolKind: event.data.toolKind,
+          }),
+          messages: updateMessage(
+            state.messages,
+            state.activeAssistantMessageId,
+            (message) => ({
+              ...message,
+              toolCalls: upsertToolCall(message.toolCalls ?? [], {
+                id: event.data.toolCallId,
+                name: event.data.name,
+                status: 'running',
+                args: event.data.args,
+                startedAt: event.data.startedAt ?? event.data.ts,
+                agentRound: event.data.agentRound,
+                toolCallIndex: event.data.toolCallIndex,
+                toolKind: event.data.toolKind,
+              }),
+            }),
+          ),
+        }
+      }
+
+      if (event.event === 'tool_call_end') {
+        const traceEvents = capTraceEvents([...state.traceEvents, event])
+        const existing = state.toolCalls.find((item) => item.id === event.data.toolCallId)
+        if (!existing) {
+          return {
+            ...state,
+            traceEvents,
+            toolCalls: upsertToolCall(state.toolCalls, {
+              id: event.data.toolCallId,
+              name: 'unknown_tool',
+              status: event.data.status === 'completed' ? 'completed' : 'error',
+              result: event.data.result,
+              startedAt: event.data.startedAt ?? undefined,
+              endedAt: event.data.endedAt ?? event.data.ts,
+              durationMs: event.data.durationMs ?? null,
+              agentRound: event.data.agentRound,
+              toolCallIndex: event.data.toolCallIndex,
+              toolKind: event.data.toolKind,
+            }),
+          }
+        }
+        return {
+          ...state,
+          traceEvents,
+          toolCalls: updateToolCall(state.toolCalls, event.data.toolCallId, {
+            status: event.data.status === 'completed' ? 'completed' : 'error',
+            result: event.data.result,
+            startedAt: event.data.startedAt ?? existing.startedAt,
+            endedAt: event.data.endedAt ?? event.data.ts,
+            durationMs: event.data.durationMs ?? existing.durationMs ?? null,
+            agentRound: event.data.agentRound ?? existing.agentRound,
+            toolCallIndex: event.data.toolCallIndex ?? existing.toolCallIndex,
+            toolKind: event.data.toolKind ?? existing.toolKind,
+          }),
+          messages: updateMessage(
+            state.messages,
+            state.activeAssistantMessageId,
+            (message) => ({
+              ...message,
+              toolCalls: updateToolCall(message.toolCalls ?? [], event.data.toolCallId, {
+                status: event.data.status === 'completed' ? 'completed' : 'error',
+                result: event.data.result,
+                startedAt: event.data.startedAt ?? existing.startedAt,
+                endedAt: event.data.endedAt ?? event.data.ts,
+                durationMs: event.data.durationMs ?? existing.durationMs ?? null,
+                agentRound: event.data.agentRound ?? existing.agentRound,
+                toolCallIndex: event.data.toolCallIndex ?? existing.toolCallIndex,
+                toolKind: event.data.toolKind ?? existing.toolKind,
+              }),
+            }),
+          ),
+        }
+      }
+
+      if (event.event === 'run_end') {
+        const traceEvents = capTraceEvents([...state.traceEvents, event])
+        const nextStatus = event.data.status === 'error' ? 'error' : event.data.status
+        const nextFinalText = event.data.finalText || state.result.finalText
+        return {
+          ...state,
+          traceEvents,
+          status: nextStatus,
           result: {
             ...state.result,
-            finalText: event.data.finalText ?? state.result.finalText,
+            finalText: nextFinalText,
             durationMs: event.data.durationMs ?? state.result.durationMs,
           },
+          messages: updateMessage(
+            state.messages,
+            state.activeAssistantMessageId,
+            (message) => ({
+              ...message,
+              content: event.data.finalText || message.content,
+              status: nextStatus,
+            }),
+          ),
           abortController: null,
           activeRunId: null,
           activeRunStartedAt: null,
+          activeAssistantMessageId: null,
         }
       }
 
@@ -234,10 +421,20 @@ export const useAgentTestRunStore = create<AgentTestRunState>()((set, get) => ({
       abortController: null,
       activeRunId: null,
       activeRunStartedAt: null,
+      activeAssistantMessageId: null,
       result: {
         ...state.result,
         errorMessage: message,
       },
+      messages: updateMessage(
+        state.messages,
+        state.activeAssistantMessageId,
+        (item) => ({
+          ...item,
+          content: item.content || message,
+          status: 'error',
+        }),
+      ),
     }))
   },
 
@@ -246,11 +443,15 @@ export const useAgentTestRunStore = create<AgentTestRunState>()((set, get) => ({
     controller?.abort()
     set({
       status: 'idle',
+      submittedInput: '',
       activeRunId: null,
       activeRunStartedAt: null,
       result: EMPTY_RESULT,
       traceEvents: [],
       analysisMap: {},
+      toolCalls: [],
+      messages: [],
+      activeAssistantMessageId: null,
       abortController: null,
     })
   },

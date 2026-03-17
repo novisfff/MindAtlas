@@ -25,6 +25,7 @@ interface QuickAddPopoverProps {
 
 const CONTAINER_ALLOWED_TYPES = new Set<ContainerBodyNodeType>([
   'llm',
+  'agent',
   'tool',
   'if_else',
   'parameter_extractor',

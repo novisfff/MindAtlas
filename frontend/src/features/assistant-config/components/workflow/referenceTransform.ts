@@ -15,6 +15,8 @@ const TEMPLATE_KEYS = [
   'inputSource',
   'output_selector',
   'outputSelector',
+  'text_template',
+  'textTemplate',
   'args_template',
   'argsTemplate',
   'json_body_template',
@@ -182,6 +184,26 @@ function transformConfig(
       }
       return fieldRecord
     })
+  }
+
+  const rewriteOutputFields = (rawFields: unknown): unknown => {
+    if (!Array.isArray(rawFields)) return rawFields
+    return rawFields.map((field) => {
+      if (!field || typeof field !== 'object' || Array.isArray(field)) return field
+      const fieldRecord = { ...(field as Record<string, unknown>) }
+      if (typeof fieldRecord.value === 'string') {
+        fieldRecord.value = rewriteTemplateRefs(fieldRecord.value, resolver)
+      }
+      return fieldRecord
+    })
+  }
+
+  if (Array.isArray(next.outputFields)) {
+    next.outputFields = rewriteOutputFields(next.outputFields)
+  }
+
+  if (Array.isArray(next.output_fields)) {
+    next.output_fields = rewriteOutputFields(next.output_fields)
   }
 
   const rewriteBranchCondition = (condition: unknown): unknown => {

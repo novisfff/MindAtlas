@@ -125,6 +125,10 @@ export const deleteAgentProfile = (id: string) =>
 export interface AgentTestRunRequest {
   draft: AgentTestRunDraftInput
   userInput: string
+  history?: Array<{
+    role: 'user' | 'assistant'
+    content: string
+  }>
   streamOutput?: boolean
 }
 
@@ -156,6 +160,10 @@ export type AgentTestRunEvent =
         toolCallId: string
         name: string
         args: Record<string, unknown>
+        startedAt?: string
+        agentRound?: number
+        toolCallIndex?: number
+        toolKind?: 'tool' | 'knowledge'
         ts: string
       }
     }
@@ -166,6 +174,12 @@ export type AgentTestRunEvent =
         toolCallId: string
         status: string
         result: string
+        startedAt?: string | null
+        endedAt?: string
+        durationMs?: number | null
+        agentRound?: number
+        toolCallIndex?: number
+        toolKind?: 'tool' | 'knowledge'
         ts: string
       }
     }

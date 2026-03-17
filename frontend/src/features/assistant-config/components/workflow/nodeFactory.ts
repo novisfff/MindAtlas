@@ -32,6 +32,16 @@ export function createDefaultNodeConfig(
     }
   }
 
+  if (nodeType === 'agent') {
+    return {
+      userInput: '{{start.user_input}}',
+      toolNames: [],
+      maxIterations: 12,
+      knowledgeEnabled: false,
+      modelSource: 'default',
+    }
+  }
+
   if (nodeType === 'output') {
     return {
       outputMode: 'text',

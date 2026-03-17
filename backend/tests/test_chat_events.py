@@ -76,6 +76,59 @@ class ChatEventAdapterTests(unittest.TestCase):
         self.assertEqual(payload["count"], 0)
         self.assertEqual(payload["steps"], [])
 
+    def test_tool_call_events_preserve_agent_trace_context(self) -> None:
+        self.adapter.on_tool_call_start(
+            "tool_1",
+            "list_tags",
+            {"query": "roadmap"},
+            node_id="agent_1",
+            node_type="agent",
+            node_execution_id="exec_1",
+            agent_round=2,
+            tool_call_index=1,
+            tool_kind="knowledge",
+            started_at="2026-03-13T10:00:00+00:00",
+        )
+        self.adapter.on_tool_call_end(
+            "tool_1",
+            "completed",
+            "{\"ok\":true}",
+            node_id="agent_1",
+            node_type="agent",
+            node_execution_id="exec_1",
+            agent_round=2,
+            tool_call_index=1,
+            tool_kind="knowledge",
+            started_at="2026-03-13T10:00:00+00:00",
+            ended_at="2026-03-13T10:00:01+00:00",
+            duration_ms=1000,
+        )
+
+        self.assertEqual(self.adapter.tool_calls_data[0]["nodeId"], "agent_1")
+        self.assertEqual(self.adapter.tool_calls_data[0]["nodeType"], "agent")
+        self.assertEqual(self.adapter.tool_calls_data[0]["nodeExecutionId"], "exec_1")
+        self.assertEqual(self.adapter.tool_calls_data[0]["agentRound"], 2)
+        self.assertEqual(self.adapter.tool_calls_data[0]["toolKind"], "knowledge")
+        self.assertEqual(self.adapter.tool_results_data[0]["durationMs"], 1000)
+        self.assertEqual(self.adapter.tool_results_data[0]["endedAt"], "2026-03-13T10:00:01+00:00")
+
+        event, payload = self._last_event()
+        self.assertEqual(event, "tool_call_end")
+        self.assertEqual(payload["nodeId"], "agent_1")
+        self.assertEqual(payload["nodeExecutionId"], "exec_1")
+        self.assertEqual(payload["toolKind"], "knowledge")
+        self.assertEqual(payload["durationMs"], 1000)
+
+    def test_tool_call_events_fill_timing_when_not_provided(self) -> None:
+        self.adapter.on_tool_call_start("tool_2", "list_tags", {"query": "roadmap"})
+        self.adapter.on_tool_call_end("tool_2", "completed", "{}")
+
+        self.assertIn("startedAt", self.adapter.tool_calls_data[0])
+        self.assertIn("startedAt", self.adapter.tool_results_data[0])
+        self.assertIn("endedAt", self.adapter.tool_results_data[0])
+        self.assertIn("durationMs", self.adapter.tool_results_data[0])
+        self.assertIsInstance(self.adapter.tool_results_data[0]["durationMs"], int)
+
 
 if __name__ == "__main__":
     unittest.main()

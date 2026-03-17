@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Play,
   Square,
@@ -11,9 +11,12 @@ import {
   AlertCircle,
   CheckCircle2,
   Clock,
-  Trash2,
   RefreshCcw,
   Keyboard,
+  ChevronDown,
+  ChevronRight,
+  Wrench,
+  Database,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
@@ -21,19 +24,22 @@ import { Switch } from '@/components/ui/switch'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { HumanApprovalCard } from '@/features/shared/hitl'
 import { useWorkflowEditorStore } from '../../stores/workflow-editor-store'
-import { useWorkflowTestRunStore } from '../../stores/workflow-test-run-store'
+import {
+  buildCompletedWorkflowConversationHistory,
+  useWorkflowTestRunStore,
+} from '../../stores/workflow-test-run-store'
 import { runWorkflowTestStreamById, submitWorkflowRunApprovalDecision, validateWorkflowById } from '../../api/workflows'
-import type { WorkflowRunEvent } from '../../api/workflow'
+import { defaultLabelForNodeType } from './labelUtils'
 import { serializeToWorkflowInput } from './serialization'
 import { isValidStartStructuredFieldName, normalizeStartNodeConfig } from './startNodeConfig'
-import type { StartStructuredField } from '../../api/workflow'
+import type { ContainerBodyNodeType, NodeType, StartStructuredField } from '../../api/workflow'
 
 interface WorkflowTestRunPanelProps {
   workflowId: string
   startInputMode: 'text' | 'structured'
 }
 
-type PanelTab = 'input' | 'result' | 'trace' | 'raw'
+type PanelTab = 'conversation' | 'input' | 'result' | 'trace' | 'raw'
 const NODE_IO_PREVIEW_LIMIT = 800
 
 function stringifySnapshotValue(value: unknown): string {
@@ -56,48 +62,10 @@ function canExpandSnapshotValue(value: unknown): boolean {
   return stringifySnapshotValue(value).length > NODE_IO_PREVIEW_LIMIT
 }
 
-function formatEventTitle(event: WorkflowRunEvent): string {
-  switch (event.event) {
-    case 'node_start':
-      return `[node] start ${event.data.nodeId}`
-    case 'node_end':
-      return `[node] end ${event.data.nodeId} (${event.data.status})`
-    case 'branch_decision':
-      return `[branch] ${event.data.nodeId} -> ${event.data.handle}`
-    case 'tool_call_start':
-      return `[tool] start ${event.data.name}`
-    case 'tool_call_end':
-      return `[tool] end ${event.data.toolCallId}`
-    case 'run_start':
-      return '[run] started'
-    case 'run_end':
-      return `[run] ${event.data.status}`
-    case 'run_error':
-      return `[run] error (${event.data.stage})`
-    case 'node_output_delta':
-      return `[node] delta(merged) ${event.data.nodeId}`
-    case 'content_delta':
-      return '[output] content delta(merged)'
-    case 'node_snapshot':
-      return `[node] snapshot ${event.data.nodeId} (${event.data.status})`
-    case 'human_approval_requested':
-      return `[hitl] requested ${event.data.approval.nodeId}`
-    case 'human_approval_resolved':
-      return `[hitl] resolved ${event.data.approval.nodeId} (${event.data.approval.status})`
-  }
-  return 'unknown-event'
-}
-
-function eventNodeId(event: WorkflowRunEvent): string | null {
-  if (
-    event.event === 'node_start'
-    || event.event === 'node_end'
-    || event.event === 'branch_decision'
-    || event.event === 'node_snapshot'
-  ) {
-    return event.data.nodeId
-  }
-  return null
+function formatToolStatus(status: 'running' | 'completed' | 'error'): string {
+  if (status === 'completed') return 'completed'
+  if (status === 'error') return 'failed'
+  return 'running'
 }
 
 function splitScopedNodeId(scoped: string): { containerId: string; nodeId: string } | null {
@@ -107,6 +75,28 @@ function splitScopedNodeId(scoped: string): { containerId: string; nodeId: strin
     containerId: scoped.slice(0, idx),
     nodeId: scoped.slice(idx + 2),
   }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  return value as Record<string, unknown>
+}
+
+function resolveDisplayLabel(rawLabel: unknown, rawNodeType: unknown, fallback: string): string {
+  const label = `${rawLabel ?? ''}`.trim()
+  if (label) return label
+  const nodeType = `${rawNodeType ?? ''}`.trim() as NodeType
+  return nodeType ? defaultLabelForNodeType(nodeType) : fallback
+}
+
+function extractContainerBodyNodes(config: unknown): Array<Record<string, unknown>> {
+  const configRecord = asRecord(config)
+  if (!configRecord) return []
+  const rawNodes = configRecord.bodyNodes ?? configRecord.body_nodes
+  if (!Array.isArray(rawNodes)) return []
+  return rawNodes
+    .map((item) => asRecord(item))
+    .filter((item): item is Record<string, unknown> => item !== null)
 }
 
 function parseStructuredValue(
@@ -142,6 +132,7 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
   const [activeTab, setActiveTab] = useState<PanelTab>('input')
   const [expandedNodeIo, setExpandedNodeIo] = useState<Record<string, boolean>>({})
   const [expandedNodeIoFull, setExpandedNodeIoFull] = useState<Record<string, boolean>>({})
+  const [expandedToolDetails, setExpandedToolDetails] = useState<Record<string, boolean>>({})
   const [resetDialogOpen, setResetDialogOpen] = useState(false)
   const [submittingApprovalId, setSubmittingApprovalId] = useState<string | null>(null)
   const wfStore = useWorkflowEditorStore()
@@ -151,6 +142,11 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
     input,
     structuredInput,
     streamOutput,
+    sessionId,
+    sessionMemory,
+    messages,
+    turnsByRunId,
+    selectedRunId,
     result,
     deltaSummary,
     traceEvents,
@@ -167,33 +163,76 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
     cancelRun,
     ingestEvent,
     markRunError,
+    selectRun,
     reset,
   } = useWorkflowTestRunStore()
+  const isConversationMode = startInputMode === 'text'
   const startStructuredFields = useMemo(() => {
     const startNode = wfStore.nodes.find((node) => node.data.nodeType === 'start')
     return normalizeStartNodeConfig(startNode?.data.config ?? null).structuredFields
       .filter((field) => isValidStartStructuredFieldName(field.name))
   }, [wfStore.nodes])
 
-  const orderedTrace = useMemo(() => [...traceEvents].reverse(), [traceEvents])
-  const traceNodes = useMemo(() => Object.values(nodeTraceMap), [nodeTraceMap])
-  const orderedNodeDeltaSummary = useMemo(
+  const traceNodes = useMemo(
     () =>
-      Object.entries(deltaSummary.nodes)
-        .map(([nodeId, summary]) => ({ nodeId, ...summary }))
-        .sort((a, b) => b.chars - a.chars),
-    [deltaSummary.nodes],
+      Object.values(nodeTraceMap).sort((a, b) => {
+        const aStarted = a.startedAt ?? Number.MAX_SAFE_INTEGER
+        const bStarted = b.startedAt ?? Number.MAX_SAFE_INTEGER
+        if (aStarted !== bStarted) return aStarted - bStarted
+        if (a.nodeId !== b.nodeId) return a.nodeId.localeCompare(b.nodeId)
+        return a.executionKey.localeCompare(b.executionKey)
+      }),
+    [nodeTraceMap],
   )
+  const traceNodeLabelMap = useMemo(() => {
+    const labelMap = new Map<string, string>()
+
+    for (const node of wfStore.nodes) {
+      const nodeData = asRecord(node.data)
+      const nodeId = `${node.id ?? nodeData?.nodeId ?? ''}`.trim()
+      if (!nodeId) continue
+
+      const nodeType = `${nodeData?.nodeType ?? ''}`.trim()
+      const nodeLabel = resolveDisplayLabel(nodeData?.label, nodeType, nodeId)
+      labelMap.set(nodeId, nodeLabel)
+
+      if (nodeType !== 'iteration' && nodeType !== 'loop') continue
+
+      const bodyNodes = extractContainerBodyNodes(nodeData?.config)
+      for (const bodyNode of bodyNodes) {
+        const innerNodeId = `${bodyNode.nodeId ?? bodyNode.node_id ?? ''}`.trim()
+        if (!innerNodeId) continue
+        const innerNodeType = `${bodyNode.nodeType ?? bodyNode.node_type ?? ''}`.trim() as ContainerBodyNodeType
+        const innerNodeLabel = resolveDisplayLabel(bodyNode.label, innerNodeType, innerNodeId)
+        labelMap.set(`${nodeId}::${innerNodeId}`, `${nodeLabel} / ${innerNodeLabel}`)
+      }
+    }
+
+    return labelMap
+  }, [wfStore.nodes])
   const hasAnyRunResult = useMemo(
     () =>
       status !== 'idle'
+      || messages.length > 0
+      || Object.keys(turnsByRunId).length > 0
       || sessionRuns.length > 0
       || result.durationMs !== null
       || Boolean(result.finalText)
       || result.finalJson !== null
       || Boolean(result.errorMessage),
-    [result.durationMs, result.errorMessage, result.finalJson, result.finalText, sessionRuns.length, status],
+    [messages.length, result.durationMs, result.errorMessage, result.finalJson, result.finalText, sessionRuns.length, status, turnsByRunId],
   )
+  const selectedTurn = selectedRunId ? turnsByRunId[selectedRunId] ?? null : null
+
+  useEffect(() => {
+    if (isConversationMode && activeTab === 'input') {
+      setActiveTab('conversation')
+      return
+    }
+    if (!isConversationMode && activeTab === 'conversation') {
+      setActiveTab('input')
+    }
+  }, [activeTab, isConversationMode])
 
   const handleSubmitApprovalDecision = async (
     approvalId: string,
@@ -257,6 +296,9 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
       workflow: ReturnType<typeof serializeToWorkflowInput>
       userInput?: string
       structuredInput?: Record<string, unknown>
+      sessionId?: string
+      history?: Array<{ role: 'user' | 'assistant'; content: string }>
+      sessionMemory?: { conversationSummary?: string; skillFacts?: string[] }
       streamOutput: boolean
     } = {
       workflow,
@@ -288,12 +330,23 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
         return
       }
       payload.userInput = userInput
+      payload.sessionId = sessionId
+      payload.history = buildCompletedWorkflowConversationHistory(messages)
+      if (sessionMemory.conversationSummary || sessionMemory.skillFacts.length > 0) {
+        payload.sessionMemory = {
+          conversationSummary: sessionMemory.conversationSummary,
+          skillFacts: sessionMemory.skillFacts,
+        }
+      }
     }
 
     const controller = new AbortController()
-    beginRun(controller)
+    beginRun(controller, {
+      mode: startInputMode,
+      submittedInput: payload.userInput,
+    })
     setPanelOpen(true)
-    setActiveTab('trace')
+    setActiveTab(startInputMode === 'text' ? 'conversation' : 'trace')
 
     try {
       await runWorkflowTestStreamById(
@@ -364,13 +417,13 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
         {/* Tabs Bar */}
         <div className="px-3 py-2 border-b flex items-center gap-1 bg-white shrink-0">
           {[
-            { id: 'input', label: '输入', icon: Keyboard },
+            ...(isConversationMode ? [{ id: 'conversation', label: '对话', icon: Keyboard }] : [{ id: 'input', label: '输入', icon: Keyboard }]),
             { id: 'result', label: '结果', icon: FileJson },
             { id: 'trace', label: '追踪', icon: ListTree },
             { id: 'raw', label: '原始', icon: GitBranch },
           ].map((tab) => {
             const Icon = tab.icon
-            const disabled = tab.id !== 'input' && !hasAnyRunResult
+            const disabled = tab.id !== 'input' && tab.id !== 'conversation' && !hasAnyRunResult
             return (
               <button
                 key={tab.id}
@@ -394,18 +447,178 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
         </div>
 
         <div className="flex-1 overflow-auto p-4 custom-scrollbar bg-slate-50/50">
-          {activeTab === 'input' && (
+          {activeTab === 'conversation' && isConversationMode && (
+            <div className="h-full flex flex-col gap-4">
+              <div className="flex-1 overflow-auto min-h-0 space-y-4 pr-1">
+                {messages.length === 0 ? (
+                  <div className="flex h-full min-h-[320px] flex-col items-center justify-center text-center text-muted-foreground">
+                    <Keyboard className="w-8 h-8 mb-3 opacity-20" />
+                    <p className="text-sm font-medium text-foreground">连续试运行对话</p>
+                  </div>
+                ) : (
+                  messages.map((message) => {
+                    if (message.role === 'user') {
+                      return (
+                        <div key={message.id} className="flex justify-end">
+                          <div className="max-w-[85%] rounded-2xl rounded-tr-[4px] bg-primary px-4 py-2.5 text-sm leading-relaxed text-primary-foreground shadow-sm whitespace-pre-wrap">
+                            {message.content}
+                          </div>
+                        </div>
+                      )
+                    }
+
+                    const isSelected = Boolean(message.runId && message.runId === selectedRunId)
+                    const assistantContent = message.finalJson !== undefined && message.finalJson !== null
+                      ? JSON.stringify(message.finalJson, null, 2)
+                      : (message.content || message.errorMessage || '')
+
+                    return (
+                      <button
+                        key={message.id}
+                        type="button"
+                        disabled={!message.runId || status === 'running'}
+                        onClick={() => {
+                          if (!message.runId) return
+                          selectRun(message.runId)
+                        }}
+                        className={`w-full text-left rounded-2xl border bg-white/80 p-4 shadow-sm transition-all ${
+                          isSelected ? 'border-primary/40 ring-2 ring-primary/10' : 'border-border/60 hover:border-primary/20'
+                        } ${!message.runId || status === 'running' ? 'cursor-default' : 'cursor-pointer'}`}
+                      >
+                        <div className="flex items-start gap-3">
+                          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-primary/20 bg-primary/10 text-primary">
+                            <Terminal className="w-4 h-4" />
+                          </div>
+                          <div className="min-w-0 flex-1 space-y-2">
+                            <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                              <span className="font-medium text-foreground">Assistant</span>
+                              {message.runId && (
+                                <span className="rounded-full bg-slate-100 px-2 py-0.5 font-mono">
+                                  {message.runId.slice(0, 8)}
+                                </span>
+                              )}
+                              <span className={`rounded-full px-2 py-0.5 ${
+                                message.status === 'completed'
+                                  ? 'bg-green-50 text-green-700'
+                                  : message.status === 'error'
+                                    ? 'bg-red-50 text-red-700'
+                                    : message.status === 'cancelled'
+                                      ? 'bg-slate-100 text-slate-600'
+                                      : 'bg-blue-50 text-blue-700'
+                              }`}>
+                                {message.status}
+                              </span>
+                              {isSelected && (
+                                <span className="rounded-full bg-primary/10 px-2 py-0.5 text-primary">
+                                  当前查看
+                                </span>
+                              )}
+                            </div>
+                            <div className="rounded-xl border bg-slate-50/70 px-3 py-2.5">
+                              {message.status === 'running' && !assistantContent ? (
+                                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  正在生成...
+                                </div>
+                              ) : message.finalJson !== undefined && message.finalJson !== null ? (
+                                <pre className="whitespace-pre-wrap break-words text-xs font-mono text-slate-700">
+                                  {assistantContent}
+                                </pre>
+                              ) : (
+                                <div className="whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700">
+                                  {assistantContent || '(empty output)'}
+                                </div>
+                              )}
+                            </div>
+                            {message.runId && status !== 'running' && (
+                              <div className="text-[11px] text-muted-foreground">
+                                点击此回复可切换下方 Result / Trace / Raw 到本轮
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </button>
+                    )
+                  })
+                )}
+              </div>
+
+              <div className="shrink-0 rounded-xl border bg-white p-3 shadow-sm space-y-3">
+                <textarea
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault()
+                      if (status !== 'running') {
+                        void handleRun()
+                      }
+                    }
+                  }}
+                  disabled={status === 'running'}
+                  placeholder="继续输入测试内容..."
+                  className="min-h-[88px] w-full resize-none rounded-lg border bg-background px-4 py-3 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/50 transition-all font-mono"
+                />
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        id="conversation-stream-mode"
+                        checked={streamOutput}
+                        onCheckedChange={setStreamOutput}
+                        disabled={status === 'running'}
+                        className="data-[state=checked]:bg-primary scale-90 origin-left"
+                      />
+                      <label
+                        htmlFor="conversation-stream-mode"
+                        className="text-xs text-muted-foreground cursor-pointer select-none"
+                      >
+                        流式输出
+                      </label>
+                    </div>
+                    <span className="text-[11px] text-muted-foreground">
+                      {messages.length} message{messages.length === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setResetDialogOpen(true)}
+                      className="p-2 text-muted-foreground hover:text-foreground rounded-lg hover:bg-muted transition-colors"
+                      title="重置所有内容"
+                    >
+                      <RefreshCcw className="w-4 h-4" />
+                    </button>
+                    {status === 'running' ? (
+                      <button
+                        onClick={cancelRun}
+                        className="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-600 hover:bg-red-100 rounded-lg text-xs font-medium transition-colors"
+                      >
+                        <Square className="w-3.5 h-3.5 fill-current" />
+                        停止
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => void handleRun()}
+                        disabled={!input.trim()}
+                        className="flex items-center gap-2 px-6 py-2 bg-primary text-primary-foreground hover:bg-primary/90 rounded-lg text-xs font-medium shadow-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed active:scale-95"
+                      >
+                        <Play className="w-3.5 h-3.5 fill-current" />
+                        发送
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'input' && !isConversationMode && (
             <div className="h-full flex flex-col gap-4">
               <div className="flex-1 flex flex-col gap-2 min-h-0">
                 <div className="flex items-center justify-between shrink-0">
                   <label className="text-xs font-medium text-foreground">
-                    {startInputMode === 'structured' ? t('settings.skills.structuredInputRunPanelTitle') : '测试输入'}
+                    {t('settings.skills.structuredInputRunPanelTitle')}
                   </label>
-                  {startInputMode === 'text' && (
-                    <span className="text-[10px] text-muted-foreground">
-                      {input.length} chars
-                    </span>
-                  )}
                 </div>
                 {startInputMode === 'structured' ? (
                   <div className="flex-1 overflow-auto space-y-2 rounded-lg border bg-white px-3 py-3">
@@ -492,7 +705,6 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
                   ) : (
                     <button
                       onClick={() => void handleRun()}
-                      disabled={startInputMode === 'text' ? !input.trim() : false}
                       className="flex items-center gap-2 px-6 py-2 bg-primary text-primary-foreground hover:bg-primary/90 rounded-lg text-xs font-medium shadow-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed active:scale-95"
                     >
                       <Play className="w-3.5 h-3.5 fill-current" />
@@ -512,6 +724,12 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
                 </div>
               ) : (
                 <div className="space-y-3">
+                  {isConversationMode && selectedTurn && (
+                    <div className="flex items-center gap-2 text-[10px] text-muted-foreground bg-slate-100/70 px-3 py-1.5 rounded-md border border-slate-200">
+                      <Clock className="w-3 h-3" />
+                      当前查看轮次：{selectedTurn.runId.slice(0, 8)}
+                    </div>
+                  )}
                   {result.finalJson !== null && (
                     <div className="flex items-center gap-2 text-[10px] text-blue-600 bg-blue-50/50 px-3 py-1.5 rounded-md border border-blue-100">
                       <FileJson className="w-3 h-3" />
@@ -536,7 +754,7 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
                 </div>
               )}
 
-              {sessionRuns.length > 0 && (
+              {!isConversationMode && sessionRuns.length > 0 && (
                 <div className="pt-4 border-t">
                   <div className="text-xs font-medium text-muted-foreground mb-3 flex items-center gap-2">
                     <Clock className="w-3.5 h-3.5" />
@@ -594,12 +812,13 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
                 )}
 
                 {traceNodes.map((node) => {
-                  const snapshot = nodeSnapshots[node.nodeId]
-                  const ioExpanded = !!expandedNodeIo[node.nodeId]
-                  const ioFullExpanded = !!expandedNodeIoFull[node.nodeId]
+                  const snapshot = nodeSnapshots[node.executionKey]
+                  const ioExpanded = !!expandedNodeIo[node.executionKey]
+                  const ioFullExpanded = !!expandedNodeIoFull[node.executionKey]
+                  const nodeDisplayName = traceNodeLabelMap.get(node.nodeId) ?? node.nodeId
 
                   return (
-                    <div key={node.nodeId} className="group rounded-lg border bg-white shadow-sm overflow-hidden transition-all hover:shadow-md">
+                    <div key={node.executionKey} className="group rounded-lg border bg-white shadow-sm overflow-hidden transition-all hover:shadow-md">
                       <div className="px-3 py-2.5 flex items-center justify-between gap-3 bg-slate-50/50">
                         <div className="flex items-center gap-3">
                           <div className={`w-1.5 h-1.5 rounded-full ${node.status === 'success' ? 'bg-green-500' :
@@ -608,10 +827,15 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
                             }`} />
                           <div>
                             <div className="text-xs font-semibold text-foreground flex items-center gap-2">
-                              {node.nodeId}
+                              {nodeDisplayName}
                               {node.durationMs && (
                                 <span className="text-[10px] font-normal text-muted-foreground bg-slate-100 px-1.5 py-0.5 rounded">
                                   {node.durationMs}ms
+                                </span>
+                              )}
+                              {node.nodeExecutionId && (
+                                <span className="text-[10px] font-normal text-muted-foreground bg-slate-100 px-1.5 py-0.5 rounded font-mono">
+                                  {node.nodeExecutionId.slice(0, 8)}
                                 </span>
                               )}
                             </div>
@@ -627,7 +851,7 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
                           </button>
                           {snapshot && (
                             <button
-                              onClick={() => setExpandedNodeIo(prev => ({ ...prev, [node.nodeId]: !prev[node.nodeId] }))}
+                              onClick={() => setExpandedNodeIo(prev => ({ ...prev, [node.executionKey]: !prev[node.executionKey] }))}
                               className={`text-[10px] px-2 py-1 rounded border transition-all ${ioExpanded
                                 ? 'bg-primary/5 text-primary border-primary/20'
                                 : 'text-muted-foreground hover:text-primary hover:bg-white hover:border-slate-200'
@@ -670,12 +894,76 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
 
                           {canExpandSnapshotValue(snapshot.input) || canExpandSnapshotValue(snapshot.output) ? (
                             <button
-                              onClick={() => setExpandedNodeIoFull(prev => ({ ...prev, [node.nodeId]: !prev[node.nodeId] }))}
+                              onClick={() => setExpandedNodeIoFull(prev => ({ ...prev, [node.executionKey]: !prev[node.executionKey] }))}
                               className="w-full text-center text-[10px] text-muted-foreground hover:text-primary py-1 hover:bg-slate-50 rounded transition-colors"
                             >
                               {ioFullExpanded ? 'Show Less' : 'Show Full Content'}
                             </button>
                           ) : null}
+                        </div>
+                      )}
+
+                      {node.nodeType === 'agent' && node.toolCalls && node.toolCalls.length > 0 && (
+                        <div className="border-t bg-white px-3 py-3 space-y-2">
+                          <div className="flex items-center gap-2 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+                            <Wrench className="w-3 h-3" />
+                            Tool Chain
+                          </div>
+                          <div className="space-y-2">
+                            {node.toolCalls.map((toolCall) => {
+                              const toolKey = `${node.executionKey}:${toolCall.id}`
+                              const expanded = !!expandedToolDetails[toolKey]
+                              return (
+                                <div key={toolCall.id} className="rounded border bg-slate-50/70">
+                                  <button
+                                    onClick={() => setExpandedToolDetails((prev) => ({ ...prev, [toolKey]: !prev[toolKey] }))}
+                                    className="w-full px-3 py-2 flex items-center justify-between gap-3 text-left"
+                                  >
+                                    <div className="min-w-0 flex items-center gap-2">
+                                      {expanded ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />}
+                                      <span className="text-[11px] text-foreground truncate">
+                                        {`Round ${toolCall.agentRound ?? '?'} · ${toolCall.name} · ${formatToolStatus(toolCall.status)}${typeof toolCall.durationMs === 'number' ? ` · ${toolCall.durationMs}ms` : ''}`}
+                                      </span>
+                                    </div>
+                                    {toolCall.toolKind === 'knowledge' ? (
+                                      <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] text-blue-700">
+                                        <Database className="w-3 h-3" />
+                                        Knowledge
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] text-slate-600">
+                                        Tool
+                                      </span>
+                                    )}
+                                  </button>
+                                  {expanded && (
+                                    <div className="border-t px-3 py-2 space-y-2">
+                                      <div className="grid gap-2">
+                                        <div className="space-y-1">
+                                          <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Args</div>
+                                          <div className="rounded border bg-white px-2.5 py-2">
+                                            <pre className="text-[10px] font-mono whitespace-pre-wrap break-words text-slate-600">
+                                              {previewSnapshotValue(toolCall.args ?? {})}
+                                            </pre>
+                                          </div>
+                                        </div>
+                                        {toolCall.result !== undefined && (
+                                          <div className="space-y-1">
+                                            <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Result</div>
+                                            <div className="rounded border bg-white px-2.5 py-2">
+                                              <pre className="text-[10px] font-mono whitespace-pre-wrap break-words text-slate-600">
+                                                {previewSnapshotValue(toolCall.result)}
+                                              </pre>
+                                            </div>
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
                         </div>
                       )}
                     </div>
@@ -711,7 +999,7 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
           variant="destructive"
           onConfirm={() => {
             reset()
-            setActiveTab('input')
+            setActiveTab(isConversationMode ? 'conversation' : 'input')
             setResetDialogOpen(false)
           }}
           onCancel={() => setResetDialogOpen(false)}

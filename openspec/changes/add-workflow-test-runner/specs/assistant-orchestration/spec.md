@@ -42,6 +42,36 @@ Workflow test run SHALL not create assistant conversation/messages records.
 - **THEN** no conversation/message persistence APIs SHALL be invoked
 - **AND** no chat history record SHALL be created from test-run output
 
+### Requirement: Workflow Draft Test Run SHALL Support Multi-Turn Conversation For Text Start
+Workflow draft test run SHALL support multi-turn conversation when the workflow `start.inputMode` is `text`.
+
+#### Scenario: Continue text-mode workflow conversation
+- **WHEN** workflow test run is started from a text-mode start node
+- **AND** caller provides a stable `sessionId` plus completed `history`
+- **THEN** runtime SHALL execute the new turn with that history
+- **AND** the frontend SHALL be able to inspect the result, trace, and raw events for each completed turn
+
+#### Scenario: Structured start remains single-run
+- **WHEN** workflow test run is started from a structured start node
+- **THEN** caller SHALL provide only the current structured input
+- **AND** `history` and `sessionMemory` SHALL be rejected
+
+### Requirement: Workflow Draft Test Run SHALL Maintain Ephemeral L0 L1 L2 Session Memory
+Workflow draft test run SHALL keep short-term conversation memory semantics aligned with the assistant system for text-mode sessions, without backend persistence.
+
+#### Scenario: Use ephemeral session memory in text-mode test run
+- **WHEN** caller sends text-mode `history` and `sessionMemory`
+- **THEN** runtime SHALL build L0 from `history`
+- **AND** runtime SHALL use `sessionMemory.conversationSummary` as temporary L1
+- **AND** runtime SHALL use `sessionMemory.skillFacts` as temporary L2
+- **AND** runtime SHALL NOT persist those values to backend conversation memory tables
+
+#### Scenario: Return next ephemeral session memory after completed run
+- **WHEN** a text-mode workflow test run completes successfully
+- **THEN** system SHALL compute the next effective conversation summary and skill facts
+- **AND** system SHALL return them in `run_end.sessionMemory`
+- **AND** if memory computation fails, the run SHALL still complete and the previous session memory SHALL be returned
+
 ### Requirement: Subflow Trace IDs SHALL Be Routable
 Container subflow trace events SHALL expose scoped node IDs to avoid collisions and enable editor routing.
 

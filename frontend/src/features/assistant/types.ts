@@ -7,6 +7,15 @@ export interface ToolCall {
   result?: string
   status: 'pending' | 'running' | 'completed' | 'error'
   hidden?: boolean
+  nodeId?: string
+  nodeType?: string
+  nodeExecutionId?: string
+  agentRound?: number
+  toolCallIndex?: number
+  toolKind?: 'tool' | 'knowledge'
+  startedAt?: string
+  endedAt?: string
+  durationMs?: number
 }
 
 export interface SkillCall {
@@ -57,7 +66,20 @@ export interface Message {
   skillCalls?: SkillCall[]
   analysisSteps?: Analysis[]
   humanApprovals?: HumanApproval[]
-  toolResults?: { id: string; status: string; result: string }[]
+  toolResults?: {
+    id: string
+    status: string
+    result: string
+    nodeId?: string
+    nodeType?: string
+    nodeExecutionId?: string
+    agentRound?: number
+    toolCallIndex?: number
+    toolKind?: 'tool' | 'knowledge'
+    startedAt?: string
+    endedAt?: string
+    durationMs?: number
+  }[]
   createdAt: string
   updatedAt: string
 }

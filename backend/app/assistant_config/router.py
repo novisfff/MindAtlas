@@ -585,6 +585,7 @@ def test_run_workflow(
 _NODE_TYPE_LABELS = {
     "start": "Start",
     "llm": "LLM",
+    "agent": "Agent",
     "tool": "Tool",
     "if_else": "IF/ELSE",
     "parameter_extractor": "Parameter Extractor",
@@ -601,6 +602,7 @@ _NODE_TYPE_LABELS = {
 _NODE_TYPE_DESCRIPTIONS = {
     "start": "Workflow entry point, defines input variables",
     "llm": "Call LLM for analysis and intermediate generation",
+    "agent": "Agentic LLM node that can decide whether to call configured tools and built-in KB retrieval",
     "tool": "Execute a registered tool",
     "if_else": "IF/ELIF/ELSE branching with configurable conditions and logic",
     "parameter_extractor": "Extract structured parameters from text using LLM",

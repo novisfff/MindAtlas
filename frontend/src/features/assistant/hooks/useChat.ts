@@ -184,12 +184,28 @@ export function useChat() {
               args: evt.data.args as Record<string, unknown>,
               status: 'running',
               hidden: (evt.data.hidden as boolean) ?? false,
+              nodeId: (evt.data.nodeId as string | undefined) ?? undefined,
+              nodeType: (evt.data.nodeType as string | undefined) ?? undefined,
+              nodeExecutionId: (evt.data.nodeExecutionId as string | undefined) ?? undefined,
+              agentRound: typeof evt.data.agentRound === 'number' ? evt.data.agentRound as number : undefined,
+              toolCallIndex: typeof evt.data.toolCallIndex === 'number' ? evt.data.toolCallIndex as number : undefined,
+              toolKind: (evt.data.toolKind as ToolCall['toolKind'] | undefined) ?? undefined,
+              startedAt: (evt.data.startedAt as string | undefined) ?? undefined,
             }
             addToolCall(toolCall)
           } else if (evt.event === 'tool_call_end') {
             updateToolCall(evt.data.toolCallId as string, {
               status: (evt.data.status as string) === 'completed' ? 'completed' : 'error',
               result: evt.data.result as string,
+              nodeId: (evt.data.nodeId as string | undefined) ?? undefined,
+              nodeType: (evt.data.nodeType as string | undefined) ?? undefined,
+              nodeExecutionId: (evt.data.nodeExecutionId as string | undefined) ?? undefined,
+              agentRound: typeof evt.data.agentRound === 'number' ? evt.data.agentRound as number : undefined,
+              toolCallIndex: typeof evt.data.toolCallIndex === 'number' ? evt.data.toolCallIndex as number : undefined,
+              toolKind: (evt.data.toolKind as ToolCall['toolKind'] | undefined) ?? undefined,
+              startedAt: (evt.data.startedAt as string | undefined) ?? undefined,
+              endedAt: (evt.data.endedAt as string | undefined) ?? undefined,
+              durationMs: typeof evt.data.durationMs === 'number' ? evt.data.durationMs as number : undefined,
             })
           } else if (evt.event === 'skill_start') {
             const skillCall: SkillCall = {
@@ -404,12 +420,28 @@ export function useChat() {
               args: evt.data.args as Record<string, unknown>,
               status: 'running',
               hidden: (evt.data.hidden as boolean) ?? false,
+              nodeId: (evt.data.nodeId as string | undefined) ?? undefined,
+              nodeType: (evt.data.nodeType as string | undefined) ?? undefined,
+              nodeExecutionId: (evt.data.nodeExecutionId as string | undefined) ?? undefined,
+              agentRound: typeof evt.data.agentRound === 'number' ? evt.data.agentRound as number : undefined,
+              toolCallIndex: typeof evt.data.toolCallIndex === 'number' ? evt.data.toolCallIndex as number : undefined,
+              toolKind: (evt.data.toolKind as ToolCall['toolKind'] | undefined) ?? undefined,
+              startedAt: (evt.data.startedAt as string | undefined) ?? undefined,
             }
             addToolCall(toolCall)
           } else if (evt.event === 'tool_call_end') {
             updateToolCall(evt.data.toolCallId as string, {
               status: (evt.data.status as string) === 'completed' ? 'completed' : 'error',
               result: evt.data.result as string,
+              nodeId: (evt.data.nodeId as string | undefined) ?? undefined,
+              nodeType: (evt.data.nodeType as string | undefined) ?? undefined,
+              nodeExecutionId: (evt.data.nodeExecutionId as string | undefined) ?? undefined,
+              agentRound: typeof evt.data.agentRound === 'number' ? evt.data.agentRound as number : undefined,
+              toolCallIndex: typeof evt.data.toolCallIndex === 'number' ? evt.data.toolCallIndex as number : undefined,
+              toolKind: (evt.data.toolKind as ToolCall['toolKind'] | undefined) ?? undefined,
+              startedAt: (evt.data.startedAt as string | undefined) ?? undefined,
+              endedAt: (evt.data.endedAt as string | undefined) ?? undefined,
+              durationMs: typeof evt.data.durationMs === 'number' ? evt.data.durationMs as number : undefined,
             })
           } else if (evt.event === 'skill_start') {
             const skillCall: SkillCall = {

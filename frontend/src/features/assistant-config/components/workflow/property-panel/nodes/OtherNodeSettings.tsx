@@ -318,8 +318,9 @@ type ContainerBodyEdge = {
 }
 
 const CONTAINER_NODE_TYPES: Array<{ value: NodeType; labelKey: string }> = [
-    { value: 'llm', labelKey: 'settings.skills.nodeTypes.llm' },
-    { value: 'tool', labelKey: 'settings.skills.nodeTypes.tool' },
+  { value: 'llm', labelKey: 'settings.skills.nodeTypes.llm' },
+  { value: 'agent', labelKey: 'settings.skills.nodeTypes.agent' },
+  { value: 'tool', labelKey: 'settings.skills.nodeTypes.tool' },
     { value: 'if_else', labelKey: 'settings.skills.nodeTypes.if_else' },
     { value: 'parameter_extractor', labelKey: 'settings.skills.nodeTypes.parameter_extractor' },
     { value: 'knowledge_retrieval', labelKey: 'settings.skills.nodeTypes.knowledge_retrieval' },

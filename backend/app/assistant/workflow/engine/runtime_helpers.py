@@ -21,7 +21,8 @@ from app.assistant.workflow.env_vars import WorkflowEnvVarSpec, parse_env_var_sp
 
 logger = logging.getLogger(__name__)
 
-AGENT_MAX_ITERATIONS = 10
+AGENT_MAX_ITERATIONS = 12
+TRACE_CONTEXT_METADATA_KEY = "__trace_context__"
 
 MAX_TEXT_LEN = 8000
 START_STRUCTURED_FIELD_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
@@ -169,12 +170,16 @@ def coerce_output_field_value(field_name: str, rendered_value: str, field_spec: 
 
 
 def emit(metadata: dict[str, Any], event: str, **kwargs: Any) -> None:
+    next_kwargs = _apply_trace_context(metadata, event, kwargs)
     cb = metadata.get(event)
     if not callable(cb):
         return
+    invoke_callback(cb, **next_kwargs)
+
+
+def invoke_callback(cb: Callable[..., Any], **kwargs: Any) -> Any:
     try:
-        cb(**kwargs)
-        return
+        return cb(**kwargs)
     except TypeError:
         # Backward compatibility for callbacks that only accept a subset of fields.
         try:
@@ -199,13 +204,65 @@ def emit(metadata: dict[str, Any], event: str, **kwargs: Any) -> None:
             raise
 
         if accepted_kwargs:
-            cb(**accepted_kwargs)
-            return
+            return cb(**accepted_kwargs)
 
         if len(kwargs) == 1:
-            cb(next(iter(kwargs.values())))
-            return
+            return cb(next(iter(kwargs.values())))
         raise
+
+
+def with_node_execution_context(
+    metadata: dict[str, Any] | None,
+    *,
+    node_id: str,
+    node_type: str,
+    node_execution_id: str,
+) -> dict[str, Any]:
+    next_metadata = dict(metadata or {})
+    next_metadata[TRACE_CONTEXT_METADATA_KEY] = {
+        "node_id": str(node_id or "").strip(),
+        "node_type": str(node_type or "").strip(),
+        "node_execution_id": str(node_execution_id or "").strip(),
+    }
+    return next_metadata
+
+
+def _apply_trace_context(
+    metadata: dict[str, Any] | None,
+    event: str,
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    raw_context = metadata.get(TRACE_CONTEXT_METADATA_KEY) if isinstance(metadata, dict) else None
+    if not isinstance(raw_context, dict):
+        return kwargs
+
+    next_kwargs = dict(kwargs)
+    node_id = str(raw_context.get("node_id", "") or "").strip()
+    node_type = str(raw_context.get("node_type", "") or "").strip()
+    node_execution_id = str(raw_context.get("node_execution_id", "") or "").strip()
+
+    if node_execution_id and "node_execution_id" not in next_kwargs:
+        next_kwargs["node_execution_id"] = node_execution_id
+
+    if event in {"on_tool_call_start", "on_tool_call_end"}:
+        if node_id and "node_id" not in next_kwargs:
+            next_kwargs["node_id"] = node_id
+        if node_type and "node_type" not in next_kwargs:
+            next_kwargs["node_type"] = node_type
+        return next_kwargs
+
+    if event in {
+        "on_node_start",
+        "on_node_output_delta",
+        "on_node_end",
+        "on_branch_decision",
+        "on_node_snapshot",
+    }:
+        if node_id and "node_id" not in next_kwargs:
+            next_kwargs["node_id"] = node_id
+        if event in {"on_node_start", "on_node_snapshot"} and node_type and "node_type" not in next_kwargs:
+            next_kwargs["node_type"] = node_type
+    return next_kwargs
 
 
 def wrap_tool_with_db(tool: Any, db_bind: Any) -> Callable:

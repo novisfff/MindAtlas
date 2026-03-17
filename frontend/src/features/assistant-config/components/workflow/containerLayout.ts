@@ -4,6 +4,7 @@ import { normalizeIfElseConfig } from './ifElseConfig'
 const BODY_NODE_SIZE: Record<ContainerBodyNodeType, { width: number; height: number }> = {
   start: { width: 240, height: 96 },
   llm: { width: 240, height: 112 },
+  agent: { width: 240, height: 112 },
   tool: { width: 240, height: 112 },
   if_else: { width: 240, height: 160 },
   parameter_extractor: { width: 240, height: 112 },

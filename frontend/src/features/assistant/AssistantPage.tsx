@@ -58,12 +58,36 @@ function AssistantPageContent() {
           const rawSkillCalls = msg.skillCalls || msg.skill_calls
 
           if (rawToolCalls && Array.isArray(rawToolCalls)) {
-            const resultsMap = new Map<string, { status: string; result: string }>()
+            const resultsMap = new Map<string, {
+              status: string
+              result: string
+              nodeId?: string
+              nodeType?: string
+              nodeExecutionId?: string
+              agentRound?: number
+              toolCallIndex?: number
+              toolKind?: string
+              startedAt?: string
+              endedAt?: string
+              durationMs?: number
+            }>()
             if (rawToolResults && Array.isArray(rawToolResults)) {
               for (const r of rawToolResults) {
                 // Handle potentially different naming in results too
                 const id = r.id || r.tool_call_id || r.toolCallId
-                resultsMap.set(id, { status: r.status, result: r.result })
+                resultsMap.set(id, {
+                  status: r.status,
+                  result: r.result,
+                  nodeId: r.nodeId ?? r.node_id,
+                  nodeType: r.nodeType ?? r.node_type,
+                  nodeExecutionId: r.nodeExecutionId ?? r.node_execution_id,
+                  agentRound: r.agentRound ?? r.agent_round,
+                  toolCallIndex: r.toolCallIndex ?? r.tool_call_index,
+                  toolKind: r.toolKind ?? r.tool_kind,
+                  startedAt: r.startedAt ?? r.started_at,
+                  endedAt: r.endedAt ?? r.ended_at,
+                  durationMs: r.durationMs ?? r.duration_ms,
+                })
               }
             }
             toolCalls = rawToolCalls.map((tc: any) => {
@@ -76,6 +100,15 @@ function AssistantPageContent() {
                 result: result?.result,
                 status: (result?.status === 'completed' ? 'completed' : 'error') as 'completed' | 'error',
                 hidden: tc.hidden ?? false,
+                nodeId: tc.nodeId ?? tc.node_id ?? result?.nodeId,
+                nodeType: tc.nodeType ?? tc.node_type ?? result?.nodeType,
+                nodeExecutionId: tc.nodeExecutionId ?? tc.node_execution_id ?? result?.nodeExecutionId,
+                agentRound: tc.agentRound ?? tc.agent_round ?? result?.agentRound,
+                toolCallIndex: tc.toolCallIndex ?? tc.tool_call_index ?? result?.toolCallIndex,
+                toolKind: tc.toolKind ?? tc.tool_kind ?? result?.toolKind,
+                startedAt: tc.startedAt ?? tc.started_at ?? result?.startedAt,
+                endedAt: result?.endedAt,
+                durationMs: result?.durationMs,
               }
             })
           }

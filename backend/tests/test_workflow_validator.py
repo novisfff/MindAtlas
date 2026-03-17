@@ -691,6 +691,211 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertTrue(any("loop maxIterations must be between 1 and 1000" in e.message for e in result.errors))
 
+    def test_agent_node_requires_tool_names_or_knowledge(self) -> None:
+        from app.assistant.workflow.validation.validator import validate_workflow, validate_workflow_compile
+
+        nodes = [
+            {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
+            {
+                "node_id": "agent_1",
+                "node_type": "agent",
+                "label": "Agent",
+                "config": {
+                    "userInput": "{{start.user_input}}",
+                    "toolNames": [],
+                },
+            },
+        ]
+        edges = [
+            {"source_node_id": "start", "target_node_id": "agent_1", "source_handle": "output"},
+        ]
+        nodes, edges = self._append_output_node(nodes, edges, "agent_1")
+
+        result = validate_workflow(nodes, edges)
+        self.assertFalse(result.valid)
+        self.assertTrue(
+            any("requires at least one toolNames entry or knowledgeEnabled=true" in e.message for e in result.errors)
+        )
+
+        compile_result = validate_workflow_compile(nodes, edges, tool_names=set())
+        self.assertFalse(compile_result.valid)
+        self.assertTrue(
+            any(
+                "requires at least one toolNames entry or knowledgeEnabled=true" in e.message
+                for e in compile_result.errors
+            )
+        )
+
+    def test_agent_node_allows_knowledge_enabled_without_tool_names(self) -> None:
+        from app.assistant.workflow.validation.validator import validate_workflow, validate_workflow_compile
+
+        nodes = [
+            {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
+            {
+                "node_id": "agent_1",
+                "node_type": "agent",
+                "label": "Agent",
+                "config": {
+                    "userInput": "{{start.user_input}}",
+                    "toolNames": [],
+                    "knowledgeEnabled": True,
+                    "knowledgeMode": "hybrid",
+                    "knowledgeTopK": 5,
+                },
+            },
+        ]
+        edges = [
+            {"source_node_id": "start", "target_node_id": "agent_1", "source_handle": "output"},
+        ]
+        nodes, edges = self._append_output_node(nodes, edges, "agent_1")
+
+        result = validate_workflow(nodes, edges)
+        self.assertTrue(result.valid, [e.message for e in result.errors])
+
+        compile_result = validate_workflow_compile(nodes, edges, tool_names={"kb_search"})
+        self.assertTrue(compile_result.valid, [e.message for e in compile_result.errors])
+
+    def test_agent_node_rejects_kb_search_in_tool_names(self) -> None:
+        from app.assistant.workflow.validation.validator import validate_workflow, validate_workflow_compile
+
+        nodes = [
+            {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
+            {
+                "node_id": "agent_1",
+                "node_type": "agent",
+                "label": "Agent",
+                "config": {
+                    "userInput": "{{start.user_input}}",
+                    "toolNames": ["kb_search"],
+                    "knowledgeEnabled": True,
+                },
+            },
+        ]
+        edges = [
+            {"source_node_id": "start", "target_node_id": "agent_1", "source_handle": "output"},
+        ]
+        nodes, edges = self._append_output_node(nodes, edges, "agent_1")
+
+        result = validate_workflow(nodes, edges)
+        self.assertFalse(result.valid)
+        self.assertTrue(
+            any("must not include kb_search; use knowledgeEnabled instead" in e.message for e in result.errors),
+            [e.message for e in result.errors],
+        )
+
+        compile_result = validate_workflow_compile(nodes, edges, tool_names={"kb_search"})
+        self.assertFalse(compile_result.valid)
+        self.assertTrue(
+            any(
+                "must not include kb_search; use knowledgeEnabled instead" in e.message
+                for e in compile_result.errors
+            ),
+            [e.message for e in compile_result.errors],
+        )
+
+    def test_agent_node_rejects_invalid_knowledge_config(self) -> None:
+        from app.assistant.workflow.validation.validator import validate_workflow, validate_workflow_compile
+
+        nodes = [
+            {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
+            {
+                "node_id": "agent_1",
+                "node_type": "agent",
+                "label": "Agent",
+                "config": {
+                    "userInput": "{{start.user_input}}",
+                    "toolNames": [],
+                    "knowledgeEnabled": True,
+                    "knowledgeMode": "unsupported",
+                    "knowledgeTopK": 99,
+                },
+            },
+        ]
+        edges = [
+            {"source_node_id": "start", "target_node_id": "agent_1", "source_handle": "output"},
+        ]
+        nodes, edges = self._append_output_node(nodes, edges, "agent_1")
+
+        result = validate_workflow(nodes, edges)
+        self.assertFalse(result.valid)
+        self.assertTrue(any("knowledgeMode is invalid" in e.message for e in result.errors), [e.message for e in result.errors])
+        self.assertTrue(any("knowledgeTopK must be between 1 and 50" in e.message for e in result.errors), [e.message for e in result.errors])
+
+        compile_result = validate_workflow_compile(nodes, edges, tool_names={"kb_search"})
+        self.assertFalse(compile_result.valid)
+        self.assertTrue(any("knowledgeMode is invalid" in e.message for e in compile_result.errors), [e.message for e in compile_result.errors])
+        self.assertTrue(any("knowledgeTopK must be between 1 and 50" in e.message for e in compile_result.errors), [e.message for e in compile_result.errors])
+
+    def test_agent_node_max_iterations_range_validation(self) -> None:
+        from app.assistant.workflow.validation.validator import validate_workflow
+
+        nodes = [
+            {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
+            {
+                "node_id": "agent_1",
+                "node_type": "agent",
+                "label": "Agent",
+                "config": {
+                    "userInput": "{{start.user_input}}",
+                    "toolNames": ["create_entry"],
+                    "maxIterations": 99,
+                },
+            },
+        ]
+        edges = [
+            {"source_node_id": "start", "target_node_id": "agent_1", "source_handle": "output"},
+        ]
+        nodes, edges = self._append_output_node(nodes, edges, "agent_1")
+
+        result = validate_workflow(nodes, edges)
+        self.assertFalse(result.valid)
+        self.assertTrue(any("maxIterations must be between 1 and 20" in e.message for e in result.errors))
+
+    def test_container_body_agent_uses_same_validation_rules(self) -> None:
+        from app.assistant.workflow.validation.validator import validate_workflow, validate_workflow_compile
+
+        nodes = [
+            {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
+            {
+                "node_id": "iter_1",
+                "node_type": "iteration",
+                "label": "Iter",
+                "config": {
+                    "inputSource": "{{start.user_input}}",
+                    "outputVariable": "results",
+                    "outputSelector": "{{container.item}}",
+                    "bodyNodes": [
+                        {"nodeId": "start", "nodeType": "start", "label": "Start", "config": {}},
+                        {
+                            "nodeId": "agent_body",
+                            "nodeType": "agent",
+                            "label": "Agent Body",
+                            "config": {
+                                "userInput": "{{container.item}}",
+                                "toolNames": [],
+                                "knowledgeEnabled": True,
+                                "knowledgeMode": "local",
+                                "knowledgeTopK": 3,
+                            },
+                        },
+                    ],
+                    "bodyEdges": [
+                        {"sourceNodeId": "start", "targetNodeId": "agent_body", "sourceHandle": "output"},
+                    ],
+                },
+            },
+        ]
+        edges = [
+            {"source_node_id": "start", "target_node_id": "iter_1", "source_handle": "output"},
+        ]
+        nodes, edges = self._append_output_node(nodes, edges, "iter_1")
+
+        result = validate_workflow(nodes, edges)
+        self.assertTrue(result.valid, [e.message for e in result.errors])
+
+        compile_result = validate_workflow_compile(nodes, edges, tool_names={"kb_search"})
+        self.assertTrue(compile_result.valid, [e.message for e in compile_result.errors])
+
 
 if __name__ == "__main__":
     unittest.main()

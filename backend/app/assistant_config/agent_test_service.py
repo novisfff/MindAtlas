@@ -33,12 +33,31 @@ class PreparedAgentTestRun:
     agent_profile_id: UUID
     display_name: str
     user_input: str
+    history: list[dict[str, str]]
     stream_output: bool
     skill_definition: SkillDefinition
 
 
 def _utc_iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _build_trace_context_payload(extra: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+
+    agent_round = extra.get("agent_round")
+    if isinstance(agent_round, int):
+        payload["agentRound"] = agent_round
+
+    tool_call_index = extra.get("tool_call_index")
+    if isinstance(tool_call_index, int):
+        payload["toolCallIndex"] = tool_call_index
+
+    tool_kind = str(extra.get("tool_kind", "") or "").strip().lower()
+    if tool_kind in {"tool", "knowledge"}:
+        payload["toolKind"] = tool_kind
+
+    return payload
 
 
 class AgentTestRunService:
@@ -133,6 +152,7 @@ class AgentTestRunService:
             agent_profile_id=profile.id,
             display_name=profile.name,
             user_input=request.user_input,
+            history=[dict(item) for item in request.history],
             stream_output=bool(request.stream_output),
             skill_definition=skill_definition,
         )
@@ -158,6 +178,8 @@ class AgentTestRunService:
         pending_content_parts: list[str] = []
         pending_content_chars = 0
         last_delta_flush_at = time.perf_counter()
+        tool_started_perf: dict[str, float] = {}
+        tool_started_at: dict[str, str] = {}
 
         def enqueue(event_name: str, **payload: Any) -> None:
             event_queue.append(self._sse(event_name, payload))
@@ -269,24 +291,41 @@ class AgentTestRunService:
             return
 
         try:
-            def on_tool_call_start(tool_call_id: str, tool_name: str, args: Any) -> None:
+            def on_tool_call_start(tool_call_id: str, tool_name: str, args: Any, **extra: Any) -> None:
+                started_at = _utc_iso_now()
+                tool_started_at[tool_call_id] = started_at
+                tool_started_perf[tool_call_id] = time.perf_counter()
                 _queue_key_event(
                     "tool_call_start",
                     runId=run_id,
                     toolCallId=tool_call_id,
                     name=tool_name,
                     args=args,
-                    ts=_utc_iso_now(),
+                    startedAt=started_at,
+                    ts=started_at,
+                    **_build_trace_context_payload(extra),
                 )
 
-            def on_tool_call_end(tool_call_id: str, status: str, result: Any) -> None:
+            def on_tool_call_end(tool_call_id: str, status: str, result: Any, **extra: Any) -> None:
+                ended_at = _utc_iso_now()
+                started_perf = tool_started_perf.pop(tool_call_id, None)
+                started_at = tool_started_at.pop(tool_call_id, None)
+                duration_ms = (
+                    max(0, int((time.perf_counter() - started_perf) * 1000))
+                    if isinstance(started_perf, (int, float))
+                    else None
+                )
                 _queue_key_event(
                     "tool_call_end",
                     runId=run_id,
                     toolCallId=tool_call_id,
                     status=status,
                     result=result,
-                    ts=_utc_iso_now(),
+                    startedAt=started_at,
+                    endedAt=ended_at,
+                    durationMs=duration_ms,
+                    ts=ended_at,
+                    **_build_trace_context_payload(extra),
                 )
 
             def on_analysis_start(analysis_id: str) -> None:
@@ -317,7 +356,7 @@ class AgentTestRunService:
             for delta in engine.execute(
                 skill=prepared.skill_definition,
                 user_input=prepared.user_input,
-                history=[],
+                history=prepared.history,
                 runtime_context={
                     "stream_output": prepared.stream_output,
                     "conversation_id": f"agent_test:{run_id}",

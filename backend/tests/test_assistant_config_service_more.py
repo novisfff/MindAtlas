@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from unittest.mock import patch
+from uuid import uuid4
 from pydantic import ValidationError
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
@@ -424,3 +425,69 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.status_code, 422)
         self.assertEqual(ctx.exception.code, 42207)
+
+    def test_collect_workflow_tool_names_includes_agent_main_and_container_body(self) -> None:
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        workflow_nodes = [
+            {"node_type": "start", "config": {}},
+            {
+                "node_type": "agent",
+                "config": {
+                    "toolNames": ["create_entry", "  "],
+                },
+            },
+            {
+                "node_type": "iteration",
+                "config": {
+                    "bodyNodes": [
+                        {"nodeType": "start", "config": {}},
+                        {
+                            "nodeType": "agent",
+                            "config": {
+                                "toolNames": ["update_entry"],
+                            },
+                        },
+                    ],
+                },
+            },
+        ]
+
+        collected = AssistantConfigService._collect_workflow_tool_names(workflow_nodes)
+        self.assertEqual(collected, {"create_entry", "update_entry"})
+
+    def test_collect_workflow_custom_model_ids_includes_agent_main_and_container_body(self) -> None:
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        main_model_id = uuid4()
+        body_model_id = uuid4()
+        workflow_nodes = [
+            {"node_type": "start", "config": {}},
+            {
+                "node_type": "agent",
+                "config": {
+                    "toolNames": ["create_entry"],
+                    "modelSource": "custom",
+                    "modelId": str(main_model_id),
+                },
+            },
+            {
+                "node_type": "loop",
+                "config": {
+                    "bodyNodes": [
+                        {"nodeType": "start", "config": {}},
+                        {
+                            "nodeType": "agent",
+                            "config": {
+                                "toolNames": ["update_entry"],
+                                "modelSource": "custom",
+                                "modelId": str(body_model_id),
+                            },
+                        },
+                    ],
+                },
+            },
+        ]
+
+        collected = AssistantConfigService._collect_workflow_custom_model_ids(workflow_nodes)
+        self.assertEqual(collected, {main_model_id, body_model_id})

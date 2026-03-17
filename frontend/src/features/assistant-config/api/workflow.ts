@@ -6,6 +6,7 @@ import { SSEParser } from '@/lib/sse/SSEParser'
 export type NodeType =
   | 'start'
   | 'llm'
+  | 'agent'
   | 'tool'
   | 'if_else'
   | 'parameter_extractor'
@@ -98,6 +99,15 @@ export interface LLMNodeConfig {
   knowledgeSourceNodeIds?: string[]
   knowledgeInjectMode?: 'references_only' | 'full_payload'
   knowledgeMaxRefs?: number
+  modelSource?: 'default' | 'custom'
+  modelId?: string
+}
+
+export interface AgentNodeConfig {
+  systemPrompt?: string
+  userInput?: string
+  toolNames?: string[]
+  maxIterations?: number
   modelSource?: 'default' | 'custom'
   modelId?: string
 }
@@ -233,6 +243,7 @@ export interface HumanInLoopNodeConfig {
 export type ContainerBodyNodeType =
   | 'start'
   | 'llm'
+  | 'agent'
   | 'tool'
   | 'if_else'
   | 'parameter_extractor'
@@ -286,6 +297,7 @@ export interface LoopNodeConfig {
 export type NodeConfig =
   | StartNodeConfig
   | LLMNodeConfig
+  | AgentNodeConfig
   | OutputNodeConfig
   | ToolNodeConfig
   | IfElseNodeConfig
@@ -344,6 +356,18 @@ export interface WorkflowNode {
   updatedAt: string
 }
 
+interface WorkflowNodeTraceContext {
+  nodeExecutionId?: string
+}
+
+interface WorkflowAgentToolTraceContext extends WorkflowNodeTraceContext {
+  nodeId?: string
+  nodeType?: string
+  agentRound?: number
+  toolCallIndex?: number
+  toolKind?: 'tool' | 'knowledge'
+}
+
 export interface WorkflowEdge {
   id: string
   edgeId: string
@@ -396,10 +420,23 @@ export interface WorkflowValidationResponse {
   errors: WorkflowValidationError[]
 }
 
+export interface WorkflowConversationHistoryItem {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export interface WorkflowTestSessionMemory {
+  conversationSummary?: string
+  skillFacts?: string[]
+}
+
 export interface WorkflowTestRunRequest {
   workflow: WorkflowInput
   userInput?: string
   structuredInput?: Record<string, unknown>
+  sessionId?: string
+  history?: WorkflowConversationHistoryItem[]
+  sessionMemory?: WorkflowTestSessionMemory
   streamOutput?: boolean
 }
 
@@ -420,7 +457,7 @@ export type WorkflowRunEvent =
         nodeId: string
         nodeType: string
         ts: string
-      }
+      } & WorkflowNodeTraceContext
     }
   | {
       event: 'node_output_delta'
@@ -430,7 +467,7 @@ export type WorkflowRunEvent =
         // merged delta payload (not guaranteed one token per event)
         delta: string
         ts: string
-      }
+      } & WorkflowNodeTraceContext
     }
   | {
       event: 'branch_decision'
@@ -439,7 +476,7 @@ export type WorkflowRunEvent =
         nodeId: string
         handle: string
         ts: string
-      }
+      } & WorkflowNodeTraceContext
     }
   | {
       event: 'tool_call_start'
@@ -448,8 +485,9 @@ export type WorkflowRunEvent =
         toolCallId: string
         name: string
         args: Record<string, unknown>
+        startedAt?: string
         ts: string
-      }
+      } & WorkflowAgentToolTraceContext
     }
   | {
       event: 'tool_call_end'
@@ -458,8 +496,11 @@ export type WorkflowRunEvent =
         toolCallId: string
         status: string
         result: string
+        startedAt?: string | null
+        endedAt?: string
+        durationMs?: number | null
         ts: string
-      }
+      } & WorkflowAgentToolTraceContext
     }
   | {
       event: 'content_delta'
@@ -477,7 +518,7 @@ export type WorkflowRunEvent =
         nodeId: string
         status: string
         ts: string
-      }
+      } & WorkflowNodeTraceContext
     }
   | {
       event: 'node_snapshot'
@@ -491,7 +532,7 @@ export type WorkflowRunEvent =
         errorMessage: string | null
         hardTruncated?: boolean
         ts: string
-      }
+      } & WorkflowNodeTraceContext
     }
   | {
       event: 'run_end'
@@ -501,6 +542,7 @@ export type WorkflowRunEvent =
         durationMs: number
         finalText: string
         finalJson: Record<string, unknown> | Array<unknown> | null
+        sessionMemory?: WorkflowTestSessionMemory
         streamOutput: boolean
       }
     }

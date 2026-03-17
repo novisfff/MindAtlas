@@ -217,7 +217,7 @@ class OutputFieldSpecInput(CamelModel):
 # ==================== Workflow DAG Schemas ====================
 
 NodeType = Literal[
-    "start", "llm", "tool", "if_else",
+    "start", "llm", "agent", "tool", "if_else",
     "parameter_extractor", "knowledge_retrieval",
     "iteration", "loop", "code_executor", "http_request", "variable_assign", "human_in_loop", "output",
 ]
@@ -287,11 +287,44 @@ def _resolve_workflow_start_input_mode(workflow: WorkflowInput | None) -> str:
     return "text"
 
 
+class WorkflowConversationHistoryItem(CamelModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=8000)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "WorkflowConversationHistoryItem":
+        self.content = str(self.content or "").strip()
+        if not self.content:
+            raise ValueError("history content must not be empty")
+        return self
+
+
+class WorkflowTestSessionMemoryInput(CamelModel):
+    conversation_summary: str | None = Field(default=None, max_length=8000)
+    skill_facts: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "WorkflowTestSessionMemoryInput":
+        if self.conversation_summary is not None:
+            self.conversation_summary = str(self.conversation_summary or "").strip()
+        normalized_facts: list[str] = []
+        for item in self.skill_facts:
+            value = str(item or "").strip()
+            if not value:
+                continue
+            normalized_facts.append(value)
+        self.skill_facts = normalized_facts
+        return self
+
+
 class WorkflowTestRunRequest(CamelModel):
     """工作流测试运行请求（仅运行草稿，不持久化）。"""
     workflow: WorkflowInput
     user_input: str | None = Field(default=None, max_length=8000)
     structured_input: dict | None = None
+    session_id: UUID | None = None
+    history: list[WorkflowConversationHistoryItem] = Field(default_factory=list, max_length=100)
+    session_memory: WorkflowTestSessionMemoryInput | None = None
     stream_output: bool = True
 
     @model_validator(mode="after")
@@ -302,12 +335,17 @@ class WorkflowTestRunRequest(CamelModel):
                 raise ValueError("structured_input is required when start inputMode=structured")
             if self.user_input is not None and str(self.user_input).strip():
                 raise ValueError("user_input is not allowed when start inputMode=structured")
+            if self.history:
+                raise ValueError("history is not allowed when start inputMode=structured")
+            if self.session_memory is not None:
+                raise ValueError("session_memory is not allowed when start inputMode=structured")
             return self
 
         if self.structured_input is not None:
             raise ValueError("structured_input is only allowed when start inputMode=structured")
         if self.user_input is None or not str(self.user_input).strip():
             raise ValueError("user_input is required when start inputMode=text")
+        self.user_input = str(self.user_input).strip()
         return self
 
 
@@ -340,7 +378,26 @@ class AgentTestRunRequest(CamelModel):
     """Agent 测试运行请求（仅运行草稿，不持久化）。"""
     draft: AgentTestRunDraftInput
     user_input: str = Field(..., min_length=1, max_length=8000)
+    history: list[dict[str, str]] = Field(default_factory=list, max_length=100)
     stream_output: bool = True
+
+    @model_validator(mode="after")
+    def _validate_history(self) -> "AgentTestRunRequest":
+        normalized_history: list[dict[str, str]] = []
+        for item in self.history:
+            if not isinstance(item, dict):
+                raise ValueError("history items must be objects")
+            role = str(item.get("role", "") or "").strip().lower()
+            content = str(item.get("content", "") or "").strip()
+            if role not in {"user", "assistant"}:
+                raise ValueError("history role must be user or assistant")
+            if not content:
+                raise ValueError("history content must not be empty")
+            if len(content) > 8000:
+                raise ValueError("history content exceeds max length 8000")
+            normalized_history.append({"role": role, "content": content})
+        self.history = normalized_history
+        return self
 
 
 class WorkflowValidationError(CamelModel):

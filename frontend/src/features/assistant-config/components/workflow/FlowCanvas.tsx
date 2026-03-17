@@ -28,6 +28,7 @@ import { FlowControls } from './FlowControls'
 const nodeTypes: NodeTypes = {
   start: WorkflowNode,
   llm: WorkflowNode,
+  agent: WorkflowNode,
   tool: WorkflowNode,
   if_else: WorkflowNode,
   parameter_extractor: WorkflowNode,
@@ -264,7 +265,7 @@ export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
       }
     }
 
-    Object.entries(nodeTraceMap).forEach(([rawNodeId, trace]) => {
+    Object.values(nodeTraceMap).forEach((trace) => {
       const mappedStatus = trace.status === 'running'
         ? 'running'
         : trace.status === 'error'
@@ -273,6 +274,7 @@ export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
             ? 'success'
             : null
       if (!mappedStatus) return
+      const rawNodeId = trace.nodeId
       const scopeIdx = rawNodeId.indexOf('::')
       if (scopeIdx > 0) {
         const containerId = rawNodeId.slice(0, scopeIdx)

@@ -6,6 +6,7 @@ import i18n from '@/lib/i18n'
 const DEFAULT_LABEL_BY_TYPE: Record<NodeType, string> = {
   start: 'Start',
   llm: 'LLM',
+  agent: 'Agent',
   tool: 'Tool',
   if_else: 'If Else',
   parameter_extractor: 'Parameter Extractor',
@@ -22,6 +23,7 @@ const DEFAULT_LABEL_BY_TYPE: Record<NodeType, string> = {
 const NODE_TYPE_LABEL_KEY: Record<NodeType, string> = {
   start: 'settings.skills.nodeTypes.start',
   llm: 'settings.skills.nodeTypes.llm',
+  agent: 'settings.skills.nodeTypes.agent',
   tool: 'settings.skills.nodeTypes.tool',
   if_else: 'settings.skills.nodeTypes.if_else',
   parameter_extractor: 'settings.skills.nodeTypes.parameter_extractor',

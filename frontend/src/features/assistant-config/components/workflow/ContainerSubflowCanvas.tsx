@@ -1,6 +1,7 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import {
   Brain,
+  Bot,
   BookOpen,
   GitBranch,
   Infinity,
@@ -47,6 +48,7 @@ const edgeTypes = {
 const NODE_STYLES: Record<ContainerBodyNodeType, { header: string; icon: typeof Play; iconColor: string }> = {
   start: { header: 'bg-green-50 border-b border-green-100', icon: Play, iconColor: 'text-green-600' },
   llm: { header: 'bg-purple-50 border-b border-purple-100', icon: Brain, iconColor: 'text-purple-600' },
+  agent: { header: 'bg-indigo-50 border-b border-indigo-100', icon: Bot, iconColor: 'text-indigo-600' },
   tool: { header: 'bg-sky-50 border-b border-sky-100', icon: Wrench, iconColor: 'text-sky-600' },
   if_else: { header: 'bg-yellow-50 border-b border-yellow-100', icon: GitBranch, iconColor: 'text-yellow-600' },
   parameter_extractor: { header: 'bg-pink-50 border-b border-pink-100', icon: ScanSearch, iconColor: 'text-pink-600' },
@@ -61,6 +63,7 @@ const PREVIEW_MAX = 50
 const NODE_ICON_MAP: Record<ContainerBodyNodeType, typeof Play> = {
   start: Play,
   llm: Brain,
+  agent: Bot,
   tool: Wrench,
   if_else: GitBranch,
   parameter_extractor: ScanSearch,
@@ -112,6 +115,15 @@ function getSubflowPreview(nodeType: ContainerBodyNodeType, config: Record<strin
   switch (nodeType) {
     case 'llm':
       return truncate(cfg.systemPrompt as string, PREVIEW_MAX)
+    case 'agent': {
+      const prompt = truncate(cfg.systemPrompt as string, 38)
+      const toolNames = Array.isArray(cfg.toolNames)
+        ? cfg.toolNames.map((item) => String(item).trim()).filter(Boolean)
+        : []
+      const toolSummary = toolNames.length > 0 ? `tools ${toolNames.length}` : 'no tools'
+      if (!prompt) return toolSummary
+      return `${prompt} · ${toolSummary}`
+    }
     case 'tool':
       return (cfg.toolName as string) || ''
     case 'if_else': {

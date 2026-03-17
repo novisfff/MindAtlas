@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -132,6 +133,48 @@ class AssistantConfigServiceTests(unittest.TestCase):
 
         rec2 = self.db.query(AssistantTool).filter(AssistantTool.name == "t1").first()
         self.assertIsNone(rec2)
+
+    def test_validate_workflow_dependencies_adds_implicit_kb_search_for_agent_and_knowledge_nodes(self) -> None:
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        workflow = SimpleNamespace(
+            nodes=[
+                {"node_id": "start", "node_type": "start", "config": {}},
+                {"node_id": "kr_1", "node_type": "knowledge_retrieval", "config": {"query": "{{start.user_input}}"}},
+                {
+                    "node_id": "agent_1",
+                    "node_type": "agent",
+                    "config": {
+                        "toolNames": ["search_entries"],
+                        "knowledgeEnabled": True,
+                    },
+                },
+                {
+                    "node_id": "iter_1",
+                    "node_type": "iteration",
+                    "config": {
+                        "bodyNodes": [
+                            {"nodeId": "start", "nodeType": "start", "config": {}},
+                            {
+                                "nodeId": "agent_body",
+                                "nodeType": "agent",
+                                "config": {"toolNames": [], "knowledgeEnabled": True},
+                            },
+                        ],
+                        "bodyEdges": [],
+                    },
+                },
+            ]
+        )
+
+        with patch(
+            "app.assistant_config.service.ToolRegistry.list_system_tools",
+            return_value=[_SysTool("search_entries")],
+        ):
+            deps = svc.validate_workflow_dependencies(workflow)
+
+        self.assertEqual(deps, {"search_entries", "kb_search"})
 
     def test_sync_system_tools_integrity_error_40910(self) -> None:
         from app.assistant_config.service import AssistantConfigService  # noqa: E402

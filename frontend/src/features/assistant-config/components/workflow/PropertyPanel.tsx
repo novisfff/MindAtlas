@@ -12,6 +12,7 @@ import type {
 import { buildWorkflowReferenceParams } from './variableReferences'
 import { NodeHeader } from './property-panel/NodeHeader'
 import { StartNodeSettings } from './property-panel/nodes/StartNodeSettings'
+import { AgentNodeSettings } from './property-panel/nodes/AgentNodeSettings'
 import { LlmNodeSettings } from './property-panel/nodes/LlmNodeSettings'
 import { ToolNodeSettings } from './property-panel/nodes/ToolNodeSettings'
 import { IfElseNodeSettings } from './property-panel/nodes/IfElseNodeSettings'
@@ -597,6 +598,8 @@ export function PropertyPanel({ tools, workflowDescription, onWorkflowDescriptio
             modelOptions={nodeModelOptions}
           />
         )
+      case 'agent':
+        return <AgentNodeSettings {...commonProps} tools={tools} modelOptions={nodeModelOptions} />
       case 'tool':
         return <ToolNodeSettings {...commonProps} tools={tools} />
       case 'if_else':

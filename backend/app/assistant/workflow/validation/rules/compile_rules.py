@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from typing import Sequence
+from uuid import UUID
 
 from app.assistant.workflow.validation.contracts import _SYS_FIELDS
 from app.assistant.workflow.validation.helpers import (
@@ -25,6 +26,10 @@ from app.assistant.workflow.validation.rules.if_else_rules import (
 from app.assistant.workflow.validation.rules.variable_assign_rules import (
     validate_variable_assign_node_config,
 )
+
+
+_AGENT_KNOWLEDGE_MODES = {"naive", "local", "global", "hybrid", "mix"}
+_INTERNAL_AGENT_KB_TOOL_NAME = "kb_search"
 
 
 def resolve_compile_start_env_var_types(nodes: Sequence) -> dict[str, str]:
@@ -170,6 +175,182 @@ def _validate_compile_output_node_config(
                             message=f"output field '{name or '<unknown>'}' requires string value",
                         )
                     )
+
+
+def _validate_compile_model_source_for_llm_like_nodes(
+    *,
+    node_id: str | None,
+    cfg: dict,
+    errors: list[ValidationError],
+    subject: str = "node",
+) -> None:
+    raw_model_source = cfg_get(cfg, "model_source", "modelSource", default=None)
+    model_source = str(raw_model_source or "default").strip().lower() or "default"
+    if model_source not in {"default", "custom"}:
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=f"Unsupported {subject} modelSource: {raw_model_source}",
+            )
+        )
+
+    raw_model_id = cfg_get(cfg, "model_id", "modelId", default=None)
+    model_id = str(raw_model_id).strip() if raw_model_id is not None else ""
+    if model_source == "custom" and not model_id:
+        message = "custom modelSource requires modelId" if subject == "node" else f"{subject} custom modelSource requires modelId"
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=message,
+            )
+        )
+    if model_source == "default" and model_id:
+        message = "default modelSource must not provide modelId" if subject == "node" else f"{subject} default modelSource must not provide modelId"
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=message,
+            )
+        )
+    if model_id:
+        try:
+            UUID(model_id)
+        except Exception:
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"Invalid {subject} modelId (must be UUID): {model_id}",
+                )
+            )
+
+
+def _validate_compile_agent_node_config(
+    *,
+    node_id: str | None,
+    cfg: dict,
+    errors: list[ValidationError],
+    subject: str = "agent",
+) -> None:
+    system_prompt = cfg_get(cfg, "system_prompt", "systemPrompt", default=None)
+    if system_prompt is not None and not isinstance(system_prompt, str):
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=f"{subject} systemPrompt must be a string",
+            )
+        )
+
+    user_input = cfg_get(cfg, "user_input", "userInput", default=None)
+    if user_input is not None and not isinstance(user_input, str):
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=f"{subject} userInput must be a string",
+            )
+        )
+
+    tool_names_raw = cfg_get(cfg, "tool_names", "toolNames", default=None)
+    tool_names: list[str] = []
+    if tool_names_raw is None:
+        tool_names = []
+    elif not isinstance(tool_names_raw, list):
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=f"{subject} toolNames must be a string array",
+            )
+        )
+    else:
+        for idx, item in enumerate(tool_names_raw, start=1):
+            if not isinstance(item, str) or not item.strip():
+                errors.append(
+                    ValidationError(
+                        node_id=node_id,
+                        message=f"{subject} toolNames[{idx}] must be a non-empty string",
+                    )
+                )
+                continue
+            tool_name = item.strip()
+            tool_names.append(tool_name)
+            if tool_name == _INTERNAL_AGENT_KB_TOOL_NAME:
+                errors.append(
+                    ValidationError(
+                        node_id=node_id,
+                        message=f"{subject} toolNames must not include kb_search; use knowledgeEnabled instead",
+                    )
+                )
+
+    knowledge_enabled_raw = cfg_get(cfg, "knowledge_enabled", "knowledgeEnabled", default=None)
+    knowledge_enabled = False
+    if knowledge_enabled_raw is None:
+        knowledge_enabled = False
+    elif isinstance(knowledge_enabled_raw, bool):
+        knowledge_enabled = knowledge_enabled_raw
+    else:
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=f"{subject} knowledgeEnabled must be a boolean",
+            )
+        )
+
+    knowledge_mode_raw = cfg_get(cfg, "knowledge_mode", "knowledgeMode", default=None)
+    if knowledge_mode_raw is not None and str(knowledge_mode_raw).strip():
+        knowledge_mode = str(knowledge_mode_raw).strip().lower()
+        if knowledge_mode not in _AGENT_KNOWLEDGE_MODES:
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} knowledgeMode is invalid: {knowledge_mode_raw}",
+                )
+            )
+
+    knowledge_top_k_raw = cfg_get(cfg, "knowledge_top_k", "knowledgeTopK", default=None)
+    if knowledge_top_k_raw is not None and str(knowledge_top_k_raw).strip():
+        try:
+            knowledge_top_k = int(knowledge_top_k_raw)
+        except Exception:
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} knowledgeTopK must be an integer between 1 and 50",
+                )
+            )
+        else:
+            if knowledge_top_k < 1 or knowledge_top_k > 50:
+                errors.append(
+                    ValidationError(
+                        node_id=node_id,
+                        message=f"{subject} knowledgeTopK must be between 1 and 50",
+                    )
+                )
+
+    if not tool_names and not knowledge_enabled:
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=f"{subject} requires at least one toolNames entry or knowledgeEnabled=true",
+            )
+        )
+
+    max_iterations_raw = cfg_get(cfg, "max_iterations", "maxIterations", default=12)
+    try:
+        max_iterations = int(max_iterations_raw)
+    except Exception:
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=f"{subject} maxIterations must be an integer between 1 and 20",
+            )
+        )
+    else:
+        if max_iterations < 1 or max_iterations > 20:
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} maxIterations must be between 1 and 20",
+                )
+            )
 
 
 def _validate_compile_if_else_node_conditions(
@@ -344,6 +525,14 @@ def _validate_compile_container_body_nodes(
                 not_found_message=f"{node_type} body node '{body_node_id}' references unknown tool: {{tool_name}}",
             )
 
+        if body_type in {"llm", "parameter_extractor", "agent"}:
+            _validate_compile_model_source_for_llm_like_nodes(
+                node_id=node_id,
+                cfg=body_cfg,
+                errors=errors,
+                subject=f"{node_type} body node '{body_node_id}'",
+            )
+
         if body_type == "llm":
             _validate_compile_body_llm_node(
                 parent_node_id=node_id,
@@ -352,6 +541,26 @@ def _validate_compile_container_body_nodes(
                 body_cfg=body_cfg,
                 errors=errors,
             )
+
+        if body_type == "agent":
+            _validate_compile_agent_node_config(
+                node_id=node_id,
+                cfg=body_cfg,
+                errors=errors,
+                subject=f"{node_type} body node '{body_node_id}' agent",
+            )
+            body_agent_tool_names = cfg_get(body_cfg, "tool_names", "toolNames", default=[])
+            if isinstance(body_agent_tool_names, list):
+                for raw_tool_name in body_agent_tool_names:
+                    if isinstance(raw_tool_name, str) and raw_tool_name.strip() == _INTERNAL_AGENT_KB_TOOL_NAME:
+                        continue
+                    _validate_compile_tool_reference(
+                        node_id=node_id,
+                        tool_name=raw_tool_name,
+                        tool_names=tool_names,
+                        errors=errors,
+                        not_found_message=f"{node_type} body node '{body_node_id}' references unknown tool: {{tool_name}}",
+                    )
 
         if body_type == "if_else":
             _validate_compile_body_if_else_node_conditions(
@@ -419,6 +628,43 @@ def validate_compile_node(
             cfg=cfg,
             errors=errors,
         )
+        _validate_compile_model_source_for_llm_like_nodes(
+            node_id=node_id,
+            cfg=cfg,
+            errors=errors,
+        )
+
+    if node_type == "parameter_extractor":
+        _validate_compile_model_source_for_llm_like_nodes(
+            node_id=node_id,
+            cfg=cfg,
+            errors=errors,
+        )
+
+    if node_type == "agent":
+        _validate_compile_agent_node_config(
+            node_id=node_id,
+            cfg=cfg,
+            errors=errors,
+        )
+        _validate_compile_model_source_for_llm_like_nodes(
+            node_id=node_id,
+            cfg=cfg,
+            errors=errors,
+            subject="agent",
+        )
+        agent_tool_names = cfg_get(cfg, "tool_names", "toolNames", default=[])
+        if isinstance(agent_tool_names, list):
+            for raw_tool_name in agent_tool_names:
+                if isinstance(raw_tool_name, str) and raw_tool_name.strip() == _INTERNAL_AGENT_KB_TOOL_NAME:
+                    continue
+                _validate_compile_tool_reference(
+                    node_id=node_id,
+                    tool_name=raw_tool_name,
+                    tool_names=tool_names,
+                    errors=errors,
+                    not_found_message="Agent node references unknown tool: {tool_name}",
+                )
 
     if node_type == "output":
         _validate_compile_output_node_config(

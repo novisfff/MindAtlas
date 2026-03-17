@@ -68,7 +68,7 @@ def build_output_node(
                 stream_output_enabled
                 and single_ref is not None
                 and single_ref[0] == output_stream_source_node_id
-                and workflow_node_types.get(single_ref[0]) == "llm"
+                and workflow_node_types.get(single_ref[0]) in {"llm", "agent"}
                 and single_ref[1] in {"response", "text"}
             )
             if not should_skip_final_emit and rendered_text:

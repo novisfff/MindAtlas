@@ -199,6 +199,11 @@ def _build_dag_llm_node(*args, **kwargs):
 
 
 
+def _build_dag_agent_node(*args, **kwargs):
+    from app.assistant.workflow.engine.node_builders.dag_agent_node import build_dag_agent_node
+    return build_dag_agent_node(*args, **kwargs)
+
+
 def _build_output_node(*args, **kwargs):
     from app.assistant.workflow.engine.node_builders.output_node import build_output_node
     return build_output_node(*args, **kwargs)
@@ -315,6 +320,7 @@ def build_workflow_dag_subgraph(
         node_llms=node_llms,
         build_start_node=_build_start_node,
         build_dag_llm_node=_build_dag_llm_node,
+        build_dag_agent_node=_build_dag_agent_node,
         build_output_node=_build_output_node,
         build_dag_tool_node=_build_dag_tool_node,
         build_code_executor_node=_build_code_executor_node,
@@ -351,20 +357,12 @@ def build_workflow_dag_subgraph(
 
 # ==================== Agent Loop Subgraph (Phase 3) ====================
 
-_AGENT_MAX_ITERATIONS = 10
+_AGENT_MAX_ITERATIONS = 12
 
 
 def _build_agent_node(*args, **kwargs):
     from app.assistant.workflow.engine.node_builders.agent_node import build_agent_node
     return build_agent_node(*args, **kwargs)
-
-
-
-def _build_tool_node(*args, **kwargs):
-    from app.assistant.workflow.engine.node_builders.agent_tool_node import build_tool_node
-    return build_tool_node(*args, **kwargs)
-
-
 
 def build_agent_subgraph(
     skill: SkillDefinition,
@@ -379,8 +377,6 @@ def build_agent_subgraph(
         llm=llm,
         tools=tools,
         db_bind=db_bind,
-        build_agent_node=_build_agent_node,
-        build_tool_node=_build_tool_node,
         state_type=AssistantState,
     )
 
@@ -577,6 +573,37 @@ class LangGraphEngine:
             )
             return "", 0
 
+    def _load_runtime_memory_overrides(
+        self,
+        *,
+        raw_context: dict[str, Any],
+    ) -> tuple[str | None, list[str] | None]:
+        raw_override = raw_context.get("session_memory", raw_context.get("sessionMemory"))
+        if not isinstance(raw_override, dict):
+            return None, None
+
+        from app.assistant.memory_service import AssistantMemoryService
+
+        settings = get_settings()
+        l1_override: str | None = None
+        l2_override: list[str] | None = None
+
+        if "conversation_summary" in raw_override or "conversationSummary" in raw_override:
+            max_chars = max(1, int(getattr(settings, "assistant_memory_l1_max_chars", 2000) or 2000))
+            l1_override = AssistantMemoryService.truncate_summary(
+                str(raw_override.get("conversation_summary", raw_override.get("conversationSummary", "")) or "").strip(),
+                max_chars=max_chars,
+            )
+
+        if "skill_facts" in raw_override or "skillFacts" in raw_override:
+            max_items = max(1, int(getattr(settings, "assistant_memory_l2_max_items", 20) or 20))
+            l2_override = AssistantMemoryService.normalize_l2_facts(
+                raw_override.get("skill_facts", raw_override.get("skillFacts", [])),
+                max_items=max_items,
+            )
+
+        return l1_override, l2_override
+
     def execute(
         self,
         skill: SkillDefinition,
@@ -688,11 +715,21 @@ class LangGraphEngine:
                 "l0_source_count": 0,
                 "l0_trimmed_chars": 0,
             }
-        l1_text = self._load_l1_summary(conversation_id_uuid=conversation_id_uuid)
-        l2_text, l2_count = self._load_l2_text(
-            conversation_id_uuid=conversation_id_uuid,
-            skill_name=skill.name,
-        )
+        l1_override, l2_facts_override = self._load_runtime_memory_overrides(raw_context=parsed_ctx.raw_context)
+        if l1_override is None:
+            l1_text = self._load_l1_summary(conversation_id_uuid=conversation_id_uuid)
+        else:
+            l1_text = l1_override
+        if l2_facts_override is None:
+            l2_text, l2_count = self._load_l2_text(
+                conversation_id_uuid=conversation_id_uuid,
+                skill_name=skill.name,
+            )
+        else:
+            from app.assistant.memory_service import AssistantMemoryService
+
+            l2_text = AssistantMemoryService.render_l2_text(l2_facts_override)
+            l2_count = len(l2_facts_override)
         l0_messages = l0_window.get("l0_messages")
         if not isinstance(l0_messages, list):
             l0_messages = []

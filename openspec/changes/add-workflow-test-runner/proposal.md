@@ -8,6 +8,8 @@ Workflow DAG editing currently lacks a closed-loop test experience for draft gra
 - Add full SSE trace protocol for run lifecycle, node events, branch decisions, tool calls, and output deltas.
 - Add per-node I/O snapshot event (`node_snapshot`) so each executed node can be inspected in trace.
 - Add editor-side test panel with input, run/cancel, stream toggle, result/trace/raw tabs.
+- Add text-mode multi-turn conversation in workflow test-run, with per-turn trace/result/raw inspection.
+- Add ephemeral L0/L1/L2 session memory for workflow test-run text conversations, stored only in the current page session.
 - Add runtime node highlight in canvas based on incoming test trace events.
 - Keep test runs isolated from assistant conversation storage.
 
@@ -24,4 +26,5 @@ Workflow DAG editing currently lacks a closed-loop test experience for draft gra
   - `frontend/src/features/assistant-config/components/workflow/FlowCanvas.tsx`
   - `frontend/src/features/assistant-config/components/workflow/WorkflowNode.tsx`
   - `frontend/src/features/assistant-config/stores/workflow-test-run-store.ts`
+  - `backend/app/assistant/memory_computation.py`
   - `frontend/src/lib/sse/SSEParser.ts`

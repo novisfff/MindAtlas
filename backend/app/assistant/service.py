@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session, selectinload
 
 from app.ai_registry.runtime import resolve_openai_compat_config
+from app.assistant.memory_computation import AssistantMemoryComputationService
 from app.assistant.memory_service import AssistantMemoryService
 from app.assistant.models import AssistantChatRun, Conversation, Message
 from app.assistant.orchestration.chat_events import ChatEventAdapter
@@ -46,11 +47,6 @@ _CHECKPOINT_MIN_CHARS = 128
 _CHECKPOINT_MAX_INTERVAL_SEC = 1.0
 _RUN_EVENT_POLL_SEC = 0.2
 _CANCEL_POLL_SEC = 0.2
-_L1_PROMPT_USER_MAX_CHARS = 2000
-_L1_PROMPT_ASSISTANT_MAX_CHARS = 4000
-_L2_PROMPT_USER_MAX_CHARS = 2000
-_L2_PROMPT_ASSISTANT_MAX_CHARS = 4000
-
 
 class AssistantService:
     _attached_run_stream_ids: set[str] = set()
@@ -61,6 +57,7 @@ class AssistantService:
     def __init__(self, db: Session):
         self.db = db
         self._openai_fallback_client = OpenAiFallbackClient()
+        self._memory_computation_service = AssistantMemoryComputationService(self._openai_fallback_client)
 
     @classmethod
     def _mark_run_stream_attached(cls, run_id: str) -> None:
@@ -740,10 +737,7 @@ class AssistantService:
 
     @staticmethod
     def _truncate_l1_prompt_text(text: str, *, max_chars: int) -> str:
-        value = str(text or "").strip()
-        if len(value) <= max_chars:
-            return value
-        return value[:max_chars]
+        return AssistantMemoryComputationService.truncate_prompt_text(text, max_chars=max_chars)
 
     def _build_l1_incremental_summary_messages(
         self,
@@ -753,29 +747,12 @@ class AssistantService:
         assistant_text: str,
         max_chars: int,
     ) -> list[dict[str, str]]:
-        system_prompt = (
-            "你是“会话记忆增量摘要器”。请把现有摘要与本轮对话增量融合为新的短期记忆摘要。"
-            "要求：1) 保留稳定偏好、任务目标、关键约束、未完成事项与重要事实；"
-            "2) 与旧摘要冲突时以本轮新信息为准；3) 严禁编造未出现的信息；"
-            "4) 仅输出纯文本摘要，不要 JSON、不要标题、不要解释；"
-            f"5) 最终摘要不超过 {max_chars} 个字符。"
+        return self._memory_computation_service.build_l1_incremental_summary_messages(
+            prev_summary=prev_summary,
+            user_text=user_text,
+            assistant_text=assistant_text,
+            max_chars=max_chars,
         )
-        prev_block = str(prev_summary or "").strip() or "(空)"
-        user_block = self._truncate_l1_prompt_text(user_text, max_chars=_L1_PROMPT_USER_MAX_CHARS)
-        assistant_block = self._truncate_l1_prompt_text(
-            assistant_text,
-            max_chars=_L1_PROMPT_ASSISTANT_MAX_CHARS,
-        )
-        user_prompt = (
-            f"现有摘要：\n{prev_block}\n\n"
-            f"本轮用户输入：\n{user_block}\n\n"
-            f"本轮助手输出：\n{assistant_block}\n\n"
-            "请输出融合后的新摘要："
-        )
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
 
     def _update_l1_summary_after_run(
         self,
@@ -803,20 +780,13 @@ class AssistantService:
                     status = "skipped"
                     return
 
-                messages = self._build_l1_incremental_summary_messages(
+                next_summary, status = self._memory_computation_service.compute_next_l1_summary(
+                    cfg=cfg,
                     prev_summary=prev_summary,
                     user_text=user_text,
                     assistant_text=assistant_text,
                     max_chars=max_chars,
                 )
-                raw = self._call_openai(cfg, messages)
-                candidate = str(self._parse_openai_content(raw) or "").strip()
-                if not candidate:
-                    next_summary = prev_summary
-                    status = "skipped"
-                else:
-                    next_summary = memory_service.truncate_summary(candidate, max_chars=max_chars)
-                    status = "success"
                 next_chars = len(next_summary)
                 if next_summary != prev_summary:
                     memory_service.upsert_l1_summary(conversation_id, next_summary)
@@ -837,31 +807,7 @@ class AssistantService:
 
     @staticmethod
     def _parse_json_object_text(content: str) -> dict[str, Any]:
-        raw = str(content or "").strip()
-        if not raw:
-            return {}
-
-        if raw.startswith("```"):
-            parts = raw.split("```")
-            if len(parts) >= 3:
-                raw = parts[1].strip()
-            raw = raw.strip()
-            if raw.startswith("json"):
-                raw = raw[4:].strip()
-
-        try:
-            parsed = json.loads(raw)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            start = raw.find("{")
-            end = raw.rfind("}")
-            if 0 <= start < end:
-                try:
-                    parsed = json.loads(raw[start : end + 1])
-                    return parsed if isinstance(parsed, dict) else {}
-                except Exception:
-                    return {}
-            return {}
+        return AssistantMemoryComputationService.parse_json_object_text(content)
 
     @staticmethod
     def _resolve_selected_skill_for_l2(skill_calls_data: list[dict[str, Any]] | None) -> str:
@@ -883,30 +829,13 @@ class AssistantService:
         assistant_text: str,
         max_items: int,
     ) -> list[dict[str, str]]:
-        system_prompt = (
-            "你是“会话+Skill 事实记忆提取器”。请基于已有 facts 和本轮对话，"
-            "输出该 Skill 可复用的稳定事实。要求："
-            "1) 仅保留用户偏好、任务约束、关键背景、未完成事项、重要实体与结论；"
-            "2) 与旧 facts 冲突时以本轮信息优先；3) 严禁编造；"
-            f"4) 必须严格输出 JSON 对象，格式为 {{\"facts\": [\"...\"]}}；5) 最多 {max_items} 条。"
+        return self._memory_computation_service.build_l2_incremental_facts_messages(
+            prev_facts=prev_facts,
+            skill_name=skill_name,
+            user_text=user_text,
+            assistant_text=assistant_text,
+            max_items=max_items,
         )
-        prev_block = json.dumps(prev_facts, ensure_ascii=False)
-        user_block = self._truncate_l1_prompt_text(user_text, max_chars=_L2_PROMPT_USER_MAX_CHARS)
-        assistant_block = self._truncate_l1_prompt_text(
-            assistant_text,
-            max_chars=_L2_PROMPT_ASSISTANT_MAX_CHARS,
-        )
-        user_prompt = (
-            f"skill_name: {skill_name}\n"
-            f"existing_facts: {prev_block}\n"
-            f"user_turn: {user_block}\n"
-            f"assistant_turn: {assistant_block}\n"
-            "请输出新的 JSON："
-        )
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
 
     def _update_l2_memory_after_run(
         self,
@@ -939,27 +868,14 @@ class AssistantService:
                     status = "skipped"
                     return
 
-                messages = self._build_l2_incremental_facts_messages(
+                next_facts, status = self._memory_computation_service.compute_next_l2_facts(
+                    cfg=cfg,
                     prev_facts=prev_facts,
                     skill_name=normalized_skill_name,
                     user_text=user_text,
                     assistant_text=assistant_text,
                     max_items=max_items,
                 )
-                raw = self._call_openai(cfg, messages)
-                candidate = str(self._parse_openai_content(raw) or "").strip()
-                parsed = self._parse_json_object_text(candidate)
-                parsed_facts = parsed.get("facts")
-                if not isinstance(parsed_facts, list):
-                    next_facts = prev_facts
-                    status = "skipped"
-                else:
-                    next_facts = memory_service.normalize_l2_facts(parsed_facts, max_items=max_items)
-                    if not next_facts:
-                        next_facts = prev_facts
-                        status = "skipped"
-                    else:
-                        status = "success"
                 next_count = len(next_facts)
                 if next_facts != prev_facts:
                     memory_service.upsert_l2_facts(conversation_id, normalized_skill_name, next_facts)
