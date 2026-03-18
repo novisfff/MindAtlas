@@ -157,6 +157,32 @@ class WorkflowMemoryModeStep4Tests(unittest.TestCase):
         self.assertNotIn("memory_conversation_summary", start_fields)
         self.assertNotIn("memory_skill_facts", start_fields)
 
+    def test_start_node_emits_trace_start_and_end_events(self) -> None:
+        from app.assistant.workflow.engine.node_builders.start_node import build_start_node
+
+        node_start_events: list[tuple[str, str]] = []
+        node_end_events: list[tuple[str, str]] = []
+        start_node = build_start_node(
+            {
+                "__node_id": "start",
+                "input_mode": "text",
+            }
+        )
+
+        result = start_node(
+            {
+                "user_input": "hello",
+                "metadata": {
+                    "on_node_start": lambda node_id, node_type: node_start_events.append((node_id, node_type)),
+                    "on_node_end": lambda node_id, status: node_end_events.append((node_id, status)),
+                },
+            }
+        )
+
+        self.assertEqual(result["node_outputs"]["start"]["text"], "hello")
+        self.assertEqual(node_start_events, [("start", "start")])
+        self.assertEqual(node_end_events, [("start", "ok")])
+
     def test_llm_node_injects_memory_block_only_in_auto_mode(self) -> None:
         from app.assistant.workflow.engine.node_builders.llm_node import build_dag_llm_node
 

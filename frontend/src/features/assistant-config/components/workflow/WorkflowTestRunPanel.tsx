@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Play,
   Square,
@@ -135,6 +135,7 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
   const [expandedToolDetails, setExpandedToolDetails] = useState<Record<string, boolean>>({})
   const [resetDialogOpen, setResetDialogOpen] = useState(false)
   const [submittingApprovalId, setSubmittingApprovalId] = useState<string | null>(null)
+  const runSubmitLockedRef = useRef(false)
   const wfStore = useWorkflowEditorStore()
   const {
     panelOpen,
@@ -274,98 +275,105 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
   }
 
   const handleRun = async () => {
-    if (!workflowId) return
-    const workflow = serializeToWorkflowInput(wfStore.nodes, wfStore.edges, wfStore.viewport)
-    let validation
+    if (runSubmitLockedRef.current || status === 'running') return
+    runSubmitLockedRef.current = true
+
     try {
-      validation = await validateWorkflowById(workflowId, workflow)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '校验失败'
-      toast.error(message)
-      markRunError(message)
-      return
-    }
-    if (!validation.valid) {
-      const message = validation.errors.map((item) => item.message).slice(0, 3).join('; ') || 'Workflow validation failed'
-      toast.error(message)
-      markRunError(message)
-      return
-    }
-
-    const payload: {
-      workflow: ReturnType<typeof serializeToWorkflowInput>
-      userInput?: string
-      structuredInput?: Record<string, unknown>
-      sessionId?: string
-      history?: Array<{ role: 'user' | 'assistant'; content: string }>
-      sessionMemory?: { conversationSummary?: string; skillFacts?: string[] }
-      streamOutput: boolean
-    } = {
-      workflow,
-      streamOutput,
-    }
-
-    if (startInputMode === 'structured') {
-      const structuredPayload: Record<string, unknown> = {}
-      for (const field of startStructuredFields) {
-        const parsed = parseStructuredValue(field, structuredInput[field.name])
-        if (!parsed.ok) {
-          if (parsed.missing) {
-            if (field.required) {
-              toast.error(t('settings.skills.structuredInputInvalid'))
-              return
-            }
-            continue
-          }
-          toast.error(t('settings.skills.structuredInputInvalid'))
-          return
-        }
-        structuredPayload[field.name] = parsed.value
-      }
-      payload.structuredInput = structuredPayload
-    } else {
-      const userInput = input.trim()
-      if (!userInput) {
-        toast.error('请输入测试输入')
+      if (!workflowId) return
+      const workflow = serializeToWorkflowInput(wfStore.nodes, wfStore.edges, wfStore.viewport)
+      let validation
+      try {
+        validation = await validateWorkflowById(workflowId, workflow)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '校验失败'
+        toast.error(message)
+        markRunError(message)
         return
       }
-      payload.userInput = userInput
-      payload.sessionId = sessionId
-      payload.history = buildCompletedWorkflowConversationHistory(messages)
-      if (sessionMemory.conversationSummary || sessionMemory.skillFacts.length > 0) {
-        payload.sessionMemory = {
-          conversationSummary: sessionMemory.conversationSummary,
-          skillFacts: sessionMemory.skillFacts,
+      if (!validation.valid) {
+        const message = validation.errors.map((item) => item.message).slice(0, 3).join('; ') || 'Workflow validation failed'
+        toast.error(message)
+        markRunError(message)
+        return
+      }
+
+      const payload: {
+        workflow: ReturnType<typeof serializeToWorkflowInput>
+        userInput?: string
+        structuredInput?: Record<string, unknown>
+        sessionId?: string
+        history?: Array<{ role: 'user' | 'assistant'; content: string }>
+        sessionMemory?: { conversationSummary?: string; skillFacts?: string[] }
+        streamOutput: boolean
+      } = {
+        workflow,
+        streamOutput,
+      }
+
+      if (startInputMode === 'structured') {
+        const structuredPayload: Record<string, unknown> = {}
+        for (const field of startStructuredFields) {
+          const parsed = parseStructuredValue(field, structuredInput[field.name])
+          if (!parsed.ok) {
+            if (parsed.missing) {
+              if (field.required) {
+                toast.error(t('settings.skills.structuredInputInvalid'))
+                return
+              }
+              continue
+            }
+            toast.error(t('settings.skills.structuredInputInvalid'))
+            return
+          }
+          structuredPayload[field.name] = parsed.value
+        }
+        payload.structuredInput = structuredPayload
+      } else {
+        const userInput = input.trim()
+        if (!userInput) {
+          toast.error('请输入测试输入')
+          return
+        }
+        payload.userInput = userInput
+        payload.sessionId = sessionId
+        payload.history = buildCompletedWorkflowConversationHistory(messages)
+        if (sessionMemory.conversationSummary || sessionMemory.skillFacts.length > 0) {
+          payload.sessionMemory = {
+            conversationSummary: sessionMemory.conversationSummary,
+            skillFacts: sessionMemory.skillFacts,
+          }
         }
       }
-    }
 
-    const controller = new AbortController()
-    beginRun(controller, {
-      mode: startInputMode,
-      submittedInput: payload.userInput,
-    })
-    setPanelOpen(true)
-    setActiveTab(startInputMode === 'text' ? 'conversation' : 'trace')
+      const controller = new AbortController()
+      beginRun(controller, {
+        mode: startInputMode,
+        submittedInput: payload.userInput,
+      })
+      setPanelOpen(true)
+      setActiveTab(startInputMode === 'text' ? 'conversation' : 'trace')
 
-    try {
-      await runWorkflowTestStreamById(
-        workflowId,
-        payload,
-        {
-          signal: controller.signal,
-          onEvent: (event) => {
-            if (controller.signal.aborted) return
-            ingestEvent(event)
+      try {
+        await runWorkflowTestStreamById(
+          workflowId,
+          payload,
+          {
+            signal: controller.signal,
+            onEvent: (event) => {
+              if (controller.signal.aborted) return
+              ingestEvent(event)
+            },
           },
-        },
-      )
-    } catch (error) {
-      const isAbort = error instanceof Error && error.name === 'AbortError'
-      if (isAbort) return
-      const message = error instanceof Error ? error.message : 'Workflow test run failed'
-      markRunError(message)
-      toast.error(message)
+        )
+      } catch (error) {
+        const isAbort = error instanceof Error && error.name === 'AbortError'
+        if (isAbort) return
+        const message = error instanceof Error ? error.message : 'Workflow test run failed'
+        markRunError(message)
+        toast.error(message)
+      }
+    } finally {
+      runSubmitLockedRef.current = false
     }
   }
 
@@ -548,9 +556,10 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => {
+                    if (e.nativeEvent.isComposing || e.repeat) return
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault()
-                      if (status !== 'running') {
+                      if (status !== 'running' && !runSubmitLockedRef.current) {
                         void handleRun()
                       }
                     }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -104,6 +104,7 @@ export default function AgentEditorPage() {
   const [modelId, setModelId] = useState('')
   const [versionPanelOpen, setVersionPanelOpen] = useState(false)
   const [publishDialogOpen, setPublishDialogOpen] = useState(false)
+  const runSubmitLockedRef = useRef(false)
 
   const { data: agent, isLoading } = useQuery({
     queryKey: ['assistant-agent-profile', agentProfileId],
@@ -318,17 +319,20 @@ export default function AgentEditorPage() {
   }
 
   const handleRunTest = async () => {
-    if (!input.trim() || !systemPrompt.trim()) return
-    if (modelSource === 'custom' && !modelId) {
-      toast.error(t('settings.skills.agentModelRequired'))
-      return
-    }
-    const submittedInput = input.trim()
-    const history = buildCompletedConversationHistory(messages)
-    const ctrl = new AbortController()
-    beginRun(ctrl, submittedInput)
+    if (runSubmitLockedRef.current || status === 'running') return
+    runSubmitLockedRef.current = true
 
     try {
+      if (!input.trim() || !systemPrompt.trim()) return
+      if (modelSource === 'custom' && !modelId) {
+        toast.error(t('settings.skills.agentModelRequired'))
+        return
+      }
+      const submittedInput = input.trim()
+      const history = buildCompletedConversationHistory(messages)
+      const ctrl = new AbortController()
+      beginRun(ctrl, submittedInput)
+
       await runAgentTestStream(
         agentProfileId!,
         {
@@ -347,8 +351,8 @@ export default function AgentEditorPage() {
           signal: ctrl.signal,
           onEvent: (event: AgentTestRunEvent) => {
             ingestEvent(event)
-          }
-        }
+          },
+        },
       )
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
@@ -357,6 +361,8 @@ export default function AgentEditorPage() {
       console.error(err)
       markRunError(err instanceof Error ? err.message : String(err))
       toast.error(t('settings.skills.agentTestRunFailed'))
+    } finally {
+      runSubmitLockedRef.current = false
     }
   }
 
@@ -752,9 +758,12 @@ export default function AgentEditorPage() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing || e.repeat) return
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault()
-                  if (status !== 'running') handleRunTest()
+                  if (status !== 'running' && !runSubmitLockedRef.current) {
+                    void handleRunTest()
+                  }
                 }
               }}
               disabled={status === 'running'}
