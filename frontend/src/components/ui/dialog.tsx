@@ -1,4 +1,5 @@
 import * as React from "react"
+import { createPortal } from "react-dom"
 import { X } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -12,12 +13,17 @@ const Dialog = ({
     children: React.ReactNode
 }) => {
     const [isOpen, setIsOpen] = React.useState(open || false)
+    const [mounted, setMounted] = React.useState(false)
 
     React.useEffect(() => {
         if (open !== undefined) {
             setIsOpen(open)
         }
     }, [open])
+
+    React.useEffect(() => {
+        setMounted(true)
+    }, [])
 
     React.useEffect(() => {
         const handleEscape = (e: KeyboardEvent) => {
@@ -32,22 +38,31 @@ const Dialog = ({
 
         if (isOpen) {
             document.addEventListener("keydown", handleEscape)
+            const currentCount = Number(document.body.dataset.uiModalCount || "0")
+            document.body.dataset.uiModalCount = String(currentCount + 1)
             document.body.style.overflow = "hidden"
         }
 
         return () => {
             document.removeEventListener("keydown", handleEscape)
-            document.body.style.overflow = "unset"
+            const currentCount = Number(document.body.dataset.uiModalCount || "0")
+            const nextCount = Math.max(0, currentCount - 1)
+            if (nextCount === 0) {
+                delete document.body.dataset.uiModalCount
+                document.body.style.overflow = "unset"
+                return
+            }
+            document.body.dataset.uiModalCount = String(nextCount)
         }
     }, [isOpen, onOpenChange, open])
 
-    if (!isOpen) return null
+    if (!isOpen || !mounted) return null
 
-    return (
+    return createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center">
             {/* Backdrop */}
             <div
-                className="fixed inset-0 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200"
+                className="fixed inset-0 bg-slate-950/38 backdrop-blur-[2px] animate-in fade-in duration-200"
                 onClick={() => {
                     if (open !== undefined && onOpenChange) {
                         onOpenChange(false)
@@ -57,7 +72,8 @@ const Dialog = ({
                 }}
             />
             {children}
-        </div>
+        </div>,
+        document.body
     )
 }
 
@@ -69,7 +85,7 @@ const DialogContent = React.forwardRef<
         ref={ref}
         data-ui-modal="true"
         className={cn(
-            "relative z-50 grid w-full max-w-lg gap-4 border bg-background p-6 shadow-lg duration-200 animate-in fade-in-90 zoom-in-95 rounded-xl sm:rounded-lg",
+            "relative z-[1] mx-4 grid w-[min(100%,40rem)] max-h-[calc(100vh-2rem)] gap-4 overflow-y-auto rounded-[24px] border border-slate-200 bg-white p-6 text-slate-900 shadow-[0_24px_80px_rgba(15,23,42,0.22)] duration-200 animate-in fade-in-90 zoom-in-95",
             className
         )}
         {...props}

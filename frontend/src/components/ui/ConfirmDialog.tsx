@@ -33,12 +33,12 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   return (
     <Dialog open={isOpen} onOpenChange={(nextOpen) => { if (!nextOpen) onCancel() }}>
-      <DialogContent className="sm:max-w-md rounded-[24px] border-white/80 bg-white/96 p-6 shadow-[0_24px_70px_rgba(15,23,42,0.22)]">
+      <DialogContent className="sm:max-w-md rounded-[24px] border-slate-200 bg-white p-6 shadow-[0_24px_70px_rgba(15,23,42,0.2)]">
         <DialogHeader className="space-y-2 text-left">
           <DialogTitle className="text-lg font-semibold text-slate-900">
             {title}
           </DialogTitle>
-          <DialogDescription className="text-sm leading-6 text-slate-500">
+          <DialogDescription className="text-sm leading-6 text-slate-600">
             {description}
           </DialogDescription>
         </DialogHeader>

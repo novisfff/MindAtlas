@@ -27,10 +27,10 @@ export function PublishVersionDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md rounded-[24px] border-white/80 bg-white/96 p-6 shadow-[0_24px_70px_rgba(15,23,42,0.22)]">
+      <DialogContent className="sm:max-w-md rounded-[24px] border-slate-200 bg-white p-6 shadow-[0_24px_70px_rgba(15,23,42,0.2)]">
         <DialogHeader className="space-y-2 text-left">
-          <DialogTitle>{t('settings.skills.versioning.publishDialogTitle')}</DialogTitle>
-          <DialogDescription>
+          <DialogTitle className="text-lg font-semibold text-slate-900">{t('settings.skills.versioning.publishDialogTitle')}</DialogTitle>
+          <DialogDescription className="text-sm leading-6 text-slate-600">
             {t('settings.skills.versioning.publishDialogSubtitle', {
               defaultValue: '保存当前草稿并创建一个新的发布版本。',
             })}
@@ -44,7 +44,7 @@ export function PublishVersionDialog({
             value={versionName}
             onChange={(event) => setVersionName(event.target.value)}
             placeholder={t('settings.skills.versioning.publishVersionNamePlaceholder')}
-            className="w-full rounded-md border border-input px-3 py-2 text-sm"
+            className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition focus:border-primary/50 focus:ring-2 focus:ring-primary/15"
             disabled={submitting}
           />
         </div>
