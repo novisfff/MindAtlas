@@ -6,6 +6,14 @@ import socket
 from urllib.parse import urlparse
 
 
+_DNS_FAKE_IP_NETWORKS = [
+    # Some proxy/DNS stacks (for example Clash fake-ip mode) synthesize
+    # benchmark-range answers for public hostnames. We only tolerate this
+    # during hostname resolution, never for direct IP literals.
+    ipaddress.ip_network("198.18.0.0/15"),
+]
+
+
 BLOCKED_NETWORKS = [
     ipaddress.ip_network("0.0.0.0/8"),
     ipaddress.ip_network("127.0.0.0/8"),
@@ -14,6 +22,7 @@ BLOCKED_NETWORKS = [
     ipaddress.ip_network("192.168.0.0/16"),
     ipaddress.ip_network("100.64.0.0/10"),
     ipaddress.ip_network("169.254.0.0/16"),
+    *_DNS_FAKE_IP_NETWORKS,
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("::/128"),
     ipaddress.ip_network("fc00::/7"),
@@ -26,16 +35,32 @@ class SSRFError(ValueError):
     pass
 
 
-def _is_ip_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+def _normalize_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     # Normalize IPv6-mapped IPv4 (e.g. ::ffff:127.0.0.1) to its IPv4 equivalent
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
-        ip = ip.ipv4_mapped
+        return ip.ipv4_mapped
+    return ip
 
-    # Use Python built-in checks for broad coverage
-    if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved or ip.is_unspecified:
+
+def _is_dns_fake_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    normalized = _normalize_ip(ip)
+    return any(normalized in net for net in _DNS_FAKE_IP_NETWORKS)
+
+
+def _is_ip_blocked(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    *,
+    allow_dns_fake_ip: bool = False,
+) -> bool:
+    normalized = _normalize_ip(ip)
+
+    if allow_dns_fake_ip and _is_dns_fake_ip(normalized):
+        return False
+
+    if normalized.is_loopback or normalized.is_link_local or normalized.is_reserved or normalized.is_unspecified:
         return True
 
-    return any(ip in net for net in BLOCKED_NETWORKS)
+    return any(normalized in net for net in BLOCKED_NETWORKS)
 
 
 def validate_url_ssrf(url: str, *, raise_api_exception: bool = False) -> None:
@@ -78,6 +103,9 @@ def validate_url_ssrf(url: str, *, raise_api_exception: bool = False) -> None:
     # Check if hostname is a direct IP literal
     try:
         ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        ip = None
+    else:
         if _is_ip_blocked(ip):
             msg = "URL resolves to blocked IP range"
             if raise_api_exception:
@@ -85,8 +113,6 @@ def validate_url_ssrf(url: str, *, raise_api_exception: bool = False) -> None:
                 raise ApiException(status_code=400, code=40024, message=msg)
             raise SSRFError(msg)
         return
-    except ValueError:
-        pass
 
     # Resolve hostname and check all IPs
     try:
@@ -105,7 +131,7 @@ def validate_url_ssrf(url: str, *, raise_api_exception: bool = False) -> None:
 
     for _family, _, _, _, sockaddr in addrs:
         ip = ipaddress.ip_address(sockaddr[0])
-        if _is_ip_blocked(ip):
+        if _is_ip_blocked(ip, allow_dns_fake_ip=True):
             msg = "URL resolves to blocked IP range"
             if raise_api_exception:
                 from app.common.exceptions import ApiException

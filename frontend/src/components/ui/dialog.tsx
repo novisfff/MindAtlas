@@ -67,6 +67,7 @@ const DialogContent = React.forwardRef<
 >(({ className, children, ...props }, ref) => (
     <div
         ref={ref}
+        data-ui-modal="true"
         className={cn(
             "relative z-50 grid w-full max-w-lg gap-4 border bg-background p-6 shadow-lg duration-200 animate-in fade-in-90 zoom-in-95 rounded-xl sm:rounded-lg",
             className

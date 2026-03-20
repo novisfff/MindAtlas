@@ -2,6 +2,8 @@ import { apiClient } from '@/lib/api/client'
 import type {
   WorkflowEdge,
   WorkflowHumanApproval,
+  WorkflowCopilotRequest,
+  WorkflowCopilotResponse,
   WorkflowInput,
   WorkflowNode,
   WorkflowTestRunRequest,
@@ -132,6 +134,15 @@ export const validateWorkflowById = (workflowId: string, data: WorkflowInput) =>
   apiClient.post<WorkflowValidationResponse>(
     `/api/assistant-config/workflows/${workflowId}/validate`,
     { body: data },
+  )
+
+export const respondWorkflowCopilotById = (
+  workflowId: string,
+  payload: WorkflowCopilotRequest,
+) =>
+  apiClient.post<WorkflowCopilotResponse>(
+    `/api/assistant-config/workflows/${workflowId}/copilot/respond`,
+    { body: payload },
   )
 
 export const runWorkflowTestStreamById = (

@@ -420,6 +420,118 @@ export interface WorkflowValidationResponse {
   errors: WorkflowValidationError[]
 }
 
+export type WorkflowCopilotMode =
+  | 'generate'
+  | 'edit_selection'
+  | 'fix_validation'
+  | 'analyze_test_run'
+
+export type WorkflowCopilotStatus =
+  | 'proposal'
+  | 'question'
+  | 'analysis'
+  | 'no_op'
+
+export type WorkflowCopilotSelectionScope =
+  | 'workflow'
+  | 'selection'
+  | 'container'
+
+export type WorkflowCopilotLayoutRecommendation =
+  | 'keep'
+  | 'autolayout'
+
+export type WorkflowCopilotOperationType =
+  | 'add_node'
+  | 'update_node'
+  | 'remove_node'
+  | 'add_edge'
+  | 'remove_edge'
+  | 'move_node'
+  | 'autolayout'
+
+export interface WorkflowCopilotSelection {
+  scope: WorkflowCopilotSelectionScope
+  nodeIds: string[]
+  edgeIds: string[]
+  containerId?: string | null
+}
+
+export interface WorkflowCopilotConversationItem {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export interface WorkflowCopilotValidationIssue {
+  severity: 'error' | 'warning'
+  nodeId?: string | null
+  subflowNodeId?: string | null
+  message: string
+  source?: string
+}
+
+export interface WorkflowCopilotValidationContext {
+  errors: WorkflowCopilotValidationIssue[]
+  warnings: WorkflowCopilotValidationIssue[]
+}
+
+export interface WorkflowCopilotTestRunContext {
+  selectedRunId: string
+  result: unknown
+  trace: unknown
+  raw: unknown
+}
+
+export interface WorkflowCopilotOperation {
+  type: WorkflowCopilotOperationType
+  containerId?: string | null
+  nodeId?: string | null
+  nodeType?: NodeType
+  label?: string | null
+  config?: Record<string, unknown> | null
+  configPatch?: Record<string, unknown> | null
+  replaceConfig?: boolean
+  positionX?: number | null
+  positionY?: number | null
+  edgeId?: string | null
+  sourceNodeId?: string | null
+  targetNodeId?: string | null
+  sourceHandle?: string | null
+  targetHandle?: string | null
+  conditionType?: 'expression' | 'default' | null
+  conditionExpr?: ConditionExpression | null
+}
+
+export interface WorkflowCopilotProposal {
+  title: string
+  summary: string
+  operations: WorkflowCopilotOperation[]
+  proposedWorkflow: WorkflowInput
+  baseDraftHash: string
+  proposedDraftHash: string
+  layoutRecommendation: WorkflowCopilotLayoutRecommendation
+  validation: WorkflowValidationResponse
+  affectedNodeIds: string[]
+  warnings: string[]
+}
+
+export interface WorkflowCopilotRequest {
+  mode: WorkflowCopilotMode
+  instruction: string
+  draft: WorkflowInput
+  selection?: WorkflowCopilotSelection
+  conversation?: WorkflowCopilotConversationItem[]
+  validationContext?: WorkflowCopilotValidationContext
+  testRunContext?: WorkflowCopilotTestRunContext
+}
+
+export interface WorkflowCopilotResponse {
+  status: WorkflowCopilotStatus
+  message: string
+  proposal?: WorkflowCopilotProposal | null
+  suggestions?: string[]
+}
+
 export interface WorkflowConversationHistoryItem {
   role: 'user' | 'assistant'
   content: string

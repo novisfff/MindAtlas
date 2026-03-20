@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -70,3 +71,27 @@ class AiRegistryServiceTests(unittest.TestCase):
         self.assertEqual(captured["user_agent"], "MindAtlas/1.0")
         self.assertEqual(captured["accept"], "application/json")
 
+    def test_create_allows_hostname_when_dns_returns_fake_ip(self) -> None:
+        from app.ai_registry.service import AiCredentialService  # noqa: E402
+
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+        service = AiCredentialService(db)
+
+        with (
+            patch(
+                "app.common.ssrf.socket.getaddrinfo",
+                return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.34", 0))],
+            ),
+            patch("app.ai_registry.service.encrypt_api_key", return_value="enc"),
+            patch("app.ai_registry.service.api_key_hint", return_value="****"),
+        ):
+            cred = service.create("codex-for-me", "https://api-vip.codex-for.me/v1", "sk-test")
+
+        self.assertEqual(cred.name, "codex-for-me")
+        self.assertEqual(cred.base_url, "https://api-vip.codex-for.me/v1")
+        self.assertEqual(cred.api_key_encrypted, "enc")
+        self.assertEqual(cred.api_key_hint, "****")
+        db.add.assert_called_once()
+        db.commit.assert_called_once()
+        db.refresh.assert_called_once_with(cred)

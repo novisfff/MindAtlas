@@ -189,6 +189,7 @@ type SubflowNodeData = {
   removable: boolean
   quickAddHandles: string[]
   tools: WorkflowToolDefinition[]
+  floatingUiEpoch?: number
   onRemove?: (nodeId: string) => void
   onQuickAdd?: (nodeId: string, handleId: string, payload: QuickAddPayload) => void
 }
@@ -411,6 +412,7 @@ function SubflowNodeCard({ id, data, selected }: SubflowNodeComponentProps) {
       : []
   const elseHandleId = ifElseConfig?.elseHandle || 'else'
   const quickAddHandleSet = new Set(data.quickAddHandles ?? [])
+  const floatingUiEpoch = Number(data.floatingUiEpoch ?? 0)
   const [openQuickAddHandle, setOpenQuickAddHandle] = useState<string | null>(null)
   const pointerDownRef = useRef<{ handleId: string; x: number; y: number } | null>(null)
   const ifElseHandleStartTop = resolveSubflowHandleTop(data.nodeType, data.config ?? null, branchHandles[0] ?? elseHandleId)
@@ -424,6 +426,10 @@ function SubflowNodeCard({ id, data, selected }: SubflowNodeComponentProps) {
     })
     return () => cancelAnimationFrame(raf)
   }, [id, ifElseMinHeight, branchHandles.length, updateNodeInternals, data.config])
+
+  useEffect(() => {
+    setOpenQuickAddHandle(null)
+  }, [floatingUiEpoch])
 
   const handleHandlePointerDown = (handleId: string, event: ReactPointerEvent) => {
     if (!quickAddHandleSet.has(handleId)) return
@@ -587,6 +593,7 @@ function toReactFlowNodes(
   onRemoveNode: (nodeId: string) => void,
   onQuickAddNode: (nodeId: string, handleId: string, payload: QuickAddPayload) => void,
   tools: WorkflowToolDefinition[],
+  floatingUiEpoch: number,
 ): Node<SubflowNodeData>[] {
   return nodes.map((item, index) => ({
     id: item.nodeId,
@@ -604,6 +611,7 @@ function toReactFlowNodes(
       quickAddHandles: quickAddHandleMap.get(item.nodeId) ?? [],
       onQuickAdd: onQuickAddNode,
       tools,
+      floatingUiEpoch,
     },
     draggable: item.nodeType !== 'start',
   }))
@@ -806,6 +814,7 @@ export function ContainerSubflowCanvas({
   bodyNodes,
   bodyEdges,
   tools,
+  floatingUiEpoch = 0,
   canvasHeight = 168,
   canvasWidth,
   onSelectionChange,
@@ -814,6 +823,7 @@ export function ContainerSubflowCanvas({
   bodyNodes: ContainerBodyNode[]
   bodyEdges: ContainerBodyEdge[]
   tools: WorkflowToolDefinition[]
+  floatingUiEpoch?: number
   canvasHeight?: number
   canvasWidth?: number
   onSelectionChange?: (selection: { nodeId: string | null; edgeId: string | null }) => void
@@ -937,8 +947,8 @@ export function ContainerSubflowCanvas({
   )
 
   const flowNodes = useMemo(
-    () => toReactFlowNodes(bodyNodes, quickAddHandleMap, handleRemoveNode, handleQuickAdd, tools),
-    [quickAddHandleMap, bodyNodes, handleQuickAdd, handleRemoveNode, tools],
+    () => toReactFlowNodes(bodyNodes, quickAddHandleMap, handleRemoveNode, handleQuickAdd, tools, floatingUiEpoch),
+    [quickAddHandleMap, bodyNodes, floatingUiEpoch, handleQuickAdd, handleRemoveNode, tools],
   )
 
   const handleDeleteEdge = useCallback(

@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ReactFlowProvider } from '@xyflow/react'
-import { ArrowLeft, Save, Undo2, Redo2, Loader2, LayoutTemplate, Play, ListChecks, AlertCircle, Send, History, SlidersHorizontal } from 'lucide-react'
+import { ArrowLeft, Save, Undo2, Redo2, Loader2, LayoutTemplate, Play, ListChecks, AlertCircle, Send, History, SlidersHorizontal, Sparkles, Wrench } from 'lucide-react'
 import { toast } from 'sonner'
 import { isApiError } from '@/lib/api/client'
 import {
@@ -16,20 +16,38 @@ import {
   saveWorkflowById,
   validateWorkflowById,
 } from '../api/workflows'
-import type { NodeConfig, WorkflowInput } from '../api/workflow'
+import type {
+  NodeConfig,
+  NodeType,
+  WorkflowCopilotMode,
+  WorkflowCopilotProposal,
+  WorkflowCopilotSelection,
+  WorkflowCopilotTestRunContext,
+  WorkflowCopilotValidationContext,
+  WorkflowInput,
+} from '../api/workflow'
 import { getSystemToolDefinitions, getToolsWithParams } from '../api/tools'
 import { useWorkflowEditorStore } from '../stores/workflow-editor-store'
-import { useWorkflowTestRunStore } from '../stores/workflow-test-run-store'
 import { FlowCanvas } from '../components/workflow/FlowCanvas'
 import { NodePalette } from '../components/workflow/NodePalette'
-import { PropertyPanel } from '../components/workflow/PropertyPanel'
+import {
+  PropertyPanel,
+  getPropertyPanelSelectionTargetKey,
+  resolveSelectionContextFromTarget,
+  type PropertyPanelSelectionTarget,
+} from '../components/workflow/PropertyPanel'
+import { WorkflowCopilotPanel, type WorkflowCopilotLaunchContext } from '../components/workflow/WorkflowCopilotPanel'
+import { WorkflowReadonlyCanvas } from '../components/workflow/WorkflowReadonlyCanvas'
 import { WorkflowTestRunPanel } from '../components/workflow/WorkflowTestRunPanel'
 import { WorkflowValidationChecklistPanel } from '../components/workflow/WorkflowValidationChecklistPanel'
 import { WorkflowEnvVarPanel } from '../components/workflow/WorkflowEnvVarPanel'
-import { serializeToWorkflowInput, deserializeFromWorkflow } from '../components/workflow/serialization'
+import { WorkflowEditorSurfaceShell } from '../components/workflow/WorkflowEditorSurfaceShell'
+import { WorkflowEditorSurfaceRail, type WorkflowEditorSurfaceRailItem } from '../components/workflow/WorkflowEditorSurfaceRail'
+import { serializeToWorkflowInput, deserializeFromWorkflow, deserializeFromWorkflowInput } from '../components/workflow/serialization'
 import { PublishVersionDialog } from '../components/versioning/PublishVersionDialog'
 import { TargetVersionPanel } from '../components/versioning/TargetVersionPanel'
 import {
+  buildWorkflowDraftHash,
   buildValidationSignature,
   computeDeadEndWarnings,
   normalizeValidationIssues,
@@ -37,11 +55,10 @@ import {
 } from '../components/workflow/workflowValidation'
 import type { WorkflowToolDefinition } from '../components/workflow/types'
 import { autoLayoutWorkflowWithSubflows } from '../components/workflow/autoLayout'
+import { NODE_CATALOG_ITEMS } from '../components/workflow/nodeCatalog'
 import { normalizeStartNodeConfig } from '../components/workflow/startNodeConfig'
 import { getStartNodeFromNodes, getWorkflowEnvVarsFromNodes, toStartConfigWithEnvVars } from '../components/workflow/workflowEnvVars'
 
-
-import { Tooltip } from '../../../components/ui/Tooltip'
 import {
   HoverCard,
   HoverCardContent,
@@ -49,6 +66,180 @@ import {
 } from '../../../components/ui/hover-card'
 
 import '@xyflow/react/dist/style.css'
+
+type CopilotPreviewMode = 'current' | 'proposed'
+type WorkflowEditorSurfaceId = 'copilot' | 'testRun' | 'validation' | 'versionHistory' | 'envVars'
+type WorkflowEditorDialogId = 'publish' | 'envVarEdit' | 'confirm'
+type WorkbenchPropertyTarget = PropertyPanelSelectionTarget
+type WorkflowWorkbenchTabKey = string
+type WorkbenchTabRecord =
+  | {
+      key: WorkflowWorkbenchTabKey
+      kind: 'surface'
+      surfaceId: WorkflowEditorSurfaceId
+    }
+  | {
+      key: WorkflowWorkbenchTabKey
+      kind: 'property'
+      target: WorkbenchPropertyTarget
+    }
+
+type MaterializedCopilotWorkflow = {
+  workflow: WorkflowInput
+  nodes: ReturnType<typeof deserializeFromWorkflowInput>['nodes']
+  edges: ReturnType<typeof deserializeFromWorkflowInput>['edges']
+  viewport?: ReturnType<typeof deserializeFromWorkflowInput>['viewport']
+}
+
+const NODE_TYPE_ICON_MAP = Object.fromEntries(
+  NODE_CATALOG_ITEMS.map((item) => [item.type, item.icon]),
+) as Partial<Record<NodeType, typeof Play>>
+
+function buildCopilotProposalKey(proposal: WorkflowCopilotProposal): string {
+  return `${proposal.baseDraftHash}:${proposal.proposedDraftHash}`
+}
+
+function shouldNormalizeCopilotLayout(proposal: WorkflowCopilotProposal): boolean {
+  if (proposal.layoutRecommendation === 'autolayout') return true
+  return proposal.operations.some((operation) => (
+    operation.type === 'add_node' ||
+    operation.type === 'remove_node' ||
+    operation.type === 'add_edge' ||
+    operation.type === 'remove_edge'
+  ))
+}
+
+function materializeCopilotWorkflow(proposal: WorkflowCopilotProposal): MaterializedCopilotWorkflow {
+  const restored = deserializeFromWorkflowInput(proposal.proposedWorkflow)
+  const nodes = shouldNormalizeCopilotLayout(proposal)
+    ? autoLayoutWorkflowWithSubflows(restored.nodes, restored.edges)
+    : restored.nodes
+
+  return {
+    workflow: serializeToWorkflowInput(nodes, restored.edges, restored.viewport),
+    nodes,
+    edges: restored.edges,
+    viewport: restored.viewport,
+  }
+}
+
+function getSurfaceTabKey(surfaceId: WorkflowEditorSurfaceId): WorkflowWorkbenchTabKey {
+  return `surface:${surfaceId}`
+}
+
+function buildSurfaceTab(surfaceId: WorkflowEditorSurfaceId): WorkbenchTabRecord {
+  return {
+    key: getSurfaceTabKey(surfaceId),
+    kind: 'surface',
+    surfaceId,
+  }
+}
+
+function buildPropertyTab(target: WorkbenchPropertyTarget): WorkbenchTabRecord {
+  return {
+    key: getPropertyPanelSelectionTargetKey(target),
+    kind: 'property',
+    target,
+  }
+}
+
+function isSamePropertyTarget(a: WorkbenchPropertyTarget | null, b: WorkbenchPropertyTarget | null): boolean {
+  if (!a || !b) return false
+  if (a.kind !== b.kind) return false
+  if (a.kind === 'main' && b.kind === 'main') {
+    return a.nodeId === b.nodeId
+  }
+  if (a.kind === 'subflow' && b.kind === 'subflow') {
+    return a.containerId === b.containerId && a.nodeId === b.nodeId
+  }
+  return false
+}
+
+function getCurrentSelectionPropertyTarget(params: {
+  selectedNodeId: string | null
+  selectedEdgeId: string | null
+  selectedSubflowContainerId: string | null
+  selectedSubflowNodeId: string | null
+  selectedSubflowEdgeId: string | null
+}): WorkbenchPropertyTarget | null {
+  if (params.selectedSubflowContainerId && params.selectedSubflowNodeId) {
+    return {
+      kind: 'subflow',
+      containerId: params.selectedSubflowContainerId,
+      nodeId: params.selectedSubflowNodeId,
+    }
+  }
+  if (params.selectedEdgeId || params.selectedSubflowEdgeId) return null
+  if (!params.selectedNodeId) return null
+  return {
+    kind: 'main',
+    nodeId: params.selectedNodeId,
+  }
+}
+
+function canAppendCopilotSelection(
+  current: WorkflowCopilotSelection | undefined,
+  incoming: WorkflowCopilotSelection | undefined,
+): boolean {
+  if (!current || !incoming) return false
+  if (current.scope !== incoming.scope) return false
+  return (current.containerId ?? null) === (incoming.containerId ?? null)
+}
+
+function mergeCopilotSelection(
+  current: WorkflowCopilotSelection,
+  incoming: WorkflowCopilotSelection,
+): WorkflowCopilotSelection {
+  const nextNodeIds = Array.from(new Set([
+    ...current.nodeIds.map((item) => String(item || '').trim()).filter(Boolean),
+    ...incoming.nodeIds.map((item) => String(item || '').trim()).filter(Boolean),
+  ]))
+  const nextEdgeIds = Array.from(new Set([
+    ...current.edgeIds.map((item) => String(item || '').trim()).filter(Boolean),
+    ...incoming.edgeIds.map((item) => String(item || '').trim()).filter(Boolean),
+  ]))
+  return {
+    scope: current.scope,
+    nodeIds: nextNodeIds,
+    edgeIds: nextEdgeIds,
+    containerId: incoming.containerId ?? current.containerId ?? null,
+  }
+}
+
+function getNodeTypeWorkbenchIcon(nodeType: NodeType): typeof Play {
+  if (nodeType === 'start') return Play
+  if (nodeType === 'tool') return Wrench
+  return NODE_TYPE_ICON_MAP[nodeType] ?? Play
+}
+
+function getFallbackWorkbenchTabKey(
+  remainingTabs: WorkbenchTabRecord[],
+  activationHistory: WorkflowWorkbenchTabKey[],
+  closingKey?: WorkflowWorkbenchTabKey | null,
+): WorkflowWorkbenchTabKey | null {
+  return [...activationHistory]
+    .reverse()
+    .find((key) => key !== closingKey && remainingTabs.some((tab) => tab.key === key))
+    ?? remainingTabs[remainingTabs.length - 1]?.key
+    ?? null
+}
+
+function getWorkbenchPanelWidthClass(surface: WorkflowEditorSurfaceId | 'property' | null): string {
+  switch (surface) {
+    case 'property':
+    case 'validation':
+      return 'w-[420px] max-w-[calc(100vw-2rem)]'
+    case 'versionHistory':
+    case 'envVars':
+      return 'w-[460px] max-w-[calc(100vw-2rem)]'
+    case 'testRun':
+      return 'w-[520px] max-w-[calc(100vw-2rem)]'
+    case 'copilot':
+      return 'w-[540px] max-w-[calc(100vw-2rem)]'
+    default:
+      return 'w-[420px] max-w-[calc(100vw-2rem)]'
+  }
+}
 
 export default function WorkflowEditorPage() {
   const { workflowId } = useParams<{ workflowId: string }>()
@@ -58,22 +249,34 @@ export default function WorkflowEditorPage() {
   const initialized = useRef(false)
 
   const store = useWorkflowEditorStore()
-  const testRunPanelOpen = useWorkflowTestRunStore((s) => s.panelOpen)
-  const setTestRunPanelOpen = useWorkflowTestRunStore((s) => s.setPanelOpen)
-  const [validationPanelOpen, setValidationPanelOpen] = useState(false)
+  const [openWorkbenchTabs, setOpenWorkbenchTabs] = useState<WorkbenchTabRecord[]>([])
+  const [activeWorkbenchTabKey, setActiveWorkbenchTabKey] = useState<WorkflowWorkbenchTabKey | null>(null)
+  const [activationHistory, setActivationHistory] = useState<WorkflowWorkbenchTabKey[]>([])
+  const [activeDialog, setActiveDialog] = useState<WorkflowEditorDialogId | null>(null)
+  const [floatingUiEpoch, setFloatingUiEpoch] = useState(0)
+  const [validationHoverOpen, setValidationHoverOpen] = useState(false)
   const [isValidating, setIsValidating] = useState(false)
   const [validationErrors, setValidationErrors] = useState<WorkflowValidationIssue[]>([])
   const [validationWarnings, setValidationWarnings] = useState<WorkflowValidationIssue[]>([])
   const [validationRequestError, setValidationRequestError] = useState<string | null>(null)
   const [lastValidatedAt, setLastValidatedAt] = useState<number | null>(null)
   const [workflowDescriptionDraft, setWorkflowDescriptionDraft] = useState('')
-  const [versionPanelOpen, setVersionPanelOpen] = useState(false)
-  const [envPanelOpen, setEnvPanelOpen] = useState(false)
-  const [publishDialogOpen, setPublishDialogOpen] = useState(false)
+  const [copilotSessionRetained, setCopilotSessionRetained] = useState(false)
+  const [copilotLaunchContext, setCopilotLaunchContext] = useState<WorkflowCopilotLaunchContext | null>(null)
+  const [activeCopilotProposal, setActiveCopilotProposal] = useState<WorkflowCopilotProposal | null>(null)
+  const [copilotPreviewMode, setCopilotPreviewMode] = useState<CopilotPreviewMode>('proposed')
+  const [copilotPreviewVisible, setCopilotPreviewVisible] = useState(false)
+  const [isApplyingCopilotProposal, setIsApplyingCopilotProposal] = useState(false)
+  const [lastAppliedCopilot, setLastAppliedCopilot] = useState<{
+    proposalKey: string
+    appliedDraftHash: string
+  } | null>(null)
   const validationSeqRef = useRef(0)
   const debounceTimerRef = useRef<number | null>(null)
   const latestSignatureRef = useRef('')
   const workflowSnapshotRef = useRef<WorkflowInput | null>(null)
+  const copilotLaunchNonceRef = useRef(0)
+  const lastSelectionTargetKeyRef = useRef<string | null>(null)
 
   const { data: workflowEntity, isLoading } = useQuery({
     queryKey: ['assistant-workflow', workflowId],
@@ -88,7 +291,7 @@ export default function WorkflowEditorPage() {
   } = useQuery({
     queryKey: ['assistant-workflow-versions', workflowId],
     queryFn: () => listWorkflowVersions(workflowId!),
-    enabled: !!workflowId && versionPanelOpen,
+    enabled: !!workflowId && activeWorkbenchTabKey === getSurfaceTabKey('versionHistory'),
   })
   const { data: systemToolDefs = [] } = useQuery({
     queryKey: ['assistant-system-tool-definitions-workflow'],
@@ -128,9 +331,13 @@ export default function WorkflowEditorPage() {
     () => serializeToWorkflowInput(store.nodes, store.edges, store.viewport),
     [store.edges, store.nodes, store.viewport],
   )
+  const currentDraftHash = useMemo(
+    () => buildWorkflowDraftHash(workflowInput),
+    [workflowInput],
+  )
   const defaultPublishVersionName = useMemo(
     () => new Date().toLocaleString(),
-    [publishDialogOpen],
+    [activeDialog],
   )
   const validationSignature = useMemo(
     () => buildValidationSignature(workflowInput),
@@ -140,13 +347,130 @@ export default function WorkflowEditorPage() {
     const startNode = store.nodes.find((node) => node.data.nodeType === 'start')
     return normalizeStartNodeConfig(startNode?.data.config ?? null).inputMode
   }, [store.nodes])
+  const currentSelectionTarget = useMemo(
+    () => getCurrentSelectionPropertyTarget({
+      selectedNodeId: store.selectedNodeId,
+      selectedEdgeId: store.selectedEdgeId,
+      selectedSubflowContainerId: store.selectedSubflowContainerId,
+      selectedSubflowNodeId: store.selectedSubflowNodeId,
+      selectedSubflowEdgeId: store.selectedSubflowEdgeId,
+    }),
+    [
+      store.selectedEdgeId,
+      store.selectedNodeId,
+      store.selectedSubflowContainerId,
+      store.selectedSubflowEdgeId,
+      store.selectedSubflowNodeId,
+    ],
+  )
   const workflowEnvVars = useMemo(
     () => getWorkflowEnvVarsFromNodes(store.nodes),
     [store.nodes],
   )
+  const activeWorkbenchTab = useMemo(
+    () => openWorkbenchTabs.find((tab) => tab.key === activeWorkbenchTabKey) ?? null,
+    [activeWorkbenchTabKey, openWorkbenchTabs],
+  )
+  const activePropertyTarget = activeWorkbenchTab?.kind === 'property' ? activeWorkbenchTab.target : null
+  const activeSurface = activeWorkbenchTab?.kind === 'surface' ? activeWorkbenchTab.surfaceId : null
+  const visibleSurface: WorkflowEditorSurfaceId | 'property' | null = activeWorkbenchTab
+    ? (activeWorkbenchTab.kind === 'surface' ? activeWorkbenchTab.surfaceId : 'property')
+    : null
   const hasUnsavedChanges = useMemo(
     () => store.isDirty || workflowDescriptionDraft !== (workflowEntity?.description ?? ''),
     [store.isDirty, workflowDescriptionDraft, workflowEntity?.description],
+  )
+  const testRunPanelOpen = activeSurface === 'testRun'
+  const validationPanelOpen = activeSurface === 'validation'
+  const versionPanelOpen = activeSurface === 'versionHistory'
+  const envPanelOpen = activeSurface === 'envVars'
+  const copilotOpen = activeSurface === 'copilot'
+  const editorToolbarLocked = activeDialog !== null || (copilotOpen && copilotPreviewVisible)
+  const activeCopilotProposalKey = useMemo(
+    () => activeCopilotProposal ? buildCopilotProposalKey(activeCopilotProposal) : null,
+    [activeCopilotProposal],
+  )
+  const materializedCopilotWorkflow = useMemo(
+    () => activeCopilotProposal ? materializeCopilotWorkflow(activeCopilotProposal) : null,
+    [activeCopilotProposal],
+  )
+  const currentReadonlyWorkflow = useMemo(
+    () => deserializeFromWorkflowInput(workflowInput),
+    [workflowInput],
+  )
+  const previewReadonlyWorkflow = useMemo(
+    () => copilotPreviewMode === 'current' || !materializedCopilotWorkflow
+      ? currentReadonlyWorkflow
+      : {
+          nodes: materializedCopilotWorkflow.nodes,
+          edges: materializedCopilotWorkflow.edges,
+          viewport: materializedCopilotWorkflow.viewport,
+        },
+    [copilotPreviewMode, currentReadonlyWorkflow, materializedCopilotWorkflow],
+  )
+  const currentProposalApplyState = useMemo<'idle' | 'applied_current' | 'applied_stale'>(() => {
+    if (!activeCopilotProposalKey || !lastAppliedCopilot || activeCopilotProposalKey !== lastAppliedCopilot.proposalKey) {
+      return 'idle'
+    }
+    return currentDraftHash === lastAppliedCopilot.appliedDraftHash ? 'applied_current' : 'applied_stale'
+  }, [activeCopilotProposalKey, currentDraftHash, lastAppliedCopilot])
+  const showProposedPreview = Boolean(activeCopilotProposal && copilotPreviewVisible)
+  const showCopilotPreviewPane = Boolean(activeSurface === 'copilot' && activeCopilotProposal && copilotPreviewVisible)
+  const effectivePreviewMode: CopilotPreviewMode = showProposedPreview ? copilotPreviewMode : 'current'
+  const effectivePreviewWorkflow = useMemo(
+    () => effectivePreviewMode === 'current' ? currentReadonlyWorkflow : previewReadonlyWorkflow,
+    [currentReadonlyWorkflow, effectivePreviewMode, previewReadonlyWorkflow],
+  )
+  const workbenchTabItems = useMemo<Array<WorkflowEditorSurfaceRailItem<WorkflowWorkbenchTabKey>>>(() => (
+    openWorkbenchTabs.flatMap((tab) => {
+      if (tab.kind === 'surface') {
+        const surfaceMeta: Record<WorkflowEditorSurfaceId, { label: string; icon: ReactNode }> = {
+          copilot: {
+            label: t('settings.skills.workflowCopilot.title'),
+            icon: <Sparkles className="h-4 w-4" />,
+          },
+          testRun: {
+            label: t('settings.skills.workflowActions.testRun'),
+            icon: <Play className="h-4 w-4" />,
+          },
+          validation: {
+            label: t('settings.skills.workflowValidationChecklistTitle'),
+            icon: <ListChecks className="h-4 w-4" />,
+          },
+          versionHistory: {
+            label: t('settings.skills.workflowActions.versionHistory'),
+            icon: <History className="h-4 w-4" />,
+          },
+          envVars: {
+            label: t('settings.skills.workflowActions.env'),
+            icon: <SlidersHorizontal className="h-4 w-4" />,
+          },
+        }
+        const meta = surfaceMeta[tab.surfaceId]
+        return [{ id: tab.key, label: meta.label, icon: meta.icon }]
+      }
+
+      const context = resolveSelectionContextFromTarget(store.nodes, tab.target)
+      if (!context) return []
+
+      const nodeType = context.mode === 'main' ? context.node.data.nodeType : context.node.nodeType
+      const Icon = getNodeTypeWorkbenchIcon(nodeType)
+      const label = context.mode === 'main'
+        ? (String(context.node.data.label ?? '').trim() || context.node.id)
+        : `${String(context.containerNode.data.label ?? '').trim() || context.containerNode.id} / ${String(context.node.label ?? '').trim() || context.node.nodeId}`
+
+      return [{
+        id: tab.key,
+        label,
+        icon: <Icon className="h-4 w-4" />,
+      }]
+    })
+  ), [openWorkbenchTabs, store.nodes, t])
+  const canShowSurfaceRail = workbenchTabItems.length > 1
+  const publishDialogOpen = activeDialog === 'publish'
+  const rightWorkbenchWidthClass = useMemo(
+    () => getWorkbenchPanelWidthClass(visibleSurface),
+    [visibleSurface],
   )
 
 
@@ -174,11 +498,23 @@ export default function WorkflowEditorPage() {
     setValidationWarnings([])
     setValidationRequestError(null)
     setLastValidatedAt(null)
-    setValidationPanelOpen(false)
     setIsValidating(false)
     validationSeqRef.current = 0
     latestSignatureRef.current = ''
     workflowSnapshotRef.current = null
+    setOpenWorkbenchTabs([])
+    setActiveWorkbenchTabKey(null)
+    setActivationHistory([])
+    setActiveDialog(null)
+    setFloatingUiEpoch(0)
+    setValidationHoverOpen(false)
+    setCopilotSessionRetained(false)
+    setActiveCopilotProposal(null)
+    setCopilotPreviewVisible(false)
+    setCopilotPreviewMode('proposed')
+    setLastAppliedCopilot(null)
+    setIsApplyingCopilotProposal(false)
+    lastSelectionTargetKeyRef.current = null
     if (debounceTimerRef.current) {
       window.clearTimeout(debounceTimerRef.current)
       debounceTimerRef.current = null
@@ -249,10 +585,232 @@ export default function WorkflowEditorPage() {
     }
   }, [workflowId, runWorkflowValidation, validationSignature, workflowInput])
 
+  useEffect(() => {
+    if (!copilotPreviewVisible) return
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur()
+    }
+  }, [copilotPreviewVisible])
+
+  const closeFloatingUi = useCallback(() => {
+    setValidationHoverOpen(false)
+    setFloatingUiEpoch((current) => current + 1)
+  }, [])
+
+  const syncSelectionToPropertyTarget = useCallback((target: WorkbenchPropertyTarget) => {
+    if (target.kind === 'subflow') {
+      const alreadySelected = (
+        store.selectedSubflowContainerId === target.containerId &&
+        store.selectedSubflowNodeId === target.nodeId &&
+        !store.selectedSubflowEdgeId
+      )
+      if (!alreadySelected) {
+        store.setSelectedSubflowSelection(target.containerId, target.nodeId, null)
+      }
+      store.requestFocusNode(target.containerId)
+      return
+    }
+
+    const alreadySelected = (
+      store.selectedNodeId === target.nodeId &&
+      !store.selectedEdgeId &&
+      !store.selectedSubflowNodeId &&
+      !store.selectedSubflowEdgeId
+    )
+    if (!alreadySelected) {
+      store.setSelectedNodeId(target.nodeId)
+    }
+    store.requestFocusNode(target.nodeId)
+  }, [store])
+
+  const activateWorkbenchTab = useCallback((
+    key: WorkflowWorkbenchTabKey,
+    options?: { syncSelection?: boolean },
+  ) => {
+    if (activeWorkbenchTabKey === key) {
+      if (options?.syncSelection) {
+        const currentTab = openWorkbenchTabs.find((tab) => tab.key === key)
+        if (currentTab?.kind === 'property') {
+          syncSelectionToPropertyTarget(currentTab.target)
+        }
+      }
+      return
+    }
+
+    closeFloatingUi()
+    if (activeSurface === 'copilot') {
+      setCopilotPreviewVisible(false)
+    }
+    setActiveWorkbenchTabKey(key)
+    setActivationHistory((current) => [...current.filter((item) => item !== key), key])
+
+    if (options?.syncSelection) {
+      const nextTab = openWorkbenchTabs.find((tab) => tab.key === key)
+      if (nextTab?.kind === 'property') {
+        syncSelectionToPropertyTarget(nextTab.target)
+      }
+    }
+  }, [activeSurface, activeWorkbenchTabKey, closeFloatingUi, openWorkbenchTabs, syncSelectionToPropertyTarget])
+
+  const openWorkbenchTab = useCallback((
+    tab: WorkbenchTabRecord,
+    options?: { syncSelection?: boolean },
+  ) => {
+    closeFloatingUi()
+    if (activeSurface === 'copilot' && activeWorkbenchTabKey !== tab.key) {
+      setCopilotPreviewVisible(false)
+    }
+
+    setOpenWorkbenchTabs((current) => current.some((item) => item.key === tab.key) ? current : [...current, tab])
+    setActiveWorkbenchTabKey(tab.key)
+    setActivationHistory((current) => [...current.filter((item) => item !== tab.key), tab.key])
+
+    if (options?.syncSelection && tab.kind === 'property') {
+      syncSelectionToPropertyTarget(tab.target)
+    }
+  }, [activeSurface, activeWorkbenchTabKey, closeFloatingUi, syncSelectionToPropertyTarget])
+
+  const openSurfaceTab = useCallback((surface: WorkflowEditorSurfaceId) => {
+    openWorkbenchTab(buildSurfaceTab(surface))
+  }, [openWorkbenchTab])
+
+  const openPropertyTab = useCallback((
+    target: WorkbenchPropertyTarget,
+    options?: { syncSelection?: boolean },
+  ) => {
+    openWorkbenchTab(buildPropertyTab(target), options)
+  }, [openWorkbenchTab])
+
+  const closeWorkbenchTab = useCallback((key: WorkflowWorkbenchTabKey) => {
+    const closingTab = openWorkbenchTabs.find((tab) => tab.key === key)
+    if (!closingTab) return
+
+    closeFloatingUi()
+
+    if (closingTab.kind === 'surface' && closingTab.surfaceId === 'copilot') {
+      setCopilotPreviewVisible(false)
+    }
+
+    if (closingTab.kind === 'property') {
+      if (closingTab.target.kind === 'subflow') {
+        const matchesCurrentSelection = (
+          store.selectedSubflowContainerId === closingTab.target.containerId &&
+          store.selectedSubflowNodeId === closingTab.target.nodeId
+        )
+        if (matchesCurrentSelection) {
+          store.clearSelectedSubflowSelection()
+        }
+      } else {
+        const matchesCurrentSelection = (
+          store.selectedNodeId === closingTab.target.nodeId &&
+          !store.selectedSubflowNodeId
+        )
+        if (matchesCurrentSelection) {
+          store.setSelectedNodeId(null)
+        }
+      }
+    }
+
+    const remainingTabs = openWorkbenchTabs.filter((tab) => tab.key !== key)
+    const fallbackKey = activeWorkbenchTabKey === key
+      ? getFallbackWorkbenchTabKey(remainingTabs, activationHistory, key)
+      : activeWorkbenchTabKey
+
+    setOpenWorkbenchTabs(remainingTabs)
+    setActivationHistory((current) => current.filter((item) => item !== key))
+    setActiveWorkbenchTabKey(fallbackKey)
+
+    if (fallbackKey) {
+      const fallbackTab = remainingTabs.find((tab) => tab.key === fallbackKey)
+      if (fallbackTab?.kind === 'property') {
+        syncSelectionToPropertyTarget(fallbackTab.target)
+      }
+    }
+  }, [
+    activeWorkbenchTabKey,
+    activationHistory,
+    closeFloatingUi,
+    openWorkbenchTabs,
+    store,
+    syncSelectionToPropertyTarget,
+  ])
+
+  const closeActiveSurface = useCallback(() => {
+    if (!activeWorkbenchTabKey) return
+    closeWorkbenchTab(activeWorkbenchTabKey)
+  }, [activeWorkbenchTabKey, closeWorkbenchTab])
+
+  const toggleSurface = useCallback((surface: WorkflowEditorSurfaceId) => {
+    const tabKey = getSurfaceTabKey(surface)
+    if (activeSurface === surface && activeWorkbenchTabKey === tabKey) {
+      closeWorkbenchTab(tabKey)
+      return
+    }
+    openSurfaceTab(surface)
+  }, [activeSurface, activeWorkbenchTabKey, closeWorkbenchTab, openSurfaceTab])
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      if (event.defaultPrevented) return
+      if (!activeWorkbenchTabKey) return
+      if (document.querySelector('[data-ui-modal="true"]')) return
+      const target = event.target
+      if (target instanceof HTMLElement) {
+        const isEditable = target.isContentEditable || Boolean(target.closest('input, textarea, select, [contenteditable], [role="textbox"]'))
+        if (isEditable) return
+      }
+      event.preventDefault()
+      closeActiveSurface()
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [activeWorkbenchTabKey, closeActiveSurface])
+
+  useEffect(() => {
+    const nextKey = currentSelectionTarget ? getPropertyPanelSelectionTargetKey(currentSelectionTarget) : null
+    if (lastSelectionTargetKeyRef.current === nextKey) return
+    lastSelectionTargetKeyRef.current = nextKey
+    if (!currentSelectionTarget) return
+    const isAlreadyActive = activeWorkbenchTab?.kind === 'property' && isSamePropertyTarget(activeWorkbenchTab.target, currentSelectionTarget)
+    if (isAlreadyActive) return
+    openPropertyTab(currentSelectionTarget)
+  }, [activeWorkbenchTab, currentSelectionTarget, openPropertyTab])
+
+  useEffect(() => {
+    const invalidKeys = openWorkbenchTabs
+      .filter((tab) => tab.kind === 'property' && !resolveSelectionContextFromTarget(store.nodes, tab.target))
+      .map((tab) => tab.key)
+
+    if (invalidKeys.length === 0) return
+
+    const remainingTabs = openWorkbenchTabs.filter((tab) => !invalidKeys.includes(tab.key))
+    const nextActiveKey = activeWorkbenchTabKey && !invalidKeys.includes(activeWorkbenchTabKey)
+      ? activeWorkbenchTabKey
+      : getFallbackWorkbenchTabKey(remainingTabs, activationHistory, activeWorkbenchTabKey)
+
+    setOpenWorkbenchTabs(remainingTabs)
+    setActivationHistory((current) => current.filter((key) => !invalidKeys.includes(key)))
+    setActiveWorkbenchTabKey(nextActiveKey)
+
+    if (nextActiveKey) {
+      const fallbackTab = remainingTabs.find((tab) => tab.key === nextActiveKey)
+      if (fallbackTab?.kind === 'property') {
+        syncSelectionToPropertyTarget(fallbackTab.target)
+      }
+    }
+  }, [
+    activationHistory,
+    activeWorkbenchTabKey,
+    openWorkbenchTabs,
+    store.nodes,
+    syncSelectionToPropertyTarget,
+  ])
+
   const handleValidateNow = useCallback(() => {
-    setValidationPanelOpen((prev) => !prev)
+    toggleSurface('validation')
     void runWorkflowValidation(workflowInput, validationSignature, true)
-  }, [runWorkflowValidation, validationSignature, workflowInput])
+  }, [runWorkflowValidation, toggleSurface, validationSignature, workflowInput])
 
   const handleValidationRefresh = useCallback(() => {
     void runWorkflowValidation(workflowInput, validationSignature, true)
@@ -270,6 +828,91 @@ export default function WorkflowEditorPage() {
     store.setSelectedNodeId(issue.nodeId)
     store.requestFocusNode(issue.nodeId)
   }, [store])
+
+  const openCopilot = useCallback((payload: {
+    mode: WorkflowCopilotMode
+    title?: string
+    instruction?: string
+    selection?: WorkflowCopilotSelection
+    validationContext?: WorkflowCopilotValidationContext
+    testRunContext?: WorkflowCopilotTestRunContext
+    restoreOnClose?: boolean
+  }) => {
+    const shouldAppendSelection = (
+      payload.mode === 'edit_selection' &&
+      copilotSessionRetained &&
+      copilotLaunchContext?.mode === 'edit_selection' &&
+      canAppendCopilotSelection(copilotLaunchContext.selection, payload.selection)
+    )
+    const nextSelection = shouldAppendSelection && copilotLaunchContext?.selection && payload.selection
+      ? mergeCopilotSelection(copilotLaunchContext.selection, payload.selection)
+      : payload.selection
+    copilotLaunchNonceRef.current += 1
+    setCopilotSessionRetained(true)
+    setCopilotLaunchContext({
+      nonce: copilotLaunchNonceRef.current,
+      mode: payload.mode,
+      title: shouldAppendSelection ? (copilotLaunchContext?.title ?? payload.title) : payload.title,
+      instruction: payload.instruction,
+      selection: nextSelection,
+      appendSelection: shouldAppendSelection,
+      validationContext: payload.validationContext,
+      testRunContext: payload.testRunContext,
+    })
+    openSurfaceTab('copilot')
+  }, [copilotLaunchContext, copilotSessionRetained, openSurfaceTab])
+
+  const switchWorkbenchTab = useCallback((key: WorkflowWorkbenchTabKey) => {
+    if (activeWorkbenchTabKey === key) return
+    const targetTab = openWorkbenchTabs.find((tab) => tab.key === key)
+    if (!targetTab) return
+    activateWorkbenchTab(key, { syncSelection: targetTab.kind === 'property' })
+  }, [activateWorkbenchTab, activeWorkbenchTabKey, openWorkbenchTabs])
+
+  const handleApplyCopilotProposal = useCallback(async (proposal: WorkflowCopilotProposal) => {
+    if (isApplyingCopilotProposal) return
+    if (currentDraftHash !== proposal.baseDraftHash) {
+      toast.error(t('settings.skills.workflowCopilot.hashConflict'))
+      return
+    }
+
+    setIsApplyingCopilotProposal(true)
+    try {
+      const materialized = materializeCopilotWorkflow(proposal)
+      store.replaceWorkflow(materialized.nodes, materialized.edges, materialized.viewport, { pushHistory: true })
+
+      const focusNodeId = proposal.affectedNodeIds.find((nodeId) => materialized.nodes.some((node) => node.id === nodeId))
+      if (focusNodeId) {
+        store.requestFocusNode(focusNodeId)
+      }
+
+      const nextSignature = buildValidationSignature(materialized.workflow)
+      await runWorkflowValidation(materialized.workflow, nextSignature, true)
+
+      setLastAppliedCopilot({
+        proposalKey: buildCopilotProposalKey(proposal),
+        appliedDraftHash: buildWorkflowDraftHash(materialized.workflow),
+      })
+      setCopilotPreviewVisible(false)
+      toast.success(t('settings.skills.workflowCopilot.applySuccess'))
+    } finally {
+      setIsApplyingCopilotProposal(false)
+    }
+  }, [currentDraftHash, isApplyingCopilotProposal, runWorkflowValidation, store, t])
+
+  const handleUndoAppliedCopilot = useCallback(() => {
+    if (!lastAppliedCopilot || currentDraftHash !== lastAppliedCopilot.appliedDraftHash) {
+      toast.error(t('settings.skills.workflowCopilot.undoUnavailable'))
+      return
+    }
+    store.undo()
+    setCopilotPreviewVisible(false)
+    toast.success(t('settings.skills.workflowCopilot.undoAppliedSuccess'))
+  }, [currentDraftHash, lastAppliedCopilot, store, t])
+
+  const handleCloseCopilot = useCallback(() => {
+    closeActiveSurface()
+  }, [closeActiveSurface])
 
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -313,7 +956,7 @@ export default function WorkflowEditorPage() {
     },
     onSuccess: () => {
       store.resetDirty()
-      setPublishDialogOpen(false)
+      setActiveDialog(null)
       qc.invalidateQueries({ queryKey: ['assistant-workflow', workflowId] })
       qc.invalidateQueries({ queryKey: ['assistant-workflow-versions', workflowId] })
       qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
@@ -351,6 +994,11 @@ export default function WorkflowEditorPage() {
         } as any)
         store.loadWorkflow(restored.nodes, restored.edges, restored.viewport)
         store.resetDirty()
+        setOpenWorkbenchTabs([])
+        setActiveWorkbenchTabKey(null)
+        setActivationHistory([])
+        setCopilotPreviewVisible(false)
+        lastSelectionTargetKeyRef.current = null
       }
       qc.invalidateQueries({ queryKey: ['assistant-workflow', workflowId] })
       qc.invalidateQueries({ queryKey: ['assistant-workflow-versions', workflowId] })
@@ -411,10 +1059,6 @@ export default function WorkflowEditorPage() {
     clearVersionsMutation.mutate()
   }, [clearVersionsMutation])
 
-  const handleOpenVersionPanel = useCallback(() => {
-    setVersionPanelOpen((prev) => !prev)
-  }, [])
-
   const handleWorkflowEnvVarsChange = useCallback((nextVars: typeof workflowEnvVars) => {
     const startNode = getStartNodeFromNodes(store.nodes)
     if (!startNode) {
@@ -444,6 +1088,10 @@ export default function WorkflowEditorPage() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey
+      if (copilotOpen && mod && e.key.toLowerCase() === 'z') {
+        e.preventDefault()
+        return
+      }
       if (mod && e.key === 's') {
         e.preventDefault()
         handleSave()
@@ -459,7 +1107,7 @@ export default function WorkflowEditorPage() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [handleSave, store])
+  }, [copilotOpen, handleSave, store])
 
   // Warn on page unload
   useEffect(() => {
@@ -473,13 +1121,6 @@ export default function WorkflowEditorPage() {
     return () => window.removeEventListener('beforeunload', handler)
   }, [hasUnsavedChanges])
 
-  // Mutual exclusion: Close test run panel when property panel opens (node selected)
-  useEffect(() => {
-    if (store.selectedNodeId || store.selectedSubflowNodeId) {
-      setTestRunPanelOpen(false)
-    }
-  }, [store.selectedNodeId, store.selectedSubflowNodeId, setTestRunPanelOpen])
-
   if (isLoading) {
     return (
       <div className="flex h-screen items-center justify-center gap-2 text-sm text-muted-foreground">
@@ -491,284 +1132,547 @@ export default function WorkflowEditorPage() {
 
   return (
     <ReactFlowProvider>
-      <div className="relative w-screen h-screen bg-slate-50 overflow-hidden">
-        {/* Full Screen Canvas */}
+      <div className="relative w-screen h-screen overflow-hidden bg-slate-50">
         <div className="absolute inset-0 z-0">
           <FlowCanvas
             tools={workflowTools}
             workflowDescription={workflowDescriptionDraft}
+            readOnly={activeDialog !== null || (copilotOpen && copilotPreviewVisible)}
+            floatingUiEpoch={floatingUiEpoch}
           />
         </div>
 
-        {/* Floating Header */}
-        <div className="absolute top-4 left-4 right-4 z-10 flex justify-between items-start pointer-events-none">
-          {/* Left: Title & Back */}
-          <div className="pointer-events-auto bg-white/70 backdrop-blur-md shadow-sm border border-white/50 rounded-2xl p-2 flex items-center gap-3 pr-4">
+        <div className="absolute top-4 left-4 right-4 z-10 flex items-start justify-between pointer-events-none">
+          <div className="pointer-events-auto flex items-center gap-3 rounded-2xl border border-white/50 bg-white/70 p-2 pr-4 shadow-sm backdrop-blur-md">
             <button
               onClick={handleBack}
-              className="p-2 rounded-xl hover:bg-white/60 transition-colors"
+              className="rounded-xl p-2 transition-colors hover:bg-white/60"
               title={t('settings.skills.workflowActions.back')}
             >
-              <ArrowLeft className="w-4 h-4 text-foreground/80" />
+              <ArrowLeft className="h-4 w-4 text-foreground/80" />
             </button>
             <div className="flex flex-col">
               <h1 className="text-sm font-semibold leading-none">{workflowEntity?.name ?? ''}</h1>
-              <span className="text-[10px] text-muted-foreground mt-0.5">{t('settings.skills.workflowEditor')}</span>
+              <span className="mt-0.5 text-[10px] text-muted-foreground">{t('settings.skills.workflowEditor')}</span>
             </div>
           </div>
 
-          {/* Right: Actions */}
-          <div className="pointer-events-auto bg-white/70 backdrop-blur-md shadow-sm border border-white/50 rounded-2xl p-2 flex items-center gap-1.5">
+          <div className="pointer-events-auto flex items-center gap-1.5 rounded-2xl border border-white/50 bg-white/70 p-2 shadow-sm backdrop-blur-md">
             <button
               onClick={() => store.undo()}
-              disabled={!store.canUndo()}
-              className="p-2 rounded-xl hover:bg-white/60 disabled:opacity-30 transition-colors"
+              disabled={!store.canUndo() || editorToolbarLocked}
+              className="rounded-xl p-2 transition-colors hover:bg-white/60 disabled:opacity-30"
               title={t('settings.skills.workflowActions.undo')}
             >
-              <Undo2 className="w-4 h-4 text-foreground/80" />
+              <Undo2 className="h-4 w-4 text-foreground/80" />
             </button>
             <button
               onClick={() => store.redo()}
-              disabled={!store.canRedo()}
-              className="p-2 rounded-xl hover:bg-white/60 disabled:opacity-30 transition-colors"
+              disabled={!store.canRedo() || editorToolbarLocked}
+              className="rounded-xl p-2 transition-colors hover:bg-white/60 disabled:opacity-30"
               title={t('settings.skills.workflowActions.redo')}
             >
-              <Redo2 className="w-4 h-4 text-foreground/80" />
+              <Redo2 className="h-4 w-4 text-foreground/80" />
             </button>
             <button
               onClick={handleAutoLayout}
-              disabled={store.nodes.length <= 1}
-              className="p-2 rounded-xl hover:bg-white/60 disabled:opacity-30 transition-colors"
+              disabled={store.nodes.length <= 1 || editorToolbarLocked}
+              className="rounded-xl p-2 transition-colors hover:bg-white/60 disabled:opacity-30"
               title={t('settings.skills.workflowActions.autoLayout')}
             >
-              <LayoutTemplate className="w-4 h-4 text-foreground/80" />
+              <LayoutTemplate className="h-4 w-4 text-foreground/80" />
             </button>
             <button
-              onClick={() => {
-                if (!testRunPanelOpen) {
-                  store.setSelectedNodeId(null)
-                  store.clearSelectedSubflowSelection()
-                }
-                setTestRunPanelOpen(!testRunPanelOpen)
-              }}
+              onClick={() => toggleSurface('testRun')}
+              disabled={editorToolbarLocked}
               className={`
-                flex items-center gap-2 px-3 py-1.5 rounded-xl text-sm font-medium transition-all shadow-sm
+                flex items-center gap-2 rounded-xl border px-3 py-1.5 text-sm font-medium shadow-sm transition-all
                 ${testRunPanelOpen
-                  ? 'bg-blue-100 text-blue-700 hover:bg-blue-200 border border-blue-200'
-                  : 'bg-white/90 hover:bg-white text-slate-700 border border-slate-200 hover:border-slate-300'
+                  ? 'border-blue-200 bg-blue-100 text-blue-700 hover:bg-blue-200'
+                  : 'border-slate-200 bg-white/90 text-slate-700 hover:border-slate-300 hover:bg-white'
                 }
+                disabled:cursor-not-allowed disabled:opacity-40
               `}
               title={t('settings.skills.workflowActions.testRun')}
             >
-              <Play className="w-3.5 h-3.5 fill-current" />
+              <Play className="h-3.5 w-3.5 fill-current" />
               {t('settings.skills.workflowActions.testRun')}
             </button>
-            <HoverCard openDelay={200} closeDelay={100}>
+            <HoverCard open={validationHoverOpen} onOpenChange={setValidationHoverOpen} openDelay={200} closeDelay={100}>
               <HoverCardTrigger asChild>
                 <button
                   onClick={handleValidateNow}
+                  disabled={editorToolbarLocked}
                   className={`
-                    relative flex items-center gap-2 px-3 py-1.5 rounded-xl text-sm font-medium transition-all shadow-sm
+                    relative flex items-center gap-2 rounded-xl border px-3 py-1.5 text-sm font-medium shadow-sm transition-all
                     ${validationPanelOpen
-                      ? 'bg-blue-100 text-blue-700 hover:bg-blue-200 border border-blue-200'
-                      : 'bg-white/90 hover:bg-white text-slate-700 border border-slate-200 hover:border-slate-300'
+                      ? 'border-blue-200 bg-blue-100 text-blue-700 hover:bg-blue-200'
+                      : 'border-slate-200 bg-white/90 text-slate-700 hover:border-slate-300 hover:bg-white'
                     }
+                    disabled:cursor-not-allowed disabled:opacity-40
                   `}
                 >
-                  <ListChecks className={`w-3.5 h-3.5 ${isValidating ? 'animate-pulse text-blue-600' : ''}`} />
+                  <ListChecks className={`h-3.5 w-3.5 ${isValidating ? 'animate-pulse text-blue-600' : ''}`} />
                   {t('settings.skills.workflowActions.validate')}
-                  {(validationErrors.length > 0) && (
+                  {validationErrors.length > 0 ? (
                     <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500"></span>
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75" />
+                      <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
                     </span>
-                  )}
-                  {(!isValidating && lastValidatedAt && validationErrors.length === 0) && (
+                  ) : null}
+                  {!isValidating && lastValidatedAt && validationErrors.length === 0 ? (
                     <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
-                      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500"></span>
+                      <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-green-500" />
                     </span>
-                  )}
+                  ) : null}
                 </button>
               </HoverCardTrigger>
               <HoverCardContent side="bottom" align="end" className="w-60 p-3">
                 <div
-                  className="flex flex-col gap-2 cursor-pointer"
-                  onClick={() => setValidationPanelOpen(true)}
+                  className="flex cursor-pointer flex-col gap-2"
+                  onClick={() => openSurfaceTab('validation')}
                 >
                   <div className="flex items-center gap-2">
                     {isValidating ? (
-                      <Loader2 className="w-4 h-4 text-blue-600 animate-spin" />
+                      <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
                     ) : validationErrors.length > 0 ? (
-                      <AlertCircle className="w-4 h-4 text-red-600" />
+                      <AlertCircle className="h-4 w-4 text-red-600" />
                     ) : validationWarnings.length > 0 ? (
-                      <AlertCircle className="w-4 h-4 text-amber-600" />
+                      <AlertCircle className="h-4 w-4 text-amber-600" />
                     ) : lastValidatedAt ? (
-                      <ListChecks className="w-4 h-4 text-green-600" />
+                      <ListChecks className="h-4 w-4 text-green-600" />
                     ) : (
-                      <ListChecks className="w-4 h-4 text-muted-foreground" />
+                      <ListChecks className="h-4 w-4 text-muted-foreground" />
                     )}
-                    <span className={`text-sm font-medium ${isValidating ? 'text-blue-700' :
-                      validationErrors.length > 0 ? 'text-red-700' :
-                        validationWarnings.length > 0 ? 'text-amber-700' :
-                          lastValidatedAt ? 'text-green-700' : 'text-foreground'
-                      }`}>
-                      {isValidating ? t('settings.skills.workflowValidationPopup.running') :
-                        validationErrors.length > 0 ? t('settings.skills.workflowValidationPopup.failed') :
-                          validationWarnings.length > 0 ? t('settings.skills.workflowValidationPopup.warnings') :
-                            lastValidatedAt ? t('settings.skills.workflowValidationPopup.success') :
-                              t('settings.skills.workflowValidationPopup.ready')}
+                    <span className={`text-sm font-medium ${
+                      isValidating ? 'text-blue-700'
+                        : validationErrors.length > 0 ? 'text-red-700'
+                          : validationWarnings.length > 0 ? 'text-amber-700'
+                            : lastValidatedAt ? 'text-green-700' : 'text-foreground'
+                    }`}>
+                      {isValidating ? t('settings.skills.workflowValidationPopup.running')
+                        : validationErrors.length > 0 ? t('settings.skills.workflowValidationPopup.failed')
+                          : validationWarnings.length > 0 ? t('settings.skills.workflowValidationPopup.warnings')
+                            : lastValidatedAt ? t('settings.skills.workflowValidationPopup.success')
+                              : t('settings.skills.workflowValidationPopup.ready')}
                     </span>
                   </div>
 
-                  {(validationErrors.length > 0 || validationWarnings.length > 0) && (
-                    <div className="flex items-center gap-3 text-xs pl-6">
-                      {validationErrors.length > 0 && (
-                        <span className="text-red-600 font-medium">
+                  {(validationErrors.length > 0 || validationWarnings.length > 0) ? (
+                    <div className="flex items-center gap-3 pl-6 text-xs">
+                      {validationErrors.length > 0 ? (
+                        <span className="font-medium text-red-600">
                           {validationErrors.length} {t('settings.skills.workflowValidationPopup.errors')}
                         </span>
-                      )}
-                      {validationWarnings.length > 0 && (
-                        <span className="text-amber-600 font-medium">
+                      ) : null}
+                      {validationWarnings.length > 0 ? (
+                        <span className="font-medium text-amber-600">
                           {validationWarnings.length} {t('settings.skills.workflowValidationPopup.warns')}
                         </span>
-                      )}
+                      ) : null}
                     </div>
-                  )}
+                  ) : null}
 
-                  {lastValidatedAt && (
-                    <div className="text-[10px] text-muted-foreground border-t pt-2 mt-1 flex justify-between items-center">
+                  {lastValidatedAt ? (
+                    <div className="mt-1 flex items-center justify-between border-t pt-2 text-[10px] text-muted-foreground">
                       <span>{t('settings.skills.workflowValidationPopup.lastValidated', { time: new Date(lastValidatedAt).toLocaleTimeString() })}</span>
-                      <ArrowLeft className="w-3 h-3 rotate-180 opacity-50" />
+                      <ArrowLeft className="h-3 w-3 rotate-180 opacity-50" />
                     </div>
-                  )}
+                  ) : null}
                 </div>
               </HoverCardContent>
             </HoverCard>
-            <div className="w-px h-5 bg-border mx-1" />
             <button
-              onClick={handleOpenVersionPanel}
-              className={`
-                flex items-center gap-2 px-3 py-1.5 rounded-xl text-sm font-medium transition-all shadow-sm
-                ${versionPanelOpen
-                  ? 'bg-blue-100 text-blue-700 hover:bg-blue-200 border border-blue-200'
-                  : 'bg-white/90 hover:bg-white text-slate-700 border border-slate-200 hover:border-slate-300'
+              onClick={() => {
+                if (copilotOpen) {
+                  handleCloseCopilot()
+                  return
                 }
+                if (copilotSessionRetained) {
+                  openSurfaceTab('copilot')
+                  return
+                }
+                openCopilot({
+                  mode: 'generate',
+                  title: t('settings.skills.workflowCopilot.title'),
+                  instruction: '',
+                })
+              }}
+              disabled={editorToolbarLocked}
+              className={`
+                flex items-center gap-2 rounded-xl border px-3 py-1.5 text-sm font-medium shadow-sm transition-all
+                ${copilotOpen
+                  ? 'border-blue-200 bg-blue-100 text-blue-700 hover:bg-blue-200'
+                  : 'border-slate-200 bg-white/90 text-slate-700 hover:border-slate-300 hover:bg-white'
+                }
+                disabled:cursor-not-allowed disabled:opacity-40
+              `}
+              title={t('settings.skills.workflowCopilot.title')}
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              {t('settings.skills.workflowCopilot.button')}
+            </button>
+            <div className="mx-1 h-5 w-px bg-border" />
+            <button
+              onClick={() => toggleSurface('versionHistory')}
+              disabled={editorToolbarLocked}
+              className={`
+                flex items-center gap-2 rounded-xl border px-3 py-1.5 text-sm font-medium shadow-sm transition-all
+                ${versionPanelOpen
+                  ? 'border-blue-200 bg-blue-100 text-blue-700 hover:bg-blue-200'
+                  : 'border-slate-200 bg-white/90 text-slate-700 hover:border-slate-300 hover:bg-white'
+                }
+                disabled:cursor-not-allowed disabled:opacity-40
               `}
               title={t('settings.skills.workflowActions.versionHistory')}
             >
-              <History className="w-3.5 h-3.5" />
+              <History className="h-3.5 w-3.5" />
               {t('settings.skills.workflowActions.versionHistory')}
             </button>
             <button
-              onClick={() => setEnvPanelOpen((prev) => !prev)}
+              onClick={() => toggleSurface('envVars')}
+              disabled={editorToolbarLocked}
               className={`
-                flex items-center gap-2 px-3 py-1.5 rounded-xl text-sm font-medium transition-all shadow-sm
+                flex items-center gap-2 rounded-xl border px-3 py-1.5 text-sm font-medium shadow-sm transition-all
                 ${envPanelOpen
-                  ? 'bg-blue-100 text-blue-700 hover:bg-blue-200 border border-blue-200'
-                  : 'bg-white/90 hover:bg-white text-slate-700 border border-slate-200 hover:border-slate-300'
+                  ? 'border-blue-200 bg-blue-100 text-blue-700 hover:bg-blue-200'
+                  : 'border-slate-200 bg-white/90 text-slate-700 hover:border-slate-300 hover:bg-white'
                 }
+                disabled:cursor-not-allowed disabled:opacity-40
               `}
               title={t('settings.skills.workflowActions.env')}
             >
-              <SlidersHorizontal className="w-3.5 h-3.5" />
+              <SlidersHorizontal className="h-3.5 w-3.5" />
               {t('settings.skills.workflowActions.env')}
             </button>
             <button
-              onClick={() => setPublishDialogOpen(true)}
-              disabled={publishMutation.isPending}
-              className="flex items-center gap-2 px-4 py-1.5 rounded-xl text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 border border-blue-700 disabled:opacity-50 transition-all shadow-sm"
+              onClick={() => {
+                closeFloatingUi()
+                setActiveDialog('publish')
+              }}
+              disabled={publishMutation.isPending || editorToolbarLocked}
+              className="flex items-center gap-2 rounded-xl border border-blue-700 bg-blue-600 px-4 py-1.5 text-sm font-medium text-white shadow-sm transition-all hover:bg-blue-700 disabled:opacity-50"
               title={t('settings.skills.workflowActions.saveAndPublish')}
             >
               {publishMutation.isPending ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : (
-                <Send className="w-3.5 h-3.5" />
+                <Send className="h-3.5 w-3.5" />
               )}
               {t('settings.skills.workflowActions.saveAndPublish')}
             </button>
             <button
               onClick={() => saveMutation.mutate()}
-              disabled={saveMutation.isPending || !hasUnsavedChanges}
+              disabled={saveMutation.isPending || !hasUnsavedChanges || editorToolbarLocked}
               className={`
-                flex items-center gap-2 px-4 py-1.5 rounded-xl text-sm font-medium transition-all shadow-sm
+                flex items-center gap-2 rounded-xl border px-4 py-1.5 text-sm font-medium shadow-sm transition-all
                 ${hasUnsavedChanges
-                  ? 'bg-primary text-primary-foreground hover:bg-primary/90 border border-primary'
-                  : 'bg-white/50 text-muted-foreground hover:bg-white/60 border border-slate-200'
+                  ? 'border-primary bg-primary text-primary-foreground hover:bg-primary/90'
+                  : 'border-slate-200 bg-white/50 text-muted-foreground hover:bg-white/60'
                 }
               `}
             >
               {saveMutation.isPending ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : (
-                <Save className="w-3.5 h-3.5" />
+                <Save className="h-3.5 w-3.5" />
               )}
               {t('settings.skills.workflowActions.save')}
             </button>
           </div>
         </div>
 
-        {/* Floating Palette (Left) */}
-        <div className="absolute left-4 top-20 bottom-24 z-10 w-fit pointer-events-none flex flex-col justify-start min-h-0">
-          <div className="pointer-events-auto min-h-0 flex flex-col">
+        <div className="absolute left-4 top-[4.75rem] bottom-24 z-10 flex w-fit min-h-0 flex-col justify-start pointer-events-none">
+          <div className={`min-h-0 flex flex-col ${editorToolbarLocked ? 'pointer-events-none opacity-60' : 'pointer-events-auto'}`}>
             <NodePalette tools={workflowTools} />
           </div>
         </div>
 
-        {/* Floating Property Panel (Right) */}
-        <div className="absolute right-4 top-24 bottom-4 z-10 pointer-events-none flex flex-col items-end justify-start">
-          <div className="pointer-events-auto h-full flex flex-col">
-            <PropertyPanel
-              tools={workflowTools}
-              workflowDescription={workflowDescriptionDraft}
-              onWorkflowDescriptionChange={setWorkflowDescriptionDraft}
-            />
+        {visibleSurface && visibleSurface !== 'copilot' ? (
+          <div className="absolute right-4 top-[4.75rem] bottom-4 z-20 flex flex-col items-end justify-start pointer-events-none">
+            <div className={`relative flex h-full min-h-0 items-start ${canShowSurfaceRail ? 'pl-11' : ''}`}>
+              {canShowSurfaceRail ? (
+                <WorkflowEditorSurfaceRail
+                  items={workbenchTabItems}
+                  activeItem={activeWorkbenchTabKey}
+                  onSelect={switchWorkbenchTab}
+                  className="absolute left-0 top-5"
+                />
+              ) : null}
+              <div
+                className={`pointer-events-auto h-full min-h-0 flex flex-col transition-[width,max-width] duration-200 ease-out will-change-[width] ${rightWorkbenchWidthClass}`}
+              >
+                <div
+                  key={activeWorkbenchTabKey ?? 'workbench-empty'}
+                  className="h-full min-h-0 animate-in fade-in-50 slide-in-from-right-1 duration-150"
+                >
+                  {visibleSurface === 'property' ? (
+                    <PropertyPanel
+                      tools={workflowTools}
+                      workflowDescription={workflowDescriptionDraft}
+                      onWorkflowDescriptionChange={setWorkflowDescriptionDraft}
+                      selectionTarget={activePropertyTarget}
+                      onClose={closeActiveSurface}
+                      onAskAiEdit={({ title, instruction, selection }) => openCopilot({
+                        mode: 'edit_selection',
+                        title,
+                        instruction,
+                        selection,
+                        restoreOnClose: true,
+                      })}
+                    />
+                  ) : null}
+                  {visibleSurface === 'validation' ? (
+                    <WorkflowValidationChecklistPanel
+                      open
+                      isValidating={isValidating}
+                      errors={validationErrors}
+                      warnings={validationWarnings}
+                      requestError={validationRequestError}
+                      lastValidatedAt={lastValidatedAt}
+                      onClose={closeActiveSurface}
+                      onLocate={handleLocateValidationIssue}
+                      onRefresh={handleValidationRefresh}
+                      onAskAiFix={() => openCopilot({
+                        mode: 'fix_validation',
+                        title: t('settings.skills.workflowCopilot.fixWithAi'),
+                        instruction: t('settings.skills.workflowCopilot.defaultFixInstruction'),
+                        validationContext: {
+                          errors: validationErrors.map((issue) => ({
+                            severity: issue.severity,
+                            nodeId: issue.nodeId,
+                            subflowNodeId: issue.subflowNodeId ?? null,
+                            message: issue.message,
+                            source: issue.source,
+                          })),
+                          warnings: validationWarnings.map((issue) => ({
+                            severity: issue.severity,
+                            nodeId: issue.nodeId,
+                            subflowNodeId: issue.subflowNodeId ?? null,
+                            message: issue.message,
+                            source: issue.source,
+                          })),
+                        },
+                        restoreOnClose: true,
+                      })}
+                    />
+                  ) : null}
+                  {visibleSurface === 'testRun' && workflowId ? (
+                    <WorkflowTestRunPanel
+                      open
+                      workflowId={workflowId}
+                      startInputMode={startInputMode}
+                      onClose={closeActiveSurface}
+                      onAnalyzeWithAi={(context) => openCopilot({
+                        mode: 'analyze_test_run',
+                        title: t('settings.skills.workflowCopilot.analyzeWithAi'),
+                        instruction: t('settings.skills.workflowCopilot.defaultAnalyzeInstruction'),
+                        testRunContext: context,
+                        restoreOnClose: true,
+                      })}
+                    />
+                  ) : null}
+                  {visibleSurface === 'versionHistory' ? (
+                    <TargetVersionPanel
+                      open
+                      loading={versionsLoading}
+                      loadError={versionsError instanceof Error ? versionsError.message : null}
+                      isSystemTarget={Boolean(workflowEntity?.isSystem)}
+                      draftVersionId={workflowVersions?.draftVersionId}
+                      publishedVersionId={workflowVersions?.publishedVersionId}
+                      versions={workflowVersions?.versions ?? []}
+                      clearing={clearVersionsMutation.isPending}
+                      deletingVersionId={deleteVersionMutation.isPending ? deleteVersionMutation.variables : null}
+                      restoringVersionId={rollbackMutation.isPending ? rollbackMutation.variables : null}
+                      onClose={closeActiveSurface}
+                      onRefresh={() => { void refetchVersions() }}
+                      onClear={handleClearVersions}
+                      onDelete={handleDeleteVersion}
+                      onRestore={(versionId) => rollbackMutation.mutate(versionId)}
+                    />
+                  ) : null}
+                  {visibleSurface === 'envVars' ? (
+                    <WorkflowEnvVarPanel
+                      open
+                      envVars={workflowEnvVars}
+                      onClose={closeActiveSurface}
+                      onChange={handleWorkflowEnvVarsChange}
+                    />
+                  ) : null}
+                </div>
+              </div>
+            </div>
           </div>
-        </div>
+        ) : null}
 
-        <WorkflowValidationChecklistPanel
-          open={validationPanelOpen}
-          isValidating={isValidating}
-          errors={validationErrors}
-          warnings={validationWarnings}
-          requestError={validationRequestError}
-          lastValidatedAt={lastValidatedAt}
-          onClose={() => setValidationPanelOpen(false)}
-          onLocate={handleLocateValidationIssue}
-          onRefresh={handleValidationRefresh}
-        />
+        {workflowId && copilotSessionRetained ? (
+          <div className={`absolute inset-4 top-[4.75rem] z-30 pointer-events-none ${copilotOpen ? '' : 'hidden'}`}>
+            <div className={`h-full min-h-0 gap-3 ${showCopilotPreviewPane ? 'grid xl:grid-cols-[minmax(0,1fr)_540px]' : 'flex justify-end'}`}>
+              {showCopilotPreviewPane ? (
+                <div className="pointer-events-auto min-h-0">
+                  <WorkflowEditorSurfaceShell
+                    size="full"
+                    density="compact"
+                    icon={<Sparkles className="h-4 w-4" />}
+                    title={activeCopilotProposal?.title || t('settings.skills.workflowCopilot.previewDraftTitle')}
+                    subtitle={!activeCopilotProposal
+                      ? t('settings.skills.workflowCopilot.previewDraftHint')
+                      : effectivePreviewMode === 'current'
+                        ? t('settings.skills.workflowCopilot.previewCurrentHint')
+                        : t('settings.skills.workflowCopilot.previewProposedHint')}
+                    headerActions={(
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                        <div className="inline-flex rounded-2xl border border-slate-200 bg-slate-50 p-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCopilotPreviewMode('current')
+                              setCopilotPreviewVisible(true)
+                            }}
+                            className={`rounded-xl px-3 py-1.5 text-xs font-medium transition-colors ${
+                              effectivePreviewMode === 'current'
+                                ? 'bg-white text-slate-900 shadow-sm'
+                                : 'text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            {t('settings.skills.workflowCopilot.previewCurrent')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!activeCopilotProposal) return
+                              setCopilotPreviewMode('proposed')
+                              setCopilotPreviewVisible(true)
+                            }}
+                            disabled={!activeCopilotProposal}
+                            className={`rounded-xl px-3 py-1.5 text-xs font-medium transition-colors ${
+                              effectivePreviewMode === 'proposed'
+                                ? 'bg-white text-slate-900 shadow-sm'
+                                : 'text-slate-600 hover:text-slate-900'
+                            } disabled:cursor-not-allowed disabled:opacity-40`}
+                          >
+                            {t('settings.skills.workflowCopilot.previewProposed')}
+                          </button>
+                        </div>
+                        {activeCopilotProposal ? (
+                          <>
+                            <span className={`inline-flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-medium ${
+                              activeCopilotProposal.validation.valid
+                                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                : 'border-amber-200 bg-amber-50 text-amber-700'
+                            }`}>
+                              {activeCopilotProposal.validation.valid
+                                ? t('settings.skills.workflowCopilot.validationOk')
+                                : t('settings.skills.workflowCopilot.validationIssues', { count: activeCopilotProposal.validation.errors.length })}
+                            </span>
+                            <span className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700">
+                              {t('settings.skills.workflowCopilot.affectedNodes', { count: activeCopilotProposal.affectedNodeIds.length })}
+                            </span>
+                          </>
+                        ) : null}
+                      </div>
+                    )}
+                    bodyClassName="flex min-h-0 flex-1 overflow-hidden bg-slate-50/70 p-3.5"
+                    footerClassName="pt-2.5"
+                    footer={activeCopilotProposal ? (
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          {activeCopilotProposal.layoutRecommendation === 'autolayout' ? (
+                            <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700">
+                              <Sparkles className="h-3.5 w-3.5" />
+                              {t('settings.skills.workflowCopilot.autolayoutSuggested')}
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setCopilotPreviewVisible(false)}
+                            className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50"
+                          >
+                            {t('settings.skills.workflowCopilot.closePreview')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleApplyCopilotProposal(activeCopilotProposal)}
+                            disabled={isApplyingCopilotProposal}
+                            className="inline-flex items-center gap-2 rounded-2xl bg-primary px-4 py-2 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-60"
+                          >
+                            {isApplyingCopilotProposal ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                            {t('settings.skills.workflowCopilot.applyProposal')}
+                          </button>
+                          {currentProposalApplyState === 'applied_current' ? (
+                            <button
+                              type="button"
+                              onClick={() => void handleUndoAppliedCopilot()}
+                              className="inline-flex items-center gap-2 rounded-2xl border border-emerald-300 bg-white px-4 py-2 text-xs font-medium text-emerald-700 transition-colors hover:bg-emerald-50"
+                            >
+                              {t('settings.skills.workflowCopilot.undoApplied')}
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-xs text-muted-foreground">
+                        {t('settings.skills.workflowCopilot.previewEmptyHint')}
+                      </div>
+                    )}
+                  >
+                    <WorkflowReadonlyCanvas
+                      key={`${effectivePreviewMode}:${effectivePreviewMode === 'current' ? currentDraftHash : activeCopilotProposalKey ?? 'proposal'}`}
+                      className="h-full min-h-0 overflow-hidden rounded-[24px] border border-slate-200 bg-slate-50"
+                      nodes={effectivePreviewWorkflow.nodes}
+                      edges={effectivePreviewWorkflow.edges}
+                      highlightedNodeIds={activeCopilotProposal?.affectedNodeIds ?? []}
+                      showFitViewControl
+                    />
+                  </WorkflowEditorSurfaceShell>
+                </div>
+              ) : null}
 
-        {workflowId && <WorkflowTestRunPanel workflowId={workflowId} startInputMode={startInputMode} />}
-
-        <TargetVersionPanel
-          open={versionPanelOpen}
-          loading={versionsLoading}
-          loadError={versionsError instanceof Error ? versionsError.message : null}
-          isSystemTarget={Boolean(workflowEntity?.isSystem)}
-          draftVersionId={workflowVersions?.draftVersionId}
-          publishedVersionId={workflowVersions?.publishedVersionId}
-          versions={workflowVersions?.versions ?? []}
-          clearing={clearVersionsMutation.isPending}
-          deletingVersionId={deleteVersionMutation.isPending ? deleteVersionMutation.variables : null}
-          restoringVersionId={rollbackMutation.isPending ? rollbackMutation.variables : null}
-          onClose={() => setVersionPanelOpen(false)}
-          onRefresh={() => { void refetchVersions() }}
-          onClear={handleClearVersions}
-          onDelete={handleDeleteVersion}
-          onRestore={(versionId) => rollbackMutation.mutate(versionId)}
-        />
-
-        <WorkflowEnvVarPanel
-          open={envPanelOpen}
-          envVars={workflowEnvVars}
-          onClose={() => setEnvPanelOpen(false)}
-          onChange={handleWorkflowEnvVarsChange}
-        />
+              <div className={`min-h-0 ${showCopilotPreviewPane ? '' : 'w-full max-w-[540px]'}`}>
+                <div className={`relative flex h-full min-h-0 items-start ${canShowSurfaceRail ? 'pl-11' : ''}`}>
+                  {canShowSurfaceRail ? (
+                    <WorkflowEditorSurfaceRail
+                      items={workbenchTabItems}
+                      activeItem={activeWorkbenchTabKey}
+                      onSelect={switchWorkbenchTab}
+                      className="absolute left-0 top-5"
+                    />
+                  ) : null}
+                  <div
+                    className={`pointer-events-auto h-full min-h-0 flex-1 transition-[width,max-width] duration-300 ease-out will-change-[width] ${rightWorkbenchWidthClass}`}
+                  >
+                    <WorkflowCopilotPanel
+                      open={copilotOpen}
+                      workflowId={workflowId}
+                      draft={workflowInput}
+                      launchContext={copilotLaunchContext}
+                      layout="split"
+                      proposal={activeCopilotProposal}
+                      previewVisible={copilotPreviewVisible}
+                      previewMode={copilotPreviewMode}
+                      isApplyingProposal={isApplyingCopilotProposal}
+                      currentProposalApplyState={currentProposalApplyState}
+                      onClose={handleCloseCopilot}
+                      onProposalChange={setActiveCopilotProposal}
+                      onPreviewVisibleChange={setCopilotPreviewVisible}
+                      onPreviewModeChange={setCopilotPreviewMode}
+                      onApplyProposal={handleApplyCopilotProposal}
+                      onUndoAppliedProposal={handleUndoAppliedCopilot}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         <PublishVersionDialog
           open={publishDialogOpen}
           defaultName={defaultPublishVersionName}
           submitting={publishMutation.isPending}
-          onOpenChange={setPublishDialogOpen}
+          onOpenChange={(nextOpen) => setActiveDialog(nextOpen ? 'publish' : null)}
           onConfirm={handlePublish}
         />
       </div>

@@ -15,6 +15,7 @@ import {
   Keyboard,
   ChevronDown,
   ChevronRight,
+  Sparkles,
   Wrench,
   Database,
 } from 'lucide-react'
@@ -32,11 +33,15 @@ import { runWorkflowTestStreamById, submitWorkflowRunApprovalDecision, validateW
 import { defaultLabelForNodeType } from './labelUtils'
 import { serializeToWorkflowInput } from './serialization'
 import { isValidStartStructuredFieldName, normalizeStartNodeConfig } from './startNodeConfig'
-import type { ContainerBodyNodeType, NodeType, StartStructuredField } from '../../api/workflow'
+import type { ContainerBodyNodeType, NodeType, StartStructuredField, WorkflowCopilotTestRunContext } from '../../api/workflow'
+import { WorkflowEditorSurfaceShell } from './WorkflowEditorSurfaceShell'
 
 interface WorkflowTestRunPanelProps {
+  open: boolean
   workflowId: string
   startInputMode: 'text' | 'structured'
+  onAnalyzeWithAi?: (context: WorkflowCopilotTestRunContext) => void
+  onClose: () => void
 }
 
 type PanelTab = 'conversation' | 'input' | 'result' | 'trace' | 'raw'
@@ -127,7 +132,7 @@ function parseStructuredValue(
   return { ok: false, missing: false }
 }
 
-export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTestRunPanelProps) {
+export function WorkflowTestRunPanel({ open, workflowId, startInputMode, onAnalyzeWithAi, onClose }: WorkflowTestRunPanelProps) {
   const { t } = useTranslation()
   const [activeTab, setActiveTab] = useState<PanelTab>('input')
   const [expandedNodeIo, setExpandedNodeIo] = useState<Record<string, boolean>>({})
@@ -138,7 +143,6 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
   const runSubmitLockedRef = useRef(false)
   const wfStore = useWorkflowEditorStore()
   const {
-    panelOpen,
     status,
     input,
     structuredInput,
@@ -156,7 +160,6 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
     nodeTraceMap,
     sessionRuns,
     activeRunId,
-    setPanelOpen,
     setInput,
     setStructuredInputField,
     setStreamOutput,
@@ -350,7 +353,6 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
         mode: startInputMode,
         submittedInput: payload.userInput,
       })
-      setPanelOpen(true)
       setActiveTab(startInputMode === 'text' ? 'conversation' : 'trace')
 
       try {
@@ -377,53 +379,179 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
     }
   }
 
-  return (
-    panelOpen ? (
-      <div className="fixed right-6 top-[78px] z-50 w-[480px] h-[640px] max-w-[calc(100vw-3rem)] max-h-[calc(100vh-6rem)] rounded-xl border bg-white/95 backdrop-blur-sm shadow-2xl flex flex-col overflow-hidden animate-in slide-in-from-top-4 duration-200">
-        {/* Header */}
-        <div className="px-5 py-4 border-b bg-muted/30 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-2.5">
-            <div className="p-1.5 bg-primary/10 rounded-lg text-primary">
-              <Terminal className="w-4 h-4" />
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold leading-none text-foreground">工作流测试</h3>
-              <p className="text-[11px] text-muted-foreground mt-1">草稿直跑，不计入正式会话</p>
-            </div>
-          </div>
+  const headerStatusBadge = status === 'running' ? (
+    <div className="flex items-center gap-1.5 rounded-full border border-primary/20 bg-primary/10 px-2.5 py-1 text-[10px] text-primary">
+      <Loader2 className="h-3 w-3 animate-spin" />
+      Running
+    </div>
+  ) : status === 'completed' ? (
+    <div className="flex items-center gap-1.5 rounded-full border border-green-100 bg-green-50 px-2.5 py-1 text-[10px] text-green-600">
+      <CheckCircle2 className="h-3 w-3" />
+      Completed
+      {result.durationMs ? ` (${result.durationMs}ms)` : ''}
+    </div>
+  ) : status === 'error' ? (
+    <div className="flex items-center gap-1.5 rounded-full border border-red-100 bg-red-50 px-2.5 py-1 text-[10px] text-red-600">
+      <AlertCircle className="h-3 w-3" />
+      Failed
+    </div>
+  ) : null
 
-          {/* Status in Header */}
-          <div className="ml-auto flex items-center gap-2 mr-4">
-            {status === 'running' && (
-              <div className="flex items-center gap-1.5 text-[10px] text-primary bg-primary/10 px-2 py-1 rounded-full border border-primary/20">
-                <Loader2 className="w-3 h-3 animate-spin" />
-                Running
-              </div>
-            )}
-            {status === 'completed' && (
-              <div className="flex items-center gap-1.5 text-[10px] text-green-600 bg-green-50 px-2 py-1 rounded-full border border-green-100">
-                <CheckCircle2 className="w-3 h-3" />
-                Completed
-                {result.durationMs && ` (${result.durationMs}ms)`}
-              </div>
-            )}
-            {status === 'error' && (
-              <div className="flex items-center gap-1.5 text-[10px] text-red-600 bg-red-50 px-2 py-1 rounded-full border border-red-100">
-                <AlertCircle className="w-3 h-3" />
-                Failed
-              </div>
+  const headerActions = (
+    <>
+      {onAnalyzeWithAi && selectedTurn ? (
+        <button
+          onClick={() => onAnalyzeWithAi({
+            selectedRunId: selectedTurn.runId,
+            result: selectedTurn.result,
+            trace: Object.values(selectedTurn.nodeTraceMap),
+            raw: selectedTurn.traceEvents,
+          })}
+          className="inline-flex items-center gap-1.5 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition-colors hover:bg-slate-50"
+        >
+          <Sparkles className="h-3.5 w-3.5" />
+          {t('settings.skills.workflowCopilot.analyzeWithAi')}
+        </button>
+      ) : null}
+      {headerStatusBadge}
+    </>
+  )
+
+  const panelFooter = (
+    isConversationMode ? (
+      <div className="space-y-3">
+        <textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing || e.repeat) return
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault()
+              if (status !== 'running' && !runSubmitLockedRef.current) {
+                void handleRun()
+              }
+            }
+          }}
+          disabled={status === 'running'}
+          placeholder="继续输入测试内容..."
+          className="min-h-[88px] w-full resize-none rounded-2xl border bg-background px-4 py-3 text-sm font-mono placeholder:text-muted-foreground transition-all focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+        />
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <Switch
+                id="conversation-stream-mode"
+                checked={streamOutput}
+                onCheckedChange={setStreamOutput}
+                disabled={status === 'running'}
+                className="origin-left scale-90 data-[state=checked]:bg-primary"
+              />
+              <label
+                htmlFor="conversation-stream-mode"
+                className="cursor-pointer select-none text-xs text-muted-foreground"
+              >
+                流式输出
+              </label>
+            </div>
+            <span className="text-[11px] text-muted-foreground">
+              {messages.length} message{messages.length === 1 ? '' : 's'}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setResetDialogOpen(true)}
+              className="rounded-xl p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              title="重置所有内容"
+            >
+              <RefreshCcw className="h-4 w-4" />
+            </button>
+            {status === 'running' ? (
+              <button
+                onClick={cancelRun}
+                className="flex items-center gap-2 rounded-xl bg-red-50 px-4 py-2 text-xs font-medium text-red-600 transition-colors hover:bg-red-100"
+              >
+                <Square className="h-3.5 w-3.5 fill-current" />
+                停止
+              </button>
+            ) : (
+              <button
+                onClick={() => void handleRun()}
+                disabled={!input.trim()}
+                className="flex items-center gap-2 rounded-xl bg-primary px-6 py-2 text-xs font-medium text-primary-foreground shadow-sm transition-all hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50 active:scale-95"
+              >
+                <Play className="h-3.5 w-3.5 fill-current" />
+                发送
+              </button>
             )}
           </div>
-          <button
-            onClick={() => setPanelOpen(false)}
-            className="p-2 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <X className="w-4 h-4" />
-          </button>
+        </div>
+      </div>
+    ) : (
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <Switch
+              id="stream-mode"
+              checked={streamOutput}
+              onCheckedChange={setStreamOutput}
+              disabled={status === 'running'}
+              className="origin-left scale-90 data-[state=checked]:bg-primary"
+            />
+            <label
+              htmlFor="stream-mode"
+              className="cursor-pointer select-none text-xs text-muted-foreground"
+            >
+              流式输出
+            </label>
+          </div>
         </div>
 
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setResetDialogOpen(true)}
+            className="rounded-xl p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            title="重置所有内容"
+          >
+            <RefreshCcw className="h-4 w-4" />
+          </button>
+          {status === 'running' ? (
+            <button
+              onClick={cancelRun}
+              className="flex items-center gap-2 rounded-xl bg-red-50 px-4 py-2 text-xs font-medium text-red-600 transition-colors hover:bg-red-100"
+            >
+              <Square className="h-3.5 w-3.5 fill-current" />
+              停止
+            </button>
+          ) : (
+            <button
+              onClick={() => void handleRun()}
+              className="flex items-center gap-2 rounded-xl bg-primary px-6 py-2 text-xs font-medium text-primary-foreground shadow-sm transition-all hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50 active:scale-95"
+            >
+              <Play className="h-3.5 w-3.5 fill-current" />
+              运行
+            </button>
+          )}
+        </div>
+      </div>
+    )
+  )
+
+  return (
+    open ? (
+      <WorkflowEditorSurfaceShell
+        size="wide"
+        fluid
+        icon={<Terminal className="h-4 w-4" />}
+        title={t('settings.skills.workflowActions.testRun')}
+        subtitle="草稿直跑，不计入正式会话"
+        onClose={onClose}
+        headerActions={headerActions}
+        bodyClassName="min-h-0 flex-1 overflow-hidden bg-slate-50/70"
+        footer={panelFooter}
+      >
+
         {/* Tabs Bar */}
-        <div className="px-3 py-2 border-b flex items-center gap-1 bg-white shrink-0">
+        <div className="flex shrink-0 items-center gap-1 border-b bg-white px-3 py-2">
           {[
             ...(isConversationMode ? [{ id: 'conversation', label: '对话', icon: Keyboard }] : [{ id: 'input', label: '输入', icon: Keyboard }]),
             { id: 'result', label: '结果', icon: FileJson },
@@ -551,73 +679,6 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
                 )}
               </div>
 
-              <div className="shrink-0 rounded-xl border bg-white p-3 shadow-sm space-y-3">
-                <textarea
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.nativeEvent.isComposing || e.repeat) return
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault()
-                      if (status !== 'running' && !runSubmitLockedRef.current) {
-                        void handleRun()
-                      }
-                    }
-                  }}
-                  disabled={status === 'running'}
-                  placeholder="继续输入测试内容..."
-                  className="min-h-[88px] w-full resize-none rounded-lg border bg-background px-4 py-3 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/50 transition-all font-mono"
-                />
-                <div className="flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-3">
-                    <div className="flex items-center gap-2">
-                      <Switch
-                        id="conversation-stream-mode"
-                        checked={streamOutput}
-                        onCheckedChange={setStreamOutput}
-                        disabled={status === 'running'}
-                        className="data-[state=checked]:bg-primary scale-90 origin-left"
-                      />
-                      <label
-                        htmlFor="conversation-stream-mode"
-                        className="text-xs text-muted-foreground cursor-pointer select-none"
-                      >
-                        流式输出
-                      </label>
-                    </div>
-                    <span className="text-[11px] text-muted-foreground">
-                      {messages.length} message{messages.length === 1 ? '' : 's'}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => setResetDialogOpen(true)}
-                      className="p-2 text-muted-foreground hover:text-foreground rounded-lg hover:bg-muted transition-colors"
-                      title="重置所有内容"
-                    >
-                      <RefreshCcw className="w-4 h-4" />
-                    </button>
-                    {status === 'running' ? (
-                      <button
-                        onClick={cancelRun}
-                        className="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-600 hover:bg-red-100 rounded-lg text-xs font-medium transition-colors"
-                      >
-                        <Square className="w-3.5 h-3.5 fill-current" />
-                        停止
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => void handleRun()}
-                        disabled={!input.trim()}
-                        className="flex items-center gap-2 px-6 py-2 bg-primary text-primary-foreground hover:bg-primary/90 rounded-lg text-xs font-medium shadow-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed active:scale-95"
-                      >
-                        <Play className="w-3.5 h-3.5 fill-current" />
-                        发送
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
             </div>
           )}
 
@@ -673,54 +734,6 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
                     className="flex-1 w-full resize-none rounded-lg border bg-white px-4 py-3 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/50 transition-all font-mono"
                   />
                 )}
-              </div>
-
-              {/* Controls */}
-              <div className="flex items-center justify-between gap-4 shrink-0 bg-white p-3 rounded-lg border shadow-sm">
-                <div className="flex items-center gap-3">
-                  <div className="flex items-center gap-2">
-                    <Switch
-                      id="stream-mode"
-                      checked={streamOutput}
-                      onCheckedChange={setStreamOutput}
-                      disabled={status === 'running'}
-                      className="data-[state=checked]:bg-primary scale-90 origin-left"
-                    />
-                    <label
-                      htmlFor="stream-mode"
-                      className="text-xs text-muted-foreground cursor-pointer select-none"
-                    >
-                      流式输出
-                    </label>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setResetDialogOpen(true)}
-                    className="p-2 text-muted-foreground hover:text-foreground rounded-lg hover:bg-muted transition-colors"
-                    title="重置所有内容"
-                  >
-                    <RefreshCcw className="w-4 h-4" />
-                  </button>
-                  {status === 'running' ? (
-                    <button
-                      onClick={cancelRun}
-                      className="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-600 hover:bg-red-100 rounded-lg text-xs font-medium transition-colors"
-                    >
-                      <Square className="w-3.5 h-3.5 fill-current" />
-                      停止
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => void handleRun()}
-                      className="flex items-center gap-2 px-6 py-2 bg-primary text-primary-foreground hover:bg-primary/90 rounded-lg text-xs font-medium shadow-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed active:scale-95"
-                    >
-                      <Play className="w-3.5 h-3.5 fill-current" />
-                      运行
-                    </button>
-                  )}
-                </div>
               </div>
             </div>
           )}
@@ -1013,7 +1026,7 @@ export function WorkflowTestRunPanel({ workflowId, startInputMode }: WorkflowTes
           }}
           onCancel={() => setResetDialogOpen(false)}
         />
-      </div >
+      </WorkflowEditorSurfaceShell>
     ) : null
   )
 }

@@ -30,6 +30,8 @@ from app.assistant_config.schemas import (
     SystemToolEnabledUpdateRequest,
     WorkflowInput,
     WorkflowPublishRequest,
+    WorkflowCopilotRequest,
+    WorkflowCopilotResponse,
     WorkflowTestRunRequest,
     WorkflowVersionListResponse,
     WorkflowValidationResponse,
@@ -37,6 +39,7 @@ from app.assistant_config.schemas import (
 )
 from app.assistant_config.workflow_test_service import WorkflowTestRunService
 from app.assistant_config.agent_test_service import AgentTestRunService
+from app.assistant_config.workflow_copilot_service import WorkflowCopilotService
 from app.assistant_config.service import AssistantConfigService
 from app.common.exceptions import ApiException
 from app.common.responses import ApiResponse
@@ -486,6 +489,17 @@ def validate_workflow_by_id(
     workflow = service.get_workflow(id)
     resp = _validate_workflow_payload(db, request, workflow=workflow)
     return ApiResponse.ok(resp.model_dump(by_alias=True))
+
+
+@router.post("/workflows/{id}/copilot/respond", response_model=ApiResponse)
+def workflow_copilot_respond(
+    id: UUID,
+    request: WorkflowCopilotRequest,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = WorkflowCopilotService(db)
+    payload = service.respond(workflow_id=id, request=request)
+    return ApiResponse.ok(WorkflowCopilotResponse.model_validate(payload).model_dump(by_alias=True))
 
 
 @router.post("/workflows/{id}/test-run")

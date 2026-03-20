@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import type { WorkflowEnvVarType, WorkflowSessionVar } from '../../api/workflow'
 import {
   buildDefaultValueText,
@@ -90,11 +90,14 @@ export function EnvVarEditDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
+      <DialogContent className="sm:max-w-lg rounded-[24px] border-white/80 bg-white/96 p-6 shadow-[0_24px_70px_rgba(15,23,42,0.22)]">
+        <DialogHeader className="space-y-2 text-left">
           <DialogTitle>
             {mode === 'create' ? t('settings.skills.envVars.createTitle') : t('settings.skills.envVars.editTitle')}
           </DialogTitle>
+          <DialogDescription>
+            {t('settings.skills.envVars.formDialogDescription')}
+          </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-3">
@@ -155,14 +158,14 @@ export function EnvVarEditDialog({
           <button
             type="button"
             onClick={() => onOpenChange(false)}
-            className="h-9 rounded-md border px-3 text-sm hover:bg-muted"
+            className="h-10 rounded-xl border border-slate-200 px-4 text-sm text-slate-700 transition-colors hover:bg-slate-50"
           >
             {t('actions.cancel')}
           </button>
           <button
             type="button"
             onClick={handleConfirm}
-            className="h-9 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:opacity-90"
+            className="h-10 rounded-xl bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:opacity-90"
           >
             {mode === 'create' ? t('actions.create') : t('actions.save')}
           </button>

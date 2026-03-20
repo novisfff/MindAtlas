@@ -8,6 +8,7 @@ import type {
   ContainerBodyNodeType,
   NodeConfig,
   NodeType,
+  WorkflowCopilotSelection,
 } from '../../api/workflow'
 import { buildWorkflowReferenceParams } from './variableReferences'
 import { NodeHeader } from './property-panel/NodeHeader'
@@ -28,15 +29,19 @@ import { VariableAssignNodeSettings } from './property-panel/nodes/VariableAssig
 import { HumanInLoopNodeSettings } from './property-panel/nodes/HumanInLoopNodeSettings'
 import { OutputNodeSettings } from './property-panel/nodes/OutputNodeSettings'
 import { useModelsQuery } from '../../../ai-providers/queries'
-import { X } from 'lucide-react'
+import { Sparkles } from 'lucide-react'
 import { defaultLabelForNodeType } from './labelUtils'
 import { normalizeIfElseConfig } from './ifElseConfig'
 import type { WorkflowToolDefinition } from './types'
+import { WorkflowEditorSurfaceShell } from './WorkflowEditorSurfaceShell'
 
 interface PropertyPanelProps {
   tools: WorkflowToolDefinition[]
   workflowDescription: string
   onWorkflowDescriptionChange: (value: string) => void
+  onAskAiEdit?: (payload: { title?: string; instruction?: string; selection: WorkflowCopilotSelection }) => void
+  selectionTarget?: PropertyPanelSelectionTarget | null
+  onClose?: () => void
 }
 
 type ConfigEditSessionRef = {
@@ -59,6 +64,17 @@ type SubflowSelectionContext = {
 }
 
 type SelectionContext = MainSelectionContext | SubflowSelectionContext
+
+export type PropertyPanelSelectionTarget =
+  | {
+      kind: 'main'
+      nodeId: string
+    }
+  | {
+      kind: 'subflow'
+      containerId: string
+      nodeId: string
+    }
 
 const CONTAINER_MENTION_PARAMS = [
   {
@@ -269,7 +285,47 @@ function toSubflowGraphEdges(bodyEdges: ContainerBodyEdge[]): Edge[] {
   }))
 }
 
-function resolveSelectionContext(
+export function getPropertyPanelSelectionTargetKey(target: PropertyPanelSelectionTarget): string {
+  if (target.kind === 'main') {
+    return `property:main:${target.nodeId}`
+  }
+  return `property:subflow:${target.containerId}:${target.nodeId}`
+}
+
+export function resolveSelectionContextFromTarget(
+  nodes: Node<WfNodeData>[],
+  target: PropertyPanelSelectionTarget,
+): SelectionContext | null {
+  if (target.kind === 'subflow') {
+    const containerNode = nodes.find((node) => node.id === target.containerId)
+    if (containerNode && (containerNode.data.nodeType === 'iteration' || containerNode.data.nodeType === 'loop')) {
+      const containerConfig = (containerNode.data.config ?? {}) as Record<string, unknown>
+      const bodyNodes = normalizeContainerBodyNodes(containerConfig)
+      const bodyEdges = normalizeContainerBodyEdges(containerConfig, bodyNodes)
+      const selectedBodyNode = bodyNodes.find((node) => node.nodeId === target.nodeId)
+      if (selectedBodyNode) {
+        return {
+          mode: 'subflow',
+          containerNode,
+          containerConfig,
+          bodyNodes,
+          bodyEdges,
+          node: selectedBodyNode,
+        }
+      }
+    }
+    return null
+  }
+
+  const selectedNode = nodes.find((node) => node.id === target.nodeId)
+  if (!selectedNode) return null
+  return {
+    mode: 'main',
+    node: selectedNode,
+  }
+}
+
+export function resolveSelectionContext(
   nodes: Node<WfNodeData>[],
   selectedNodeId: string | null,
   selectedSubflowContainerId: string | null,
@@ -304,7 +360,14 @@ function resolveSelectionContext(
   }
 }
 
-export function PropertyPanel({ tools, workflowDescription, onWorkflowDescriptionChange }: PropertyPanelProps) {
+export function PropertyPanel({
+  tools,
+  workflowDescription,
+  onWorkflowDescriptionChange,
+  onAskAiEdit,
+  selectionTarget = null,
+  onClose,
+}: PropertyPanelProps) {
   const { t } = useTranslation()
   const selectedNodeId = useWorkflowEditorStore((s) => s.selectedNodeId)
   const selectedSubflowContainerId = useWorkflowEditorStore((s) => s.selectedSubflowContainerId)
@@ -320,8 +383,12 @@ export function PropertyPanel({ tools, workflowDescription, onWorkflowDescriptio
   const configEditSessionRef = useRef<ConfigEditSessionRef>({ targetKey: null, active: false })
 
   const selectionContext = useMemo(
-    () => resolveSelectionContext(nodes, selectedNodeId, selectedSubflowContainerId, selectedSubflowNodeId),
-    [nodes, selectedNodeId, selectedSubflowContainerId, selectedSubflowNodeId],
+    () => (
+      selectionTarget
+        ? resolveSelectionContextFromTarget(nodes, selectionTarget)
+        : resolveSelectionContext(nodes, selectedNodeId, selectedSubflowContainerId, selectedSubflowNodeId)
+    ),
+    [nodes, selectedNodeId, selectedSubflowContainerId, selectedSubflowNodeId, selectionTarget],
   )
 
   const getContainerSnapshot = useCallback((containerId: string) => {
@@ -627,34 +694,69 @@ export function PropertyPanel({ tools, workflowDescription, onWorkflowDescriptio
     }
   }
 
-  return (
-    <div className="w-[400px] h-full flex flex-col bg-slate-50 border-l border-slate-200 shadow-2xl z-20">
-      <div className="shrink-0 p-5 bg-white/60 backdrop-blur-sm border-b border-border/40">
-        <div className="flex items-center justify-between">
-          <div className="flex-1">
-            <NodeHeader
-              nodeType={nodeType as NodeType}
-              label={label}
-              onLabelChange={handleLabelChange}
-            />
-          </div>
-          <button
-            onClick={() => {
-              if (selectionContext.mode === 'subflow') {
-                clearSelectedSubflowSelection()
-                return
-              }
-              setSelectedNodeId(null)
-            }}
-            className="ml-2 p-1.5 text-muted-foreground hover:bg-muted rounded-md transition-colors"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      </div>
+  const copilotSelection: WorkflowCopilotSelection | null = selectionContext.mode === 'subflow'
+    ? {
+        scope: 'container',
+        nodeIds: [selectionContext.node.nodeId],
+        edgeIds: [],
+        containerId: selectionContext.containerNode.id,
+      }
+    : {
+        scope: 'selection',
+        nodeIds: [selectionContext.node.id],
+        edgeIds: [],
+      }
 
+  const copilotTitle = selectionContext.mode === 'subflow'
+    ? `${selectionContext.containerNode.data.label} / ${selectionContext.node.label}`
+    : label
+
+  const copilotInstruction = selectionContext.mode === 'subflow'
+    ? t('settings.skills.workflowCopilot.defaultEditInstructionSubflow', {
+        targetLabel: copilotTitle,
+        nodeType,
+        nodeId: selectionContext.node.nodeId,
+      })
+    : t('settings.skills.workflowCopilot.defaultEditInstruction', {
+        targetLabel: copilotTitle,
+        nodeType,
+        nodeId: selectionContext.node.id,
+      })
+
+  return (
+    <WorkflowEditorSurfaceShell
+      size="narrow"
+      fluid
+      title={(
+        <NodeHeader
+          nodeType={nodeType as NodeType}
+          label={label}
+          onLabelChange={handleLabelChange}
+        />
+      )}
+      onClose={onClose ?? (() => {
+        if (selectionContext.mode === 'subflow') {
+          clearSelectedSubflowSelection()
+          return
+        }
+        setSelectedNodeId(null)
+      })}
+      bodyClassName="min-h-0 flex-1 overflow-y-auto bg-white px-6 py-5 custom-scrollbar"
+    >
+      {onAskAiEdit && copilotSelection ? (
+        <button
+          onClick={() => onAskAiEdit({
+            title: copilotTitle,
+            instruction: copilotInstruction,
+            selection: copilotSelection,
+          })}
+          className="mb-5 inline-flex items-center gap-2 rounded-2xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100"
+        >
+          <Sparkles className="w-3.5 h-3.5" />
+          {t('settings.skills.workflowCopilot.editWithAi')}
+        </button>
+      ) : null}
       <div
-        className="flex-1 overflow-y-auto custom-scrollbar p-6 bg-white"
         onBlurCapture={(event) => {
           const nextTarget = event.relatedTarget
           if (isTextEditableElement(nextTarget)) return
@@ -666,6 +768,6 @@ export function PropertyPanel({ tools, workflowDescription, onWorkflowDescriptio
       >
         {renderContent()}
       </div>
-    </div>
+    </WorkflowEditorSurfaceShell>
   )
 }

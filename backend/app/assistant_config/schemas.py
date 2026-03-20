@@ -412,6 +412,120 @@ class WorkflowValidationResponse(CamelModel):
     errors: list[WorkflowValidationError] = Field(default_factory=list)
 
 
+WorkflowCopilotMode = Literal["generate", "edit_selection", "fix_validation", "analyze_test_run"]
+WorkflowCopilotSelectionScope = Literal["workflow", "selection", "container"]
+WorkflowCopilotStatus = Literal["proposal", "question", "analysis", "no_op"]
+WorkflowCopilotLayoutRecommendation = Literal["keep", "autolayout"]
+WorkflowCopilotOperationType = Literal[
+    "add_node",
+    "update_node",
+    "remove_node",
+    "add_edge",
+    "remove_edge",
+    "move_node",
+    "autolayout",
+]
+
+
+class WorkflowCopilotSelectionInput(CamelModel):
+    scope: WorkflowCopilotSelectionScope = "workflow"
+    node_ids: list[str] = Field(default_factory=list, max_length=100)
+    edge_ids: list[str] = Field(default_factory=list, max_length=100)
+    container_id: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "WorkflowCopilotSelectionInput":
+        self.node_ids = [str(item or "").strip() for item in self.node_ids if str(item or "").strip()]
+        self.edge_ids = [str(item or "").strip() for item in self.edge_ids if str(item or "").strip()]
+        if self.scope == "container" and not str(self.container_id or "").strip():
+            raise ValueError("container_id is required when selection scope=container")
+        if self.scope != "container":
+            self.container_id = None
+        return self
+
+
+class WorkflowCopilotValidationIssueInput(CamelModel):
+    severity: Literal["error", "warning"]
+    node_id: str | None = Field(default=None, max_length=128)
+    subflow_node_id: str | None = Field(default=None, max_length=128)
+    message: str = Field(..., min_length=1, max_length=2000)
+    source: str = Field(default="backend", max_length=64)
+
+
+class WorkflowCopilotValidationContextInput(CamelModel):
+    errors: list[WorkflowCopilotValidationIssueInput] = Field(default_factory=list, max_length=100)
+    warnings: list[WorkflowCopilotValidationIssueInput] = Field(default_factory=list, max_length=100)
+
+
+class WorkflowCopilotTestRunContextInput(CamelModel):
+    selected_run_id: str = Field(..., min_length=1, max_length=128)
+    result: Any = None
+    trace: Any = None
+    raw: Any = None
+
+
+class WorkflowCopilotConversationItem(CamelModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=8000)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "WorkflowCopilotConversationItem":
+        self.content = str(self.content or "").strip()
+        if not self.content:
+            raise ValueError("conversation content must not be empty")
+        return self
+
+
+class WorkflowCopilotOperation(CamelModel):
+    type: WorkflowCopilotOperationType
+    container_id: str | None = Field(default=None, max_length=128)
+    node_id: str | None = Field(default=None, max_length=128)
+    node_type: NodeType | None = None
+    label: str | None = Field(default=None, max_length=256)
+    config: dict | None = None
+    config_patch: dict | None = None
+    replace_config: bool = False
+    position_x: float | None = None
+    position_y: float | None = None
+    edge_id: str | None = Field(default=None, max_length=128)
+    source_node_id: str | None = Field(default=None, max_length=128)
+    target_node_id: str | None = Field(default=None, max_length=128)
+    source_handle: str | None = Field(default=None, max_length=64)
+    target_handle: str | None = Field(default=None, max_length=64)
+    condition_type: Literal["expression", "default"] | None = None
+    condition_expr: ConditionExpressionInput | None = None
+
+
+class WorkflowCopilotProposalResponse(CamelModel):
+    title: str
+    summary: str
+    operations: list[WorkflowCopilotOperation] = Field(default_factory=list)
+    proposed_workflow: WorkflowInput
+    base_draft_hash: str
+    proposed_draft_hash: str
+    layout_recommendation: WorkflowCopilotLayoutRecommendation = "keep"
+    validation: WorkflowValidationResponse
+    affected_node_ids: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class WorkflowCopilotRequest(CamelModel):
+    mode: WorkflowCopilotMode
+    instruction: str = Field(default="", max_length=8000)
+    draft: WorkflowInput
+    selection: WorkflowCopilotSelectionInput | None = None
+    conversation: list[WorkflowCopilotConversationItem] = Field(default_factory=list, max_length=40)
+    validation_context: WorkflowCopilotValidationContextInput | None = None
+    test_run_context: WorkflowCopilotTestRunContextInput | None = None
+
+
+class WorkflowCopilotResponse(CamelModel):
+    status: WorkflowCopilotStatus
+    message: str
+    proposal: WorkflowCopilotProposalResponse | None = None
+    suggestions: list[str] = Field(default_factory=list)
+
+
 class AssistantWorkflowCreateRequest(CamelModel):
     name: str = Field(..., min_length=1, max_length=128)
     description: str = Field(default="", max_length=512)

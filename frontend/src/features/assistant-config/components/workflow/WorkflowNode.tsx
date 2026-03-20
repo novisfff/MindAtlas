@@ -392,6 +392,7 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
   const quickAddTools = Array.isArray((nodeData as { quickAddTools?: unknown }).quickAddTools)
     ? ((nodeData as { quickAddTools?: WorkflowToolDefinition[] }).quickAddTools ?? [])
     : []
+  const floatingUiEpoch = Number((nodeData as { floatingUiEpoch?: unknown }).floatingUiEpoch ?? 0)
   const onQuickAdd = typeof (nodeData as { onQuickAdd?: unknown }).onQuickAdd === 'function'
     ? ((nodeData as { onQuickAdd?: (nodeId: string, handleId: string, payload: QuickAddPayload) => void }).onQuickAdd ?? null)
     : null
@@ -421,6 +422,10 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
     containerSize?.height,
     containerSize?.width,
   ])
+
+  useEffect(() => {
+    setOpenQuickAddHandle(null)
+  }, [floatingUiEpoch])
 
   const persistContainerBody = useCallback((nextNodes: ContainerBodyNode[], nextEdges: ContainerBodyEdge[]) => {
     const nextBodySignature = buildContainerBodySignature(nextNodes, nextEdges)
@@ -551,6 +556,7 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
             bodyNodes={bodyNodes}
             bodyEdges={bodyEdges}
             tools={quickAddTools}
+            floatingUiEpoch={floatingUiEpoch}
             canvasHeight={containerSize?.canvasHeight ?? 168}
             canvasWidth={containerSize?.width}
             onSelectionChange={handleSubflowSelectionChange}

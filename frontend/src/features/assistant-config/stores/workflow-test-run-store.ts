@@ -103,7 +103,6 @@ export interface WorkflowTestTurnRecord {
 }
 
 interface WorkflowTestRunState {
-  panelOpen: boolean
   status: WorkflowTestRunStatus
   input: string
   structuredInput: Record<string, unknown>
@@ -127,7 +126,6 @@ interface WorkflowTestRunState {
   sessionRuns: WorkflowSessionRunSummary[]
   abortController: AbortController | null
 
-  setPanelOpen: (open: boolean) => void
   setInput: (input: string) => void
   setStructuredInput: (value: Record<string, unknown>) => void
   setStructuredInputField: (field: string, value: unknown) => void
@@ -331,7 +329,6 @@ function formatAssistantMessageContent(message: WorkflowTestMessage): string {
 }
 
 export const useWorkflowTestRunStore = create<WorkflowTestRunState>()((set, get) => ({
-  panelOpen: false,
   status: 'idle',
   input: '',
   structuredInput: {},
@@ -355,7 +352,6 @@ export const useWorkflowTestRunStore = create<WorkflowTestRunState>()((set, get)
   sessionRuns: [],
   abortController: null,
 
-  setPanelOpen: (panelOpen) => set({ panelOpen }),
   setInput: (input) => set({ input }),
   setStructuredInput: (value) => set({ structuredInput: value }),
   setStructuredInputField: (field, value) => set((state) => ({

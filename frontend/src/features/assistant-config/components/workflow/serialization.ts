@@ -1,5 +1,6 @@
 import type { Node, Edge, Viewport } from '@xyflow/react'
 import type { WfNodeData } from '../../stores/workflow-editor-store'
+import type { WorkflowInput as DraftWorkflowInput } from '../../api/workflow'
 import type {
   WorkflowInput,
   WorkflowNodeInput,
@@ -155,6 +156,18 @@ export function deserializeFromWorkflow(workflow: AssistantWorkflow): {
     nodes: workflow.nodes,
     edges: workflow.edges,
     workflowViewport: workflow.workflowViewport,
+  })
+}
+
+export function deserializeFromWorkflowInput(workflow: DraftWorkflowInput): {
+  nodes: Node<WfNodeData>[]
+  edges: Edge[]
+  viewport?: Viewport
+} {
+  return deserializeFromWorkflowLike({
+    nodes: (workflow.nodes ?? []) as WorkflowLike['nodes'],
+    edges: (workflow.edges ?? []) as WorkflowLike['edges'],
+    workflowViewport: workflow.viewport ?? null,
   })
 }
 

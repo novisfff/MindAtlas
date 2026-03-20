@@ -10,8 +10,17 @@ reset_caches()
 
 from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from pydantic import BaseModel, model_validator  # noqa: E402
 
 from app.common.exceptions import ApiException, register_exception_handlers  # noqa: E402
+
+
+class _ValidatedBody(BaseModel):
+    value: str
+
+    @model_validator(mode="after")
+    def _validate_value(self) -> "_ValidatedBody":
+        raise ValueError("value is invalid")
 
 
 class ExceptionHandlersTests(unittest.TestCase):
@@ -34,6 +43,10 @@ class ExceptionHandlersTests(unittest.TestCase):
         @app.get("/validate")
         def validate(q: int):  # noqa: B008
             return {"q": q}
+
+        @app.post("/validate_model")
+        def validate_model(body: _ValidatedBody):  # noqa: B008, ANN001
+            return {"value": body.value}
 
         return app
 
@@ -74,3 +87,13 @@ class ExceptionHandlersTests(unittest.TestCase):
         self.assertEqual(payload["code"], 42200)
         self.assertEqual(payload["message"], "Validation Error")
         self.assertIsInstance(payload["data"], list)
+
+    def test_request_validation_error_handler_serializes_value_error_ctx(self) -> None:
+        client = TestClient(self._make_app())
+        resp = client.post("/validate_model", json={"value": "x"})
+        self.assertEqual(resp.status_code, 422)
+        payload = resp.json()
+        self.assertEqual(payload["success"], False)
+        self.assertEqual(payload["code"], 42200)
+        self.assertIsInstance(payload["data"], list)
+        self.assertIn("value is invalid", str(payload["data"]))
