@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { FileType, Tags, ChevronRight, Bot, Wrench, BrainCircuit, Network } from 'lucide-react'
+import { FileType, Tags, ChevronRight, Bot, Wrench, BrainCircuit, Network, Sparkles } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 export function SettingsPage() {
@@ -60,6 +60,15 @@ export function SettingsPage() {
       path: '/settings/assistant-targets',
       color: 'text-cyan-500',
       bgColor: 'bg-cyan-500/10'
+    },
+    {
+      id: 'system-ai-behaviors',
+      titleKey: 'pages.settings.systemAiBehaviors',
+      descKey: 'pages.settings.systemAiBehaviorsDesc',
+      icon: Sparkles,
+      path: '/settings/system-ai-behaviors',
+      color: 'text-amber-500',
+      bgColor: 'bg-amber-500/10'
     }
   ]
 

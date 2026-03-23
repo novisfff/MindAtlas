@@ -148,6 +148,8 @@
       "assistantSkillsDesc": "Manage AI assistant skill configurations",
       "assistantTargets": "Assistant Targets",
       "assistantTargetsDesc": "Manage reusable workflow and agent executables in one place",
+      "systemAiBehaviors": "System AI Behaviors",
+      "systemAiBehaviorsDesc": "Configure which workflow or agent powers built-in system AI behaviors like weekly and monthly reports",
       "assistantWorkflows": "Assistant Workflows",
       "assistantWorkflowsDesc": "Manage reusable workflow executables",
       "assistantAgents": "Assistant Agents",
@@ -963,6 +965,39 @@
           "edit_selection": "Edit Selection",
           "fix_validation": "Fix Validation",
           "analyze_test_run": "Analyze Test Run"
+        }
+      }
+    },
+    "systemBehaviors": {
+      "bindingUpdated": "System AI behavior binding updated",
+      "resetSuccess": "Reset to the system default target",
+      "openTarget": "Open Target",
+      "resetToDefault": "Reset To Default",
+      "currentBinding": "Current Binding",
+      "canonicalDefault": "Canonical Default",
+      "bindingTarget": "Binding Target",
+      "fallbackPolicy": "Fallback Policy",
+      "fallbackPolicyCanonicalDefault": "Automatically fall back to the canonical default target when the bound target is unavailable",
+      "contractSummary": "Contract Summary",
+      "contractInput": "Input Contract",
+      "contractOutput": "Output Contract",
+      "referenceCount": "Referenced by {{count}} system behaviors",
+      "deleteRebindTitle": "Delete And Rebind To Defaults",
+      "deleteRebindDescription": "This target is referenced by {{count}} system AI behaviors. Confirming will rebind those behaviors to their canonical default targets before deleting the target.",
+      "confirmRebindDelete": "Rebind And Delete",
+      "disabledReasons": {
+        "unstructuredWorkflow": "Does not satisfy the system behavior contract",
+        "unpublishedTarget": "Published version required",
+        "unavailableTarget": "Target unavailable"
+      },
+      "behaviors": {
+        "weeklyReportGeneration": {
+          "title": "Weekly Report Generation",
+          "description": "Choose which workflow or agent the system uses for weekly report generation. Manual runs and scheduler runs share this binding."
+        },
+        "monthlyReportGeneration": {
+          "title": "Monthly Report Generation",
+          "description": "Choose which workflow or agent the system uses for monthly report generation. Manual runs and scheduler runs share this binding."
         }
       }
     }

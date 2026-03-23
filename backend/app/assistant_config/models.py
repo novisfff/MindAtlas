@@ -152,6 +152,7 @@ class AssistantWorkflow(UuidPrimaryKeyMixin, TimestampMixin, Base):
         foreign_keys="AssistantWorkflowVersion.workflow_id",
     )
     skills = relationship("AssistantSkill", back_populates="workflow")
+    system_behavior_bindings = relationship("AssistantSystemBehaviorBinding", back_populates="workflow")
 
 
 class AssistantWorkflowNode(UuidPrimaryKeyMixin, TimestampMixin, Base):
@@ -269,6 +270,7 @@ class AssistantAgentProfile(UuidPrimaryKeyMixin, TimestampMixin, Base):
         passive_deletes=True,
         foreign_keys="AssistantAgentProfileVersion.agent_profile_id",
     )
+    system_behavior_bindings = relationship("AssistantSystemBehaviorBinding", back_populates="agent_profile")
 
 
 class AssistantAgentProfileVersion(UuidPrimaryKeyMixin, TimestampMixin, Base):
@@ -296,6 +298,42 @@ class AssistantAgentProfileVersion(UuidPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint("version_source IN ('save','publish')", name="ck_assistant_agent_profile_version_source"),
         Index("uq_assistant_agent_profile_version_seq", "agent_profile_id", "sequence_no", unique=True),
         Index("ix_assistant_agent_profile_version_agent_created", "agent_profile_id", "created_at"),
+    )
+
+
+class AssistantSystemBehaviorBinding(UuidPrimaryKeyMixin, TimestampMixin, Base):
+    """Binding from a built-in system AI behavior to a workflow or agent target."""
+
+    __tablename__ = "assistant_system_behavior_binding"
+
+    behavior_key = Column(String(128), nullable=False, unique=True, index=True)
+    target_type = Column(String(32), nullable=False)
+    workflow_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_workflow.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    agent_profile_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_agent_profile.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+
+    workflow = relationship("AssistantWorkflow", back_populates="system_behavior_bindings")
+    agent_profile = relationship("AssistantAgentProfile", back_populates="system_behavior_bindings")
+
+    __table_args__ = (
+        CheckConstraint(
+            "target_type IN ('workflow','agent')",
+            name="ck_assistant_system_behavior_binding_target_type",
+        ),
+        CheckConstraint(
+            "(workflow_id IS NOT NULL AND agent_profile_id IS NULL AND target_type = 'workflow') OR "
+            "(workflow_id IS NULL AND agent_profile_id IS NOT NULL AND target_type = 'agent')",
+            name="ck_assistant_system_behavior_binding_single_target",
+        ),
     )
 
 class AssistantSkillNode(UuidPrimaryKeyMixin, TimestampMixin, Base):

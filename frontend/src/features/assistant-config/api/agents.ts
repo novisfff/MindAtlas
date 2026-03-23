@@ -16,6 +16,8 @@ export interface AssistantAgentProfile {
   publishedVersionId: string | null
   referencedSkillIds: string[]
   referenceCount: number
+  referencedSystemBehaviorKeys: string[]
+  systemBehaviorReferenceCount: number
   createdAt: string
   updatedAt: string
 }
@@ -119,8 +121,15 @@ export const deleteAgentVersion = (id: string, versionId: string) =>
 export const clearAgentVersions = (id: string) =>
   apiClient.post<AgentClearVersionsResponse>(`/api/assistant-config/agents/${id}/versions/clear`)
 
-export const deleteAgentProfile = (id: string) =>
-  apiClient.delete(`/api/assistant-config/agents/${id}`)
+export const deleteAgentProfile = (
+  id: string,
+  options: { confirmRebindSystemBehaviors?: boolean } = {},
+) =>
+  apiClient.delete(`/api/assistant-config/agents/${id}`, {
+    query: {
+      confirmRebindSystemBehaviors: options.confirmRebindSystemBehaviors ?? false,
+    },
+  })
 
 export interface AgentTestRunRequest {
   draft: AgentTestRunDraftInput

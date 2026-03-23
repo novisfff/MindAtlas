@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.ai_registry.runtime import resolve_openai_compat_config
+from app.assistant_config.system_behavior_runner import SystemAiBehaviorRunInput, SystemAiBehaviorRunner
 from app.common.time import utcnow
 from app.entry.models import Entry, TimeMode
 from app.report.models import MonthlyReport, WeeklyReport
@@ -108,25 +108,39 @@ class WeeklyReportService:
             days_since_monday = 7
         return today - timedelta(days=days_since_monday)
 
-    def generate_report(self, report: WeeklyReport) -> WeeklyReport:
-        """Generate AI content for a weekly report."""
-        cfg = self._get_ai_config()
-        if not cfg:
-            report.status = "failed"
-            report.last_error = "No AI provider configured"
-            self.db.commit()
-            return report
+    def _run_system_behavior(
+        self,
+        *,
+        behavior_key: str,
+        period_type: str,
+        period_start: date,
+        period_end: date,
+        entry_count: int,
+    ) -> dict:
+        runner = SystemAiBehaviorRunner(self.db)
+        return runner.run_report_behavior(
+            behavior_key=behavior_key,
+            payload=SystemAiBehaviorRunInput(
+                period_type=period_type,
+                period_start=period_start,
+                period_end=period_end,
+                entry_count=entry_count,
+            ),
+        )
 
+    def generate_report(self, report: WeeklyReport) -> WeeklyReport:
         report.status = "generating"
         report.attempts += 1
         self.db.commit()
 
-        entries = self._get_entries_for_week(report.week_start, report.week_end)
-        prompt = self._build_prompt(report.week_start, report.week_end, entries)
-
         try:
-            raw = self._call_openai(cfg, prompt)
-            content = self._parse_response(raw)
+            content = self._run_system_behavior(
+                behavior_key="weekly_report_generation",
+                period_type="weekly",
+                period_start=report.week_start,
+                period_end=report.week_end,
+                entry_count=report.entry_count,
+            )
             report.content = content
             report.status = "completed"
             report.generated_at = utcnow()
@@ -374,35 +388,22 @@ class MonthlyReportService(WeeklyReportService):
         return point_count + range_count
 
     def generate_report(self, report: MonthlyReport) -> MonthlyReport:
-        """Generate AI content for a monthly report."""
-        cfg = self._get_ai_config()
-        if not cfg:
-            report.status = "failed"
-            report.last_error = "No AI provider configured"
-            self.db.commit()
-            return report
-
         report.status = "generating"
         report.attempts += 1
         self.db.commit()
 
-        entries = self._get_entries_for_month(report.month_start, report.month_end)
-        prompt = self._build_monthly_prompt(
-            report.month_start, report.month_end, report.entry_count, entries
-        )
-
         try:
-            raw = self._call_openai(cfg, prompt)
-            content = self._parse_response(raw)
-            # Validate content has meaningful data
-            if not content or not content.get("summary"):
-                report.status = "failed"
-                report.last_error = "AI returned empty or invalid content"
-            else:
-                report.content = content
-                report.status = "completed"
-                report.generated_at = utcnow()
-                report.last_error = None
+            content = self._run_system_behavior(
+                behavior_key="monthly_report_generation",
+                period_type="monthly",
+                period_start=report.month_start,
+                period_end=report.month_end,
+                entry_count=report.entry_count,
+            )
+            report.content = content
+            report.status = "completed"
+            report.generated_at = utcnow()
+            report.last_error = None
         except Exception as e:
             logger.exception("Failed to generate monthly report")
             report.status = "failed"

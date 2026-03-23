@@ -147,6 +147,8 @@
       "assistantSkillsDesc": "管理 AI 助手的技能配置",
       "assistantTargets": "助手智能体",
       "assistantTargetsDesc": "统一管理可复用的 Workflow 与 Agent 执行体",
+      "systemAiBehaviors": "系统 AI 行为",
+      "systemAiBehaviorsDesc": "配置周报、月报等系统内置 AI 行为实际走哪个 Workflow 或 Agent",
       "assistantWorkflows": "助手工作流",
       "assistantWorkflowsDesc": "管理可复用的工作流执行体",
       "assistantAgents": "助手 Agent",
@@ -965,6 +967,39 @@
       },
       "workflowPaletteCollapse": "收起面板",
       "workflowPaletteExpand": "展开面板"
+    },
+    "systemBehaviors": {
+      "bindingUpdated": "系统 AI 行为绑定已更新",
+      "resetSuccess": "已重置为系统默认目标",
+      "openTarget": "打开目标",
+      "resetToDefault": "重置到系统默认",
+      "currentBinding": "当前绑定",
+      "canonicalDefault": "系统默认目标",
+      "bindingTarget": "绑定目标",
+      "fallbackPolicy": "回退策略",
+      "fallbackPolicyCanonicalDefault": "目标不可用时自动回退到系统默认目标",
+      "contractSummary": "契约摘要",
+      "contractInput": "输入结构",
+      "contractOutput": "输出结构",
+      "referenceCount": "被 {{count}} 个系统行为引用",
+      "deleteRebindTitle": "删除并回退系统默认",
+      "deleteRebindDescription": "该目标正被 {{count}} 个系统 AI 行为引用。确认后会先将这些行为回退到各自的系统默认目标，再删除当前目标。",
+      "confirmRebindDelete": "回退后删除",
+      "disabledReasons": {
+        "unstructuredWorkflow": "不满足系统行为输入输出契约",
+        "unpublishedTarget": "未发布版本不可绑定",
+        "unavailableTarget": "当前目标不可用"
+      },
+      "behaviors": {
+        "weeklyReportGeneration": {
+          "title": "周报生成",
+          "description": "配置系统在生成周报时执行哪个 Workflow 或 Agent。手动生成与定时任务会共用这条绑定。"
+        },
+        "monthlyReportGeneration": {
+          "title": "月报生成",
+          "description": "配置系统在生成月报时执行哪个 Workflow 或 Agent。手动生成与定时任务会共用这条绑定。"
+        }
+      }
     }
   },
   "aiProvider": {

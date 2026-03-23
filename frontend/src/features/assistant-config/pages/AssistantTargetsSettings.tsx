@@ -18,8 +18,13 @@ import {
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { buildAssistantExecutableTargets, type AssistantExecutableTarget } from '../components/skillTargetOptions'
 import { AssistantTargetCard } from '../components/AssistantTargetCard'
+import { isApiError } from '@/lib/api/client'
 
 type CreateTargetType = 'workflow' | 'agent' | null
+type DeleteRebindConflict = {
+  target: AssistantExecutableTarget
+  behaviorKeys: string[]
+}
 
 export function AssistantTargetsSettings() {
   const { t } = useTranslation()
@@ -40,6 +45,7 @@ export function AssistantTargetsSettings() {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<AssistantExecutableTarget | null>(null)
+  const [deleteRebindConflict, setDeleteRebindConflict] = useState<DeleteRebindConflict | null>(null)
   const [expandedTargetKey, setExpandedTargetKey] = useState<string | null>(null)
   const normalizationDoneRef = useRef(false)
   const normalizationInFlightRef = useRef(false)
@@ -125,6 +131,47 @@ export function AssistantTargetsSettings() {
 
   const isLoading = isLoadingWorkflows || isLoadingAgents
   const isCreating = createWorkflowMutation.isPending || createAgentMutation.isPending
+
+  const executeDelete = (
+    target: AssistantExecutableTarget,
+    confirmRebindSystemBehaviors: boolean,
+  ) => {
+    const mutation = target.type === 'workflow' ? deleteWorkflowMutation : deleteAgentMutation
+    mutation.mutate(
+      {
+        id: target.id,
+        confirmRebindSystemBehaviors,
+      },
+      {
+        onSuccess: () => {
+          setDeleteTarget(null)
+          setDeleteRebindConflict(null)
+        },
+        onError: (error) => {
+          if (
+            isApiError(error)
+            && (error.code === 40961 || error.code === 40963)
+            && error.details
+            && typeof error.details === 'object'
+          ) {
+            const details = error.details as { referencedSystemBehaviorKeys?: unknown }
+            const behaviorKeys = Array.isArray(details.referencedSystemBehaviorKeys)
+              ? details.referencedSystemBehaviorKeys.map((item) => String(item)).filter(Boolean)
+              : []
+            setDeleteTarget(null)
+            setDeleteRebindConflict({
+              target,
+              behaviorKeys,
+            })
+            return
+          }
+
+          const message = error instanceof Error ? error.message : t('messages.error')
+          toast.error(message)
+        },
+      },
+    )
+  }
 
   useEffect(() => {
     if (isLoading) return
@@ -327,25 +374,24 @@ export function AssistantTargetsSettings() {
         onCancel={() => setDeleteTarget(null)}
         onConfirm={() => {
           if (!deleteTarget) return
-          if (deleteTarget.type === 'workflow') {
-            deleteWorkflowMutation.mutate(deleteTarget.id, {
-              onSuccess: () => setDeleteTarget(null),
-              onError: (error) => {
-                const message = error instanceof Error ? error.message : t('messages.error')
-                toast.error(message)
-              },
-            })
-            return
-          }
-          deleteAgentMutation.mutate(deleteTarget.id, {
-            onSuccess: () => setDeleteTarget(null),
-            onError: (error) => {
-              const message = error instanceof Error ? error.message : t('messages.error')
-              toast.error(message)
-            },
-          })
+          executeDelete(deleteTarget, false)
         }}
         isLoading={deleteWorkflowMutation.isPending || deleteAgentMutation.isPending}
+      />
+
+      <ConfirmDialog
+        isOpen={!!deleteRebindConflict}
+        title={t('settings.systemBehaviors.deleteRebindTitle')}
+        description={t('settings.systemBehaviors.deleteRebindDescription', {
+          count: deleteRebindConflict?.behaviorKeys.length ?? 0,
+        })}
+        onCancel={() => setDeleteRebindConflict(null)}
+        onConfirm={() => {
+          if (!deleteRebindConflict) return
+          executeDelete(deleteRebindConflict.target, true)
+        }}
+        isLoading={deleteWorkflowMutation.isPending || deleteAgentMutation.isPending}
+        confirmText={t('settings.systemBehaviors.confirmRebindDelete')}
       />
     </div>
   )

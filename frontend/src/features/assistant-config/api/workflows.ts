@@ -26,6 +26,8 @@ export interface AssistantWorkflow {
   publishedVersionId: string | null
   referencedSkillIds: string[]
   referenceCount: number
+  referencedSystemBehaviorKeys: string[]
+  systemBehaviorReferenceCount: number
   createdAt: string
   updatedAt: string
 }
@@ -118,8 +120,15 @@ export const deleteWorkflowVersion = (id: string, versionId: string) =>
 export const clearWorkflowVersions = (id: string) =>
   apiClient.post<WorkflowClearVersionsResponse>(`/api/assistant-config/workflows/${id}/versions/clear`)
 
-export const deleteWorkflow = (id: string) =>
-  apiClient.delete(`/api/assistant-config/workflows/${id}`)
+export const deleteWorkflow = (
+  id: string,
+  options: { confirmRebindSystemBehaviors?: boolean } = {},
+) =>
+  apiClient.delete(`/api/assistant-config/workflows/${id}`, {
+    query: {
+      confirmRebindSystemBehaviors: options.confirmRebindSystemBehaviors ?? false,
+    },
+  })
 
 export const saveWorkflowById = (
   workflowId: string,

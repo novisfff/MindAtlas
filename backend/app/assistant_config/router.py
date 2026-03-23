@@ -26,6 +26,8 @@ from app.assistant_config.schemas import (
     DeleteVersionResponse,
     RollbackVersionResponse,
     ResetSkillRequest,
+    SystemBehaviorBindingUpdateRequest,
+    SystemBehaviorResponse,
     SystemToolDefinitionResponse,
     SystemToolEnabledUpdateRequest,
     WorkflowInput,
@@ -190,6 +192,44 @@ def delete_skill(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
     return ApiResponse.ok(None, "Skill deleted")
 
 
+# ==================== System AI Behaviors ====================
+
+@router.get("/system-behaviors", response_model=ApiResponse)
+def list_system_behaviors(db: Session = Depends(get_db)) -> ApiResponse:
+    service = AssistantConfigService(db)
+    items = service.list_system_behaviors()
+    return ApiResponse.ok([
+        SystemBehaviorResponse.model_validate(item).model_dump(by_alias=True)
+        for item in items
+    ])
+
+
+@router.put("/system-behaviors/{behavior_key}", response_model=ApiResponse)
+def update_system_behavior_binding(
+    behavior_key: str,
+    request: SystemBehaviorBindingUpdateRequest,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = AssistantConfigService(db)
+    item = service.update_system_behavior_binding(
+        behavior_key=behavior_key,
+        target_type=request.target_type,
+        workflow_id=request.workflow_id,
+        agent_profile_id=request.agent_profile_id,
+    )
+    return ApiResponse.ok(SystemBehaviorResponse.model_validate(item).model_dump(by_alias=True))
+
+
+@router.post("/system-behaviors/{behavior_key}/reset", response_model=ApiResponse)
+def reset_system_behavior_binding(
+    behavior_key: str,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = AssistantConfigService(db)
+    item = service.reset_system_behavior_binding(behavior_key)
+    return ApiResponse.ok(SystemBehaviorResponse.model_validate(item).model_dump(by_alias=True))
+
+
 # ==================== Agents ====================
 
 @router.get("/agents", response_model=ApiResponse)
@@ -292,9 +332,13 @@ def clear_agent_profile_versions(
 
 
 @router.delete("/agents/{id}", response_model=ApiResponse)
-def delete_agent_profile(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
+def delete_agent_profile(
+    id: UUID,
+    confirm_rebind_system_behaviors: bool = Query(False, alias="confirmRebindSystemBehaviors"),
+    db: Session = Depends(get_db),
+) -> ApiResponse:
     service = AssistantConfigService(db)
-    service.delete_agent_profile(id)
+    service.delete_agent_profile(id, confirm_rebind_system_behaviors=confirm_rebind_system_behaviors)
     return ApiResponse.ok(None, "Agent profile deleted")
 
 
@@ -436,9 +480,13 @@ def clear_workflow_versions(
 
 
 @router.delete("/workflows/{id}", response_model=ApiResponse)
-def delete_workflow(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
+def delete_workflow(
+    id: UUID,
+    confirm_rebind_system_behaviors: bool = Query(False, alias="confirmRebindSystemBehaviors"),
+    db: Session = Depends(get_db),
+) -> ApiResponse:
     service = AssistantConfigService(db)
-    service.delete_workflow(id)
+    service.delete_workflow(id, confirm_rebind_system_behaviors=confirm_rebind_system_behaviors)
     return ApiResponse.ok(None, "Workflow deleted")
 
 

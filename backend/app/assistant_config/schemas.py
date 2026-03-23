@@ -20,6 +20,7 @@ TargetType = Literal["workflow", "agent"]
 AgentModelSource = Literal["default", "custom"]
 OutputFieldType = Literal["string", "number", "integer", "boolean", "object", "array"]
 VersionSource = Literal["save", "publish"]
+SystemBehaviorKey = Literal["weekly_report_generation", "monthly_report_generation"]
 
 # 允许的 URL scheme
 ALLOWED_URL_SCHEMES = {"http", "https"}
@@ -729,6 +730,8 @@ class AssistantWorkflowResponse(OrmModel):
     published_version_id: UUID | None = None
     referenced_skill_ids: list[UUID] = []
     reference_count: int = 0
+    referenced_system_behavior_keys: list[SystemBehaviorKey] = []
+    system_behavior_reference_count: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -748,8 +751,69 @@ class AssistantAgentProfileResponse(OrmModel):
     published_version_id: UUID | None = None
     referenced_skill_ids: list[UUID] = []
     reference_count: int = 0
+    referenced_system_behavior_keys: list[SystemBehaviorKey] = []
+    system_behavior_reference_count: int = 0
     created_at: datetime
     updated_at: datetime
+
+
+class SystemBehaviorContractFieldResponse(CamelModel):
+    name: str
+    type: OutputFieldType
+    required: bool = True
+    description: str = ""
+    items_type: OutputFieldType | None = None
+
+
+class SystemBehaviorContractSummaryResponse(CamelModel):
+    input_fields: list[SystemBehaviorContractFieldResponse] = []
+    output_fields: list[SystemBehaviorContractFieldResponse] = []
+
+
+class SystemBehaviorTargetSummaryResponse(CamelModel):
+    id: UUID
+    target_type: TargetType
+    name: str
+    description: str = ""
+    enabled: bool
+    is_system: bool
+    is_canonical_default: bool = False
+    workflow_id: UUID | None = None
+    agent_profile_id: UUID | None = None
+    published_version_id: UUID | None = None
+
+
+class SystemBehaviorResponse(CamelModel):
+    behavior_key: SystemBehaviorKey
+    name: str
+    description: str
+    supported_target_types: list[TargetType] = []
+    current_binding: SystemBehaviorTargetSummaryResponse
+    canonical_default_target: SystemBehaviorTargetSummaryResponse
+    fallback_policy: str
+    contract: SystemBehaviorContractSummaryResponse
+
+
+class SystemBehaviorBindingUpdateRequest(CamelModel):
+    target_type: TargetType
+    workflow_id: UUID | None = None
+    agent_profile_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _validate_target(self) -> "SystemBehaviorBindingUpdateRequest":
+        if self.workflow_id and self.agent_profile_id:
+            raise ValueError("workflow_id and agent_profile_id are mutually exclusive")
+        if self.target_type == "workflow":
+            if self.workflow_id is None:
+                raise ValueError("workflow_id is required when target_type=workflow")
+            if self.agent_profile_id is not None:
+                raise ValueError("agent_profile_id is not allowed when target_type=workflow")
+        if self.target_type == "agent":
+            if self.agent_profile_id is None:
+                raise ValueError("agent_profile_id is required when target_type=agent")
+            if self.workflow_id is not None:
+                raise ValueError("workflow_id is not allowed when target_type=agent")
+        return self
 
 
 class TargetVersionResponse(OrmModel):
