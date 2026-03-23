@@ -6,7 +6,7 @@ export function SettingsPage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
 
-  const categories = [
+  const contentCategories = [
     {
       id: 'entry-types',
       titleKey: 'pages.settings.entryTypes',
@@ -24,7 +24,10 @@ export function SettingsPage() {
       path: '/settings/tags',
       color: 'text-green-500',
       bgColor: 'bg-green-500/10'
-    },
+    }
+  ]
+
+  const aiCategories = [
     {
       id: 'ai-providers',
       titleKey: 'pages.settings.aiProviders',
@@ -72,34 +75,77 @@ export function SettingsPage() {
     }
   ]
 
+  const sections = [
+    {
+      id: 'content',
+      titleKey: 'pages.settings.contentSection',
+      descKey: 'pages.settings.contentSectionDesc',
+      gridClassName: 'grid-cols-1 md:grid-cols-2',
+      categories: contentCategories
+    },
+    {
+      id: 'ai',
+      titleKey: 'pages.settings.aiSection',
+      descKey: 'pages.settings.aiSectionDesc',
+      gridClassName: 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3',
+      categories: aiCategories
+    }
+  ]
+
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold">{t('pages.settings.title')}</h1>
-        <p className="text-muted-foreground">{t('pages.settings.subtitle')}</p>
+    <div className="mx-auto max-w-6xl space-y-8">
+      <div className="space-y-2">
+        <h1 className="text-3xl font-bold tracking-tight text-foreground">
+          {t('pages.settings.title')}
+        </h1>
+        <p className="max-w-2xl text-base text-muted-foreground">
+          {t('pages.settings.subtitle')}
+        </p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {categories.map((category) => (
-          <button
-            key={category.id}
-            onClick={() => navigate(category.path)}
-            className="group flex items-start gap-4 p-4 rounded-xl border bg-card hover:bg-accent/50 transition-all text-left"
+      <div className="space-y-5">
+        {sections.map((section) => (
+          <section
+            key={section.id}
+            className="rounded-2xl border bg-card/50 p-5 shadow-sm ring-1 ring-border/40"
           >
-            <div className={`p-3 rounded-lg ${category.bgColor} ${category.color}`}>
-              <category.icon className="w-6 h-6" />
-            </div>
-
-            <div className="flex-1">
-              <div className="flex items-center justify-between">
-                <h3 className="font-semibold text-lg">{t(category.titleKey)}</h3>
-                <ChevronRight className="w-5 h-5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
-              </div>
-              <p className="text-sm text-muted-foreground mt-1">
-                {t(category.descKey)}
+            <div className="mb-4 flex flex-col gap-1.5">
+              <h2 className="text-lg font-semibold text-foreground">
+                {t(section.titleKey)}
+              </h2>
+              <p className="text-sm text-muted-foreground">
+                {t(section.descKey)}
               </p>
             </div>
-          </button>
+
+            <div className={`grid gap-4 ${section.gridClassName}`}>
+              {section.categories.map((category) => (
+                <button
+                  key={category.id}
+                  onClick={() => navigate(category.path)}
+                  className="group flex min-h-[108px] items-center gap-4 rounded-2xl border bg-background/90 p-4 text-left shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-md"
+                >
+                  <div className={`rounded-xl p-3 ${category.bgColor} ${category.color}`}>
+                    <category.icon className="h-6 w-6" />
+                  </div>
+
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-start justify-between gap-3">
+                      <h3 className="text-lg font-semibold leading-6 text-foreground">
+                        {t(category.titleKey)}
+                      </h3>
+                      <div className="rounded-full bg-muted px-2.5 py-1 text-muted-foreground transition-colors group-hover:bg-primary/10 group-hover:text-primary">
+                        <ChevronRight className="h-4 w-4" />
+                      </div>
+                    </div>
+                    <p className="mt-1.5 line-clamp-2 text-sm leading-6 text-muted-foreground">
+                      {t(category.descKey)}
+                    </p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </section>
         ))}
       </div>
     </div>

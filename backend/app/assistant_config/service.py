@@ -62,6 +62,10 @@ from app.common.exceptions import ApiException
 
 _TOOL_TEXT_REF_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\.text\s*\}\}")
 _TARGET_VERSION_LIMIT = 100
+_SYSTEM_BEHAVIOR_EXAMPLE_WORKFLOW_NAMES: dict[str, str] = {
+    "weekly_report_generation": "weekly_report_example__workflow",
+    "monthly_report_generation": "monthly_report_example__workflow",
+}
 
 
 class AssistantConfigService:
@@ -187,6 +191,31 @@ class AssistantConfigService:
         if value:
             return value[:255]
         return AssistantConfigService._utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _workflow_name_exists(self, name: str) -> bool:
+        candidate = str(name or "").strip().lower()
+        if not candidate:
+            return False
+        existing = (
+            self.db.query(AssistantWorkflow.id)
+            .filter(func.lower(AssistantWorkflow.name) == candidate)
+            .first()
+        )
+        return existing is not None
+
+    def _next_available_workflow_name(self, base_name: str) -> str:
+        normalized = str(base_name or "").strip()
+        if not normalized:
+            raise ValueError("base_name is required")
+        if not self._workflow_name_exists(normalized):
+            return normalized
+
+        suffix = 2
+        while True:
+            candidate = f"{normalized}__{suffix}"
+            if not self._workflow_name_exists(candidate):
+                return candidate
+            suffix += 1
 
     @staticmethod
     def _workflow_input_to_snapshot(workflow: WorkflowInput) -> dict[str, Any]:
@@ -1211,6 +1240,73 @@ class AssistantConfigService:
             for definition in list_system_behavior_definitions()
             if definition.key in bindings
         ]
+
+    def create_system_behavior_example_workflow(
+        self,
+        behavior_key: str,
+        *,
+        bind_to_behavior: bool = False,
+    ) -> dict[str, Any]:
+        definition = self._get_system_behavior_definition_or_error(behavior_key)
+        self.ensure_system_behaviors()
+        if definition.default_target.target_type != "workflow":
+            raise ApiException(
+                status_code=500,
+                code=50037,
+                message=f"Unsupported canonical target type: {definition.default_target.target_type}",
+            )
+
+        base_name = _SYSTEM_BEHAVIOR_EXAMPLE_WORKFLOW_NAMES.get(definition.key)
+        if not base_name:
+            raise ApiException(
+                status_code=500,
+                code=50038,
+                message=f"Missing example workflow name for system AI behavior: {definition.key}",
+            )
+
+        workflow_name = self._next_available_workflow_name(base_name)
+        preset_workflow = WorkflowInput.model_validate(
+            get_system_behavior_default_workflow(definition).model_dump(by_alias=True)
+        )
+        workflow = self._create_workflow_entity(
+            AssistantWorkflowCreateRequest(
+                name=workflow_name,
+                description=f"Example workflow for {definition.name}.",
+                enabled=True,
+                workflow=preset_workflow,
+            )
+        )
+
+        binding = self._ensure_system_behavior_binding_entity(definition)
+        if bind_to_behavior:
+            self._assign_system_behavior_binding_target(
+                binding,
+                target_type="workflow",
+                workflow=workflow,
+            )
+
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(
+                status_code=409,
+                code=40964,
+                message="Create system AI behavior example workflow failed",
+            ) from exc
+
+        created_workflow = self.get_workflow(workflow.id)
+        refreshed = self._get_system_behavior_binding(definition.key)
+        if refreshed is None:
+            raise ApiException(
+                status_code=500,
+                code=50039,
+                message="System AI behavior binding missing after example workflow creation",
+            )
+        return {
+            "created_workflow": self._serialize_workflow(created_workflow),
+            "system_behavior": self._serialize_system_behavior(definition, refreshed),
+        }
 
     def update_system_behavior_binding(
         self,
@@ -3164,11 +3260,9 @@ class AssistantConfigService:
             raise ApiException(status_code=404, code=40430, message=f"Workflow not found: {workflow_id}")
         return workflow
 
-    def create_workflow(self, request: AssistantWorkflowCreateRequest) -> AssistantWorkflow:
-        existing = self.db.query(AssistantWorkflow).filter(AssistantWorkflow.name.ilike(request.name)).first()
-        if existing:
+    def _create_workflow_entity(self, request: AssistantWorkflowCreateRequest) -> AssistantWorkflow:
+        if self._workflow_name_exists(request.name):
             raise ApiException(status_code=400, code=40030, message=f"Workflow name exists: {request.name}")
-
         workflow_input = request.workflow or self._build_default_workflow_input()
         workflow = AssistantWorkflow(
             name=request.name,
@@ -3190,6 +3284,10 @@ class AssistantConfigService:
         workflow.draft_version_id = published.id
         workflow.published_version_id = published.id
         self._trim_workflow_versions(workflow)
+        return workflow
+
+    def create_workflow(self, request: AssistantWorkflowCreateRequest) -> AssistantWorkflow:
+        workflow = self._create_workflow_entity(request)
 
         try:
             self.db.commit()

@@ -27,6 +27,8 @@ from app.assistant_config.schemas import (
     RollbackVersionResponse,
     ResetSkillRequest,
     SystemBehaviorBindingUpdateRequest,
+    SystemBehaviorExampleWorkflowCreateRequest,
+    SystemBehaviorExampleWorkflowCreateResponse,
     SystemBehaviorResponse,
     SystemToolDefinitionResponse,
     SystemToolEnabledUpdateRequest,
@@ -228,6 +230,22 @@ def reset_system_behavior_binding(
     service = AssistantConfigService(db)
     item = service.reset_system_behavior_binding(behavior_key)
     return ApiResponse.ok(SystemBehaviorResponse.model_validate(item).model_dump(by_alias=True))
+
+
+@router.post("/system-behaviors/{behavior_key}/create-example-workflow", response_model=ApiResponse)
+def create_system_behavior_example_workflow(
+    behavior_key: str,
+    request: SystemBehaviorExampleWorkflowCreateRequest | None = None,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = AssistantConfigService(db)
+    item = service.create_system_behavior_example_workflow(
+        behavior_key,
+        bind_to_behavior=request.bind_to_behavior if request else False,
+    )
+    return ApiResponse.ok(
+        SystemBehaviorExampleWorkflowCreateResponse.model_validate(item).model_dump(by_alias=True)
+    )
 
 
 # ==================== Agents ====================

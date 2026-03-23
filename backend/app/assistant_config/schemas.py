@@ -794,6 +794,15 @@ class SystemBehaviorResponse(CamelModel):
     contract: SystemBehaviorContractSummaryResponse
 
 
+class SystemBehaviorExampleWorkflowCreateResponse(CamelModel):
+    created_workflow: AssistantWorkflowResponse
+    system_behavior: SystemBehaviorResponse
+
+
+class SystemBehaviorExampleWorkflowCreateRequest(CamelModel):
+    bind_to_behavior: bool = False
+
+
 class SystemBehaviorBindingUpdateRequest(CamelModel):
     target_type: TargetType
     workflow_id: UUID | None = None

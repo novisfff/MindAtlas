@@ -206,6 +206,55 @@ class SystemAiBehaviorBindingTests(unittest.TestCase):
         self.assertEqual(payload["current_binding"]["target_type"], "agent")
         self.assertEqual(payload["current_binding"]["agent_profile_id"], agent.id)
 
+    def test_create_example_workflow_creates_without_binding_by_default(self) -> None:
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+        from app.assistant_config.system_behavior_registry import get_system_behavior_definition  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        before = svc.list_system_behaviors()
+        before_binding_id = next(
+            item["current_binding"]["workflow_id"]
+            for item in before
+            if item["behavior_key"] == "weekly_report_generation"
+        )
+        payload = svc.create_system_behavior_example_workflow("weekly_report_generation")
+
+        created = payload["created_workflow"]
+        self.assertEqual(created["name"], "weekly_report_example__workflow")
+        self.assertFalse(created["is_system"])
+        self.assertTrue(created["enabled"])
+        self.assertIsNotNone(created["published_version_id"])
+        self.assertEqual(payload["system_behavior"]["current_binding"]["workflow_id"], before_binding_id)
+
+        workflow = svc.get_workflow(created["id"])
+        definition = get_system_behavior_definition("weekly_report_generation")
+        self.assertIsNotNone(definition)
+        svc._validate_system_behavior_workflow_target(definition=definition, workflow=workflow)  # noqa: SLF001
+
+    def test_create_example_workflow_can_bind_when_requested(self) -> None:
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        payload = svc.create_system_behavior_example_workflow(
+            "weekly_report_generation",
+            bind_to_behavior=True,
+        )
+
+        self.assertEqual(
+            payload["system_behavior"]["current_binding"]["workflow_id"],
+            payload["created_workflow"]["id"],
+        )
+
+    def test_create_example_workflow_names_increment(self) -> None:
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        first = svc.create_system_behavior_example_workflow("weekly_report_generation")
+        second = svc.create_system_behavior_example_workflow("weekly_report_generation")
+
+        self.assertEqual(first["created_workflow"]["name"], "weekly_report_example__workflow")
+        self.assertEqual(second["created_workflow"]["name"], "weekly_report_example__workflow__2")
+
     def test_delete_workflow_requires_confirm_then_rebinds_to_default(self) -> None:
         from app.assistant_config.models import AssistantWorkflow  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402

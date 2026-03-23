@@ -247,3 +247,21 @@ export const useResetSystemBehaviorBindingMutation = () => {
     },
   })
 }
+
+export const useCreateSystemBehaviorExampleWorkflowMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      behaviorKey,
+      data,
+    }: {
+      behaviorKey: string
+      data?: systemBehaviorsApi.CreateSystemBehaviorExampleWorkflowRequest
+    }) => systemBehaviorsApi.createSystemBehaviorExampleWorkflow(behaviorKey, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflow'] })
+    },
+  })
+}

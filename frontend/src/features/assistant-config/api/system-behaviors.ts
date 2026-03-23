@@ -1,4 +1,5 @@
 import { apiClient } from '@/lib/api/client'
+import type { AssistantWorkflow } from './workflows'
 
 export type SystemBehaviorTargetType = 'workflow' | 'agent'
 
@@ -39,6 +40,15 @@ export interface SystemBehavior {
   contract: SystemBehaviorContractSummary
 }
 
+export interface CreateSystemBehaviorExampleWorkflowResponse {
+  createdWorkflow: AssistantWorkflow
+  systemBehavior: SystemBehavior
+}
+
+export interface CreateSystemBehaviorExampleWorkflowRequest {
+  bindToBehavior?: boolean
+}
+
 export interface UpdateSystemBehaviorBindingRequest {
   targetType: SystemBehaviorTargetType
   workflowId?: string | null
@@ -58,3 +68,12 @@ export const updateSystemBehaviorBinding = (
 
 export const resetSystemBehaviorBinding = (behaviorKey: string) =>
   apiClient.post<SystemBehavior>(`/api/assistant-config/system-behaviors/${behaviorKey}/reset`)
+
+export const createSystemBehaviorExampleWorkflow = (
+  behaviorKey: string,
+  data: CreateSystemBehaviorExampleWorkflowRequest = {},
+) =>
+  apiClient.post<CreateSystemBehaviorExampleWorkflowResponse>(
+    `/api/assistant-config/system-behaviors/${behaviorKey}/create-example-workflow`,
+    { body: data },
+  )
