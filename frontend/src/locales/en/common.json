@@ -243,20 +243,24 @@
       },
       "roles": {
         "system": "System Assistant",
-        "lightrag": "LightRAG Knowledge Graph"
+        "lightrag": "LightRAG Knowledge Graph",
+        "workflowCopilot": "Workflow Copilot"
       },
       "modelTypes": {
         "llm": "Language Model",
         "embedding": "Embedding"
       },
       "selectModel": "Select a model...",
+      "notSet": "Not set",
+      "unknownModel": "Unknown model",
       "addModel": "Add Model",
       "editModel": "Edit Model",
       "selectType": "Select Type",
       "modelName": "Model Name",
       "hints": {
         "assignSystem": "Model for general chat assistance",
-        "assignLightrag": "Models for RAG indexing and retrieval"
+        "assignLightrag": "Models for RAG indexing and retrieval",
+        "assignWorkflowCopilot": "Model for workflow copilot generation, analysis, and fix suggestions"
       },
       "providers": {
         "title": "AI Providers",

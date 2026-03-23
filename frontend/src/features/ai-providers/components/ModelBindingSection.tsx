@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Bot, BrainCircuit, ChevronDown, ChevronRight } from 'lucide-react'
+import { Bot, BrainCircuit, ChevronDown, ChevronRight, Sparkles } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { ModelSelector } from './ModelSelector'
 import { useModelBindingsQuery, useUpdateBindingsMutation, useModelsQuery } from '../queries'
@@ -18,8 +18,8 @@ export function ModelBindingSection({ className }: ModelBindingSectionProps) {
   const updateBindingsMutation = useUpdateBindingsMutation()
 
   const getModelName = (id?: string | null) => {
-    if (!id) return t('settings.tools.notSet')
-    return allModels.find(m => m.id === id)?.name || t('settings.tools.unknown')
+    if (!id) return t('settings.ai.notSet')
+    return allModels.find(m => m.id === id)?.name || t('settings.ai.unknownModel')
   }
 
   const handleAssistantLlmChange = (modelId: string | null) => {
@@ -35,6 +35,16 @@ export function ModelBindingSection({ className }: ModelBindingSectionProps) {
   const handleLightragLlmChange = (modelId: string | null) => {
     updateBindingsMutation.mutate(
       { lightrag: { llmModelId: modelId } },
+      {
+        onSuccess: () => toast.success(t('messages.success')),
+        onError: () => toast.error(t('messages.error')),
+      }
+    )
+  }
+
+  const handleWorkflowCopilotLlmChange = (modelId: string | null) => {
+    updateBindingsMutation.mutate(
+      { workflowCopilot: { llmModelId: modelId } },
       {
         onSuccess: () => toast.success(t('messages.success')),
         onError: () => toast.error(t('messages.error')),
@@ -70,6 +80,11 @@ export function ModelBindingSection({ className }: ModelBindingSectionProps) {
                 <BrainCircuit className="w-3 h-3" />
                 <span>{getModelName(bindings.lightrag?.llmModelId)}</span>
               </div>
+              <div className="w-px h-3 bg-border" />
+              <div className="flex items-center gap-1">
+                <Sparkles className="w-3 h-3" />
+                <span>{getModelName(bindings.workflowCopilot?.llmModelId)}</span>
+              </div>
             </div>
           )}
         </div>
@@ -84,10 +99,10 @@ export function ModelBindingSection({ className }: ModelBindingSectionProps) {
             {t('settings.ai.sections.assignmentsDesc')}
           </p>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {/* System Assistant Card */}
-            <div className="rounded-xl border bg-background/50 p-4 space-y-4">
-              <div className="flex items-center gap-2">
+            <div className="rounded-xl border bg-background/50 p-4 h-full flex flex-col gap-4">
+              <div className="flex items-start gap-2 min-h-[88px]">
                 <div className="p-2 rounded-lg bg-violet-500/10 text-violet-600">
                   <Bot className="w-5 h-5" />
                 </div>
@@ -113,8 +128,8 @@ export function ModelBindingSection({ className }: ModelBindingSectionProps) {
             </div>
 
             {/* LightRAG Card */}
-            <div className="rounded-xl border bg-background/50 p-4 space-y-4">
-              <div className="flex items-center gap-2">
+            <div className="rounded-xl border bg-background/50 p-4 h-full flex flex-col gap-4">
+              <div className="flex items-start gap-2 min-h-[88px]">
                 <div className="p-2 rounded-lg bg-purple-500/10 text-purple-600">
                   <BrainCircuit className="w-5 h-5" />
                 </div>
@@ -134,6 +149,33 @@ export function ModelBindingSection({ className }: ModelBindingSectionProps) {
                   modelType="llm"
                   value={bindings?.lightrag?.llmModelId ?? null}
                   onChange={handleLightragLlmChange}
+                  disabled={updateBindingsMutation.isPending}
+                />
+              </div>
+            </div>
+
+            {/* Workflow Copilot Card */}
+            <div className="rounded-xl border bg-background/50 p-4 h-full flex flex-col gap-4">
+              <div className="flex items-start gap-2 min-h-[88px]">
+                <div className="p-2 rounded-lg bg-amber-500/10 text-amber-600">
+                  <Sparkles className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-medium">{t('settings.ai.roles.workflowCopilot')}</h3>
+                  <p className="text-xs text-muted-foreground">
+                    {t('settings.ai.hints.assignWorkflowCopilot')}
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">
+                  {t('settings.ai.modelTypes.llm')}
+                </label>
+                <ModelSelector
+                  modelType="llm"
+                  value={bindings?.workflowCopilot?.llmModelId ?? null}
+                  onChange={handleWorkflowCopilotLlmChange}
                   disabled={updateBindingsMutation.isPending}
                 />
               </div>

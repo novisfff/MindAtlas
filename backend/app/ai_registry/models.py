@@ -55,10 +55,10 @@ class AiModel(UuidPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class AiComponentBinding(UuidPrimaryKeyMixin, TimestampMixin, Base):
-    """AI 组件绑定 (系统助手/LightRAG 各自绑定的 LLM/Embedding 模型)"""
+    """AI 组件绑定 (系统助手/LightRAG/Workflow Copilot 绑定的默认模型)"""
     __tablename__ = "ai_component_binding"
 
-    # assistant | lightrag
+    # assistant | lightrag | workflow_copilot
     component = Column(String(32), nullable=False, unique=True, index=True)
 
     llm_model_id = Column(
@@ -73,5 +73,8 @@ class AiComponentBinding(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     __table_args__ = (
-        CheckConstraint("component IN ('assistant','lightrag')", name="ck_ai_component_binding_component"),
+        CheckConstraint(
+            "component IN ('assistant','lightrag','workflow_copilot')",
+            name="ck_ai_component_binding_component",
+        ),
     )

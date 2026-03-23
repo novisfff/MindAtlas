@@ -458,7 +458,11 @@ class WorkflowCopilotService:
         return ""
 
     def _resolve_llm_config(self) -> OpenAiFallbackConfig:
-        cfg = resolve_openai_compat_config(self.db, component="assistant", model_type="llm")
+        # Prefer the dedicated workflow copilot binding, but keep assistant fallback
+        # so existing installs continue to work until users customize it.
+        cfg = resolve_openai_compat_config(self.db, component="workflow_copilot", model_type="llm")
+        if cfg is None:
+            cfg = resolve_openai_compat_config(self.db, component="assistant", model_type="llm")
         if cfg is None:
             raise ApiException(status_code=409, code=40960, message="No active AI provider configured")
         return OpenAiFallbackConfig(

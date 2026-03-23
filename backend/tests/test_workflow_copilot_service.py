@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import call
 from uuid import uuid4
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
@@ -858,6 +859,43 @@ class WorkflowCopilotServiceTests(unittest.TestCase):
         analyze_payload = json.loads(analyze_messages[1]["content"])
         self.assertIn("testRunFocus", analyze_payload["modeContext"])
         self.assertIn("tool_lookup", analyze_payload["modeContext"]["testRunFocus"]["failedNodeIds"])
+
+    def test_resolve_llm_config_prefers_dedicated_workflow_copilot_binding(self) -> None:
+        from app.assistant_config.workflow_copilot_service import WorkflowCopilotService
+
+        service = WorkflowCopilotService(self.db, client=_FakeCopilotClient({"status": "question", "message": "x"}))
+
+        with unittest.mock.patch(
+            "app.assistant_config.workflow_copilot_service.resolve_openai_compat_config",
+            return_value=SimpleNamespace(api_key="k", base_url="https://api.example.com", model="gpt-copilot"),
+        ) as resolve_mock:
+            cfg = service._resolve_llm_config()
+
+        self.assertEqual(cfg.model, "gpt-copilot")
+        resolve_mock.assert_called_once_with(self.db, component="workflow_copilot", model_type="llm")
+
+    def test_resolve_llm_config_falls_back_to_assistant_binding(self) -> None:
+        from app.assistant_config.workflow_copilot_service import WorkflowCopilotService
+
+        service = WorkflowCopilotService(self.db, client=_FakeCopilotClient({"status": "question", "message": "x"}))
+
+        with unittest.mock.patch(
+            "app.assistant_config.workflow_copilot_service.resolve_openai_compat_config",
+            side_effect=[
+                None,
+                SimpleNamespace(api_key="k", base_url="https://api.example.com", model="gpt-assistant"),
+            ],
+        ) as resolve_mock:
+            cfg = service._resolve_llm_config()
+
+        self.assertEqual(cfg.model, "gpt-assistant")
+        self.assertEqual(
+            resolve_mock.call_args_list,
+            [
+                call(self.db, component="workflow_copilot", model_type="llm"),
+                call(self.db, component="assistant", model_type="llm"),
+            ],
+        )
 
     def test_edit_selection_mode_context_includes_primary_target_for_main_node(self) -> None:
         from app.assistant_config.schemas import WorkflowCopilotRequest, WorkflowCopilotSelectionInput

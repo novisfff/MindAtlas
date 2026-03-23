@@ -242,20 +242,24 @@
       },
       "roles": {
         "system": "系统助手",
-        "lightrag": "LightRAG 知识图谱"
+        "lightrag": "LightRAG 知识图谱",
+        "workflowCopilot": "工作流 Copilot"
       },
       "modelTypes": {
         "llm": "语言模型",
         "embedding": "Embedding (向量)"
       },
       "selectModel": "选择模型...",
+      "notSet": "未设置",
+      "unknownModel": "未知模型",
       "addModel": "添加模型",
       "editModel": "编辑模型",
       "selectType": "选择类型",
       "modelName": "模型名称",
       "hints": {
         "assignSystem": "用于通用对话助手的模型",
-        "assignLightrag": "用于 RAG 索引和检索的模型"
+        "assignLightrag": "用于 RAG 索引和检索的模型",
+        "assignWorkflowCopilot": "用于工作流 Copilot 生成、分析和修复建议的模型"
       },
       "providers": {
         "title": "AI 服务商",
