@@ -337,77 +337,30 @@ export function SystemAiBehaviorsSettings() {
 
                 {isExpanded && (
                   <div className="border-t bg-muted/10 p-5 animate-in slide-in-from-top-2">
-                    <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(300px,0.85fr)]">
-                      <div className="space-y-4">
-                        <div className="rounded-2xl border bg-background/95 p-4">
-                          <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
-                            {t('settings.systemBehaviors.currentBinding')}
-                          </div>
-                          <div
-                            className="mt-3 truncate text-base font-semibold text-foreground"
-                            title={behavior.currentBinding.name}
-                          >
-                            {behavior.currentBinding.name}
-                          </div>
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            <span className="inline-flex items-center rounded-full bg-muted px-3 py-1 text-xs font-medium text-foreground">
-                              {targetTypeLabel(behavior.currentBinding.targetType)}
-                            </span>
-                            {behavior.currentBinding.isCanonicalDefault && (
-                              <span className="inline-flex items-center rounded-full bg-amber-100 px-3 py-1 text-xs font-medium text-amber-700">
-                                {t('settings.skills.systemDefaultTarget')}
-                              </span>
-                            )}
-                          </div>
+                    <div className="grid gap-4 xl:grid-cols-[minmax(280px,0.7fr)_minmax(0,1.3fr)] xl:items-start">
+                      <div className="rounded-2xl border bg-background/95 p-4">
+                        <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                          {t('settings.systemBehaviors.currentBinding')}
                         </div>
-
-                        <div className="rounded-2xl border bg-background/95 p-4">
-                          <div className="flex flex-col gap-1">
-                            <div className="text-sm font-medium text-foreground">
-                              {t('settings.systemBehaviors.contractSummary')}
-                            </div>
-                            <p className="text-sm text-muted-foreground">
-                              {t('settings.systemBehaviors.contractHint')}
-                            </p>
-                          </div>
-
-                          <div className="mt-4 grid gap-3 md:grid-cols-2">
-                            <div className="rounded-2xl border bg-muted/10 p-4">
-                              <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
-                                {t('settings.systemBehaviors.contractInput')}
-                              </div>
-                              <div className="mt-3 flex flex-wrap gap-2">
-                                {behavior.contract.inputFields.map((field) => (
-                                  <span
-                                    key={field.name}
-                                    className="inline-flex items-center rounded-full border bg-background px-3 py-1.5 text-xs font-medium text-foreground"
-                                  >
-                                    {field.name}: {formatFieldType(field)}
-                                  </span>
-                                ))}
-                              </div>
-                            </div>
-
-                            <div className="rounded-2xl border bg-muted/10 p-4">
-                              <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
-                                {t('settings.systemBehaviors.contractOutput')}
-                              </div>
-                              <div className="mt-3 flex flex-wrap gap-2">
-                                {behavior.contract.outputFields.map((field) => (
-                                  <span
-                                    key={field.name}
-                                    className="inline-flex items-center rounded-full border bg-background px-3 py-1.5 text-xs font-medium text-foreground"
-                                  >
-                                    {field.name}: {formatFieldType(field)}
-                                  </span>
-                                ))}
-                              </div>
-                            </div>
-                          </div>
+                        <div
+                          className="mt-3 break-all text-lg font-semibold leading-8 text-foreground"
+                          title={behavior.currentBinding.name}
+                        >
+                          {behavior.currentBinding.name}
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <span className="inline-flex items-center rounded-full bg-muted px-3 py-1 text-xs font-medium text-foreground">
+                            {targetTypeLabel(behavior.currentBinding.targetType)}
+                          </span>
+                          {behavior.currentBinding.isCanonicalDefault && (
+                            <span className="inline-flex items-center rounded-full bg-amber-100 px-3 py-1 text-xs font-medium text-amber-700">
+                              {t('settings.skills.systemDefaultTarget')}
+                            </span>
+                          )}
                         </div>
                       </div>
 
-                      <aside className="rounded-2xl border bg-background/95 p-4">
+                      <aside className="rounded-2xl border bg-background/95 p-4 xl:self-start">
                         <div className="space-y-4">
                           <div>
                             <div className="text-sm font-medium text-foreground">
@@ -589,6 +542,51 @@ export function SystemAiBehaviorsSettings() {
                           </div>
                         </div>
                       </aside>
+
+                      <div className="rounded-2xl border bg-background/95 p-4 xl:col-span-2">
+                        <div className="flex flex-col gap-1">
+                          <div className="text-sm font-medium text-foreground">
+                            {t('settings.systemBehaviors.contractSummary')}
+                          </div>
+                          <p className="text-sm text-muted-foreground">
+                            {t('settings.systemBehaviors.contractHint')}
+                          </p>
+                        </div>
+
+                        <div className="mt-4 grid gap-3 md:grid-cols-2">
+                          <div className="rounded-2xl border bg-muted/10 p-4">
+                            <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                              {t('settings.systemBehaviors.contractInput')}
+                            </div>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              {behavior.contract.inputFields.map((field) => (
+                                <span
+                                  key={field.name}
+                                  className="inline-flex items-center rounded-full border bg-background px-3 py-1.5 text-xs font-medium text-foreground"
+                                >
+                                  {field.name}: {formatFieldType(field)}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="rounded-2xl border bg-muted/10 p-4">
+                            <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                              {t('settings.systemBehaviors.contractOutput')}
+                            </div>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              {behavior.contract.outputFields.map((field) => (
+                                <span
+                                  key={field.name}
+                                  className="inline-flex items-center rounded-full border bg-background px-3 py-1.5 text-xs font-medium text-foreground"
+                                >
+                                  {field.name}: {formatFieldType(field)}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 )}
