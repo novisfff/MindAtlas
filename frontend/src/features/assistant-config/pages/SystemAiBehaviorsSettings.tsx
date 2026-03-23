@@ -337,48 +337,50 @@ export function SystemAiBehaviorsSettings() {
 
                 {isExpanded && (
                   <div className="border-t bg-muted/10 p-5 animate-in slide-in-from-top-2">
-                    <div className="grid gap-4 xl:grid-cols-[minmax(280px,0.7fr)_minmax(0,1.3fr)] xl:items-start">
-                      <div className="rounded-2xl border bg-background/95 p-4">
-                        <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
-                          {t('settings.systemBehaviors.currentBinding')}
-                        </div>
-                        <div
-                          className="mt-3 break-all text-lg font-semibold leading-8 text-foreground"
-                          title={behavior.currentBinding.name}
-                        >
-                          {behavior.currentBinding.name}
-                        </div>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          <span className="inline-flex items-center rounded-full bg-muted px-3 py-1 text-xs font-medium text-foreground">
-                            {targetTypeLabel(behavior.currentBinding.targetType)}
-                          </span>
-                          {behavior.currentBinding.isCanonicalDefault && (
-                            <span className="inline-flex items-center rounded-full bg-amber-100 px-3 py-1 text-xs font-medium text-amber-700">
-                              {t('settings.skills.systemDefaultTarget')}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-
-                      <aside className="rounded-2xl border bg-background/95 p-4 xl:self-start">
-                        <div className="space-y-4">
-                          <div>
-                            <div className="text-sm font-medium text-foreground">
-                              {t('settings.systemBehaviors.bindingSettings')}
+                    <div className="space-y-4">
+                      <div className="grid gap-4 xl:grid-cols-[minmax(320px,0.82fr)_minmax(0,1.18fr)] xl:items-start">
+                        <div className="rounded-[28px] border bg-background/95 p-5 shadow-sm">
+                          <div className="flex items-start gap-4">
+                            <div className="rounded-2xl border bg-muted/20 p-3 text-muted-foreground">
+                              {(currentTarget?.type ?? behavior.currentBinding.targetType) === 'workflow' ? (
+                                <Workflow className="h-5 w-5" />
+                              ) : (
+                                <Bot className="h-5 w-5" />
+                              )}
                             </div>
-                            <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                              {t('settings.systemBehaviors.bindingSettingsDesc')}
-                            </p>
+                            <div className="min-w-0 flex-1">
+                              <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                                {t('settings.systemBehaviors.currentBinding')}
+                              </div>
+                              <div
+                                className="mt-3 text-lg font-semibold leading-8 text-foreground [overflow-wrap:anywhere]"
+                                title={behavior.currentBinding.name}
+                              >
+                                {behavior.currentBinding.name}
+                              </div>
+                              <div className="mt-4 flex flex-wrap gap-2">
+                                <span className="inline-flex items-center rounded-full bg-muted px-3 py-1 text-xs font-medium text-foreground">
+                                  {targetTypeLabel(behavior.currentBinding.targetType)}
+                                </span>
+                                {behavior.currentBinding.isCanonicalDefault && (
+                                  <span className="inline-flex items-center rounded-full bg-amber-100 px-3 py-1 text-xs font-medium text-amber-700">
+                                    {t('settings.skills.systemDefaultTarget')}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
                           </div>
+                        </div>
 
-                          <div className="rounded-2xl border bg-muted/10 p-4">
-                            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <aside className="rounded-[28px] border bg-background/95 p-5 shadow-sm xl:self-start">
+                          <div className="flex flex-col gap-4">
+                            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                               <div className="space-y-1">
-                                <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
-                                  {t('settings.systemBehaviors.bindingTarget')}
+                                <div className="text-sm font-medium text-foreground">
+                                  {t('settings.systemBehaviors.bindingSettings')}
                                 </div>
-                                <p className="text-xs leading-5 text-muted-foreground">
-                                  {t('settings.systemBehaviors.createExampleWorkflowHint')}
+                                <p className="text-sm leading-6 text-muted-foreground">
+                                  {t('settings.systemBehaviors.bindingSettingsDesc')}
                                 </p>
                               </div>
                               <button
@@ -396,154 +398,163 @@ export function SystemAiBehaviorsSettings() {
                               </button>
                             </div>
 
-                            <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
-                              <Popover
-                                open={pickerOpen}
-                                onOpenChange={(open) => setPickerOpenBehaviorKey(open ? behavior.behaviorKey : null)}
-                              >
-                                <PopoverTrigger asChild>
-                                  <button
-                                    type="button"
-                                    disabled={isMutating}
-                                    className="group flex min-h-[68px] w-full flex-1 items-center gap-3 rounded-2xl border bg-background px-3.5 py-3 text-left shadow-sm transition-all hover:border-primary/30 hover:bg-muted/15 disabled:opacity-50"
-                                  >
-                                    <div className="rounded-xl border bg-muted/30 p-2 text-muted-foreground">
-                                      {(currentTarget?.type ?? behavior.currentBinding.targetType) === 'workflow' ? (
-                                        <Workflow className="h-4 w-4" />
-                                      ) : (
-                                        <Bot className="h-4 w-4" />
-                                      )}
-                                    </div>
+                            <div className="rounded-[24px] border bg-muted/[0.08] p-4">
+                              <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                                {t('settings.systemBehaviors.bindingTarget')}
+                              </div>
+                              <p className="mt-1 text-xs leading-6 text-muted-foreground">
+                                {t('settings.systemBehaviors.createExampleWorkflowHint')}
+                              </p>
 
-                                    <div className="min-w-0 flex-1">
-                                      <div className="flex flex-wrap items-center gap-2">
-                                        <Badge variant="outline" className="font-normal">
-                                          {targetTypeLabel(currentTarget?.type ?? behavior.currentBinding.targetType)}
-                                        </Badge>
-                                        {currentTarget?.key === SYSTEM_DEFAULT_TARGET_KEY && (
-                                          <Badge variant="secondary" className="font-normal">
-                                            {t('settings.skills.systemDefaultTarget')}
-                                          </Badge>
+                              <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
+                                <Popover
+                                  open={pickerOpen}
+                                  onOpenChange={(open) => setPickerOpenBehaviorKey(open ? behavior.behaviorKey : null)}
+                                >
+                                  <PopoverTrigger asChild>
+                                    <button
+                                      type="button"
+                                      disabled={isMutating}
+                                      className="group flex min-h-[74px] w-full items-center gap-3 rounded-[22px] border bg-background px-4 py-3 text-left shadow-sm transition-all hover:border-primary/30 hover:bg-muted/15 disabled:opacity-50"
+                                    >
+                                      <div className="rounded-2xl border bg-muted/30 p-2.5 text-muted-foreground">
+                                        {(currentTarget?.type ?? behavior.currentBinding.targetType) === 'workflow' ? (
+                                          <Workflow className="h-4 w-4" />
+                                        ) : (
+                                          <Bot className="h-4 w-4" />
                                         )}
                                       </div>
-                                      <div
-                                        className="mt-1.5 truncate text-sm font-semibold text-foreground"
-                                        title={currentTarget?.name ?? behavior.currentBinding.name}
-                                      >
-                                        {currentTarget?.name ?? behavior.currentBinding.name}
-                                      </div>
-                                    </div>
 
-                                    <div className="rounded-full border bg-muted/30 p-2 text-muted-foreground transition-colors group-hover:bg-muted/50">
-                                      <ChevronDown className="h-4 w-4 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
-                                    </div>
-                                  </button>
-                                </PopoverTrigger>
-                                <PopoverContent
-                                  align="start"
-                                  sideOffset={8}
-                                  className="w-[min(560px,calc(100vw-3rem))] rounded-2xl p-2 shadow-xl"
-                                >
-                                  <div className="border-b px-3 pb-3 pt-2">
-                                    <div className="text-sm font-medium text-foreground">
-                                      {t('settings.systemBehaviors.targetPickerTitle')}
-                                    </div>
-                                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                                      {t('settings.systemBehaviors.targetPickerHint')}
-                                    </p>
-                                  </div>
-                                  <div className="mt-2 max-h-[360px] space-y-1 overflow-y-auto pr-1">
-                                    {orderedTargets.map((target) => {
-                                      const isSelected = target.key === currentTargetKey
-                                      const Icon = target.type === 'workflow' ? Workflow : Bot
-                                      return (
-                                        <button
-                                          key={target.key}
-                                          type="button"
-                                          disabled={!target.bindable && target.key !== SYSTEM_DEFAULT_TARGET_KEY}
-                                          onClick={() => handleSelectTarget(behavior, target)}
-                                          className={cn(
-                                            'flex w-full items-start gap-3 rounded-2xl border px-3 py-3 text-left transition-all',
-                                            isSelected
-                                              ? 'border-primary/25 bg-primary/5'
-                                              : 'border-transparent bg-background hover:border-border hover:bg-muted/40',
-                                            !target.bindable && target.key !== SYSTEM_DEFAULT_TARGET_KEY
-                                              ? 'cursor-not-allowed opacity-55 grayscale'
-                                              : 'cursor-pointer',
+                                      <div className="min-w-0 flex-1">
+                                        <div className="flex flex-wrap items-center gap-2">
+                                          <Badge variant="outline" className="font-normal">
+                                            {targetTypeLabel(currentTarget?.type ?? behavior.currentBinding.targetType)}
+                                          </Badge>
+                                          {currentTarget?.key === SYSTEM_DEFAULT_TARGET_KEY && (
+                                            <Badge variant="secondary" className="font-normal">
+                                              {t('settings.skills.systemDefaultTarget')}
+                                            </Badge>
                                           )}
+                                        </div>
+                                        <div
+                                          className="mt-2 text-sm font-semibold leading-6 text-foreground [overflow-wrap:anywhere]"
+                                          title={currentTarget?.name ?? behavior.currentBinding.name}
                                         >
-                                          <div className={cn(
-                                            'mt-0.5 rounded-lg p-2',
-                                            isSelected ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
-                                          )}>
-                                            <Icon className="h-4 w-4" />
-                                          </div>
+                                          {currentTarget?.name ?? behavior.currentBinding.name}
+                                        </div>
+                                      </div>
 
-                                          <div className="min-w-0 flex-1">
-                                            <div className="flex flex-wrap items-center gap-2">
-                                              <span
-                                                className="truncate text-sm font-medium text-foreground"
-                                                title={target.name}
-                                              >
-                                                {target.name}
-                                              </span>
-                                              <Badge variant="outline" className="font-normal">
-                                                {targetTypeLabel(target.type)}
-                                              </Badge>
-                                              {target.key === SYSTEM_DEFAULT_TARGET_KEY && (
-                                                <Badge variant="secondary" className="font-normal">
-                                                  {t('settings.skills.systemDefaultTarget')}
-                                                </Badge>
-                                              )}
-                                              {target.isSystemDefault && target.key !== SYSTEM_DEFAULT_TARGET_KEY && (
-                                                <Badge variant="secondary" className="font-normal">
-                                                  {t('settings.systemBehaviors.defaultAliasSource')}
-                                                </Badge>
-                                              )}
+                                      <div className="rounded-full border bg-muted/30 p-2 text-muted-foreground transition-colors group-hover:bg-muted/50">
+                                        <ChevronDown className="h-4 w-4 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
+                                      </div>
+                                    </button>
+                                  </PopoverTrigger>
+                                  <PopoverContent
+                                    align="start"
+                                    sideOffset={8}
+                                    className="w-[min(560px,calc(100vw-3rem))] rounded-2xl p-2 shadow-xl"
+                                  >
+                                    <div className="border-b px-3 pb-3 pt-2">
+                                      <div className="text-sm font-medium text-foreground">
+                                        {t('settings.systemBehaviors.targetPickerTitle')}
+                                      </div>
+                                      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                                        {t('settings.systemBehaviors.targetPickerHint')}
+                                      </p>
+                                    </div>
+                                    <div className="mt-2 max-h-[360px] space-y-1 overflow-y-auto pr-1">
+                                      {orderedTargets.map((target) => {
+                                        const isSelected = target.key === currentTargetKey
+                                        const Icon = target.type === 'workflow' ? Workflow : Bot
+                                        return (
+                                          <button
+                                            key={target.key}
+                                            type="button"
+                                            disabled={!target.bindable && target.key !== SYSTEM_DEFAULT_TARGET_KEY}
+                                            onClick={() => handleSelectTarget(behavior, target)}
+                                            className={cn(
+                                              'flex w-full items-start gap-3 rounded-2xl border px-3 py-3 text-left transition-all',
+                                              isSelected
+                                                ? 'border-primary/25 bg-primary/5'
+                                                : 'border-transparent bg-background hover:border-border hover:bg-muted/40',
+                                              !target.bindable && target.key !== SYSTEM_DEFAULT_TARGET_KEY
+                                                ? 'cursor-not-allowed opacity-55 grayscale'
+                                                : 'cursor-pointer',
+                                            )}
+                                          >
+                                            <div className={cn(
+                                              'mt-0.5 rounded-lg p-2',
+                                              isSelected ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
+                                            )}>
+                                              <Icon className="h-4 w-4" />
                                             </div>
 
-                                            <div className="mt-1 text-xs leading-5 text-muted-foreground">
-                                              {!target.bindable && target.key !== SYSTEM_DEFAULT_TARGET_KEY
-                                                ? disabledReasonLabel(target)
-                                                : target.description || t('settings.systemBehaviors.targetReady')}
+                                            <div className="min-w-0 flex-1">
+                                              <div className="flex flex-wrap items-center gap-2">
+                                                <span
+                                                  className="truncate text-sm font-medium text-foreground"
+                                                  title={target.name}
+                                                >
+                                                  {target.name}
+                                                </span>
+                                                <Badge variant="outline" className="font-normal">
+                                                  {targetTypeLabel(target.type)}
+                                                </Badge>
+                                                {target.key === SYSTEM_DEFAULT_TARGET_KEY && (
+                                                  <Badge variant="secondary" className="font-normal">
+                                                    {t('settings.skills.systemDefaultTarget')}
+                                                  </Badge>
+                                                )}
+                                                {target.isSystemDefault && target.key !== SYSTEM_DEFAULT_TARGET_KEY && (
+                                                  <Badge variant="secondary" className="font-normal">
+                                                    {t('settings.systemBehaviors.defaultAliasSource')}
+                                                  </Badge>
+                                                )}
+                                              </div>
+
+                                              <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                                                {!target.bindable && target.key !== SYSTEM_DEFAULT_TARGET_KEY
+                                                  ? disabledReasonLabel(target)
+                                                  : target.description || t('settings.systemBehaviors.targetReady')}
+                                              </div>
                                             </div>
-                                          </div>
 
-                                          {isSelected && (
-                                            <Check className="mt-1 h-4 w-4 shrink-0 text-primary" />
-                                          )}
-                                        </button>
-                                      )
-                                    })}
-                                  </div>
-                                </PopoverContent>
-                              </Popover>
+                                            {isSelected && (
+                                              <Check className="mt-1 h-4 w-4 shrink-0 text-primary" />
+                                            )}
+                                          </button>
+                                        )
+                                      })}
+                                    </div>
+                                  </PopoverContent>
+                                </Popover>
 
+                                <button
+                                  type="button"
+                                  onClick={() => openTarget(behavior.currentBinding.targetType, behavior.currentBinding.id)}
+                                  className="inline-flex h-[74px] items-center justify-center gap-2 rounded-[22px] border bg-background px-5 text-sm font-medium text-muted-foreground shadow-sm transition-colors hover:bg-muted/30 hover:text-foreground lg:min-w-[152px]"
+                                >
+                                  <ExternalLink className="h-4 w-4" />
+                                  {t('settings.systemBehaviors.editTarget')}
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="flex justify-end">
                               <button
-                                type="button"
-                                onClick={() => openTarget(behavior.currentBinding.targetType, behavior.currentBinding.id)}
-                                className="inline-flex h-14 items-center justify-center gap-2 rounded-2xl border bg-background px-4 text-sm font-medium text-muted-foreground shadow-sm transition-colors hover:bg-muted/30 hover:text-foreground md:min-w-[128px]"
+                                onClick={() => handleReset(behavior.behaviorKey)}
+                                disabled={resetDisabled}
+                                className="inline-flex h-11 min-w-[180px] items-center justify-center gap-2 rounded-xl border px-4 text-sm font-medium transition-colors hover:bg-muted/40 disabled:opacity-50"
                               >
-                                <ExternalLink className="h-4 w-4" />
-                                {t('settings.systemBehaviors.editTarget')}
+                                <RotateCcw className="h-4 w-4" />
+                                {t('settings.systemBehaviors.resetToDefault')}
                               </button>
                             </div>
                           </div>
+                        </aside>
+                      </div>
 
-                          <div className="flex justify-end">
-                            <button
-                              onClick={() => handleReset(behavior.behaviorKey)}
-                              disabled={resetDisabled}
-                              className="inline-flex h-11 min-w-[180px] items-center justify-center gap-2 rounded-xl border px-4 text-sm font-medium transition-colors hover:bg-muted/40 disabled:opacity-50"
-                            >
-                              <RotateCcw className="h-4 w-4" />
-                              {t('settings.systemBehaviors.resetToDefault')}
-                            </button>
-                          </div>
-                        </div>
-                      </aside>
-
-                      <div className="rounded-2xl border bg-background/95 p-4 xl:col-span-2">
+                      <div className="rounded-[28px] border bg-background/95 p-5 shadow-sm">
                         <div className="flex flex-col gap-1">
                           <div className="text-sm font-medium text-foreground">
                             {t('settings.systemBehaviors.contractSummary')}
