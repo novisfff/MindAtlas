@@ -7,7 +7,7 @@ import time
 from typing import Any, Callable, Iterator
 from uuid import UUID
 
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from app.ai_registry.runtime import resolve_openai_compat_config
 from app.assistant.memory_computation import AssistantMemoryComputationService
@@ -34,10 +34,12 @@ from app.assistant.workflow.human_approval_runtime import (
     list_pending_approvals_for_conversation,
     submit_human_approval_decision,
 )
+from app.common.request_context import reset_request_locale, set_request_locale
 from app.common.exceptions import ApiException
 from app.common.time import utcnow
 from app.config import get_settings
 from app.database import SessionLocal
+from app.system_settings.service import resolve_system_locale
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,14 @@ class AssistantService:
         self.db = db
         self._openai_fallback_client = OpenAiFallbackClient()
         self._memory_computation_service = AssistantMemoryComputationService(self._openai_fallback_client)
+
+    @staticmethod
+    def _normalize_locale(locale: str | None) -> str:
+        return resolve_system_locale(preferred_locale=locale)
+
+    @classmethod
+    def _localized_text(cls, locale: str | None, *, zh: str, en: str) -> str:
+        return zh if cls._normalize_locale(locale) == "zh" else en
 
     @classmethod
     def _mark_run_stream_attached(cls, run_id: str) -> None:
@@ -294,6 +304,7 @@ class AssistantService:
     def chat_stream(self, conversation_id: UUID, user_message: str, *, stream_output: bool = True) -> Iterator[bytes]:
         """SSE 聊天入口：创建 run、后台执行、附着回放流。"""
         conversation = self.get_conversation_basic(conversation_id)
+        locale = resolve_system_locale(self.db)
         run_svc = AssistantChatRunService(self.db)
         active = run_svc.get_active_run(conversation_id=conversation.id)
         if active is not None:
@@ -336,7 +347,7 @@ class AssistantService:
             event_name="run_status",
             payload={"status": "queued"},
         )
-        self._start_background_run(run_id=run.id, stream_output=stream_output)
+        self._start_background_run(run_id=run.id, stream_output=stream_output, locale=locale)
         yield from self.stream_run(conversation.id, run_id=run.id, after_seq=0)
 
     def stream_run(self, conversation_id: UUID, *, run_id: UUID, after_seq: int = 0) -> Iterator[bytes]:
@@ -347,21 +358,22 @@ class AssistantService:
 
         run_key = str(run_id)
         last_seq = max(0, int(after_seq or 0))
+        read_session_factory = sessionmaker(bind=self.db.get_bind(), future=True)
         self._mark_run_stream_attached(run_key)
         try:
             while True:
-                # Re-open read view on every poll so long-lived streams can observe
-                # status/event updates committed by background threads.
-                self.db.rollback()
-                self.db.expire_all()
-                events = run_svc.list_events_after(run_id=run_id, after_seq=last_seq, limit=200)
-                for event in events:
-                    payload = dict(event.payload or {})
-                    payload["seq"] = int(event.seq)
-                    last_seq = int(event.seq)
-                    yield self._sse(event.event_name, payload)
+                # Use a fresh read session per poll so updates committed by
+                # background workers and other sessions are always visible.
+                with read_session_factory() as read_db:
+                    read_svc = AssistantChatRunService(read_db)
+                    events = read_svc.list_events_after(run_id=run_id, after_seq=last_seq, limit=200)
+                    for event in events:
+                        payload = dict(event.payload or {})
+                        payload["seq"] = int(event.seq)
+                        last_seq = int(event.seq)
+                        yield self._sse(event.event_name, payload)
 
-                current = run_svc.get_run(conversation_id=conversation_id, run_id=run_id)
+                    current = read_svc.get_run(conversation_id=conversation_id, run_id=run_id)
                 if current is None:
                     break
                 status = str(current.status or "")
@@ -375,18 +387,20 @@ class AssistantService:
         finally:
             self._mark_run_stream_detached(run_key)
 
-    def _start_background_run(self, *, run_id: UUID, stream_output: bool) -> None:
+    def _start_background_run(self, *, run_id: UUID, stream_output: bool, locale: str) -> None:
         run_key = str(run_id)
         if self._has_background_thread(run_key):
             return
 
         def _runner() -> None:
             db = SessionLocal()
+            locale_token = set_request_locale(locale)
             try:
-                AssistantService(db)._run_chat_background(run_id=run_id, stream_output=stream_output)
+                AssistantService(db)._run_chat_background(run_id=run_id, stream_output=stream_output, locale=locale)
             except Exception:
                 logger.exception("assistant background run crashed run_id=%s", run_id)
             finally:
+                reset_request_locale(locale_token)
                 try:
                     db.close()
                 except Exception:
@@ -401,7 +415,8 @@ class AssistantService:
         self._register_background_thread(run_key, thread)
         thread.start()
 
-    def _run_chat_background(self, *, run_id: UUID, stream_output: bool) -> None:
+    def _run_chat_background(self, *, run_id: UUID, stream_output: bool, locale: str | None = None) -> None:
+        resolved_locale = resolve_system_locale(self.db, preferred_locale=locale)
         run = self.db.get(AssistantChatRun, run_id)
         if run is None:
             return
@@ -541,6 +556,7 @@ class AssistantService:
                     message_id=assistant_msg.id,
                     run_id=run_id,
                     stream_output=stream_output,
+                    locale=resolved_locale,
                     on_tool_call_start=_wrap_event_callback(event_adapter.on_tool_call_start),
                     on_tool_call_end=_wrap_event_callback(event_adapter.on_tool_call_end),
                     on_skill_start=_wrap_event_callback(event_adapter.on_skill_start),
@@ -576,7 +592,7 @@ class AssistantService:
 
             _persist_checkpoint(force=True)
             if not conversation.title:
-                title = self._generate_title(user_msg.content or "", assistant_msg.content or "")
+                title = self._generate_title(user_msg.content or "", assistant_msg.content or "", locale=locale)
                 if title:
                     conversation.title = title
                     self.db.commit()
@@ -625,6 +641,7 @@ class AssistantService:
         message_id: UUID | None = None,
         run_id: UUID | None = None,
         stream_output: bool = True,
+        locale: str | None = None,
         db: Session | None = None,
         on_tool_call_start: Callable[[str, str, dict], None] | None = None,
         on_tool_call_end: Callable[[str, str, str], None] | None = None,
@@ -641,10 +658,11 @@ class AssistantService:
     ) -> Iterator[str]:
         logger.debug("assistant._generate_response start conversation_id=%s", conversation_id)
         db_session = db or self.db
+        resolved_locale = resolve_system_locale(db_session, preferred_locale=locale)
         cfg = self._get_openai_config(db_session)
         if not cfg:
             logger.debug("assistant: no active AI provider config, using fallback response")
-            yield from self._fallback_response()
+            yield from self._fallback_response(locale=resolved_locale)
             return
         try:
             from app.assistant.orchestration.agent_runtime import AssistantAgent
@@ -655,7 +673,7 @@ class AssistantService:
                 model=cfg.model,
                 db=db_session,
             )
-            history = self._build_llm_messages(conversation_id, db=db_session)
+            history = self._build_llm_messages(conversation_id, db=db_session, locale=resolved_locale)
             user_input = history[-1]["content"] if history else ""
             for delta in agent.stream(
                 history[:-1],
@@ -666,6 +684,7 @@ class AssistantService:
                     "run_id": str(run_id) if run_id else (str(message_id) if message_id else None),
                     "channel_type": "assistant_chat",
                     "message_id": str(message_id) if message_id else None,
+                    "locale": resolved_locale,
                 },
                 on_tool_call_start=on_tool_call_start,
                 on_tool_call_end=on_tool_call_end,
@@ -690,16 +709,32 @@ class AssistantService:
             logger.error("LangChain Agent failed: %s", error_msg, exc_info=True)
             lowered = error_msg.lower()
             if any(k in lowered for k in ("blocked", "content_filter", "content filter", "policy", "safety")):
-                yield "抱歉，您的请求被 AI 服务拒绝，请尝试换一种表达方式。"
+                yield self._localized_text(
+                    resolved_locale,
+                    zh="抱歉，您的请求被 AI 服务拒绝，请尝试换一种表达方式。",
+                    en="Sorry, the AI service refused this request. Please try rephrasing it.",
+                )
                 return
-            yield "抱歉，处理您的请求时出现错误，请稍后重试。"
+            yield self._localized_text(
+                resolved_locale,
+                zh="抱歉，处理您的请求时出现错误，请稍后重试。",
+                en="Sorry, something went wrong while processing your request. Please try again later.",
+            )
             return
 
-    def _fallback_response(self, error: bool = False) -> Iterator[str]:
+    def _fallback_response(self, error: bool = False, *, locale: str | None = None) -> Iterator[str]:
         if error:
-            msg = "抱歉，AI 服务暂时不可用，请稍后重试。"
+            msg = self._localized_text(
+                locale,
+                zh="抱歉，AI 服务暂时不可用，请稍后重试。",
+                en="Sorry, the AI service is temporarily unavailable. Please try again later.",
+            )
         else:
-            msg = "抱歉，当前没有配置 AI 服务。请在设置中配置 AI Provider。"
+            msg = self._localized_text(
+                locale,
+                zh="抱歉，当前没有配置 AI 服务。请在设置中配置 AI Provider。",
+                en="Sorry, no AI service is configured right now. Please configure an AI provider in Settings.",
+            )
         yield from self._chunk_text(msg)
 
     def _chunk_text(self, text: str, chunk_size: int = 16) -> Iterator[str]:
@@ -713,17 +748,26 @@ class AssistantService:
         payload = json.dumps(data, ensure_ascii=False, default=str)
         return f"event: {event}\ndata: {payload}\n\n".encode("utf-8")
 
-    def _generate_title(self, user_message: str, assistant_response: str) -> str | None:
+    def _generate_title(self, user_message: str, assistant_response: str, *, locale: str | None = None) -> str | None:
         cfg = self._get_openai_config()
         if not cfg:
             return None
-        prompt = f"""根据以下对话内容，生成一个简短的对话标题（不超过20个字）。
+        if self._normalize_locale(locale) == "zh":
+            prompt = f"""根据以下对话内容，生成一个简短的对话标题（不超过20个字）。
 只输出标题本身，不要加引号或其他标点。
 
 用户: {user_message[:200]}
 助手: {assistant_response[:200]}
 
 标题:"""
+        else:
+            prompt = f"""Generate a short conversation title from the dialog below (no more than 20 words).
+Return only the title text without quotes or extra punctuation.
+
+User: {user_message[:200]}
+Assistant: {assistant_response[:200]}
+
+Title:"""
         messages = [{"role": "user", "content": prompt}]
         try:
             raw = self._call_openai(cfg, messages)
@@ -918,7 +962,7 @@ class AssistantService:
     def _build_api_url(self, base_url: str, endpoint: str) -> str:
         return self._openai_fallback_client.build_api_url(base_url, endpoint)
 
-    def _build_llm_messages(self, conversation_id: UUID, db: Session | None = None) -> list[dict]:
+    def _build_llm_messages(self, conversation_id: UUID, db: Session | None = None, *, locale: str | None = None) -> list[dict]:
         db_session = db or self.db
         history = (
             db_session.query(Message)
@@ -929,10 +973,18 @@ class AssistantService:
         out: list[dict] = [
             {
                 "role": "system",
-                "content": (
-                    "你是 MindAtlas 的 AI 助手，一个智能的个人秘书。"
-                    "你可以帮助用户管理知识和经历记录。"
-                    "请用简洁、友好的方式回答问题。"
+                "content": self._localized_text(
+                    locale,
+                    zh=(
+                        "你是 MindAtlas 的 AI 助手，一个智能的个人秘书。"
+                        "你可以帮助用户管理知识和经历记录。"
+                        "请用简洁、友好的方式回答问题。"
+                    ),
+                    en=(
+                        "You are the MindAtlas AI assistant, an intelligent personal secretary. "
+                        "You help users manage their knowledge and life records. "
+                        "Respond in a concise and friendly way."
+                    ),
                 ),
             }
         ]

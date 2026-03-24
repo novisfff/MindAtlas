@@ -483,11 +483,14 @@ class SystemAiBehaviorBindingTests(unittest.TestCase):
             _FakeLangGraphEngine.seen_runtime_contexts[-1].get("workflow_id"),
             str(weekly_default_id),
         )
+        self.assertEqual(_FakeLangGraphEngine.seen_runtime_contexts[-1].get("locale"), "zh")
 
     def test_weekly_report_service_uses_system_behavior_runner(self) -> None:
         from app.report.service import WeeklyReportService  # noqa: E402
+        from app.system_settings.service import SystemSettingsService  # noqa: E402
 
         _FakeLangGraphEngine.seen_runtime_contexts = []
+        SystemSettingsService(self.db).set_locale("en")
 
         service = WeeklyReportService(self.db)
         report = service.get_or_create_for_week(date(2026, 3, 16))
@@ -506,6 +509,10 @@ class SystemAiBehaviorBindingTests(unittest.TestCase):
         self.assertEqual(report.content["suggestions"], ["Keep going"])
         self.assertEqual(report.content["trends"], "Stable trend")
         self.assertIsNotNone(report.generated_at)
+        self.assertEqual(report.content_locale, "en")
+        self.assertEqual(_FakeLangGraphEngine.seen_runtime_contexts[-1].get("locale"), "en")
+        SystemSettingsService(self.db).set_locale("zh")
+        self.assertTrue(service.should_generate_report(report))
 
 
 if __name__ == "__main__":

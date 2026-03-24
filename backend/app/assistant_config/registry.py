@@ -517,24 +517,25 @@ class SkillRegistry(_BaseRegistry):
     """技能注册表 - 解析系统技能和数据库自定义技能"""
 
     @staticmethod
-    def list_system_skills() -> list[Any]:
-        from app.assistant.skill_catalog.definitions import SKILLS
-        return list(SKILLS)
+    def list_system_skills(locale: str | None = None) -> list[Any]:
+        from app.assistant.skill_catalog.defaults_loader import load_system_skill_defaults
+
+        return list(load_system_skill_defaults(locale=locale))
 
     @staticmethod
-    def list_system_skill_definitions() -> list[SystemSkillFullDefinition]:
+    def list_system_skill_definitions(locale: str | None = None) -> list[SystemSkillFullDefinition]:
         """获取系统 Skill 元数据定义。"""
         return [
             SkillRegistry._to_skill_full_definition(skill, include_workflow=True)
-            for skill in SkillRegistry.list_system_skills()
+            for skill in SkillRegistry.list_system_skills(locale=locale)
         ]
 
     @staticmethod
-    def resolve_system_skill(skill_name: str) -> Any | None:
+    def resolve_system_skill(skill_name: str, locale: str | None = None) -> Any | None:
         """解析系统 Skill。"""
         from app.assistant.skill_catalog.definitions import get_skill_by_name
 
-        return get_skill_by_name(skill_name)
+        return get_skill_by_name(skill_name, locale=locale)
 
     def list_db_skills(
         self,
@@ -579,7 +580,13 @@ class SkillRegistry(_BaseRegistry):
         """获取启用的数据库 Skills。"""
         return self.list_db_skills(include_workflow=include_workflow, include_disabled=False)
 
-    def resolve(self, skill_name: str, include_workflow: bool = True) -> Any | None:
+    def resolve(
+        self,
+        skill_name: str,
+        include_workflow: bool = True,
+        *,
+        locale: str | None = None,
+    ) -> Any | None:
         """解析 Skill - 优先从数据库查找，未命中时回退到系统定义。
 
         逻辑:
@@ -612,7 +619,7 @@ class SkillRegistry(_BaseRegistry):
             if not record.enabled:
                 # 默认 Skill 不可被禁用，回退到系统定义
                 if skill_name == DEFAULT_SKILL_NAME:
-                    return self.resolve_system_skill(skill_name)
+                    return self.resolve_system_skill(skill_name, locale=locale)
                 return None
 
             from app.assistant.skill_catalog.converters import (
@@ -629,16 +636,22 @@ class SkillRegistry(_BaseRegistry):
                     ) from exc
             return db_skill_to_definition_light(record)
 
-        return self.resolve_system_skill(skill_name)
+        return self.resolve_system_skill(skill_name, locale=locale)
 
-    def get_skill_by_name(self, skill_name: str, include_workflow: bool = True) -> Any | None:
+    def get_skill_by_name(
+        self,
+        skill_name: str,
+        include_workflow: bool = True,
+        *,
+        locale: str | None = None,
+    ) -> Any | None:
         """按名称获取 Skill（先查 DB，再回退系统定义）。
 
         Args:
             skill_name: Skill 名称。
             include_workflow: 解析 DB Skill 时是否加载 workflow nodes/edges。
         """
-        return self.resolve(skill_name=skill_name, include_workflow=include_workflow)
+        return self.resolve(skill_name=skill_name, include_workflow=include_workflow, locale=locale)
 
     @staticmethod
     def _to_skill_full_definition(skill: Any, *, include_workflow: bool) -> SystemSkillFullDefinition:

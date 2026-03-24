@@ -31,6 +31,7 @@ from app.assistant_config.schemas import WorkflowInput, WorkflowTestRunRequest
 from app.assistant_config.service import AssistantConfigService
 from app.common.exceptions import ApiException
 from app.config import get_settings
+from app.system_settings.service import resolve_system_locale
 
 logger = logging.getLogger(__name__)
 
@@ -710,6 +711,7 @@ class WorkflowTestRunService:
                     "channel_type": "workflow_test",
                     "workflow_id": str(prepared.workflow_id),
                     "skill_id": str(prepared.skill_id) if prepared.skill_id else None,
+                    "locale": resolve_system_locale(self.db),
                     **(
                         {"session_memory": prepared.session_memory.to_payload()}
                         if prepared.start_input_mode == "text"

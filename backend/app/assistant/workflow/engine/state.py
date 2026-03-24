@@ -22,6 +22,7 @@ class AssistantState(TypedDict, total=False):
     user_input: str
     kb_enabled: bool
     memory_mode: str
+    sys_vars: dict[str, str]
     iteration_count: int
     metadata: dict
     memory_context: dict[str, Any]

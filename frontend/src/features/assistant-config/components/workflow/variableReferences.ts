@@ -39,6 +39,26 @@ const SYS_REFERENCE_PARAMS: InputParam[] = [
     required: false,
     description: 'Current conversation id',
   },
+  {
+    name: 'sys.locale',
+    referencePath: 'sys.locale',
+    itemLabel: 'locale',
+    groupKey: 'sys',
+    groupLabel: 'System Variables',
+    paramType: 'string',
+    required: false,
+    description: 'Current system locale (zh or en)',
+  },
+  {
+    name: 'sys.language',
+    referencePath: 'sys.language',
+    itemLabel: 'language',
+    groupKey: 'sys',
+    groupLabel: 'System Variables',
+    paramType: 'string',
+    required: false,
+    description: 'Current response language name',
+  },
 ]
 
 function normalizeOutputMode(raw: unknown): 'text' | 'structured' {

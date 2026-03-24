@@ -59,22 +59,55 @@ from app.assistant_config.system_behavior_registry import (
     list_system_behavior_definitions,
 )
 from app.common.exceptions import ApiException
+from app.system_settings.service import resolve_system_locale
 
 _TOOL_TEXT_REF_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\.text\s*\}\}")
 _TARGET_VERSION_LIMIT = 100
-_SYSTEM_BEHAVIOR_EXAMPLE_WORKFLOW_NAMES: dict[str, str] = {
-    "weekly_report_generation": "weekly_report_example__workflow",
-    "monthly_report_generation": "monthly_report_example__workflow",
+_SYSTEM_BEHAVIOR_EXAMPLE_WORKFLOW_METADATA: dict[str, dict[str, dict[str, str]]] = {
+    "weekly_report_generation": {
+        "zh": {
+            "name": "weekly_report_example__workflow",
+            "description": "周报生成示例工作流。",
+        },
+        "en": {
+            "name": "weekly_report_example__workflow",
+            "description": "Weekly report example workflow.",
+        },
+    },
+    "monthly_report_generation": {
+        "zh": {
+            "name": "monthly_report_example__workflow",
+            "description": "月报生成示例工作流。",
+        },
+        "en": {
+            "name": "monthly_report_example__workflow",
+            "description": "Monthly report example workflow.",
+        },
+    },
 }
-_SYSTEM_BEHAVIOR_EXAMPLE_WORKFLOW_DESCRIPTIONS: dict[str, str] = {
-    "weekly_report_generation": "周报生成示例工作流。",
-    "monthly_report_generation": "月报生成示例工作流。",
+_SYSTEM_SKILL_DISPLAY_NAMES: dict[str, dict[str, str]] = {
+    "quick_stats": {"zh": "快速统计工作流", "en": "Quick Stats Workflow"},
+    "smart_capture": {"zh": "智能创建记录工作流", "en": "Smart Capture Workflow"},
+    "periodic_review": {"zh": "周期性回顾工作流", "en": "Periodic Review Workflow"},
+    DEFAULT_SKILL_NAME: {"zh": "默认对话智能体", "en": "General Chat Agent"},
 }
 
 
 class AssistantConfigService:
     def __init__(self, db: Session):
         self.db = db
+
+    def _current_locale(self, preferred_locale: str | None = None) -> str:
+        return resolve_system_locale(self.db, preferred_locale=preferred_locale)
+
+    def _localized_system_behavior_example_meta(self, behavior_key: str, *, locale: str | None = None) -> dict[str, str]:
+        normalized_locale = self._current_locale(locale)
+        meta = _SYSTEM_BEHAVIOR_EXAMPLE_WORKFLOW_METADATA.get(behavior_key, {})
+        localized = meta.get(normalized_locale) or meta.get("zh") or {}
+        return {
+            "name": str(localized.get("name") or f"{behavior_key}_example_workflow"),
+            "description": str(localized.get("description") or ""),
+        }
 
     @staticmethod
     def _build_default_workflow_input() -> WorkflowInput:
@@ -529,13 +562,14 @@ class AssistantConfigService:
 
         from app.assistant.skill_catalog.defaults_loader import get_system_workflow_baseline
 
+        locale = self._current_locale()
         for linked_skill in (workflow.skills or []):
             if not bool(getattr(linked_skill, "is_system", False)):
                 continue
             name = str(getattr(linked_skill, "name", "") or "").strip()
             if not name:
                 continue
-            baseline = get_system_workflow_baseline(name)
+            baseline = get_system_workflow_baseline(name, locale=locale)
             if baseline is not None:
                 return baseline
         return None
@@ -546,13 +580,14 @@ class AssistantConfigService:
 
         from app.assistant.skill_catalog.defaults_loader import get_system_agent_baseline
 
+        locale = self._current_locale()
         for linked_skill in (agent_profile.skills or []):
             if not bool(getattr(linked_skill, "is_system", False)):
                 continue
             name = str(getattr(linked_skill, "name", "") or "").strip()
             if not name:
                 continue
-            baseline = get_system_agent_baseline(name)
+            baseline = get_system_agent_baseline(name, locale=locale)
             if baseline is not None:
                 return baseline
         return None
@@ -693,7 +728,7 @@ class AssistantConfigService:
         model_source, model_id = self._read_agent_model_config(normalized_kb)
         return {
             "id": agent_profile.id,
-            "name": agent_profile.name,
+            "name": self._display_agent_profile_name(agent_profile),
             "description": agent_profile.description or "",
             "system_prompt": draft.system_prompt,
             "tools": draft.tools or [],
@@ -741,11 +776,33 @@ class AssistantConfigService:
         raw_name = str(workflow.name or "").strip()
         if not raw_name or not bool(workflow.is_system):
             return raw_name
-        for definition in list_system_behavior_definitions():
+        locale = self._current_locale()
+        for definition in list_system_behavior_definitions(locale=locale):
             if definition.default_target.target_type != "workflow":
                 continue
             if definition.default_target.canonical_name == raw_name:
-                return f"{definition.name}工作流"
+                return f"{definition.name}工作流" if locale == "zh" else f"{definition.name} Workflow"
+        for linked_skill in (workflow.skills or []):
+            if not bool(getattr(linked_skill, "is_system", False)):
+                continue
+            display = _SYSTEM_SKILL_DISPLAY_NAMES.get(str(getattr(linked_skill, "name", "") or "").strip(), {})
+            localized = str(display.get(locale) or "").strip()
+            if localized:
+                return localized
+        return raw_name
+
+    def _display_agent_profile_name(self, agent_profile: AssistantAgentProfile) -> str:
+        raw_name = str(agent_profile.name or "").strip()
+        if not raw_name or not bool(agent_profile.is_system):
+            return raw_name
+        locale = self._current_locale()
+        for linked_skill in (agent_profile.skills or []):
+            if not bool(getattr(linked_skill, "is_system", False)):
+                continue
+            display = _SYSTEM_SKILL_DISPLAY_NAMES.get(str(getattr(linked_skill, "name", "") or "").strip(), {})
+            localized = str(display.get(locale) or "").strip()
+            if localized:
+                return localized
         return raw_name
 
     def _serialize_system_behavior_target_summary(
@@ -777,7 +834,7 @@ class AssistantConfigService:
         return {
             "id": agent_profile.id,
             "target_type": "agent",
-            "name": agent_profile.name,
+            "name": self._display_agent_profile_name(agent_profile),
             "description": agent_profile.description or "",
             "enabled": bool(agent_profile.enabled),
             "is_system": bool(agent_profile.is_system),
@@ -823,7 +880,7 @@ class AssistantConfigService:
         return str(binding.target_type or "") == "agent" and binding.agent_profile_id == agent_profile.id
 
     def _get_system_behavior_definition_or_error(self, behavior_key: str) -> SystemBehaviorDefinition:
-        definition = get_system_behavior_definition(behavior_key)
+        definition = get_system_behavior_definition(behavior_key, locale=self._current_locale())
         if definition is None:
             raise ApiException(
                 status_code=404,
@@ -1064,6 +1121,7 @@ class AssistantConfigService:
         self,
         definition: SystemBehaviorDefinition,
     ) -> AssistantWorkflow:
+        locale = self._current_locale()
         expected_name = definition.default_target.canonical_name
         workflow = (
             self.db.query(AssistantWorkflow)
@@ -1099,10 +1157,10 @@ class AssistantConfigService:
 
         workflow.is_system = True
         workflow.enabled = True
-        workflow.description = definition.description
 
         if workflow.published_version_id is None:
-            workflow_input = get_system_behavior_default_workflow(definition)
+            workflow.description = definition.description
+            workflow_input = get_system_behavior_default_workflow(definition, locale=locale)
             self._apply_workflow_to_workflow_entity(workflow, workflow_input, persist=True)
             published = self._create_workflow_version(
                 workflow=workflow,
@@ -1120,8 +1178,9 @@ class AssistantConfigService:
         self,
         definition: SystemBehaviorDefinition,
     ) -> AssistantWorkflow:
+        locale = self._current_locale()
         workflow = self._resolve_or_create_system_behavior_default_workflow(definition)
-        workflow_input = get_system_behavior_default_workflow(definition)
+        workflow_input = get_system_behavior_default_workflow(definition, locale=locale)
         self._apply_workflow_to_workflow_entity(workflow, workflow_input, persist=True)
         published = self._create_workflow_version(
             workflow=workflow,
@@ -1162,7 +1221,8 @@ class AssistantConfigService:
 
     def ensure_system_behaviors(self) -> None:
         changed = False
-        for definition in list_system_behavior_definitions():
+        locale = self._current_locale()
+        for definition in list_system_behavior_definitions(locale=locale):
             if definition.default_target.target_type == "workflow":
                 before = (
                     self.db.query(AssistantWorkflow.id)
@@ -1254,6 +1314,7 @@ class AssistantConfigService:
         }
 
     def list_system_behaviors(self) -> list[dict[str, Any]]:
+        locale = self._current_locale()
         self.ensure_system_behaviors()
         bindings = {
             item.behavior_key: item
@@ -1271,7 +1332,7 @@ class AssistantConfigService:
                 definition,
                 bindings[definition.key],
             )
-            for definition in list_system_behavior_definitions()
+            for definition in list_system_behavior_definitions(locale=locale)
             if definition.key in bindings
         ]
 
@@ -1282,6 +1343,7 @@ class AssistantConfigService:
         bind_to_behavior: bool = False,
     ) -> dict[str, Any]:
         definition = self._get_system_behavior_definition_or_error(behavior_key)
+        locale = self._current_locale()
         self.ensure_system_behaviors()
         if definition.default_target.target_type != "workflow":
             raise ApiException(
@@ -1290,21 +1352,13 @@ class AssistantConfigService:
                 message=f"Unsupported canonical target type: {definition.default_target.target_type}",
             )
 
-        base_name = _SYSTEM_BEHAVIOR_EXAMPLE_WORKFLOW_NAMES.get(definition.key)
-        if not base_name:
-            raise ApiException(
-                status_code=500,
-                code=50038,
-                message=f"Missing example workflow name for system AI behavior: {definition.key}",
-            )
-
-        workflow_name = self._next_available_workflow_name(base_name)
-        workflow_description = _SYSTEM_BEHAVIOR_EXAMPLE_WORKFLOW_DESCRIPTIONS.get(
-            definition.key,
-            f"{definition.name}示例工作流。",
+        example_meta = self._localized_system_behavior_example_meta(definition.key, locale=locale)
+        workflow_name = self._next_available_workflow_name(example_meta["name"])
+        workflow_description = example_meta["description"] or (
+            f"{definition.name}示例工作流。" if locale == "zh" else f"{definition.name} example workflow."
         )
         preset_workflow = WorkflowInput.model_validate(
-            get_system_behavior_default_workflow(definition).model_dump(by_alias=True)
+            get_system_behavior_default_workflow(definition, locale=locale).model_dump(by_alias=True)
         )
         workflow = self._create_workflow_entity(
             AssistantWorkflowCreateRequest(
@@ -1432,7 +1486,7 @@ class AssistantConfigService:
             raise ApiException(status_code=400, code=40023, message="confirm=true required")
 
         self.ensure_system_behaviors()
-        definitions = list_system_behavior_definitions()
+        definitions = list_system_behavior_definitions(locale=self._current_locale())
         affected: list[dict[str, Any]] = []
         for definition in definitions:
             binding = self._ensure_system_behavior_binding_entity(definition)
@@ -2215,7 +2269,7 @@ class AssistantConfigService:
         - 对于已存在且已绑定 workflow_id 的系统技能，sync 不覆盖图结构与坐标，
           以避免覆盖用户已手动调整过的布局。
         """
-        system_skills = SkillRegistry.list_system_skills()
+        system_skills = SkillRegistry.list_system_skills(locale=self._current_locale())
         if not system_skills:
             return
 
@@ -2902,7 +2956,7 @@ class AssistantConfigService:
 
         from app.assistant.skill_catalog.definitions import get_skill_by_name
 
-        default = get_skill_by_name(skill.name)
+        default = get_skill_by_name(skill.name, locale=self._current_locale())
         if not default:
             raise ApiException(status_code=404, code=40412, message=f"Default not found: {skill.name}")
 
@@ -2928,10 +2982,14 @@ class AssistantConfigService:
         if not confirm:
             raise ApiException(status_code=400, code=40023, message="confirm=true required")
 
-        from app.assistant.skill_catalog.definitions import SKILLS, get_skill_by_name
+        locale = self._current_locale()
+        from app.assistant.skill_catalog.defaults_loader import load_system_skill_defaults
+        from app.assistant.skill_catalog.definitions import get_skill_by_name
+
+        system_defaults = load_system_skill_defaults(locale=locale)
 
         # 获取代码侧系统技能名称集合
-        default_names = {s.name for s in SKILLS}
+        default_names = {s.name for s in system_defaults}
 
         # 获取 DB 中所有系统技能
         db_system_skills = (
@@ -2949,7 +3007,7 @@ class AssistantConfigService:
         for skill in db_system_skills:
             if skill.name in default_names:
                 # 重置到默认配置
-                default = get_skill_by_name(skill.name)
+                default = get_skill_by_name(skill.name, locale=locale)
                 if default:
                     self._reset_skill_to_default(skill, default)
                     reset_count += 1
@@ -2962,7 +3020,7 @@ class AssistantConfigService:
 
         # 创建缺失的系统技能
         existing_names = {s.name for s in db_system_skills}
-        for s in SKILLS:
+        for s in system_defaults:
             if s.name not in existing_names:
                 skill = AssistantSkill(
                     name=s.name,
@@ -2976,8 +3034,8 @@ class AssistantConfigService:
                     is_system=True,
                     enabled=True,
                 )
-                self.db.add(skill)
                 self._reset_skill_to_default(skill, s)
+                self.db.add(skill)
                 created_count += 1
                 affected.append({"name": s.name, "id": None, "action": "created"})
 

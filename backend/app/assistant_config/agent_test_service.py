@@ -21,6 +21,7 @@ from app.assistant_config.registry import ToolRegistry
 from app.assistant_config.schemas import AgentTestRunRequest
 from app.assistant_config.service import AssistantConfigService
 from app.common.exceptions import ApiException
+from app.system_settings.service import resolve_system_locale
 
 logger = logging.getLogger(__name__)
 
@@ -360,6 +361,9 @@ class AgentTestRunService:
                 runtime_context={
                     "stream_output": prepared.stream_output,
                     "conversation_id": f"agent_test:{run_id}",
+                    "run_id": run_id,
+                    "channel_type": "agent_test",
+                    "locale": resolve_system_locale(self.db),
                 },
                 on_tool_call_start=on_tool_call_start,
                 on_tool_call_end=on_tool_call_end,

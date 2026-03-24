@@ -81,7 +81,7 @@ def normalize_output_fields(raw: Any) -> list[OutputFieldSpec]:
     return result
 
 
-def build_json_output_constraint(field_specs: list[OutputFieldSpec]) -> str:
+def build_json_output_constraint(field_specs: list[OutputFieldSpec], locale: str | None = None) -> str:
     """根据字段规格生成 JSON 输出约束字符串
 
     示例输出：
@@ -89,38 +89,9 @@ def build_json_output_constraint(field_specs: list[OutputFieldSpec]) -> str:
     - {"tags": string[]}
     - {"time_mode": "POINT"|"RANGE", "time_at": string|null}
     """
-    if not field_specs:
-        return ""
+    from app.assistant.workflow.execution_copy import build_json_output_constraint as _build_constraint
 
-    def format_type(spec: OutputFieldSpec) -> str:
-        """格式化单个字段的类型表示"""
-        base_type = spec.type
-
-        # 处理枚举
-        if spec.enum:
-            type_str = "|".join(f'"{v}"' for v in spec.enum)
-        elif base_type == "array":
-            # 数组类型
-            items = spec.items_type or "string"
-            type_str = f"{items}[]"
-        else:
-            type_str = base_type
-
-        # 处理 nullable
-        if spec.nullable:
-            type_str = f"{type_str}|null"
-
-        return type_str
-
-    fields_str = ", ".join(
-        f'"{spec.name}": {format_type(spec)}'
-        for spec in field_specs
-    )
-
-    return (
-        f"输出要求：只输出一个 JSON 对象：{{{fields_str}}}；"
-        "禁止输出额外描述、Markdown、代码块围栏。"
-    )
+    return _build_constraint(field_specs, locale=locale)
 
 
 # ==================== Knowledge Base 配置 ====================

@@ -20,6 +20,7 @@ from app.report.schemas import (
     WeeklyReportListResponse,
     WeeklyReportResponse,
 )
+from app.system_settings.service import resolve_system_locale
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,14 @@ class _OpenAiConfig:
 class WeeklyReportService:
     def __init__(self, db: Session):
         self.db = db
+
+    def _current_locale(self) -> str:
+        return resolve_system_locale(self.db)
+
+    def should_generate_report(self, report: WeeklyReport | MonthlyReport) -> bool:
+        if str(report.status or "") != "completed":
+            return True
+        return str(getattr(report, "content_locale", "") or "").strip() != self._current_locale()
 
     def get_latest(self) -> WeeklyReport | None:
         return (
@@ -73,6 +82,7 @@ class WeeklyReportService:
             week_end=week_end,
             entry_count=entry_count,
             status="pending",
+            content_locale=None,
         )
         self.db.add(report)
         self.db.commit()
@@ -129,6 +139,7 @@ class WeeklyReportService:
         )
 
     def generate_report(self, report: WeeklyReport) -> WeeklyReport:
+        current_locale = self._current_locale()
         report.status = "generating"
         report.attempts += 1
         self.db.commit()
@@ -142,6 +153,7 @@ class WeeklyReportService:
                 entry_count=report.entry_count,
             )
             report.content = content
+            report.content_locale = current_locale
             report.status = "completed"
             report.generated_at = utcnow()
             report.last_error = None
@@ -360,6 +372,7 @@ class MonthlyReportService(WeeklyReportService):
             month_end=month_end,
             entry_count=entry_count,
             status="pending",
+            content_locale=None,
         )
         self.db.add(report)
         self.db.commit()
@@ -388,6 +401,7 @@ class MonthlyReportService(WeeklyReportService):
         return point_count + range_count
 
     def generate_report(self, report: MonthlyReport) -> MonthlyReport:
+        current_locale = self._current_locale()
         report.status = "generating"
         report.attempts += 1
         self.db.commit()
@@ -401,6 +415,7 @@ class MonthlyReportService(WeeklyReportService):
                 entry_count=report.entry_count,
             )
             report.content = content
+            report.content_locale = current_locale
             report.status = "completed"
             report.generated_at = utcnow()
             report.last_error = None

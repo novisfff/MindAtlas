@@ -19,6 +19,7 @@ from app.assistant.skill_catalog.base import (
     WorkflowEdgeDefinition,
     WorkflowNodeDefinition,
 )
+from app.assistant.workflow import execution_copy as _copy
 from app.assistant.workflow.engine.engine import LangGraphEngine
 from app.assistant.workflow.engine.runtime_helpers import extract_json_object
 from app.assistant_config.models import AssistantAgentProfile, AssistantWorkflow
@@ -26,6 +27,7 @@ from app.assistant_config.schemas import AgentPublishDraftInput, WorkflowInput
 from app.assistant_config.service import AssistantConfigService
 from app.assistant_config.system_behavior_registry import SystemBehaviorDefinition
 from app.common.exceptions import ApiException
+from app.system_settings.service import resolve_system_locale
 
 
 @dataclass(frozen=True)
@@ -129,45 +131,13 @@ class SystemAiBehaviorRunner:
             workflow_edges=workflow_edges,
         )
 
-    @staticmethod
-    def _build_agent_system_prompt(
-        *,
-        definition: SystemBehaviorDefinition,
-        base_prompt: str,
-    ) -> str:
-        contract = (
-            f"You are executing the system AI behavior '{definition.name}'.\n"
-            "You may use tools if needed.\n"
-            "Your final answer must be a single JSON object with exactly these fields:\n"
-            '- "summary": string\n'
-            '- "suggestions": string[]\n'
-            '- "trends": string\n'
-            "Do not output Markdown fences or any prose outside the JSON object."
-        )
-        trimmed_base = str(base_prompt or "").strip()
-        if not trimmed_base:
-            return contract
-        return f"{trimmed_base}\n\n{contract}"
-
-    @staticmethod
-    def _build_agent_user_input(
-        *,
-        definition: SystemBehaviorDefinition,
-        payload: SystemAiBehaviorRunInput,
-    ) -> str:
-        body = json.dumps(payload.to_structured_input(), ensure_ascii=False)
-        return (
-            f"Run the system AI behavior '{definition.name}' for the following structured input.\n"
-            f"Use the time range to inspect relevant records if needed.\n\n"
-            f"{body}"
-        )
-
     def _build_agent_skill_definition(
         self,
         *,
         definition: SystemBehaviorDefinition,
         agent_profile: AssistantAgentProfile,
         draft: AgentPublishDraftInput,
+        locale: str,
     ) -> SkillDefinition:
         normalized_kb = draft.kb_config if isinstance(draft.kb_config, dict) else {"enabled": False}
         return SkillDefinition(
@@ -179,8 +149,9 @@ class SystemAiBehaviorRunner:
             langgraph_pattern="agent_loop",
             model_source=draft.model_source,
             model_id=str(draft.model_id) if draft.model_id is not None else None,
-            system_prompt=self._build_agent_system_prompt(
-                definition=definition,
+            system_prompt=_copy.build_system_behavior_agent_contract(
+                locale=locale,
+                behavior_name=definition.name,
                 base_prompt=draft.system_prompt or "",
             ),
             kb=SkillKBConfig(enabled=bool(normalized_kb.get("enabled", False))),
@@ -230,6 +201,7 @@ class SystemAiBehaviorRunner:
         behavior_key: str,
         payload: SystemAiBehaviorRunInput,
     ) -> dict[str, Any]:
+        locale = resolve_system_locale(self.db)
         definition, _binding, target_type, target, _fallback_used = (
             self.config_service.resolve_system_behavior_execution_target(behavior_key)
         )
@@ -259,6 +231,7 @@ class SystemAiBehaviorRunner:
                         "run_id": uuid4().hex,
                         "channel_type": "system_behavior",
                         "workflow_id": str(target.id),
+                        "locale": locale,
                     },
                 )
             )
@@ -271,18 +244,24 @@ class SystemAiBehaviorRunner:
             definition=definition,
             agent_profile=target,
             draft=draft,
+            locale=locale,
         )
         engine = self._build_engine(skill)
         output = "".join(
             engine.execute(
                 skill=skill,
-                user_input=self._build_agent_user_input(definition=definition, payload=payload),
+                user_input=_copy.build_system_behavior_agent_user_input(
+                    locale=locale,
+                    behavior_name=definition.name,
+                    payload_json=json.dumps(payload.to_structured_input(), ensure_ascii=False),
+                ),
                 history=[],
                 runtime_context={
                     "stream_output": False,
                     "conversation_id": f"system_behavior:{behavior_key}:{uuid4().hex}",
                     "run_id": uuid4().hex,
                     "channel_type": "system_behavior",
+                    "locale": locale,
                 },
             )
         )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from app.assistant.workflow import execution_copy as _copy
 from app.assistant.workflow.engine import engine as engine_runtime
 from app.assistant.workflow.engine.runtime_helpers import (
     emit,
@@ -24,6 +25,7 @@ def build_kr_node(
         node_outputs = dict(state.get("node_outputs", {}))
         start_inputs = get_start_inputs(node_outputs)
         sys_vars = state.get("sys_vars", {}) or {}
+        locale = sys_vars.get("locale")
         env_vars = state.get("env_vars", {}) or {}
 
         query_template = node_cfg.get("query", "{{start.user_input}}")
@@ -66,10 +68,10 @@ def build_kr_node(
                         raw_payload = parsed
             except Exception as e:
                 logger.warning("KR node %s failed: %s", node_id, e)
-                result_text = f"知识库检索失败: {e}"
+                result_text = _copy.build_knowledge_failure_message(locale, e)
                 raw_payload = {"error": str(e)}
         else:
-            result_text = "知识库工具不可用"
+            result_text = _copy.build_knowledge_unavailable_message(locale)
             raw_payload = {"error": "kb_search not available"}
 
         payload_obj = raw_payload if isinstance(raw_payload, dict) else {}
@@ -81,7 +83,7 @@ def build_kr_node(
         mode_value = payload_mode if isinstance(payload_mode, str) and payload_mode.strip() else (mode or "system_default")
         result_value = payload_obj.get("result") if isinstance(payload_obj, dict) else None
         if result_value is None:
-            result_value = result_text or f"检索到 {references_count} 条参考资料"
+            result_value = result_text or _copy.build_knowledge_result_fallback(locale, references_count)
         if not result_text:
             result_text = stringify(result_value)
 

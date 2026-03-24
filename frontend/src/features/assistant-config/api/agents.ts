@@ -1,4 +1,5 @@
 import { apiClient } from '@/lib/api/client'
+import { withMindAtlasLocale } from '@/lib/api/locale'
 import { SSEParser } from '@/lib/sse/SSEParser'
 
 export interface AssistantAgentProfile {
@@ -249,9 +250,9 @@ export const runAgentTestStream = async (
 ) => {
   const response = await fetch(`/api/assistant-config/agents/${agentProfileId}/test-run`, {
     method: 'POST',
-    headers: {
+    headers: withMindAtlasLocale({
       'Content-Type': 'application/json',
-    },
+    }),
     body: JSON.stringify(payload),
     signal: options.signal,
   })

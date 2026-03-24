@@ -572,23 +572,17 @@ def render_memory_injection_block(
     *,
     memory_context: dict[str, Any] | None,
     max_chars: int,
+    locale: str | None = None,
 ) -> str:
     sections = resolve_structured_memory_fields(memory_context)
-    chunks: list[str] = []
-    if sections.get("memory_conversation_summary"):
-        chunks.append(f"### Conversation Summary\n{sections['memory_conversation_summary']}")
-    if sections.get("memory_skill_facts"):
-        chunks.append(f"### Skill Facts\n{sections['memory_skill_facts']}")
-    if not chunks:
-        return ""
+    from app.assistant.workflow.execution_copy import build_memory_injection_block
 
-    block = (
-        "## Short-Term Memory\n"
-        "Use this as context only. If it conflicts with current user intent, prioritize current user input.\n\n"
-        + "\n\n".join(chunks)
+    return build_memory_injection_block(
+        locale=locale,
+        conversation_summary=sections.get("memory_conversation_summary", ""),
+        skill_facts=sections.get("memory_skill_facts", ""),
+        max_chars=max_chars,
     )
-    limit = max(1, int(max_chars or 1))
-    return block if len(block) <= limit else block[:limit]
 
 
 def resolve_node_template_vars(

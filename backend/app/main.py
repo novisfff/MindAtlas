@@ -20,7 +20,12 @@ if (os.environ.get("MINDATLAS_FAULTHANDLER") or "").strip().lower() in {"1", "tr
         pass
 
 from app.common.exceptions import register_exception_handlers
-from app.common.request_context import reset_request_id, set_request_id
+from app.common.request_context import (
+    reset_request_id,
+    reset_request_locale,
+    set_request_id,
+    set_request_locale,
+)
 from app.common.responses import ApiResponse
 from app.config import get_settings
 from app.entry_type.router import router as entry_type_router
@@ -38,6 +43,8 @@ from app.graph.router import router as graph_router
 from app.lightrag.router import router as lightrag_router
 from app.report.router import router as report_router
 from app.scheduler import setup_scheduler, shutdown_scheduler
+from app.system_settings.router import router as system_settings_router
+from app.system_settings.service import normalize_system_locale
 
 settings = get_settings()
 
@@ -79,7 +86,10 @@ async def request_logging_middleware(request, call_next):
     logger = logging.getLogger("app.request")
     request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
     request.state.request_id = request_id
-    token = set_request_id(request_id)
+    locale = normalize_system_locale(request.headers.get("x-mindatlas-locale"))
+    request.state.locale = locale
+    request_id_token = set_request_id(request_id)
+    request_locale_token = set_request_locale(locale)
     start = time.perf_counter()
     try:
         response = await call_next(request)
@@ -94,7 +104,8 @@ async def request_logging_middleware(request, call_next):
         )
         raise
     finally:
-        reset_request_id(token)
+        reset_request_locale(request_locale_token)
+        reset_request_id(request_id_token)
 
     duration_ms = (time.perf_counter() - start) * 1000.0
     response.headers["x-request-id"] = request_id
@@ -131,6 +142,7 @@ app.include_router(stats_router)
 app.include_router(graph_router)
 app.include_router(lightrag_router)
 app.include_router(report_router)
+app.include_router(system_settings_router)
 
 
 @app.get("/health", response_model=ApiResponse)

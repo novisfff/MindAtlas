@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.ai_registry.runtime import resolve_openai_compat_config_by_model_id
 from app.assistant.openai_compat import build_openai_compat_client_headers
 from app.assistant.skill_catalog.base import SkillDefinition
+from app.assistant.workflow import execution_copy as _copy
 from app.assistant.workflow.engine import execution_context as _exec_ctx
 from app.assistant.workflow.engine import execution_plan as _exec_plan
 from app.assistant.workflow.engine import execution_services as _exec_services
@@ -31,22 +32,7 @@ _NODE_SNAPSHOT_TEXT_PREVIEW_LIMIT = 4000
 
 # ==================== Helpers ====================
 
-KB_CITATION_INSTRUCTIONS = """## 引用标注（知识库问答）
-当你使用 `kb_search` 返回的参考资料时，必须在相关句子末尾添加引用标注。
-
-引用格式：
-- 使用 `[^n]` 格式标注引用，n 为参考资料的编号
-- 例如：根据记录显示[^1]，该项目于2024年启动[^2]。
-
-重要约束：
-- 只能引用 kb_search 返回结果中提供的编号，不要编造不存在的编号
-- 不需要在回答末尾输出脚注定义，系统会自动处理
-- 如果参考了某条资料，务必标注对应编号
-
-工具使用要求：
-- 当“知识库开关”启用时，系统会通过 `kb_search` 为你提供参考资料（UNTRUSTED）
-- `kb_search` 返回结果里包含 `references`（编号）和召回内容；回答时严格按编号引用
-"""
+KB_CITATION_INSTRUCTIONS = _copy.build_kb_citation_instructions("zh")
 
 
 def _extract_single_template_reference(template: str) -> tuple[str, str] | None:
@@ -464,33 +450,18 @@ class LangGraphEngine:
                 logger.warning("LangGraph tool not found: %s", name)
         return tools
 
-    def _build_agent_system_prompt(self, skill: SkillDefinition, tool_names: list[str]) -> str:
+    def _build_agent_system_prompt(self, skill: SkillDefinition, tool_names: list[str], *, locale: str | None) -> str:
         """Task 6.2: 构建 agent_loop 系统提示词，含 KB 引导。"""
         kb_enabled = bool(getattr(getattr(skill, "kb", None), "enabled", False))
-        today = date.today()
-
-        prompt = (
-            f"你是 MindAtlas 的 AI 助手，正在执行 Skill: {skill.name}\n\n"
-            f"## Skill 描述\n{skill.description}\n\n"
-            f"## 当前日期\n{today.isoformat()}（{today.strftime('%A')}）\n\n"
-            f"## 可用工具\n你可以使用以下工具来完成任务：{', '.join(tool_names)}\n\n"
-            f"## 执行原则\n"
-            f"1. 根据用户需求，自主决定是否调用工具以及调用顺序\n"
-            f"2. 可以多次调用工具来收集信息\n"
-            f"3. 完成任务后，给出清晰友好的回复\n"
+        return _copy.build_agent_system_prompt(
+            locale=locale,
+            skill_name=skill.name,
+            skill_description=skill.description,
+            tool_names=tool_names,
+            current_date=date.today(),
+            base_prompt=skill.system_prompt or "",
+            kb_enabled=kb_enabled,
         )
-
-        if skill.system_prompt:
-            prompt += f"\n## 额外指令\n{skill.system_prompt}\n"
-
-        if kb_enabled:
-            prompt += f"\n{KB_CITATION_INSTRUCTIONS}\n"
-            prompt += (
-                "\n## 知识库使用要求\n"
-                "当用户提问可能涉及已有知识/记录时，你必须先调用 kb_search 检索相关资料。\n"
-            )
-
-        return prompt
 
     def _resolve_node_custom_llm(self, model_id: str, *, node_id: str) -> ChatOpenAI:
         if self.db is None:
@@ -773,7 +744,7 @@ class LangGraphEngine:
         if pattern == "agent_loop":
             # 设置 system prompt
             tool_names = [getattr(t, "name", "") for t in tools]
-            sys_prompt = self._build_agent_system_prompt(skill, tool_names)
+            sys_prompt = self._build_agent_system_prompt(skill, tool_names, locale=parsed_ctx.locale)
             if memory_mode == "auto":
                 memory_block = _rt.render_memory_injection_block(
                     memory_context=memory_context,
@@ -781,6 +752,7 @@ class LangGraphEngine:
                         1,
                         int(getattr(settings, "assistant_memory_injection_max_chars", 30000) or 30000),
                     ),
+                    locale=parsed_ctx.locale,
                 )
                 if memory_block:
                     sys_prompt = f"{sys_prompt}\n\n{memory_block}"

@@ -61,6 +61,7 @@ def make_session() -> Session:
     import app.tag.models  # noqa: F401,E402
     import app.lightrag.models  # noqa: F401,E402
     import app.report.models  # noqa: F401,E402
+    import app.system_settings.models  # noqa: F401,E402
 
     _normalize_report_tables_for_sqlite()
 

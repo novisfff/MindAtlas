@@ -1,0 +1,172 @@
+{
+  "nodes": [
+    {
+      "nodeId": "start",
+      "nodeType": "start",
+      "label": "Start",
+      "positionX": 120,
+      "positionY": 280,
+      "config": {
+        "inputMode": "structured",
+        "memoryMode": "off",
+        "structuredFields": [
+          {
+            "name": "periodType",
+            "type": "string",
+            "required": true,
+            "description": "Report period type."
+          },
+          {
+            "name": "periodStart",
+            "type": "string",
+            "required": true,
+            "description": "Inclusive report period start date in YYYY-MM-DD format."
+          },
+          {
+            "name": "periodEnd",
+            "type": "string",
+            "required": true,
+            "description": "Inclusive report period end date in YYYY-MM-DD format."
+          },
+          {
+            "name": "entryCount",
+            "type": "integer",
+            "required": true,
+            "description": "Number of entries in the current period."
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_entries",
+      "nodeType": "tool",
+      "label": "Load Entries",
+      "positionX": 520,
+      "positionY": 200,
+      "config": {
+        "toolName": "get_entries_by_time_range",
+        "inputBindings": {
+          "start_date": "{{start.periodStart}}",
+          "end_date": "{{start.periodEnd}}"
+        }
+      }
+    },
+    {
+      "nodeId": "tool_activity",
+      "nodeType": "tool",
+      "label": "Analyze Activity",
+      "positionX": 520,
+      "positionY": 360,
+      "config": {
+        "toolName": "analyze_activity",
+        "inputBindings": {
+          "start_date": "{{start.periodStart}}",
+          "end_date": "{{start.periodEnd}}"
+        }
+      }
+    },
+    {
+      "nodeId": "llm_report",
+      "nodeType": "llm",
+      "label": "Generate Monthly Report",
+      "positionX": 980,
+      "positionY": 280,
+      "config": {
+        "systemPrompt": "Generate a concise and grounded monthly report for MindAtlas in English. Base the output on the provided period metadata, retrieved entries, and activity analysis. The summary should capture the month's key progress, themes, and stage-level focus. Suggestions must be an array of actionable English strings. Trends should summarize sustained patterns, changes, and longer-term signals worth watching. Do not speculate beyond the available data.",
+        "userInput": "Report period: {{start.periodType}}\nStart date: {{start.periodStart}}\nEnd date: {{start.periodEnd}}\nEntry count: {{start.entryCount}}\n\nEntries:\n{{tool_entries.result}}\n\nActivity analysis:\n{{tool_activity.result}}",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "summary",
+            "type": "string",
+            "nullable": false
+          },
+          {
+            "name": "suggestions",
+            "type": "array",
+            "itemsType": "string",
+            "nullable": false
+          },
+          {
+            "name": "trends",
+            "type": "string",
+            "nullable": false
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "output_final",
+      "nodeType": "output",
+      "label": "Output",
+      "positionX": 1420,
+      "positionY": 280,
+      "config": {
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "summary",
+            "type": "string",
+            "nullable": false,
+            "value": "{{llm_report.summary}}"
+          },
+          {
+            "name": "suggestions",
+            "type": "array",
+            "itemsType": "string",
+            "nullable": false,
+            "value": "{{llm_report.suggestions}}"
+          },
+          {
+            "name": "trends",
+            "type": "string",
+            "nullable": false,
+            "value": "{{llm_report.trends}}"
+          }
+        ]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edgeId": "e_start_entries",
+      "sourceNodeId": "start",
+      "targetNodeId": "tool_entries",
+      "sourceHandle": "output",
+      "targetHandle": "input"
+    },
+    {
+      "edgeId": "e_start_activity",
+      "sourceNodeId": "start",
+      "targetNodeId": "tool_activity",
+      "sourceHandle": "output",
+      "targetHandle": "input"
+    },
+    {
+      "edgeId": "e_entries_report",
+      "sourceNodeId": "tool_entries",
+      "targetNodeId": "llm_report",
+      "sourceHandle": "output",
+      "targetHandle": "input"
+    },
+    {
+      "edgeId": "e_activity_report",
+      "sourceNodeId": "tool_activity",
+      "targetNodeId": "llm_report",
+      "sourceHandle": "output",
+      "targetHandle": "input"
+    },
+    {
+      "edgeId": "e_report_output",
+      "sourceNodeId": "llm_report",
+      "targetNodeId": "output_final",
+      "sourceHandle": "output",
+      "targetHandle": "input"
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  }
+}

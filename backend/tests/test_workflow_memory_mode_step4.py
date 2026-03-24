@@ -12,6 +12,14 @@ bootstrap_backend_imports()
 
 class WorkflowMemoryModeStep4Tests(unittest.TestCase):
     @staticmethod
+    def _memory_headers() -> tuple[str, str, str]:
+        from app.system_settings.service import get_default_system_locale
+
+        if get_default_system_locale() == "zh":
+            return ("## 短期记忆", "### 对话摘要", "### 技能事实")
+        return ("## Short-Term Memory", "### Conversation Summary", "### Skill Facts")
+
+    @staticmethod
     def _base_workflow(
         *,
         start_config: dict,
@@ -239,15 +247,16 @@ class WorkflowMemoryModeStep4Tests(unittest.TestCase):
                     )
                 llm_messages = llm.calls[0]
                 system_prompt = llm_messages[0]["content"]
+                memory_title, summary_title, facts_title = self._memory_headers()
                 if should_inject:
-                    self.assertIn("## Short-Term Memory", system_prompt)
-                    self.assertIn("### Conversation Summary", system_prompt)
-                    self.assertIn("### Skill Facts", system_prompt)
+                    self.assertIn(memory_title, system_prompt)
+                    self.assertIn(summary_title, system_prompt)
+                    self.assertIn(facts_title, system_prompt)
                     self.assertNotIn("### Recent Dialogue", system_prompt)
                     self.assertEqual(llm_messages[1], {"role": "user", "content": "hi"})
                     self.assertEqual(llm_messages[2], {"role": "assistant", "content": "hello"})
                 else:
-                    self.assertNotIn("## Short-Term Memory", system_prompt)
+                    self.assertNotIn(memory_title, system_prompt)
                     self.assertEqual(llm_messages[1], {"role": "user", "content": "hello"})
 
     def test_agent_loop_uses_default_memory_mode_for_injection(self) -> None:
@@ -312,9 +321,10 @@ class WorkflowMemoryModeStep4Tests(unittest.TestCase):
             )
 
         system_prompt = captured_state["messages"][0].content
-        self.assertIn("## Short-Term Memory", system_prompt)
-        self.assertIn("### Conversation Summary", system_prompt)
-        self.assertIn("### Skill Facts", system_prompt)
+        memory_title, summary_title, facts_title = self._memory_headers()
+        self.assertIn(memory_title, system_prompt)
+        self.assertIn(summary_title, system_prompt)
+        self.assertIn(facts_title, system_prompt)
         self.assertNotIn("### Recent Dialogue", system_prompt)
 
         captured_state.clear()
@@ -349,7 +359,7 @@ class WorkflowMemoryModeStep4Tests(unittest.TestCase):
                 )
             )
         system_prompt = captured_state["messages"][0].content
-        self.assertNotIn("## Short-Term Memory", system_prompt)
+        self.assertNotIn(memory_title, system_prompt)
 
 
 if __name__ == "__main__":

@@ -1,3 +1,5 @@
+import { withMindAtlasLocale } from './locale'
+
 export interface ApiResponse<T> {
   code: number
   message: string
@@ -138,7 +140,7 @@ export class ApiClient {
     const queryString = buildQueryString(options.query)
     const url = joinUrl(this.baseUrl, `${path}${queryString}`)
 
-    const headers = new Headers(this.defaultHeaders)
+    const headers = withMindAtlasLocale(this.defaultHeaders)
     if (options.headers) {
       new Headers(options.headers).forEach((value, key) => headers.set(key, value))
     }

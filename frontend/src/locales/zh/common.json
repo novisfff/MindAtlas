@@ -99,6 +99,26 @@
     "keywords": "关键词",
     "noContent": "暂无详细内容"
   },
+  "layout": {
+    "languageSwitcher": {
+      "ariaLabel": "切换语言 / Switch language",
+      "confirmTitle": "切换系统语言？\nSwitch system language?",
+      "confirmDescription": "界面文案和系统内置 AI 的默认响应语言将切换为 {{languageZh}}，已自定义内容不会自动重置。\nUI copy and built-in system AI responses will switch to {{languageEn}}. Custom content will not be reset automatically.",
+      "confirmAction": "切换为 {{languageZh}}\nSwitch to {{languageEn}}",
+      "cancelAction": "取消\nCancel",
+      "persistError": "语言切换失败，请稍后重试 / Failed to switch language. Please try again.",
+      "targetLanguages": {
+        "zh": {
+          "zh": "中文",
+          "en": "Chinese"
+        },
+        "en": {
+          "zh": "English",
+          "en": "English"
+        }
+      }
+    }
+  },
   "tags": {
     "searchPlaceholder": "搜索或创建标签...",
     "create": "创建标签“{{name}}”"

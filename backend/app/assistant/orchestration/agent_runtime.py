@@ -49,9 +49,13 @@ class AssistantAgent:
         stream_queue.put(chunk)
 
     @staticmethod
-    def _resolve_skill_definition(db: Session | None, skill_name: str):
+    def _resolve_skill_definition(db: Session | None, skill_name: str, *, locale: str | None = None):
         if db is not None:
+            if locale:
+                return SkillRegistry(db).resolve(skill_name, include_workflow=True, locale=locale)
             return SkillRegistry(db).resolve(skill_name, include_workflow=True)
+        if locale:
+            return SkillRegistry.resolve_system_skill(skill_name, locale=locale)
         return SkillRegistry.resolve_system_skill(skill_name)
 
     def _resolve_engine_for_skill(self, skill_def):
@@ -115,6 +119,7 @@ class AssistantAgent:
     def _execute_skill(self, state: SupervisorState, *, skill_name: str) -> dict[str, Any]:
         ensure_not_cancelled(state.get("cancel_checker"), message="assistant run cancelled before skill execution")
         runtime_context = state.get("runtime_context") or {}
+        locale = str(runtime_context.get("locale", runtime_context.get("systemLocale", "")) or "").strip() or None
         skill_id = f"skill_{uuid.uuid4().hex[:8]}"
         hidden = skill_name == DEFAULT_SKILL_NAME
 
@@ -124,7 +129,10 @@ class AssistantAgent:
             self._push_stream_chunk(state, "")
 
         try:
-            skill_def = self._resolve_skill_definition(self.db, skill_name)
+            if locale:
+                skill_def = self._resolve_skill_definition(self.db, skill_name, locale=locale)
+            else:
+                skill_def = self._resolve_skill_definition(self.db, skill_name)
             if skill_def is None:
                 raise ValueError(f"Skill not found or disabled: {skill_name}")
             workflow_nodes = list(getattr(skill_def, "workflow_nodes", []) or [])

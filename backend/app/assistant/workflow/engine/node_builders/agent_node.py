@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_openai import ChatOpenAI
 
 from app.assistant.skill_catalog.base import SkillDefinition
+from app.assistant.workflow import execution_copy as _copy
 from app.assistant.workflow.engine.runtime_helpers import AGENT_MAX_ITERATIONS, emit
 from app.assistant.workflow.engine.state import AssistantState
 
@@ -20,10 +21,12 @@ def build_agent_node(
     def agent_node(state: AssistantState) -> dict:
         metadata = state.get("metadata", {})
         iteration = state.get("iteration_count", 0)
+        sys_vars = state.get("sys_vars", {}) if isinstance(state.get("sys_vars"), dict) else {}
+        locale = sys_vars.get("locale")
 
         if iteration >= AGENT_MAX_ITERATIONS:
             return {
-                "messages": [AIMessage(content="工具调用次数过多，未能完成任务。请尝试缩小问题范围或换一种问法。")],
+                "messages": [AIMessage(content=_copy.build_agent_iterations_exhausted_message(locale))],
                 "iteration_count": iteration,
             }
 

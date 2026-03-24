@@ -10,7 +10,7 @@ interface AppState {
   localeManuallySet: boolean
   setTheme: (theme: 'light' | 'dark' | 'system') => void
   toggleSidebar: () => void
-  setLocale: (locale: Locale) => void
+  setLocale: (locale: Locale, options?: { manual?: boolean }) => void
 }
 
 function getBrowserLocale(): Locale {
@@ -33,7 +33,7 @@ export const useAppStore = create<AppState>()(
       localeManuallySet: false,
       setTheme: (theme) => set({ theme }),
       toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
-      setLocale: (locale) => set({ locale, localeManuallySet: true }),
+      setLocale: (locale, options) => set({ locale, localeManuallySet: options?.manual ?? true }),
     }),
     {
       name: 'mindatlas-store',

@@ -208,6 +208,32 @@ class AgentTestRunServiceTests(unittest.TestCase):
         error_payload = next(payload for name, payload in events if name == "run_error")
         self.assertEqual(error_payload["stage"], "bootstrap")
 
+    def test_stream_passes_persisted_locale_to_engine_runtime_context(self) -> None:
+        from app.assistant_config.agent_test_service import AgentTestRunService
+        from app.system_settings.service import SystemSettingsService
+
+        profile = self._create_agent_profile()
+        SystemSettingsService(self.db).set_locale("en")
+        service = AgentTestRunService(self.db)
+        prepared = service.prepare(profile.id, self._valid_request(stream_output=False))
+        captured_runtime_context: dict[str, object] = {}
+
+        class _FakeEngine:
+            def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                captured_runtime_context.update(kwargs.get("runtime_context") or {})
+                yield "ok"
+
+        with patch(
+            "app.assistant_config.agent_test_service.resolve_openai_compat_config",
+            return_value=SimpleNamespace(api_key="k", base_url="https://api.example.com", model="gpt-test"),
+        ), patch(
+            "app.assistant_config.agent_test_service.AgentTestRunService._build_engine",
+            return_value=_FakeEngine(),
+        ):
+            _ = list(service.stream(prepared))
+
+        self.assertEqual(captured_runtime_context.get("locale"), "en")
+
     def test_stream_uses_custom_model_config_when_requested(self) -> None:
         from app.assistant_config.agent_test_service import AgentTestRunService
         from app.assistant_config.schemas import AgentTestRunDraftInput, AgentTestRunRequest

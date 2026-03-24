@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from langchain_openai import ChatOpenAI
 
+from app.assistant.workflow import execution_copy as _copy
 from app.assistant.workflow.engine.runtime_helpers import (
     cfg_bool_value,
     cfg_int_value,
@@ -32,6 +33,7 @@ def build_dag_llm_node(
         node_outputs = dict(state.get("node_outputs", {}))
         start_inputs = get_start_inputs(node_outputs)
         sys_vars = state.get("sys_vars", {}) or {}
+        locale = sys_vars.get("locale")
         env_vars = state.get("env_vars", {}) or {}
         workflow_node_types = state.get("workflow_node_types", {}) or {}
         runtime_node_llms = state.get("node_llms", {}) or {}
@@ -114,18 +116,14 @@ def build_dag_llm_node(
                         specs.append(OutputFieldSpec(**f))
                     except Exception:
                         specs.append(OutputFieldSpec(name=f.get("name", "field")))
-            constraint = build_json_output_constraint(specs)
+            constraint = build_json_output_constraint(specs, locale=locale)
         elif structured_mode:
-            constraint = "输出要求：只输出一个 JSON 对象；禁止输出额外描述、Markdown、代码块围栏。"
+            constraint = _copy.build_generic_json_output_constraint(locale)
         else:
             constraint = ""
 
         today = date.today()
-        full_prompt = (
-            f"你是 MindAtlas AI 助手的分析模块。\n\n"
-            f"## 当前日期\n{today.isoformat()}（{today.strftime('%A')}）\n\n"
-            f"## 任务\n{system_prompt}\n\n"
-        )
+        memory_block = ""
         if memory_mode == "auto":
             settings = get_settings()
             memory_block = render_memory_injection_block(
@@ -134,11 +132,15 @@ def build_dag_llm_node(
                     1,
                     int(getattr(settings, "assistant_memory_injection_max_chars", 30000) or 30000),
                 ),
+                locale=locale,
             )
-            if memory_block:
-                full_prompt += f"{memory_block}\n\n"
-        if constraint:
-            full_prompt += f"## {constraint}\n\n"
+        full_prompt = _copy.build_dag_llm_system_prompt(
+            locale=locale,
+            current_date=today,
+            task_prompt=system_prompt,
+            memory_block=memory_block,
+            constraint=constraint,
+        )
 
         msgs = [
             {"role": "system", "content": full_prompt},
@@ -189,10 +191,7 @@ def build_dag_llm_node(
             if selected_payloads:
                 msgs.append({
                     "role": "system",
-                    "content": (
-                        "以下是你显式绑定的知识检索结果(JSON)。"
-                        "你只能把这些内容作为知识依据，不要杜撰引用。"
-                    ),
+                    "content": _copy.build_llm_knowledge_injection_notice(locale),
                 })
                 msgs.append({
                     "role": "user",

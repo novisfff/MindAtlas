@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "skills": [
+    {
+      "name": "quick_stats",
+      "description": "Quick statistics for data inside MindAtlas only, such as entries, tags, types, and dashboard-level totals. Do not use this for summarizing external companies, projects, or people.",
+      "intentExamples": [
+        "How many entries do I have in MindAtlas?",
+        "Show me my dashboard stats",
+        "How many tags and types do I have?",
+        "What's my total entry count right now?"
+      ],
+      "targetType": "workflow",
+      "presetFile": "workflows/quick_stats.en.json",
+      "hidden": false
+    },
+    {
+      "name": "smart_capture",
+      "description": "Smart entry creation for saving user-provided content into MindAtlas. Use this when the user wants to create, add, save, record, or store something, or when they directly provide content that should be captured.",
+      "intentExamples": [
+        "Please save what I learned about Python today",
+        "Save the following as a note: ...",
+        "Create a new task: submit the report next Monday",
+        "Take a note: React 19 introduces...",
+        "Today I learned about the new features in React 19"
+      ],
+      "targetType": "workflow",
+      "presetFile": "workflows/smart_capture.en.json",
+      "hidden": false
+    },
+    {
+      "name": "periodic_review",
+      "description": "Periodic review and analysis across a time range in MindAtlas, such as generating weekly reviews, monthly reviews, or retrospectives. The user should imply or specify a time range like last week, this month, or a concrete date range.",
+      "intentExamples": [
+        "Review my MindAtlas entries from last week and generate a weekly report",
+        "Retrospect on what I recorded this month",
+        "Analyze my entries from 2025-01-01 to 2025-01-31",
+        "Show me my learning progress for this week"
+      ],
+      "targetType": "workflow",
+      "presetFile": "workflows/periodic_review.en.json",
+      "hidden": false
+    },
+    {
+      "name": "general_chat",
+      "description": "Default fallback conversation when no other skill matches. Supports knowledge Q&A, summarization, writing help, translation, and similar tasks. It may use knowledge-base retrieval results, but it should not perform write/create actions by default.",
+      "intentExamples": [],
+      "targetType": "agent",
+      "presetFile": "agents/general_chat.en.json",
+      "hidden": true
+    }
+  ]
+}

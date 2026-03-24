@@ -4,6 +4,7 @@ import { useChatStore } from '../stores/chat-store'
 import { buildRunStreamUrl, createConversation, getActiveRun, stopRun } from '../api'
 import { assistantKeys } from '../queries'
 import { ToolCall, SkillCall, WorkflowStep } from '../types'
+import { withMindAtlasLocale } from '@/lib/api/locale'
 import { SSEParser } from '@/lib/sse/SSEParser'
 
 const RUN_CURSOR_KEY_PREFIX = 'assistant.run.cursor.'
@@ -135,6 +136,7 @@ export function useChat() {
     try {
       const response = await fetch(url, {
         method: 'GET',
+        headers: withMindAtlasLocale(),
         signal: abortRef.current.signal,
       })
       if (!response.ok || !response.body) {
@@ -330,7 +332,7 @@ export function useChat() {
     try {
       const response = await fetch(chatUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: withMindAtlasLocale({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ message: content }),
         signal: abortRef.current.signal,
       })

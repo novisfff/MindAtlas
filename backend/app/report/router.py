@@ -38,8 +38,7 @@ def generate_weekly_report(db: Session = Depends(get_db)) -> ApiResponse:
     week_start = service.get_last_monday()
     report = service.get_or_create_for_week(week_start)
 
-    # Generate AI content if not completed
-    if report.status != "completed":
+    if service.should_generate_report(report):
         report = service.generate_report(report)
 
     data = WeeklyReportResponse.model_validate(report)
@@ -73,7 +72,7 @@ def generate_monthly_report(db: Session = Depends(get_db)) -> ApiResponse:
     month_start = service.get_last_month_start()
     report = service.get_or_create_for_month(month_start)
 
-    if report.status != "completed":
+    if service.should_generate_report(report):
         report = service.generate_report(report)
 
     data = MonthlyReportResponse.model_validate(report)

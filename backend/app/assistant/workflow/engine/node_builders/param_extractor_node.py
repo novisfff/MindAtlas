@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from langchain_openai import ChatOpenAI
 
+from app.assistant.workflow import execution_copy as _copy
 from app.assistant.workflow.engine.runtime_helpers import (
     emit,
     extract_json_object,
@@ -24,6 +25,7 @@ def build_param_extractor_node(
         node_outputs = dict(state.get("node_outputs", {}))
         start_inputs = get_start_inputs(node_outputs)
         sys_vars = state.get("sys_vars", {}) or {}
+        locale = sys_vars.get("locale")
         env_vars = state.get("env_vars", {}) or {}
         runtime_node_llms = state.get("node_llms", {}) or {}
         if not isinstance(runtime_node_llms, dict):
@@ -85,16 +87,12 @@ def build_param_extractor_node(
             )
 
         field_names = [spec.name for spec in specs]
-        constraint = build_json_output_constraint(specs)
-
-        system_prompt = (
-            "你是结构化参数提取器。"
-            "你的任务是根据输入内容，提取目标字段并严格返回一个 JSON 对象。"
+        constraint = build_json_output_constraint(specs, locale=locale)
+        system_prompt = _copy.build_param_extractor_system_prompt(
+            locale=locale,
+            instruction=instruction,
+            constraint=constraint,
         )
-        if instruction.strip():
-            system_prompt += f"\n\n额外提取说明：\n{instruction.strip()}"
-        if constraint:
-            system_prompt += f"\n\n{constraint}"
 
         msgs = [
             {"role": "system", "content": system_prompt},

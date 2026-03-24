@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from langchain_openai import ChatOpenAI
 
+from app.assistant.workflow import execution_copy as _copy
 from app.assistant.workflow.engine import engine as engine_runtime
 from app.assistant.workflow.engine.runtime_helpers import (
     emit,
@@ -29,6 +30,7 @@ def build_dag_tool_node(
         node_outputs = dict(state.get("node_outputs", {}))
         start_inputs = get_start_inputs(node_outputs)
         sys_vars = state.get("sys_vars", {}) or {}
+        locale = sys_vars.get("locale")
         env_vars = state.get("env_vars", {}) or {}
         tool_name = node_cfg.get("tool_name", "")
         tool_call_id = f"tool_{uuid.uuid4().hex[:8]}"
@@ -96,7 +98,7 @@ def build_dag_tool_node(
         except Exception as e:
             logger.error("DAG tool %s failed: %s", tool_name, e)
             status = "error"
-            result = f"工具执行失败: {e}"
+            result = _copy.build_tool_execution_failed_message(locale, e)
 
         result_str = stringify(result)
         raw: Any = result

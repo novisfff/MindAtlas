@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from langchain_core.messages import ToolMessage
 
+from app.assistant.workflow import execution_copy as _copy
 from app.assistant.workflow.engine import engine as engine_runtime
 from app.assistant.workflow.engine.runtime_helpers import (
     emit,
@@ -22,6 +23,8 @@ def build_tool_node(
 
     def tool_node(state: AssistantState) -> dict:
         metadata = state.get("metadata", {})
+        sys_vars = state.get("sys_vars", {}) if isinstance(state.get("sys_vars"), dict) else {}
+        locale = sys_vars.get("locale")
         messages = state.get("messages", [])
         last_msg = messages[-1] if messages else None
         tool_calls = getattr(last_msg, "tool_calls", []) if last_msg else []
@@ -40,7 +43,7 @@ def build_tool_node(
             result = ""
             if not tool:
                 status = "error"
-                result = f"工具 {tool_name} 不存在"
+                result = _copy.build_tool_unavailable_message(locale, tool_name)
             else:
                 wrapped = engine_runtime._wrap_tool_with_db(tool, db_bind)
                 try:
@@ -48,7 +51,7 @@ def build_tool_node(
                 except Exception as e:
                     logger.error("Tool %s failed: %s", tool_name, e)
                     status = "error"
-                    result = f"工具执行失败: {e}"
+                    result = _copy.build_tool_execution_failed_message(locale, e)
 
             result_str = stringify(result)
             emit(metadata, "on_tool_call_end",
