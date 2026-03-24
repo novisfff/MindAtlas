@@ -120,6 +120,7 @@ def build_initial_state(
         "user_input": user_input,
         "kb_enabled": kb_enabled,
         "memory_mode": memory_mode,
+        "sys_vars": sys_vars,
         "memory_context": normalized_memory_context,
         "iteration_count": 0,
         "metadata": metadata,

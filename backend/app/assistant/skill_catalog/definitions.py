@@ -6,6 +6,7 @@ from app.assistant.skill_catalog.defaults_loader import (
     get_system_skill_default,
     load_system_skill_defaults,
 )
+from app.system_settings.service import get_default_system_locale
 
 
 def _require_system_skill(name: str) -> SkillDefinition:
@@ -15,7 +16,7 @@ def _require_system_skill(name: str) -> SkillDefinition:
     return skill
 
 
-SKILLS: list[SkillDefinition] = load_system_skill_defaults()
+SKILLS: list[SkillDefinition] = load_system_skill_defaults(locale=get_default_system_locale())
 
 # Compatibility exports for existing imports/tests.
 QUICK_STATS = _require_system_skill("quick_stats")
@@ -24,6 +25,5 @@ PERIODIC_REVIEW = _require_system_skill("periodic_review")
 GENERAL_CHAT = _require_system_skill(DEFAULT_SKILL_NAME)
 
 
-def get_skill_by_name(name: str) -> SkillDefinition | None:
-    return get_system_skill_default(name)
-
+def get_skill_by_name(name: str, locale: str | None = None) -> SkillDefinition | None:
+    return get_system_skill_default(name, locale=locale)

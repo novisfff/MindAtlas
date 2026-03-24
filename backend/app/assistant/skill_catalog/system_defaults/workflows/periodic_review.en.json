@@ -1,0 +1,152 @@
+{
+  "nodes": [
+    {
+      "nodeId": "start",
+      "nodeType": "start",
+      "label": "Start",
+      "positionX": 120.0,
+      "positionY": 320.0,
+      "config": {
+        "inputMode": "text",
+        "structuredFields": []
+      }
+    },
+    {
+      "nodeId": "llm_dates",
+      "nodeType": "llm",
+      "label": "Resolve Time Range",
+      "positionX": 530.0,
+      "positionY": 320.0,
+      "config": {
+        "systemPrompt": "Understand the time range the user wants to review or analyze, then output structured retrieval parameters.\nRules:\n- start_date and end_date must use YYYY-MM-DD format and satisfy start_date <= end_date.\n- If the user does not provide exact dates, infer them from phrases like last week, this month, or this year.",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "start_date"
+          },
+          {
+            "name": "end_date"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_entries",
+      "nodeType": "tool",
+      "label": "Load Entries",
+      "positionX": 940.0,
+      "positionY": 245.0,
+      "config": {
+        "toolName": "get_entries_by_time_range",
+        "inputBindings": {
+          "start_date": "{{llm_dates.start_date}}",
+          "end_date": "{{llm_dates.end_date}}"
+        }
+      }
+    },
+    {
+      "nodeId": "tool_activity",
+      "nodeType": "tool",
+      "label": "Analyze Activity",
+      "positionX": 940.0,
+      "positionY": 396.0,
+      "config": {
+        "toolName": "analyze_activity",
+        "inputBindings": {
+          "start_date": "{{llm_dates.start_date}}",
+          "end_date": "{{llm_dates.end_date}}"
+        }
+      }
+    },
+    {
+      "nodeId": "llm_output",
+      "nodeType": "llm",
+      "label": "Generate Review",
+      "positionX": 1350.0,
+      "positionY": 315.0,
+      "config": {
+        "systemPrompt": "Generate a structured review that covers key achievements, activity distribution, and meaningful insights.",
+        "userInput": "{{tool_entries.result}}\n\n{{tool_activity.result}}",
+        "outputMode": "text"
+      }
+    },
+    {
+      "nodeId": "output_final",
+      "nodeType": "output",
+      "label": "Output",
+      "positionX": 1760.0,
+      "positionY": 315.0,
+      "config": {
+        "outputMode": "text",
+        "textTemplate": "{{llm_output.response}}"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edgeId": "e_start_dates",
+      "sourceNodeId": "start",
+      "targetNodeId": "llm_dates",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_dates_entries",
+      "sourceNodeId": "llm_dates",
+      "targetNodeId": "tool_entries",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_dates_activity",
+      "sourceNodeId": "llm_dates",
+      "targetNodeId": "tool_activity",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_entries_output",
+      "sourceNodeId": "tool_entries",
+      "targetNodeId": "llm_output",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_activity_output",
+      "sourceNodeId": "tool_activity",
+      "targetNodeId": "llm_output",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_output_final",
+      "sourceNodeId": "llm_output",
+      "targetNodeId": "output_final",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  }
+}

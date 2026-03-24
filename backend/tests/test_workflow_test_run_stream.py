@@ -241,6 +241,39 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         self.assertIn("endedAt", tool_end_payload)
         self.assertIn("durationMs", tool_end_payload)
 
+    def test_stream_passes_persisted_locale_to_engine_runtime_context(self) -> None:
+        from app.assistant_config.workflow_test_service import (
+            PreparedWorkflowSessionMemory,
+            WorkflowTestRunService,
+        )
+        from app.system_settings.service import SystemSettingsService
+
+        skill = self._create_workflow_skill()
+        SystemSettingsService(self.db).set_locale("en")
+        service = WorkflowTestRunService(self.db)
+        prepared = service.prepare(skill.id, self._valid_request(stream_output=False))
+        captured_runtime_context: dict[str, object] = {}
+
+        class _FakeEngine:
+            def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                captured_runtime_context.update(kwargs.get("runtime_context") or {})
+                yield "ok"
+
+        with patch(
+            "app.assistant_config.workflow_test_service.resolve_openai_compat_config",
+            return_value=SimpleNamespace(api_key="k", base_url="https://api.example.com", model="gpt-test"),
+        ), patch(
+            "app.assistant_config.workflow_test_service.WorkflowTestRunService._build_engine",
+            return_value=_FakeEngine(),
+        ), patch.object(
+            service,
+            "_compute_next_session_memory",
+            return_value=PreparedWorkflowSessionMemory(conversation_summary="", skill_facts=[]),
+        ):
+            _ = list(service.stream(prepared))
+
+        self.assertEqual(captured_runtime_context.get("locale"), "en")
+
     def test_stream_emits_env_snapshot_payload(self) -> None:
         from app.assistant_config.workflow_test_service import (
             PreparedWorkflowSessionMemory,

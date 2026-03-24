@@ -1,4 +1,5 @@
 import { apiClient } from '@/lib/api/client'
+import { withMindAtlasLocale } from '@/lib/api/locale'
 import type { Attachment, AttachmentMarkdownResponse } from '@/types'
 
 export async function getEntryAttachments(entryId: string): Promise<Attachment[]> {
@@ -16,6 +17,7 @@ export async function uploadAttachment(
 
   const response = await fetch(`/api/attachments/entry/${encodeURIComponent(entryId)}`, {
     method: 'POST',
+    headers: withMindAtlasLocale(),
     body: formData,
   })
 

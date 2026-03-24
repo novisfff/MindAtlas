@@ -15,6 +15,7 @@ class WeeklyReport(UuidPrimaryKeyMixin, TimestampMixin, Base):
     entry_count = Column(Integer, default=0)
 
     content = Column(JSONB, nullable=True)
+    content_locale = Column(String(8), nullable=True)
 
     status = Column(String(32), default="pending")
     attempts = Column(Integer, default=0)
@@ -37,6 +38,7 @@ class MonthlyReport(UuidPrimaryKeyMixin, TimestampMixin, Base):
     entry_count = Column(Integer, default=0)
 
     content = Column(JSONB, nullable=True)
+    content_locale = Column(String(8), nullable=True)
 
     status = Column(String(32), default="pending")
     attempts = Column(Integer, default=0)

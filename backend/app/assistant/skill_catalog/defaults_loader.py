@@ -14,6 +14,7 @@ from app.assistant.skill_catalog.base import (
     WorkflowEdgeDefinition,
     WorkflowNodeDefinition,
 )
+from app.system_settings.service import get_default_system_locale, normalize_system_locale
 
 
 class _CamelModel(BaseModel):
@@ -79,6 +80,10 @@ class SystemDefaultsManifest(_CamelModel):
 
 def _defaults_dir() -> Path:
     return Path(__file__).resolve().parent / "system_defaults"
+
+
+def _normalize_defaults_locale(locale: str | None) -> str:
+    return normalize_system_locale(locale) or get_default_system_locale()
 
 
 def _read_json_file(path: Path) -> dict:
@@ -183,8 +188,12 @@ def _build_skill_definition(
     )
 
 
-def _load_system_skill_defaults_from_dir(base_dir: Path) -> list[SkillDefinition]:
-    manifest_payload = _read_json_file(base_dir / "manifest.json")
+def _load_system_skill_defaults_from_dir(base_dir: Path, locale: str | None = None) -> list[SkillDefinition]:
+    locale = _normalize_defaults_locale(locale)
+    manifest_path = base_dir / f"manifest.{locale}.json"
+    if locale == "zh" and not manifest_path.exists():
+        manifest_path = base_dir / "manifest.json"
+    manifest_payload = _read_json_file(manifest_path)
     manifest = SystemDefaultsManifest.model_validate(manifest_payload)
     if manifest.schema_version != 1:
         raise RuntimeError(f"Unsupported system defaults schemaVersion: {manifest.schema_version}")
@@ -221,27 +230,29 @@ def _load_system_skill_defaults_from_dir(base_dir: Path) -> list[SkillDefinition
     return defaults
 
 
-@lru_cache(maxsize=1)
-def _load_system_skill_defaults_cached() -> tuple[SkillDefinition, ...]:
-    defaults = _load_system_skill_defaults_from_dir(_defaults_dir())
+@lru_cache(maxsize=4)
+def _load_system_skill_defaults_cached(locale: str) -> tuple[SkillDefinition, ...]:
+    defaults = _load_system_skill_defaults_from_dir(_defaults_dir(), locale)
     return tuple(defaults)
 
 
-def load_system_skill_defaults() -> list[SkillDefinition]:
-    return list(_load_system_skill_defaults_cached())
+def load_system_skill_defaults(locale: str | None = None) -> list[SkillDefinition]:
+    normalized_locale = _normalize_defaults_locale(locale)
+    return list(_load_system_skill_defaults_cached(normalized_locale))
 
 
-def get_system_skill_default(name: str) -> SkillDefinition | None:
-    for item in _load_system_skill_defaults_cached():
+def get_system_skill_default(name: str, locale: str | None = None) -> SkillDefinition | None:
+    normalized_locale = _normalize_defaults_locale(locale)
+    for item in _load_system_skill_defaults_cached(normalized_locale):
         if item.name == name:
             return item
     return None
 
 
-def get_system_workflow_baseline(name: str):
+def get_system_workflow_baseline(name: str, locale: str | None = None):
     from app.assistant_config.schemas import WorkflowInput
 
-    skill = get_system_skill_default(name)
+    skill = get_system_skill_default(name, locale=locale)
     if skill is None or skill.langgraph_pattern != "workflow_dag":
         return None
     return WorkflowInput.model_validate(
@@ -275,10 +286,10 @@ def get_system_workflow_baseline(name: str):
     )
 
 
-def get_system_agent_baseline(name: str):
+def get_system_agent_baseline(name: str, locale: str | None = None):
     from app.assistant_config.schemas import AgentPublishDraftInput
 
-    skill = get_system_skill_default(name)
+    skill = get_system_skill_default(name, locale=locale)
     if skill is None or skill.langgraph_pattern != "agent_loop":
         return None
     raw_model_id = getattr(skill, "model_id", None)

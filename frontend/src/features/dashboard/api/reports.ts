@@ -12,6 +12,7 @@ export interface WeeklyReport {
   weekEnd: string
   entryCount: number
   content: WeeklyReportContent | null
+  contentLocale: string | null
   status: string
   attempts: number
   lastError: string | null
@@ -52,6 +53,7 @@ export interface MonthlyReport {
   monthEnd: string
   entryCount: number
   content: MonthlyReportContent | null
+  contentLocale: string | null
   status: string
   attempts: number
   lastError: string | null

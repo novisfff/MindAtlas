@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from langchain_openai import ChatOpenAI
 
+from app.assistant.workflow import execution_copy as _copy
 from app.assistant.workflow.engine.agent_execution_core import (
     AgentExecutionHooks,
     AgentExecutionRequest,
@@ -74,6 +75,7 @@ def _build_agent_kb_tool(
     db_bind: Any,
     knowledge_mode: str | None,
     knowledge_top_k: int | None,
+    locale: str | None,
 ) -> tuple[Any, Callable[..., Any]]:
     base_kb_tool = tool_map.get("kb_search")
     if base_kb_tool is None:
@@ -85,10 +87,7 @@ def _build_agent_kb_tool(
     return build_internal_kb_tool(
         base_kb_tool=base_kb_tool,
         wrapped_kb_tool=wrapped_kb_tool,
-        description=(
-            "Search the knowledge base for relevant records and references. "
-            "Use this when the answer may depend on existing notes or stored knowledge."
-        ),
+        description=_copy.build_internal_kb_tool_description(locale),
         knowledge_mode=knowledge_mode,
         knowledge_top_k=knowledge_top_k,
     )
@@ -107,6 +106,7 @@ def build_dag_agent_node(
         node_outputs = dict(state.get("node_outputs", {}))
         start_inputs = get_start_inputs(node_outputs)
         sys_vars = state.get("sys_vars", {}) or {}
+        locale = sys_vars.get("locale")
         env_vars = state.get("env_vars", {}) or {}
         runtime_node_llms = state.get("node_llms", {}) or {}
         if not isinstance(runtime_node_llms, dict):
@@ -147,6 +147,7 @@ def build_dag_agent_node(
                 db_bind=db_bind,
                 knowledge_mode=knowledge_cfg["mode"],
                 knowledge_top_k=knowledge_cfg["top_k"],
+                locale=locale,
             )
             bound_tools.append(kb_tool)
             tool_runners["kb_search"] = kb_runner
@@ -183,21 +184,7 @@ def build_dag_agent_node(
         l0_messages = _normalize_l0_messages(memory_context)
 
         today = date.today()
-        full_prompt = (
-            "你是 MindAtlas AI 助手的 Agent 执行节点。\n\n"
-            f"## 当前日期\n{today.isoformat()}（{today.strftime('%A')}）\n\n"
-            f"## 任务\n{system_prompt}\n\n"
-            "你可以根据用户输入自主决定是否调用工具。"
-        )
-        if knowledge_cfg["enabled"]:
-            full_prompt = (
-                f"{full_prompt}\n\n"
-                f"{engine_runtime.KB_CITATION_INSTRUCTIONS}\n\n"
-                "## 知识库使用要求\n"
-                "当问题可能依赖已有记录或知识库内容时，你应优先调用 kb_search。\n"
-                "如果使用了 kb_search 返回的 references，回答中必须使用 [^n] 引用标记，且编号只能来自 kb_search.references。\n"
-            )
-
+        memory_block = ""
         if memory_mode == "auto":
             settings = get_settings()
             memory_block = render_memory_injection_block(
@@ -206,9 +193,15 @@ def build_dag_agent_node(
                     1,
                     int(getattr(settings, "assistant_memory_injection_max_chars", 30000) or 30000),
                 ),
+                locale=locale,
             )
-            if memory_block:
-                full_prompt = f"{full_prompt}\n\n{memory_block}"
+        full_prompt = _copy.build_dag_agent_system_prompt(
+            locale=locale,
+            current_date=today,
+            task_prompt=system_prompt,
+            memory_block=memory_block,
+            knowledge_enabled=bool(knowledge_cfg["enabled"]),
+        )
 
         conversation_messages: list[dict[str, Any]] = [
             {"role": "system", "content": full_prompt},
@@ -247,6 +240,7 @@ def build_dag_agent_node(
                 trace_context={"node_id": node_id, "node_type": "agent"},
                 knowledge_mode="node_kb" if knowledge_cfg["enabled"] else "none",
                 recent_dialogue_injection="message_flow" if memory_mode == "auto" and l0_messages else "none",
+                locale=locale,
             )
         )
         if result.stopped_by == "invalid_tool":

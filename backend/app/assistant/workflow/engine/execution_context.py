@@ -5,6 +5,11 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 from uuid import UUID, uuid4
 
+from app.system_settings.service import (
+    get_system_language_name,
+    resolve_system_locale,
+)
+
 
 @dataclass(frozen=True)
 class ParsedExecutionContext:
@@ -18,6 +23,8 @@ class ParsedExecutionContext:
     message_id_uuid: UUID | None
     workflow_id_uuid: UUID | None
     skill_id_uuid: UUID | None
+    locale: str
+    language: str
     sys_vars: dict[str, str]
 
 
@@ -58,17 +65,23 @@ def parse_execution_context(
     if not channel_type:
         channel_type = "assistant_chat"
 
-    conversation_id = str(context.get("conversation_id") or "")
+    conversation_id = str(context.get("conversation_id", context.get("conversationId", "")) or "")
     conversation_id_uuid = _parse_uuid_context(context.get("conversation_id", context.get("conversationId")))
     message_id_uuid = _parse_uuid_context(context.get("message_id", context.get("messageId")))
     workflow_id_uuid = _parse_uuid_context(context.get("workflow_id", context.get("workflowId")))
     skill_id_uuid = _parse_uuid_context(context.get("skill_id", context.get("skillId")))
+    locale = resolve_system_locale(
+        preferred_locale=str(context.get("locale", context.get("systemLocale", "")) or "").strip() or None
+    )
+    language = get_system_language_name(locale)
 
     now_utc = datetime.now(timezone.utc)
     sys_vars = {
         "date": now_utc.date().isoformat(),
         "datetime": now_utc.replace(microsecond=0, tzinfo=None).isoformat(),
         "conversation_id": conversation_id,
+        "locale": locale,
+        "language": language,
     }
 
     return ParsedExecutionContext(
@@ -82,5 +95,7 @@ def parse_execution_context(
         message_id_uuid=message_id_uuid,
         workflow_id_uuid=workflow_id_uuid,
         skill_id_uuid=skill_id_uuid,
+        locale=locale,
+        language=language,
         sys_vars=sys_vars,
     )

@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     app_name: str = Field(default="MindAtlas API", alias="APP_NAME")
     app_env: str = Field(default="development", alias="APP_ENV")
     debug: bool = Field(default=False, alias="DEBUG")
+    app_default_locale: str = Field(default="zh", alias="APP_DEFAULT_LOCALE")
 
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")

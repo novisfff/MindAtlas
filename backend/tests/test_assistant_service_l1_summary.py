@@ -114,9 +114,9 @@ class AssistantServiceL1SummaryTests(unittest.TestCase):
             "_get_openai_config",
             return_value=cfg,
         ), patch.object(
-            service,
-            "_call_openai",
-            return_value='{"choices":[{"message":{"content":"会话摘要v1"}}]}',
+            service._memory_computation_service,
+            "compute_next_l1_summary",
+            return_value=("会话摘要v1", "updated"),
         ):
             service._run_chat_background(run_id=run.id, stream_output=True)
 
@@ -156,8 +156,8 @@ class AssistantServiceL1SummaryTests(unittest.TestCase):
             "_get_openai_config",
             return_value=cfg,
         ), patch.object(
-            service,
-            "_call_openai",
+            service._memory_computation_service,
+            "compute_next_l1_summary",
             side_effect=RuntimeError("summary llm failed"),
         ):
             service._run_chat_background(run_id=run.id, stream_output=True)

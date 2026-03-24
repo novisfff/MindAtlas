@@ -8,6 +8,7 @@ from typing import Any, Callable, Literal
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from app.assistant.workflow import execution_copy as _copy
 from app.assistant.workflow.engine.runtime_helpers import emit, logger, stringify
 
 StoppedBy = Literal["final_answer", "max_iterations", "tool_error", "invalid_tool"]
@@ -40,6 +41,7 @@ class AgentExecutionRequest:
     knowledge_mode: KnowledgeMode = "none"
     recent_dialogue_injection: RecentDialogueInjection = "none"
     tool_kind_resolver: Callable[[str], str] | None = None
+    locale: str | None = None
 
 
 @dataclass(frozen=True)
@@ -218,7 +220,7 @@ def run_agent_execution(request: AgentExecutionRequest) -> AgentExecutionResult:
 
         selected_tool_runner = request.tool_runners.get(tool_name)
         if selected_tool_runner is None:
-            error_message = f"工具不可用: {tool_name}"
+            error_message = _copy.build_tool_unavailable_message(request.locale, tool_name)
             emit(
                 metadata,
                 "on_tool_call_end",
@@ -242,7 +244,7 @@ def run_agent_execution(request: AgentExecutionRequest) -> AgentExecutionResult:
         try:
             tool_result = selected_tool_runner(**tool_args)
         except Exception as exc:
-            error_message = f"工具执行失败: {exc}"
+            error_message = _copy.build_tool_execution_failed_message(request.locale, exc)
             emit(
                 metadata,
                 "on_tool_call_end",

@@ -32,7 +32,7 @@ def generate_weekly_report_job():
 
         try:
             report = service.get_or_create_for_week(week_start)
-            if report.status == "completed":
+            if not service.should_generate_report(report):
                 logger.info(f"Report for {week_start} already completed")
                 return
 
@@ -63,7 +63,7 @@ def generate_monthly_report_job():
 
         try:
             report = service.get_or_create_for_month(month_start)
-            if report.status == "completed":
+            if not service.should_generate_report(report):
                 logger.info(f"Monthly report for {month_start} already completed")
                 return
 

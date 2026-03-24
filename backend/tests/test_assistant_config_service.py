@@ -859,6 +859,10 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.db.commit()
 
         with (
+            patch(
+                "app.assistant.skill_catalog.defaults_loader.load_system_skill_defaults",
+                return_value=[WorkflowDefaultSkill()],
+            ),
             patch("app.assistant.skill_catalog.definitions.SKILLS", [WorkflowDefaultSkill()]),
             patch("app.assistant.skill_catalog.definitions.get_skill_by_name", return_value=WorkflowDefaultSkill()),
         ):

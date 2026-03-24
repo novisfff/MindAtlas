@@ -1,4 +1,5 @@
 import { apiClient } from '@/lib/api/client'
+import { withMindAtlasLocale } from '@/lib/api/locale'
 import { SSEParser } from '@/lib/sse/SSEParser'
 
 // ==================== Node Types ====================
@@ -718,9 +719,9 @@ export const runWorkflowTestStream = async (
   const targetPath = options.path || `/api/assistant-config/skills/${skillId}/workflow/test-run`
   const response = await fetch(targetPath, {
     method: 'POST',
-    headers: {
+    headers: withMindAtlasLocale({
       'Content-Type': 'application/json',
-    },
+    }),
     body: JSON.stringify(payload),
     signal: options.signal,
   })

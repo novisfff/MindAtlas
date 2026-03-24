@@ -21,6 +21,7 @@ class WeeklyReportResponse(OrmModel):
     week_end: date
     entry_count: int
     content: WeeklyReportContent | None = None
+    content_locale: str | None = None
     status: str
     attempts: int
     last_error: str | None = None
@@ -48,6 +49,7 @@ class MonthlyReportResponse(OrmModel):
     month_end: date
     entry_count: int
     content: MonthlyReportContent | None = None
+    content_locale: str | None = None
     status: str
     attempts: int
     last_error: str | None = None

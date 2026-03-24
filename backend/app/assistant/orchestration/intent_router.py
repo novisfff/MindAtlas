@@ -10,11 +10,13 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from app.assistant.workflow import execution_copy as _copy
 from app.config import get_settings
 from app.assistant.openai_compat import build_openai_compat_client_headers
 from app.assistant.skill_catalog.base import DEFAULT_SKILL_NAME, SkillDefinition
 from app.assistant.skill_catalog.converters import db_skill_to_definition_light
 from app.assistant_config.registry import SkillRegistry
+from app.system_settings.service import resolve_system_locale
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +66,9 @@ ROUTER_PROMPT = """你是一个意图分类器，判断用户输入需要使用�
 """
 
 
-def _build_skills_list(skills: list[SkillDefinition]) -> str:
+def _build_skills_list(skills: list[SkillDefinition], *, locale: str | None = None) -> str:
     """构建 Skill 列表描述"""
+    normalized_locale = resolve_system_locale(preferred_locale=locale)
     lines = []
     for skill in skills:
         intent_examples = skill.intent_examples or []
@@ -73,7 +76,10 @@ def _build_skills_list(skills: list[SkillDefinition]) -> str:
             intent_examples = []
         examples = ", ".join(f'"{e}"' for e in intent_examples[:3])
         lines.append(f"- **{skill.name}**: {skill.description}")
-        lines.append(f"  示例: {examples}")
+        if normalized_locale == "zh":
+            lines.append(f"  示例: {examples}")
+        else:
+            lines.append(f"  Examples: {examples}")
     return "\n".join(lines)
 
 
@@ -225,12 +231,12 @@ class SkillRouter:
 
         return list(reversed(selected_reversed))
 
-    def _list_skills(self) -> list[SkillDefinition]:
+    def _list_skills(self, *, locale: str | None = None) -> list[SkillDefinition]:
         """获取所有可用 Skills（系统 + 数据库启用技能）。
 
         路由阶段使用轻量级转换，不加载 workflow 详情以避免 N+1 查询。
         """
-        system_skills: list[SkillDefinition] = list(SkillRegistry.list_system_skills())
+        system_skills: list[SkillDefinition] = list(SkillRegistry.list_system_skills(locale=locale))
         if self.db is None:
             return system_skills
 
@@ -329,7 +335,12 @@ class SkillRouter:
         runtime_context: dict | None = None,
     ) -> RouteDecision:
         """判断用户意图并返回结构化路由决策。"""
-        all_skills = self._list_skills()
+        ctx = runtime_context or {}
+        locale = resolve_system_locale(
+            self.db,
+            preferred_locale=str(ctx.get("locale", ctx.get("systemLocale", "")) or "").strip() or None,
+        )
+        all_skills = self._list_skills(locale=locale)
         # 排除 hidden skill 从候选列表，避免 LLM 总选默认 skill
         candidate_skills = [s for s in all_skills if not s.hidden]
         # 检查默认 skill 是否可用（未被禁用）
@@ -337,8 +348,9 @@ class SkillRouter:
         router_history = self._build_router_history_messages(history)
         last_skill_hint = self._resolve_last_skill_hint(runtime_context)
 
-        prompt = ROUTER_PROMPT.format(
-            skills_list=_build_skills_list(candidate_skills),
+        prompt = _copy.build_router_prompt(
+            locale=locale,
+            skills_list=_build_skills_list(candidate_skills, locale=locale),
             current_date=date.today().isoformat(),
             default_skill_name=DEFAULT_SKILL_NAME,
             last_skill_hint=last_skill_hint or "",
@@ -348,7 +360,6 @@ class SkillRouter:
         messages.extend(router_history)
         messages.append({"role": "user", "content": user_input})
 
-        ctx = runtime_context or {}
         ctx_message_id = str(ctx.get("message_id") or "")
         ctx_conversation_id = str(ctx.get("conversation_id") or "")
         valid_names = {s.name for s in candidate_skills}

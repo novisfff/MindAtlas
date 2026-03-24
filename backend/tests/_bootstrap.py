@@ -157,6 +157,27 @@ def reset_caches() -> None:
         pass
 
     try:
+        from app.assistant.skill_catalog.defaults_loader import clear_system_defaults_cache
+
+        clear_system_defaults_cache()
+    except Exception:
+        pass
+
+    try:
+        from app.assistant_config.system_behavior_defaults_loader import clear_system_behavior_defaults_cache
+
+        clear_system_behavior_defaults_cache()
+    except Exception:
+        pass
+
+    try:
+        from app.assistant_config.system_behavior_registry import clear_system_behavior_registry_cache
+
+        clear_system_behavior_registry_cache()
+    except Exception:
+        pass
+
+    try:
         from app.lightrag.manager import reset_lightrag_singletons_for_tests
 
         reset_lightrag_singletons_for_tests()

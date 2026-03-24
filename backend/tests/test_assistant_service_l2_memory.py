@@ -132,9 +132,9 @@ class AssistantServiceL2MemoryTests(unittest.TestCase):
             "_get_openai_config",
             return_value=cfg,
         ), patch.object(
-            service,
-            "_call_openai",
-            return_value='{"choices":[{"message":{"content":"{\\"facts\\":[\\"事实A\\",\\"事实B\\"]}"}}]}',
+            service._memory_computation_service,
+            "compute_next_l2_facts",
+            return_value=(["事实A", "事实B"], "updated"),
         ):
             service._run_chat_background(run_id=run.id, stream_output=True)
 
@@ -185,8 +185,8 @@ class AssistantServiceL2MemoryTests(unittest.TestCase):
             "_get_openai_config",
             return_value=cfg,
         ), patch.object(
-            service,
-            "_call_openai",
+            service._memory_computation_service,
+            "compute_next_l2_facts",
             side_effect=RuntimeError("l2 llm failed"),
         ):
             service._run_chat_background(run_id=run.id, stream_output=True)
@@ -288,9 +288,9 @@ class AssistantServiceL2MemoryTests(unittest.TestCase):
             "_get_openai_config",
             return_value=cfg,
         ), patch.object(
-            service,
-            "_call_openai",
-            return_value='{"choices":[{"message":{"content":"{\\"facts\\":[\\"事实A\\"]}"}}]}',
+            service._memory_computation_service,
+            "compute_next_l2_facts",
+            return_value=(["事实A"], "updated"),
         ):
             service._run_chat_background(run_id=run.id, stream_output=True)
 

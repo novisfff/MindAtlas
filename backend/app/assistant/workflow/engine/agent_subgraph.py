@@ -4,6 +4,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
+from app.assistant.workflow import execution_copy as _copy
 from app.assistant.workflow.engine import engine as engine_runtime
 from app.assistant.workflow.engine.agent_execution_core import (
     AgentExecutionHooks,
@@ -74,6 +75,7 @@ def build_agent_subgraph(
             kb_tool, kb_runner = build_internal_kb_tool(
                 base_kb_tool=tool,
                 wrapped_kb_tool=wrapped_kb_tool,
+                description=_copy.build_internal_kb_tool_description(None),
             )
             bound_tools.append(kb_tool)
             tool_runners["kb_search"] = kb_runner
@@ -90,6 +92,7 @@ def build_agent_subgraph(
             kb_tool, kb_runner = build_internal_kb_tool(
                 base_kb_tool=base_kb_tool,
                 wrapped_kb_tool=wrapped_kb_tool,
+                description=_copy.build_internal_kb_tool_description(None),
             )
             bound_tools.append(kb_tool)
             tool_runners["kb_search"] = kb_runner
@@ -97,6 +100,8 @@ def build_agent_subgraph(
 
     def agent_node(state: dict[str, Any]) -> dict[str, Any]:
         metadata = state.get("metadata", {}) or {}
+        sys_vars = state.get("sys_vars", {}) if isinstance(state.get("sys_vars"), dict) else {}
+        locale = sys_vars.get("locale")
         raw_messages = list(state.get("messages", []) or [])
         payload_messages = [
             item for item in (_message_to_payload(message) for message in raw_messages)
@@ -128,11 +133,12 @@ def build_agent_subgraph(
                 trace_context={},
                 knowledge_mode="skill_kb" if kb_bound else "none",
                 recent_dialogue_injection="none",
+                locale=locale,
             )
         )
 
         if result.stopped_by == "max_iterations":
-            final_text = "工具调用次数过多，未能完成任务。请尝试缩小问题范围或换一种问法。"
+            final_text = _copy.build_agent_iterations_exhausted_message(locale)
         elif result.stopped_by in {"invalid_tool", "tool_error"}:
             raise RuntimeError(result.error_message or "Agent tool execution failed")
         else:
