@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import JSON, CheckConstraint, create_engine, event
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -8,6 +10,38 @@ from tests._bootstrap import bootstrap_backend_imports, reset_caches
 
 
 bootstrap_backend_imports()
+
+
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_for_sqlite(_type, _compiler, **_kwargs):  # noqa: ANN001
+    return "JSON"
+
+
+def _normalize_report_tables_for_sqlite() -> None:
+    from app.report.models import MonthlyReport, WeeklyReport  # noqa: E402
+
+    report_tables = (
+        (WeeklyReport.__table__, {"ck_weekly_report_week_range"}),
+        (
+            MonthlyReport.__table__,
+            {
+                "ck_monthly_report_month_start_is_first_day",
+                "ck_monthly_report_month_range",
+            },
+        ),
+    )
+
+    for table, ignored_check_names in report_tables:
+        content_column = table.columns.get("content")
+        if content_column is not None:
+            content_column.type = JSON()
+
+        for constraint in list(table.constraints):
+            if (
+                isinstance(constraint, CheckConstraint)
+                and constraint.name in ignored_check_names
+            ):
+                table.constraints.discard(constraint)
 
 
 def make_session() -> Session:
@@ -26,6 +60,9 @@ def make_session() -> Session:
     import app.relation.models  # noqa: F401,E402
     import app.tag.models  # noqa: F401,E402
     import app.lightrag.models  # noqa: F401,E402
+    import app.report.models  # noqa: F401,E402
+
+    _normalize_report_tables_for_sqlite()
 
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
@@ -44,4 +81,3 @@ def make_session() -> Session:
 
     SessionLocal = sessionmaker(bind=engine, future=True)
     return SessionLocal()
-

@@ -3,11 +3,13 @@ import * as toolsApi from './api/tools'
 import * as skillsApi from './api/skills'
 import * as workflowsApi from './api/workflows'
 import * as agentsApi from './api/agents'
+import * as systemBehaviorsApi from './api/system-behaviors'
 
 const invalidateAfterSkillReset = (qc: QueryClient) => {
   qc.invalidateQueries({ queryKey: ['assistant-skills'] })
   qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
   qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+  qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
   qc.invalidateQueries({ queryKey: ['assistant-workflow'] })
   qc.invalidateQueries({ queryKey: ['assistant-agent-profile'] })
   qc.invalidateQueries({ queryKey: ['assistant-workflow-versions'] })
@@ -136,17 +138,27 @@ export const useUpdateWorkflowMutation = () => {
   return useMutation({
     mutationFn: ({ id, data }: { id: string; data: workflowsApi.UpdateWorkflowRequest }) =>
       workflowsApi.updateWorkflowEntity(id, data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['assistant-workflows'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
+    },
   })
 }
 
 export const useDeleteWorkflowMutation = () => {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: workflowsApi.deleteWorkflow,
+    mutationFn: (
+      payload: string | { id: string; confirmRebindSystemBehaviors?: boolean },
+    ) => typeof payload === 'string'
+      ? workflowsApi.deleteWorkflow(payload)
+      : workflowsApi.deleteWorkflow(payload.id, {
+          confirmRebindSystemBehaviors: payload.confirmRebindSystemBehaviors,
+        }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
       qc.invalidateQueries({ queryKey: ['assistant-skills'] })
+      qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
     },
   })
 }
@@ -175,6 +187,7 @@ export const useUpdateAgentProfileMutation = () => {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['assistant-agents'] })
       qc.invalidateQueries({ queryKey: ['assistant-skills'] })
+      qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
     },
   })
 }
@@ -182,10 +195,85 @@ export const useUpdateAgentProfileMutation = () => {
 export const useDeleteAgentProfileMutation = () => {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: agentsApi.deleteAgentProfile,
+    mutationFn: (
+      payload: string | { id: string; confirmRebindSystemBehaviors?: boolean },
+    ) => typeof payload === 'string'
+      ? agentsApi.deleteAgentProfile(payload)
+      : agentsApi.deleteAgentProfile(payload.id, {
+          confirmRebindSystemBehaviors: payload.confirmRebindSystemBehaviors,
+        }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['assistant-agents'] })
       qc.invalidateQueries({ queryKey: ['assistant-skills'] })
+      qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
+    },
+  })
+}
+
+// ==================== System AI Behaviors ====================
+
+export const useSystemBehaviorsQuery = () =>
+  useQuery({
+    queryKey: ['assistant-system-behaviors'],
+    queryFn: systemBehaviorsApi.getSystemBehaviors,
+  })
+
+export const useUpdateSystemBehaviorBindingMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      behaviorKey,
+      data,
+    }: {
+      behaviorKey: string
+      data: systemBehaviorsApi.UpdateSystemBehaviorBindingRequest
+    }) => systemBehaviorsApi.updateSystemBehaviorBinding(behaviorKey, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+    },
+  })
+}
+
+export const useResetSystemBehaviorBindingMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: systemBehaviorsApi.resetSystemBehaviorBinding,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+    },
+  })
+}
+
+export const useResetAllSystemBehaviorsMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: systemBehaviorsApi.resetAllSystemBehaviors,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+    },
+  })
+}
+
+export const useCreateSystemBehaviorExampleWorkflowMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      behaviorKey,
+      data,
+    }: {
+      behaviorKey: string
+      data?: systemBehaviorsApi.CreateSystemBehaviorExampleWorkflowRequest
+    }) => systemBehaviorsApi.createSystemBehaviorExampleWorkflow(behaviorKey, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflow'] })
     },
   })
 }

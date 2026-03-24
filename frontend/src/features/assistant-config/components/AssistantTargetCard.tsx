@@ -96,6 +96,12 @@ export const AssistantTargetCard = memo(function AssistantTargetCard({
                             <Hash className="w-3.5 h-3.5" />
                             <span>{t('settings.skills.referenceCount', { count: target.referenceCount })}</span>
                         </div>
+                        {(target.systemBehaviorReferenceCount ?? 0) > 0 && (
+                          <div className="flex items-center gap-1">
+                            <Hash className="w-3.5 h-3.5" />
+                            <span>{t('settings.systemBehaviors.referenceCount', { count: target.systemBehaviorReferenceCount })}</span>
+                          </div>
+                        )}
                         {workflow?.updatedAt && (
                             <div className="flex items-center gap-1">
                                 <Clock className="w-3.5 h-3.5" />

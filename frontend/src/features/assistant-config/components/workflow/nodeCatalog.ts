@@ -1,4 +1,4 @@
-import { Brain, type LucideIcon, GitBranch, Infinity, RefreshCw, ScanSearch, BookOpen, SendHorizontal, FileCode2, Equal, UserCheck, Globe } from 'lucide-react'
+import { Brain, Bot, type LucideIcon, GitBranch, Infinity, RefreshCw, ScanSearch, BookOpen, SendHorizontal, FileCode2, Equal, UserCheck, Globe } from 'lucide-react'
 import type { NodeType } from '../../api/workflow'
 
 export type NodeCatalogCategory = 'basic' | 'logic' | 'data' | 'output'
@@ -11,6 +11,7 @@ export interface NodeCatalogItem {
 
 export const NODE_CATALOG_ITEMS: NodeCatalogItem[] = [
   { type: 'llm', icon: Brain, category: 'basic' },
+  { type: 'agent', icon: Bot, category: 'basic' },
   { type: 'if_else', icon: GitBranch, category: 'logic' },
   { type: 'iteration', icon: RefreshCw, category: 'logic' },
   { type: 'loop', icon: Infinity, category: 'logic' },

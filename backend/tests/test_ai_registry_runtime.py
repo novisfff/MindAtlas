@@ -126,3 +126,48 @@ class AiRegistryRuntimeTests(unittest.TestCase):
             self.assertIsNone(bad_cfg)
         finally:
             db.close()
+
+    def test_resolve_openai_compat_config_supports_workflow_copilot_component(self) -> None:
+        from app.ai_registry.models import AiComponentBinding, AiCredential, AiModel  # noqa: E402
+        from app.ai_registry.runtime import resolve_openai_compat_config  # noqa: E402
+        from tests._db import make_session  # noqa: E402
+
+        db = make_session()
+        try:
+            cred = AiCredential(
+                name="workflow-copilot-runtime",
+                base_url="https://copilot.example.com/openai",
+                api_key_encrypted="enc",
+                api_key_hint="****",
+            )
+            db.add(cred)
+            db.commit()
+            db.refresh(cred)
+
+            model = AiModel(
+                credential_id=cred.id,
+                name="gpt-4.1-mini",
+                model_type="llm",
+            )
+            db.add(model)
+            db.commit()
+            db.refresh(model)
+
+            binding = AiComponentBinding(
+                component="workflow_copilot",
+                llm_model_id=model.id,
+                embedding_model_id=None,
+            )
+            db.add(binding)
+            db.commit()
+
+            with patch("app.ai_registry.runtime.decrypt_api_key", return_value=" sk-workflow-copilot "):
+                cfg = resolve_openai_compat_config(db, component="workflow_copilot", model_type="llm")
+
+            self.assertIsNotNone(cfg)
+            assert cfg is not None
+            self.assertEqual(cfg.model, "gpt-4.1-mini")
+            self.assertEqual(cfg.api_key, "sk-workflow-copilot")
+            self.assertEqual(cfg.base_url, "https://copilot.example.com/openai/v1")
+        finally:
+            db.close()

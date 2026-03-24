@@ -65,6 +65,12 @@ interface WorkflowEditorState {
 
   resetDirty: () => void
   loadWorkflow: (nodes: Node<WfNodeData>[], edges: Edge[], viewport?: Viewport) => void
+  replaceWorkflow: (
+    nodes: Node<WfNodeData>[],
+    edges: Edge[],
+    viewport?: Viewport,
+    options?: { pushHistory?: boolean },
+  ) => void
 }
 
 const MAX_HISTORY = 50
@@ -317,4 +323,21 @@ export const useWorkflowEditorStore = create<WorkflowEditorState>()((set, get) =
       focusTargetNodeId: null,
       focusRequestNonce: 0,
     }),
+
+  replaceWorkflow: (nodes, edges, viewport, options) => {
+    if (options?.pushHistory !== false) {
+      get().pushHistory()
+    }
+    set({
+      nodes,
+      edges,
+      viewport: viewport ?? get().viewport,
+      isDirty: true,
+      selectedNodeId: null,
+      selectedEdgeId: null,
+      selectedSubflowContainerId: null,
+      selectedSubflowNodeId: null,
+      selectedSubflowEdgeId: null,
+    })
+  },
 }))

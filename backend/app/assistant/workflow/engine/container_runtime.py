@@ -4,6 +4,7 @@ from typing import Any, Callable
 
 from langchain_openai import ChatOpenAI
 
+from app.assistant.workflow.engine import runtime_helpers as rt
 from app.assistant.workflow.engine.runtime_helpers import cfg_list_value, stringify
 from app.assistant.workflow.engine.state import NodeOutput, WorkflowState
 
@@ -112,26 +113,26 @@ def _build_container_scoped_metadata(
 
     on_node_start = raw_metadata.get("on_node_start")
     if callable(on_node_start):
-        def _wrapped_node_start(*, node_id: str, node_type: str, _cb=on_node_start) -> None:
-            _cb(node_id=_scoped_node_id(node_id), node_type=node_type)
+        def _wrapped_node_start(*, node_id: str, node_type: str, _cb=on_node_start, **extra: Any) -> None:
+            rt.invoke_callback(_cb, node_id=_scoped_node_id(node_id), node_type=node_type, **extra)
         scoped["on_node_start"] = _wrapped_node_start
 
     on_node_output_delta = raw_metadata.get("on_node_output_delta")
     if callable(on_node_output_delta):
-        def _wrapped_node_output_delta(*, node_id: str, delta: str, _cb=on_node_output_delta) -> None:
-            _cb(node_id=_scoped_node_id(node_id), delta=delta)
+        def _wrapped_node_output_delta(*, node_id: str, delta: str, _cb=on_node_output_delta, **extra: Any) -> None:
+            rt.invoke_callback(_cb, node_id=_scoped_node_id(node_id), delta=delta, **extra)
         scoped["on_node_output_delta"] = _wrapped_node_output_delta
 
     on_node_end = raw_metadata.get("on_node_end")
     if callable(on_node_end):
-        def _wrapped_node_end(*, node_id: str, status: str, _cb=on_node_end) -> None:
-            _cb(node_id=_scoped_node_id(node_id), status=status)
+        def _wrapped_node_end(*, node_id: str, status: str, _cb=on_node_end, **extra: Any) -> None:
+            rt.invoke_callback(_cb, node_id=_scoped_node_id(node_id), status=status, **extra)
         scoped["on_node_end"] = _wrapped_node_end
 
     on_branch_decision = raw_metadata.get("on_branch_decision")
     if callable(on_branch_decision):
-        def _wrapped_branch_decision(*, node_id: str, handle: str, _cb=on_branch_decision) -> None:
-            _cb(node_id=_scoped_node_id(node_id), handle=handle)
+        def _wrapped_branch_decision(*, node_id: str, handle: str, _cb=on_branch_decision, **extra: Any) -> None:
+            rt.invoke_callback(_cb, node_id=_scoped_node_id(node_id), handle=handle, **extra)
         scoped["on_branch_decision"] = _wrapped_branch_decision
 
     on_node_snapshot = raw_metadata.get("on_node_snapshot")
@@ -146,8 +147,10 @@ def _build_container_scoped_metadata(
             error_message: str | None = None,
             hard_truncated: bool = False,
             _cb=on_node_snapshot,
+            **extra: Any,
         ) -> None:
-            _cb(
+            rt.invoke_callback(
+                _cb,
                 node_id=_scoped_node_id(node_id),
                 node_type=node_type,
                 status=status,
@@ -155,8 +158,43 @@ def _build_container_scoped_metadata(
                 output=output,
                 error_message=error_message,
                 hard_truncated=hard_truncated,
+                **extra,
             )
         scoped["on_node_snapshot"] = _wrapped_node_snapshot
+
+    on_tool_call_start = raw_metadata.get("on_tool_call_start")
+    if callable(on_tool_call_start):
+        def _wrapped_tool_call_start(
+            *,
+            tool_call_id: str,
+            tool_name: str,
+            args: Any,
+            _cb=on_tool_call_start,
+            **extra: Any,
+        ) -> None:
+            next_extra = dict(extra)
+            node_id = str(next_extra.get("node_id", "") or "").strip()
+            if node_id:
+                next_extra["node_id"] = _scoped_node_id(node_id)
+            rt.invoke_callback(_cb, tool_call_id=tool_call_id, tool_name=tool_name, args=args, **next_extra)
+        scoped["on_tool_call_start"] = _wrapped_tool_call_start
+
+    on_tool_call_end = raw_metadata.get("on_tool_call_end")
+    if callable(on_tool_call_end):
+        def _wrapped_tool_call_end(
+            *,
+            tool_call_id: str,
+            status: str,
+            result: Any,
+            _cb=on_tool_call_end,
+            **extra: Any,
+        ) -> None:
+            next_extra = dict(extra)
+            node_id = str(next_extra.get("node_id", "") or "").strip()
+            if node_id:
+                next_extra["node_id"] = _scoped_node_id(node_id)
+            rt.invoke_callback(_cb, tool_call_id=tool_call_id, status=status, result=result, **next_extra)
+        scoped["on_tool_call_end"] = _wrapped_tool_call_end
 
     on_human_approval_requested = raw_metadata.get("on_human_approval_requested")
     if callable(on_human_approval_requested):
@@ -274,15 +312,28 @@ def execute_container_body(
             "metadata": metadata,
             "node_outputs": node_outputs_local,
             "user_input": stringify(container_input),
+            "memory_mode": str(parent_state.get("memory_mode", "auto") or "auto"),
+            "memory_context": parent_state.get("memory_context", {}),
             "sys_vars": sys_vars,
             "workflow_node_types": body_type_map,
             "node_llms": runtime_node_llms,
+            "stream_output_enabled": bool(parent_state.get("stream_output_enabled", True)),
+            "output_stream_source_node_id": str(parent_state.get("output_stream_source_node_id", "") or ""),
             "env_vars": env_vars_local,
             "env_specs": env_specs_local,
         }
 
         if node_type == "llm":
             node_fn = engine_runtime._build_dag_llm_node(current, cfg, llm, node_llms=scoped_node_llms)
+        elif node_type == "agent":
+            node_fn = engine_runtime._build_dag_agent_node(
+                current,
+                cfg,
+                llm,
+                tool_map,
+                db_bind,
+                node_llms=scoped_node_llms,
+            )
         elif node_type == "tool":
             node_fn = engine_runtime._build_dag_tool_node(current, cfg, tool_map, args_llm, db_bind)
         elif node_type == "if_else":

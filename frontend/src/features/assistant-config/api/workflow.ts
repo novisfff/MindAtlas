@@ -6,6 +6,7 @@ import { SSEParser } from '@/lib/sse/SSEParser'
 export type NodeType =
   | 'start'
   | 'llm'
+  | 'agent'
   | 'tool'
   | 'if_else'
   | 'parameter_extractor'
@@ -70,6 +71,7 @@ export interface WorkflowSessionVar {
 
 export interface StartNodeConfig {
   inputMode?: 'text' | 'structured'
+  memoryMode?: 'auto' | 'off' | 'structured'
   structuredFields?: StartStructuredField[]
   sessionVars?: WorkflowSessionVar[]
 }
@@ -97,6 +99,15 @@ export interface LLMNodeConfig {
   knowledgeSourceNodeIds?: string[]
   knowledgeInjectMode?: 'references_only' | 'full_payload'
   knowledgeMaxRefs?: number
+  modelSource?: 'default' | 'custom'
+  modelId?: string
+}
+
+export interface AgentNodeConfig {
+  systemPrompt?: string
+  userInput?: string
+  toolNames?: string[]
+  maxIterations?: number
   modelSource?: 'default' | 'custom'
   modelId?: string
 }
@@ -232,6 +243,7 @@ export interface HumanInLoopNodeConfig {
 export type ContainerBodyNodeType =
   | 'start'
   | 'llm'
+  | 'agent'
   | 'tool'
   | 'if_else'
   | 'parameter_extractor'
@@ -285,6 +297,7 @@ export interface LoopNodeConfig {
 export type NodeConfig =
   | StartNodeConfig
   | LLMNodeConfig
+  | AgentNodeConfig
   | OutputNodeConfig
   | ToolNodeConfig
   | IfElseNodeConfig
@@ -343,6 +356,18 @@ export interface WorkflowNode {
   updatedAt: string
 }
 
+interface WorkflowNodeTraceContext {
+  nodeExecutionId?: string
+}
+
+interface WorkflowAgentToolTraceContext extends WorkflowNodeTraceContext {
+  nodeId?: string
+  nodeType?: string
+  agentRound?: number
+  toolCallIndex?: number
+  toolKind?: 'tool' | 'knowledge'
+}
+
 export interface WorkflowEdge {
   id: string
   edgeId: string
@@ -395,10 +420,135 @@ export interface WorkflowValidationResponse {
   errors: WorkflowValidationError[]
 }
 
+export type WorkflowCopilotMode =
+  | 'generate'
+  | 'edit_selection'
+  | 'fix_validation'
+  | 'analyze_test_run'
+
+export type WorkflowCopilotStatus =
+  | 'proposal'
+  | 'question'
+  | 'analysis'
+  | 'no_op'
+
+export type WorkflowCopilotSelectionScope =
+  | 'workflow'
+  | 'selection'
+  | 'container'
+
+export type WorkflowCopilotLayoutRecommendation =
+  | 'keep'
+  | 'autolayout'
+
+export type WorkflowCopilotOperationType =
+  | 'add_node'
+  | 'update_node'
+  | 'remove_node'
+  | 'add_edge'
+  | 'remove_edge'
+  | 'move_node'
+  | 'autolayout'
+
+export interface WorkflowCopilotSelection {
+  scope: WorkflowCopilotSelectionScope
+  nodeIds: string[]
+  edgeIds: string[]
+  containerId?: string | null
+}
+
+export interface WorkflowCopilotConversationItem {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export interface WorkflowCopilotValidationIssue {
+  severity: 'error' | 'warning'
+  nodeId?: string | null
+  subflowNodeId?: string | null
+  message: string
+  source?: string
+}
+
+export interface WorkflowCopilotValidationContext {
+  errors: WorkflowCopilotValidationIssue[]
+  warnings: WorkflowCopilotValidationIssue[]
+}
+
+export interface WorkflowCopilotTestRunContext {
+  selectedRunId: string
+  result: unknown
+  trace: unknown
+  raw: unknown
+}
+
+export interface WorkflowCopilotOperation {
+  type: WorkflowCopilotOperationType
+  containerId?: string | null
+  nodeId?: string | null
+  nodeType?: NodeType
+  label?: string | null
+  config?: Record<string, unknown> | null
+  configPatch?: Record<string, unknown> | null
+  replaceConfig?: boolean
+  positionX?: number | null
+  positionY?: number | null
+  edgeId?: string | null
+  sourceNodeId?: string | null
+  targetNodeId?: string | null
+  sourceHandle?: string | null
+  targetHandle?: string | null
+  conditionType?: 'expression' | 'default' | null
+  conditionExpr?: ConditionExpression | null
+}
+
+export interface WorkflowCopilotProposal {
+  title: string
+  summary: string
+  operations: WorkflowCopilotOperation[]
+  proposedWorkflow: WorkflowInput
+  baseDraftHash: string
+  proposedDraftHash: string
+  layoutRecommendation: WorkflowCopilotLayoutRecommendation
+  validation: WorkflowValidationResponse
+  affectedNodeIds: string[]
+  warnings: string[]
+}
+
+export interface WorkflowCopilotRequest {
+  mode: WorkflowCopilotMode
+  instruction: string
+  draft: WorkflowInput
+  selection?: WorkflowCopilotSelection
+  conversation?: WorkflowCopilotConversationItem[]
+  validationContext?: WorkflowCopilotValidationContext
+  testRunContext?: WorkflowCopilotTestRunContext
+}
+
+export interface WorkflowCopilotResponse {
+  status: WorkflowCopilotStatus
+  message: string
+  proposal?: WorkflowCopilotProposal | null
+  suggestions?: string[]
+}
+
+export interface WorkflowConversationHistoryItem {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export interface WorkflowTestSessionMemory {
+  conversationSummary?: string
+  skillFacts?: string[]
+}
+
 export interface WorkflowTestRunRequest {
   workflow: WorkflowInput
   userInput?: string
   structuredInput?: Record<string, unknown>
+  sessionId?: string
+  history?: WorkflowConversationHistoryItem[]
+  sessionMemory?: WorkflowTestSessionMemory
   streamOutput?: boolean
 }
 
@@ -419,7 +569,7 @@ export type WorkflowRunEvent =
         nodeId: string
         nodeType: string
         ts: string
-      }
+      } & WorkflowNodeTraceContext
     }
   | {
       event: 'node_output_delta'
@@ -429,7 +579,7 @@ export type WorkflowRunEvent =
         // merged delta payload (not guaranteed one token per event)
         delta: string
         ts: string
-      }
+      } & WorkflowNodeTraceContext
     }
   | {
       event: 'branch_decision'
@@ -438,7 +588,7 @@ export type WorkflowRunEvent =
         nodeId: string
         handle: string
         ts: string
-      }
+      } & WorkflowNodeTraceContext
     }
   | {
       event: 'tool_call_start'
@@ -447,8 +597,9 @@ export type WorkflowRunEvent =
         toolCallId: string
         name: string
         args: Record<string, unknown>
+        startedAt?: string
         ts: string
-      }
+      } & WorkflowAgentToolTraceContext
     }
   | {
       event: 'tool_call_end'
@@ -457,8 +608,11 @@ export type WorkflowRunEvent =
         toolCallId: string
         status: string
         result: string
+        startedAt?: string | null
+        endedAt?: string
+        durationMs?: number | null
         ts: string
-      }
+      } & WorkflowAgentToolTraceContext
     }
   | {
       event: 'content_delta'
@@ -476,7 +630,7 @@ export type WorkflowRunEvent =
         nodeId: string
         status: string
         ts: string
-      }
+      } & WorkflowNodeTraceContext
     }
   | {
       event: 'node_snapshot'
@@ -490,7 +644,7 @@ export type WorkflowRunEvent =
         errorMessage: string | null
         hardTruncated?: boolean
         ts: string
-      }
+      } & WorkflowNodeTraceContext
     }
   | {
       event: 'run_end'
@@ -500,6 +654,7 @@ export type WorkflowRunEvent =
         durationMs: number
         finalText: string
         finalJson: Record<string, unknown> | Array<unknown> | null
+        sessionMemory?: WorkflowTestSessionMemory
         streamOutput: boolean
       }
     }

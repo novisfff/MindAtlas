@@ -24,12 +24,19 @@ from app.assistant_config.schemas import (
     AssistantWorkflowUpdateRequest,
     ClearVersionsResponse,
     DeleteVersionResponse,
+    ResetAllSystemBehaviorsResponse,
     RollbackVersionResponse,
     ResetSkillRequest,
+    SystemBehaviorBindingUpdateRequest,
+    SystemBehaviorExampleWorkflowCreateRequest,
+    SystemBehaviorExampleWorkflowCreateResponse,
+    SystemBehaviorResponse,
     SystemToolDefinitionResponse,
     SystemToolEnabledUpdateRequest,
     WorkflowInput,
     WorkflowPublishRequest,
+    WorkflowCopilotRequest,
+    WorkflowCopilotResponse,
     WorkflowTestRunRequest,
     WorkflowVersionListResponse,
     WorkflowValidationResponse,
@@ -37,6 +44,7 @@ from app.assistant_config.schemas import (
 )
 from app.assistant_config.workflow_test_service import WorkflowTestRunService
 from app.assistant_config.agent_test_service import AgentTestRunService
+from app.assistant_config.workflow_copilot_service import WorkflowCopilotService
 from app.assistant_config.service import AssistantConfigService
 from app.common.exceptions import ApiException
 from app.common.responses import ApiResponse
@@ -187,6 +195,72 @@ def delete_skill(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
     return ApiResponse.ok(None, "Skill deleted")
 
 
+# ==================== System AI Behaviors ====================
+
+@router.get("/system-behaviors", response_model=ApiResponse)
+def list_system_behaviors(db: Session = Depends(get_db)) -> ApiResponse:
+    service = AssistantConfigService(db)
+    items = service.list_system_behaviors()
+    return ApiResponse.ok([
+        SystemBehaviorResponse.model_validate(item).model_dump(by_alias=True)
+        for item in items
+    ])
+
+
+@router.put("/system-behaviors/{behavior_key}", response_model=ApiResponse)
+def update_system_behavior_binding(
+    behavior_key: str,
+    request: SystemBehaviorBindingUpdateRequest,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = AssistantConfigService(db)
+    item = service.update_system_behavior_binding(
+        behavior_key=behavior_key,
+        target_type=request.target_type,
+        workflow_id=request.workflow_id,
+        agent_profile_id=request.agent_profile_id,
+    )
+    return ApiResponse.ok(SystemBehaviorResponse.model_validate(item).model_dump(by_alias=True))
+
+
+@router.post("/system-behaviors/{behavior_key}/reset", response_model=ApiResponse)
+def reset_system_behavior_binding(
+    behavior_key: str,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = AssistantConfigService(db)
+    item = service.reset_system_behavior_binding(behavior_key)
+    return ApiResponse.ok(SystemBehaviorResponse.model_validate(item).model_dump(by_alias=True))
+
+
+@router.post("/system-behaviors/reset-all", response_model=ApiResponse)
+def reset_all_system_behaviors(
+    request: ResetSkillRequest,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = AssistantConfigService(db)
+    result = service.reset_all_system_behaviors(confirm=request.confirm)
+    return ApiResponse.ok(
+        ResetAllSystemBehaviorsResponse.model_validate(result).model_dump(by_alias=True)
+    )
+
+
+@router.post("/system-behaviors/{behavior_key}/create-example-workflow", response_model=ApiResponse)
+def create_system_behavior_example_workflow(
+    behavior_key: str,
+    request: SystemBehaviorExampleWorkflowCreateRequest | None = None,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = AssistantConfigService(db)
+    item = service.create_system_behavior_example_workflow(
+        behavior_key,
+        bind_to_behavior=request.bind_to_behavior if request else False,
+    )
+    return ApiResponse.ok(
+        SystemBehaviorExampleWorkflowCreateResponse.model_validate(item).model_dump(by_alias=True)
+    )
+
+
 # ==================== Agents ====================
 
 @router.get("/agents", response_model=ApiResponse)
@@ -289,9 +363,13 @@ def clear_agent_profile_versions(
 
 
 @router.delete("/agents/{id}", response_model=ApiResponse)
-def delete_agent_profile(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
+def delete_agent_profile(
+    id: UUID,
+    confirm_rebind_system_behaviors: bool = Query(False, alias="confirmRebindSystemBehaviors"),
+    db: Session = Depends(get_db),
+) -> ApiResponse:
     service = AssistantConfigService(db)
-    service.delete_agent_profile(id)
+    service.delete_agent_profile(id, confirm_rebind_system_behaviors=confirm_rebind_system_behaviors)
     return ApiResponse.ok(None, "Agent profile deleted")
 
 
@@ -433,9 +511,13 @@ def clear_workflow_versions(
 
 
 @router.delete("/workflows/{id}", response_model=ApiResponse)
-def delete_workflow(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
+def delete_workflow(
+    id: UUID,
+    confirm_rebind_system_behaviors: bool = Query(False, alias="confirmRebindSystemBehaviors"),
+    db: Session = Depends(get_db),
+) -> ApiResponse:
     service = AssistantConfigService(db)
-    service.delete_workflow(id)
+    service.delete_workflow(id, confirm_rebind_system_behaviors=confirm_rebind_system_behaviors)
     return ApiResponse.ok(None, "Workflow deleted")
 
 
@@ -486,6 +568,17 @@ def validate_workflow_by_id(
     workflow = service.get_workflow(id)
     resp = _validate_workflow_payload(db, request, workflow=workflow)
     return ApiResponse.ok(resp.model_dump(by_alias=True))
+
+
+@router.post("/workflows/{id}/copilot/respond", response_model=ApiResponse)
+def workflow_copilot_respond(
+    id: UUID,
+    request: WorkflowCopilotRequest,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = WorkflowCopilotService(db)
+    payload = service.respond(workflow_id=id, request=request)
+    return ApiResponse.ok(WorkflowCopilotResponse.model_validate(payload).model_dump(by_alias=True))
 
 
 @router.post("/workflows/{id}/test-run")
@@ -585,6 +678,7 @@ def test_run_workflow(
 _NODE_TYPE_LABELS = {
     "start": "Start",
     "llm": "LLM",
+    "agent": "Agent",
     "tool": "Tool",
     "if_else": "IF/ELSE",
     "parameter_extractor": "Parameter Extractor",
@@ -601,6 +695,7 @@ _NODE_TYPE_LABELS = {
 _NODE_TYPE_DESCRIPTIONS = {
     "start": "Workflow entry point, defines input variables",
     "llm": "Call LLM for analysis and intermediate generation",
+    "agent": "Agentic LLM node that can decide whether to call configured tools and built-in KB retrieval",
     "tool": "Execute a registered tool",
     "if_else": "IF/ELIF/ELSE branching with configurable conditions and logic",
     "parameter_extractor": "Extract structured parameters from text using LLM",

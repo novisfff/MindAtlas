@@ -65,6 +65,7 @@ class WorkflowHumanInLoopRuntimeTests(unittest.TestCase):
         self.assertEqual(payload['submittedValues']['title'], 'final title')
         self.assertEqual(payload['submittedValues']['priority'], 2)
         self.assertEqual(payload['comment'], 'looks good')
+        self.assertFalse(payload.get('runtimeWaiting', True))
 
     def test_reject_requires_comment_when_configured(self) -> None:
         from app.assistant.workflow.human_approval_runtime import submit_human_approval_decision
@@ -219,6 +220,15 @@ class WorkflowHumanInLoopRuntimeTests(unittest.TestCase):
 
         self.assertEqual(payload['submittedValues']['record_date'], '')
         self.assertEqual(payload['submittedValues']['record_time'], '')
+
+    def test_cancel_pending_human_approvals_for_run_marks_cancelled(self) -> None:
+        from app.assistant.workflow.human_approval_runtime import cancel_pending_human_approvals_for_run
+
+        row = self._create_pending_approval()
+        payloads = cancel_pending_human_approvals_for_run(self.db, run_id='run_hitl_1')
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0]['id'], str(row.id))
+        self.assertEqual(payloads[0]['status'], 'cancelled')
 
 
 if __name__ == '__main__':

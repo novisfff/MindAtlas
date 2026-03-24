@@ -20,6 +20,7 @@ TargetType = Literal["workflow", "agent"]
 AgentModelSource = Literal["default", "custom"]
 OutputFieldType = Literal["string", "number", "integer", "boolean", "object", "array"]
 VersionSource = Literal["save", "publish"]
+SystemBehaviorKey = Literal["weekly_report_generation", "monthly_report_generation"]
 
 # 允许的 URL scheme
 ALLOWED_URL_SCHEMES = {"http", "https"}
@@ -217,7 +218,7 @@ class OutputFieldSpecInput(CamelModel):
 # ==================== Workflow DAG Schemas ====================
 
 NodeType = Literal[
-    "start", "llm", "tool", "if_else",
+    "start", "llm", "agent", "tool", "if_else",
     "parameter_extractor", "knowledge_retrieval",
     "iteration", "loop", "code_executor", "http_request", "variable_assign", "human_in_loop", "output",
 ]
@@ -287,11 +288,44 @@ def _resolve_workflow_start_input_mode(workflow: WorkflowInput | None) -> str:
     return "text"
 
 
+class WorkflowConversationHistoryItem(CamelModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=8000)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "WorkflowConversationHistoryItem":
+        self.content = str(self.content or "").strip()
+        if not self.content:
+            raise ValueError("history content must not be empty")
+        return self
+
+
+class WorkflowTestSessionMemoryInput(CamelModel):
+    conversation_summary: str | None = Field(default=None, max_length=8000)
+    skill_facts: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "WorkflowTestSessionMemoryInput":
+        if self.conversation_summary is not None:
+            self.conversation_summary = str(self.conversation_summary or "").strip()
+        normalized_facts: list[str] = []
+        for item in self.skill_facts:
+            value = str(item or "").strip()
+            if not value:
+                continue
+            normalized_facts.append(value)
+        self.skill_facts = normalized_facts
+        return self
+
+
 class WorkflowTestRunRequest(CamelModel):
     """工作流测试运行请求（仅运行草稿，不持久化）。"""
     workflow: WorkflowInput
     user_input: str | None = Field(default=None, max_length=8000)
     structured_input: dict | None = None
+    session_id: UUID | None = None
+    history: list[WorkflowConversationHistoryItem] = Field(default_factory=list, max_length=100)
+    session_memory: WorkflowTestSessionMemoryInput | None = None
     stream_output: bool = True
 
     @model_validator(mode="after")
@@ -302,12 +336,17 @@ class WorkflowTestRunRequest(CamelModel):
                 raise ValueError("structured_input is required when start inputMode=structured")
             if self.user_input is not None and str(self.user_input).strip():
                 raise ValueError("user_input is not allowed when start inputMode=structured")
+            if self.history:
+                raise ValueError("history is not allowed when start inputMode=structured")
+            if self.session_memory is not None:
+                raise ValueError("session_memory is not allowed when start inputMode=structured")
             return self
 
         if self.structured_input is not None:
             raise ValueError("structured_input is only allowed when start inputMode=structured")
         if self.user_input is None or not str(self.user_input).strip():
             raise ValueError("user_input is required when start inputMode=text")
+        self.user_input = str(self.user_input).strip()
         return self
 
 
@@ -340,7 +379,26 @@ class AgentTestRunRequest(CamelModel):
     """Agent 测试运行请求（仅运行草稿，不持久化）。"""
     draft: AgentTestRunDraftInput
     user_input: str = Field(..., min_length=1, max_length=8000)
+    history: list[dict[str, str]] = Field(default_factory=list, max_length=100)
     stream_output: bool = True
+
+    @model_validator(mode="after")
+    def _validate_history(self) -> "AgentTestRunRequest":
+        normalized_history: list[dict[str, str]] = []
+        for item in self.history:
+            if not isinstance(item, dict):
+                raise ValueError("history items must be objects")
+            role = str(item.get("role", "") or "").strip().lower()
+            content = str(item.get("content", "") or "").strip()
+            if role not in {"user", "assistant"}:
+                raise ValueError("history role must be user or assistant")
+            if not content:
+                raise ValueError("history content must not be empty")
+            if len(content) > 8000:
+                raise ValueError("history content exceeds max length 8000")
+            normalized_history.append({"role": role, "content": content})
+        self.history = normalized_history
+        return self
 
 
 class WorkflowValidationError(CamelModel):
@@ -353,6 +411,120 @@ class WorkflowValidationResponse(CamelModel):
     """工作流拓扑验证响应"""
     valid: bool
     errors: list[WorkflowValidationError] = Field(default_factory=list)
+
+
+WorkflowCopilotMode = Literal["generate", "edit_selection", "fix_validation", "analyze_test_run"]
+WorkflowCopilotSelectionScope = Literal["workflow", "selection", "container"]
+WorkflowCopilotStatus = Literal["proposal", "question", "analysis", "no_op"]
+WorkflowCopilotLayoutRecommendation = Literal["keep", "autolayout"]
+WorkflowCopilotOperationType = Literal[
+    "add_node",
+    "update_node",
+    "remove_node",
+    "add_edge",
+    "remove_edge",
+    "move_node",
+    "autolayout",
+]
+
+
+class WorkflowCopilotSelectionInput(CamelModel):
+    scope: WorkflowCopilotSelectionScope = "workflow"
+    node_ids: list[str] = Field(default_factory=list, max_length=100)
+    edge_ids: list[str] = Field(default_factory=list, max_length=100)
+    container_id: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "WorkflowCopilotSelectionInput":
+        self.node_ids = [str(item or "").strip() for item in self.node_ids if str(item or "").strip()]
+        self.edge_ids = [str(item or "").strip() for item in self.edge_ids if str(item or "").strip()]
+        if self.scope == "container" and not str(self.container_id or "").strip():
+            raise ValueError("container_id is required when selection scope=container")
+        if self.scope != "container":
+            self.container_id = None
+        return self
+
+
+class WorkflowCopilotValidationIssueInput(CamelModel):
+    severity: Literal["error", "warning"]
+    node_id: str | None = Field(default=None, max_length=128)
+    subflow_node_id: str | None = Field(default=None, max_length=128)
+    message: str = Field(..., min_length=1, max_length=2000)
+    source: str = Field(default="backend", max_length=64)
+
+
+class WorkflowCopilotValidationContextInput(CamelModel):
+    errors: list[WorkflowCopilotValidationIssueInput] = Field(default_factory=list, max_length=100)
+    warnings: list[WorkflowCopilotValidationIssueInput] = Field(default_factory=list, max_length=100)
+
+
+class WorkflowCopilotTestRunContextInput(CamelModel):
+    selected_run_id: str = Field(..., min_length=1, max_length=128)
+    result: Any = None
+    trace: Any = None
+    raw: Any = None
+
+
+class WorkflowCopilotConversationItem(CamelModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=8000)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "WorkflowCopilotConversationItem":
+        self.content = str(self.content or "").strip()
+        if not self.content:
+            raise ValueError("conversation content must not be empty")
+        return self
+
+
+class WorkflowCopilotOperation(CamelModel):
+    type: WorkflowCopilotOperationType
+    container_id: str | None = Field(default=None, max_length=128)
+    node_id: str | None = Field(default=None, max_length=128)
+    node_type: NodeType | None = None
+    label: str | None = Field(default=None, max_length=256)
+    config: dict | None = None
+    config_patch: dict | None = None
+    replace_config: bool = False
+    position_x: float | None = None
+    position_y: float | None = None
+    edge_id: str | None = Field(default=None, max_length=128)
+    source_node_id: str | None = Field(default=None, max_length=128)
+    target_node_id: str | None = Field(default=None, max_length=128)
+    source_handle: str | None = Field(default=None, max_length=64)
+    target_handle: str | None = Field(default=None, max_length=64)
+    condition_type: Literal["expression", "default"] | None = None
+    condition_expr: ConditionExpressionInput | None = None
+
+
+class WorkflowCopilotProposalResponse(CamelModel):
+    title: str
+    summary: str
+    operations: list[WorkflowCopilotOperation] = Field(default_factory=list)
+    proposed_workflow: WorkflowInput
+    base_draft_hash: str
+    proposed_draft_hash: str
+    layout_recommendation: WorkflowCopilotLayoutRecommendation = "keep"
+    validation: WorkflowValidationResponse
+    affected_node_ids: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class WorkflowCopilotRequest(CamelModel):
+    mode: WorkflowCopilotMode
+    instruction: str = Field(default="", max_length=8000)
+    draft: WorkflowInput
+    selection: WorkflowCopilotSelectionInput | None = None
+    conversation: list[WorkflowCopilotConversationItem] = Field(default_factory=list, max_length=40)
+    validation_context: WorkflowCopilotValidationContextInput | None = None
+    test_run_context: WorkflowCopilotTestRunContextInput | None = None
+
+
+class WorkflowCopilotResponse(CamelModel):
+    status: WorkflowCopilotStatus
+    message: str
+    proposal: WorkflowCopilotProposalResponse | None = None
+    suggestions: list[str] = Field(default_factory=list)
 
 
 class AssistantWorkflowCreateRequest(CamelModel):
@@ -516,6 +688,19 @@ class ResetAllSkillsResponse(CamelModel):
     affected: list[dict]
 
 
+class ResetAllSystemBehaviorsAffectedItem(CamelModel):
+    behavior_key: SystemBehaviorKey
+    name: str
+    target_type: TargetType
+    target_name: str
+
+
+class ResetAllSystemBehaviorsResponse(CamelModel):
+    """重置所有系统 AI 行为绑定的响应"""
+    reset_count: int
+    affected: list[ResetAllSystemBehaviorsAffectedItem] = []
+
+
 class WorkflowNodeResponse(OrmModel):
     """工作流节点响应"""
     id: UUID
@@ -558,6 +743,8 @@ class AssistantWorkflowResponse(OrmModel):
     published_version_id: UUID | None = None
     referenced_skill_ids: list[UUID] = []
     reference_count: int = 0
+    referenced_system_behavior_keys: list[SystemBehaviorKey] = []
+    system_behavior_reference_count: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -577,8 +764,78 @@ class AssistantAgentProfileResponse(OrmModel):
     published_version_id: UUID | None = None
     referenced_skill_ids: list[UUID] = []
     reference_count: int = 0
+    referenced_system_behavior_keys: list[SystemBehaviorKey] = []
+    system_behavior_reference_count: int = 0
     created_at: datetime
     updated_at: datetime
+
+
+class SystemBehaviorContractFieldResponse(CamelModel):
+    name: str
+    type: OutputFieldType
+    required: bool = True
+    description: str = ""
+    items_type: OutputFieldType | None = None
+
+
+class SystemBehaviorContractSummaryResponse(CamelModel):
+    input_fields: list[SystemBehaviorContractFieldResponse] = []
+    output_fields: list[SystemBehaviorContractFieldResponse] = []
+
+
+class SystemBehaviorTargetSummaryResponse(CamelModel):
+    id: UUID
+    target_type: TargetType
+    name: str
+    description: str = ""
+    enabled: bool
+    is_system: bool
+    is_canonical_default: bool = False
+    workflow_id: UUID | None = None
+    agent_profile_id: UUID | None = None
+    published_version_id: UUID | None = None
+
+
+class SystemBehaviorResponse(CamelModel):
+    behavior_key: SystemBehaviorKey
+    name: str
+    description: str
+    supported_target_types: list[TargetType] = []
+    current_binding: SystemBehaviorTargetSummaryResponse
+    canonical_default_target: SystemBehaviorTargetSummaryResponse
+    fallback_policy: str
+    contract: SystemBehaviorContractSummaryResponse
+
+
+class SystemBehaviorExampleWorkflowCreateResponse(CamelModel):
+    created_workflow: AssistantWorkflowResponse
+    system_behavior: SystemBehaviorResponse
+
+
+class SystemBehaviorExampleWorkflowCreateRequest(CamelModel):
+    bind_to_behavior: bool = False
+
+
+class SystemBehaviorBindingUpdateRequest(CamelModel):
+    target_type: TargetType
+    workflow_id: UUID | None = None
+    agent_profile_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _validate_target(self) -> "SystemBehaviorBindingUpdateRequest":
+        if self.workflow_id and self.agent_profile_id:
+            raise ValueError("workflow_id and agent_profile_id are mutually exclusive")
+        if self.target_type == "workflow":
+            if self.workflow_id is None:
+                raise ValueError("workflow_id is required when target_type=workflow")
+            if self.agent_profile_id is not None:
+                raise ValueError("agent_profile_id is not allowed when target_type=workflow")
+        if self.target_type == "agent":
+            if self.agent_profile_id is None:
+                raise ValueError("agent_profile_id is required when target_type=agent")
+            if self.workflow_id is not None:
+                raise ValueError("workflow_id is not allowed when target_type=agent")
+        return self
 
 
 class TargetVersionResponse(OrmModel):

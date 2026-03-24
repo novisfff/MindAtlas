@@ -7,12 +7,13 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.assistant.schemas import (
+    AssistantRunResponse,
     ChatRequest,
     ConversationCreateRequest,
-    HumanApprovalDecisionRequest,
     ConversationListResponse,
     ConversationResponse,
     ConversationSummaryResponse,
+    HumanApprovalDecisionRequest,
 )
 from app.assistant.service import AssistantService
 from app.common.responses import ApiResponse
@@ -75,11 +76,54 @@ def chat(
         service.chat_stream(id, request.message, stream_output=request.stream_output),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/conversations/{id}/runs/active", response_model=ApiResponse)
+def get_active_run(
+    id: UUID,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = AssistantService(db)
+    payload = service.get_active_run_payload(id)
+    data = AssistantRunResponse.model_validate(payload).model_dump(by_alias=True) if payload else None
+    return ApiResponse.ok(data)
+
+
+@router.get("/conversations/{id}/runs/{run_id}/stream")
+def stream_run(
+    id: UUID,
+    run_id: UUID,
+    after_seq: int = Query(0, ge=0, alias="afterSeq"),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    service = AssistantService(db)
+    service.get_conversation_basic(id)
+    return StreamingResponse(
+        service.stream_run(id, run_id=run_id, after_seq=after_seq),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/conversations/{id}/runs/{run_id}/stop", response_model=ApiResponse)
+def stop_run(
+    id: UUID,
+    run_id: UUID,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = AssistantService(db)
+    payload = service.stop_run(conversation_id=id, run_id=run_id)
+    data = AssistantRunResponse.model_validate(payload).model_dump(by_alias=True)
+    return ApiResponse.ok(data)
 
 
 @router.get("/conversations/{id}/approvals/pending", response_model=ApiResponse)

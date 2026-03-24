@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Union
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(
+            str(_BACKEND_ROOT / ".env"),
+            str(_BACKEND_ROOT / ".env.local"),
+        ),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -104,6 +111,25 @@ class Settings(BaseSettings):
     assistant_kb_graph_recall_max_chunk_chars: int = Field(default=600, alias="ASSISTANT_KB_GRAPH_RECALL_MAX_CHUNK_CHARS")
     assistant_kb_graph_recall_min_score: float = Field(default=0.0, alias="ASSISTANT_KB_GRAPH_RECALL_MIN_SCORE")
     assistant_kb_graph_recall_max_tokens: int = Field(default=8, alias="ASSISTANT_KB_GRAPH_RECALL_MAX_TOKENS")
+    assistant_router_history_turns: int = Field(default=3, alias="ASSISTANT_ROUTER_HISTORY_TURNS")
+    assistant_router_history_max_chars_per_message: int = Field(
+        default=400,
+        alias="ASSISTANT_ROUTER_HISTORY_MAX_CHARS_PER_MESSAGE",
+    )
+    assistant_router_history_max_messages: int = Field(default=6, alias="ASSISTANT_ROUTER_HISTORY_MAX_MESSAGES")
+    assistant_router_include_last_skill_hint: bool = Field(
+        default=True,
+        alias="ASSISTANT_ROUTER_INCLUDE_LAST_SKILL_HINT",
+    )
+    assistant_memory_l0_turns: int = Field(default=6, alias="ASSISTANT_MEMORY_L0_TURNS")
+    assistant_memory_l0_max_chars: int = Field(default=25000, alias="ASSISTANT_MEMORY_L0_MAX_CHARS")
+    assistant_memory_l1_max_chars: int = Field(default=2000, alias="ASSISTANT_MEMORY_L1_MAX_CHARS")
+    assistant_memory_l2_max_items: int = Field(default=20, alias="ASSISTANT_MEMORY_L2_MAX_ITEMS")
+    assistant_memory_mode_default: str = Field(default="auto", alias="ASSISTANT_MEMORY_MODE_DEFAULT")
+    assistant_memory_injection_max_chars: int = Field(
+        default=30000,
+        alias="ASSISTANT_MEMORY_INJECTION_MAX_CHARS",
+    )
 
     # KB prompt injection budget (executor formats kb_search result into prompt)
     kb_context_max_chars: int = Field(default=16000, alias="KB_CONTEXT_MAX_CHARS")

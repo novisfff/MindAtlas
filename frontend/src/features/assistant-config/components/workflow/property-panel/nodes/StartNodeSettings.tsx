@@ -6,6 +6,7 @@ import {
   normalizeStartNodeConfig,
   START_FIELD_TYPE_OPTIONS,
   type StartInputMode,
+  type StartMemoryMode,
 } from '../../startNodeConfig'
 
 interface StartNodeSettingsProps {
@@ -36,8 +37,13 @@ export function StartNodeSettings({
   const updateMode = (mode: StartInputMode) => {
     onUpdate({
       inputMode: mode,
+      memoryMode: normalized.memoryMode,
       structuredFields: mode === 'structured' ? fields : [],
     })
+  }
+
+  const updateMemoryMode = (mode: StartMemoryMode) => {
+    onUpdate({ memoryMode: mode })
   }
 
   const updateField = (index: number, patch: Partial<StartStructuredField>) => {
@@ -89,6 +95,21 @@ export function StartNodeSettings({
         options={[
           { label: t('settings.skills.startInputModeText'), value: 'text' },
           { label: t('settings.skills.startInputModeStructured'), value: 'structured' },
+        ]}
+      />
+
+      <CommonSegmentedControl
+        icon={<Settings2 className="w-4 h-4" />}
+        label={t('settings.skills.startMemoryMode')}
+        value={normalized.memoryMode}
+        onChange={(value) => {
+          const mode = value === 'off' || value === 'structured' ? value : 'auto'
+          updateMemoryMode(mode)
+        }}
+        options={[
+          { label: t('settings.skills.startMemoryModeAuto'), value: 'auto' },
+          { label: t('settings.skills.startMemoryModeOff'), value: 'off' },
+          { label: t('settings.skills.startMemoryModeStructured'), value: 'structured' },
         ]}
       />
 

@@ -79,6 +79,18 @@ class RemoteToolTests(unittest.TestCase):
             with self.assertRaises(SSRFError):
                 validate_url_ssrf("https://example.com/api")
 
+    def test_validate_url_security_allows_fake_ip_dns_result(self):
+        with patch.object(
+            ssrf_mod.socket,
+            "getaddrinfo",
+            return_value=[(socket.AF_INET, 0, 0, "", ("198.18.0.34", 0))],
+        ):
+            validate_url_ssrf("https://api-vip.codex-for.me/v1")
+
+    def test_validate_url_security_blocks_direct_fake_ip_literal(self):
+        with self.assertRaises(SSRFError):
+            validate_url_ssrf("http://198.18.0.34/ping")
+
     def test_invoke_post_json_body_and_query_params_and_auth(self):
         captured = {}
 

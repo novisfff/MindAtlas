@@ -16,7 +16,7 @@ export function ModelSelector({ modelType, value, onChange, disabled }: ModelSel
 
   const getCredentialName = (credentialId: string) => {
     const cred = credentials.find((c) => c.id === credentialId)
-    return cred?.name ?? 'Unknown'
+    return cred?.name ?? t('common.unknown')
   }
 
   if (modelsLoading) {

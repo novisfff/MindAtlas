@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import {
   Play,
   Brain,
+  Bot,
   Wrench,
   GitBranch,
   ScanSearch,
@@ -30,6 +31,7 @@ import { QuickAddPopover, type QuickAddPayload } from './QuickAddPopover'
 const NODE_STYLES: Record<NodeType, { header: string; icon: typeof Play; iconColor: string }> = {
   start: { header: 'bg-gradient-to-r from-emerald-100/90 to-green-100/90 border-b border-emerald-200', icon: Play, iconColor: 'text-emerald-700' },
   llm: { header: 'bg-gradient-to-r from-violet-100/90 to-purple-100/90 border-b border-violet-200', icon: Brain, iconColor: 'text-violet-700' },
+  agent: { header: 'bg-gradient-to-r from-indigo-100/90 to-sky-100/90 border-b border-indigo-200', icon: Bot, iconColor: 'text-indigo-700' },
   tool: { header: 'bg-gradient-to-r from-sky-100/90 to-blue-100/90 border-b border-sky-200', icon: Wrench, iconColor: 'text-sky-700' },
   if_else: { header: 'bg-gradient-to-r from-amber-100/90 to-yellow-100/90 border-b border-amber-200', icon: GitBranch, iconColor: 'text-amber-700' },
   parameter_extractor: { header: 'bg-gradient-to-r from-fuchsia-100/90 to-pink-100/90 border-b border-fuchsia-200', icon: ScanSearch, iconColor: 'text-fuchsia-700' },
@@ -187,6 +189,15 @@ function getPreview(data: WfNodeData): string {
     }
     case 'llm':
       return truncate(cfg.systemPrompt as string, 50)
+    case 'agent': {
+      const prompt = truncate(cfg.systemPrompt as string, 38)
+      const toolNames = Array.isArray(cfg.toolNames)
+        ? cfg.toolNames.map((item) => String(item).trim()).filter(Boolean)
+        : []
+      const toolSummary = toolNames.length > 0 ? `tools ${toolNames.length}` : 'no tools'
+      if (!prompt) return toolSummary
+      return `${prompt} · ${toolSummary}`
+    }
     case 'tool':
       return (cfg.toolName as string) || ''
     case 'if_else': {
@@ -381,6 +392,7 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
   const quickAddTools = Array.isArray((nodeData as { quickAddTools?: unknown }).quickAddTools)
     ? ((nodeData as { quickAddTools?: WorkflowToolDefinition[] }).quickAddTools ?? [])
     : []
+  const floatingUiEpoch = Number((nodeData as { floatingUiEpoch?: unknown }).floatingUiEpoch ?? 0)
   const onQuickAdd = typeof (nodeData as { onQuickAdd?: unknown }).onQuickAdd === 'function'
     ? ((nodeData as { onQuickAdd?: (nodeId: string, handleId: string, payload: QuickAddPayload) => void }).onQuickAdd ?? null)
     : null
@@ -410,6 +422,10 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
     containerSize?.height,
     containerSize?.width,
   ])
+
+  useEffect(() => {
+    setOpenQuickAddHandle(null)
+  }, [floatingUiEpoch])
 
   const persistContainerBody = useCallback((nextNodes: ContainerBodyNode[], nextEdges: ContainerBodyEdge[]) => {
     const nextBodySignature = buildContainerBodySignature(nextNodes, nextEdges)
@@ -540,6 +556,7 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
             bodyNodes={bodyNodes}
             bodyEdges={bodyEdges}
             tools={quickAddTools}
+            floatingUiEpoch={floatingUiEpoch}
             canvasHeight={containerSize?.canvasHeight ?? 168}
             canvasWidth={containerSize?.width}
             onSelectionChange={handleSubflowSelectionChange}

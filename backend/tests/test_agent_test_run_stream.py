@@ -97,8 +97,22 @@ class AgentTestRunServiceTests(unittest.TestCase):
                 kwargs["on_analysis_start"]("analysis_1")
                 kwargs["on_analysis_delta"]("analysis_1", "thinking")
                 kwargs["on_analysis_end"]("analysis_1")
-                kwargs["on_tool_call_start"]("tool_1", "search_entries", {"q": "hello"})
-                kwargs["on_tool_call_end"]("tool_1", "completed", "{}")
+                kwargs["on_tool_call_start"](
+                    "tool_1",
+                    "search_entries",
+                    {"q": "hello"},
+                    agent_round=1,
+                    tool_call_index=1,
+                    tool_kind="tool",
+                )
+                kwargs["on_tool_call_end"](
+                    "tool_1",
+                    "completed",
+                    "{}",
+                    agent_round=1,
+                    tool_call_index=1,
+                    tool_kind="tool",
+                )
                 yield "A"
                 yield "B"
 
@@ -121,6 +135,20 @@ class AgentTestRunServiceTests(unittest.TestCase):
         self.assertIn("tool_call_end", event_names)
         self.assertIn("content_delta", event_names)
         self.assertIn("run_end", event_names)
+
+        tool_start_payload = next(payload for name, payload in events if name == "tool_call_start")
+        self.assertEqual(tool_start_payload["toolCallId"], "tool_1")
+        self.assertEqual(tool_start_payload["agentRound"], 1)
+        self.assertEqual(tool_start_payload["toolCallIndex"], 1)
+        self.assertEqual(tool_start_payload["toolKind"], "tool")
+        self.assertIn("startedAt", tool_start_payload)
+
+        tool_end_payload = next(payload for name, payload in events if name == "tool_call_end")
+        self.assertEqual(tool_end_payload["toolCallId"], "tool_1")
+        self.assertEqual(tool_end_payload["toolKind"], "tool")
+        self.assertIn("startedAt", tool_end_payload)
+        self.assertIn("endedAt", tool_end_payload)
+        self.assertIn("durationMs", tool_end_payload)
 
         run_end_payload = next(payload for name, payload in events if name == "run_end")
         self.assertEqual(run_end_payload["status"], "completed")
@@ -221,3 +249,45 @@ class AgentTestRunServiceTests(unittest.TestCase):
         self.assertEqual(run_end_payload["status"], "completed")
         self.assertEqual(run_end_payload["finalText"], "ok")
         by_id_mock.assert_called_once()
+
+    def test_stream_passes_history_to_engine(self) -> None:
+        from app.assistant_config.agent_test_service import AgentTestRunService
+        from app.assistant_config.schemas import AgentTestRunDraftInput, AgentTestRunRequest
+
+        profile = self._create_agent_profile()
+        service = AgentTestRunService(self.db)
+        request = AgentTestRunRequest(
+            draft=AgentTestRunDraftInput(
+                system_prompt="You are a test agent",
+                tools=[],
+                kb_config={"enabled": False},
+            ),
+            user_input="follow up",
+            history=[
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi there"},
+            ],
+            stream_output=True,
+        )
+        prepared = service.prepare(profile.id, request)
+        captured_history = None
+
+        class _FakeEngine:
+            def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                nonlocal captured_history
+                captured_history = kwargs.get("history")
+                yield "ok"
+
+        with patch(
+            "app.assistant_config.agent_test_service.resolve_openai_compat_config",
+            return_value=SimpleNamespace(api_key="k", base_url="https://api.example.com", model="gpt-test"),
+        ), patch(
+            "app.assistant_config.agent_test_service.AgentTestRunService._build_engine",
+            return_value=_FakeEngine(),
+        ):
+            chunks = list(service.stream(prepared))
+
+        events = _parse_sse_events(chunks)
+        run_end_payload = next(payload for name, payload in events if name == "run_end")
+        self.assertEqual(run_end_payload["status"], "completed")
+        self.assertEqual(captured_history, request.history)

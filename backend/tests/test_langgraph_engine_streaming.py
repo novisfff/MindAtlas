@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from types import SimpleNamespace
 from uuid import uuid4
 from unittest.mock import patch
 
@@ -193,6 +194,786 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
 
         self.assertEqual(content_emitted, ["A", "B"])
 
+    def test_workflow_agent_node_without_tool_call_outputs_text(self) -> None:
+        from app.assistant.workflow.engine.engine import _build_dag_agent_node
+
+        class _Chunk:
+            def __init__(self, content: str, tool_calls: list[dict] | None = None) -> None:
+                self.content = content
+                self.tool_calls = list(tool_calls or [])
+                self.additional_kwargs = {}
+                self.response_metadata = {}
+
+            def __add__(self, other: "_Chunk") -> "_Chunk":
+                return _Chunk(
+                    (self.content or "") + (other.content or ""),
+                    list(self.tool_calls or []) + list(other.tool_calls or []),
+                )
+
+        class _LLMWithTools:
+            def stream(self, _messages):
+                yield _Chunk("agent ")
+                yield _Chunk("answer")
+
+        class _LLM:
+            def bind_tools(self, _tools, parallel_tool_calls=False):
+                return _LLMWithTools()
+
+        class _Tool:
+            name = "noop"
+
+            @staticmethod
+            def func(**_kwargs):
+                return "ok"
+
+        streamed: list[str] = []
+        node = _build_dag_agent_node(
+            "agent_1",
+            {
+                "system_prompt": "reply",
+                "user_input": "{{start.user_input}}",
+                "tool_names": ["noop"],
+                "max_iterations": 3,
+            },
+            _LLM(),
+            {"noop": _Tool()},
+            db_bind=object(),
+        )
+
+        out = node(
+            {
+                "node_outputs": {
+                    "start": {"json_fields": {"user_input": "hello"}, "text": "hello", "status": "ok"},
+                },
+                "memory_mode": "off",
+                "metadata": {
+                    "on_node_output_delta": lambda node_id, delta: streamed.append(delta),
+                },
+            }
+        )
+
+        self.assertEqual(streamed, ["agent ", "answer"])
+        self.assertEqual(out["node_outputs"]["agent_1"]["text"], "agent answer")
+        self.assertEqual(out["node_outputs"]["agent_1"]["json_fields"]["response"], "agent answer")
+
+    def test_agent_loop_execution_uses_shared_core_for_tool_call(self) -> None:
+        from app.assistant.skill_catalog.base import SkillDefinition
+        from app.assistant.workflow.engine.engine import LangGraphEngine
+
+        class _Chunk:
+            def __init__(self, content: str, tool_calls: list[dict] | None = None) -> None:
+                self.content = content
+                self.tool_calls = list(tool_calls or [])
+                self.additional_kwargs = {}
+                self.response_metadata = {}
+
+            def __add__(self, other: "_Chunk") -> "_Chunk":
+                return _Chunk(
+                    (self.content or "") + (other.content or ""),
+                    list(self.tool_calls or []) + list(other.tool_calls or []),
+                )
+
+        class _LLMWithTools:
+            def __init__(self) -> None:
+                self.calls: list[list[dict[str, object]]] = []
+
+            def stream(self, messages):
+                self.calls.append(messages)
+                has_tool_result = any(isinstance(msg, dict) and msg.get("role") == "tool" for msg in messages)
+                if has_tool_result:
+                    yield _Chunk("done")
+                    return
+                yield _Chunk(
+                    "",
+                    tool_calls=[
+                        {
+                            "id": "call_sum_1",
+                            "name": "sum_tool",
+                            "args": {"a": 1, "b": 2},
+                        }
+                    ],
+                )
+
+        class _LLM:
+            def __init__(self) -> None:
+                self.runner = _LLMWithTools()
+                self.bound_tools: list[object] = []
+
+            def bind_tools(self, tools, parallel_tool_calls=False):
+                self.bound_tools = list(tools)
+                return self.runner
+
+        class _Tool:
+            name = "sum_tool"
+
+            @staticmethod
+            def func(**kwargs):
+                return str(int(kwargs.get("a", 0)) + int(kwargs.get("b", 0)))
+
+        tool_starts: list[dict[str, object]] = []
+        tool_ends: list[dict[str, object]] = []
+        llm = _LLM()
+        with patch(
+            "app.assistant.workflow.engine.engine.ChatOpenAI",
+            side_effect=[llm, _LLM()],
+        ):
+            engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=None)
+
+        with patch.object(engine, "_build_tools", return_value=[_Tool()]), patch(
+            "app.assistant.workflow.engine.agent_subgraph.engine_runtime._wrap_tool_with_db",
+            side_effect=lambda tool, _db_bind: (lambda **kwargs: tool.func(**kwargs)),
+        ):
+            skill = SkillDefinition(
+                name="agent_skill",
+                description="d",
+                intent_examples=[],
+                tools=["sum_tool"],
+                mode="langgraph",
+                langgraph_pattern="agent_loop",
+                system_prompt="reply",
+            )
+            out = list(
+                engine.execute(
+                    skill=skill,
+                    user_input="calc",
+                    history=[],
+                    on_tool_call_start=lambda **payload: tool_starts.append(payload),
+                    on_tool_call_end=lambda **payload: tool_ends.append(payload),
+                )
+            )
+
+        self.assertEqual("".join([chunk for chunk in out if chunk]), "done")
+        self.assertEqual(tool_starts[0]["tool_name"], "sum_tool")
+        self.assertEqual(tool_starts[0]["agent_round"], 1)
+        self.assertEqual(tool_starts[0]["tool_call_index"], 1)
+        self.assertEqual(tool_starts[0]["tool_kind"], "tool")
+        self.assertEqual(tool_ends[0]["status"], "completed")
+        self.assertEqual(tool_ends[0]["result"], "3")
+        self.assertTrue(
+            any(isinstance(msg, dict) and msg.get("role") == "tool" for msg in llm.runner.calls[-1]),
+            llm.runner.calls[-1],
+        )
+
+    def test_agent_loop_execution_uses_internal_kb_tool_and_knowledge_trace(self) -> None:
+        from app.assistant.skill_catalog.base import SkillDefinition, SkillKBConfig
+        from app.assistant.workflow.engine.engine import LangGraphEngine
+
+        class _Chunk:
+            def __init__(self, content: str, tool_calls: list[dict] | None = None) -> None:
+                self.content = content
+                self.tool_calls = list(tool_calls or [])
+                self.additional_kwargs = {}
+                self.response_metadata = {}
+
+            def __add__(self, other: "_Chunk") -> "_Chunk":
+                return _Chunk(
+                    (self.content or "") + (other.content or ""),
+                    list(self.tool_calls or []) + list(other.tool_calls or []),
+                )
+
+        class _LLMWithTools:
+            def __init__(self) -> None:
+                self.calls: list[list[dict[str, object]]] = []
+
+            def stream(self, messages):
+                self.calls.append(messages)
+                has_tool_result = any(isinstance(msg, dict) and msg.get("role") == "tool" for msg in messages)
+                if has_tool_result:
+                    yield _Chunk("知识回答[^1]")
+                    return
+                yield _Chunk(
+                    "",
+                    tool_calls=[
+                        {
+                            "id": "call_kb_1",
+                            "name": "kb_search",
+                            "args": {"query": "roadmap"},
+                        }
+                    ],
+                )
+
+        class _LLM:
+            def __init__(self) -> None:
+                self.runner = _LLMWithTools()
+                self.bound_tools: list[object] = []
+
+            def bind_tools(self, tools, parallel_tool_calls=False):
+                self.bound_tools = list(tools)
+                return self.runner
+
+        kb_calls: list[dict[str, object]] = []
+
+        class _KbTool:
+            name = "kb_search"
+
+            @staticmethod
+            def func(**kwargs):
+                kb_calls.append(kwargs)
+                return json.dumps(
+                    {
+                        "query": kwargs.get("query"),
+                        "references": [{"index": 1, "title": "Roadmap"}],
+                    },
+                    ensure_ascii=False,
+                )
+
+        tool_starts: list[dict[str, object]] = []
+        llm = _LLM()
+        with patch(
+            "app.assistant.workflow.engine.engine.ChatOpenAI",
+            side_effect=[llm, _LLM()],
+        ):
+            engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=None)
+
+        with patch.object(engine, "_build_tools", return_value=[_KbTool()]), patch(
+            "app.assistant.workflow.engine.agent_subgraph.engine_runtime._wrap_tool_with_db",
+            side_effect=lambda tool, _db_bind: (lambda **kwargs: tool.func(**kwargs)),
+        ):
+            skill = SkillDefinition(
+                name="agent_skill",
+                description="d",
+                intent_examples=[],
+                tools=[],
+                mode="langgraph",
+                langgraph_pattern="agent_loop",
+                system_prompt="reply",
+                kb=SkillKBConfig(enabled=True),
+            )
+            out = list(
+                engine.execute(
+                    skill=skill,
+                    user_input="问下 roadmap",
+                    history=[],
+                    on_tool_call_start=lambda **payload: tool_starts.append(payload),
+                )
+            )
+
+        self.assertEqual("".join([chunk for chunk in out if chunk]), "知识回答[^1]")
+        self.assertEqual(kb_calls, [{"query": "roadmap"}])
+        self.assertEqual(tool_starts[0]["tool_name"], "kb_search")
+        self.assertEqual(tool_starts[0]["tool_kind"], "knowledge")
+        self.assertEqual(list(llm.bound_tools[0].args_schema.model_fields.keys()), ["query"])
+        system_prompt = llm.runner.calls[0][0]["content"]
+        self.assertIn("知识库使用要求", system_prompt)
+
+    def test_agent_loop_execution_raises_on_tool_failure(self) -> None:
+        from app.assistant.skill_catalog.base import SkillDefinition
+        from app.assistant.workflow.engine.engine import LangGraphEngine
+
+        class _Chunk:
+            def __init__(self, content: str, tool_calls: list[dict] | None = None) -> None:
+                self.content = content
+                self.tool_calls = list(tool_calls or [])
+                self.additional_kwargs = {}
+                self.response_metadata = {}
+
+            def __add__(self, other: "_Chunk") -> "_Chunk":
+                return _Chunk(
+                    (self.content or "") + (other.content or ""),
+                    list(self.tool_calls or []) + list(other.tool_calls or []),
+                )
+
+        class _LLMWithTools:
+            def stream(self, messages):
+                has_tool_result = any(isinstance(msg, dict) and msg.get("role") == "tool" for msg in messages)
+                if has_tool_result:
+                    yield _Chunk("done")
+                    return
+                yield _Chunk(
+                    "",
+                    tool_calls=[
+                        {
+                            "id": "call_fail_1",
+                            "name": "bad_tool",
+                            "args": {"x": 1},
+                        }
+                    ],
+                )
+
+        class _LLM:
+            def bind_tools(self, tools, parallel_tool_calls=False):
+                return _LLMWithTools()
+
+        class _Tool:
+            name = "bad_tool"
+
+            @staticmethod
+            def func(**_kwargs):
+                raise RuntimeError("boom")
+
+        with patch(
+            "app.assistant.workflow.engine.engine.ChatOpenAI",
+            side_effect=[_LLM(), _LLM()],
+        ):
+            engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=None)
+
+        with patch.object(engine, "_build_tools", return_value=[_Tool()]), patch(
+            "app.assistant.workflow.engine.agent_subgraph.engine_runtime._wrap_tool_with_db",
+            side_effect=lambda tool, _db_bind: (lambda **kwargs: tool.func(**kwargs)),
+        ):
+            skill = SkillDefinition(
+                name="agent_skill",
+                description="d",
+                intent_examples=[],
+                tools=["bad_tool"],
+                mode="langgraph",
+                langgraph_pattern="agent_loop",
+                system_prompt="reply",
+            )
+            with self.assertRaises(RuntimeError) as ctx:
+                list(
+                    engine.execute(
+                        skill=skill,
+                        user_input="calc",
+                        history=[],
+                    )
+                )
+
+        self.assertIn("工具执行失败", str(ctx.exception))
+
+    def test_workflow_agent_node_runs_single_tool_call_then_converges(self) -> None:
+        from app.assistant.workflow.engine.engine import _build_dag_agent_node
+
+        class _Chunk:
+            def __init__(self, content: str, tool_calls: list[dict] | None = None) -> None:
+                self.content = content
+                self.tool_calls = list(tool_calls or [])
+                self.additional_kwargs = {}
+                self.response_metadata = {}
+
+            def __add__(self, other: "_Chunk") -> "_Chunk":
+                return _Chunk(
+                    (self.content or "") + (other.content or ""),
+                    list(self.tool_calls or []) + list(other.tool_calls or []),
+                )
+
+        class _LLMWithTools:
+            def __init__(self) -> None:
+                self.calls: list[list[dict[str, object]]] = []
+
+            def stream(self, messages):
+                self.calls.append(messages)
+                has_tool_result = any(isinstance(msg, dict) and msg.get("role") == "tool" for msg in messages)
+                if has_tool_result:
+                    yield _Chunk("done")
+                    return
+                yield _Chunk(
+                    "",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "name": "sum_tool",
+                            "args": {"a": 1, "b": 2},
+                        }
+                    ],
+                )
+
+        class _LLM:
+            def __init__(self) -> None:
+                self.runner = _LLMWithTools()
+
+            def bind_tools(self, _tools, parallel_tool_calls=False):
+                return self.runner
+
+        class _Tool:
+            name = "sum_tool"
+
+            @staticmethod
+            def func(**kwargs):
+                return str(int(kwargs.get("a", 0)) + int(kwargs.get("b", 0)))
+
+        tool_starts: list[dict[str, object]] = []
+        tool_ends: list[dict[str, object]] = []
+        llm = _LLM()
+        with patch(
+            "app.assistant.workflow.engine.node_builders.dag_agent_node.engine_runtime._wrap_tool_with_db",
+            side_effect=lambda tool, _db_bind: (lambda **kwargs: tool.func(**kwargs)),
+        ):
+            node = _build_dag_agent_node(
+                "agent_1",
+                {
+                    "system_prompt": "reply",
+                    "user_input": "{{start.user_input}}",
+                    "tool_names": ["sum_tool"],
+                    "max_iterations": 3,
+                },
+                llm,
+                {"sum_tool": _Tool()},
+                db_bind=object(),
+            )
+            out = node(
+                {
+                    "node_outputs": {
+                        "start": {"json_fields": {"user_input": "calc"}, "text": "calc", "status": "ok"},
+                    },
+                    "memory_mode": "off",
+                    "metadata": {
+                        "on_tool_call_start": lambda **payload: tool_starts.append(payload),
+                        "on_tool_call_end": lambda **payload: tool_ends.append(payload),
+                    },
+                }
+            )
+
+        self.assertEqual(out["node_outputs"]["agent_1"]["text"], "done")
+        self.assertEqual(len(tool_starts), 1)
+        self.assertEqual(tool_starts[0]["tool_name"], "sum_tool")
+        self.assertEqual(len(tool_ends), 1)
+        self.assertEqual(tool_ends[0]["status"], "completed")
+        self.assertEqual(tool_ends[0]["result"], "3")
+        self.assertTrue(
+            any(isinstance(msg, dict) and msg.get("role") == "tool" for msg in llm.runner.calls[-1]),
+            llm.runner.calls[-1],
+        )
+
+    def test_workflow_agent_tool_events_include_parent_trace_context(self) -> None:
+        from app.assistant.workflow.engine.engine import _build_dag_agent_node
+        from app.assistant.workflow.engine.runtime_helpers import with_node_execution_context
+
+        class _Chunk:
+            def __init__(self, content: str, tool_calls: list[dict] | None = None) -> None:
+                self.content = content
+                self.tool_calls = list(tool_calls or [])
+                self.additional_kwargs = {}
+                self.response_metadata = {}
+
+            def __add__(self, other: "_Chunk") -> "_Chunk":
+                return _Chunk(
+                    (self.content or "") + (other.content or ""),
+                    list(self.tool_calls or []) + list(other.tool_calls or []),
+                )
+
+        class _LLMWithTools:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def stream(self, _messages):
+                self.calls += 1
+                if self.calls == 1:
+                    yield _Chunk(
+                        "",
+                        tool_calls=[
+                            {
+                                "id": "call_sum_1",
+                                "name": "sum_tool",
+                                "args": {"a": 1, "b": 2},
+                            }
+                        ],
+                    )
+                    return
+                yield _Chunk("done")
+
+        class _LLM:
+            def __init__(self) -> None:
+                self.runner = _LLMWithTools()
+
+            def bind_tools(self, _tools, parallel_tool_calls=False):
+                return self.runner
+
+        class _Tool:
+            name = "sum_tool"
+
+            @staticmethod
+            def func(**kwargs):
+                return str(int(kwargs.get("a", 0)) + int(kwargs.get("b", 0)))
+
+        tool_starts: list[dict[str, object]] = []
+        tool_ends: list[dict[str, object]] = []
+        metadata = with_node_execution_context(
+            {
+                "on_tool_call_start": lambda **payload: tool_starts.append(payload),
+                "on_tool_call_end": lambda **payload: tool_ends.append(payload),
+            },
+            node_id="agent_1",
+            node_type="agent",
+            node_execution_id="exec_123",
+        )
+
+        with patch(
+            "app.assistant.workflow.engine.node_builders.dag_agent_node.engine_runtime._wrap_tool_with_db",
+            side_effect=lambda tool, _db_bind: (lambda **kwargs: tool.func(**kwargs)),
+        ):
+            node = _build_dag_agent_node(
+                "agent_1",
+                {
+                    "system_prompt": "reply",
+                    "user_input": "{{start.user_input}}",
+                    "tool_names": ["sum_tool"],
+                    "max_iterations": 3,
+                },
+                _LLM(),
+                {"sum_tool": _Tool()},
+                db_bind=object(),
+            )
+            out = node(
+                {
+                    "node_outputs": {
+                        "start": {"json_fields": {"user_input": "calc"}, "text": "calc", "status": "ok"},
+                    },
+                    "memory_mode": "off",
+                    "metadata": metadata,
+                }
+            )
+
+        self.assertEqual(out["node_outputs"]["agent_1"]["text"], "done")
+        self.assertEqual(tool_starts[0]["node_id"], "agent_1")
+        self.assertEqual(tool_starts[0]["node_type"], "agent")
+        self.assertEqual(tool_starts[0]["node_execution_id"], "exec_123")
+        self.assertEqual(tool_starts[0]["agent_round"], 1)
+        self.assertEqual(tool_starts[0]["tool_call_index"], 1)
+        self.assertEqual(tool_starts[0]["tool_kind"], "tool")
+        self.assertEqual(tool_ends[0]["node_execution_id"], "exec_123")
+        self.assertEqual(tool_ends[0]["status"], "completed")
+
+    def test_workflow_agent_node_supports_builtin_kb_search_with_fixed_mode_and_top_k(self) -> None:
+        from app.assistant.workflow.engine.engine import _build_dag_agent_node
+
+        class _Chunk:
+            def __init__(self, content: str, tool_calls: list[dict] | None = None) -> None:
+                self.content = content
+                self.tool_calls = list(tool_calls or [])
+                self.additional_kwargs = {}
+                self.response_metadata = {}
+
+            def __add__(self, other: "_Chunk") -> "_Chunk":
+                return _Chunk(
+                    (self.content or "") + (other.content or ""),
+                    list(self.tool_calls or []) + list(other.tool_calls or []),
+                )
+
+        class _LLMWithTools:
+            def __init__(self) -> None:
+                self.calls: list[list[dict[str, object]]] = []
+
+            def stream(self, messages):
+                self.calls.append(messages)
+                has_tool_result = any(isinstance(msg, dict) and msg.get("role") == "tool" for msg in messages)
+                if has_tool_result:
+                    yield _Chunk("知识回答[^1]")
+                    return
+                yield _Chunk(
+                    "",
+                    tool_calls=[
+                        {
+                            "id": "call_kb_1",
+                            "name": "kb_search",
+                            "args": {"query": "project roadmap"},
+                        }
+                    ],
+                )
+
+        class _LLM:
+            def __init__(self) -> None:
+                self.runner = _LLMWithTools()
+                self.bound_tools: list[object] = []
+
+            def bind_tools(self, tools, parallel_tool_calls=False):
+                self.bound_tools = list(tools)
+                return self.runner
+
+        kb_calls: list[dict[str, object]] = []
+
+        class _KbTool:
+            name = "kb_search"
+
+            @staticmethod
+            def func(**kwargs):
+                kb_calls.append(kwargs)
+                return json.dumps(
+                    {
+                        "query": kwargs.get("query"),
+                        "mode": kwargs.get("mode"),
+                        "references": [{"index": 1, "title": "Roadmap"}],
+                    },
+                    ensure_ascii=False,
+                )
+
+        tool_starts: list[dict[str, object]] = []
+        tool_ends: list[dict[str, object]] = []
+        llm = _LLM()
+        with patch(
+            "app.assistant.workflow.engine.node_builders.dag_agent_node.engine_runtime._wrap_tool_with_db",
+            side_effect=lambda tool, _db_bind: (lambda **kwargs: tool.func(**kwargs)),
+        ):
+            node = _build_dag_agent_node(
+                "agent_1",
+                {
+                    "system_prompt": "answer with references",
+                    "user_input": "{{start.user_input}}",
+                    "tool_names": [],
+                    "knowledge_enabled": True,
+                    "knowledge_mode": "hybrid",
+                    "knowledge_top_k": 7,
+                    "max_iterations": 3,
+                },
+                llm,
+                {"kb_search": _KbTool()},
+                db_bind=object(),
+            )
+            out = node(
+                {
+                    "node_outputs": {
+                        "start": {"json_fields": {"user_input": "roadmap?"}, "text": "roadmap?", "status": "ok"},
+                    },
+                    "memory_mode": "off",
+                    "metadata": {
+                        "on_tool_call_start": lambda **payload: tool_starts.append(payload),
+                        "on_tool_call_end": lambda **payload: tool_ends.append(payload),
+                    },
+                }
+            )
+
+        self.assertEqual(out["node_outputs"]["agent_1"]["text"], "知识回答[^1]")
+        self.assertEqual(len(llm.bound_tools), 1)
+        self.assertEqual(getattr(llm.bound_tools[0], "name", None), "kb_search")
+        self.assertEqual(
+            kb_calls,
+            [{"query": "project roadmap", "mode": "hybrid", "top_k": 7}],
+        )
+        self.assertEqual(tool_starts[0]["tool_name"], "kb_search")
+        self.assertEqual(tool_starts[0]["args"], {"query": "project roadmap"})
+        self.assertEqual(tool_ends[0]["status"], "completed")
+        system_prompt = llm.runner.calls[0][0]["content"]
+        self.assertIn("知识库使用要求", system_prompt)
+        self.assertIn("[^n]", system_prompt)
+
+    def test_workflow_agent_node_without_knowledge_does_not_bind_internal_kb_tool(self) -> None:
+        from app.assistant.workflow.engine.engine import _build_dag_agent_node
+
+        class _Chunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+                self.tool_calls = []
+                self.additional_kwargs = {}
+                self.response_metadata = {}
+
+            def __add__(self, other: "_Chunk") -> "_Chunk":
+                return _Chunk((self.content or "") + (other.content or ""))
+
+        class _LLMWithTools:
+            def __init__(self) -> None:
+                self.calls: list[list[dict[str, object]]] = []
+
+            def stream(self, messages):
+                self.calls.append(messages)
+                yield _Chunk("done")
+
+        class _LLM:
+            def __init__(self) -> None:
+                self.runner = _LLMWithTools()
+                self.bound_tools: list[object] = []
+
+            def bind_tools(self, tools, parallel_tool_calls=False):
+                self.bound_tools = list(tools)
+                return self.runner
+
+        class _Tool:
+            name = "noop"
+
+            @staticmethod
+            def func(**_kwargs):
+                return "ok"
+
+        llm = _LLM()
+        with patch(
+            "app.assistant.workflow.engine.node_builders.dag_agent_node.engine_runtime._wrap_tool_with_db",
+            side_effect=lambda tool, _db_bind: (lambda **kwargs: tool.func(**kwargs)),
+        ):
+            node = _build_dag_agent_node(
+                "agent_1",
+                {
+                    "system_prompt": "reply",
+                    "user_input": "{{start.user_input}}",
+                    "tool_names": ["noop"],
+                    "max_iterations": 3,
+                },
+                llm,
+                {"noop": _Tool()},
+                db_bind=object(),
+            )
+            node(
+                {
+                    "node_outputs": {
+                        "start": {"json_fields": {"user_input": "hello"}, "text": "hello", "status": "ok"},
+                    },
+                    "memory_mode": "off",
+                    "metadata": {},
+                }
+            )
+
+        self.assertEqual([getattr(tool, "name", None) for tool in llm.bound_tools], ["noop"])
+        system_prompt = llm.runner.calls[0][0]["content"]
+        self.assertNotIn("知识库使用要求", system_prompt)
+
+    def test_workflow_agent_node_exceeding_max_iterations_raises(self) -> None:
+        from app.assistant.workflow.engine.engine import _build_dag_agent_node
+
+        class _Chunk:
+            def __init__(self, content: str, tool_calls: list[dict] | None = None) -> None:
+                self.content = content
+                self.tool_calls = list(tool_calls or [])
+                self.additional_kwargs = {}
+                self.response_metadata = {}
+
+            def __add__(self, other: "_Chunk") -> "_Chunk":
+                return _Chunk(
+                    (self.content or "") + (other.content or ""),
+                    list(self.tool_calls or []) + list(other.tool_calls or []),
+                )
+
+        class _LLMWithTools:
+            def stream(self, _messages):
+                yield _Chunk(
+                    "",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "name": "sum_tool",
+                            "args": {"a": 1},
+                        }
+                    ],
+                )
+
+        class _LLM:
+            def bind_tools(self, _tools, parallel_tool_calls=False):
+                return _LLMWithTools()
+
+        class _Tool:
+            name = "sum_tool"
+
+            @staticmethod
+            def func(**_kwargs):
+                return "1"
+
+        with patch(
+            "app.assistant.workflow.engine.node_builders.dag_agent_node.engine_runtime._wrap_tool_with_db",
+            side_effect=lambda tool, _db_bind: (lambda **kwargs: tool.func(**kwargs)),
+        ):
+            node = _build_dag_agent_node(
+                "agent_1",
+                {
+                    "system_prompt": "reply",
+                    "user_input": "{{start.user_input}}",
+                    "tool_names": ["sum_tool"],
+                    "max_iterations": 1,
+                },
+                _LLM(),
+                {"sum_tool": _Tool()},
+                db_bind=object(),
+            )
+
+            with self.assertRaises(RuntimeError) as ctx:
+                node(
+                    {
+                        "node_outputs": {
+                            "start": {"json_fields": {"user_input": "calc"}, "text": "calc", "status": "ok"},
+                        },
+                        "memory_mode": "off",
+                        "metadata": {},
+                    }
+                )
+
+        self.assertIn("exceeded maxIterations=1", str(ctx.exception))
+
     def test_output_node_text_single_ref_skips_duplicate_emit_when_passthrough(self) -> None:
         from app.assistant.workflow.engine.engine import _build_output_node
 
@@ -222,10 +1003,41 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(out["node_outputs"]["output_1"]["text"], "AB")
         self.assertEqual(out["node_outputs"]["output_1"]["json_fields"]["response"], "AB")
 
-    def test_output_node_text_non_passthrough_emits_once(self) -> None:
+    def test_output_node_text_single_ref_skips_duplicate_emit_when_agent_passthrough(self) -> None:
         from app.assistant.workflow.engine.engine import _build_output_node
 
         content_emitted: list[str] = []
+        node = _build_output_node(
+            "output_1",
+            {
+                "output_mode": "text",
+                "text_template": "{{agent_1.response}}",
+            },
+        )
+
+        out = node(
+            {
+                "node_outputs": {
+                    "start": {"json_fields": {"user_input": "hello"}, "text": "hello", "status": "ok"},
+                    "agent_1": {"json_fields": {"response": "AB"}, "text": "AB", "status": "ok"},
+                },
+                "workflow_node_types": {"agent_1": "agent", "output_1": "output"},
+                "stream_output_enabled": True,
+                "output_stream_source_node_id": "agent_1",
+                "metadata": {"on_content_delta": lambda chunk: content_emitted.append(chunk)},
+            }
+        )
+
+        self.assertEqual(content_emitted, [])
+        self.assertEqual(out["node_outputs"]["output_1"]["text"], "AB")
+        self.assertEqual(out["node_outputs"]["output_1"]["json_fields"]["response"], "AB")
+
+    def test_output_node_text_non_passthrough_emits_chunked(self) -> None:
+        from app.assistant.workflow.engine.engine import _build_output_node
+
+        content_emitted: list[str] = []
+        llm_response = "A" * 64
+        expected_text = f"Result: {llm_response}"
         node = _build_output_node(
             "output_1",
             {
@@ -238,7 +1050,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             {
                 "node_outputs": {
                     "start": {"json_fields": {"user_input": "hello"}, "text": "hello", "status": "ok"},
-                    "llm_1": {"json_fields": {"response": "AB"}, "text": "AB", "status": "ok"},
+                    "llm_1": {"json_fields": {"response": llm_response}, "text": llm_response, "status": "ok"},
                 },
                 "workflow_node_types": {"llm_1": "llm", "output_1": "output"},
                 "stream_output_enabled": True,
@@ -247,13 +1059,15 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(content_emitted, ["Result: AB"])
-        self.assertEqual(out["node_outputs"]["output_1"]["text"], "Result: AB")
+        self.assertGreater(len(content_emitted), 1)
+        self.assertEqual("".join(content_emitted), expected_text)
+        self.assertEqual(out["node_outputs"]["output_1"]["text"], expected_text)
 
-    def test_output_node_structured_emits_json_once(self) -> None:
+    def test_output_node_structured_emits_json_chunked(self) -> None:
         from app.assistant.workflow.engine.engine import _build_output_node
 
         content_emitted: list[str] = []
+        llm_response = "B" * 64
         node = _build_output_node(
             "output_1",
             {
@@ -269,7 +1083,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             {
                 "node_outputs": {
                     "start": {"json_fields": {"user_input": "hello"}, "text": "hello", "status": "ok"},
-                    "llm_1": {"json_fields": {"response": "AB"}, "text": "AB", "status": "ok"},
+                    "llm_1": {"json_fields": {"response": llm_response}, "text": llm_response, "status": "ok"},
                 },
                 "workflow_node_types": {"llm_1": "llm", "output_1": "output"},
                 "stream_output_enabled": True,
@@ -278,9 +1092,9 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(len(content_emitted), 1)
-        parsed = json.loads(content_emitted[0])
-        self.assertEqual(parsed["answer"], "AB")
+        self.assertGreater(len(content_emitted), 1)
+        parsed = json.loads("".join(content_emitted))
+        self.assertEqual(parsed["answer"], llm_response)
         self.assertEqual(parsed["count"], 2)
         self.assertEqual(out["node_outputs"]["output_1"]["json_fields"]["count"], 2)
 
@@ -358,6 +1172,31 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         )
 
         self.assertEqual("".join(buffered), "A\n\nB")
+
+    def test_stream_runtime_supports_legacy_node_delta_callback_name(self) -> None:
+        from app.assistant.workflow.engine.stream_runtime import (
+            RuntimeEventHandlers,
+            dispatch_runtime_event,
+        )
+
+        captured: list[tuple[str, str]] = []
+        handlers = RuntimeEventHandlers(
+            on_node_output_delta=lambda node_id, node_delta: captured.append((node_id, node_delta)),
+        )
+
+        dispatch_runtime_event(
+            event_name="node_output_delta",
+            payload={
+                "node_id": "agent_1",
+                "delta": "hello",
+            },
+            handlers=handlers,
+            stream_output_enabled=True,
+            buffered_content_chunks=[],
+            content_segment_state={},
+        )
+
+        self.assertEqual(captured, [("agent_1", "hello")])
 
     def test_output_field_integer_array_rejects_boolean_items(self) -> None:
         from app.assistant.workflow.engine.engine import _coerce_output_field_value
@@ -711,6 +1550,386 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         self.assertEqual(sys_vars.get("conversation_id"), "conv-abc")
         self.assertTrue(sys_vars.get("date"))
         self.assertTrue(sys_vars.get("datetime"))
+        self.assertIn("memory_context", captured_state)
+        self.assertEqual(captured_state["memory_context"].get("l1_text"), "")
+        self.assertEqual(captured_state["memory_context"].get("l2_text"), "")
+
+    def test_execute_builds_l0_memory_context_from_history(self) -> None:
+        from app.assistant.skill_catalog.base import SkillDefinition
+        from app.assistant.workflow.engine.engine import LangGraphEngine
+
+        class _FakeChunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _FakeLLM:
+            def stream(self, _messages):
+                yield _FakeChunk("x")
+
+        captured_state: dict[str, object] = {}
+
+        class _FakeCompiled:
+            def stream(self, state):
+                captured_state.update(state)
+                cb = state["metadata"].get("on_content_delta")
+                if callable(cb):
+                    cb("ok")
+                yield {"step": 1}
+
+        skill = SkillDefinition(
+            name="wf_skill",
+            description="d",
+            intent_examples=[],
+            tools=[],
+            mode="langgraph",
+            langgraph_pattern="workflow_dag",
+            workflow_nodes=[{"node_id": "start", "node_type": "start", "config": {}}],
+            workflow_edges=[],
+        )
+
+        with patch("app.assistant.workflow.engine.engine.ChatOpenAI", return_value=_FakeLLM()):
+            engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=None)
+
+        with patch(
+            "app.assistant.workflow.engine.engine._get_or_compile_graph",
+            return_value=_FakeCompiled(),
+        ), patch(
+            "app.assistant.workflow.engine.engine.get_settings",
+            return_value=SimpleNamespace(
+                assistant_memory_l0_turns=1,
+                assistant_memory_l0_max_chars=120,
+            ),
+        ):
+            _ = list(
+                engine.execute(
+                    skill=skill,
+                    user_input="repeat me",
+                    history=[
+                        {"role": "system", "content": "sys"},
+                        {"role": "user", "content": "first user"},
+                        {"role": "assistant", "content": "first assistant"},
+                        {"role": "user", "content": "repeat me"},
+                    ],
+                )
+            )
+
+        memory_context = captured_state.get("memory_context", {})
+        self.assertIsInstance(memory_context, dict)
+        self.assertEqual(memory_context.get("l0_source_count"), 2)
+        self.assertIn("User: first user", str(memory_context.get("l0_text", "")))
+        self.assertIn("Assistant: first assistant", str(memory_context.get("l0_text", "")))
+        self.assertNotIn("repeat me", str(memory_context.get("l0_text", "")))
+        self.assertLessEqual(len(str(memory_context.get("l0_text", ""))), 120)
+        self.assertEqual(
+            memory_context.get("l0_messages"),
+            [
+                {"role": "user", "content": "first user"},
+                {"role": "assistant", "content": "first assistant"},
+            ],
+        )
+
+    def test_execute_loads_l1_summary_into_memory_context(self) -> None:
+        from app.assistant.models import AssistantConversationL1Memory, Conversation
+        from app.assistant.skill_catalog.base import SkillDefinition
+        from app.assistant.workflow.engine.engine import LangGraphEngine
+        from tests._db import make_session
+
+        class _FakeChunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _FakeLLM:
+            def stream(self, _messages):
+                yield _FakeChunk("x")
+
+        captured_state: dict[str, object] = {}
+
+        class _FakeCompiled:
+            def stream(self, state):
+                captured_state.update(state)
+                cb = state["metadata"].get("on_content_delta")
+                if callable(cb):
+                    cb("ok")
+                yield {"step": 1}
+
+        skill = SkillDefinition(
+            name="wf_skill",
+            description="d",
+            intent_examples=[],
+            tools=[],
+            mode="langgraph",
+            langgraph_pattern="workflow_dag",
+            workflow_nodes=[{"node_id": "start", "node_type": "start", "config": {}}],
+            workflow_edges=[],
+        )
+
+        db = make_session()
+        try:
+            conv = Conversation(title="l1")
+            db.add(conv)
+            db.commit()
+            db.refresh(conv)
+            db.add(
+                AssistantConversationL1Memory(
+                    conversation_id=conv.id,
+                    summary_text="历史摘要信息",
+                )
+            )
+            db.commit()
+
+            with patch("app.assistant.workflow.engine.engine.ChatOpenAI", return_value=_FakeLLM()):
+                engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=db)
+
+            with patch(
+                "app.assistant.workflow.engine.engine._get_or_compile_graph",
+                return_value=_FakeCompiled(),
+            ):
+                _ = list(
+                    engine.execute(
+                        skill=skill,
+                        user_input="u",
+                        history=[],
+                        runtime_context={"conversation_id": str(conv.id)},
+                    )
+                )
+        finally:
+            db.close()
+
+        memory_context = captured_state.get("memory_context", {})
+        self.assertIsInstance(memory_context, dict)
+        self.assertEqual(memory_context.get("l1_text"), "历史摘要信息")
+
+    def test_execute_loads_l2_text_into_memory_context_by_skill(self) -> None:
+        from app.assistant.models import AssistantConversationSkillL2Memory, Conversation
+        from app.assistant.skill_catalog.base import SkillDefinition
+        from app.assistant.workflow.engine.engine import LangGraphEngine
+        from tests._db import make_session
+
+        class _FakeChunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _FakeLLM:
+            def stream(self, _messages):
+                yield _FakeChunk("x")
+
+        captured_state: dict[str, object] = {}
+
+        class _FakeCompiled:
+            def stream(self, state):
+                captured_state.update(state)
+                cb = state["metadata"].get("on_content_delta")
+                if callable(cb):
+                    cb("ok")
+                yield {"step": 1}
+
+        skill = SkillDefinition(
+            name="smart_capture",
+            description="d",
+            intent_examples=[],
+            tools=[],
+            mode="langgraph",
+            langgraph_pattern="workflow_dag",
+            workflow_nodes=[{"node_id": "start", "node_type": "start", "config": {}}],
+            workflow_edges=[],
+        )
+
+        db = make_session()
+        try:
+            conv = Conversation(title="l2")
+            db.add(conv)
+            db.commit()
+            db.refresh(conv)
+            db.add(
+                AssistantConversationSkillL2Memory(
+                    conversation_id=conv.id,
+                    skill_name="smart_capture",
+                    facts=["事实1", "事实2"],
+                    version=1,
+                )
+            )
+            db.commit()
+
+            with patch("app.assistant.workflow.engine.engine.ChatOpenAI", return_value=_FakeLLM()):
+                engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=db)
+
+            with patch(
+                "app.assistant.workflow.engine.engine._get_or_compile_graph",
+                return_value=_FakeCompiled(),
+            ):
+                _ = list(
+                    engine.execute(
+                        skill=skill,
+                        user_input="u",
+                        history=[],
+                        runtime_context={"conversation_id": str(conv.id)},
+                    )
+                )
+        finally:
+            db.close()
+
+        memory_context = captured_state.get("memory_context", {})
+        self.assertIsInstance(memory_context, dict)
+        self.assertEqual(memory_context.get("l2_text"), "- 事实1\n- 事实2")
+
+    def test_execute_l2_text_empty_when_skill_not_matched(self) -> None:
+        from app.assistant.models import AssistantConversationSkillL2Memory, Conversation
+        from app.assistant.skill_catalog.base import SkillDefinition
+        from app.assistant.workflow.engine.engine import LangGraphEngine
+        from tests._db import make_session
+
+        class _FakeChunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _FakeLLM:
+            def stream(self, _messages):
+                yield _FakeChunk("x")
+
+        captured_state: dict[str, object] = {}
+
+        class _FakeCompiled:
+            def stream(self, state):
+                captured_state.update(state)
+                cb = state["metadata"].get("on_content_delta")
+                if callable(cb):
+                    cb("ok")
+                yield {"step": 1}
+
+        skill = SkillDefinition(
+            name="quick_stats",
+            description="d",
+            intent_examples=[],
+            tools=[],
+            mode="langgraph",
+            langgraph_pattern="workflow_dag",
+            workflow_nodes=[{"node_id": "start", "node_type": "start", "config": {}}],
+            workflow_edges=[],
+        )
+
+        db = make_session()
+        try:
+            conv = Conversation(title="l2-skill-miss")
+            db.add(conv)
+            db.commit()
+            db.refresh(conv)
+            db.add(
+                AssistantConversationSkillL2Memory(
+                    conversation_id=conv.id,
+                    skill_name="smart_capture",
+                    facts=["事实1"],
+                    version=1,
+                )
+            )
+            db.commit()
+
+            with patch("app.assistant.workflow.engine.engine.ChatOpenAI", return_value=_FakeLLM()):
+                engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=db)
+
+            with patch(
+                "app.assistant.workflow.engine.engine._get_or_compile_graph",
+                return_value=_FakeCompiled(),
+            ):
+                _ = list(
+                    engine.execute(
+                        skill=skill,
+                        user_input="u",
+                        history=[],
+                        runtime_context={"conversation_id": str(conv.id)},
+                    )
+                )
+        finally:
+            db.close()
+
+        memory_context = captured_state.get("memory_context", {})
+        self.assertIsInstance(memory_context, dict)
+        self.assertEqual(memory_context.get("l2_text"), "")
+
+    def test_execute_prefers_runtime_session_memory_over_db(self) -> None:
+        from app.assistant.models import AssistantConversationL1Memory, AssistantConversationSkillL2Memory, Conversation
+        from app.assistant.skill_catalog.base import SkillDefinition
+        from app.assistant.workflow.engine.engine import LangGraphEngine
+        from tests._db import make_session
+
+        class _FakeChunk:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _FakeLLM:
+            def stream(self, _messages):
+                yield _FakeChunk("x")
+
+        captured_state: dict[str, object] = {}
+
+        class _FakeCompiled:
+            def stream(self, state):
+                captured_state.update(state)
+                cb = state["metadata"].get("on_content_delta")
+                if callable(cb):
+                    cb("ok")
+                yield {"step": 1}
+
+        skill = SkillDefinition(
+            name="smart_capture",
+            description="d",
+            intent_examples=[],
+            tools=[],
+            mode="langgraph",
+            langgraph_pattern="workflow_dag",
+            workflow_nodes=[{"node_id": "start", "node_type": "start", "config": {}}],
+            workflow_edges=[],
+        )
+
+        db = make_session()
+        try:
+            conv = Conversation(title="override-memory")
+            db.add(conv)
+            db.commit()
+            db.refresh(conv)
+            db.add(
+                AssistantConversationL1Memory(
+                    conversation_id=conv.id,
+                    summary_text="数据库摘要",
+                )
+            )
+            db.add(
+                AssistantConversationSkillL2Memory(
+                    conversation_id=conv.id,
+                    skill_name="smart_capture",
+                    facts=["数据库事实"],
+                    version=1,
+                )
+            )
+            db.commit()
+
+            with patch("app.assistant.workflow.engine.engine.ChatOpenAI", return_value=_FakeLLM()):
+                engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=db)
+
+            with patch(
+                "app.assistant.workflow.engine.engine._get_or_compile_graph",
+                return_value=_FakeCompiled(),
+            ):
+                _ = list(
+                    engine.execute(
+                        skill=skill,
+                        user_input="u",
+                        history=[],
+                        runtime_context={
+                            "conversation_id": str(conv.id),
+                            "session_memory": {
+                                "conversationSummary": "前端摘要",
+                                "skillFacts": ["前端事实1", "前端事实2"],
+                            },
+                        },
+                    )
+                )
+        finally:
+            db.close()
+
+        memory_context = captured_state.get("memory_context", {})
+        self.assertIsInstance(memory_context, dict)
+        self.assertEqual(memory_context.get("l1_text"), "前端摘要")
+        self.assertEqual(memory_context.get("l2_text"), "- 前端事实1\n- 前端事实2")
 
     def test_execute_output_passthrough_source_skips_structured_llm(self) -> None:
         from app.assistant.skill_catalog.base import SkillDefinition
@@ -987,9 +2206,7 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
 
         self.assertEqual(len(llm.calls), 1)
         messages = llm.calls[0]
-        context_msg = next(m for m in messages if m.get("content", "").startswith("上下文数据"))
-        context_payload = json.loads(context_msg["content"].split("\n", 1)[1])
-        self.assertNotIn("kr_1", context_payload)
+        self.assertFalse(any(m.get("content", "").startswith("上下文数据") for m in messages))
 
         injected = next(m for m in messages if "\"inject_mode\"" in m.get("content", ""))
         payload = json.loads(injected["content"])
@@ -1394,6 +2611,95 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
 
         self.assertIn("iter_1::llm_body", node_llms)
 
+    def test_resolve_workflow_node_llms_supports_agent_custom_model_main_and_body(self) -> None:
+        from app.assistant.skill_catalog.base import SkillDefinition
+        from app.assistant.workflow.engine.engine import LangGraphEngine
+
+        class _FakeLLM:
+            def stream(self, _messages):
+                return iter(())
+
+        main_model_id = str(uuid4())
+        body_model_id = str(uuid4())
+        skill = SkillDefinition(
+            name="wf_agent_model",
+            description="d",
+            intent_examples=[],
+            tools=[],
+            mode="langgraph",
+            langgraph_pattern="workflow_dag",
+            workflow_nodes=[
+                {
+                    "node_id": "start",
+                    "node_type": "start",
+                    "label": "Start",
+                    "config": {},
+                },
+                {
+                    "node_id": "agent_1",
+                    "node_type": "agent",
+                    "label": "Agent",
+                    "config": {
+                        "toolNames": ["create_entry"],
+                        "modelSource": "custom",
+                        "modelId": main_model_id,
+                    },
+                },
+                {
+                    "node_id": "iter_1",
+                    "node_type": "iteration",
+                    "label": "Iteration",
+                    "config": {
+                        "inputSource": "{{start.user_input}}",
+                        "outputVariable": "items",
+                        "outputSelector": "{{agent_body.response}}",
+                        "bodyNodes": [
+                            {"nodeId": "start", "nodeType": "start", "label": "Start", "config": {}},
+                            {
+                                "nodeId": "agent_body",
+                                "nodeType": "agent",
+                                "label": "Body Agent",
+                                "config": {
+                                    "toolNames": ["create_entry"],
+                                    "modelSource": "custom",
+                                    "modelId": body_model_id,
+                                    "userInput": "{{container.item}}",
+                                },
+                            },
+                        ],
+                        "bodyEdges": [
+                            {"sourceNodeId": "start", "targetNodeId": "agent_body", "sourceHandle": "output"},
+                        ],
+                    },
+                },
+            ],
+            workflow_edges=[
+                {
+                    "edge_id": "e1",
+                    "source_node_id": "start",
+                    "target_node_id": "agent_1",
+                    "source_handle": "output",
+                    "target_handle": "input",
+                }
+            ],
+        )
+
+        with patch("app.assistant.workflow.engine.engine.ChatOpenAI", return_value=_FakeLLM()):
+            engine = LangGraphEngine(api_key="k", base_url="https://x", model="m", db=object())
+        with patch(
+            "app.assistant.workflow.engine.engine.resolve_openai_compat_config_by_model_id",
+            side_effect=lambda _db, model_id, model_type: SimpleNamespace(
+                api_key="sk-test",
+                base_url="https://example.com/v1",
+                model="gpt-4.1-mini",
+                model_id=uuid4() if not model_id else uuid4(),
+            ),
+        ):
+            node_llms = engine._resolve_workflow_node_llms(skill)
+
+        self.assertIn("agent_1", node_llms)
+        self.assertIn("iter_1::agent_body", node_llms)
+
     def test_iteration_node_aggregates_body_outputs(self) -> None:
         from app.assistant.workflow.engine.engine import _build_iteration_node
 
@@ -1456,6 +2762,97 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
         node_out = out["node_outputs"]["iter_1"]
         self.assertIn("items", node_out["json_fields"])
         self.assertEqual(len(node_out["json_fields"]["items"]), 2)
+
+    def test_iteration_node_supports_agent_body_execution(self) -> None:
+        from app.assistant.workflow.engine.engine import _build_iteration_node
+
+        class _Chunk:
+            def __init__(self, content: str, tool_calls: list[dict] | None = None) -> None:
+                self.content = content
+                self.tool_calls = list(tool_calls or [])
+                self.additional_kwargs = {}
+                self.response_metadata = {}
+
+            def __add__(self, other: "_Chunk") -> "_Chunk":
+                return _Chunk(
+                    (self.content or "") + (other.content or ""),
+                    list(self.tool_calls or []) + list(other.tool_calls or []),
+                )
+
+        class _LLMWithTools:
+            def stream(self, messages):
+                user_text = ""
+                for message in reversed(messages):
+                    if isinstance(message, dict) and message.get("role") == "user":
+                        user_text = str(message.get("content", "") or "")
+                        break
+                yield _Chunk(f"echo:{user_text}")
+
+        class _LLM:
+            def bind_tools(self, _tools, parallel_tool_calls=False):
+                return _LLMWithTools()
+
+        class _Tool:
+            name = "noop"
+
+            @staticmethod
+            def func(**_kwargs):
+                return "ok"
+
+        node = _build_iteration_node(
+            "iter_1",
+            {
+                "input_source": "{{start.user_input}}",
+                "output_variable": "results",
+                "output_selector": "{{agent_body.response}}",
+                "parallel_mode": False,
+                "error_strategy": "fail_fast",
+                "flatten_output": False,
+                "body_nodes": [
+                    {"node_id": "start", "node_type": "start", "config": {}},
+                    {
+                        "node_id": "agent_body",
+                        "node_type": "agent",
+                        "config": {
+                            "system_prompt": "echo",
+                            "user_input": "{{container.item}}",
+                            "tool_names": ["noop"],
+                            "max_iterations": 3,
+                        },
+                    },
+                ],
+                "body_edges": [
+                    {"source_node_id": "start", "target_node_id": "agent_body", "source_handle": "output"},
+                ],
+            },
+            _LLM(),
+            _LLM(),
+            {"noop": _Tool()},
+            object(),
+            node_llms=None,
+        )
+
+        with patch(
+            "app.assistant.workflow.engine.node_builders.dag_agent_node.engine_runtime._wrap_tool_with_db",
+            side_effect=lambda tool, _db_bind: (lambda **kwargs: tool.func(**kwargs)),
+        ):
+            out = node(
+                {
+                    "user_input": '["a", "b"]',
+                    "node_outputs": {
+                        "start": {
+                            "status": "ok",
+                            "text": '["a", "b"]',
+                            "raw": ["a", "b"],
+                            "json_fields": {"user_input": '["a", "b"]'},
+                        }
+                    },
+                    "metadata": {},
+                }
+            )
+
+        node_out = out["node_outputs"]["iter_1"]
+        self.assertEqual(node_out["json_fields"]["results"], ["echo:a", "echo:b"])
 
     def test_loop_node_terminates_by_container_condition(self) -> None:
         from app.assistant.workflow.engine.engine import _build_loop_node

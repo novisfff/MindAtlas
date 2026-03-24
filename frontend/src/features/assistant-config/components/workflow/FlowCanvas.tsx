@@ -28,6 +28,7 @@ import { FlowControls } from './FlowControls'
 const nodeTypes: NodeTypes = {
   start: WorkflowNode,
   llm: WorkflowNode,
+  agent: WorkflowNode,
   tool: WorkflowNode,
   if_else: WorkflowNode,
   parameter_extractor: WorkflowNode,
@@ -232,6 +233,8 @@ function createWorkflowEdge(params: {
 interface FlowCanvasProps {
   tools: WorkflowToolDefinition[]
   workflowDescription?: string
+  readOnly?: boolean
+  floatingUiEpoch?: number
 }
 
 type RuntimeNodeStatus = 'running' | 'success' | 'error'
@@ -242,7 +245,7 @@ const RUNTIME_STATUS_PRIORITY: Record<RuntimeNodeStatus, number> = {
   success: 1,
 }
 
-export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
+export function FlowCanvas({ tools, workflowDescription, readOnly = false, floatingUiEpoch = 0 }: FlowCanvasProps) {
   const reactFlowWrapper = useRef<HTMLDivElement>(null)
   const { screenToFlowPosition, setCenter } = useReactFlow()
   const store = useWorkflowEditorStore()
@@ -264,7 +267,7 @@ export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
       }
     }
 
-    Object.entries(nodeTraceMap).forEach(([rawNodeId, trace]) => {
+    Object.values(nodeTraceMap).forEach((trace) => {
       const mappedStatus = trace.status === 'running'
         ? 'running'
         : trace.status === 'error'
@@ -273,6 +276,7 @@ export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
             ? 'success'
             : null
       if (!mappedStatus) return
+      const rawNodeId = trace.nodeId
       const scopeIdx = rawNodeId.indexOf('::')
       if (scopeIdx > 0) {
         const containerId = rawNodeId.slice(0, scopeIdx)
@@ -285,11 +289,14 @@ export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
     return merged
   }, [nodeTraceMap])
 
+  const isEditable = isInteractive && !readOnly
+
   const handleDeleteEdge = useCallback(
     (edgeId: string) => {
+      if (readOnly) return
       store.removeEdge(edgeId)
     },
-    [store],
+    [readOnly, store],
   )
 
   const handleSelectEdge = useCallback(
@@ -326,6 +333,7 @@ export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
 
   const handleQuickAdd = useCallback(
     (anchorNodeId: string, anchorHandle: string, payload: QuickAddPayload) => {
+      if (readOnly) return
       const anchorNode = store.nodes.find((item) => item.id === anchorNodeId)
       if (!anchorNode) return
       const isInputSide = anchorHandle === 'input'
@@ -399,7 +407,7 @@ export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
           }),
       )
     },
-    [store, tools],
+    [readOnly, store, tools],
   )
 
   const nodesWithRuntimeData: Node<WfNodeData>[] = useMemo(
@@ -413,9 +421,10 @@ export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
           quickAddHandles: quickAddHandleMap.get(node.id) ?? [],
           onQuickAdd: handleQuickAdd,
           quickAddTools: tools,
+          floatingUiEpoch,
         },
       })),
-    [handleQuickAdd, quickAddHandleMap, runtimeStatusByNodeId, store.nodes, tools, workflowDescription],
+    [floatingUiEpoch, handleQuickAdd, quickAddHandleMap, runtimeStatusByNodeId, store.nodes, tools, workflowDescription],
   )
 
   const onEdgeClick = useCallback(
@@ -427,22 +436,25 @@ export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
 
   const onNodesChange: OnNodesChange = useCallback(
     (changes) => {
+      if (readOnly) return
       const updated = applyNodeChanges(changes, store.nodes)
       store.setNodes(updated as Node<WfNodeData>[])
     },
-    [store],
+    [readOnly, store],
   )
 
   const onEdgesChange: OnEdgesChange = useCallback(
     (changes) => {
+      if (readOnly) return
       const updated = applyEdgeChanges(changes, store.edges)
       store.setEdges(updated)
     },
-    [store],
+    [readOnly, store],
   )
 
   const onConnect: OnConnect = useCallback(
     (connection) => {
+      if (readOnly) return
       if (!connection.source || !connection.target) return
       const sourceNode = nodeMap.get(connection.source)
       const targetNode = nodeMap.get(connection.target)
@@ -471,28 +483,32 @@ export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
         type: 'workflowBezier',
       })
     },
-    [nodeMap, store],
+    [nodeMap, readOnly, store],
   )
 
   const onNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
+      if (readOnly) return
       store.setSelectedNodeId(node.id)
     },
-    [store],
+    [readOnly, store],
   )
 
   const onPaneClick = useCallback(() => {
+    if (readOnly) return
     store.setSelectedNodeId(null)
     store.setSelectedEdgeId(null)
-  }, [store])
+  }, [readOnly, store])
 
   const onDragOver = useCallback((e: React.DragEvent) => {
+    if (readOnly) return
     e.preventDefault()
     e.dataTransfer.dropEffect = 'move'
-  }, [])
+  }, [readOnly])
 
   const onDrop = useCallback(
     (e: React.DragEvent) => {
+      if (readOnly) return
       e.preventDefault()
 
       const position = screenToFlowPosition({ x: e.clientX, y: e.clientY })
@@ -529,7 +545,7 @@ export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
 
       store.addNode(createMainFlowNode({ id: nodeId, nodeType, position }))
     },
-    [screenToFlowPosition, store, tools],
+    [readOnly, screenToFlowPosition, store, tools],
   )
 
   const isEditableElement = (target: EventTarget | Element | null): boolean => {
@@ -540,6 +556,7 @@ export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
 
   const onDelete = useCallback(
     (e: KeyboardEvent) => {
+      if (readOnly) return
       const isDeleteKey = e.key === 'Delete' || e.key === 'Backspace'
       if (!isDeleteKey) return
 
@@ -559,7 +576,7 @@ export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
         store.removeEdge(store.selectedEdgeId)
       }
     },
-    [store],
+    [readOnly, store],
   )
 
   // Register delete handler
@@ -607,12 +624,12 @@ export function FlowCanvas({ tools, workflowDescription }: FlowCanvasProps) {
         snapGrid={[16, 16]}
         fitView
         deleteKeyCode={null}
-        nodesDraggable={isInteractive}
-        nodesConnectable={isInteractive}
-        elementsSelectable={isInteractive}
+        nodesDraggable={isEditable}
+        nodesConnectable={isEditable}
+        elementsSelectable={isEditable}
       >
         <Background gap={16} size={1} color="#94a3b8" className="opacity-40" />
-        <FlowControls isInteractive={isInteractive} onLockChange={setIsInteractive} />
+        <FlowControls isInteractive={isEditable} onLockChange={setIsInteractive} />
         <MiniMap
           nodeStrokeWidth={3}
           zoomable

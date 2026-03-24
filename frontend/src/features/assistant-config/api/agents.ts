@@ -16,6 +16,8 @@ export interface AssistantAgentProfile {
   publishedVersionId: string | null
   referencedSkillIds: string[]
   referenceCount: number
+  referencedSystemBehaviorKeys: string[]
+  systemBehaviorReferenceCount: number
   createdAt: string
   updatedAt: string
 }
@@ -119,12 +121,23 @@ export const deleteAgentVersion = (id: string, versionId: string) =>
 export const clearAgentVersions = (id: string) =>
   apiClient.post<AgentClearVersionsResponse>(`/api/assistant-config/agents/${id}/versions/clear`)
 
-export const deleteAgentProfile = (id: string) =>
-  apiClient.delete(`/api/assistant-config/agents/${id}`)
+export const deleteAgentProfile = (
+  id: string,
+  options: { confirmRebindSystemBehaviors?: boolean } = {},
+) =>
+  apiClient.delete(`/api/assistant-config/agents/${id}`, {
+    query: {
+      confirmRebindSystemBehaviors: options.confirmRebindSystemBehaviors ?? false,
+    },
+  })
 
 export interface AgentTestRunRequest {
   draft: AgentTestRunDraftInput
   userInput: string
+  history?: Array<{
+    role: 'user' | 'assistant'
+    content: string
+  }>
   streamOutput?: boolean
 }
 
@@ -156,6 +169,10 @@ export type AgentTestRunEvent =
         toolCallId: string
         name: string
         args: Record<string, unknown>
+        startedAt?: string
+        agentRound?: number
+        toolCallIndex?: number
+        toolKind?: 'tool' | 'knowledge'
         ts: string
       }
     }
@@ -166,6 +183,12 @@ export type AgentTestRunEvent =
         toolCallId: string
         status: string
         result: string
+        startedAt?: string | null
+        endedAt?: string
+        durationMs?: number | null
+        agentRound?: number
+        toolCallIndex?: number
+        toolKind?: 'tool' | 'knowledge'
         ts: string
       }
     }

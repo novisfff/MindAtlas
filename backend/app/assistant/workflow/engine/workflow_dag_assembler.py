@@ -18,6 +18,7 @@ class WorkflowNodeBuilderDeps:
     node_llms: dict[str, ChatOpenAI] | None
     build_start_node: Callable[[dict[str, Any]], Callable[[WorkflowState], dict]]
     build_dag_llm_node: Callable[..., Callable[[WorkflowState], dict]]
+    build_dag_agent_node: Callable[..., Callable[[WorkflowState], dict]]
     build_output_node: Callable[..., Callable[[WorkflowState], dict]]
     build_dag_tool_node: Callable[..., Callable[[WorkflowState], dict]]
     build_code_executor_node: Callable[..., Callable[[WorkflowState], dict]]
@@ -42,6 +43,15 @@ def _build_workflow_node_fn(
         return deps.build_start_node(node_cfg)
     if node_type == "llm":
         return deps.build_dag_llm_node(node_id, node_cfg, deps.llm, node_llms=deps.node_llms)
+    if node_type == "agent":
+        return deps.build_dag_agent_node(
+            node_id,
+            node_cfg,
+            deps.llm,
+            deps.tool_map,
+            deps.db_bind,
+            node_llms=deps.node_llms,
+        )
     if node_type == "output":
         return deps.build_output_node(node_id, node_cfg)
     if node_type == "tool":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Callable
+from uuid import uuid4
 
 from app.assistant.workflow.engine import runtime_helpers as rt
 from app.assistant.workflow.engine.snapshot_input_resolvers import (
@@ -223,17 +224,26 @@ def wrap_workflow_node_with_snapshot(
 
     def wrapped(state: WorkflowState) -> dict:
         metadata = state.get("metadata", {}) if isinstance(state, dict) else {}
+        node_execution_id = uuid4().hex
+        scoped_metadata = rt.with_node_execution_context(
+            metadata,
+            node_id=node_id,
+            node_type=node_type,
+            node_execution_id=node_execution_id,
+        )
+        state_with_metadata = dict(state)
+        state_with_metadata["metadata"] = scoped_metadata
         try:
-            snapshot_input = input_builder(node_type, node_cfg, state)
+            snapshot_input = input_builder(node_type, node_cfg, state_with_metadata)
         except Exception as exc:
             snapshot_input = {
                 "snapshotError": f"failed to build input snapshot: {exc}",
             }
         try:
-            result = node_fn(state)
+            result = node_fn(state_with_metadata)
         except Exception as exc:
             snapshot_emitter(
-                metadata,
+                scoped_metadata,
                 node_id=node_id,
                 node_type=node_type,
                 status="error",
@@ -261,7 +271,7 @@ def wrap_workflow_node_with_snapshot(
                 "snapshotError": f"failed to build output snapshot: {exc}",
             }
         snapshot_emitter(
-            metadata,
+            scoped_metadata,
             node_id=node_id,
             node_type=node_type,
             status="ok",

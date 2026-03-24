@@ -12,6 +12,9 @@ from uuid import UUID, uuid4
 from sqlalchemy.orm import Session
 
 from app.ai_registry.runtime import resolve_openai_compat_config
+from app.assistant.memory_computation import AssistantMemoryComputationService
+from app.assistant.memory_service import AssistantMemoryService
+from app.assistant.orchestration.openai_fallback_client import OpenAiFallbackConfig
 from app.assistant.skill_catalog.base import (
     ConditionExpression,
     SkillDefinition,
@@ -27,6 +30,7 @@ from app.assistant_config.models import AssistantWorkflow
 from app.assistant_config.schemas import WorkflowInput, WorkflowTestRunRequest
 from app.assistant_config.service import AssistantConfigService
 from app.common.exceptions import ApiException
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +46,24 @@ class PreparedWorkflowTestRun:
     workflow: WorkflowInput
     user_input: str | None
     structured_input: dict[str, Any] | None
+    session_id: str
+    history: list[dict[str, str]]
+    session_memory: "PreparedWorkflowSessionMemory"
     start_input_mode: str
     stream_output: bool
     skill_definition: SkillDefinition
+
+
+@dataclass(frozen=True)
+class PreparedWorkflowSessionMemory:
+    conversation_summary: str
+    skill_facts: list[str]
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "conversationSummary": self.conversation_summary,
+            "skillFacts": list(self.skill_facts),
+        }
 
 
 def _utc_iso_now() -> str:
@@ -64,12 +83,43 @@ def _safe_json_parse(text: str) -> dict[str, Any] | list[Any] | None:
     return None
 
 
+def _build_trace_context_payload(extra: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+
+    node_id = str(extra.get("node_id", "") or "").strip()
+    if node_id:
+        payload["nodeId"] = node_id
+
+    node_type = str(extra.get("node_type", "") or "").strip()
+    if node_type:
+        payload["nodeType"] = node_type
+
+    node_execution_id = str(extra.get("node_execution_id", "") or "").strip()
+    if node_execution_id:
+        payload["nodeExecutionId"] = node_execution_id
+
+    agent_round = extra.get("agent_round")
+    if isinstance(agent_round, int):
+        payload["agentRound"] = agent_round
+
+    tool_call_index = extra.get("tool_call_index")
+    if isinstance(tool_call_index, int):
+        payload["toolCallIndex"] = tool_call_index
+
+    tool_kind = str(extra.get("tool_kind", "") or "").strip().lower()
+    if tool_kind in {"tool", "knowledge"}:
+        payload["toolKind"] = tool_kind
+
+    return payload
+
+
 class WorkflowTestRunService:
     """Workflow test-run service for editor draft execution (no persistence)."""
 
     def __init__(self, db: Session):
         self.db = db
         self.config_service = AssistantConfigService(db)
+        self._memory_computation_service = AssistantMemoryComputationService()
 
     @staticmethod
     def _sse(event: str, data: dict[str, Any]) -> bytes:
@@ -99,6 +149,18 @@ class WorkflowTestRunService:
             if isinstance(raw_fields, list):
                 start_structured_fields = [item for item in raw_fields if isinstance(item, dict)]
             break
+
+        normalized_session_id = str(request.session_id or uuid4()).strip()
+        normalized_history = [
+            {
+                "role": str(getattr(item, "role", item.get("role")) if isinstance(item, dict) else item.role).strip(),
+                "content": str(
+                    getattr(item, "content", item.get("content")) if isinstance(item, dict) else item.content
+                ).strip(),
+            }
+            for item in request.history
+        ]
+        normalized_session_memory = self._normalize_session_memory(request.session_memory)
 
         if start_input_mode == "structured":
             provided_input = request.structured_input
@@ -234,9 +296,42 @@ class WorkflowTestRunService:
             workflow=workflow,
             user_input=request.user_input if start_input_mode == "text" else None,
             structured_input=request.structured_input if start_input_mode == "structured" else None,
+            session_id=normalized_session_id,
+            history=normalized_history,
+            session_memory=normalized_session_memory,
             start_input_mode=start_input_mode,
             stream_output=bool(request.stream_output),
             skill_definition=skill_definition,
+        )
+
+    def _normalize_session_memory(
+        self,
+        session_memory: Any,
+    ) -> PreparedWorkflowSessionMemory:
+        raw = session_memory
+        if raw is None:
+            return PreparedWorkflowSessionMemory(conversation_summary="", skill_facts=[])
+
+        settings = get_settings()
+        max_chars = max(1, int(getattr(settings, "assistant_memory_l1_max_chars", 2000) or 2000))
+        max_items = max(1, int(getattr(settings, "assistant_memory_l2_max_items", 20) or 20))
+        raw_summary = raw.get("conversation_summary", raw.get("conversationSummary", "")) if isinstance(raw, dict) else (
+            getattr(raw, "conversation_summary", "")
+        )
+        raw_facts = raw.get("skill_facts", raw.get("skillFacts", [])) if isinstance(raw, dict) else (
+            getattr(raw, "skill_facts", [])
+        )
+        conversation_summary = AssistantMemoryService.truncate_summary(
+            str(raw_summary or "").strip(),
+            max_chars=max_chars,
+        )
+        skill_facts = AssistantMemoryService.normalize_l2_facts(
+            list(raw_facts or []),
+            max_items=max_items,
+        )
+        return PreparedWorkflowSessionMemory(
+            conversation_summary=conversation_summary,
+            skill_facts=skill_facts,
         )
 
     def prepare(self, skill_id: UUID, request: WorkflowTestRunRequest) -> PreparedWorkflowTestRun:
@@ -281,19 +376,82 @@ class WorkflowTestRunService:
             db=self.db,
         )
 
+    @staticmethod
+    def _build_runtime_conversation_id(session_id: str) -> str:
+        value = str(session_id or "").strip() or uuid4().hex
+        return f"workflow_test_session:{value}"
+
+    def _compute_next_session_memory(
+        self,
+        *,
+        cfg: OpenAiFallbackConfig | None,
+        prepared: PreparedWorkflowTestRun,
+        assistant_text: str,
+        run_id: str,
+    ) -> PreparedWorkflowSessionMemory:
+        previous = prepared.session_memory
+        if prepared.start_input_mode != "text":
+            return previous
+
+        settings = get_settings()
+        max_chars = max(1, int(getattr(settings, "assistant_memory_l1_max_chars", 2000) or 2000))
+        max_items = max(1, int(getattr(settings, "assistant_memory_l2_max_items", 20) or 20))
+
+        next_summary = previous.conversation_summary
+        next_facts = list(previous.skill_facts)
+
+        try:
+            next_summary, _ = self._memory_computation_service.compute_next_l1_summary(
+                cfg=cfg,
+                prev_summary=previous.conversation_summary,
+                user_text=prepared.user_input or "",
+                assistant_text=assistant_text,
+                max_chars=max_chars,
+            )
+        except Exception:
+            logger.exception(
+                "workflow test run l1 compute failed scope=%s run_id=%s",
+                prepared.display_name,
+                run_id,
+            )
+
+        try:
+            next_facts, _ = self._memory_computation_service.compute_next_l2_facts(
+                cfg=cfg,
+                prev_facts=previous.skill_facts,
+                skill_name=prepared.display_name,
+                user_text=prepared.user_input or "",
+                assistant_text=assistant_text,
+                max_items=max_items,
+            )
+        except Exception:
+            logger.exception(
+                "workflow test run l2 compute failed scope=%s run_id=%s",
+                prepared.display_name,
+                run_id,
+            )
+
+        return PreparedWorkflowSessionMemory(
+            conversation_summary=next_summary,
+            skill_facts=next_facts,
+        )
+
     def stream(self, prepared: PreparedWorkflowTestRun) -> Iterator[bytes]:
         """Execute prepared workflow test run and return SSE event stream."""
         run_id = uuid4().hex
         started_at = _utc_iso_now()
         started_perf = time.perf_counter()
+        runtime_conversation_id = self._build_runtime_conversation_id(prepared.session_id)
 
         event_queue: deque[bytes] = deque()
         final_parts: list[str] = []
         pending_content_delta_parts: list[str] = []
         pending_content_delta_chars = 0
-        pending_node_delta_parts: dict[str, list[str]] = {}
-        pending_node_delta_chars: dict[str, int] = {}
+        pending_node_delta_parts: dict[tuple[str, str], list[str]] = {}
+        pending_node_delta_chars: dict[tuple[str, str], int] = {}
         last_delta_flush_at = time.perf_counter()
+        tool_started_perf: dict[str, float] = {}
+        tool_started_at: dict[str, str] = {}
 
         def enqueue(event_name: str, **payload: Any) -> None:
             event_queue.append(self._sse(event_name, payload))
@@ -323,7 +481,7 @@ class WorkflowTestRunService:
                 return
 
             ts = _utc_iso_now()
-            for node_id, parts in list(pending_node_delta_parts.items()):
+            for (node_id, node_execution_id), parts in list(pending_node_delta_parts.items()):
                 if not parts:
                     continue
                 enqueue(
@@ -332,6 +490,7 @@ class WorkflowTestRunService:
                     nodeId=node_id,
                     delta="".join(parts),
                     ts=ts,
+                    **({"nodeExecutionId": node_execution_id} if node_execution_id else {}),
                 )
             if pending_content_delta_chars > 0 and pending_content_delta_parts:
                 enqueue(
@@ -417,64 +576,86 @@ class WorkflowTestRunService:
             return
 
         try:
-            def on_tool_call_start(tool_call_id: str, tool_name: str, args: Any) -> None:
+            def on_tool_call_start(tool_call_id: str, tool_name: str, args: Any, **extra: Any) -> None:
+                started_at = _utc_iso_now()
+                tool_started_at[tool_call_id] = started_at
+                tool_started_perf[tool_call_id] = time.perf_counter()
                 _queue_key_event(
                     "tool_call_start",
                     runId=run_id,
                     toolCallId=tool_call_id,
                     name=tool_name,
                     args=args,
-                    ts=_utc_iso_now(),
+                    startedAt=started_at,
+                    ts=started_at,
+                    **_build_trace_context_payload(extra),
                 )
 
-            def on_tool_call_end(tool_call_id: str, status: str, result: Any) -> None:
+            def on_tool_call_end(tool_call_id: str, status: str, result: Any, **extra: Any) -> None:
+                ended_at = _utc_iso_now()
+                started_perf = tool_started_perf.pop(tool_call_id, None)
+                started_at = tool_started_at.pop(tool_call_id, None)
+                duration_ms = (
+                    max(0, int((time.perf_counter() - started_perf) * 1000))
+                    if isinstance(started_perf, (int, float))
+                    else None
+                )
                 _queue_key_event(
                     "tool_call_end",
                     runId=run_id,
                     toolCallId=tool_call_id,
                     status=status,
                     result=result,
-                    ts=_utc_iso_now(),
+                    startedAt=started_at,
+                    endedAt=ended_at,
+                    durationMs=duration_ms,
+                    ts=ended_at,
+                    **_build_trace_context_payload(extra),
                 )
 
-            def on_node_start(node_id: str, node_type: str) -> None:
+            def on_node_start(node_id: str, node_type: str, **extra: Any) -> None:
                 _queue_key_event(
                     "node_start",
                     runId=run_id,
                     nodeId=node_id,
                     nodeType=node_type,
                     ts=_utc_iso_now(),
+                    **_build_trace_context_payload(extra),
                 )
 
-            def on_node_output_delta(node_id: str, node_delta: str) -> None:
+            def on_node_output_delta(node_id: str, delta: str, **extra: Any) -> None:
                 nonlocal last_delta_flush_at
-                delta_text = str(node_delta or "")
+                delta_text = str(delta or "")
                 if not delta_text:
                     return
                 had_pending = _has_pending_delta()
-                node_parts = pending_node_delta_parts.setdefault(node_id, [])
+                node_execution_id = str(extra.get("node_execution_id", "") or "").strip()
+                node_key = (node_id, node_execution_id)
+                node_parts = pending_node_delta_parts.setdefault(node_key, [])
                 node_parts.append(delta_text)
-                pending_node_delta_chars[node_id] = pending_node_delta_chars.get(node_id, 0) + len(delta_text)
+                pending_node_delta_chars[node_key] = pending_node_delta_chars.get(node_key, 0) + len(delta_text)
                 if not had_pending:
                     last_delta_flush_at = time.perf_counter()
                 flush_pending_delta(force=False)
 
-            def on_node_end(node_id: str, status: str) -> None:
+            def on_node_end(node_id: str, status: str, **extra: Any) -> None:
                 _queue_key_event(
                     "node_end",
                     runId=run_id,
                     nodeId=node_id,
                     status=status,
                     ts=_utc_iso_now(),
+                    **_build_trace_context_payload(extra),
                 )
 
-            def on_branch_decision(node_id: str, handle: str) -> None:
+            def on_branch_decision(node_id: str, handle: str, **extra: Any) -> None:
                 _queue_key_event(
                     "branch_decision",
                     runId=run_id,
                     nodeId=node_id,
                     handle=handle,
                     ts=_utc_iso_now(),
+                    **_build_trace_context_payload(extra),
                 )
 
             def on_node_snapshot(
@@ -485,6 +666,7 @@ class WorkflowTestRunService:
                 output_data: Any,
                 error_message: str | None,
                 hard_truncated: bool,
+                **extra: Any,
             ) -> None:
                 _queue_key_event(
                     "node_snapshot",
@@ -497,6 +679,7 @@ class WorkflowTestRunService:
                     errorMessage=error_message,
                     hardTruncated=hard_truncated,
                     ts=_utc_iso_now(),
+                    **_build_trace_context_payload(extra),
                 )
 
             def on_human_approval_requested(payload: dict[str, Any]) -> None:
@@ -518,15 +701,20 @@ class WorkflowTestRunService:
             for delta in engine.execute(
                 skill=prepared.skill_definition,
                 user_input=prepared.user_input or "",
-                history=[],
+                history=prepared.history,
                 runtime_context={
                     "stream_output": prepared.stream_output,
-                    "conversation_id": f"workflow_test:{run_id}",
+                    "conversation_id": runtime_conversation_id,
                     "structured_input": prepared.structured_input,
                     "run_id": run_id,
                     "channel_type": "workflow_test",
                     "workflow_id": str(prepared.workflow_id),
                     "skill_id": str(prepared.skill_id) if prepared.skill_id else None,
+                    **(
+                        {"session_memory": prepared.session_memory.to_payload()}
+                        if prepared.start_input_mode == "text"
+                        else {}
+                    ),
                 },
                 on_tool_call_start=on_tool_call_start,
                 on_tool_call_end=on_tool_call_end,
@@ -555,6 +743,19 @@ class WorkflowTestRunService:
             yield from flush()
             final_text = "".join(final_parts)
             final_json = _safe_json_parse(final_text)
+            next_session_memory_payload: dict[str, Any] | None = None
+            if prepared.start_input_mode == "text":
+                next_session_memory = self._compute_next_session_memory(
+                    cfg=OpenAiFallbackConfig(
+                        api_key=cfg.api_key,
+                        base_url=cfg.base_url,
+                        model=cfg.model,
+                    ),
+                    prepared=prepared,
+                    assistant_text=final_text,
+                    run_id=run_id,
+                )
+                next_session_memory_payload = next_session_memory.to_payload()
             duration_ms = int((time.perf_counter() - started_perf) * 1000)
             enqueue(
                 "run_end",
@@ -564,6 +765,7 @@ class WorkflowTestRunService:
                 finalText=final_text,
                 finalJson=final_json,
                 streamOutput=prepared.stream_output,
+                **({"sessionMemory": next_session_memory_payload} if next_session_memory_payload is not None else {}),
             )
             yield from flush()
         except GeneratorExit:

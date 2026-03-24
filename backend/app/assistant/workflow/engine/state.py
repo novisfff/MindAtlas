@@ -21,8 +21,10 @@ class AssistantState(TypedDict, total=False):
     skill_name: str
     user_input: str
     kb_enabled: bool
+    memory_mode: str
     iteration_count: int
     metadata: dict
+    memory_context: dict[str, Any]
     current_step: int
     step_outputs: dict[int, StepOutput]
     summary_trace: list[dict]
@@ -62,7 +64,9 @@ class WorkflowState(TypedDict, total=False):
     skill_name: str
     user_input: str
     kb_enabled: bool
+    memory_mode: str
     metadata: dict
+    memory_context: dict[str, Any]
     node_outputs: Annotated[dict[str, NodeOutput], _merge_node_outputs]
     execution_trace: Annotated[list[str], _merge_trace]
     branch_decisions: Annotated[dict[str, str], _merge_branch_decisions]
@@ -74,4 +78,3 @@ class WorkflowState(TypedDict, total=False):
     structured_input: dict[str, Any]
     env_vars: dict[str, Any]
     env_specs: dict[str, dict[str, Any]]
-

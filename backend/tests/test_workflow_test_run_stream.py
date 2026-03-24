@@ -4,6 +4,7 @@ import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+from uuid import uuid4
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 from tests._db import make_session
@@ -136,7 +137,10 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         self.assertIn("Invalid workflow topology", ctx.exception.message)
 
     def test_stream_emits_run_and_trace_events(self) -> None:
-        from app.assistant_config.workflow_test_service import WorkflowTestRunService
+        from app.assistant_config.workflow_test_service import (
+            PreparedWorkflowSessionMemory,
+            WorkflowTestRunService,
+        )
 
         skill = self._create_workflow_skill()
         service = WorkflowTestRunService(self.db)
@@ -144,24 +148,45 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
 
         class _FakeEngine:
             def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
-                kwargs["on_node_start"]("start", "start")
-                kwargs["on_node_end"]("start", "ok")
-                kwargs["on_node_start"]("llm_1", "llm")
-                kwargs["on_node_output_delta"]("llm_1", "A")
-                kwargs["on_tool_call_start"]("tool_1", "search_entries", {"q": "hello"})
-                kwargs["on_tool_call_end"]("tool_1", "completed", "{}")
+                kwargs["on_node_start"]("start", "start", node_execution_id="exec_start")
+                kwargs["on_node_end"]("start", "ok", node_execution_id="exec_start")
+                kwargs["on_node_start"]("llm_1", "agent", node_execution_id="exec_agent_1")
+                kwargs["on_node_output_delta"]("llm_1", "A", node_execution_id="exec_agent_1")
+                kwargs["on_tool_call_start"](
+                    "tool_1",
+                    "search_entries",
+                    {"q": "hello"},
+                    node_id="llm_1",
+                    node_type="agent",
+                    node_execution_id="exec_agent_1",
+                    agent_round=1,
+                    tool_call_index=1,
+                    tool_kind="tool",
+                )
+                kwargs["on_tool_call_end"](
+                    "tool_1",
+                    "completed",
+                    "{}",
+                    node_id="llm_1",
+                    node_type="agent",
+                    node_execution_id="exec_agent_1",
+                    agent_round=1,
+                    tool_call_index=1,
+                    tool_kind="tool",
+                )
                 yield "A"
-                kwargs["on_node_output_delta"]("llm_1", "B")
+                kwargs["on_node_output_delta"]("llm_1", "B", node_execution_id="exec_agent_1")
                 yield "B"
-                kwargs["on_node_end"]("llm_1", "ok")
+                kwargs["on_node_end"]("llm_1", "ok", node_execution_id="exec_agent_1")
                 kwargs["on_node_snapshot"](
                     "llm_1",
-                    "llm",
+                    "agent",
                     "ok",
                     {"userInput": "hello"},
                     {"response": "AB"},
                     None,
                     False,
+                    node_execution_id="exec_agent_1",
                 )
 
         with patch(
@@ -170,6 +195,10 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         ), patch(
             "app.assistant_config.workflow_test_service.WorkflowTestRunService._build_engine",
             return_value=_FakeEngine(),
+        ), patch.object(
+            service,
+            "_compute_next_session_memory",
+            return_value=PreparedWorkflowSessionMemory(conversation_summary="", skill_facts=[]),
         ):
             chunks = list(service.stream(prepared))
 
@@ -189,13 +218,34 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         self.assertEqual(run_end_payload["finalText"], "AB")
         snapshot_payload = next(payload for name, payload in events if name == "node_snapshot")
         self.assertEqual(snapshot_payload["nodeId"], "llm_1")
-        self.assertEqual(snapshot_payload["nodeType"], "llm")
+        self.assertEqual(snapshot_payload["nodeType"], "agent")
         self.assertEqual(snapshot_payload["status"], "ok")
         self.assertEqual(snapshot_payload["input"], {"userInput": "hello"})
         self.assertEqual(snapshot_payload["output"], {"response": "AB"})
+        self.assertEqual(snapshot_payload["nodeExecutionId"], "exec_agent_1")
+
+        node_start_payload = next(payload for name, payload in events if name == "node_start" and payload["nodeId"] == "llm_1")
+        self.assertEqual(node_start_payload["nodeExecutionId"], "exec_agent_1")
+
+        tool_start_payload = next(payload for name, payload in events if name == "tool_call_start")
+        self.assertEqual(tool_start_payload["nodeId"], "llm_1")
+        self.assertEqual(tool_start_payload["nodeType"], "agent")
+        self.assertEqual(tool_start_payload["nodeExecutionId"], "exec_agent_1")
+        self.assertEqual(tool_start_payload["agentRound"], 1)
+        self.assertEqual(tool_start_payload["toolCallIndex"], 1)
+        self.assertEqual(tool_start_payload["toolKind"], "tool")
+        self.assertIn("startedAt", tool_start_payload)
+
+        tool_end_payload = next(payload for name, payload in events if name == "tool_call_end")
+        self.assertEqual(tool_end_payload["nodeExecutionId"], "exec_agent_1")
+        self.assertIn("endedAt", tool_end_payload)
+        self.assertIn("durationMs", tool_end_payload)
 
     def test_stream_emits_env_snapshot_payload(self) -> None:
-        from app.assistant_config.workflow_test_service import WorkflowTestRunService
+        from app.assistant_config.workflow_test_service import (
+            PreparedWorkflowSessionMemory,
+            WorkflowTestRunService,
+        )
 
         skill = self._create_workflow_skill()
         service = WorkflowTestRunService(self.db)
@@ -232,6 +282,10 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         ), patch(
             "app.assistant_config.workflow_test_service.WorkflowTestRunService._build_engine",
             return_value=_FakeEngine(),
+        ), patch.object(
+            service,
+            "_compute_next_session_memory",
+            return_value=PreparedWorkflowSessionMemory(conversation_summary="", skill_facts=[]),
         ):
             chunks = list(service.stream(prepared))
 
@@ -242,7 +296,10 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         self.assertEqual(snapshot_payload["output"]["after"], 3)
 
     def test_stream_emits_human_approval_events(self) -> None:
-        from app.assistant_config.workflow_test_service import WorkflowTestRunService
+        from app.assistant_config.workflow_test_service import (
+            PreparedWorkflowSessionMemory,
+            WorkflowTestRunService,
+        )
 
         skill = self._create_workflow_skill()
         service = WorkflowTestRunService(self.db)
@@ -282,6 +339,10 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         ), patch(
             "app.assistant_config.workflow_test_service.WorkflowTestRunService._build_engine",
             return_value=_FakeEngine(),
+        ), patch.object(
+            service,
+            "_compute_next_session_memory",
+            return_value=PreparedWorkflowSessionMemory(conversation_summary="", skill_facts=[]),
         ):
             chunks = list(service.stream(prepared))
 
@@ -296,7 +357,10 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         self.assertEqual(resolved["approval"]["status"], "approved")
 
     def test_stream_aggregates_high_frequency_delta_events(self) -> None:
-        from app.assistant_config.workflow_test_service import WorkflowTestRunService
+        from app.assistant_config.workflow_test_service import (
+            PreparedWorkflowSessionMemory,
+            WorkflowTestRunService,
+        )
 
         skill = self._create_workflow_skill()
         service = WorkflowTestRunService(self.db)
@@ -317,6 +381,10 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         ), patch(
             "app.assistant_config.workflow_test_service.WorkflowTestRunService._build_engine",
             return_value=_FakeEngine(),
+        ), patch.object(
+            service,
+            "_compute_next_session_memory",
+            return_value=PreparedWorkflowSessionMemory(conversation_summary="", skill_facts=[]),
         ):
             chunks = list(service.stream(prepared))
 
@@ -379,6 +447,162 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
 
         self.assertEqual(run_error_payload["stage"], "bootstrap")
         self.assertEqual(run_end_payload["status"], "error")
+
+    def test_prepare_rejects_structured_history_and_session_memory(self) -> None:
+        from app.assistant_config.schemas import (
+            WorkflowEdgeInput,
+            WorkflowInput,
+            WorkflowNodeInput,
+            WorkflowTestRunRequest,
+        )
+
+        workflow = WorkflowInput(
+            nodes=[
+                WorkflowNodeInput(
+                    node_id="start",
+                    node_type="start",
+                    label="Start",
+                    config={
+                        "inputMode": "structured",
+                        "structuredFields": [
+                            {"name": "title", "type": "string", "required": True},
+                        ],
+                    },
+                ),
+                WorkflowNodeInput(node_id="output_1", node_type="output", label="Output", config={"textTemplate": "ok"}),
+            ],
+            edges=[
+                WorkflowEdgeInput(
+                    edge_id="e1",
+                    source_node_id="start",
+                    target_node_id="output_1",
+                    source_handle="output",
+                    target_handle="input",
+                ),
+            ],
+        )
+
+        with self.assertRaises(ValueError):
+            WorkflowTestRunRequest(
+                workflow=workflow,
+                structured_input={"title": "hello"},
+                history=[{"role": "user", "content": "old turn"}],
+                session_memory={"conversationSummary": "summary", "skillFacts": ["fact"]},
+            )
+
+    def test_stream_passes_history_and_session_memory_to_engine(self) -> None:
+        from app.assistant_config.schemas import WorkflowTestRunRequest
+        from app.assistant_config.workflow_test_service import (
+            PreparedWorkflowSessionMemory,
+            WorkflowTestRunService,
+        )
+
+        skill = self._create_workflow_skill()
+        service = WorkflowTestRunService(self.db)
+        base_request = self._valid_request(stream_output=True)
+        request = WorkflowTestRunRequest(
+            workflow=base_request.workflow,
+            user_input=base_request.user_input,
+            stream_output=base_request.stream_output,
+            session_id=uuid4(),
+            history=[
+                {"role": "user", "content": "first question"},
+                {"role": "assistant", "content": "first answer"},
+            ],
+            session_memory={
+                "conversationSummary": "旧摘要",
+                "skillFacts": ["事实A"],
+            },
+        )
+        prepared = service.prepare(skill.id, request)
+        captured_kwargs: dict[str, object] = {}
+
+        class _FakeEngine:
+            def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                captured_kwargs.update(kwargs)
+                yield "AB"
+
+        with patch(
+            "app.assistant_config.workflow_test_service.resolve_openai_compat_config",
+            return_value=SimpleNamespace(api_key="k", base_url="https://api.example.com", model="gpt-test"),
+        ), patch(
+            "app.assistant_config.workflow_test_service.WorkflowTestRunService._build_engine",
+            return_value=_FakeEngine(),
+        ), patch.object(
+            service,
+            "_compute_next_session_memory",
+            return_value=PreparedWorkflowSessionMemory(
+                conversation_summary="新摘要",
+                skill_facts=["事实A", "事实B"],
+            ),
+        ):
+            chunks = list(service.stream(prepared))
+
+        self.assertEqual(
+            captured_kwargs["history"],
+            [
+                {"role": "user", "content": "first question"},
+                {"role": "assistant", "content": "first answer"},
+            ],
+        )
+        runtime_context = captured_kwargs["runtime_context"]
+        assert isinstance(runtime_context, dict)
+        self.assertEqual(runtime_context["session_memory"], {"conversationSummary": "旧摘要", "skillFacts": ["事实A"]})
+        self.assertTrue(str(runtime_context["conversation_id"]).startswith("workflow_test_session:"))
+
+        events = _parse_sse_events(chunks)
+        run_end_payload = next(payload for name, payload in events if name == "run_end")
+        self.assertEqual(
+            run_end_payload["sessionMemory"],
+            {"conversationSummary": "新摘要", "skillFacts": ["事实A", "事实B"]},
+        )
+
+    def test_stream_memory_compute_fail_open_keeps_previous_session_memory(self) -> None:
+        from app.assistant_config.schemas import WorkflowTestRunRequest
+        from app.assistant_config.workflow_test_service import WorkflowTestRunService
+
+        skill = self._create_workflow_skill()
+        service = WorkflowTestRunService(self.db)
+        base_request = self._valid_request(stream_output=False)
+        request = WorkflowTestRunRequest(
+            workflow=base_request.workflow,
+            user_input=base_request.user_input,
+            stream_output=base_request.stream_output,
+            session_memory={
+                "conversationSummary": "旧摘要",
+                "skillFacts": ["事实A"],
+            },
+        )
+        prepared = service.prepare(skill.id, request)
+
+        class _FakeEngine:
+            def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                yield "AB"
+
+        with patch(
+            "app.assistant_config.workflow_test_service.resolve_openai_compat_config",
+            return_value=SimpleNamespace(api_key="k", base_url="https://api.example.com", model="gpt-test"),
+        ), patch(
+            "app.assistant_config.workflow_test_service.WorkflowTestRunService._build_engine",
+            return_value=_FakeEngine(),
+        ), patch.object(
+            service._memory_computation_service,
+            "compute_next_l1_summary",
+            side_effect=RuntimeError("l1 failed"),
+        ), patch.object(
+            service._memory_computation_service,
+            "compute_next_l2_facts",
+            side_effect=RuntimeError("l2 failed"),
+        ):
+            chunks = list(service.stream(prepared))
+
+        events = _parse_sse_events(chunks)
+        run_end_payload = next(payload for name, payload in events if name == "run_end")
+        self.assertEqual(run_end_payload["status"], "completed")
+        self.assertEqual(
+            run_end_payload["sessionMemory"],
+            {"conversationSummary": "旧摘要", "skillFacts": ["事实A"]},
+        )
 
 
 if __name__ == "__main__":

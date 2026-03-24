@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import type { WorkflowEnvVarType, WorkflowSessionVar } from '../../api/workflow'
 import {
   buildDefaultValueText,
@@ -90,31 +90,34 @@ export function EnvVarEditDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>
+      <DialogContent className="sm:max-w-xl rounded-[24px] border-slate-200 bg-white p-6 shadow-[0_24px_70px_rgba(15,23,42,0.2)]">
+        <DialogHeader className="space-y-2 text-left">
+          <DialogTitle className="text-lg font-semibold text-slate-900">
             {mode === 'create' ? t('settings.skills.envVars.createTitle') : t('settings.skills.envVars.editTitle')}
           </DialogTitle>
+          <DialogDescription className="text-sm leading-6 text-slate-600">
+            {t('settings.skills.envVars.formDialogDescription')}
+          </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-3">
-          <div className="space-y-1">
-            <label className="text-xs font-medium text-foreground/80">{t('settings.skills.envVars.formName')}</label>
+        <div className="space-y-3.5">
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-slate-700">{t('settings.skills.envVars.formName')}</label>
             <input
               type="text"
               value={name}
               onChange={(event) => setName(event.target.value)}
-              className="w-full rounded-md border bg-background px-3 py-2 text-xs"
+              className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition focus:border-primary/50 focus:ring-2 focus:ring-primary/15"
               placeholder="counter"
             />
           </div>
 
-          <div className="space-y-1">
-            <label className="text-xs font-medium text-foreground/80">{t('settings.skills.envVars.formType')}</label>
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-slate-700">{t('settings.skills.envVars.formType')}</label>
             <select
               value={varType}
               onChange={(event) => setVarType(event.target.value as WorkflowEnvVarType)}
-              className="w-full rounded-md border bg-background px-3 py-2 text-xs"
+              className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition focus:border-primary/50 focus:ring-2 focus:ring-primary/15"
             >
               {TYPE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
@@ -122,24 +125,24 @@ export function EnvVarEditDialog({
             </select>
           </div>
 
-          <div className="space-y-1">
-            <label className="text-xs font-medium text-foreground/80">{t('settings.skills.envVars.formDefaultValue')}</label>
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-slate-700">{t('settings.skills.envVars.formDefaultValue')}</label>
             <input
               type="text"
               value={defaultValueText}
               onChange={(event) => setDefaultValueText(event.target.value)}
-              className="w-full rounded-md border bg-background px-3 py-2 text-xs font-mono"
+              className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-mono text-slate-900 shadow-sm outline-none transition focus:border-primary/50 focus:ring-2 focus:ring-primary/15"
               placeholder={t('settings.skills.envVars.formDefaultPlaceholder')}
             />
           </div>
 
-          <div className="space-y-1">
-            <label className="text-xs font-medium text-foreground/80">{t('settings.skills.envVars.formDescription')}</label>
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-slate-700">{t('settings.skills.envVars.formDescription')}</label>
             <input
               type="text"
               value={description}
               onChange={(event) => setDescription(event.target.value)}
-              className="w-full rounded-md border bg-background px-3 py-2 text-xs"
+              className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition focus:border-primary/50 focus:ring-2 focus:ring-primary/15"
               placeholder={t('settings.skills.envVars.formDescriptionPlaceholder')}
             />
           </div>
@@ -155,14 +158,14 @@ export function EnvVarEditDialog({
           <button
             type="button"
             onClick={() => onOpenChange(false)}
-            className="h-9 rounded-md border px-3 text-sm hover:bg-muted"
+            className="h-10 rounded-xl border border-slate-200 px-4 text-sm text-slate-700 transition-colors hover:bg-slate-50"
           >
             {t('actions.cancel')}
           </button>
           <button
             type="button"
             onClick={handleConfirm}
-            className="h-9 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:opacity-90"
+            className="h-10 rounded-xl bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:opacity-90"
           >
             {mode === 'create' ? t('actions.create') : t('actions.save')}
           </button>

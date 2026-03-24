@@ -21,6 +21,7 @@ from app.assistant_config.models import (
     AssistantSkill,
     AssistantSkillEdge,
     AssistantSkillNode,
+    AssistantSystemBehaviorBinding,
     AssistantWorkflow,
     AssistantWorkflowEdge,
     AssistantWorkflowNode,
@@ -43,16 +44,32 @@ from app.assistant_config.schemas import (
     ClearVersionsResponse,
     DeleteVersionResponse,
     RollbackVersionResponse,
+    SystemBehaviorResponse,
     TargetType,
     TargetVersionResponse,
     WorkflowPublishRequest,
     WorkflowVersionListResponse,
     WorkflowInput,
 )
+from app.assistant_config.system_behavior_defaults_loader import get_system_behavior_default_workflow
+from app.assistant_config.system_behavior_registry import (
+    SystemBehaviorDefinition,
+    SystemBehaviorFieldDefinition,
+    get_system_behavior_definition,
+    list_system_behavior_definitions,
+)
 from app.common.exceptions import ApiException
 
 _TOOL_TEXT_REF_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\.text\s*\}\}")
 _TARGET_VERSION_LIMIT = 100
+_SYSTEM_BEHAVIOR_EXAMPLE_WORKFLOW_NAMES: dict[str, str] = {
+    "weekly_report_generation": "weekly_report_example__workflow",
+    "monthly_report_generation": "monthly_report_example__workflow",
+}
+_SYSTEM_BEHAVIOR_EXAMPLE_WORKFLOW_DESCRIPTIONS: dict[str, str] = {
+    "weekly_report_generation": "周报生成示例工作流。",
+    "monthly_report_generation": "月报生成示例工作流。",
+}
 
 
 class AssistantConfigService:
@@ -178,6 +195,31 @@ class AssistantConfigService:
         if value:
             return value[:255]
         return AssistantConfigService._utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _workflow_name_exists(self, name: str) -> bool:
+        candidate = str(name or "").strip().lower()
+        if not candidate:
+            return False
+        existing = (
+            self.db.query(AssistantWorkflow.id)
+            .filter(func.lower(AssistantWorkflow.name) == candidate)
+            .first()
+        )
+        return existing is not None
+
+    def _next_available_workflow_name(self, base_name: str) -> str:
+        normalized = str(base_name or "").strip()
+        if not normalized:
+            raise ValueError("base_name is required")
+        if not self._workflow_name_exists(normalized):
+            return normalized
+
+        suffix = 2
+        while True:
+            candidate = f"{normalized}__{suffix}"
+            if not self._workflow_name_exists(candidate):
+                return candidate
+            suffix += 1
 
     @staticmethod
     def _workflow_input_to_snapshot(workflow: WorkflowInput) -> dict[str, Any]:
@@ -603,11 +645,14 @@ class AssistantConfigService:
 
     def _serialize_workflow(self, workflow: AssistantWorkflow) -> dict[str, Any]:
         referenced_skill_ids = [s.id for s in (workflow.skills or [])]
+        referenced_system_behavior_keys = self._binding_keys_from_relationship(
+            getattr(workflow, "system_behavior_bindings", None)
+        )
         draft_workflow = self._get_workflow_draft_input(workflow)
         ts = workflow.updated_at or workflow.created_at or self._utcnow()
         return {
             "id": workflow.id,
-            "name": workflow.name,
+            "name": self._display_workflow_name(workflow),
             "description": workflow.description or "",
             "is_system": bool(workflow.is_system),
             "enabled": bool(workflow.enabled),
@@ -627,6 +672,8 @@ class AssistantConfigService:
             "published_version_id": workflow.published_version_id,
             "referenced_skill_ids": referenced_skill_ids,
             "reference_count": len(referenced_skill_ids),
+            "referenced_system_behavior_keys": referenced_system_behavior_keys,
+            "system_behavior_reference_count": len(referenced_system_behavior_keys),
             "created_at": workflow.created_at,
             "updated_at": workflow.updated_at,
         }
@@ -636,6 +683,9 @@ class AssistantConfigService:
 
     def _serialize_agent_profile(self, agent_profile: AssistantAgentProfile) -> dict[str, Any]:
         referenced_skill_ids = [s.id for s in (agent_profile.skills or [])]
+        referenced_system_behavior_keys = self._binding_keys_from_relationship(
+            getattr(agent_profile, "system_behavior_bindings", None)
+        )
         draft = self._get_agent_profile_draft(agent_profile)
         normalized_kb = dict(draft.kb_config or {})
         normalized_kb["model_source"] = draft.model_source
@@ -656,12 +706,829 @@ class AssistantConfigService:
             "published_version_id": agent_profile.published_version_id,
             "referenced_skill_ids": referenced_skill_ids,
             "reference_count": len(referenced_skill_ids),
+            "referenced_system_behavior_keys": referenced_system_behavior_keys,
+            "system_behavior_reference_count": len(referenced_system_behavior_keys),
             "created_at": agent_profile.created_at,
             "updated_at": agent_profile.updated_at,
         }
 
     def serialize_agent_profile(self, agent_profile: AssistantAgentProfile) -> dict[str, Any]:
         return self._serialize_agent_profile(agent_profile)
+
+    @staticmethod
+    def _serialize_system_behavior_contract_field(
+        field: SystemBehaviorFieldDefinition,
+    ) -> dict[str, Any]:
+        return {
+            "name": field.name,
+            "type": field.type,
+            "required": bool(field.required),
+            "description": field.description or "",
+            "items_type": field.items_type,
+        }
+
+    @staticmethod
+    def _binding_keys_from_relationship(bindings: list[AssistantSystemBehaviorBinding] | None) -> list[str]:
+        return sorted(
+            {
+                str(item.behavior_key or "").strip()
+                for item in (bindings or [])
+                if str(getattr(item, "behavior_key", "") or "").strip()
+            }
+        )
+
+    def _display_workflow_name(self, workflow: AssistantWorkflow) -> str:
+        raw_name = str(workflow.name or "").strip()
+        if not raw_name or not bool(workflow.is_system):
+            return raw_name
+        for definition in list_system_behavior_definitions():
+            if definition.default_target.target_type != "workflow":
+                continue
+            if definition.default_target.canonical_name == raw_name:
+                return f"{definition.name}工作流"
+        return raw_name
+
+    def _serialize_system_behavior_target_summary(
+        self,
+        *,
+        target_type: TargetType,
+        workflow: AssistantWorkflow | None = None,
+        agent_profile: AssistantAgentProfile | None = None,
+        is_canonical_default: bool = False,
+    ) -> dict[str, Any]:
+        if target_type == "workflow":
+            if workflow is None:
+                raise ValueError("workflow is required when target_type=workflow")
+            return {
+                "id": workflow.id,
+                "target_type": "workflow",
+                "name": self._display_workflow_name(workflow),
+                "description": workflow.description or "",
+                "enabled": bool(workflow.enabled),
+                "is_system": bool(workflow.is_system),
+                "is_canonical_default": bool(is_canonical_default),
+                "workflow_id": workflow.id,
+                "agent_profile_id": None,
+                "published_version_id": workflow.published_version_id,
+            }
+
+        if agent_profile is None:
+            raise ValueError("agent_profile is required when target_type=agent")
+        return {
+            "id": agent_profile.id,
+            "target_type": "agent",
+            "name": agent_profile.name,
+            "description": agent_profile.description or "",
+            "enabled": bool(agent_profile.enabled),
+            "is_system": bool(agent_profile.is_system),
+            "is_canonical_default": bool(is_canonical_default),
+            "workflow_id": None,
+            "agent_profile_id": agent_profile.id,
+            "published_version_id": agent_profile.published_version_id,
+        }
+
+    @staticmethod
+    def _assign_system_behavior_binding_target(
+        binding: AssistantSystemBehaviorBinding,
+        *,
+        target_type: TargetType,
+        workflow: AssistantWorkflow | None = None,
+        agent_profile: AssistantAgentProfile | None = None,
+    ) -> None:
+        binding.target_type = target_type
+        if target_type == "workflow":
+            if workflow is None:
+                raise ValueError("workflow target requires workflow entity")
+            binding.workflow = workflow
+            binding.agent_profile = None
+            return
+
+        if agent_profile is None:
+            raise ValueError("agent target requires agent profile entity")
+        binding.workflow = None
+        binding.agent_profile = agent_profile
+
+    @staticmethod
+    def _system_behavior_binding_matches_workflow(
+        binding: AssistantSystemBehaviorBinding,
+        workflow: AssistantWorkflow,
+    ) -> bool:
+        return str(binding.target_type or "") == "workflow" and binding.workflow_id == workflow.id
+
+    @staticmethod
+    def _system_behavior_binding_matches_agent(
+        binding: AssistantSystemBehaviorBinding,
+        agent_profile: AssistantAgentProfile,
+    ) -> bool:
+        return str(binding.target_type or "") == "agent" and binding.agent_profile_id == agent_profile.id
+
+    def _get_system_behavior_definition_or_error(self, behavior_key: str) -> SystemBehaviorDefinition:
+        definition = get_system_behavior_definition(behavior_key)
+        if definition is None:
+            raise ApiException(
+                status_code=404,
+                code=40436,
+                message=f"System AI behavior not found: {behavior_key}",
+            )
+        return definition
+
+    def _get_system_behavior_binding(self, behavior_key: str) -> AssistantSystemBehaviorBinding | None:
+        return (
+            self.db.query(AssistantSystemBehaviorBinding)
+            .options(
+                joinedload(AssistantSystemBehaviorBinding.workflow),
+                joinedload(AssistantSystemBehaviorBinding.agent_profile),
+            )
+            .filter(AssistantSystemBehaviorBinding.behavior_key == behavior_key)
+            .first()
+        )
+
+    def _get_workflow_published_input(self, workflow: AssistantWorkflow) -> WorkflowInput | None:
+        if workflow.published_version_id is None:
+            return None
+        version = (
+            self.db.query(AssistantWorkflowVersion)
+            .filter(
+                AssistantWorkflowVersion.id == workflow.published_version_id,
+                AssistantWorkflowVersion.workflow_id == workflow.id,
+            )
+            .first()
+        )
+        if version is None or not isinstance(version.snapshot, dict):
+            return None
+        try:
+            return self._workflow_input_from_snapshot(version.snapshot)
+        except Exception:
+            return None
+
+    def _get_agent_profile_published_draft(self, agent_profile: AssistantAgentProfile) -> AgentPublishDraftInput | None:
+        if agent_profile.published_version_id is None:
+            return None
+        version = (
+            self.db.query(AssistantAgentProfileVersion)
+            .filter(
+                AssistantAgentProfileVersion.id == agent_profile.published_version_id,
+                AssistantAgentProfileVersion.agent_profile_id == agent_profile.id,
+            )
+            .first()
+        )
+        if version is None or not isinstance(version.snapshot, dict):
+            return None
+        try:
+            return self._agent_draft_from_snapshot(version.snapshot)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _extract_structured_start_fields(workflow_input: WorkflowInput) -> dict[str, dict[str, Any]]:
+        for node in workflow_input.nodes:
+            if node.node_type != "start":
+                continue
+            cfg = node.config if isinstance(node.config, dict) else {}
+            raw_fields = cfg.get("structured_fields", cfg.get("structuredFields", []))
+            if not isinstance(raw_fields, list):
+                return {}
+            field_map: dict[str, dict[str, Any]] = {}
+            for item in raw_fields:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "") or "").strip()
+                if not name:
+                    continue
+                field_map[name] = item
+            return field_map
+        return {}
+
+    @staticmethod
+    def _normalize_output_mode(config: dict[str, Any]) -> str:
+        raw_mode = str(config.get("output_mode", config.get("outputMode", "text")) or "text").strip().lower()
+        if raw_mode == "json":
+            return "structured"
+        return "structured" if raw_mode == "structured" else "text"
+
+    def _workflow_has_system_behavior_output_contract(
+        self,
+        *,
+        workflow_input: WorkflowInput,
+        definition: SystemBehaviorDefinition,
+    ) -> bool:
+        for node in workflow_input.nodes:
+            if node.node_type != "output":
+                continue
+            config = node.config if isinstance(node.config, dict) else {}
+            if self._normalize_output_mode(config) != "structured":
+                continue
+            raw_fields = config.get("output_fields", config.get("outputFields", []))
+            if not isinstance(raw_fields, list):
+                continue
+            field_map: dict[str, dict[str, Any]] = {}
+            for item in raw_fields:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "") or "").strip()
+                if not name:
+                    continue
+                field_map[name] = item
+
+            matches = True
+            for expected in definition.output_fields:
+                actual = field_map.get(expected.name)
+                if actual is None:
+                    matches = False
+                    break
+                actual_type = str(actual.get("type", "string") or "string").strip().lower()
+                if actual_type != expected.type:
+                    matches = False
+                    break
+                if expected.type == "array":
+                    actual_items_type = str(
+                        actual.get("items_type", actual.get("itemsType", "")) or ""
+                    ).strip().lower()
+                    if actual_items_type != str(expected.items_type or "").strip().lower():
+                        matches = False
+                        break
+            if matches:
+                return True
+        return False
+
+    def _validate_system_behavior_workflow_target(
+        self,
+        *,
+        definition: SystemBehaviorDefinition,
+        workflow: AssistantWorkflow,
+    ) -> WorkflowInput:
+        if not workflow.enabled:
+            raise ApiException(
+                status_code=409,
+                code=40949,
+                message=f"Workflow target is disabled: {workflow.name}",
+            )
+
+        published_input = self._get_workflow_published_input(workflow)
+        if published_input is None:
+            raise ApiException(
+                status_code=409,
+                code=40950,
+                message=f"Workflow target has no published version: {workflow.name}",
+            )
+
+        self._apply_workflow_to_workflow_entity(workflow, published_input, persist=False)
+
+        if self._resolve_start_input_mode(published_input) != "structured":
+            raise ApiException(
+                status_code=422,
+                code=42248,
+                message=f"Workflow target must use structured start input: {workflow.name}",
+            )
+
+        start_field_map = self._extract_structured_start_fields(published_input)
+        missing_fields: list[str] = []
+        invalid_fields: list[str] = []
+        for expected in definition.input_fields:
+            actual = start_field_map.get(expected.name)
+            if actual is None:
+                missing_fields.append(expected.name)
+                continue
+            actual_type = str(actual.get("type", "string") or "string").strip().lower()
+            if actual_type != expected.type:
+                invalid_fields.append(expected.name)
+                continue
+            if expected.required and not bool(actual.get("required", False)):
+                invalid_fields.append(expected.name)
+
+        if missing_fields or invalid_fields:
+            detail_parts: list[str] = []
+            if missing_fields:
+                detail_parts.append(f"missing input fields: {', '.join(sorted(missing_fields))}")
+            if invalid_fields:
+                detail_parts.append(f"invalid input fields: {', '.join(sorted(set(invalid_fields)))}")
+            raise ApiException(
+                status_code=422,
+                code=42249,
+                message=f"Workflow target does not satisfy system behavior input contract: {'; '.join(detail_parts)}",
+            )
+
+        if not self._workflow_has_system_behavior_output_contract(
+            workflow_input=published_input,
+            definition=definition,
+        ):
+            raise ApiException(
+                status_code=422,
+                code=42250,
+                message=(
+                    "Workflow target does not expose a structured output node for "
+                    f"system behavior contract: {workflow.name}"
+                ),
+            )
+
+        return published_input
+
+    def _validate_system_behavior_agent_target(
+        self,
+        *,
+        agent_profile: AssistantAgentProfile,
+    ) -> AgentPublishDraftInput:
+        if not agent_profile.enabled:
+            raise ApiException(
+                status_code=409,
+                code=40951,
+                message=f"Agent target is disabled: {agent_profile.name}",
+            )
+
+        published_draft = self._get_agent_profile_published_draft(agent_profile)
+        if published_draft is None:
+            raise ApiException(
+                status_code=409,
+                code=40952,
+                message=f"Agent target has no published version: {agent_profile.name}",
+            )
+
+        normalized_kb = self._normalize_agent_kb_config(
+            kb_config=published_draft.kb_config,
+            model_source=published_draft.model_source,
+            model_id=published_draft.model_id,
+            existing_kb_config=published_draft.kb_config if isinstance(published_draft.kb_config, dict) else {"enabled": False},
+        )
+        self._validate_agent_tool_names(published_draft.tools)
+        return AgentPublishDraftInput.model_validate(
+            {
+                "system_prompt": published_draft.system_prompt,
+                "tools": published_draft.tools,
+                "kb_config": normalized_kb,
+                "model_source": published_draft.model_source,
+                "model_id": published_draft.model_id,
+            }
+        )
+
+    def _resolve_or_create_system_behavior_default_workflow(
+        self,
+        definition: SystemBehaviorDefinition,
+    ) -> AssistantWorkflow:
+        expected_name = definition.default_target.canonical_name
+        workflow = (
+            self.db.query(AssistantWorkflow)
+            .options(joinedload(AssistantWorkflow.system_behavior_bindings))
+            .filter(
+                AssistantWorkflow.name == expected_name,
+                AssistantWorkflow.is_system.is_(True),
+            )
+            .first()
+        )
+        if workflow is None:
+            conflicting = (
+                self.db.query(AssistantWorkflow)
+                .filter(AssistantWorkflow.name == expected_name)
+                .first()
+            )
+            if conflicting is not None and not bool(conflicting.is_system):
+                raise ApiException(
+                    status_code=409,
+                    code=40953,
+                    message=f"Cannot create system behavior workflow due to custom name conflict: {expected_name}",
+                )
+            workflow = AssistantWorkflow(
+                name=expected_name,
+                description=definition.description,
+                workflow_version=0,
+                workflow_viewport=None,
+                is_system=True,
+                enabled=True,
+            )
+            self.db.add(workflow)
+            self.db.flush()
+
+        workflow.is_system = True
+        workflow.enabled = True
+        workflow.description = definition.description
+
+        if workflow.published_version_id is None:
+            workflow_input = get_system_behavior_default_workflow(definition)
+            self._apply_workflow_to_workflow_entity(workflow, workflow_input, persist=True)
+            published = self._create_workflow_version(
+                workflow=workflow,
+                workflow_input=workflow_input,
+                version_source="publish",
+                version_name="System Default",
+            )
+            workflow.draft_version_id = published.id
+            workflow.published_version_id = published.id
+            self._trim_workflow_versions(workflow)
+
+        return workflow
+
+    def _reset_system_behavior_default_workflow_to_preset(
+        self,
+        definition: SystemBehaviorDefinition,
+    ) -> AssistantWorkflow:
+        workflow = self._resolve_or_create_system_behavior_default_workflow(definition)
+        workflow_input = get_system_behavior_default_workflow(definition)
+        self._apply_workflow_to_workflow_entity(workflow, workflow_input, persist=True)
+        published = self._create_workflow_version(
+            workflow=workflow,
+            workflow_input=workflow_input,
+            version_source="publish",
+            version_name=None,
+        )
+        self._keep_only_workflow_version(workflow, published.id)
+        workflow.is_system = True
+        workflow.enabled = True
+        workflow.description = definition.description
+        return workflow
+
+    def _ensure_system_behavior_binding_entity(
+        self,
+        definition: SystemBehaviorDefinition,
+    ) -> AssistantSystemBehaviorBinding:
+        binding = self._get_system_behavior_binding(definition.key)
+        if binding is not None:
+            return binding
+
+        if definition.default_target.target_type != "workflow":
+            raise ApiException(
+                status_code=500,
+                code=50030,
+                message=f"Unsupported system behavior default target type: {definition.default_target.target_type}",
+            )
+
+        default_workflow = self._resolve_or_create_system_behavior_default_workflow(definition)
+        binding = AssistantSystemBehaviorBinding(
+            behavior_key=definition.key,
+            target_type="workflow",
+            workflow=default_workflow,
+        )
+        self.db.add(binding)
+        self.db.flush()
+        return binding
+
+    def ensure_system_behaviors(self) -> None:
+        changed = False
+        for definition in list_system_behavior_definitions():
+            if definition.default_target.target_type == "workflow":
+                before = (
+                    self.db.query(AssistantWorkflow.id)
+                    .filter(
+                        AssistantWorkflow.name == definition.default_target.canonical_name,
+                        AssistantWorkflow.is_system.is_(True),
+                    )
+                    .first()
+                )
+                workflow = self._resolve_or_create_system_behavior_default_workflow(definition)
+                if before is None or workflow.published_version_id is None:
+                    changed = True
+            binding_before = self._get_system_behavior_binding(definition.key)
+            binding = self._ensure_system_behavior_binding_entity(definition)
+            if binding_before is None:
+                changed = True
+
+        if not changed:
+            return
+
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40954, message="Sync system AI behaviors failed") from exc
+
+    def _serialize_system_behavior(
+        self,
+        definition: SystemBehaviorDefinition,
+        binding: AssistantSystemBehaviorBinding,
+    ) -> dict[str, Any]:
+        if definition.default_target.target_type == "workflow":
+            canonical_workflow = self._resolve_or_create_system_behavior_default_workflow(definition)
+            canonical_summary = self._serialize_system_behavior_target_summary(
+                target_type="workflow",
+                workflow=canonical_workflow,
+                is_canonical_default=True,
+            )
+        else:
+            raise ApiException(
+                status_code=500,
+                code=50031,
+                message=f"Unsupported canonical target type: {definition.default_target.target_type}",
+            )
+
+        if str(binding.target_type or "") == "workflow":
+            if binding.workflow is None:
+                raise ApiException(
+                    status_code=409,
+                    code=40955,
+                    message=f"System AI behavior binding is missing workflow target: {binding.behavior_key}",
+                )
+            current_binding = self._serialize_system_behavior_target_summary(
+                target_type="workflow",
+                workflow=binding.workflow,
+                is_canonical_default=self._system_behavior_binding_matches_workflow(binding, canonical_workflow),
+            )
+        else:
+            if binding.agent_profile is None:
+                raise ApiException(
+                    status_code=409,
+                    code=40956,
+                    message=f"System AI behavior binding is missing agent target: {binding.behavior_key}",
+                )
+            current_binding = self._serialize_system_behavior_target_summary(
+                target_type="agent",
+                agent_profile=binding.agent_profile,
+                is_canonical_default=False,
+            )
+
+        return {
+            "behavior_key": definition.key,
+            "name": definition.name,
+            "description": definition.description,
+            "supported_target_types": list(definition.supported_target_types),
+            "current_binding": current_binding,
+            "canonical_default_target": canonical_summary,
+            "fallback_policy": definition.fallback_policy,
+            "contract": {
+                "input_fields": [
+                    self._serialize_system_behavior_contract_field(field)
+                    for field in definition.input_fields
+                ],
+                "output_fields": [
+                    self._serialize_system_behavior_contract_field(field)
+                    for field in definition.output_fields
+                ],
+            },
+        }
+
+    def list_system_behaviors(self) -> list[dict[str, Any]]:
+        self.ensure_system_behaviors()
+        bindings = {
+            item.behavior_key: item
+            for item in (
+                self.db.query(AssistantSystemBehaviorBinding)
+                .options(
+                    joinedload(AssistantSystemBehaviorBinding.workflow),
+                    joinedload(AssistantSystemBehaviorBinding.agent_profile),
+                )
+                .all()
+            )
+        }
+        return [
+            self._serialize_system_behavior(
+                definition,
+                bindings[definition.key],
+            )
+            for definition in list_system_behavior_definitions()
+            if definition.key in bindings
+        ]
+
+    def create_system_behavior_example_workflow(
+        self,
+        behavior_key: str,
+        *,
+        bind_to_behavior: bool = False,
+    ) -> dict[str, Any]:
+        definition = self._get_system_behavior_definition_or_error(behavior_key)
+        self.ensure_system_behaviors()
+        if definition.default_target.target_type != "workflow":
+            raise ApiException(
+                status_code=500,
+                code=50037,
+                message=f"Unsupported canonical target type: {definition.default_target.target_type}",
+            )
+
+        base_name = _SYSTEM_BEHAVIOR_EXAMPLE_WORKFLOW_NAMES.get(definition.key)
+        if not base_name:
+            raise ApiException(
+                status_code=500,
+                code=50038,
+                message=f"Missing example workflow name for system AI behavior: {definition.key}",
+            )
+
+        workflow_name = self._next_available_workflow_name(base_name)
+        workflow_description = _SYSTEM_BEHAVIOR_EXAMPLE_WORKFLOW_DESCRIPTIONS.get(
+            definition.key,
+            f"{definition.name}示例工作流。",
+        )
+        preset_workflow = WorkflowInput.model_validate(
+            get_system_behavior_default_workflow(definition).model_dump(by_alias=True)
+        )
+        workflow = self._create_workflow_entity(
+            AssistantWorkflowCreateRequest(
+                name=workflow_name,
+                description=workflow_description,
+                enabled=True,
+                workflow=preset_workflow,
+            )
+        )
+
+        binding = self._ensure_system_behavior_binding_entity(definition)
+        if bind_to_behavior:
+            self._assign_system_behavior_binding_target(
+                binding,
+                target_type="workflow",
+                workflow=workflow,
+            )
+
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(
+                status_code=409,
+                code=40964,
+                message="Create system AI behavior example workflow failed",
+            ) from exc
+
+        created_workflow = self.get_workflow(workflow.id)
+        refreshed = self._get_system_behavior_binding(definition.key)
+        if refreshed is None:
+            raise ApiException(
+                status_code=500,
+                code=50039,
+                message="System AI behavior binding missing after example workflow creation",
+            )
+        return {
+            "created_workflow": self._serialize_workflow(created_workflow),
+            "system_behavior": self._serialize_system_behavior(definition, refreshed),
+        }
+
+    def update_system_behavior_binding(
+        self,
+        *,
+        behavior_key: str,
+        target_type: TargetType,
+        workflow_id: UUID | None = None,
+        agent_profile_id: UUID | None = None,
+    ) -> dict[str, Any]:
+        definition = self._get_system_behavior_definition_or_error(behavior_key)
+        self.ensure_system_behaviors()
+        if target_type not in definition.supported_target_types:
+            raise ApiException(
+                status_code=422,
+                code=42251,
+                message=f"Unsupported target type for system AI behavior '{behavior_key}': {target_type}",
+            )
+
+        binding = self._ensure_system_behavior_binding_entity(definition)
+        if target_type == "workflow":
+            if workflow_id is None:
+                raise ApiException(status_code=422, code=42252, message="workflow_id is required")
+            workflow = self.get_workflow(workflow_id)
+            self._validate_system_behavior_workflow_target(
+                definition=definition,
+                workflow=workflow,
+            )
+            self._assign_system_behavior_binding_target(
+                binding,
+                target_type="workflow",
+                workflow=workflow,
+            )
+        else:
+            if agent_profile_id is None:
+                raise ApiException(status_code=422, code=42253, message="agent_profile_id is required")
+            agent_profile = self.get_agent_profile(agent_profile_id)
+            self._validate_system_behavior_agent_target(agent_profile=agent_profile)
+            self._assign_system_behavior_binding_target(
+                binding,
+                target_type="agent",
+                agent_profile=agent_profile,
+            )
+
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40957, message="Update system AI behavior binding failed") from exc
+
+        refreshed = self._get_system_behavior_binding(definition.key)
+        if refreshed is None:
+            raise ApiException(status_code=500, code=50032, message="System AI behavior binding missing after update")
+        return self._serialize_system_behavior(definition, refreshed)
+
+    def reset_system_behavior_binding(self, behavior_key: str) -> dict[str, Any]:
+        definition = self._get_system_behavior_definition_or_error(behavior_key)
+        self.ensure_system_behaviors()
+        binding = self._ensure_system_behavior_binding_entity(definition)
+        if definition.default_target.target_type != "workflow":
+            raise ApiException(
+                status_code=500,
+                code=50033,
+                message=f"Unsupported canonical target type: {definition.default_target.target_type}",
+            )
+        workflow = self._reset_system_behavior_default_workflow_to_preset(definition)
+        self._assign_system_behavior_binding_target(
+            binding,
+            target_type="workflow",
+            workflow=workflow,
+        )
+
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40958, message="Reset system AI behavior binding failed") from exc
+
+        refreshed = self._get_system_behavior_binding(definition.key)
+        if refreshed is None:
+            raise ApiException(status_code=500, code=50034, message="System AI behavior binding missing after reset")
+        return self._serialize_system_behavior(definition, refreshed)
+
+    def reset_all_system_behaviors(self, confirm: bool) -> dict[str, Any]:
+        if not confirm:
+            raise ApiException(status_code=400, code=40023, message="confirm=true required")
+
+        self.ensure_system_behaviors()
+        definitions = list_system_behavior_definitions()
+        affected: list[dict[str, Any]] = []
+        for definition in definitions:
+            binding = self._ensure_system_behavior_binding_entity(definition)
+            if definition.default_target.target_type != "workflow":
+                raise ApiException(
+                    status_code=500,
+                    code=50036,
+                    message=f"Unsupported canonical target type: {definition.default_target.target_type}",
+                )
+            workflow = self._reset_system_behavior_default_workflow_to_preset(definition)
+            self._assign_system_behavior_binding_target(
+                binding,
+                target_type="workflow",
+                workflow=workflow,
+            )
+            affected.append(
+                {
+                    "behavior_key": definition.key,
+                    "name": definition.name,
+                    "target_type": "workflow",
+                    "target_name": self._display_workflow_name(workflow),
+                }
+            )
+
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40965, message="Reset all system AI behaviors failed") from exc
+
+        return {
+            "reset_count": len(affected),
+            "affected": affected,
+        }
+
+    def resolve_system_behavior_execution_target(
+        self,
+        behavior_key: str,
+    ) -> tuple[SystemBehaviorDefinition, AssistantSystemBehaviorBinding, TargetType, AssistantWorkflow | AssistantAgentProfile, bool]:
+        definition = self._get_system_behavior_definition_or_error(behavior_key)
+        self.ensure_system_behaviors()
+        binding = self._ensure_system_behavior_binding_entity(definition)
+        fallback_used = False
+
+        def _canonical_target() -> tuple[TargetType, AssistantWorkflow | AssistantAgentProfile]:
+            if definition.default_target.target_type == "workflow":
+                workflow = self._resolve_or_create_system_behavior_default_workflow(definition)
+                self._validate_system_behavior_workflow_target(
+                    definition=definition,
+                    workflow=workflow,
+                )
+                return ("workflow", workflow)
+            raise ApiException(
+                status_code=500,
+                code=50035,
+                message=f"Unsupported canonical target type: {definition.default_target.target_type}",
+            )
+
+        try:
+            if str(binding.target_type or "") == "workflow":
+                if binding.workflow is None:
+                    raise ApiException(status_code=409, code=40959, message="Missing bound workflow target")
+                self._validate_system_behavior_workflow_target(
+                    definition=definition,
+                    workflow=binding.workflow,
+                )
+                return definition, binding, "workflow", binding.workflow, fallback_used
+
+            if binding.agent_profile is None:
+                raise ApiException(status_code=409, code=40960, message="Missing bound agent target")
+            self._validate_system_behavior_agent_target(agent_profile=binding.agent_profile)
+            return definition, binding, "agent", binding.agent_profile, fallback_used
+        except ApiException:
+            fallback_used = True
+            target_type, target = _canonical_target()
+            return definition, binding, target_type, target, fallback_used
+
+    def _rebind_system_behaviors_to_defaults(self, behavior_keys: list[str]) -> None:
+        normalized_keys = sorted({str(item or "").strip() for item in behavior_keys if str(item or "").strip()})
+        if not normalized_keys:
+            return
+        for behavior_key in normalized_keys:
+            definition = self._get_system_behavior_definition_or_error(behavior_key)
+            binding = self._ensure_system_behavior_binding_entity(definition)
+            if definition.default_target.target_type != "workflow":
+                raise ApiException(
+                    status_code=500,
+                    code=50036,
+                    message=f"Unsupported canonical target type: {definition.default_target.target_type}",
+                )
+            workflow = self._resolve_or_create_system_behavior_default_workflow(definition)
+            self._assign_system_behavior_binding_target(
+                binding,
+                target_type="workflow",
+                workflow=workflow,
+            )
 
     @staticmethod
     def _read_agent_model_config(kb_config: dict | None) -> tuple[str, UUID | None]:
@@ -753,7 +1620,7 @@ class AssistantConfigService:
             if workflow is not None:
                 target_summary = {
                     "id": workflow.id,
-                    "name": workflow.name,
+                    "name": self._display_workflow_name(workflow),
                     "enabled": bool(workflow.enabled),
                 }
         else:
@@ -2266,6 +3133,22 @@ class AssistantConfigService:
                     if isinstance(tool_name, str) and tool_name.strip():
                         tool_names.add(tool_name.strip())
 
+                if node_type == "knowledge_retrieval":
+                    tool_names.add("kb_search")
+
+                if node_type == "agent" and isinstance(cfg, dict):
+                    raw_tool_names = cfg.get("toolNames", cfg.get("tool_names"))
+                    if isinstance(raw_tool_names, list):
+                        for raw_name in raw_tool_names:
+                            if not isinstance(raw_name, str):
+                                continue
+                            tool_name = raw_name.strip()
+                            if tool_name:
+                                tool_names.add(tool_name)
+                    knowledge_enabled = cfg.get("knowledgeEnabled", cfg.get("knowledge_enabled"))
+                    if isinstance(knowledge_enabled, bool) and knowledge_enabled:
+                        tool_names.add("kb_search")
+
                 if node_type in {"iteration", "loop"} and isinstance(cfg, dict):
                     body_nodes = cfg.get("bodyNodes", cfg.get("body_nodes"))
                     if isinstance(body_nodes, list):
@@ -2287,7 +3170,7 @@ class AssistantConfigService:
                     node_type = getattr(node, "node_type", None)
                     cfg = getattr(node, "config", None) or {}
 
-                if node_type in {"llm", "parameter_extractor"} and isinstance(cfg, dict):
+                if node_type in {"llm", "parameter_extractor", "agent"} and isinstance(cfg, dict):
                     model_source_raw = cfg.get("modelSource", cfg.get("model_source", "default"))
                     model_source = str(model_source_raw or "default").strip().lower()
                     if model_source == "custom":
@@ -2319,6 +3202,7 @@ class AssistantConfigService:
             for t in ToolRegistry.list_system_tools()
             if getattr(t, "name", None)
         }
+        system_names |= set(ToolRegistry.INTERNAL_TOOL_NAMES)
         disabled_names = {
             name
             for name, in self.db.query(AssistantTool.name).filter(AssistantTool.enabled.is_(False)).all()
@@ -2389,6 +3273,7 @@ class AssistantConfigService:
             for t in ToolRegistry.list_system_tools()
             if getattr(t, "name", None)
         }
+        system_names |= set(ToolRegistry.INTERNAL_TOOL_NAMES)
         enabled_remote_names = {
             name
             for name, in self.db.query(AssistantTool.name).filter(
@@ -2423,12 +3308,14 @@ class AssistantConfigService:
     # Workflows CRUD
     # -------------------------
     def list_workflows(self, include_disabled: bool = False) -> list[AssistantWorkflow]:
+        self.ensure_system_behaviors()
         q = (
             self.db.query(AssistantWorkflow)
             .options(
                 joinedload(AssistantWorkflow.nodes),
                 joinedload(AssistantWorkflow.edges),
                 joinedload(AssistantWorkflow.skills),
+                joinedload(AssistantWorkflow.system_behavior_bindings),
             )
             .order_by(AssistantWorkflow.created_at.desc())
         )
@@ -2443,6 +3330,7 @@ class AssistantConfigService:
                 joinedload(AssistantWorkflow.nodes),
                 joinedload(AssistantWorkflow.edges),
                 joinedload(AssistantWorkflow.skills),
+                joinedload(AssistantWorkflow.system_behavior_bindings),
             )
             .filter(AssistantWorkflow.id == workflow_id)
             .first()
@@ -2451,11 +3339,9 @@ class AssistantConfigService:
             raise ApiException(status_code=404, code=40430, message=f"Workflow not found: {workflow_id}")
         return workflow
 
-    def create_workflow(self, request: AssistantWorkflowCreateRequest) -> AssistantWorkflow:
-        existing = self.db.query(AssistantWorkflow).filter(AssistantWorkflow.name.ilike(request.name)).first()
-        if existing:
+    def _create_workflow_entity(self, request: AssistantWorkflowCreateRequest) -> AssistantWorkflow:
+        if self._workflow_name_exists(request.name):
             raise ApiException(status_code=400, code=40030, message=f"Workflow name exists: {request.name}")
-
         workflow_input = request.workflow or self._build_default_workflow_input()
         workflow = AssistantWorkflow(
             name=request.name,
@@ -2477,6 +3363,10 @@ class AssistantConfigService:
         workflow.draft_version_id = published.id
         workflow.published_version_id = published.id
         self._trim_workflow_versions(workflow)
+        return workflow
+
+    def create_workflow(self, request: AssistantWorkflowCreateRequest) -> AssistantWorkflow:
+        workflow = self._create_workflow_entity(request)
 
         try:
             self.db.commit()
@@ -2689,7 +3579,7 @@ class AssistantConfigService:
             }
         )
 
-    def delete_workflow(self, workflow_id: UUID) -> None:
+    def delete_workflow(self, workflow_id: UUID, *, confirm_rebind_system_behaviors: bool = False) -> None:
         workflow = self.get_workflow(workflow_id)
         if workflow.is_system:
             raise ApiException(status_code=400, code=40031, message="System workflow cannot be deleted")
@@ -2700,8 +3590,28 @@ class AssistantConfigService:
                 code=40932,
                 message=f"Workflow is referenced by skills: {skill_names}",
             )
+        behavior_keys = self._binding_keys_from_relationship(getattr(workflow, "system_behavior_bindings", None))
+        if behavior_keys and not confirm_rebind_system_behaviors:
+            raise ApiException(
+                status_code=409,
+                code=40961,
+                message="Workflow is referenced by system AI behaviors",
+                details={
+                    "targetType": "workflow",
+                    "targetId": str(workflow.id),
+                    "targetName": workflow.name,
+                    "referencedSystemBehaviorKeys": behavior_keys,
+                    "action": "confirm_rebind_then_delete",
+                },
+            )
+        if behavior_keys:
+            self._rebind_system_behaviors_to_defaults(behavior_keys)
         self.db.delete(workflow)
-        self.db.commit()
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40962, message="Delete workflow failed") from exc
 
     def update_workflow_by_id(self, workflow_id: UUID, workflow: WorkflowInput) -> AssistantWorkflow:
         workflow_model = self.get_workflow(workflow_id)
@@ -2715,9 +3625,13 @@ class AssistantConfigService:
     # Agent Profiles CRUD
     # -------------------------
     def list_agent_profiles(self, include_disabled: bool = False) -> list[AssistantAgentProfile]:
+        self.ensure_system_behaviors()
         q = (
             self.db.query(AssistantAgentProfile)
-            .options(joinedload(AssistantAgentProfile.skills))
+            .options(
+                joinedload(AssistantAgentProfile.skills),
+                joinedload(AssistantAgentProfile.system_behavior_bindings),
+            )
             .order_by(AssistantAgentProfile.created_at.desc())
         )
         if not include_disabled:
@@ -2727,7 +3641,10 @@ class AssistantConfigService:
     def get_agent_profile(self, agent_profile_id: UUID) -> AssistantAgentProfile:
         profile = (
             self.db.query(AssistantAgentProfile)
-            .options(joinedload(AssistantAgentProfile.skills))
+            .options(
+                joinedload(AssistantAgentProfile.skills),
+                joinedload(AssistantAgentProfile.system_behavior_bindings),
+            )
             .filter(AssistantAgentProfile.id == agent_profile_id)
             .first()
         )
@@ -3032,7 +3949,7 @@ class AssistantConfigService:
             }
         )
 
-    def delete_agent_profile(self, agent_profile_id: UUID) -> None:
+    def delete_agent_profile(self, agent_profile_id: UUID, *, confirm_rebind_system_behaviors: bool = False) -> None:
         profile = self.get_agent_profile(agent_profile_id)
         if profile.is_system:
             raise ApiException(status_code=400, code=40033, message="System agent profile cannot be deleted")
@@ -3043,8 +3960,28 @@ class AssistantConfigService:
                 code=40935,
                 message=f"Agent profile is referenced by skills: {skill_names}",
             )
+        behavior_keys = self._binding_keys_from_relationship(getattr(profile, "system_behavior_bindings", None))
+        if behavior_keys and not confirm_rebind_system_behaviors:
+            raise ApiException(
+                status_code=409,
+                code=40963,
+                message="Agent profile is referenced by system AI behaviors",
+                details={
+                    "targetType": "agent",
+                    "targetId": str(profile.id),
+                    "targetName": profile.name,
+                    "referencedSystemBehaviorKeys": behavior_keys,
+                    "action": "confirm_rebind_then_delete",
+                },
+            )
+        if behavior_keys:
+            self._rebind_system_behaviors_to_defaults(behavior_keys)
         self.db.delete(profile)
-        self.db.commit()
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40964, message="Delete agent profile failed") from exc
 
     # -------------------------
     # Compatibility workflow methods on skill routes

@@ -9,7 +9,7 @@ from pydantic import Field
 from app.common.schemas import CamelModel, OrmModel
 
 AiModelType = Literal["llm", "embedding"]
-AiComponent = Literal["assistant", "lightrag"]
+AiComponent = Literal["assistant", "lightrag", "workflow_copilot"]
 
 
 # ==================== Credential ====================
@@ -100,6 +100,7 @@ class ComponentBinding(CamelModel):
 class ModelBindingsResponse(CamelModel):
     assistant: ComponentBinding
     lightrag: ComponentBinding
+    workflow_copilot: ComponentBinding
 
 
 class UpdateComponentBindingRequest(CamelModel):
@@ -110,3 +111,4 @@ class UpdateComponentBindingRequest(CamelModel):
 class UpdateModelBindingsRequest(CamelModel):
     assistant: UpdateComponentBindingRequest | None = None
     lightrag: UpdateComponentBindingRequest | None = None
+    workflow_copilot: UpdateComponentBindingRequest | None = None

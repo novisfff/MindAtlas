@@ -10,7 +10,7 @@ import { CalendarPage } from '@/features/calendar'
 import { SettingsPage, EntryTypeSettings, TagSettings } from '@/features/settings'
 import { AiProviderSettings } from '@/features/ai-providers'
 import { AssistantPage } from '@/features/assistant'
-import { ToolSettings, SkillSettings, AssistantTargetsSettings } from '@/features/assistant-config'
+import { ToolSettings, SkillSettings, AssistantTargetsSettings, SystemAiBehaviorsSettings } from '@/features/assistant-config'
 
 const WorkflowEditorPage = lazy(
   () => import('@/features/assistant-config/pages/WorkflowEditorPage'),
@@ -64,6 +64,7 @@ export default function App() {
             <Route path="/settings/assistant-tools" element={<ToolSettings />} />
             <Route path="/settings/assistant-skills" element={<SkillSettings />} />
             <Route path="/settings/assistant-targets" element={<AssistantTargetsSettings />} />
+            <Route path="/settings/system-ai-behaviors" element={<SystemAiBehaviorsSettings />} />
             <Route path="/settings/assistant-workflows" element={<Navigate to="/settings/assistant-targets" replace />} />
             <Route path="/settings/assistant-agents" element={<Navigate to="/settings/assistant-targets" replace />} />
             <Route path="/assistant" element={<AssistantPage />} />

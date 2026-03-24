@@ -18,6 +18,7 @@ export function createDefaultNodeConfig(
   if (nodeType === 'start') {
     return {
       inputMode: 'text',
+      memoryMode: 'auto',
       structuredFields: [],
       sessionVars: [],
     }
@@ -27,6 +28,16 @@ export function createDefaultNodeConfig(
     return {
       outputMode: 'text',
       userInput: '{{start.user_input}}',
+      modelSource: 'default',
+    }
+  }
+
+  if (nodeType === 'agent') {
+    return {
+      userInput: '{{start.user_input}}',
+      toolNames: [],
+      maxIterations: 12,
+      knowledgeEnabled: false,
       modelSource: 'default',
     }
   }

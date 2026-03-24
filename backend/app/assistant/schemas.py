@@ -53,3 +53,15 @@ class ConversationResponse(ConversationSummaryResponse):
 class ConversationListResponse(CamelModel):
     items: list[ConversationSummaryResponse] = Field(default_factory=list)
     total: int
+
+
+class AssistantRunResponse(CamelModel):
+    run_id: UUID
+    conversation_id: UUID
+    message_id: UUID | None = None
+    status: str
+    last_event_seq: int = 0
+    checkpoint_seq: int = 0
+    cancel_requested_at: datetime | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None

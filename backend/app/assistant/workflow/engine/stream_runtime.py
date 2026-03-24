@@ -5,6 +5,9 @@ from queue import Empty, Queue
 from threading import Thread
 from typing import Any, Callable, Iterator
 
+from app.assistant.run_control import AssistantRunCancelled, ensure_not_cancelled
+from app.assistant.workflow.engine import runtime_helpers as rt
+
 _OUTPUT_SEGMENT_SEPARATOR = "\n\n"
 
 
@@ -39,21 +42,23 @@ def build_runtime_metadata(
         "on_content_delta": _on_content_delta,
     }
     if handlers.on_tool_call_start:
-        metadata["on_tool_call_start"] = lambda tool_call_id, tool_name, args: (
+        metadata["on_tool_call_start"] = lambda tool_call_id, tool_name, args, **extra: (
             push_runtime_event(
                 "tool_call_start",
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
                 args=args,
+                **extra,
             )
         )
     if handlers.on_tool_call_end:
-        metadata["on_tool_call_end"] = lambda tool_call_id, status, result: (
+        metadata["on_tool_call_end"] = lambda tool_call_id, status, result, **extra: (
             push_runtime_event(
                 "tool_call_end",
                 tool_call_id=tool_call_id,
                 status=status,
                 result=result,
+                **extra,
             )
         )
     if handlers.on_analysis_start:
@@ -69,24 +74,24 @@ def build_runtime_metadata(
             push_runtime_event("analysis_end", analysis_id=analysis_id)
         )
     if handlers.on_node_start:
-        metadata["on_node_start"] = lambda node_id, node_type: (
-            push_runtime_event("node_start", node_id=node_id, node_type=node_type)
+        metadata["on_node_start"] = lambda node_id, node_type, **extra: (
+            push_runtime_event("node_start", node_id=node_id, node_type=node_type, **extra)
         )
     if handlers.on_node_output_delta:
-        metadata["on_node_output_delta"] = lambda node_id, delta: (
-            push_runtime_event("node_output_delta", node_id=node_id, delta=delta)
+        metadata["on_node_output_delta"] = lambda node_id, delta, **extra: (
+            push_runtime_event("node_output_delta", node_id=node_id, delta=delta, **extra)
         )
     if handlers.on_node_end:
-        metadata["on_node_end"] = lambda node_id, status: (
-            push_runtime_event("node_end", node_id=node_id, status=status)
+        metadata["on_node_end"] = lambda node_id, status, **extra: (
+            push_runtime_event("node_end", node_id=node_id, status=status, **extra)
         )
     if handlers.on_branch_decision:
-        metadata["on_branch_decision"] = lambda node_id, handle: (
-            push_runtime_event("branch_decision", node_id=node_id, handle=handle)
+        metadata["on_branch_decision"] = lambda node_id, handle, **extra: (
+            push_runtime_event("branch_decision", node_id=node_id, handle=handle, **extra)
         )
     if handlers.on_node_snapshot:
         metadata["on_node_snapshot"] = (
-            lambda node_id, node_type, status, input, output, error_message=None, hard_truncated=False: (
+            lambda node_id, node_type, status, input, output, error_message=None, hard_truncated=False, **extra: (
                 push_runtime_event(
                     "node_snapshot",
                     node_id=node_id,
@@ -96,6 +101,7 @@ def build_runtime_metadata(
                     output=output,
                     error_message=error_message,
                     hard_truncated=hard_truncated,
+                    **extra,
                 )
             )
         )
@@ -143,19 +149,31 @@ def dispatch_runtime_event(
         return graph_done, yielded
 
     if event_name == "tool_call_start" and handlers.on_tool_call_start:
-        handlers.on_tool_call_start(
-            payload.get("tool_call_id", ""),
-            payload.get("tool_name", ""),
-            payload.get("args", {}),
+        rt.invoke_callback(
+            handlers.on_tool_call_start,
+            tool_call_id=payload.get("tool_call_id", ""),
+            tool_name=payload.get("tool_name", ""),
+            args=payload.get("args", {}),
+            **{
+                key: value
+                for key, value in payload.items()
+                if key not in {"tool_call_id", "tool_name", "args"}
+            },
         )
         yielded.append("")
         return graph_done, yielded
 
     if event_name == "tool_call_end" and handlers.on_tool_call_end:
-        handlers.on_tool_call_end(
-            payload.get("tool_call_id", ""),
-            payload.get("status", ""),
-            payload.get("result", ""),
+        rt.invoke_callback(
+            handlers.on_tool_call_end,
+            tool_call_id=payload.get("tool_call_id", ""),
+            status=payload.get("status", ""),
+            result=payload.get("result", ""),
+            **{
+                key: value
+                for key, value in payload.items()
+                if key not in {"tool_call_id", "status", "result"}
+            },
         )
         yielded.append("")
         return graph_done, yielded
@@ -179,34 +197,79 @@ def dispatch_runtime_event(
         return graph_done, yielded
 
     if event_name == "node_start" and handlers.on_node_start:
-        handlers.on_node_start(payload.get("node_id", ""), payload.get("node_type", ""))
+        rt.invoke_callback(
+            handlers.on_node_start,
+            node_id=payload.get("node_id", ""),
+            node_type=payload.get("node_type", ""),
+            **{
+                key: value
+                for key, value in payload.items()
+                if key not in {"node_id", "node_type"}
+            },
+        )
         yielded.append("")
         return graph_done, yielded
 
     if event_name == "node_output_delta" and handlers.on_node_output_delta:
-        handlers.on_node_output_delta(payload.get("node_id", ""), payload.get("delta", ""))
+        rt.invoke_callback(
+            handlers.on_node_output_delta,
+            node_id=payload.get("node_id", ""),
+            delta=payload.get("delta", ""),
+            node_delta=payload.get("delta", ""),
+            **{
+                key: value
+                for key, value in payload.items()
+                if key not in {"node_id", "delta"}
+            },
+        )
         yielded.append("")
         return graph_done, yielded
 
     if event_name == "node_end" and handlers.on_node_end:
-        handlers.on_node_end(payload.get("node_id", ""), payload.get("status", ""))
+        rt.invoke_callback(
+            handlers.on_node_end,
+            node_id=payload.get("node_id", ""),
+            status=payload.get("status", ""),
+            **{
+                key: value
+                for key, value in payload.items()
+                if key not in {"node_id", "status"}
+            },
+        )
         yielded.append("")
         return graph_done, yielded
 
     if event_name == "branch_decision" and handlers.on_branch_decision:
-        handlers.on_branch_decision(payload.get("node_id", ""), payload.get("handle", ""))
+        rt.invoke_callback(
+            handlers.on_branch_decision,
+            node_id=payload.get("node_id", ""),
+            handle=payload.get("handle", ""),
+            **{
+                key: value
+                for key, value in payload.items()
+                if key not in {"node_id", "handle"}
+            },
+        )
         yielded.append("")
         return graph_done, yielded
 
     if event_name == "node_snapshot" and handlers.on_node_snapshot:
-        handlers.on_node_snapshot(
-            payload.get("node_id", ""),
-            payload.get("node_type", ""),
-            payload.get("status", ""),
-            payload.get("input"),
-            payload.get("output"),
-            payload.get("error_message"),
-            bool(payload.get("hard_truncated", False)),
+        rt.invoke_callback(
+            handlers.on_node_snapshot,
+            node_id=payload.get("node_id", ""),
+            node_type=payload.get("node_type", ""),
+            status=payload.get("status", ""),
+            input=payload.get("input"),
+            output=payload.get("output"),
+            input_data=payload.get("input"),
+            output_data=payload.get("output"),
+            error_message=payload.get("error_message"),
+            hard_truncated=bool(payload.get("hard_truncated", False)),
+            **{
+                key: value
+                for key, value in payload.items()
+                if key not in {"node_id", "node_type", "status", "input", "output", "error_message", "hard_truncated"}
+            },
         )
         yielded.append("")
         return graph_done, yielded
@@ -240,6 +303,7 @@ def run_graph_stream(
     push_runtime_event: Callable[..., None],
     handlers: RuntimeEventHandlers,
     stream_output_enabled: bool,
+    cancel_checker: Callable[[], bool] | None = None,
     event_poll_timeout: float = 0.1,
 ) -> Iterator[str]:
     graph_errors: list[Exception] = []
@@ -261,7 +325,13 @@ def run_graph_stream(
     content_segment_state: dict[str, Any] = {
         "last_output_source_node_id": "",
     }
+    cancel_error: AssistantRunCancelled | None = None
     while not graph_done or not runtime_events.empty():
+        try:
+            ensure_not_cancelled(cancel_checker, message="assistant run cancelled while polling workflow events")
+        except AssistantRunCancelled as exc:
+            cancel_error = exc
+            break
         try:
             event_name, payload = runtime_events.get(timeout=event_poll_timeout)
         except Empty:
@@ -280,6 +350,10 @@ def run_graph_stream(
             graph_done = True
         for out in outputs:
             yield out
+
+    if cancel_error is not None:
+        graph_thread.join(timeout=0.2)
+        raise cancel_error
 
     graph_thread.join()
     if graph_errors:

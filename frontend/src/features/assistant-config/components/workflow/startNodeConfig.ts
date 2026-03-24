@@ -1,9 +1,21 @@
 import type { StartStructuredField, WorkflowInput, WorkflowSessionVar, WorkflowEnvVarType } from '../../api/workflow'
 
 export type StartInputMode = 'text' | 'structured'
+export type StartMemoryMode = 'auto' | 'off' | 'structured'
 
 const FIELD_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/
 const ALLOWED_FIELD_TYPES = new Set(['string', 'number', 'integer', 'boolean'])
+const ALLOWED_MEMORY_MODES = new Set<StartMemoryMode>(['auto', 'off', 'structured'])
+export const START_MEMORY_STRUCTURED_FIELD_NAMES = new Set([
+  'memory_recent_dialogue',
+  'memory_conversation_summary',
+  'memory_skill_facts',
+])
+const LEGACY_START_MEMORY_FIELD_NAMES = new Set([
+  'memory_l0',
+  'memory_l1',
+  'memory_l2',
+])
 const ALLOWED_ENV_TYPES = new Set<WorkflowEnvVarType>([
   'string',
   'number',
@@ -22,6 +34,7 @@ export const START_FIELD_TYPE_OPTIONS: Array<{ label: string; value: StartStruct
 
 export interface NormalizedStartNodeConfig {
   inputMode: StartInputMode
+  memoryMode: StartMemoryMode
   structuredFields: StartStructuredField[]
   sessionVars: WorkflowSessionVar[]
 }
@@ -29,6 +42,7 @@ export interface NormalizedStartNodeConfig {
 export function buildDefaultStartNodeConfig(): NormalizedStartNodeConfig {
   return {
     inputMode: 'text',
+    memoryMode: 'auto',
     structuredFields: [],
     sessionVars: [],
   }
@@ -74,7 +88,12 @@ function normalizeSessionVar(raw: unknown): WorkflowSessionVar | null {
 }
 
 export function isValidStartStructuredFieldName(name: string): boolean {
-  return FIELD_NAME_RE.test(name) && name !== 'user_input'
+  return (
+    FIELD_NAME_RE.test(name)
+    && name !== 'user_input'
+    && !START_MEMORY_STRUCTURED_FIELD_NAMES.has(name)
+    && !LEGACY_START_MEMORY_FIELD_NAMES.has(name)
+  )
 }
 
 export function normalizeStartNodeConfig(rawConfig: unknown): NormalizedStartNodeConfig {
@@ -84,6 +103,10 @@ export function normalizeStartNodeConfig(rawConfig: unknown): NormalizedStartNod
   const cfg = rawConfig as Record<string, unknown>
   const rawMode = String(cfg.inputMode ?? cfg.input_mode ?? 'text').trim().toLowerCase()
   const inputMode: StartInputMode = rawMode === 'structured' ? 'structured' : 'text'
+  const rawMemoryMode = String(cfg.memoryMode ?? cfg.memory_mode ?? 'auto').trim().toLowerCase()
+  const memoryMode: StartMemoryMode = ALLOWED_MEMORY_MODES.has(rawMemoryMode as StartMemoryMode)
+    ? (rawMemoryMode as StartMemoryMode)
+    : 'auto'
   const rawFields = (cfg.structuredFields ?? cfg.structured_fields) as unknown
   const structuredFields = Array.isArray(rawFields)
     ? rawFields
@@ -98,6 +121,7 @@ export function normalizeStartNodeConfig(rawConfig: unknown): NormalizedStartNod
     : []
   return {
     inputMode,
+    memoryMode,
     structuredFields,
     sessionVars,
   }

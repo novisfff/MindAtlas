@@ -10,7 +10,7 @@ from app.ai_provider.crypto import decrypt_api_key
 from app.ai_registry.models import AiComponentBinding, AiCredential, AiModel
 from app.common.ssrf import normalize_openai_base_url
 
-AiComponent = Literal["assistant", "lightrag"]
+AiComponent = Literal["assistant", "lightrag", "workflow_copilot"]
 AiModelType = Literal["llm", "embedding"]
 
 
@@ -68,7 +68,7 @@ def resolve_openai_compat_config(
 
     Args:
         db: 数据库会话
-        component: 组件名称 (assistant / lightrag)
+        component: 组件名称 (assistant / lightrag / workflow_copilot)
         model_type: 模型类型 (llm / embedding)
 
     Returns:

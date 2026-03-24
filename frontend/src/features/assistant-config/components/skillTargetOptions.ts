@@ -17,6 +17,8 @@ export interface AssistantExecutableTarget {
   isSystem: boolean
   isSystemDefault?: boolean
   referenceCount: number
+  systemBehaviorReferenceCount?: number
+  referencedSystemBehaviorKeys?: string[]
   bindable: boolean
   disabledReason?: string
 }
@@ -65,6 +67,8 @@ export function buildAssistantExecutableTargets(
     enabled: workflow.enabled,
     isSystem: workflow.isSystem,
     referenceCount: workflow.referenceCount,
+    systemBehaviorReferenceCount: workflow.systemBehaviorReferenceCount,
+    referencedSystemBehaviorKeys: workflow.referencedSystemBehaviorKeys,
   }))
 
   const agentTargets: AssistantExecutableTarget[] = agents.map((agent) => ({
@@ -76,6 +80,8 @@ export function buildAssistantExecutableTargets(
     enabled: agent.enabled,
     isSystem: agent.isSystem,
     referenceCount: agent.referenceCount,
+    systemBehaviorReferenceCount: agent.systemBehaviorReferenceCount,
+    referencedSystemBehaviorKeys: agent.referencedSystemBehaviorKeys,
     bindable: true,
   }))
 
@@ -93,6 +99,89 @@ export function buildAssistantExecutableTargets(
     ))
   }
   return sortedTargets
+}
+
+export function buildSystemBehaviorBindingTargets(
+  workflows: AssistantWorkflow[],
+  agents: AssistantAgentProfile[],
+  options?: BuildTargetOptions,
+): AssistantExecutableTarget[] {
+  const workflowTargets: AssistantExecutableTarget[] = workflows.map((workflow) => {
+    const isStructured = isStructuredStartWorkflowFromNodes(
+      (workflow.nodes ?? []).map((node) => ({
+        nodeType: node.nodeType,
+        config: node.config,
+      })),
+    )
+    const hasPublishedVersion = Boolean(workflow.publishedVersionId)
+    const isEnabled = Boolean(workflow.enabled)
+    let disabledReason: string | undefined
+    if (!isStructured) disabledReason = 'unstructured_workflow'
+    if (!hasPublishedVersion) disabledReason = 'unpublished_target'
+    if (!isEnabled) disabledReason = 'unavailable_target'
+    return {
+      key: `workflow:${workflow.id}`,
+      id: workflow.id,
+      type: 'workflow',
+      name: workflow.name,
+      description: workflow.description,
+      enabled: workflow.enabled,
+      isSystem: workflow.isSystem,
+      isSystemDefault: false,
+      referenceCount: workflow.referenceCount,
+      systemBehaviorReferenceCount: workflow.systemBehaviorReferenceCount,
+      referencedSystemBehaviorKeys: workflow.referencedSystemBehaviorKeys,
+      bindable: isStructured && hasPublishedVersion && isEnabled,
+      disabledReason,
+    }
+  })
+
+  const agentTargets: AssistantExecutableTarget[] = agents.map((agent) => {
+    const hasPublishedVersion = Boolean(agent.publishedVersionId)
+    const isEnabled = Boolean(agent.enabled)
+    let disabledReason: string | undefined
+    if (!hasPublishedVersion) disabledReason = 'unpublished_target'
+    if (!isEnabled) disabledReason = 'unavailable_target'
+    return {
+      key: `agent:${agent.id}`,
+      id: agent.id,
+      type: 'agent',
+      name: agent.name,
+      description: agent.description,
+      enabled: agent.enabled,
+      isSystem: agent.isSystem,
+      isSystemDefault: false,
+      referenceCount: agent.referenceCount,
+      systemBehaviorReferenceCount: agent.systemBehaviorReferenceCount,
+      referencedSystemBehaviorKeys: agent.referencedSystemBehaviorKeys,
+      bindable: hasPublishedVersion && isEnabled,
+      disabledReason,
+    }
+  })
+
+  const sortedTargets = [...workflowTargets, ...agentTargets].sort((a, b) => {
+    if (a.isSystem !== b.isSystem) return a.isSystem ? -1 : 1
+    return a.name.localeCompare(b.name)
+  })
+
+  const defaultTarget = inferSystemDefaultTarget(sortedTargets, options)
+  const withDefaultMarked = defaultTarget
+    ? sortedTargets.map((item) => (
+        item.key === defaultTarget.key
+          ? { ...item, isSystemDefault: true }
+          : item
+      ))
+    : sortedTargets
+
+  if (!defaultTarget) return withDefaultMarked
+
+  const specialDefaultTarget: AssistantExecutableTarget = {
+    ...defaultTarget,
+    key: SYSTEM_DEFAULT_TARGET_KEY,
+    isSystemDefault: true,
+  }
+
+  return [specialDefaultTarget, ...withDefaultMarked.filter((item) => item.key !== defaultTarget.key)]
 }
 
 export function buildSkillBindingTargets(

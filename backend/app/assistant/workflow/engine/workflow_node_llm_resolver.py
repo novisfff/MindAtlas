@@ -42,7 +42,7 @@ def resolve_workflow_node_llms(
 
         raw_cfg = getattr(node, "config", None)
         cfg = normalize_config(raw_cfg) if isinstance(raw_cfg, dict) else {}
-        if node_type in {"llm", "parameter_extractor"}:
+        if node_type in {"llm", "parameter_extractor", "agent"}:
             _bind_model_for_node(runtime_key=node_id, cfg=cfg)
             continue
         if node_type not in {"iteration", "loop"}:
@@ -52,7 +52,7 @@ def resolve_workflow_node_llms(
         for body in body_nodes:
             body_id = str(body.get("node_id", "") or "").strip()
             body_type = str(body.get("node_type", "") or "").strip()
-            if not body_id or body_type not in {"llm", "parameter_extractor"}:
+            if not body_id or body_type not in {"llm", "parameter_extractor", "agent"}:
                 continue
             body_cfg = body.get("config") if isinstance(body.get("config"), dict) else {}
             runtime_key = f"{node_id}::{body_id}"

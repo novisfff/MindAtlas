@@ -29,6 +29,19 @@ class ApiException(StarletteHTTPException):
         self.details = details
 
 
+def _make_json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {
+            str(key): _make_json_safe(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_make_json_safe(item) for item in value]
+    return str(value)
+
+
 def register_exception_handlers(app: FastAPI, *, debug: bool = False) -> None:
     logger = logging.getLogger(__name__)
 
@@ -61,7 +74,11 @@ def register_exception_handlers(app: FastAPI, *, debug: bool = False) -> None:
         )
         return JSONResponse(
             status_code=422,
-            content=ApiResponse.fail(code=42200, message="Validation Error", data=exc.errors()).model_dump(),
+            content=ApiResponse.fail(
+                code=42200,
+                message="Validation Error",
+                data=_make_json_safe(exc.errors()),
+            ).model_dump(),
         )
 
     @app.exception_handler(StarletteHTTPException)

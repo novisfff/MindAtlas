@@ -18,6 +18,7 @@ _OPENAI_COMPAT_DEFAULT_HEADERS = {
     "accept": "application/json",
     "user-agent": "MindAtlas/1.0",
 }
+_AI_COMPONENTS: tuple[AiComponent, ...] = ("assistant", "lightrag", "workflow_copilot")
 
 
 def _infer_model_type(model_id: str) -> AiModelType:
@@ -287,10 +288,7 @@ class AiBindingService:
         return row
 
     def get_bindings(self) -> dict[str, AiComponentBinding]:
-        return {
-            "assistant": self._get_or_create("assistant"),
-            "lightrag": self._get_or_create("lightrag"),
-        }
+        return {component: self._get_or_create(component) for component in _AI_COMPONENTS}
 
     def _validate_model_type(self, model_id: UUID, expected: AiModelType) -> None:
         m = self.db.query(AiModel).filter(AiModel.id == model_id).first()

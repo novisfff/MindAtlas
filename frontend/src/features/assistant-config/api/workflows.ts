@@ -2,6 +2,8 @@ import { apiClient } from '@/lib/api/client'
 import type {
   WorkflowEdge,
   WorkflowHumanApproval,
+  WorkflowCopilotRequest,
+  WorkflowCopilotResponse,
   WorkflowInput,
   WorkflowNode,
   WorkflowTestRunRequest,
@@ -24,6 +26,8 @@ export interface AssistantWorkflow {
   publishedVersionId: string | null
   referencedSkillIds: string[]
   referenceCount: number
+  referencedSystemBehaviorKeys: string[]
+  systemBehaviorReferenceCount: number
   createdAt: string
   updatedAt: string
 }
@@ -116,8 +120,15 @@ export const deleteWorkflowVersion = (id: string, versionId: string) =>
 export const clearWorkflowVersions = (id: string) =>
   apiClient.post<WorkflowClearVersionsResponse>(`/api/assistant-config/workflows/${id}/versions/clear`)
 
-export const deleteWorkflow = (id: string) =>
-  apiClient.delete(`/api/assistant-config/workflows/${id}`)
+export const deleteWorkflow = (
+  id: string,
+  options: { confirmRebindSystemBehaviors?: boolean } = {},
+) =>
+  apiClient.delete(`/api/assistant-config/workflows/${id}`, {
+    query: {
+      confirmRebindSystemBehaviors: options.confirmRebindSystemBehaviors ?? false,
+    },
+  })
 
 export const saveWorkflowById = (
   workflowId: string,
@@ -132,6 +143,15 @@ export const validateWorkflowById = (workflowId: string, data: WorkflowInput) =>
   apiClient.post<WorkflowValidationResponse>(
     `/api/assistant-config/workflows/${workflowId}/validate`,
     { body: data },
+  )
+
+export const respondWorkflowCopilotById = (
+  workflowId: string,
+  payload: WorkflowCopilotRequest,
+) =>
+  apiClient.post<WorkflowCopilotResponse>(
+    `/api/assistant-config/workflows/${workflowId}/copilot/respond`,
+    { body: payload },
   )
 
 export const runWorkflowTestStreamById = (

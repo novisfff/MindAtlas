@@ -1,0 +1,172 @@
+{
+  "nodes": [
+    {
+      "nodeId": "start",
+      "nodeType": "start",
+      "label": "开始",
+      "positionX": 120,
+      "positionY": 280,
+      "config": {
+        "inputMode": "structured",
+        "memoryMode": "off",
+        "structuredFields": [
+          {
+            "name": "periodType",
+            "type": "string",
+            "required": true,
+            "description": "报告周期类型。"
+          },
+          {
+            "name": "periodStart",
+            "type": "string",
+            "required": true,
+            "description": "报告周期开始日期，格式为 YYYY-MM-DD，包含当天。"
+          },
+          {
+            "name": "periodEnd",
+            "type": "string",
+            "required": true,
+            "description": "报告周期结束日期，格式为 YYYY-MM-DD，包含当天。"
+          },
+          {
+            "name": "entryCount",
+            "type": "integer",
+            "required": true,
+            "description": "当前周期内的记录数量。"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_entries",
+      "nodeType": "tool",
+      "label": "加载记录",
+      "positionX": 520,
+      "positionY": 200,
+      "config": {
+        "toolName": "get_entries_by_time_range",
+        "inputBindings": {
+          "start_date": "{{start.periodStart}}",
+          "end_date": "{{start.periodEnd}}"
+        }
+      }
+    },
+    {
+      "nodeId": "tool_activity",
+      "nodeType": "tool",
+      "label": "分析活动",
+      "positionX": 520,
+      "positionY": 360,
+      "config": {
+        "toolName": "analyze_activity",
+        "inputBindings": {
+          "start_date": "{{start.periodStart}}",
+          "end_date": "{{start.periodEnd}}"
+        }
+      }
+    },
+    {
+      "nodeId": "llm_report",
+      "nodeType": "llm",
+      "label": "生成周报",
+      "positionX": 980,
+      "positionY": 280,
+      "config": {
+        "systemPrompt": "请为 MindAtlas 生成一份简洁、扎实的中文周报。请基于提供的周期信息、检索到的记录内容和活动分析结果完成输出。summary 要聚焦本周的关键进展与重点内容；suggestions 必须是可直接执行的中文字符串数组；trends 需要总结本周出现的模式、变化或值得关注的现象。不要脱离已有数据臆测。",
+        "userInput": "报告周期：{{start.periodType}}\n开始日期：{{start.periodStart}}\n结束日期：{{start.periodEnd}}\n记录数量：{{start.entryCount}}\n\n记录内容：\n{{tool_entries.result}}\n\n活动分析：\n{{tool_activity.result}}",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "summary",
+            "type": "string",
+            "nullable": false
+          },
+          {
+            "name": "suggestions",
+            "type": "array",
+            "itemsType": "string",
+            "nullable": false
+          },
+          {
+            "name": "trends",
+            "type": "string",
+            "nullable": false
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "output_final",
+      "nodeType": "output",
+      "label": "输出",
+      "positionX": 1420,
+      "positionY": 280,
+      "config": {
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "summary",
+            "type": "string",
+            "nullable": false,
+            "value": "{{llm_report.summary}}"
+          },
+          {
+            "name": "suggestions",
+            "type": "array",
+            "itemsType": "string",
+            "nullable": false,
+            "value": "{{llm_report.suggestions}}"
+          },
+          {
+            "name": "trends",
+            "type": "string",
+            "nullable": false,
+            "value": "{{llm_report.trends}}"
+          }
+        ]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edgeId": "e_start_entries",
+      "sourceNodeId": "start",
+      "targetNodeId": "tool_entries",
+      "sourceHandle": "output",
+      "targetHandle": "input"
+    },
+    {
+      "edgeId": "e_start_activity",
+      "sourceNodeId": "start",
+      "targetNodeId": "tool_activity",
+      "sourceHandle": "output",
+      "targetHandle": "input"
+    },
+    {
+      "edgeId": "e_entries_report",
+      "sourceNodeId": "tool_entries",
+      "targetNodeId": "llm_report",
+      "sourceHandle": "output",
+      "targetHandle": "input"
+    },
+    {
+      "edgeId": "e_activity_report",
+      "sourceNodeId": "tool_activity",
+      "targetNodeId": "llm_report",
+      "sourceHandle": "output",
+      "targetHandle": "input"
+    },
+    {
+      "edgeId": "e_report_output",
+      "sourceNodeId": "llm_report",
+      "targetNodeId": "output_final",
+      "sourceHandle": "output",
+      "targetHandle": "input"
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  }
+}

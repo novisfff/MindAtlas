@@ -83,6 +83,51 @@ export function buildValidationSignature(workflow: WorkflowInput): string {
   })
 }
 
+function sha256Fallback(text: string): string {
+  let hash = 2166136261
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0')
+}
+
+export function buildWorkflowDraftHash(workflow: WorkflowInput): string {
+  const nodesSig = [...workflow.nodes]
+    .map((node) => ({
+      nodeId: node.nodeId,
+      nodeType: node.nodeType,
+      label: node.label ?? '',
+      positionX: node.positionX ?? 0,
+      positionY: node.positionY ?? 0,
+      config: toStableJsonLike(node.config ?? null),
+    }))
+    .sort((a, b) => a.nodeId.localeCompare(b.nodeId))
+
+  const edgesSig = [...workflow.edges]
+    .map((edge) => ({
+      edgeId: edge.edgeId,
+      sourceNodeId: edge.sourceNodeId,
+      targetNodeId: edge.targetNodeId,
+      sourceHandle: edge.sourceHandle ?? 'output',
+      targetHandle: edge.targetHandle ?? 'input',
+      conditionType: edge.conditionType ?? null,
+      conditionExpr: toStableJsonLike(edge.conditionExpr ?? null),
+      label: edge.label ?? null,
+    }))
+    .sort((a, b) => {
+      const keyA = `${a.edgeId}|${a.sourceNodeId}|${a.targetNodeId}`
+      const keyB = `${b.edgeId}|${b.sourceNodeId}|${b.targetNodeId}`
+      return keyA.localeCompare(keyB)
+    })
+
+  return sha256Fallback(stableStringify({
+    nodes: nodesSig,
+    edges: edgesSig,
+    viewport: toStableJsonLike(workflow.viewport ?? null),
+  }))
+}
+
 export function computeDeadEndWarnings(
   workflow: WorkflowInput,
   warningMessage: string,

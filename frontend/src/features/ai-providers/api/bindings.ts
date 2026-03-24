@@ -13,6 +13,7 @@ export interface ComponentBinding {
 export interface ModelBindings {
   assistant: ComponentBinding
   lightrag: ComponentBinding
+  workflowCopilot: ComponentBinding
 }
 
 export interface UpdateComponentBindingRequest {
@@ -23,6 +24,7 @@ export interface UpdateComponentBindingRequest {
 export interface UpdateModelBindingsRequest {
   assistant?: UpdateComponentBindingRequest
   lightrag?: UpdateComponentBindingRequest
+  workflowCopilot?: UpdateComponentBindingRequest
 }
 
 // ==================== API Functions ====================

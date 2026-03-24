@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { remarkCitation } from './remark-citation'
@@ -7,7 +8,8 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { ToolCall, SkillCall, Analysis, HumanApproval } from '../types'
-import { submitApprovalDecision } from '../api'
+import { listPendingApprovals, submitApprovalDecision } from '../api'
+import { assistantKeys } from '../queries'
 import { useChatStore } from '../stores/chat-store'
 import { ToolCallDisplay } from './ToolCallDisplay'
 import { SkillCallDisplay } from './SkillCallDisplay'
@@ -30,11 +32,21 @@ interface MessageItemProps {
   isStreaming?: boolean
 }
 
+const truncateHintText = (value: string, maxChars: number) => {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  if (text.length <= maxChars) return text
+  return `${text.slice(0, Math.max(1, maxChars - 1)).trimEnd()}…`
+}
+
 export function MessageItem({ message, variant = 'default', isStreaming }: MessageItemProps) {
   const { t } = useTranslation()
-  const { currentConversationId, upsertHumanApproval } = useChatStore((state) => ({
+  const queryClient = useQueryClient()
+  const { currentConversationId, upsertHumanApproval, setConversationPendingApprovals, activeWorkflowSteps } = useChatStore((state) => ({
     currentConversationId: state.currentConversationId,
     upsertHumanApproval: state.upsertHumanApproval,
+    setConversationPendingApprovals: state.setConversationPendingApprovals,
+    activeWorkflowSteps: state.activeWorkflowSteps,
   }))
   const [submittingApprovalId, setSubmittingApprovalId] = useState<string | null>(null)
   const isUser = message.role === 'user'
@@ -50,6 +62,16 @@ export function MessageItem({ message, variant = 'default', isStreaming }: Messa
   // 2. 流式输出中 + 内容为空（等待 AI 生成）
   const showKbSearching = activeHiddenTools && activeHiddenTools.length > 0
   const showGenerating = isStreaming && !message.content && !showKbSearching
+  const runningStepLabels = activeWorkflowSteps
+    .map((step) => (step.nodeLabel || step.nodeId || step.nodeType || '').trim())
+    .filter(Boolean)
+  const rawGeneratingHint = runningStepLabels.length === 0
+    ? t('pages.assistant.generatingResponse', 'Generating response...')
+    : runningStepLabels.length === 1
+      ? t('pages.assistant.workflowRunning', { step: runningStepLabels[0] })
+      : t('pages.assistant.workflowRunningParallel', { count: runningStepLabels.length })
+  const maxHintChars = isCompact ? 24 : 38
+  const generatingHint = truncateHintText(rawGeneratingHint, maxHintChars)
 
   const handleSubmitApproval = async (
     approvalId: string,
@@ -63,6 +85,14 @@ export function MessageItem({ message, variant = 'default', isStreaming }: Messa
     try {
       const approval = await submitApprovalDecision(currentConversationId, approvalId, payload)
       upsertHumanApproval(approval)
+      try {
+        const pending = await listPendingApprovals(currentConversationId)
+        setConversationPendingApprovals(pending)
+      } catch {
+        setConversationPendingApprovals([])
+      }
+      queryClient.invalidateQueries({ queryKey: [...assistantKeys.conversations(), currentConversationId] })
+      queryClient.invalidateQueries({ queryKey: assistantKeys.conversations() })
       toast.success(t('settings.skills.humanApproval.submitted'))
     } catch (error) {
       const message = error instanceof Error ? error.message : t('settings.skills.humanApproval.submitFailed')
@@ -136,9 +166,9 @@ export function MessageItem({ message, variant = 'default', isStreaming }: Messa
           )}
           {/* 等待 AI 生成回复状态 */}
           {showGenerating && (
-            <div className="flex items-center gap-2 text-xs text-muted-foreground my-2 animate-pulse px-1">
+            <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground my-2 animate-pulse px-1">
               <Loader2 className="h-3 w-3 animate-spin" />
-              <span>{t('pages.assistant.generatingResponse', 'Generating response...')}</span>
+              <span className="min-w-0 flex-1 truncate">{generatingHint}</span>
             </div>
           )}
           <CitationProvider content={message.content || ''} toolCalls={message.toolCalls}>

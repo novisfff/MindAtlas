@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 
 interface PublishVersionDialogProps {
   open: boolean
@@ -27,9 +27,14 @@ export function PublishVersionDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>{t('settings.skills.versioning.publishDialogTitle')}</DialogTitle>
+      <DialogContent className="sm:max-w-md rounded-[24px] border-slate-200 bg-white p-6 shadow-[0_24px_70px_rgba(15,23,42,0.2)]">
+        <DialogHeader className="space-y-2 text-left">
+          <DialogTitle className="text-lg font-semibold text-slate-900">{t('settings.skills.versioning.publishDialogTitle')}</DialogTitle>
+          <DialogDescription className="text-sm leading-6 text-slate-600">
+            {t('settings.skills.versioning.publishDialogSubtitle', {
+              defaultValue: '保存当前草稿并创建一个新的发布版本。',
+            })}
+          </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
           <label className="text-sm font-medium">
@@ -39,7 +44,7 @@ export function PublishVersionDialog({
             value={versionName}
             onChange={(event) => setVersionName(event.target.value)}
             placeholder={t('settings.skills.versioning.publishVersionNamePlaceholder')}
-            className="w-full rounded-md border border-input px-3 py-2 text-sm"
+            className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition focus:border-primary/50 focus:ring-2 focus:ring-primary/15"
             disabled={submitting}
           />
         </div>
@@ -47,7 +52,7 @@ export function PublishVersionDialog({
           <button
             type="button"
             onClick={() => onOpenChange(false)}
-            className="rounded-md border px-3 py-2 text-sm hover:bg-muted"
+            className="rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 transition-colors hover:bg-slate-50"
             disabled={submitting}
           >
             {t('common.cancel')}
@@ -55,7 +60,7 @@ export function PublishVersionDialog({
           <button
             type="button"
             onClick={() => onConfirm(versionName.trim())}
-            className="rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
+            className="rounded-xl bg-primary px-3 py-2 text-sm text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-60"
             disabled={submitting}
           >
             {t('settings.skills.workflowActions.saveAndPublish')}

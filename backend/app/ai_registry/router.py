@@ -146,6 +146,7 @@ def get_bindings(db: Session = Depends(get_db)) -> ApiResponse:
 
     assistant = bindings["assistant"]
     lightrag = bindings["lightrag"]
+    workflow_copilot = bindings["workflow_copilot"]
     payload = ModelBindingsResponse(
         assistant=ComponentBinding(
             llm_model_id=assistant.llm_model_id,
@@ -158,6 +159,12 @@ def get_bindings(db: Session = Depends(get_db)) -> ApiResponse:
             embedding_model_id=lightrag.embedding_model_id,
             llm_model=_model_or_none(lightrag.llm_model_id),
             embedding_model=_model_or_none(lightrag.embedding_model_id),
+        ),
+        workflow_copilot=ComponentBinding(
+            llm_model_id=workflow_copilot.llm_model_id,
+            embedding_model_id=workflow_copilot.embedding_model_id,
+            llm_model=_model_or_none(workflow_copilot.llm_model_id),
+            embedding_model=_model_or_none(workflow_copilot.embedding_model_id),
         ),
     )
     return ApiResponse.ok(payload.model_dump(by_alias=True))
@@ -177,5 +184,11 @@ def update_bindings(request: UpdateModelBindingsRequest, db: Session = Depends(g
             "lightrag",
             llm_model_id=request.lightrag.llm_model_id,
             embedding_model_id=request.lightrag.embedding_model_id,
+        )
+    if request.workflow_copilot is not None:
+        svc.update_component(
+            "workflow_copilot",
+            llm_model_id=request.workflow_copilot.llm_model_id,
+            embedding_model_id=request.workflow_copilot.embedding_model_id,
         )
     return get_bindings(db=db)

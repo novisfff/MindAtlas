@@ -21,6 +21,7 @@ class SkillRouterPromptFormatTests(unittest.TestCase):
             current_date="2026-01-01",
             skills_list="",
             default_skill_name=DEFAULT_SKILL_NAME,
+            last_skill_hint="",
         )
         self.assertIn(DEFAULT_SKILL_NAME, rendered)
-
+        self.assertIn('"skill"', rendered)
