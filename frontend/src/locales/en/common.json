@@ -903,6 +903,7 @@
         "editWithAi": "Edit With AI",
         "fixWithAi": "AI Fix",
         "analyzeWithAi": "AI Analyze",
+        "clearConversation": "Clear Chat",
         "send": "Send",
         "applyProposal": "Apply Proposal",
         "applySuccess": "Copilot proposal applied",

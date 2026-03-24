@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import { Bot, Loader2, SendHorizontal, Sparkles, Wand2, X } from 'lucide-react'
+import { Bot, Loader2, SendHorizontal, Sparkles, Trash2, Wand2, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import type {
@@ -445,6 +445,16 @@ export function WorkflowCopilotPanel({
     onPreviewVisibleChange(false)
   }
 
+  const hasConversationState = Boolean(input.trim() || messages.length > 0 || proposal || previewVisible)
+
+  const handleClearConversation = () => {
+    if (isSubmitting || !hasConversationState) return
+    setMessages([])
+    setInput('')
+    onProposalChange(null)
+    onPreviewVisibleChange(false)
+  }
+
   const handleSend = async () => {
     if (!workflowId || !effectiveInstruction || isSubmitting) return
 
@@ -771,6 +781,20 @@ export function WorkflowCopilotPanel({
     </div>
   ) : null
 
+  const headerActions = (
+    <button
+      type="button"
+      onClick={handleClearConversation}
+      disabled={isSubmitting || !hasConversationState}
+      className="inline-flex h-8 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-medium text-slate-600 transition-colors hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900 disabled:pointer-events-none disabled:opacity-45"
+      title={t('settings.skills.workflowCopilot.clearConversation')}
+      aria-label={t('settings.skills.workflowCopilot.clearConversation')}
+    >
+      <Trash2 className="h-3.5 w-3.5" />
+      <span className="whitespace-nowrap">{t('settings.skills.workflowCopilot.clearConversation')}</span>
+    </button>
+  )
+
   return (
     <div className={wrapperClassName} style={wrapperStyle}>
       <WorkflowEditorSurfaceShell
@@ -780,6 +804,7 @@ export function WorkflowCopilotPanel({
         icon={<Sparkles className="w-4 h-4" />}
         title={t('settings.skills.workflowCopilot.title')}
         subtitle={isSplitLayout ? t('settings.skills.workflowCopilot.splitLayoutHint') : (title || modeLabel(mode, t))}
+        headerActions={headerActions}
         onClose={onClose}
         bodyClassName={`min-h-0 flex-1 overflow-auto bg-slate-50/70 ${isSplitLayout ? 'px-4 py-3.5' : 'px-3.5 py-3.5'}`}
         footer={panelFooter}

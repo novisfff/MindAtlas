@@ -901,6 +901,7 @@
         "editWithAi": "让 AI 帮我改这个节点",
         "fixWithAi": "AI 修复",
         "analyzeWithAi": "AI 分析",
+        "clearConversation": "清空对话",
         "send": "发送",
         "applyProposal": "应用提案",
         "applySuccess": "已应用 Copilot 提案",

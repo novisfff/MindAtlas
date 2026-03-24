@@ -13,6 +13,7 @@ import {
 } from '@xyflow/react'
 import { Maximize2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { cn } from '@/lib/utils'
 import type { WfNodeData } from '../../stores/workflow-editor-store'
 import '@xyflow/react/dist/style.css'
 
@@ -163,9 +164,10 @@ function WorkflowReadonlyCanvasInner({
   ), [edges])
 
   return (
-    <div className={className}>
+    <div className={cn('h-full min-h-0 min-w-0 w-full', className)}>
       <ReactFlowProvider>
         <ReactFlow
+          className="h-full w-full"
           nodes={previewNodes}
           edges={previewEdges}
           nodeTypes={nodeTypes}

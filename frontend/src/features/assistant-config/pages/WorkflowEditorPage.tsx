@@ -1507,9 +1507,9 @@ export default function WorkflowEditorPage() {
 
         {workflowId && copilotSessionRetained ? (
           <div className={`absolute inset-4 top-[4.75rem] z-30 pointer-events-none ${copilotOpen ? '' : 'hidden'}`}>
-            <div className={`h-full min-h-0 gap-3 ${showCopilotPreviewPane ? 'grid xl:grid-cols-[minmax(0,1fr)_540px]' : 'flex justify-end'}`}>
+            <div className={`h-full min-h-0 gap-3 ${showCopilotPreviewPane ? 'grid grid-cols-[minmax(0,1fr)_minmax(380px,540px)]' : 'flex justify-end'}`}>
               {showCopilotPreviewPane ? (
-                <div className="pointer-events-auto min-h-0">
+                <div className="pointer-events-auto min-h-0 min-w-0">
                   <WorkflowEditorSurfaceShell
                     size="full"
                     density="compact"
@@ -1630,7 +1630,7 @@ export default function WorkflowEditorPage() {
                 </div>
               ) : null}
 
-              <div className={`min-h-0 ${showCopilotPreviewPane ? '' : 'w-full max-w-[540px]'}`}>
+              <div className={`min-h-0 ${showCopilotPreviewPane ? 'min-w-0' : 'w-full max-w-[540px]'}`}>
                 <div className={`relative flex h-full min-h-0 items-start ${canShowSurfaceRail ? 'pl-11' : ''}`}>
                   {canShowSurfaceRail ? (
                     <WorkflowEditorSurfaceRail
@@ -1641,7 +1641,9 @@ export default function WorkflowEditorPage() {
                     />
                   ) : null}
                   <div
-                    className={`pointer-events-auto h-full min-h-0 flex-1 transition-[width,max-width] duration-300 ease-out will-change-[width] ${rightWorkbenchWidthClass}`}
+                    className={`pointer-events-auto h-full min-h-0 flex-1 transition-[width,max-width] duration-300 ease-out will-change-[width] ${
+                      showCopilotPreviewPane ? 'w-full min-w-0 max-w-none' : rightWorkbenchWidthClass
+                    }`}
                   >
                     <WorkflowCopilotPanel
                       open={copilotOpen}
