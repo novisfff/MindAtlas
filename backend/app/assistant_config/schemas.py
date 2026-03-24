@@ -688,6 +688,19 @@ class ResetAllSkillsResponse(CamelModel):
     affected: list[dict]
 
 
+class ResetAllSystemBehaviorsAffectedItem(CamelModel):
+    behavior_key: SystemBehaviorKey
+    name: str
+    target_type: TargetType
+    target_name: str
+
+
+class ResetAllSystemBehaviorsResponse(CamelModel):
+    """重置所有系统 AI 行为绑定的响应"""
+    reset_count: int
+    affected: list[ResetAllSystemBehaviorsAffectedItem] = []
+
+
 class WorkflowNodeResponse(OrmModel):
     """工作流节点响应"""
     id: UUID

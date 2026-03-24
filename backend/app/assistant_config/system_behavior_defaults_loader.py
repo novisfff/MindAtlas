@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from functools import lru_cache
 from pathlib import Path
 
 from app.assistant_config.schemas import WorkflowInput
@@ -43,7 +42,6 @@ def _read_json(path: Path) -> dict:
     return payload
 
 
-@lru_cache(maxsize=16)
 def load_system_behavior_workflow_preset(preset_file: str) -> WorkflowInput:
     payload = _read_json(_resolve_preset_path(preset_file))
     return WorkflowInput.model_validate(payload)

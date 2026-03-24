@@ -49,6 +49,18 @@ export interface CreateSystemBehaviorExampleWorkflowRequest {
   bindToBehavior?: boolean
 }
 
+export interface ResetAllSystemBehaviorsAffectedItem {
+  behaviorKey: 'weekly_report_generation' | 'monthly_report_generation'
+  name: string
+  targetType: SystemBehaviorTargetType
+  targetName: string
+}
+
+export interface ResetAllSystemBehaviorsResponse {
+  resetCount: number
+  affected: ResetAllSystemBehaviorsAffectedItem[]
+}
+
 export interface UpdateSystemBehaviorBindingRequest {
   targetType: SystemBehaviorTargetType
   workflowId?: string | null
@@ -68,6 +80,11 @@ export const updateSystemBehaviorBinding = (
 
 export const resetSystemBehaviorBinding = (behaviorKey: string) =>
   apiClient.post<SystemBehavior>(`/api/assistant-config/system-behaviors/${behaviorKey}/reset`)
+
+export const resetAllSystemBehaviors = () =>
+  apiClient.post<ResetAllSystemBehaviorsResponse>('/api/assistant-config/system-behaviors/reset-all', {
+    body: { confirm: true },
+  })
 
 export const createSystemBehaviorExampleWorkflow = (
   behaviorKey: string,

@@ -45,22 +45,22 @@ REPORT_INPUT_FIELDS: tuple[SystemBehaviorFieldDefinition, ...] = (
     SystemBehaviorFieldDefinition(
         name="periodType",
         type="string",
-        description="Logical report period kind, for example weekly or monthly.",
+        description="报告周期类型，例如 weekly 或 monthly。",
     ),
     SystemBehaviorFieldDefinition(
         name="periodStart",
         type="string",
-        description="Inclusive report period start date in YYYY-MM-DD format.",
+        description="报告周期开始日期，格式为 YYYY-MM-DD，包含当天。",
     ),
     SystemBehaviorFieldDefinition(
         name="periodEnd",
         type="string",
-        description="Inclusive report period end date in YYYY-MM-DD format.",
+        description="报告周期结束日期，格式为 YYYY-MM-DD，包含当天。",
     ),
     SystemBehaviorFieldDefinition(
         name="entryCount",
         type="integer",
-        description="Number of entries that fall within the report period.",
+        description="落在当前报告周期内的记录数量。",
     ),
 )
 
@@ -68,18 +68,18 @@ REPORT_OUTPUT_FIELDS: tuple[SystemBehaviorFieldDefinition, ...] = (
     SystemBehaviorFieldDefinition(
         name="summary",
         type="string",
-        description="Human-readable report summary.",
+        description="面向用户展示的报告摘要。",
     ),
     SystemBehaviorFieldDefinition(
         name="suggestions",
         type="array",
-        description="Follow-up suggestions extracted from the report.",
+        description="从报告中提炼出的后续行动建议。",
         items_type="string",
     ),
     SystemBehaviorFieldDefinition(
         name="trends",
         type="string",
-        description="Observed trends for the period.",
+        description="对当前周期趋势的观察与总结。",
     ),
 )
 
@@ -89,8 +89,8 @@ def _registry() -> dict[SystemBehaviorKey, SystemBehaviorDefinition]:
     return {
         "weekly_report_generation": SystemBehaviorDefinition(
             key="weekly_report_generation",
-            name="Weekly Report Generation",
-            description="Generate the system weekly report through a reusable assistant target.",
+            name="周报生成",
+            description="通过可复用的 Workflow 或 Agent 生成系统周报。",
             supported_target_types=("workflow", "agent"),
             input_fields=REPORT_INPUT_FIELDS,
             output_fields=REPORT_OUTPUT_FIELDS,
@@ -103,8 +103,8 @@ def _registry() -> dict[SystemBehaviorKey, SystemBehaviorDefinition]:
         ),
         "monthly_report_generation": SystemBehaviorDefinition(
             key="monthly_report_generation",
-            name="Monthly Report Generation",
-            description="Generate the system monthly report through a reusable assistant target.",
+            name="月报生成",
+            description="通过可复用的 Workflow 或 Agent 生成系统月报。",
             supported_target_types=("workflow", "agent"),
             input_fields=REPORT_INPUT_FIELDS,
             output_fields=REPORT_OUTPUT_FIELDS,

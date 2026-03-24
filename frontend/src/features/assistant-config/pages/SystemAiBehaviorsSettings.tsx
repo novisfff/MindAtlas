@@ -21,6 +21,7 @@ import type { SystemBehavior } from '../api/system-behaviors'
 import {
   useAgentProfilesQuery,
   useCreateSystemBehaviorExampleWorkflowMutation,
+  useResetAllSystemBehaviorsMutation,
   useResetSystemBehaviorBindingMutation,
   useSystemBehaviorsQuery,
   useUpdateSystemBehaviorBindingMutation,
@@ -32,6 +33,7 @@ import {
   SYSTEM_DEFAULT_TARGET_KEY,
   type AssistantExecutableTarget,
 } from '../components/skillTargetOptions'
+import { ResetDangerConfirmDialog } from '../components/ResetDangerConfirmDialog'
 
 const BEHAVIOR_LOCALE_KEY: Record<SystemBehavior['behaviorKey'], string> = {
   weekly_report_generation: 'weeklyReportGeneration',
@@ -66,6 +68,11 @@ export function SystemAiBehaviorsSettings() {
   const navigate = useNavigate()
   const [expandedBehaviorKey, setExpandedBehaviorKey] = useState<SystemBehavior['behaviorKey'] | null>(null)
   const [pickerOpenBehaviorKey, setPickerOpenBehaviorKey] = useState<SystemBehavior['behaviorKey'] | null>(null)
+  const [showResetAllConfirm, setShowResetAllConfirm] = useState(false)
+  const [resetBehaviorPrompt, setResetBehaviorPrompt] = useState<{
+    behaviorKey: SystemBehavior['behaviorKey']
+    behaviorName: string
+  } | null>(null)
   const [createdExamplePrompt, setCreatedExamplePrompt] = useState<{
     behaviorKey: SystemBehavior['behaviorKey']
     behaviorName: string
@@ -77,6 +84,7 @@ export function SystemAiBehaviorsSettings() {
   const { data: behaviors = [], isLoading: isLoadingBehaviors } = useSystemBehaviorsQuery()
   const updateBindingMutation = useUpdateSystemBehaviorBindingMutation()
   const resetBindingMutation = useResetSystemBehaviorBindingMutation()
+  const resetAllMutation = useResetAllSystemBehaviorsMutation()
   const createExampleWorkflowMutation = useCreateSystemBehaviorExampleWorkflowMutation()
 
   const targetsByBehavior = useMemo(() => new Map(
@@ -173,9 +181,21 @@ export function SystemAiBehaviorsSettings() {
   const handleReset = async (behaviorKey: string) => {
     try {
       await resetBindingMutation.mutateAsync(behaviorKey)
+      setResetBehaviorPrompt(null)
       toast.success(t('settings.systemBehaviors.resetSuccess'))
     } catch (error) {
       const message = error instanceof Error ? error.message : t('messages.error')
+      toast.error(message)
+    }
+  }
+
+  const handleResetAll = async () => {
+    try {
+      await resetAllMutation.mutateAsync()
+      setShowResetAllConfirm(false)
+      toast.success(t('settings.systemBehaviors.resetAllSuccess'))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t('settings.systemBehaviors.resetAllError')
       toast.error(message)
     }
   }
@@ -226,7 +246,7 @@ export function SystemAiBehaviorsSettings() {
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 px-6 py-8">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="space-y-1.5">
           <div className="flex items-center gap-2">
             <button
@@ -243,6 +263,22 @@ export function SystemAiBehaviorsSettings() {
             {t('pages.settings.systemAiBehaviorsDesc')}
           </p>
         </div>
+        {behaviors.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setShowResetAllConfirm(true)}
+            disabled={loading || resetAllMutation.isPending}
+            className="group flex items-center gap-1.5 self-start px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:text-orange-600 disabled:opacity-50"
+            title={t('settings.systemBehaviors.resetAll')}
+          >
+            {resetAllMutation.isPending ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RotateCcw className="h-3.5 w-3.5 transition-transform duration-500 group-hover:rotate-180" />
+            )}
+            {t('settings.systemBehaviors.resetAll')}
+          </button>
+        )}
       </div>
 
       {loading ? (
@@ -526,7 +562,12 @@ export function SystemAiBehaviorsSettings() {
                             </button>
 
                             <button
-                              onClick={() => handleReset(behavior.behaviorKey)}
+                              onClick={() => setResetBehaviorPrompt({
+                                behaviorKey: behavior.behaviorKey,
+                                behaviorName: t(`settings.systemBehaviors.behaviors.${localeKey}.title`, {
+                                  defaultValue: behavior.name,
+                                }),
+                              })}
                               disabled={resetDisabled}
                               className="group inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-border/80 bg-background px-4 text-[13px] font-medium text-foreground shadow-sm transition-all hover:bg-muted/40 hover:shadow-md disabled:opacity-50"
                             >
@@ -614,6 +655,35 @@ export function SystemAiBehaviorsSettings() {
         confirmText={t('settings.systemBehaviors.bindCreatedWorkflowConfirm')}
         cancelText={t('settings.systemBehaviors.bindCreatedWorkflowSkip')}
         isLoading={updateBindingMutation.isPending}
+      />
+
+      <ResetDangerConfirmDialog
+        open={!!resetBehaviorPrompt}
+        scope="systemBehaviors"
+        mode="single"
+        targetName={resetBehaviorPrompt?.behaviorName}
+        loading={resetBindingMutation.isPending}
+        onOpenChange={(open) => {
+          if (!open) {
+            setResetBehaviorPrompt(null)
+          }
+        }}
+        onConfirm={() => {
+          if (!resetBehaviorPrompt) return
+          void handleReset(resetBehaviorPrompt.behaviorKey)
+        }}
+      />
+
+      <ResetDangerConfirmDialog
+        open={showResetAllConfirm}
+        scope="systemBehaviors"
+        mode="all"
+        affectedCount={behaviors.length}
+        loading={resetAllMutation.isPending}
+        onOpenChange={setShowResetAllConfirm}
+        onConfirm={() => {
+          void handleResetAll()
+        }}
       />
     </div>
   )

@@ -3,7 +3,7 @@
     {
       "nodeId": "start",
       "nodeType": "start",
-      "label": "Start",
+      "label": "开始",
       "positionX": 120,
       "positionY": 280,
       "config": {
@@ -14,25 +14,25 @@
             "name": "periodType",
             "type": "string",
             "required": true,
-            "description": "Report period type."
+            "description": "报告周期类型。"
           },
           {
             "name": "periodStart",
             "type": "string",
             "required": true,
-            "description": "Inclusive period start date in YYYY-MM-DD."
+            "description": "报告周期开始日期，格式为 YYYY-MM-DD，包含当天。"
           },
           {
             "name": "periodEnd",
             "type": "string",
             "required": true,
-            "description": "Inclusive period end date in YYYY-MM-DD."
+            "description": "报告周期结束日期，格式为 YYYY-MM-DD，包含当天。"
           },
           {
             "name": "entryCount",
             "type": "integer",
             "required": true,
-            "description": "Number of entries within the period."
+            "description": "当前周期内的记录数量。"
           }
         ]
       }
@@ -40,7 +40,7 @@
     {
       "nodeId": "tool_entries",
       "nodeType": "tool",
-      "label": "Load Entries",
+      "label": "加载记录",
       "positionX": 520,
       "positionY": 200,
       "config": {
@@ -54,7 +54,7 @@
     {
       "nodeId": "tool_activity",
       "nodeType": "tool",
-      "label": "Analyze Activity",
+      "label": "分析活动",
       "positionX": 520,
       "positionY": 360,
       "config": {
@@ -68,12 +68,12 @@
     {
       "nodeId": "llm_report",
       "nodeType": "llm",
-      "label": "Compose Monthly Report",
+      "label": "生成月报",
       "positionX": 980,
       "positionY": 280,
       "config": {
-        "systemPrompt": "Generate a concise monthly report for MindAtlas. Base the result on the provided period metadata, the fetched entries, and the activity analysis. Emphasize longer-running patterns and next-step suggestions. Suggestions must be actionable strings. Trends should highlight notable themes for the month.",
-        "userInput": "Report period: {{start.periodType}}\nStart: {{start.periodStart}}\nEnd: {{start.periodEnd}}\nEntry count: {{start.entryCount}}\n\nEntries:\n{{tool_entries.result}}\n\nActivity analysis:\n{{tool_activity.result}}",
+        "systemPrompt": "请为 MindAtlas 生成一份简洁、扎实的中文月报。请基于提供的周期信息、检索到的记录内容和活动分析结果完成输出。summary 要概括本月的核心进展、主要主题与阶段性重点；suggestions 必须是可直接执行的中文字符串数组；trends 需要总结本月持续出现的模式、变化趋势和值得关注的长期信号。不要脱离已有数据臆测。",
+        "userInput": "报告周期：{{start.periodType}}\n开始日期：{{start.periodStart}}\n结束日期：{{start.periodEnd}}\n记录数量：{{start.entryCount}}\n\n记录内容：\n{{tool_entries.result}}\n\n活动分析：\n{{tool_activity.result}}",
         "outputMode": "structured",
         "outputFields": [
           {
@@ -98,7 +98,7 @@
     {
       "nodeId": "output_final",
       "nodeType": "output",
-      "label": "Output",
+      "label": "输出",
       "positionX": 1420,
       "positionY": 280,
       "config": {

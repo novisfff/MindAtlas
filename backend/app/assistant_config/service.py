@@ -66,6 +66,10 @@ _SYSTEM_BEHAVIOR_EXAMPLE_WORKFLOW_NAMES: dict[str, str] = {
     "weekly_report_generation": "weekly_report_example__workflow",
     "monthly_report_generation": "monthly_report_example__workflow",
 }
+_SYSTEM_BEHAVIOR_EXAMPLE_WORKFLOW_DESCRIPTIONS: dict[str, str] = {
+    "weekly_report_generation": "周报生成示例工作流。",
+    "monthly_report_generation": "月报生成示例工作流。",
+}
 
 
 class AssistantConfigService:
@@ -648,7 +652,7 @@ class AssistantConfigService:
         ts = workflow.updated_at or workflow.created_at or self._utcnow()
         return {
             "id": workflow.id,
-            "name": workflow.name,
+            "name": self._display_workflow_name(workflow),
             "description": workflow.description or "",
             "is_system": bool(workflow.is_system),
             "enabled": bool(workflow.enabled),
@@ -733,8 +737,19 @@ class AssistantConfigService:
             }
         )
 
-    @staticmethod
+    def _display_workflow_name(self, workflow: AssistantWorkflow) -> str:
+        raw_name = str(workflow.name or "").strip()
+        if not raw_name or not bool(workflow.is_system):
+            return raw_name
+        for definition in list_system_behavior_definitions():
+            if definition.default_target.target_type != "workflow":
+                continue
+            if definition.default_target.canonical_name == raw_name:
+                return f"{definition.name}工作流"
+        return raw_name
+
     def _serialize_system_behavior_target_summary(
+        self,
         *,
         target_type: TargetType,
         workflow: AssistantWorkflow | None = None,
@@ -747,7 +762,7 @@ class AssistantConfigService:
             return {
                 "id": workflow.id,
                 "target_type": "workflow",
-                "name": workflow.name,
+                "name": self._display_workflow_name(workflow),
                 "description": workflow.description or "",
                 "enabled": bool(workflow.enabled),
                 "is_system": bool(workflow.is_system),
@@ -1101,6 +1116,25 @@ class AssistantConfigService:
 
         return workflow
 
+    def _reset_system_behavior_default_workflow_to_preset(
+        self,
+        definition: SystemBehaviorDefinition,
+    ) -> AssistantWorkflow:
+        workflow = self._resolve_or_create_system_behavior_default_workflow(definition)
+        workflow_input = get_system_behavior_default_workflow(definition)
+        self._apply_workflow_to_workflow_entity(workflow, workflow_input, persist=True)
+        published = self._create_workflow_version(
+            workflow=workflow,
+            workflow_input=workflow_input,
+            version_source="publish",
+            version_name=None,
+        )
+        self._keep_only_workflow_version(workflow, published.id)
+        workflow.is_system = True
+        workflow.enabled = True
+        workflow.description = definition.description
+        return workflow
+
     def _ensure_system_behavior_binding_entity(
         self,
         definition: SystemBehaviorDefinition,
@@ -1265,13 +1299,17 @@ class AssistantConfigService:
             )
 
         workflow_name = self._next_available_workflow_name(base_name)
+        workflow_description = _SYSTEM_BEHAVIOR_EXAMPLE_WORKFLOW_DESCRIPTIONS.get(
+            definition.key,
+            f"{definition.name}示例工作流。",
+        )
         preset_workflow = WorkflowInput.model_validate(
             get_system_behavior_default_workflow(definition).model_dump(by_alias=True)
         )
         workflow = self._create_workflow_entity(
             AssistantWorkflowCreateRequest(
                 name=workflow_name,
-                description=f"Example workflow for {definition.name}.",
+                description=workflow_description,
                 enabled=True,
                 workflow=preset_workflow,
             )
@@ -1371,7 +1409,7 @@ class AssistantConfigService:
                 code=50033,
                 message=f"Unsupported canonical target type: {definition.default_target.target_type}",
             )
-        workflow = self._resolve_or_create_system_behavior_default_workflow(definition)
+        workflow = self._reset_system_behavior_default_workflow_to_preset(definition)
         self._assign_system_behavior_binding_target(
             binding,
             target_type="workflow",
@@ -1388,6 +1426,47 @@ class AssistantConfigService:
         if refreshed is None:
             raise ApiException(status_code=500, code=50034, message="System AI behavior binding missing after reset")
         return self._serialize_system_behavior(definition, refreshed)
+
+    def reset_all_system_behaviors(self, confirm: bool) -> dict[str, Any]:
+        if not confirm:
+            raise ApiException(status_code=400, code=40023, message="confirm=true required")
+
+        self.ensure_system_behaviors()
+        definitions = list_system_behavior_definitions()
+        affected: list[dict[str, Any]] = []
+        for definition in definitions:
+            binding = self._ensure_system_behavior_binding_entity(definition)
+            if definition.default_target.target_type != "workflow":
+                raise ApiException(
+                    status_code=500,
+                    code=50036,
+                    message=f"Unsupported canonical target type: {definition.default_target.target_type}",
+                )
+            workflow = self._reset_system_behavior_default_workflow_to_preset(definition)
+            self._assign_system_behavior_binding_target(
+                binding,
+                target_type="workflow",
+                workflow=workflow,
+            )
+            affected.append(
+                {
+                    "behavior_key": definition.key,
+                    "name": definition.name,
+                    "target_type": "workflow",
+                    "target_name": self._display_workflow_name(workflow),
+                }
+            )
+
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40965, message="Reset all system AI behaviors failed") from exc
+
+        return {
+            "reset_count": len(affected),
+            "affected": affected,
+        }
 
     def resolve_system_behavior_execution_target(
         self,
@@ -1541,7 +1620,7 @@ class AssistantConfigService:
             if workflow is not None:
                 target_summary = {
                     "id": workflow.id,
-                    "name": workflow.name,
+                    "name": self._display_workflow_name(workflow),
                     "enabled": bool(workflow.enabled),
                 }
         else:
