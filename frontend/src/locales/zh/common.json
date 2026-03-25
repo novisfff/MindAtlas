@@ -165,7 +165,7 @@
       "capabilities": {
         "label": "扩展配置",
         "title": "按能力分类补充 AI 配置",
-        "description": "把 LightRAG、Docling 这类扩展能力单独放在这里配置，主模型连接保持简洁，后续排查也更清晰。"
+        "description": "继续补充 LightRAG、Docling 等扩展能力配置。"
       },
       "review": {
         "label": "确认完成",
@@ -187,7 +187,7 @@
       "advancedTitle": "高级 AI 配置",
       "advancedDescription": "这里继续补充 Embedding、摘要语言和 Rerank 等逻辑配置，Docker 已接管的服务地址和开关不需要在这里重复填写。",
       "lightragLocaleLabel": "LightRAG 摘要语言",
-      "lightragLocaleHint": "这里会直接跟随你前面选择的系统语言，并在初始化后固定下来，后续不支持再修改。",
+      "lightragLocaleHint": "初始化时可以在这里单独设置；初始化完成后将固定下来，后续不支持再修改。",
       "discoverTitle": "测试连接并发现模型",
       "discoverDescription": "如果服务支持标准模型列表接口，我们会自动拉取可选模型；拉取失败时你仍然可以手动填写。",
       "discoverAction": "测试并发现模型",

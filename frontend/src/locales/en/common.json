@@ -188,7 +188,7 @@
       "advancedTitle": "Advanced AI defaults",
       "advancedDescription": "Use this area for logical defaults such as embedding, summary language, and rerank. Docker-managed service endpoints and switches stay out of the initialization flow.",
       "lightragLocaleLabel": "LightRAG summary language",
-      "lightragLocaleHint": "This follows the system language you selected earlier and becomes fixed after initialization. It cannot be changed later.",
+      "lightragLocaleHint": "You can configure it during initialization, but it becomes fixed after setup and cannot be changed later.",
       "discoverTitle": "Test the connection and discover models",
       "discoverDescription": "If the provider exposes a standard model list endpoint, we'll fetch the available models for you. You can still type one manually if discovery fails.",
       "discoverAction": "Test and discover models",

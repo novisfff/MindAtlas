@@ -359,7 +359,9 @@ function buildRuntimeConfigPayload(
     state.runtimeConfigDraft.documentParsing.workerEnabled &&
     state.runtimeConfigDraft.documentParsing.ocrEnabled
   const pictureDescriptionEnabled = state.runtimeConfigDraft.documentParsing.pictureDescriptionEnabled
-  const summaryLanguage = locale === 'zh' ? 'Chinese' : 'English'
+  const summaryLanguage =
+    state.runtimeConfigDraft.knowledgeGraph.summaryLanguage.trim() ||
+    (locale === 'zh' ? 'Chinese' : 'English')
   const embeddingModelName = (state.runtimeConfigDraft.knowledgeGraph.embeddingModelName || '').trim()
   const embeddingHost = state.runtimeConfigDraft.knowledgeGraph.embeddingHost.trim()
   const embeddingApiKey = state.runtimeConfigDraft.knowledgeGraph.embeddingApiKey.trim()
@@ -636,10 +638,12 @@ export function SystemInitializationPage() {
     },
   ]
   const defaultSummaryLanguage = locale === 'zh' ? 'Chinese' : 'English'
+  const summaryLanguageValue =
+    runtimeConfigDraft.knowledgeGraph.summaryLanguage.trim() || defaultSummaryLanguage
   const rerankEnabled = rerankMode === 'enabled'
   const advancedConfigSummary = [
     knowledgeGraphEnabled
-      ? `${t('initialization.ai.lightragLocaleLabel')}: ${defaultSummaryLanguage}`
+      ? `${t('initialization.ai.lightragLocaleLabel')}: ${summaryLanguageValue}`
       : null,
     knowledgeGraphEnabled && runtimeConfigDraft.knowledgeGraph.embeddingModelName?.trim()
       ? `${t('systemSetup.forms.knowledgeGraph.embeddingModelName.label')}: ${runtimeConfigDraft.knowledgeGraph.embeddingModelName.trim()}`
@@ -846,13 +850,21 @@ export function SystemInitializationPage() {
             </p>
           </div>
 
-          <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 px-4 py-3">
-            <p className="text-sm font-medium text-amber-900">
-              {t('initialization.ai.lightragLocaleLabel')}: {defaultSummaryLanguage}
-            </p>
-            <p className="mt-1 text-xs leading-5 text-amber-700">
-              {t('initialization.ai.lightragLocaleHint')}
-            </p>
+          <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 p-4">
+            <div className="space-y-2">
+              <Label>{t('initialization.ai.lightragLocaleLabel')}</Label>
+              <input
+                value={runtimeConfigDraft.knowledgeGraph.summaryLanguage || defaultSummaryLanguage}
+                onChange={(event) =>
+                  updateRuntimeConfigGroup('knowledge_graph', { summaryLanguage: event.target.value })
+                }
+                className={FIELD_CLASSNAME}
+                placeholder={defaultSummaryLanguage}
+              />
+              <p className="text-xs leading-5 text-amber-700">
+                {t('initialization.ai.lightragLocaleHint')}
+              </p>
+            </div>
           </div>
 
           <div className="space-y-2">
@@ -864,20 +876,7 @@ export function SystemInitializationPage() {
               }
               className={FIELD_CLASSNAME}
               placeholder={t('systemSetup.forms.knowledgeGraph.embeddingModelName.placeholder')}
-              list="initialization-embedding-model-suggestions"
             />
-            {discoveredEmbeddingModels.length || DEFAULT_EMBEDDING_MODELS.length ? (
-              <datalist id="initialization-embedding-model-suggestions">
-                {Array.from(
-                  new Set([
-                    ...DEFAULT_EMBEDDING_MODELS,
-                    ...discoveredEmbeddingModels,
-                  ].filter(Boolean))
-                ).map((item) => (
-                  <option key={item} value={item} />
-                ))}
-              </datalist>
-            ) : null}
           </div>
 
           <div className="rounded-[22px] border border-slate-200 bg-slate-50/70 p-4">
@@ -1023,8 +1022,8 @@ export function SystemInitializationPage() {
                 })
               }
               options={[
-                { value: 'enabled', label: t('agentTargets.enabledStateOn') },
-                { value: 'disabled', label: t('agentTargets.enabledStateOff') },
+                { value: 'enabled', label: t('settings.skills.enabledStateOn') },
+                { value: 'disabled', label: t('settings.skills.enabledStateOff') },
               ]}
             />
             <p className="text-sm leading-6 text-slate-500">
