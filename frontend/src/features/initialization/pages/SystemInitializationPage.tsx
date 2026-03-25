@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-  ArrowLeft,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -19,7 +18,6 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { Logo } from '@/components/Logo'
 import { Button } from '@/components/ui/button'
-import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 import { initializationKeys, useInitializationDefaultsQuery, useInitializationStatusQuery, useInitializeSystemMutation } from '../queries'
 import {
@@ -29,17 +27,8 @@ import {
 } from '../store'
 import { useAppStore, type Locale } from '@/stores/app-store'
 import { discoverModelsByKey } from '@/features/ai-providers/api/credentials'
-import {
-  AutomationCapabilityFields,
-  DocumentParsingCapabilityFields,
-  getRuntimeCapabilityStatus,
-  KnowledgeGraphCapabilityFields,
-  RuntimeCapabilityMeta,
-  StorageCapabilityFields,
-  type RuntimeConfigGroupKey,
-} from '@/features/system-setup'
 
-const STEP_KEYS = ['language', 'ai', 'entryTypes', 'capabilities', 'review'] as const
+const STEP_KEYS = ['language', 'ai', 'entryTypes', 'review'] as const
 
 const PROVIDER_PRESETS = [
   {
@@ -111,7 +100,7 @@ function StepIndicator({ currentStep }: { currentStep: number }) {
             style={{ width: `${((currentStep + 1) / STEP_KEYS.length) * 100}%` }}
           />
         </div>
-        <div className="grid gap-3 md:grid-cols-5">
+        <div className="grid gap-3 md:grid-cols-4">
           {STEP_KEYS.map((key, index) => {
             const active = index === currentStep
             const done = index < currentStep
@@ -240,20 +229,8 @@ function EntryTypeCard({
           />
         </div>
 
-        <div className="grid gap-3 md:grid-cols-3">
-          {[
-            { key: 'enabled', label: t('initialization.entryTypes.toggles.enabled') },
-            { key: 'graphEnabled', label: t('initialization.entryTypes.toggles.graphEnabled') },
-            { key: 'aiEnabled', label: t('initialization.entryTypes.toggles.aiEnabled') },
-          ].map((toggle) => (
-            <div key={toggle.key} className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3">
-              <span className="text-sm font-medium text-slate-700">{toggle.label}</span>
-              <Switch
-                checked={Boolean(item[toggle.key as keyof InitializationDraftEntryType])}
-                onCheckedChange={(checked) => onUpdate({ [toggle.key]: checked } as Partial<InitializationDraftEntryType>)}
-              />
-            </div>
-          ))}
+        <div className="rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3 text-sm text-slate-600">
+          {t('initialization.entryTypes.defaultBehavior')}
         </div>
       </div>
     </div>
@@ -326,125 +303,6 @@ function LanguageStep({
   )
 }
 
-function CapabilityOverviewCard({
-  title,
-  description,
-  summary,
-  meta,
-  onConfigure,
-  onSkip,
-  onUndoSkip,
-  skipped,
-}: {
-  title: string
-  description: string
-  summary: string
-  meta: ReactNode
-  onConfigure: () => void
-  onSkip: () => void
-  onUndoSkip: () => void
-  skipped: boolean
-}) {
-  const { t } = useTranslation()
-
-  return (
-    <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
-      <div className="space-y-4">
-        <div className="space-y-3">
-          {meta}
-          <div className="space-y-2">
-            <h3 className="text-lg font-semibold text-slate-900">{title}</h3>
-            <p className="text-sm leading-6 text-slate-600">{description}</p>
-          </div>
-        </div>
-
-        <div className="rounded-[22px] border border-slate-200 bg-slate-50/70 px-4 py-4">
-          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
-            {t('initialization.capabilities.currentState')}
-          </p>
-          <p className="mt-2 text-sm leading-6 text-slate-700">{summary}</p>
-        </div>
-
-        <div className="flex flex-col gap-3 sm:flex-row">
-          <Button type="button" onClick={onConfigure} className="rounded-2xl">
-            {t('initialization.capabilities.configure')}
-          </Button>
-          {skipped ? (
-            <Button type="button" variant="outline" onClick={onUndoSkip} className="rounded-2xl">
-              {t('initialization.capabilities.undoSkip')}
-            </Button>
-          ) : (
-            <Button type="button" variant="outline" onClick={onSkip} className="rounded-2xl">
-              {t('initialization.capabilities.skip')}
-            </Button>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function buildRuntimeConfigPayload(state: ReturnType<typeof useInitializationWizardStore.getState>) {
-  const payload: Record<string, unknown> = {}
-  const skipped = new Set(state.skippedCapabilityGroups)
-
-  if (!skipped.has('storage') && state.runtimeConfigDraft.storage.isDirty) {
-    payload.storage = {
-      endpoint: state.runtimeConfigDraft.storage.endpoint,
-      accessKey: state.runtimeConfigDraft.storage.accessKey,
-      secretKey: state.runtimeConfigDraft.storage.secretKey,
-      bucket: state.runtimeConfigDraft.storage.bucket,
-      secure: state.runtimeConfigDraft.storage.secure,
-      maxFileSizeMb: state.runtimeConfigDraft.storage.maxFileSizeMb,
-      maxPdfPages: state.runtimeConfigDraft.storage.maxPdfPages,
-    }
-  }
-
-  if (!skipped.has('knowledge_graph') && state.runtimeConfigDraft.knowledgeGraph.isDirty) {
-    payload.knowledgeGraph = {
-      enabled: state.runtimeConfigDraft.knowledgeGraph.enabled,
-      neo4jUri: state.runtimeConfigDraft.knowledgeGraph.neo4jUri,
-      neo4jUser: state.runtimeConfigDraft.knowledgeGraph.neo4jUser,
-      neo4jPassword: state.runtimeConfigDraft.knowledgeGraph.neo4jPassword,
-      neo4jDatabase: state.runtimeConfigDraft.knowledgeGraph.neo4jDatabase,
-      workspace: state.runtimeConfigDraft.knowledgeGraph.workspace,
-      graphStorage: state.runtimeConfigDraft.knowledgeGraph.graphStorage,
-      summaryLanguage: state.runtimeConfigDraft.knowledgeGraph.summaryLanguage,
-      llmModelName: state.runtimeConfigDraft.knowledgeGraph.llmModelName,
-      embeddingModelName: state.runtimeConfigDraft.knowledgeGraph.embeddingModelName,
-      rerankModel: state.runtimeConfigDraft.knowledgeGraph.rerankModel,
-      rerankHost: state.runtimeConfigDraft.knowledgeGraph.rerankHost,
-      rerankApiKey: state.runtimeConfigDraft.knowledgeGraph.rerankApiKey,
-      rerankRequestFormat: state.runtimeConfigDraft.knowledgeGraph.rerankRequestFormat,
-    }
-  }
-
-  if (!skipped.has('document_parsing') && state.runtimeConfigDraft.documentParsing.isDirty) {
-    payload.documentParsing = {
-      workerEnabled: state.runtimeConfigDraft.documentParsing.workerEnabled,
-      ocrEnabled: state.runtimeConfigDraft.documentParsing.ocrEnabled,
-      ocrLangs: state.runtimeConfigDraft.documentParsing.ocrLangs,
-      pictureDescriptionEnabled: state.runtimeConfigDraft.documentParsing.pictureDescriptionEnabled,
-      pictureDescriptionUrl: state.runtimeConfigDraft.documentParsing.pictureDescriptionUrl,
-      pictureDescriptionApiKey: state.runtimeConfigDraft.documentParsing.pictureDescriptionApiKey,
-      pictureDescriptionModel: state.runtimeConfigDraft.documentParsing.pictureDescriptionModel,
-      pictureDescriptionPrompt: state.runtimeConfigDraft.documentParsing.pictureDescriptionPrompt,
-      pictureDescriptionTimeoutSec: state.runtimeConfigDraft.documentParsing.pictureDescriptionTimeoutSec,
-      pictureDescriptionParamsJson: state.runtimeConfigDraft.documentParsing.pictureDescriptionParamsJson,
-      maxFileSizeMb: state.runtimeConfigDraft.documentParsing.maxFileSizeMb,
-      maxPdfPages: state.runtimeConfigDraft.documentParsing.maxPdfPages,
-    }
-  }
-
-  if (!skipped.has('automation') && state.runtimeConfigDraft.automation.isDirty) {
-    payload.automation = {
-      schedulerEnabled: state.runtimeConfigDraft.automation.schedulerEnabled,
-    }
-  }
-
-  return Object.keys(payload).length ? payload : undefined
-}
-
 export function SystemInitializationPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -458,10 +316,6 @@ export function SystemInitializationPage() {
   const aiCredential = useInitializationWizardStore((state) => state.aiCredential)
   const llmModelName = useInitializationWizardStore((state) => state.llmModelName)
   const entryTypes = useInitializationWizardStore((state) => state.entryTypes)
-  const capabilityModules = useInitializationWizardStore((state) => state.capabilityModules)
-  const activeCapabilityGroup = useInitializationWizardStore((state) => state.activeCapabilityGroup)
-  const skippedCapabilityGroups = useInitializationWizardStore((state) => state.skippedCapabilityGroups)
-  const runtimeConfigDraft = useInitializationWizardStore((state) => state.runtimeConfigDraft)
   const setStep = useInitializationWizardStore((state) => state.setStep)
   const setDraftLocale = useInitializationWizardStore((state) => state.setLocale)
   const setAiCredential = useInitializationWizardStore((state) => state.setAiCredential)
@@ -470,10 +324,6 @@ export function SystemInitializationPage() {
   const addCustomEntryType = useInitializationWizardStore((state) => state.addCustomEntryType)
   const updateEntryType = useInitializationWizardStore((state) => state.updateEntryType)
   const removeEntryType = useInitializationWizardStore((state) => state.removeEntryType)
-  const hydrateCapabilityDefaults = useInitializationWizardStore((state) => state.hydrateCapabilityDefaults)
-  const setActiveCapabilityGroup = useInitializationWizardStore((state) => state.setActiveCapabilityGroup)
-  const setCapabilitySkipped = useInitializationWizardStore((state) => state.setCapabilitySkipped)
-  const updateRuntimeConfigGroup = useInitializationWizardStore((state) => state.updateRuntimeConfigGroup)
   const resetDraft = useInitializationWizardStore((state) => state.resetDraft)
   const defaultsQuery = useInitializationDefaultsQuery(locale)
 
@@ -490,8 +340,7 @@ export function SystemInitializationPage() {
   useEffect(() => {
     if (!defaultsQuery.data) return
     mergeDefaultEntryTypes(defaultsQuery.data.entryTypes, locale)
-    hydrateCapabilityDefaults(defaultsQuery.data.capabilityModules, defaultsQuery.data.runtimeConfig)
-  }, [defaultsQuery.data, hydrateCapabilityDefaults, locale, mergeDefaultEntryTypes])
+  }, [defaultsQuery.data, locale, mergeDefaultEntryTypes])
 
   const handleLocaleSelect = async (nextLocale: Locale) => {
     setDraftLocale(nextLocale)
@@ -544,9 +393,6 @@ export function SystemInitializationPage() {
     if (step === 2) {
       return entryTypes.length > 0 && entryTypes.every((item) => item.name.trim())
     }
-    if (step === 3 && activeCapabilityGroup) {
-      return false
-    }
     return true
   }
 
@@ -564,7 +410,6 @@ export function SystemInitializationPage() {
     }
 
     try {
-      const storeState = useInitializationWizardStore.getState()
       const result = await initializeMutation.mutateAsync({
         locale,
         aiCredential: {
@@ -581,12 +426,11 @@ export function SystemInitializationPage() {
           description: item.description?.trim() || undefined,
           color: item.color?.trim() || undefined,
           icon: item.icon?.trim() || undefined,
-          graphEnabled: item.graphEnabled,
-          aiEnabled: item.aiEnabled,
-          enabled: item.enabled,
+          graphEnabled: true,
+          aiEnabled: true,
+          enabled: true,
           origin: item.origin,
         })),
-        runtimeConfig: buildRuntimeConfigPayload(storeState),
       })
 
       resetDraft(result.locale)
@@ -635,15 +479,6 @@ export function SystemInitializationPage() {
       icon: Wand2,
     },
   ]
-
-  const capabilitySummaries = useMemo(
-    () =>
-      capabilityModules.map((module) => ({
-        ...module,
-        skipped: skippedCapabilityGroups.includes(module.groupKey),
-      })),
-    [capabilityModules, skippedCapabilityGroups]
-  )
 
   let content: ReactNode
   if (step === 0) {
@@ -812,145 +647,6 @@ export function SystemInitializationPage() {
         </div>
       </div>
     )
-  } else if (step === 3) {
-    if (activeCapabilityGroup) {
-      const module = capabilityModules.find((item) => item.groupKey === activeCapabilityGroup)
-      const currentSkipped = skippedCapabilityGroups.includes(activeCapabilityGroup)
-
-      let moduleTitle = ''
-      let moduleDescription = ''
-      let editor: ReactNode = null
-
-      if (activeCapabilityGroup === 'storage') {
-        moduleTitle = module?.title || t('systemSetup.moduleTitles.storage')
-        moduleDescription = module?.description || t('systemSetup.moduleDescriptions.storage')
-        editor = (
-          <StorageCapabilityFields
-            value={runtimeConfigDraft.storage}
-            onChange={(patch) => updateRuntimeConfigGroup('storage', patch)}
-            t={t}
-          />
-        )
-      } else if (activeCapabilityGroup === 'knowledge_graph') {
-        moduleTitle = module?.title || t('systemSetup.moduleTitles.knowledgeGraph')
-        moduleDescription = module?.description || t('systemSetup.moduleDescriptions.knowledgeGraph')
-        editor = (
-          <KnowledgeGraphCapabilityFields
-            value={runtimeConfigDraft.knowledgeGraph}
-            onChange={(patch) => updateRuntimeConfigGroup('knowledge_graph', patch)}
-            t={t}
-          />
-        )
-      } else if (activeCapabilityGroup === 'document_parsing') {
-        moduleTitle = module?.title || t('systemSetup.moduleTitles.documentParsing')
-        moduleDescription = module?.description || t('systemSetup.moduleDescriptions.documentParsing')
-        editor = (
-          <DocumentParsingCapabilityFields
-            value={runtimeConfigDraft.documentParsing}
-            onChange={(patch) => updateRuntimeConfigGroup('document_parsing', patch)}
-            t={t}
-          />
-        )
-      } else if (activeCapabilityGroup === 'automation') {
-        moduleTitle = module?.title || t('systemSetup.moduleTitles.automation')
-        moduleDescription = module?.description || t('systemSetup.moduleDescriptions.automation')
-        editor = (
-          <AutomationCapabilityFields
-            value={runtimeConfigDraft.automation}
-            onChange={(patch) => updateRuntimeConfigGroup('automation', patch)}
-            t={t}
-          />
-        )
-      }
-
-      content = (
-        <div className="space-y-6">
-          <button
-            type="button"
-            onClick={() => setActiveCapabilityGroup(null)}
-            className="inline-flex items-center gap-2 text-sm font-medium text-slate-500 transition hover:text-slate-900"
-          >
-            <ArrowLeft className="h-4 w-4" />
-            {t('initialization.capabilities.backToCenter')}
-          </button>
-
-          <div className="space-y-2">
-            <h2 className="text-2xl font-semibold text-slate-900">{moduleTitle}</h2>
-            <p className="max-w-2xl text-sm leading-6 text-slate-600">{moduleDescription}</p>
-          </div>
-
-          {module ? (
-            <RuntimeCapabilityMeta
-              module={module}
-              skipped={currentSkipped}
-              t={t}
-            />
-          ) : null}
-
-          <div className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
-            {editor}
-          </div>
-        </div>
-      )
-    } else {
-      content = (
-        <div className="space-y-6">
-          <div className="space-y-2">
-            <h2 className="text-2xl font-semibold text-slate-900">
-              {t('initialization.steps.capabilities.title')}
-            </h2>
-            <p className="max-w-2xl text-sm leading-6 text-slate-600">
-              {t('initialization.steps.capabilities.description')}
-            </p>
-          </div>
-
-          <div className="rounded-[28px] border border-slate-200 bg-slate-50/70 p-5">
-            <div className="flex items-start gap-3">
-              <div className="rounded-2xl bg-white p-2 text-slate-700 shadow-sm">
-                <ShieldCheck className="h-5 w-5" />
-              </div>
-              <div className="space-y-1">
-                <p className="text-sm font-semibold text-slate-900">
-                  {t('initialization.capabilities.introTitle')}
-                </p>
-                <p className="text-sm leading-6 text-slate-600">
-                  {t('initialization.capabilities.introDescription')}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            {capabilityModules.map((module) => {
-              const skipped = skippedCapabilityGroups.includes(module.groupKey)
-              const currentDraft =
-                module.groupKey === 'storage'
-                  ? runtimeConfigDraft.storage
-                  : module.groupKey === 'knowledge_graph'
-                    ? runtimeConfigDraft.knowledgeGraph
-                    : module.groupKey === 'document_parsing'
-                      ? runtimeConfigDraft.documentParsing
-                      : runtimeConfigDraft.automation
-              const status = getRuntimeCapabilityStatus(module, skipped, t)
-
-              return (
-                <CapabilityOverviewCard
-                  key={module.groupKey}
-                  title={module.title}
-                  description={module.description}
-                  summary={currentDraft.effectiveSummary || status.label}
-                  meta={<RuntimeCapabilityMeta module={module} skipped={skipped} t={t} />}
-                  onConfigure={() => setActiveCapabilityGroup(module.groupKey)}
-                  onSkip={() => setCapabilitySkipped(module.groupKey, true)}
-                  onUndoSkip={() => setCapabilitySkipped(module.groupKey, false)}
-                  skipped={skipped}
-                />
-              )
-            })}
-          </div>
-        </div>
-      )
-    }
   } else {
     content = (
       <div className="space-y-6">
@@ -979,31 +675,6 @@ export function SystemInitializationPage() {
           ))}
         </div>
 
-        <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
-          <div className="space-y-4">
-            <div className="space-y-1">
-              <h3 className="text-lg font-semibold text-slate-900">
-                {t('initialization.review.capabilitiesTitle')}
-              </h3>
-              <p className="text-sm leading-6 text-slate-600">
-                {t('initialization.review.capabilitiesDescription')}
-              </p>
-            </div>
-
-            <div className="space-y-3">
-              {capabilitySummaries.map((module) => (
-                <div key={module.groupKey} className="flex flex-col gap-3 rounded-[22px] border border-slate-200 bg-slate-50/70 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <p className="text-sm font-semibold text-slate-900">{module.title}</p>
-                    <p className="mt-1 text-sm leading-6 text-slate-600">{module.effectiveSummary || module.description}</p>
-                  </div>
-                  <RuntimeCapabilityMeta module={module} skipped={module.skipped} t={t} />
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
         <div className="rounded-[24px] border border-sky-200 bg-sky-50/80 p-5">
           <div className="flex items-start gap-3">
             <div className="rounded-2xl bg-white p-2 text-sky-600 shadow-sm">
@@ -1022,10 +693,7 @@ export function SystemInitializationPage() {
       </div>
     )
   }
-
-  const stepLabel = step === 3 && activeCapabilityGroup
-    ? t('initialization.capabilities.editing')
-    : t(`initialization.steps.${STEP_KEYS[step]}.label`)
+  const stepLabel = t(`initialization.steps.${STEP_KEYS[step]}.label`)
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(59,130,246,0.18),_transparent_32%),radial-gradient(circle_at_top_right,_rgba(15,23,42,0.08),_transparent_28%),linear-gradient(180deg,_#f8fbff,_#f5f7fb_45%,_#eef2f9)] px-4 py-6 sm:px-6 lg:px-8">
@@ -1046,65 +714,38 @@ export function SystemInitializationPage() {
               <div className="text-sm text-slate-500">{stepLabel}</div>
 
               <div className="flex flex-wrap items-center gap-3">
-                {step === 3 && activeCapabilityGroup ? (
-                  <>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => setActiveCapabilityGroup(null)}
-                      className="rounded-2xl"
-                    >
-                      <ChevronLeft className="h-4 w-4" />
-                      {t('initialization.capabilities.saveAndBack')}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => {
-                        setCapabilitySkipped(activeCapabilityGroup, true)
-                        setActiveCapabilityGroup(null)
-                      }}
-                      className="rounded-2xl"
-                    >
-                      {t('initialization.capabilities.skipCurrent')}
-                    </Button>
-                  </>
-                ) : (
-                  <>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => setStep(step - 1)}
-                      disabled={step === 0 || initializeMutation.isPending}
-                      className="rounded-2xl"
-                    >
-                      <ChevronLeft className="h-4 w-4" />
-                      {t('initialization.actions.back')}
-                    </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setStep(step - 1)}
+                  disabled={step === 0 || initializeMutation.isPending}
+                  className="rounded-2xl"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                  {t('initialization.actions.back')}
+                </Button>
 
-                    {step < STEP_KEYS.length - 1 ? (
-                      <Button type="button" onClick={handleNext} className="rounded-2xl">
-                        {t('initialization.actions.next')}
-                        <ChevronRight className="h-4 w-4" />
-                      </Button>
+                {step < STEP_KEYS.length - 1 ? (
+                  <Button type="button" onClick={handleNext} className="rounded-2xl">
+                    {t('initialization.actions.next')}
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    onClick={() => {
+                      void handleFinish()
+                    }}
+                    disabled={initializeMutation.isPending}
+                    className="rounded-2xl"
+                  >
+                    {initializeMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
                     ) : (
-                      <Button
-                        type="button"
-                        onClick={() => {
-                          void handleFinish()
-                        }}
-                        disabled={initializeMutation.isPending}
-                        className="rounded-2xl"
-                      >
-                        {initializeMutation.isPending ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <CheckCircle2 className="h-4 w-4" />
-                        )}
-                        {t('initialization.actions.finish')}
-                      </Button>
+                      <CheckCircle2 className="h-4 w-4" />
                     )}
-                  </>
+                    {t('initialization.actions.finish')}
+                  </Button>
                 )}
               </div>
             </div>

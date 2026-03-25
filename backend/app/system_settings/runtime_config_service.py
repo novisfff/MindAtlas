@@ -28,7 +28,7 @@ from app.system_settings.schemas import (
     RuntimeStorageConfigResponse,
     SecretFieldStateResponse,
 )
-from app.system_settings.service import normalize_system_locale
+from app.system_settings.service import get_system_language_name, normalize_system_locale, resolve_system_locale
 
 RUNTIME_STORAGE_CONFIG_KEY = "runtime_storage_config"
 RUNTIME_KNOWLEDGE_GRAPH_CONFIG_KEY = "runtime_knowledge_graph_config"
@@ -469,7 +469,7 @@ class SystemRuntimeConfigService:
         summary_language = (
             _normalize_optional_text(payload.get("summaryLanguage"))
             or _normalize_optional_text(settings.lightrag_summary_language)
-            or ""
+            or get_system_language_name(resolve_system_locale(self.db))
         )
         rerank_model = _normalize_optional_text(payload.get("rerankModel")) or _normalize_optional_text(settings.lightrag_rerank_model) or ""
         rerank_host = _normalize_optional_text(payload.get("rerankHost")) or _normalize_optional_text(settings.lightrag_rerank_host) or ""

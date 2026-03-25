@@ -316,13 +316,6 @@ export function EntryDetailPage() {
             <div className="rounded-[24px] border border-amber-200 bg-amber-50 px-4 py-4">
               <p className="text-sm font-semibold text-amber-900">{t('systemSetup.emptyStates.storageTitle')}</p>
               <p className="mt-2 text-sm leading-6 text-amber-800">{t('systemSetup.emptyStates.storageUnconfigured')}</p>
-              <button
-                type="button"
-                onClick={() => navigate('/settings/system-setup')}
-                className="mt-4 inline-flex rounded-2xl border border-amber-300 bg-white px-4 py-2 text-sm font-medium text-amber-900 transition hover:bg-amber-100"
-              >
-                {t('systemSetup.emptyStates.openSetup')}
-              </button>
             </div>
           ) : (
             <div className="space-y-3">

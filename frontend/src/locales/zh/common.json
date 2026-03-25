@@ -196,6 +196,7 @@
       "remove": "删除记录类型",
       "defaultHint": "系统默认模板，未修改时会随语言自动切换。",
       "customHint": "你自己新增的记录类型，会原样保留。",
+      "defaultBehavior": "初始化阶段会默认启用，并加入图谱和 AI，后续可在设置中再调整。",
       "origin": {
         "default": "默认",
         "custom": "自定义"
@@ -210,11 +211,6 @@
         "name": "例如 灵感、客户、研究主题",
         "icon": "例如 lightbulb、users、flask",
         "description": "说明这个记录类型主要用来承载什么内容"
-      },
-      "toggles": {
-        "enabled": "启用",
-        "graphEnabled": "参与图谱",
-        "aiEnabled": "参与 AI"
       }
     },
     "capabilities": {
@@ -240,18 +236,19 @@
       },
       "capabilitiesTitle": "能力配置摘要",
       "capabilitiesDescription": "这些能力可以使用应用配置、沿用环境默认值，或继续保持跳过状态。",
-      "noteTitle": "后续仍可继续补充",
-      "noteDescription": "LightRAG 的 Embedding 模型不是初始化阻塞项，你可以在初始化完成后到设置里继续补充。"
+      "noteTitle": "部署能力会自动接管",
+      "noteDescription": "在 Docker Compose 部署下，对象存储、知识图谱、文档解析和后台调度器都会使用内置默认配置。你只需要先完成语言、模型和记录类型。"
     }
   },
   "systemSetup": {
-    "eyebrow": "系统运行能力",
+    "eyebrow": "系统总览",
     "title": "System Setup",
-    "description": "把系统真正跑起来的运行时能力统一放在这里维护。你可以单独保存每个模块，未填写的模块会继续回退到环境默认值或保持未配置状态。",
-    "runtimeTitle": "运行时能力中心",
-    "runtimeDescription": "这些模块控制对象存储、知识图谱、文档解析和自动化任务的实际可用性。敏感字段留空会保留现有密钥。",
-    "footerTitle": "系统内置 AI 行为也可以继续细化",
-    "footerDescription": "完成运行时能力配置后，你还可以到 System AI Behaviors 页面继续指定周报、月报等系统行为走哪个 Workflow 或 Agent。",
+    "description": "在这里集中查看系统基础设置和部署能力状态。Docker Compose 部署会自动接管对象存储、知识图谱、文档解析和后台调度等服务，通常不需要手动填写运行时参数。",
+    "runtimeTitle": "部署能力状态",
+    "runtimeDescription": "以下能力默认由 Docker Compose 提供并接管。这里主要用于查看当前状态，而不是手动重新配置它们。",
+    "managedHint": "如果你使用的是 Docker Compose，通常不需要手动修改这组参数；服务不可用时优先检查容器状态、日志和默认 AI 模型绑定。",
+    "footerTitle": "需要继续细化 AI 路由时",
+    "footerDescription": "你仍然可以继续前往 AI 服务或系统 AI 行为页面，调整默认模型绑定，以及周报、月报等系统行为的实际执行目标。",
     "footerAction": "前往系统 AI 行为",
     "moduleTitles": {
       "storage": "存储与附件",
@@ -260,10 +257,10 @@
       "automation": "自动化任务"
     },
     "moduleDescriptions": {
-      "storage": "配置 MinIO 对象存储与附件上传限制。",
-      "knowledgeGraph": "配置 Neo4j、LightRAG 工作空间与图谱检索相关能力。",
-      "documentParsing": "配置 Docling、OCR 与图片描述等解析能力。",
-      "automation": "配置系统后台调度器，用于周报、月报等任务。"
+      "storage": "附件上传与预览依赖的对象存储服务。",
+      "knowledgeGraph": "Neo4j 与 LightRAG 支撑的图谱检索与 AI 图谱能力。",
+      "documentParsing": "Docling 解析、OCR 和附件入图前的文本提取能力。",
+      "automation": "系统后台调度器，负责周报、月报等定时任务。"
     },
     "sources": {
       "appConfig": "应用配置",
@@ -281,7 +278,8 @@
       "configure": "配置模块",
       "collapse": "收起",
       "validate": "测试连接",
-      "save": "保存模块"
+      "save": "保存模块",
+      "openAiProviders": "前往 AI 服务"
     },
     "messages": {
       "saved": "模块配置已保存",
@@ -439,10 +437,10 @@
     "emptyStates": {
       "openSetup": "前往 System Setup",
       "storageTitle": "附件上传尚不可用",
-      "storageUnconfigured": "系统还没有可用的对象存储配置，请先到 System Setup 完成存储与附件模块配置。",
-      "documentParsingUnavailable": "当前尚未启用文档解析能力，如需把附件索引进知识图谱，请先完成文档解析模块配置。",
-      "knowledgeGraphDisabled": "知识图谱当前处于关闭状态，请先在 System Setup 中启用并配置知识图谱模块。",
-      "knowledgeGraphIncomplete": "知识图谱还没有完成必需配置，请先在 System Setup 中补齐连接信息和模型绑定。"
+      "storageUnconfigured": "附件服务暂未就绪，请先检查 Docker Compose 中的对象存储服务是否正常运行。",
+      "documentParsingUnavailable": "文档解析服务暂未就绪；如需把附件索引进知识图谱，请检查 `parse-worker` 服务和附件解析相关容器日志。",
+      "knowledgeGraphDisabled": "知识图谱服务当前未启用，请检查 Docker Compose 中的 LightRAG 与 Neo4j 相关服务状态。",
+      "knowledgeGraphIncomplete": "知识图谱服务尚未完全就绪，请检查 Neo4j、LightRAG worker，以及默认 AI 模型绑定是否已经完成。"
     }
   },
   "tags": {
@@ -500,7 +498,7 @@
       "systemAiBehaviors": "系统 AI 行为",
       "systemAiBehaviorsDesc": "配置周报、月报等系统内置 AI 行为实际走哪个 Workflow 或 Agent",
       "systemSetup": "System Setup",
-      "systemSetupDesc": "统一维护对象存储、知识图谱、文档解析与自动化等系统运行能力",
+      "systemSetupDesc": "查看系统基础设置与 Docker Compose 接管的服务状态",
       "assistantWorkflows": "助手工作流",
       "assistantWorkflowsDesc": "管理可复用的工作流执行体",
       "assistantAgents": "助手 Agent",

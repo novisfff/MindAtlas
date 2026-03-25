@@ -68,7 +68,7 @@
       "color": "#6B7280",
       "icon": "file",
       "graphEnabled": true,
-      "aiEnabled": false,
+      "aiEnabled": true,
       "enabled": true
     }
   ]

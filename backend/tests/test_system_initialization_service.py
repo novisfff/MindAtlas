@@ -245,6 +245,7 @@ class SystemInitializationServiceTests(unittest.TestCase):
     def test_initialize_system_writes_models_bindings_and_defaults(self) -> None:
         from app.ai_registry.models import AiComponentBinding, AiCredential, AiModel
         from app.assistant_config.models import AssistantSkill, AssistantSystemBehaviorBinding
+        from app.config import get_settings
         from app.entry_type.models import EntryType
         from app.relation.models import RelationType
         from app.system_settings.initialization_service import (
@@ -271,15 +272,48 @@ class SystemInitializationServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(len(credentials), 1)
-        self.assertEqual(len(models), 1)
+        self.assertEqual(len(models), 2)
         self.assertEqual(len(bindings), 3)
-        self.assertTrue(all(item.llm_model_id == models[0].id for item in bindings))
+        llm_models = [item for item in models if item.model_type == "llm"]
+        self.assertEqual(len(llm_models), 1)
+        self.assertTrue(all(item.llm_model_id == llm_models[0].id for item in bindings))
+        lightrag_binding = next(item for item in bindings if item.component == "lightrag")
+        embedding_models = [item for item in models if item.model_type == "embedding"]
+        self.assertEqual(len(embedding_models), 1)
+        expected_embedding_name = (
+            str(get_settings().lightrag_embedding_model or "").strip() or "text-embedding-3-small"
+        )
+        self.assertEqual(embedding_models[0].name, expected_embedding_name)
+        self.assertEqual(lightrag_binding.embedding_model_id, embedding_models[0].id)
         self.assertEqual(entry_types["KNOWLEDGE"].name, "Knowledge")
         self.assertIn("CUSTOM_TYPE_1", entry_types)
         self.assertEqual(relation_types["BELONGS_TO"].name, "Belongs To")
         self.assertGreater(self.db.query(AssistantSkill).filter(AssistantSkill.is_system.is_(True)).count(), 0)
         self.assertGreater(self.db.query(AssistantSystemBehaviorBinding).count(), 0)
         self.assertIsNotNone(init_state)
+
+    def test_initialize_system_forces_entry_type_capabilities_enabled(self) -> None:
+        from app.entry_type.models import EntryType
+        from app.system_settings.initialization_service import SystemInitializationService
+
+        request = self._make_request(locale="zh")
+        request.entry_types[0].graph_enabled = False
+        request.entry_types[0].ai_enabled = False
+        request.entry_types[0].enabled = False
+
+        service = SystemInitializationService(self.db)
+        service.initialize_system(request)
+
+        knowledge = (
+            self.db.query(EntryType)
+            .filter(EntryType.code == "KNOWLEDGE")
+            .first()
+        )
+
+        self.assertIsNotNone(knowledge)
+        self.assertTrue(bool(knowledge.enabled))
+        self.assertTrue(bool(knowledge.graph_enabled))
+        self.assertTrue(bool(knowledge.ai_enabled))
 
     def test_initialize_system_rolls_back_on_invalid_provider_url(self) -> None:
         from app.ai_registry.models import AiCredential

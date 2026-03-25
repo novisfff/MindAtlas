@@ -11,6 +11,7 @@ from app.ai_registry.models import AiComponentBinding, AiCredential, AiModel
 from app.assistant_config.service import AssistantConfigService
 from app.common.exceptions import ApiException
 from app.common.ssrf import validate_url_ssrf
+from app.config import get_settings
 from app.entry.models import Entry
 from app.entry_type.models import EntryType
 from app.relation.models import RelationType
@@ -326,10 +327,17 @@ class SystemInitializationService:
         return credential
 
     def _create_llm_model(self, *, credential_id: Any, model_name: str) -> AiModel:
+        return self._create_ai_model(
+            credential_id=credential_id,
+            model_name=model_name,
+            model_type="llm",
+        )
+
+    def _create_ai_model(self, *, credential_id: Any, model_name: str, model_type: str) -> AiModel:
         model = AiModel(
             credential_id=credential_id,
             name=model_name,
-            model_type="llm",
+            model_type=model_type,
         )
         self.db.add(model)
         self.db.flush()
@@ -347,6 +355,38 @@ class SystemInitializationService:
                 self.db.add(binding)
                 self.db.flush()
             binding.llm_model_id = model_id
+
+    def _bind_default_embedding_model(self, model_id: Any) -> None:
+        binding = (
+            self.db.query(AiComponentBinding)
+            .filter(AiComponentBinding.component == "lightrag")
+            .first()
+        )
+        if binding is None:
+            binding = AiComponentBinding(component="lightrag")
+            self.db.add(binding)
+            self.db.flush()
+        binding.embedding_model_id = model_id
+
+    def _create_and_bind_default_embedding_model(self, *, credential_id: Any) -> AiModel:
+        settings = get_settings()
+        model_name = str(settings.lightrag_embedding_model or "").strip() or "text-embedding-3-small"
+        existing = (
+            self.db.query(AiModel)
+            .filter(
+                AiModel.credential_id == credential_id,
+                AiModel.name == model_name,
+                AiModel.model_type == "embedding",
+            )
+            .first()
+        )
+        model = existing or self._create_ai_model(
+            credential_id=credential_id,
+            model_name=model_name,
+            model_type="embedding",
+        )
+        self._bind_default_embedding_model(model.id)
+        return model
 
     def _next_custom_code(self, used_codes: set[str]) -> str:
         index = 1
@@ -400,9 +440,10 @@ class SystemInitializationService:
                     "description": item.description or "",
                     "color": item.color or "",
                     "icon": item.icon or "",
-                    "graph_enabled": item.graph_enabled,
-                    "ai_enabled": item.ai_enabled,
-                    "enabled": item.enabled,
+                    # Initialization keeps entry-type capabilities on by default.
+                    "graph_enabled": True,
+                    "ai_enabled": True,
+                    "enabled": True,
                 }
             )
 
@@ -481,6 +522,7 @@ class SystemInitializationService:
                 model_name=request.llm_model.name.strip(),
             )
             self._bind_llm_model(llm_model.id)
+            self._create_and_bind_default_embedding_model(credential_id=credential.id)
             self._align_entry_types(locale, request)
             self._align_relation_types(locale)
 

@@ -1,15 +1,12 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import { KnowledgeGraph, useGraphDataQuery, useLightRagGraphQuery } from '@/features/graph'
 import { useTranslation } from 'react-i18next'
 import { GraphMode, ModeSwitch } from './components/ModeSwitch'
-import { Button } from '@/components/ui/button'
 import { useRuntimeConfigQuery } from '@/features/system-setup'
 
 export function GraphPage() {
   const { t } = useTranslation()
-  const navigate = useNavigate()
   const [mode, setMode] = useState<GraphMode>('system')
   const [dateRange, setDateRange] = useState<{ start: string; end: string }>({ start: '', end: '' })
   const runtimeConfigQuery = useRuntimeConfigQuery()
@@ -45,9 +42,6 @@ export function GraphPage() {
               ? t('systemSetup.emptyStates.knowledgeGraphDisabled')
               : t('systemSetup.emptyStates.knowledgeGraphIncomplete')}
           </p>
-          <Button className="mt-6 rounded-2xl" onClick={() => navigate('/settings/system-setup')}>
-            {t('systemSetup.emptyStates.openSetup')}
-          </Button>
         </div>
       </div>
     )

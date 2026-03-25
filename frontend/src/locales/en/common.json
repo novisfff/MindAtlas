@@ -197,6 +197,7 @@
       "remove": "Remove entry type",
       "defaultHint": "System default template. If you leave it untouched, it can switch with the selected language.",
       "customHint": "This is your own custom type and will be kept as-is.",
+      "defaultBehavior": "During initialization, every type stays enabled and participates in both graph and AI. You can fine-tune that later in settings.",
       "origin": {
         "default": "Default",
         "custom": "Custom"
@@ -211,11 +212,6 @@
         "name": "For example Idea, Client, or Research Topic",
         "icon": "For example lightbulb, users, or flask",
         "description": "Describe what kind of content this entry type should hold"
-      },
-      "toggles": {
-        "enabled": "Enabled",
-        "graphEnabled": "Graph enabled",
-        "aiEnabled": "AI enabled"
       }
     },
     "capabilities": {
@@ -241,18 +237,19 @@
       },
       "capabilitiesTitle": "Capability summary",
       "capabilitiesDescription": "Each capability can use app config, keep an environment default, or stay skipped for now.",
-      "noteTitle": "You can finish the rest later",
-      "noteDescription": "LightRAG embedding is not a setup blocker. You can add an embedding model later from Settings."
+      "noteTitle": "Deployment services are already wired in",
+      "noteDescription": "In Docker Compose deployments, object storage, the knowledge graph, document parsing, and the background scheduler all start with built-in defaults. Initialization only needs your language, model, and entry types."
     }
   },
   "systemSetup": {
-    "eyebrow": "Runtime capabilities",
+    "eyebrow": "System overview",
     "title": "System Setup",
-    "description": "Manage the user-facing runtime capabilities that actually power the system here. Each module can be saved independently, and missing values continue to fall back to environment defaults or stay unconfigured.",
-    "runtimeTitle": "Runtime capability center",
-    "runtimeDescription": "These modules control storage, knowledge graph, document parsing, and background automation. Leaving a secret blank keeps the current saved key.",
-    "footerTitle": "System AI behaviors can be refined next",
-    "footerDescription": "Once runtime capabilities are in place, you can continue on to System AI Behaviors to decide which workflow or agent powers weekly reports, monthly reports, and other built-in system actions.",
+    "description": "Review the core system setup and the status of deployment-managed services here. In Docker Compose, MindAtlas wires object storage, the knowledge graph, document parsing, and background automation for you, so you usually do not need to edit runtime parameters manually.",
+    "runtimeTitle": "Deployment-managed services",
+    "runtimeDescription": "These capabilities are normally provided by Docker Compose out of the box. This page is mainly for visibility, not for re-entering infrastructure settings.",
+    "managedHint": "If you are running through Docker Compose, you usually do not need to edit these values manually. When something is unavailable, check container health, logs, and the default AI model bindings first.",
+    "footerTitle": "Need to adjust AI routing next?",
+    "footerDescription": "You can still continue to AI Providers or System AI Behaviors to refine the default model bindings and decide which workflow or agent powers built-in system actions.",
     "footerAction": "Open system AI behaviors",
     "moduleTitles": {
       "storage": "Storage & Attachments",
@@ -261,10 +258,10 @@
       "automation": "Automation"
     },
     "moduleDescriptions": {
-      "storage": "Configure MinIO object storage and attachment upload limits.",
-      "knowledgeGraph": "Configure Neo4j, LightRAG workspace settings, and graph retrieval capabilities.",
-      "documentParsing": "Configure Docling, OCR, and optional image description flows.",
-      "automation": "Configure the background scheduler used by system jobs."
+      "storage": "Object storage behind attachment upload and preview.",
+      "knowledgeGraph": "Neo4j and LightRAG services that power graph retrieval and the AI graph view.",
+      "documentParsing": "Docling parsing, OCR, and attachment text extraction before graph indexing.",
+      "automation": "Background scheduling used by weekly reports, monthly reports, and other system jobs."
     },
     "sources": {
       "appConfig": "App Config",
@@ -282,7 +279,8 @@
       "configure": "Configure module",
       "collapse": "Collapse",
       "validate": "Test connection",
-      "save": "Save module"
+      "save": "Save module",
+      "openAiProviders": "Open AI providers"
     },
     "messages": {
       "saved": "Module settings saved",
@@ -440,10 +438,10 @@
     "emptyStates": {
       "openSetup": "Open System Setup",
       "storageTitle": "Attachment upload is unavailable",
-      "storageUnconfigured": "The system does not have usable object storage yet. Open System Setup and finish the Storage & Attachments module first.",
-      "documentParsingUnavailable": "Document parsing is not enabled yet. Finish the Document Parsing module before indexing attachments into the knowledge graph.",
-      "knowledgeGraphDisabled": "The knowledge graph is currently disabled. Enable and configure it from System Setup first.",
-      "knowledgeGraphIncomplete": "The knowledge graph is missing required runtime settings. Open System Setup and complete its connection details and model bindings first."
+      "storageUnconfigured": "Attachment services are not ready yet. Please check the object storage containers in your Docker Compose deployment.",
+      "documentParsingUnavailable": "Document parsing is not ready yet. Check the `parse-worker` service and related container logs before indexing attachments into the knowledge graph.",
+      "knowledgeGraphDisabled": "The knowledge graph service is currently disabled. Please check the LightRAG and Neo4j services in your Docker Compose deployment.",
+      "knowledgeGraphIncomplete": "The knowledge graph service is not fully ready yet. Please check Neo4j, the LightRAG worker, and the default AI model bindings."
     }
   },
   "tags": {
@@ -501,7 +499,7 @@
       "systemAiBehaviors": "System AI Behaviors",
       "systemAiBehaviorsDesc": "Configure which workflow or agent powers built-in system AI behaviors like weekly and monthly reports",
       "systemSetup": "System Setup",
-      "systemSetupDesc": "Maintain runtime capabilities like object storage, knowledge graph, parsing, and automation",
+      "systemSetupDesc": "Review core setup and the status of Docker Compose managed services",
       "assistantWorkflows": "Assistant Workflows",
       "assistantWorkflowsDesc": "Manage reusable workflow executables",
       "assistantAgents": "Assistant Agents",

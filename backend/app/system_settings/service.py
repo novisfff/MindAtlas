@@ -71,6 +71,14 @@ class SystemSettingsService:
 
         self.db.commit()
         self.db.refresh(setting)
+
+        try:
+            from app.system_settings.runtime_config_service import clear_runtime_config_caches
+
+            clear_runtime_config_caches()
+        except Exception:
+            pass
+
         return normalized
 
 

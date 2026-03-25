@@ -165,14 +165,14 @@ The project provides a complete Docker Compose configuration for one-click deplo
 
 ```bash
 cd deploy
-cp .env.example .env
-cp backend.env.example backend.env
 docker compose up -d
 ```
 
+Docker deployment is zero-config by default: `docker compose up -d` works even if you do not pre-create any env files. If you want to customize ports, passwords, or advanced overrides, copy `deploy/.env.example` to `.env`. Copying it without edits keeps the same behavior.
+
 See [deploy/README.md](deploy/README.md) for detailed deployment instructions (including Neo4j + LightRAG worker).
 
-## Environment Variables
+## Backend Environment Variables (Manual Run)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -188,7 +188,9 @@ See [deploy/README.md](deploy/README.md) for detailed deployment instructions (i
 | `NEO4J_USER` | Neo4j username | `neo4j` |
 | `NEO4J_PASSWORD` | Neo4j password | - |
 
-For the full list, see `backend/.env.example`.
+These variables are mainly for running the backend manually outside Docker Compose. For Docker deployment, use the built-in defaults in `deploy/docker-compose.yml` and the optional overrides in `deploy/.env.example`.
+
+For the full manual-run list, see `backend/.env.example`.
 
 ## Documentation
 
