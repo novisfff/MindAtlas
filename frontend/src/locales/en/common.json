@@ -185,11 +185,17 @@
         "providerName": "For example OpenAI, OpenRouter, or SiliconFlow",
         "modelName": "For example gpt-4.1-mini or deepseek-chat"
       },
+      "advancedTitle": "Advanced AI defaults",
+      "advancedDescription": "Use this area for logical defaults such as embedding, summary language, and rerank. Docker-managed service endpoints and switches stay out of the initialization flow.",
+      "lightragLocaleLabel": "LightRAG summary language",
+      "lightragLocaleHint": "This follows the system language you selected earlier and becomes fixed after initialization. It cannot be changed later.",
       "discoverTitle": "Test the connection and discover models",
       "discoverDescription": "If the provider exposes a standard model list endpoint, we'll fetch the available models for you. You can still type one manually if discovery fails.",
       "discoverAction": "Test and discover models",
       "discoverFailed": "Model discovery failed. Please check the service URL, API key, or try again later.",
-      "discoverEmpty": "The connection worked, but no LLM models were found. Please type the model name manually."
+      "discoverEmpty": "The connection worked, but no LLM models were found. Please type the model name manually.",
+      "showRerank": "Show rerank settings",
+      "hideRerank": "Hide rerank settings"
     },
     "entryTypes": {
       "addCustom": "Add custom type",
@@ -233,7 +239,9 @@
         "language": "System language",
         "model": "Default model",
         "binding": "Default binding scope",
-        "entryTypes": "Entry type count"
+        "entryTypes": "Entry type count",
+        "advancedAi": "Advanced AI defaults",
+        "rerank": "Rerank"
       },
       "capabilitiesTitle": "Capability summary",
       "capabilitiesDescription": "Each capability can use app config, keep an environment default, or stay skipped for now.",

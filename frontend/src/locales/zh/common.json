@@ -184,11 +184,17 @@
         "providerName": "例如 OpenAI、OpenRouter、SiliconFlow",
         "modelName": "例如 gpt-4.1-mini、deepseek-chat"
       },
+      "advancedTitle": "高级 AI 配置",
+      "advancedDescription": "这里继续补充 Embedding、摘要语言和 Rerank 等逻辑配置，Docker 已接管的服务地址和开关不需要在这里重复填写。",
+      "lightragLocaleLabel": "LightRAG 摘要语言",
+      "lightragLocaleHint": "这里会直接跟随你前面选择的系统语言，并在初始化后固定下来，后续不支持再修改。",
       "discoverTitle": "测试连接并发现模型",
       "discoverDescription": "如果服务支持标准模型列表接口，我们会自动拉取可选模型；拉取失败时你仍然可以手动填写。",
       "discoverAction": "测试并发现模型",
       "discoverFailed": "模型发现失败，请检查服务地址、API Key 或稍后再试。",
-      "discoverEmpty": "已连接成功，但没有发现可用的 LLM 模型，请手动填写模型名。"
+      "discoverEmpty": "已连接成功，但没有发现可用的 LLM 模型，请手动填写模型名。",
+      "showRerank": "展开 Rerank 配置",
+      "hideRerank": "收起 Rerank 配置"
     },
     "entryTypes": {
       "addCustom": "添加自定义类型",
@@ -232,7 +238,9 @@
         "language": "系统语言",
         "model": "默认大模型",
         "binding": "默认绑定范围",
-        "entryTypes": "记录类型数量"
+        "entryTypes": "记录类型数量",
+        "advancedAi": "高级 AI 配置",
+        "rerank": "Rerank"
       },
       "capabilitiesTitle": "能力配置摘要",
       "capabilitiesDescription": "这些能力可以使用应用配置、沿用环境默认值，或继续保持跳过状态。",

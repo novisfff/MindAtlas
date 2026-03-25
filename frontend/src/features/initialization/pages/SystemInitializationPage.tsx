@@ -3,8 +3,10 @@ import { useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Languages,
   Loader2,
   Plus,
@@ -148,14 +150,14 @@ function EntryTypeCard({
   const { t } = useTranslation()
 
   return (
-    <div className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-sm">
-      <div className="flex flex-col gap-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
+    <div className="rounded-[22px] border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div className="min-w-0 flex-1 space-y-1.5">
+            <div className="flex flex-wrap items-center gap-2">
               <span
                 className={cn(
-                  'inline-flex items-center rounded-full px-3 py-1 text-xs font-medium',
+                  'inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-medium',
                   item.origin === 'default' ? 'bg-slate-100 text-slate-700' : 'bg-amber-100 text-amber-700'
                 )}
               >
@@ -167,7 +169,7 @@ function EntryTypeCard({
                 </span>
               ) : null}
             </div>
-            <p className="text-sm text-slate-500">
+            <p className="text-xs leading-5 text-slate-500">
               {item.origin === 'default'
                 ? t('initialization.entryTypes.defaultHint')
                 : t('initialization.entryTypes.customHint')}
@@ -177,15 +179,15 @@ function EntryTypeCard({
           <button
             type="button"
             onClick={onRemove}
-            className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-slate-200 text-slate-500 transition hover:border-red-200 hover:bg-red-50 hover:text-red-600"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 text-slate-500 transition hover:border-red-200 hover:bg-red-50 hover:text-red-600"
             aria-label={t('initialization.entryTypes.remove')}
           >
             <Trash2 className="h-4 w-4" />
           </button>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
-          <div className="space-y-2">
+        <div className="grid gap-3 md:grid-cols-[minmax(0,1.15fr)_minmax(0,0.9fr)_auto]">
+          <div className="space-y-1.5">
             <Label>{t('initialization.entryTypes.fields.name')}</Label>
             <input
               value={item.name}
@@ -195,7 +197,7 @@ function EntryTypeCard({
             />
           </div>
 
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             <Label>{t('initialization.entryTypes.fields.icon')}</Label>
             <input
               value={item.icon || ''}
@@ -205,7 +207,7 @@ function EntryTypeCard({
             />
           </div>
 
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             <Label>{t('initialization.entryTypes.fields.color')}</Label>
             <div className="flex h-11 items-center justify-center rounded-2xl border border-slate-200 bg-white px-3 shadow-sm">
               <input
@@ -218,19 +220,15 @@ function EntryTypeCard({
           </div>
         </div>
 
-        <div className="space-y-2">
+        <div className="space-y-1.5">
           <Label>{t('initialization.entryTypes.fields.description')}</Label>
           <textarea
             value={item.description || ''}
             onChange={(event) => onUpdate({ description: event.target.value })}
             className={TEXTAREA_CLASSNAME}
-            rows={3}
+            rows={2}
             placeholder={t('initialization.entryTypes.placeholders.description')}
           />
-        </div>
-
-        <div className="rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3 text-sm text-slate-600">
-          {t('initialization.entryTypes.defaultBehavior')}
         </div>
       </div>
     </div>
@@ -303,6 +301,57 @@ function LanguageStep({
   )
 }
 
+function buildRuntimeConfigPayload(
+  state: ReturnType<typeof useInitializationWizardStore.getState>,
+  locale: Locale
+) {
+  const knowledgeGraphPayload: Record<string, unknown> = {}
+  const documentParsingPayload: Record<string, unknown> = {}
+
+  const knowledgeGraphEnabled = state.runtimeConfigDraft.knowledgeGraph.enabled
+  const ocrConfigEnabled =
+    state.runtimeConfigDraft.documentParsing.workerEnabled &&
+    state.runtimeConfigDraft.documentParsing.ocrEnabled
+  const summaryLanguage = locale === 'zh' ? 'Chinese' : 'English'
+  const embeddingModelName = (state.runtimeConfigDraft.knowledgeGraph.embeddingModelName || '').trim()
+  const rerankModel = state.runtimeConfigDraft.knowledgeGraph.rerankModel.trim()
+  const rerankHost = state.runtimeConfigDraft.knowledgeGraph.rerankHost.trim()
+  const rerankApiKey = state.runtimeConfigDraft.knowledgeGraph.rerankApiKey.trim()
+  const rerankRequestFormat = state.runtimeConfigDraft.knowledgeGraph.rerankRequestFormat.trim()
+  const ocrLangs = state.runtimeConfigDraft.documentParsing.ocrLangs.trim()
+
+  if (knowledgeGraphEnabled) {
+    knowledgeGraphPayload.summaryLanguage = summaryLanguage
+  }
+  if (knowledgeGraphEnabled && embeddingModelName) {
+    knowledgeGraphPayload.embeddingModelName = embeddingModelName
+  }
+  if (knowledgeGraphEnabled && rerankModel) {
+    knowledgeGraphPayload.rerankModel = rerankModel
+  }
+  if (knowledgeGraphEnabled && rerankHost) {
+    knowledgeGraphPayload.rerankHost = rerankHost
+  }
+  if (knowledgeGraphEnabled && rerankApiKey) {
+    knowledgeGraphPayload.rerankApiKey = rerankApiKey
+  }
+  if (knowledgeGraphEnabled && (rerankModel || rerankHost || rerankApiKey) && rerankRequestFormat) {
+    knowledgeGraphPayload.rerankRequestFormat = rerankRequestFormat
+  }
+  if (ocrConfigEnabled && ocrLangs && ocrLangs !== 'auto') {
+    documentParsingPayload.ocrLangs = ocrLangs
+  }
+
+  const payload: Record<string, unknown> = {}
+  if (Object.keys(knowledgeGraphPayload).length) {
+    payload.knowledgeGraph = knowledgeGraphPayload
+  }
+  if (Object.keys(documentParsingPayload).length) {
+    payload.documentParsing = documentParsingPayload
+  }
+  return Object.keys(payload).length ? payload : undefined
+}
+
 export function SystemInitializationPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -316,6 +365,7 @@ export function SystemInitializationPage() {
   const aiCredential = useInitializationWizardStore((state) => state.aiCredential)
   const llmModelName = useInitializationWizardStore((state) => state.llmModelName)
   const entryTypes = useInitializationWizardStore((state) => state.entryTypes)
+  const runtimeConfigDraft = useInitializationWizardStore((state) => state.runtimeConfigDraft)
   const setStep = useInitializationWizardStore((state) => state.setStep)
   const setDraftLocale = useInitializationWizardStore((state) => state.setLocale)
   const setAiCredential = useInitializationWizardStore((state) => state.setAiCredential)
@@ -324,12 +374,24 @@ export function SystemInitializationPage() {
   const addCustomEntryType = useInitializationWizardStore((state) => state.addCustomEntryType)
   const updateEntryType = useInitializationWizardStore((state) => state.updateEntryType)
   const removeEntryType = useInitializationWizardStore((state) => state.removeEntryType)
+  const hydrateCapabilityDefaults = useInitializationWizardStore((state) => state.hydrateCapabilityDefaults)
+  const updateRuntimeConfigGroup = useInitializationWizardStore((state) => state.updateRuntimeConfigGroup)
   const resetDraft = useInitializationWizardStore((state) => state.resetDraft)
   const defaultsQuery = useInitializationDefaultsQuery(locale)
 
   const [isDiscovering, setIsDiscovering] = useState(false)
   const [discoveredModels, setDiscoveredModels] = useState<string[]>([])
+  const [discoveredEmbeddingModels, setDiscoveredEmbeddingModels] = useState<string[]>([])
   const [discoverError, setDiscoverError] = useState<string | null>(null)
+  const [showRerankSettings, setShowRerankSettings] = useState(() => {
+    const knowledgeGraph = useInitializationWizardStore.getState().runtimeConfigDraft.knowledgeGraph
+    return Boolean(
+      knowledgeGraph.rerankModel ||
+      knowledgeGraph.rerankHost ||
+      knowledgeGraph.rerankApiKey ||
+      knowledgeGraph.rerankApiKeyState.configured
+    )
+  })
 
   useEffect(() => {
     if (statusQuery.data?.initialized) {
@@ -340,7 +402,8 @@ export function SystemInitializationPage() {
   useEffect(() => {
     if (!defaultsQuery.data) return
     mergeDefaultEntryTypes(defaultsQuery.data.entryTypes, locale)
-  }, [defaultsQuery.data, locale, mergeDefaultEntryTypes])
+    hydrateCapabilityDefaults(defaultsQuery.data.capabilityModules, defaultsQuery.data.runtimeConfig)
+  }, [defaultsQuery.data, hydrateCapabilityDefaults, locale, mergeDefaultEntryTypes])
 
   const handleLocaleSelect = async (nextLocale: Locale) => {
     setDraftLocale(nextLocale)
@@ -360,13 +423,18 @@ export function SystemInitializationPage() {
       const result = await discoverModelsByKey(aiCredential.baseUrl.trim(), aiCredential.apiKey.trim())
       if (!result.ok) {
         setDiscoveredModels([])
+        setDiscoveredEmbeddingModels([])
         setDiscoverError(result.message || t('initialization.ai.discoverFailed'))
         return
       }
       const llmCandidates = result.models
         .filter((item) => item.suggestedType === 'llm')
         .map((item) => item.name)
+      const embeddingCandidates = result.models
+        .filter((item) => item.suggestedType === 'embedding')
+        .map((item) => item.name)
       setDiscoveredModels(llmCandidates)
+      setDiscoveredEmbeddingModels(embeddingCandidates)
       if (!llmCandidates.length) {
         setDiscoverError(t('initialization.ai.discoverEmpty'))
       } else if (!llmModelName.trim()) {
@@ -374,6 +442,7 @@ export function SystemInitializationPage() {
       }
     } catch (error) {
       setDiscoveredModels([])
+      setDiscoveredEmbeddingModels([])
       setDiscoverError(error instanceof Error ? error.message : t('initialization.ai.discoverFailed'))
     } finally {
       setIsDiscovering(false)
@@ -410,6 +479,7 @@ export function SystemInitializationPage() {
     }
 
     try {
+      const storeState = useInitializationWizardStore.getState()
       const result = await initializeMutation.mutateAsync({
         locale,
         aiCredential: {
@@ -431,6 +501,7 @@ export function SystemInitializationPage() {
           enabled: true,
           origin: item.origin,
         })),
+        runtimeConfig: buildRuntimeConfigPayload(storeState, locale),
       })
 
       resetDraft(result.locale)
@@ -479,6 +550,35 @@ export function SystemInitializationPage() {
       icon: Wand2,
     },
   ]
+  const knowledgeGraphEnabled = runtimeConfigDraft.knowledgeGraph.enabled
+  const ocrConfigEnabled =
+    runtimeConfigDraft.documentParsing.workerEnabled &&
+    runtimeConfigDraft.documentParsing.ocrEnabled
+  const defaultSummaryLanguage = locale === 'zh' ? 'Chinese' : 'English'
+  const advancedConfigSummary = [
+    knowledgeGraphEnabled
+      ? `${t('initialization.ai.lightragLocaleLabel')}: ${defaultSummaryLanguage}`
+      : null,
+    knowledgeGraphEnabled && runtimeConfigDraft.knowledgeGraph.embeddingModelName?.trim()
+      ? `${t('systemSetup.forms.knowledgeGraph.embeddingModelName.label')}: ${runtimeConfigDraft.knowledgeGraph.embeddingModelName.trim()}`
+      : null,
+    ocrConfigEnabled && runtimeConfigDraft.documentParsing.ocrLangs.trim() &&
+    runtimeConfigDraft.documentParsing.ocrLangs.trim() !== 'auto'
+      ? `${t('systemSetup.forms.documentParsing.ocrLangs.label')}: ${runtimeConfigDraft.documentParsing.ocrLangs.trim()}`
+      : null,
+    knowledgeGraphEnabled &&
+    (runtimeConfigDraft.knowledgeGraph.rerankModel.trim() || runtimeConfigDraft.knowledgeGraph.rerankHost.trim())
+      ? `${t('initialization.review.cards.rerank')}: ${runtimeConfigDraft.knowledgeGraph.rerankModel.trim() || runtimeConfigDraft.knowledgeGraph.rerankHost.trim()}`
+      : null,
+  ].filter(Boolean)
+  if (advancedConfigSummary.length) {
+    summaryItems.push({
+      key: 'advanced',
+      title: t('initialization.review.cards.advancedAi'),
+      value: advancedConfigSummary.join(' · '),
+      icon: Sparkles,
+    })
+  }
 
   let content: ReactNode
   if (step === 0) {
@@ -606,6 +706,147 @@ export function SystemInitializationPage() {
                 placeholder={t('initialization.ai.placeholders.modelName')}
               />
             </div>
+
+            {knowledgeGraphEnabled || ocrConfigEnabled ? (
+              <div className="rounded-[24px] border border-slate-200 bg-slate-50/80 p-5">
+                <div className="space-y-5">
+                  <div className="space-y-1.5">
+                    <p className="text-sm font-semibold text-slate-900">
+                      {t('initialization.ai.advancedTitle')}
+                    </p>
+                    <p className="text-sm leading-6 text-slate-600">
+                      {t('initialization.ai.advancedDescription')}
+                    </p>
+                  </div>
+
+                  {knowledgeGraphEnabled ? (
+                    <div className="space-y-4">
+                      <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 px-4 py-3">
+                        <p className="text-sm font-medium text-amber-900">
+                          {t('initialization.ai.lightragLocaleLabel')}: {defaultSummaryLanguage}
+                        </p>
+                        <p className="mt-1 text-xs leading-5 text-amber-700">
+                          {t('initialization.ai.lightragLocaleHint')}
+                        </p>
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label>{t('systemSetup.forms.knowledgeGraph.embeddingModelName.label')}</Label>
+                        <input
+                          value={runtimeConfigDraft.knowledgeGraph.embeddingModelName || ''}
+                          onChange={(event) =>
+                            updateRuntimeConfigGroup('knowledge_graph', { embeddingModelName: event.target.value })
+                          }
+                          className={FIELD_CLASSNAME}
+                          placeholder={t('systemSetup.forms.knowledgeGraph.embeddingModelName.placeholder')}
+                        />
+                        {discoveredEmbeddingModels.length ? (
+                          <div className="flex flex-wrap gap-2">
+                            {discoveredEmbeddingModels.slice(0, 6).map((model) => (
+                              <button
+                                key={model}
+                                type="button"
+                                onClick={() => updateRuntimeConfigGroup('knowledge_graph', { embeddingModelName: model })}
+                                className={cn(
+                                  'rounded-full border px-3 py-1 text-xs transition',
+                                  runtimeConfigDraft.knowledgeGraph.embeddingModelName === model
+                                    ? 'border-slate-900 bg-slate-900 text-white'
+                                    : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
+                                )}
+                              >
+                                {model}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+
+                      <div className="flex justify-start">
+                        <button
+                          type="button"
+                          onClick={() => setShowRerankSettings((current) => !current)}
+                          className="inline-flex h-11 items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:text-slate-900"
+                        >
+                          {showRerankSettings ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                          {showRerankSettings
+                            ? t('initialization.ai.hideRerank')
+                            : t('initialization.ai.showRerank')}
+                        </button>
+                      </div>
+
+                      {showRerankSettings ? (
+                        <div className="rounded-[22px] border border-slate-200 bg-white p-4">
+                          <div className="grid gap-4 md:grid-cols-2">
+                            <div className="space-y-2">
+                              <Label>{t('systemSetup.forms.knowledgeGraph.rerankModel.label')}</Label>
+                              <input
+                                value={runtimeConfigDraft.knowledgeGraph.rerankModel}
+                                onChange={(event) =>
+                                  updateRuntimeConfigGroup('knowledge_graph', { rerankModel: event.target.value })
+                                }
+                                className={FIELD_CLASSNAME}
+                                placeholder={t('systemSetup.forms.knowledgeGraph.rerankModel.placeholder')}
+                              />
+                            </div>
+
+                            <div className="space-y-2">
+                              <Label>{t('systemSetup.forms.knowledgeGraph.rerankHost.label')}</Label>
+                              <input
+                                value={runtimeConfigDraft.knowledgeGraph.rerankHost}
+                                onChange={(event) =>
+                                  updateRuntimeConfigGroup('knowledge_graph', { rerankHost: event.target.value })
+                                }
+                                className={FIELD_CLASSNAME}
+                                placeholder="https://your-rerank-host/v1"
+                              />
+                            </div>
+
+                            <div className="space-y-2">
+                              <Label>{t('systemSetup.forms.knowledgeGraph.rerankApiKey.label')}</Label>
+                              <input
+                                type="password"
+                                value={runtimeConfigDraft.knowledgeGraph.rerankApiKey}
+                                onChange={(event) =>
+                                  updateRuntimeConfigGroup('knowledge_graph', { rerankApiKey: event.target.value })
+                                }
+                                className={FIELD_CLASSNAME}
+                                placeholder={t('systemSetup.forms.knowledgeGraph.rerankApiKey.placeholder')}
+                              />
+                            </div>
+
+                            <div className="space-y-2">
+                              <Label>{t('systemSetup.forms.knowledgeGraph.rerankRequestFormat.label')}</Label>
+                              <input
+                                value={runtimeConfigDraft.knowledgeGraph.rerankRequestFormat}
+                                onChange={(event) =>
+                                  updateRuntimeConfigGroup('knowledge_graph', { rerankRequestFormat: event.target.value })
+                                }
+                                className={FIELD_CLASSNAME}
+                                placeholder="standard"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+
+                  {ocrConfigEnabled ? (
+                    <div className="space-y-2">
+                      <Label>{t('systemSetup.forms.documentParsing.ocrLangs.label')}</Label>
+                      <input
+                        value={runtimeConfigDraft.documentParsing.ocrLangs}
+                        onChange={(event) =>
+                          updateRuntimeConfigGroup('document_parsing', { ocrLangs: event.target.value })
+                        }
+                        className={FIELD_CLASSNAME}
+                        placeholder={t('systemSetup.forms.documentParsing.ocrLangs.placeholder')}
+                      />
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
       </div>

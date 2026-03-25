@@ -315,6 +315,65 @@ class SystemInitializationServiceTests(unittest.TestCase):
         self.assertTrue(bool(knowledge.graph_enabled))
         self.assertTrue(bool(knowledge.ai_enabled))
 
+    def test_initialize_system_persists_lightweight_runtime_ai_defaults(self) -> None:
+        from app.ai_registry.models import AiComponentBinding, AiModel
+        from app.system_settings.initialization_service import SystemInitializationService
+        from app.system_settings.models import AppSetting
+        from app.system_settings.schemas import RuntimeConfigPayloadRequest
+
+        request = self._make_request(locale="zh")
+        request.runtime_config = RuntimeConfigPayloadRequest.model_validate(
+            {
+                "knowledgeGraph": {
+                    "summaryLanguage": "Chinese",
+                    "embeddingModelName": "text-embedding-3-large",
+                    "rerankModel": "bge-reranker-v2-m3",
+                    "rerankHost": "https://rerank.example/v1",
+                    "rerankApiKey": "rerank-secret-123",
+                    "rerankRequestFormat": "standard",
+                },
+                "documentParsing": {
+                    "ocrLangs": "zh,en",
+                },
+            }
+        )
+
+        service = SystemInitializationService(self.db)
+        service.initialize_system(request)
+
+        models = self.db.query(AiModel).all()
+        embedding_models = [item for item in models if item.model_type == "embedding"]
+        lightrag_binding = (
+            self.db.query(AiComponentBinding)
+            .filter(AiComponentBinding.component == "lightrag")
+            .first()
+        )
+        knowledge_graph_setting = (
+            self.db.query(AppSetting)
+            .filter(AppSetting.key == "runtime_knowledge_graph_config")
+            .first()
+        )
+        document_parsing_setting = (
+            self.db.query(AppSetting)
+            .filter(AppSetting.key == "runtime_document_parsing_config")
+            .first()
+        )
+
+        self.assertEqual(len(models), 2)
+        self.assertEqual(len(embedding_models), 1)
+        self.assertEqual(embedding_models[0].name, "text-embedding-3-large")
+        self.assertIsNotNone(lightrag_binding)
+        self.assertEqual(lightrag_binding.embedding_model_id, embedding_models[0].id)
+        self.assertIsNotNone(knowledge_graph_setting)
+        self.assertEqual(knowledge_graph_setting.value_json["summaryLanguage"], "Chinese")
+        self.assertEqual(knowledge_graph_setting.value_json["rerankModel"], "bge-reranker-v2-m3")
+        self.assertEqual(knowledge_graph_setting.value_json["rerankHost"], "https://rerank.example/v1")
+        self.assertEqual(knowledge_graph_setting.value_json["rerankRequestFormat"], "standard")
+        self.assertIn("rerankApiKeyEncrypted", knowledge_graph_setting.value_json)
+        self.assertNotIn("rerankApiKey", knowledge_graph_setting.value_json)
+        self.assertIsNotNone(document_parsing_setting)
+        self.assertEqual(document_parsing_setting.value_json["ocrLangs"], "zh,en")
+
     def test_initialize_system_rolls_back_on_invalid_provider_url(self) -> None:
         from app.ai_registry.models import AiCredential
         from app.system_settings.initialization_service import (
