@@ -72,6 +72,8 @@ class ResolvedKnowledgeGraphRuntimeConfig:
     llm_model_name: str | None
     embedding_model_id: Any | None
     embedding_model_name: str | None
+    embedding_host: str
+    embedding_api_key: str
     rerank_model: str
     rerank_host: str
     rerank_api_key: str
@@ -471,6 +473,13 @@ class SystemRuntimeConfigService:
             or _normalize_optional_text(settings.lightrag_summary_language)
             or get_system_language_name(resolve_system_locale(self.db))
         )
+        embedding_host = _normalize_optional_text(payload.get("embeddingHost")) or _normalize_optional_text(settings.lightrag_embedding_host) or ""
+        embedding_api_key, embedding_api_key_state = self._secret_state(
+            payload=payload,
+            encrypted_key="embeddingApiKeyEncrypted",
+            hint_key="embeddingApiKeyHint",
+            env_value=settings.lightrag_embedding_key,
+        )
         rerank_model = _normalize_optional_text(payload.get("rerankModel")) or _normalize_optional_text(settings.lightrag_rerank_model) or ""
         rerank_host = _normalize_optional_text(payload.get("rerankHost")) or _normalize_optional_text(settings.lightrag_rerank_host) or ""
         rerank_api_key, rerank_api_key_state = self._secret_state(
@@ -515,6 +524,8 @@ class SystemRuntimeConfigService:
             llm_model_name=llm_model.name if llm_model is not None else None,
             embedding_model_id=embedding_model.id if embedding_model is not None else None,
             embedding_model_name=embedding_model.name if embedding_model is not None else None,
+            embedding_host=embedding_host,
+            embedding_api_key=embedding_api_key,
             rerank_model=rerank_model,
             rerank_host=rerank_host,
             rerank_api_key=rerank_api_key,
@@ -527,7 +538,7 @@ class SystemRuntimeConfigService:
             configured=configured,
             source=source,
             restart_required=False,
-            has_secrets=neo4j_password_state.configured or rerank_api_key_state.configured,
+            has_secrets=neo4j_password_state.configured or embedding_api_key_state.configured or rerank_api_key_state.configured,
             effective_summary=summary,
             enabled=enabled,
             neo4j_uri=neo4j_uri,
@@ -540,10 +551,12 @@ class SystemRuntimeConfigService:
             llm_model_name=resolved.llm_model_name,
             embedding_model_id=resolved.embedding_model_id,
             embedding_model_name=resolved.embedding_model_name,
+            embedding_host=embedding_host,
             rerank_model=rerank_model,
             rerank_host=rerank_host,
             rerank_request_format=rerank_request_format,
             neo4j_password_state=neo4j_password_state,
+            embedding_api_key_state=embedding_api_key_state,
             rerank_api_key_state=rerank_api_key_state,
         )
         return resolved, response
@@ -754,6 +767,7 @@ class SystemRuntimeConfigService:
             "workspace": request.workspace,
             "graphStorage": request.graph_storage,
             "summaryLanguage": request.summary_language,
+            "embeddingHost": request.embedding_host,
             "rerankModel": request.rerank_model,
             "rerankHost": request.rerank_host,
             "rerankRequestFormat": request.rerank_request_format,
@@ -773,6 +787,10 @@ class SystemRuntimeConfigService:
         if request.neo4j_password is not None and _normalize_optional_text(request.neo4j_password):
             payload["neo4jPasswordEncrypted"] = encrypt_api_key(request.neo4j_password)
             payload["neo4jPasswordHint"] = api_key_hint(request.neo4j_password)
+
+        if request.embedding_api_key is not None and _normalize_optional_text(request.embedding_api_key):
+            payload["embeddingApiKeyEncrypted"] = encrypt_api_key(request.embedding_api_key)
+            payload["embeddingApiKeyHint"] = api_key_hint(request.embedding_api_key)
 
         if request.rerank_api_key is not None and _normalize_optional_text(request.rerank_api_key):
             payload["rerankApiKeyEncrypted"] = encrypt_api_key(request.rerank_api_key)

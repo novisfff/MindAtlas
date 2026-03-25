@@ -3,10 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   CheckCircle2,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
-  ChevronUp,
   Languages,
   Loader2,
   Plus,
@@ -30,7 +28,7 @@ import {
 import { useAppStore, type Locale } from '@/stores/app-store'
 import { discoverModelsByKey } from '@/features/ai-providers/api/credentials'
 
-const STEP_KEYS = ['language', 'ai', 'entryTypes', 'review'] as const
+const STEP_KEYS = ['language', 'ai', 'entryTypes', 'capabilities', 'review'] as const
 
 const PROVIDER_PRESETS = [
   {
@@ -62,6 +60,15 @@ const PROVIDER_PRESETS = [
     className: 'border-amber-200/80 from-amber-500/15 to-orange-500/5',
   },
 ] as const
+
+const DEFAULT_EMBEDDING_MODELS = [
+  'text-embedding-3-small',
+  'text-embedding-3-large',
+  'text-embedding-ada-002',
+] as const
+
+const OCR_LANGUAGE_OPTIONS = ['auto', 'zh', 'en', 'zh,en'] as const
+const RERANK_REQUEST_FORMAT_OPTIONS = ['standard', 'aliyun'] as const
 
 const FIELD_CLASSNAME =
   'h-11 w-full rounded-2xl border border-slate-200 bg-white px-4 text-sm text-slate-900 shadow-sm outline-none transition focus:border-slate-900/50 focus:ring-4 focus:ring-slate-900/5'
@@ -102,7 +109,7 @@ function StepIndicator({ currentStep }: { currentStep: number }) {
             style={{ width: `${((currentStep + 1) / STEP_KEYS.length) * 100}%` }}
           />
         </div>
-        <div className="grid gap-3 md:grid-cols-4">
+        <div className="grid gap-3 md:grid-cols-5">
           {STEP_KEYS.map((key, index) => {
             const active = index === currentStep
             const done = index < currentStep
@@ -301,6 +308,53 @@ function LanguageStep({
   )
 }
 
+function OptionButtonGroup({
+  options,
+  value,
+  onChange,
+}: {
+  options: Array<{ value: string; label: string }>
+  value: string
+  onChange: (value: string) => void
+}) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          onClick={() => onChange(option.value)}
+          className={cn(
+            'inline-flex items-center rounded-full border px-3 py-1.5 text-sm transition',
+            value === option.value
+              ? 'border-slate-900 bg-slate-900 text-white shadow-sm'
+              : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-900'
+          )}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function resolveEmbeddingProviderMode(knowledgeGraph: ReturnType<typeof useInitializationWizardStore.getState>['runtimeConfigDraft']['knowledgeGraph']) {
+  return knowledgeGraph.embeddingHost.trim() ||
+    knowledgeGraph.embeddingApiKey.trim() ||
+    knowledgeGraph.embeddingApiKeyState.configured
+    ? 'custom'
+    : 'shared'
+}
+
+function resolveRerankMode(knowledgeGraph: ReturnType<typeof useInitializationWizardStore.getState>['runtimeConfigDraft']['knowledgeGraph']) {
+  return knowledgeGraph.rerankModel.trim() ||
+    knowledgeGraph.rerankHost.trim() ||
+    knowledgeGraph.rerankApiKey.trim() ||
+    knowledgeGraph.rerankApiKeyState.configured
+    ? 'enabled'
+    : 'disabled'
+}
+
 function buildRuntimeConfigPayload(
   state: ReturnType<typeof useInitializationWizardStore.getState>,
   locale: Locale
@@ -314,6 +368,8 @@ function buildRuntimeConfigPayload(
     state.runtimeConfigDraft.documentParsing.ocrEnabled
   const summaryLanguage = locale === 'zh' ? 'Chinese' : 'English'
   const embeddingModelName = (state.runtimeConfigDraft.knowledgeGraph.embeddingModelName || '').trim()
+  const embeddingHost = state.runtimeConfigDraft.knowledgeGraph.embeddingHost.trim()
+  const embeddingApiKey = state.runtimeConfigDraft.knowledgeGraph.embeddingApiKey.trim()
   const rerankModel = state.runtimeConfigDraft.knowledgeGraph.rerankModel.trim()
   const rerankHost = state.runtimeConfigDraft.knowledgeGraph.rerankHost.trim()
   const rerankApiKey = state.runtimeConfigDraft.knowledgeGraph.rerankApiKey.trim()
@@ -325,6 +381,12 @@ function buildRuntimeConfigPayload(
   }
   if (knowledgeGraphEnabled && embeddingModelName) {
     knowledgeGraphPayload.embeddingModelName = embeddingModelName
+  }
+  if (knowledgeGraphEnabled && embeddingHost) {
+    knowledgeGraphPayload.embeddingHost = embeddingHost
+  }
+  if (knowledgeGraphEnabled && embeddingApiKey) {
+    knowledgeGraphPayload.embeddingApiKey = embeddingApiKey
   }
   if (knowledgeGraphEnabled && rerankModel) {
     knowledgeGraphPayload.rerankModel = rerankModel
@@ -383,14 +445,12 @@ export function SystemInitializationPage() {
   const [discoveredModels, setDiscoveredModels] = useState<string[]>([])
   const [discoveredEmbeddingModels, setDiscoveredEmbeddingModels] = useState<string[]>([])
   const [discoverError, setDiscoverError] = useState<string | null>(null)
-  const [showRerankSettings, setShowRerankSettings] = useState(() => {
-    const knowledgeGraph = useInitializationWizardStore.getState().runtimeConfigDraft.knowledgeGraph
-    return Boolean(
-      knowledgeGraph.rerankModel ||
-      knowledgeGraph.rerankHost ||
-      knowledgeGraph.rerankApiKey ||
-      knowledgeGraph.rerankApiKeyState.configured
-    )
+  const [activeCapabilitySection, setActiveCapabilitySection] = useState<'lightrag' | 'docling'>('lightrag')
+  const [embeddingProviderMode, setEmbeddingProviderMode] = useState<'shared' | 'custom'>(() => {
+    return resolveEmbeddingProviderMode(useInitializationWizardStore.getState().runtimeConfigDraft.knowledgeGraph)
+  })
+  const [rerankMode, setRerankMode] = useState<'enabled' | 'disabled'>(() => {
+    return resolveRerankMode(useInitializationWizardStore.getState().runtimeConfigDraft.knowledgeGraph)
   })
 
   useEffect(() => {
@@ -403,7 +463,28 @@ export function SystemInitializationPage() {
     if (!defaultsQuery.data) return
     mergeDefaultEntryTypes(defaultsQuery.data.entryTypes, locale)
     hydrateCapabilityDefaults(defaultsQuery.data.capabilityModules, defaultsQuery.data.runtimeConfig)
+    const nextKnowledgeGraph = useInitializationWizardStore.getState().runtimeConfigDraft.knowledgeGraph
+    setEmbeddingProviderMode(resolveEmbeddingProviderMode(nextKnowledgeGraph))
+    setRerankMode(resolveRerankMode(nextKnowledgeGraph))
   }, [defaultsQuery.data, hydrateCapabilityDefaults, locale, mergeDefaultEntryTypes])
+
+  const knowledgeGraphEnabled = runtimeConfigDraft.knowledgeGraph.enabled
+  const doclingVisible =
+    runtimeConfigDraft.documentParsing.workerEnabled ||
+    runtimeConfigDraft.documentParsing.pictureDescriptionEnabled
+  const ocrConfigEnabled =
+    runtimeConfigDraft.documentParsing.workerEnabled &&
+    runtimeConfigDraft.documentParsing.ocrEnabled
+
+  useEffect(() => {
+    const nextSections: Array<'lightrag' | 'docling'> = []
+    if (knowledgeGraphEnabled) nextSections.push('lightrag')
+    if (doclingVisible) nextSections.push('docling')
+    if (!nextSections.length) return
+    if (!nextSections.includes(activeCapabilitySection)) {
+      setActiveCapabilitySection(nextSections[0])
+    }
+  }, [activeCapabilitySection, doclingVisible, knowledgeGraphEnabled])
 
   const handleLocaleSelect = async (nextLocale: Locale) => {
     setDraftLocale(nextLocale)
@@ -439,6 +520,12 @@ export function SystemInitializationPage() {
         setDiscoverError(t('initialization.ai.discoverEmpty'))
       } else if (!llmModelName.trim()) {
         setLlmModelName(llmCandidates[0])
+      }
+      if (
+        embeddingCandidates.length &&
+        !useInitializationWizardStore.getState().runtimeConfigDraft.knowledgeGraph.embeddingModelName?.trim()
+      ) {
+        updateRuntimeConfigGroup('knowledge_graph', { embeddingModelName: embeddingCandidates[0] })
       }
     } catch (error) {
       setDiscoveredModels([])
@@ -550,17 +637,41 @@ export function SystemInitializationPage() {
       icon: Wand2,
     },
   ]
-  const knowledgeGraphEnabled = runtimeConfigDraft.knowledgeGraph.enabled
-  const ocrConfigEnabled =
-    runtimeConfigDraft.documentParsing.workerEnabled &&
-    runtimeConfigDraft.documentParsing.ocrEnabled
   const defaultSummaryLanguage = locale === 'zh' ? 'Chinese' : 'English'
+  const capabilitySections = [
+    knowledgeGraphEnabled
+      ? {
+          key: 'lightrag' as const,
+          title: 'LightRAG',
+          description: t('initialization.capabilities.sections.lightrag.description'),
+        }
+      : null,
+    doclingVisible
+      ? {
+          key: 'docling' as const,
+          title: 'Docling',
+          description: t('initialization.capabilities.sections.docling.description'),
+        }
+      : null,
+  ].filter(Boolean) as Array<{ key: 'lightrag' | 'docling'; title: string; description: string }>
+  const embeddingModelOptions = Array.from(
+    new Set([
+      ...DEFAULT_EMBEDDING_MODELS,
+      ...discoveredEmbeddingModels,
+      runtimeConfigDraft.knowledgeGraph.embeddingModelName || '',
+    ].filter(Boolean))
+  )
+  const selectedEmbeddingModel = runtimeConfigDraft.knowledgeGraph.embeddingModelName || embeddingModelOptions[0] || ''
+  const rerankEnabled = rerankMode === 'enabled'
   const advancedConfigSummary = [
     knowledgeGraphEnabled
       ? `${t('initialization.ai.lightragLocaleLabel')}: ${defaultSummaryLanguage}`
       : null,
     knowledgeGraphEnabled && runtimeConfigDraft.knowledgeGraph.embeddingModelName?.trim()
       ? `${t('systemSetup.forms.knowledgeGraph.embeddingModelName.label')}: ${runtimeConfigDraft.knowledgeGraph.embeddingModelName.trim()}`
+      : null,
+    knowledgeGraphEnabled && runtimeConfigDraft.knowledgeGraph.embeddingHost.trim()
+      ? `${t('systemSetup.forms.knowledgeGraph.embeddingHost.label')}: ${runtimeConfigDraft.knowledgeGraph.embeddingHost.trim()}`
       : null,
     ocrConfigEnabled && runtimeConfigDraft.documentParsing.ocrLangs.trim() &&
     runtimeConfigDraft.documentParsing.ocrLangs.trim() !== 'auto'
@@ -706,147 +817,6 @@ export function SystemInitializationPage() {
                 placeholder={t('initialization.ai.placeholders.modelName')}
               />
             </div>
-
-            {knowledgeGraphEnabled || ocrConfigEnabled ? (
-              <div className="rounded-[24px] border border-slate-200 bg-slate-50/80 p-5">
-                <div className="space-y-5">
-                  <div className="space-y-1.5">
-                    <p className="text-sm font-semibold text-slate-900">
-                      {t('initialization.ai.advancedTitle')}
-                    </p>
-                    <p className="text-sm leading-6 text-slate-600">
-                      {t('initialization.ai.advancedDescription')}
-                    </p>
-                  </div>
-
-                  {knowledgeGraphEnabled ? (
-                    <div className="space-y-4">
-                      <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 px-4 py-3">
-                        <p className="text-sm font-medium text-amber-900">
-                          {t('initialization.ai.lightragLocaleLabel')}: {defaultSummaryLanguage}
-                        </p>
-                        <p className="mt-1 text-xs leading-5 text-amber-700">
-                          {t('initialization.ai.lightragLocaleHint')}
-                        </p>
-                      </div>
-
-                      <div className="space-y-2">
-                        <Label>{t('systemSetup.forms.knowledgeGraph.embeddingModelName.label')}</Label>
-                        <input
-                          value={runtimeConfigDraft.knowledgeGraph.embeddingModelName || ''}
-                          onChange={(event) =>
-                            updateRuntimeConfigGroup('knowledge_graph', { embeddingModelName: event.target.value })
-                          }
-                          className={FIELD_CLASSNAME}
-                          placeholder={t('systemSetup.forms.knowledgeGraph.embeddingModelName.placeholder')}
-                        />
-                        {discoveredEmbeddingModels.length ? (
-                          <div className="flex flex-wrap gap-2">
-                            {discoveredEmbeddingModels.slice(0, 6).map((model) => (
-                              <button
-                                key={model}
-                                type="button"
-                                onClick={() => updateRuntimeConfigGroup('knowledge_graph', { embeddingModelName: model })}
-                                className={cn(
-                                  'rounded-full border px-3 py-1 text-xs transition',
-                                  runtimeConfigDraft.knowledgeGraph.embeddingModelName === model
-                                    ? 'border-slate-900 bg-slate-900 text-white'
-                                    : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
-                                )}
-                              >
-                                {model}
-                              </button>
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
-
-                      <div className="flex justify-start">
-                        <button
-                          type="button"
-                          onClick={() => setShowRerankSettings((current) => !current)}
-                          className="inline-flex h-11 items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:text-slate-900"
-                        >
-                          {showRerankSettings ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                          {showRerankSettings
-                            ? t('initialization.ai.hideRerank')
-                            : t('initialization.ai.showRerank')}
-                        </button>
-                      </div>
-
-                      {showRerankSettings ? (
-                        <div className="rounded-[22px] border border-slate-200 bg-white p-4">
-                          <div className="grid gap-4 md:grid-cols-2">
-                            <div className="space-y-2">
-                              <Label>{t('systemSetup.forms.knowledgeGraph.rerankModel.label')}</Label>
-                              <input
-                                value={runtimeConfigDraft.knowledgeGraph.rerankModel}
-                                onChange={(event) =>
-                                  updateRuntimeConfigGroup('knowledge_graph', { rerankModel: event.target.value })
-                                }
-                                className={FIELD_CLASSNAME}
-                                placeholder={t('systemSetup.forms.knowledgeGraph.rerankModel.placeholder')}
-                              />
-                            </div>
-
-                            <div className="space-y-2">
-                              <Label>{t('systemSetup.forms.knowledgeGraph.rerankHost.label')}</Label>
-                              <input
-                                value={runtimeConfigDraft.knowledgeGraph.rerankHost}
-                                onChange={(event) =>
-                                  updateRuntimeConfigGroup('knowledge_graph', { rerankHost: event.target.value })
-                                }
-                                className={FIELD_CLASSNAME}
-                                placeholder="https://your-rerank-host/v1"
-                              />
-                            </div>
-
-                            <div className="space-y-2">
-                              <Label>{t('systemSetup.forms.knowledgeGraph.rerankApiKey.label')}</Label>
-                              <input
-                                type="password"
-                                value={runtimeConfigDraft.knowledgeGraph.rerankApiKey}
-                                onChange={(event) =>
-                                  updateRuntimeConfigGroup('knowledge_graph', { rerankApiKey: event.target.value })
-                                }
-                                className={FIELD_CLASSNAME}
-                                placeholder={t('systemSetup.forms.knowledgeGraph.rerankApiKey.placeholder')}
-                              />
-                            </div>
-
-                            <div className="space-y-2">
-                              <Label>{t('systemSetup.forms.knowledgeGraph.rerankRequestFormat.label')}</Label>
-                              <input
-                                value={runtimeConfigDraft.knowledgeGraph.rerankRequestFormat}
-                                onChange={(event) =>
-                                  updateRuntimeConfigGroup('knowledge_graph', { rerankRequestFormat: event.target.value })
-                                }
-                                className={FIELD_CLASSNAME}
-                                placeholder="standard"
-                              />
-                            </div>
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : null}
-
-                  {ocrConfigEnabled ? (
-                    <div className="space-y-2">
-                      <Label>{t('systemSetup.forms.documentParsing.ocrLangs.label')}</Label>
-                      <input
-                        value={runtimeConfigDraft.documentParsing.ocrLangs}
-                        onChange={(event) =>
-                          updateRuntimeConfigGroup('document_parsing', { ocrLangs: event.target.value })
-                        }
-                        className={FIELD_CLASSNAME}
-                        placeholder={t('systemSetup.forms.documentParsing.ocrLangs.placeholder')}
-                      />
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-            ) : null}
           </div>
         </div>
       </div>
@@ -886,6 +856,246 @@ export function SystemInitializationPage() {
             />
           ))}
         </div>
+      </div>
+    )
+  } else if (step === 3) {
+    const renderLightRagSection = () => (
+      <div className="space-y-5">
+        <div className="space-y-2">
+          <h3 className="text-xl font-semibold text-slate-900">LightRAG</h3>
+          <p className="text-sm leading-6 text-slate-600">
+            {t('initialization.capabilities.sections.lightrag.description')}
+          </p>
+        </div>
+
+        <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 px-4 py-3">
+          <p className="text-sm font-medium text-amber-900">
+            {t('initialization.ai.lightragLocaleLabel')}: {defaultSummaryLanguage}
+          </p>
+          <p className="mt-1 text-xs leading-5 text-amber-700">
+            {t('initialization.ai.lightragLocaleHint')}
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <Label>{t('initialization.capabilities.embeddingProvider.label')}</Label>
+          <OptionButtonGroup
+            value={embeddingProviderMode}
+            onChange={(next) => {
+              setEmbeddingProviderMode(next as 'shared' | 'custom')
+              if (next === 'shared') {
+                updateRuntimeConfigGroup('knowledge_graph', {
+                  embeddingHost: '',
+                  embeddingApiKey: '',
+                })
+              }
+            }}
+            options={[
+              { value: 'shared', label: t('initialization.capabilities.embeddingProvider.options.shared') },
+              { value: 'custom', label: t('initialization.capabilities.embeddingProvider.options.custom') },
+            ]}
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label>{t('systemSetup.forms.knowledgeGraph.embeddingModelName.label')}</Label>
+          <OptionButtonGroup
+            value={selectedEmbeddingModel}
+            onChange={(value) => updateRuntimeConfigGroup('knowledge_graph', { embeddingModelName: value })}
+            options={embeddingModelOptions.map((item) => ({ value: item, label: item }))}
+          />
+        </div>
+
+        {embeddingProviderMode === 'custom' ? (
+          <div className="rounded-[22px] border border-slate-200 bg-slate-50/70 p-4">
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label>{t('systemSetup.forms.knowledgeGraph.embeddingHost.label')}</Label>
+                <input
+                  value={runtimeConfigDraft.knowledgeGraph.embeddingHost}
+                  onChange={(event) =>
+                    updateRuntimeConfigGroup('knowledge_graph', { embeddingHost: event.target.value })
+                  }
+                  className={FIELD_CLASSNAME}
+                  placeholder={t('systemSetup.forms.knowledgeGraph.embeddingHost.placeholder')}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label>{t('systemSetup.forms.knowledgeGraph.embeddingApiKey.label')}</Label>
+                <input
+                  type="password"
+                  value={runtimeConfigDraft.knowledgeGraph.embeddingApiKey}
+                  onChange={(event) =>
+                    updateRuntimeConfigGroup('knowledge_graph', { embeddingApiKey: event.target.value })
+                  }
+                  className={FIELD_CLASSNAME}
+                  placeholder={t('systemSetup.forms.knowledgeGraph.embeddingApiKey.placeholder')}
+                />
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="space-y-2">
+          <Label>{t('initialization.capabilities.rerank.label')}</Label>
+          <OptionButtonGroup
+            value={rerankMode}
+            onChange={(value) => {
+              setRerankMode(value as 'enabled' | 'disabled')
+              if (value === 'disabled') {
+                updateRuntimeConfigGroup('knowledge_graph', {
+                  rerankModel: '',
+                  rerankHost: '',
+                  rerankApiKey: '',
+                  rerankRequestFormat: 'standard',
+                })
+                return
+              }
+            }}
+            options={[
+              { value: 'disabled', label: t('initialization.capabilities.rerank.options.disabled') },
+              { value: 'enabled', label: t('initialization.capabilities.rerank.options.enabled') },
+            ]}
+          />
+        </div>
+
+        {rerankEnabled ? (
+          <div className="rounded-[22px] border border-slate-200 bg-white p-4">
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label>{t('systemSetup.forms.knowledgeGraph.rerankModel.label')}</Label>
+                <input
+                  value={runtimeConfigDraft.knowledgeGraph.rerankModel}
+                  onChange={(event) =>
+                    updateRuntimeConfigGroup('knowledge_graph', { rerankModel: event.target.value })
+                  }
+                  className={FIELD_CLASSNAME}
+                  placeholder={t('systemSetup.forms.knowledgeGraph.rerankModel.placeholder')}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label>{t('systemSetup.forms.knowledgeGraph.rerankHost.label')}</Label>
+                <input
+                  value={runtimeConfigDraft.knowledgeGraph.rerankHost}
+                  onChange={(event) =>
+                    updateRuntimeConfigGroup('knowledge_graph', { rerankHost: event.target.value })
+                  }
+                  className={FIELD_CLASSNAME}
+                  placeholder="https://your-rerank-host/v1"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label>{t('systemSetup.forms.knowledgeGraph.rerankApiKey.label')}</Label>
+                <input
+                  type="password"
+                  value={runtimeConfigDraft.knowledgeGraph.rerankApiKey}
+                  onChange={(event) =>
+                    updateRuntimeConfigGroup('knowledge_graph', { rerankApiKey: event.target.value })
+                  }
+                  className={FIELD_CLASSNAME}
+                  placeholder={t('systemSetup.forms.knowledgeGraph.rerankApiKey.placeholder')}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label>{t('systemSetup.forms.knowledgeGraph.rerankRequestFormat.label')}</Label>
+                <OptionButtonGroup
+                  value={runtimeConfigDraft.knowledgeGraph.rerankRequestFormat}
+                  onChange={(value) =>
+                    updateRuntimeConfigGroup('knowledge_graph', { rerankRequestFormat: value })
+                  }
+                  options={RERANK_REQUEST_FORMAT_OPTIONS.map((item) => ({ value: item, label: item }))}
+                />
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    )
+
+    const renderDoclingSection = () => (
+      <div className="space-y-5">
+        <div className="space-y-2">
+          <h3 className="text-xl font-semibold text-slate-900">Docling</h3>
+          <p className="text-sm leading-6 text-slate-600">
+            {t('initialization.capabilities.sections.docling.description')}
+          </p>
+        </div>
+
+        {ocrConfigEnabled ? (
+          <div className="space-y-2">
+            <Label>{t('systemSetup.forms.documentParsing.ocrLangs.label')}</Label>
+            <OptionButtonGroup
+              value={runtimeConfigDraft.documentParsing.ocrLangs}
+              onChange={(value) => updateRuntimeConfigGroup('document_parsing', { ocrLangs: value })}
+              options={OCR_LANGUAGE_OPTIONS.map((item) => ({
+                value: item,
+                label: t(`initialization.capabilities.ocr.options.${item.replace(',', '_')}`),
+              }))}
+            />
+          </div>
+        ) : (
+          <div className="rounded-[22px] border border-slate-200 bg-slate-50/70 px-4 py-4 text-sm text-slate-600">
+            {t('initialization.capabilities.sections.docling.empty')}
+          </div>
+        )}
+      </div>
+    )
+
+    content = (
+      <div className="space-y-6">
+        <div className="space-y-2">
+          <h2 className="text-2xl font-semibold text-slate-900">
+            {t('initialization.steps.capabilities.title')}
+          </h2>
+          <p className="max-w-2xl text-sm leading-6 text-slate-600">
+            {t('initialization.steps.capabilities.description')}
+          </p>
+        </div>
+
+        {capabilitySections.length ? (
+          <>
+            <div className="grid gap-3 md:grid-cols-2">
+              {capabilitySections.map((section) => (
+                <button
+                  key={section.key}
+                  type="button"
+                  onClick={() => setActiveCapabilitySection(section.key)}
+                  className={cn(
+                    'rounded-[24px] border p-4 text-left transition-all',
+                    activeCapabilitySection === section.key
+                      ? 'border-slate-900 bg-slate-900 text-white shadow-lg shadow-slate-900/10'
+                      : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                  )}
+                >
+                  <p className="text-base font-semibold">{section.title}</p>
+                  <p className={cn(
+                    'mt-2 text-sm leading-6',
+                    activeCapabilitySection === section.key ? 'text-slate-200' : 'text-slate-500'
+                  )}>
+                    {section.description}
+                  </p>
+                </button>
+              ))}
+            </div>
+
+            <div className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+              {activeCapabilitySection === 'docling' ? renderDoclingSection() : renderLightRagSection()}
+            </div>
+          </>
+        ) : (
+          <div className="rounded-[24px] border border-slate-200 bg-white p-6 shadow-sm">
+            <p className="text-sm font-semibold text-slate-900">
+              {t('initialization.capabilities.emptyTitle')}
+            </p>
+            <p className="mt-2 text-sm leading-6 text-slate-600">
+              {t('initialization.capabilities.emptyDescription')}
+            </p>
+          </div>
+        )}
       </div>
     )
   } else {

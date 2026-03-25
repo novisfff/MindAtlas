@@ -327,6 +327,8 @@ class SystemInitializationServiceTests(unittest.TestCase):
                 "knowledgeGraph": {
                     "summaryLanguage": "Chinese",
                     "embeddingModelName": "text-embedding-3-large",
+                    "embeddingHost": "https://embedding.example/v1",
+                    "embeddingApiKey": "embedding-secret-456",
                     "rerankModel": "bge-reranker-v2-m3",
                     "rerankHost": "https://rerank.example/v1",
                     "rerankApiKey": "rerank-secret-123",
@@ -366,9 +368,12 @@ class SystemInitializationServiceTests(unittest.TestCase):
         self.assertEqual(lightrag_binding.embedding_model_id, embedding_models[0].id)
         self.assertIsNotNone(knowledge_graph_setting)
         self.assertEqual(knowledge_graph_setting.value_json["summaryLanguage"], "Chinese")
+        self.assertEqual(knowledge_graph_setting.value_json["embeddingHost"], "https://embedding.example/v1")
         self.assertEqual(knowledge_graph_setting.value_json["rerankModel"], "bge-reranker-v2-m3")
         self.assertEqual(knowledge_graph_setting.value_json["rerankHost"], "https://rerank.example/v1")
         self.assertEqual(knowledge_graph_setting.value_json["rerankRequestFormat"], "standard")
+        self.assertIn("embeddingApiKeyEncrypted", knowledge_graph_setting.value_json)
+        self.assertNotIn("embeddingApiKey", knowledge_graph_setting.value_json)
         self.assertIn("rerankApiKeyEncrypted", knowledge_graph_setting.value_json)
         self.assertNotIn("rerankApiKey", knowledge_graph_setting.value_json)
         self.assertIsNotNone(document_parsing_setting)

@@ -45,10 +45,12 @@ export interface RuntimeKnowledgeGraphConfigResponse extends RuntimeConfigModule
   llmModelName?: string | null
   embeddingModelId?: string | null
   embeddingModelName?: string | null
+  embeddingHost: string
   rerankModel: string
   rerankHost: string
   rerankRequestFormat: string
   neo4jPasswordState: SecretFieldState
+  embeddingApiKeyState: SecretFieldState
   rerankApiKeyState: SecretFieldState
 }
 
@@ -107,6 +109,8 @@ export interface RuntimeKnowledgeGraphConfigRequest {
   llmModelName?: string
   embeddingModelId?: string | null
   embeddingModelName?: string
+  embeddingHost?: string
+  embeddingApiKey?: string
   rerankModel?: string
   rerankHost?: string
   rerankApiKey?: string

@@ -127,6 +127,8 @@ class RuntimeKnowledgeGraphConfigRequest(CamelModel):
     llm_model_name: str | None = Field(default=None, max_length=255, alias="llmModelName")
     embedding_model_id: UUID | None = Field(default=None, alias="embeddingModelId")
     embedding_model_name: str | None = Field(default=None, max_length=255, alias="embeddingModelName")
+    embedding_host: str | None = Field(default=None, max_length=2048, alias="embeddingHost")
+    embedding_api_key: str | None = Field(default=None, max_length=4096, alias="embeddingApiKey")
     rerank_model: str | None = Field(default=None, max_length=255, alias="rerankModel")
     rerank_host: str | None = Field(default=None, max_length=2048, alias="rerankHost")
     rerank_api_key: str | None = Field(default=None, max_length=4096, alias="rerankApiKey")
@@ -142,6 +144,8 @@ class RuntimeKnowledgeGraphConfigRequest(CamelModel):
         "summary_language",
         "llm_model_name",
         "embedding_model_name",
+        "embedding_host",
+        "embedding_api_key",
         "rerank_model",
         "rerank_host",
         "rerank_api_key",
@@ -168,10 +172,12 @@ class RuntimeKnowledgeGraphConfigResponse(RuntimeConfigModuleBase):
     llm_model_name: str | None = Field(default=None, alias="llmModelName")
     embedding_model_id: UUID | None = Field(default=None, alias="embeddingModelId")
     embedding_model_name: str | None = Field(default=None, alias="embeddingModelName")
+    embedding_host: str = Field(default="", alias="embeddingHost")
     rerank_model: str = Field(default="", alias="rerankModel")
     rerank_host: str = Field(default="", alias="rerankHost")
     rerank_request_format: str = Field(default="standard", alias="rerankRequestFormat")
     neo4j_password_state: SecretFieldStateResponse = Field(default_factory=SecretFieldStateResponse, alias="neo4jPasswordState")
+    embedding_api_key_state: SecretFieldStateResponse = Field(default_factory=SecretFieldStateResponse, alias="embeddingApiKeyState")
     rerank_api_key_state: SecretFieldStateResponse = Field(default_factory=SecretFieldStateResponse, alias="rerankApiKeyState")
 
 

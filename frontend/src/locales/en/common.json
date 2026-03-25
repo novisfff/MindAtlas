@@ -165,8 +165,8 @@
       },
       "capabilities": {
         "label": "Capability center",
-        "title": "Add runtime capabilities when you need them",
-        "description": "Storage, knowledge graph, document parsing, and automation can all be configured here. They are optional for first launch, so you can skip them for now."
+        "title": "Configure AI capabilities by category",
+        "description": "Keep the main LLM setup simple, then configure LightRAG and Docling separately here when your deployment enables them."
       },
       "review": {
         "label": "Review",
@@ -221,6 +221,8 @@
       }
     },
     "capabilities": {
+      "emptyTitle": "No extra AI capability settings are exposed by this deployment right now",
+      "emptyDescription": "If Docker or environment settings enable more LightRAG or Docling options later, the matching sections will appear here automatically.",
       "introTitle": "The core setup is enough to get the system running, and the rest can be layered in when needed",
       "introDescription": "You can open any module to configure it now, or skip it and come back later from System Setup.",
       "currentState": "Current state",
@@ -230,7 +232,38 @@
       "backToCenter": "Back to capability center",
       "saveAndBack": "Save and return",
       "skipCurrent": "Skip this module",
-      "editing": "Editing capability module"
+      "editing": "Editing capability module",
+      "sections": {
+        "lightrag": {
+          "description": "Configure LightRAG embedding connectivity and the optional rerank service."
+        },
+        "docling": {
+          "description": "Configure OCR behavior and related attachment parsing defaults for Docling.",
+          "empty": "Docling has no extra runtime options exposed in this deployment, so it will keep using the deployment defaults."
+        }
+      },
+      "embeddingProvider": {
+        "label": "Embedding provider source",
+        "options": {
+          "shared": "Reuse the main LLM provider",
+          "custom": "Use a dedicated embedding provider"
+        }
+      },
+      "rerank": {
+        "label": "Rerank service",
+        "options": {
+          "disabled": "Do not configure separately",
+          "enabled": "Configure a dedicated rerank service"
+        }
+      },
+      "ocr": {
+        "options": {
+          "auto": "Auto detect",
+          "zh": "Chinese",
+          "en": "English",
+          "zh_en": "Chinese + English"
+        }
+      }
     },
     "review": {
       "emptyValue": "Not set",
@@ -376,6 +409,14 @@
         "embeddingModelName": {
           "label": "LightRAG embedding model",
           "placeholder": "For example text-embedding-3-small"
+        },
+        "embeddingHost": {
+          "label": "Embedding service URL",
+          "placeholder": "For example https://api.openai.com/v1"
+        },
+        "embeddingApiKey": {
+          "label": "Embedding API key",
+          "placeholder": "Enter a dedicated embedding key"
         },
         "advanced": {
           "title": "Advanced rerank config",

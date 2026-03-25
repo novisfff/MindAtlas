@@ -251,7 +251,7 @@ def _resolve_llm_config() -> _OpenAICompatModelConfig:
     return _OpenAICompatModelConfig(api_key=api_key, base_url=base_url, model=model)
 
 
-def _resolve_embedding_config(*, llm: _OpenAICompatModelConfig) -> _OpenAICompatModelConfig:
+def _resolve_embedding_config(*, llm: _OpenAICompatModelConfig, knowledge_graph_config=None) -> _OpenAICompatModelConfig:
     settings = get_settings()
     source = (getattr(settings, "lightrag_ai_key_source", "env_or_db") or "env_or_db").strip().lower()
 
@@ -264,6 +264,7 @@ def _resolve_embedding_config(*, llm: _OpenAICompatModelConfig) -> _OpenAICompat
     db_cfg = None if source == "env_only" else _try_resolve_db_model_binding(model_type="embedding")
     model = _first_non_empty(getattr(db_cfg, "model", None), cfg_model, env_model, "text-embedding-3-small")
     base_url = _first_non_empty(
+        getattr(knowledge_graph_config, "embedding_host", None),
         getattr(settings, "lightrag_embedding_host", None),
         cfg_host,
         env_host,
@@ -271,6 +272,7 @@ def _resolve_embedding_config(*, llm: _OpenAICompatModelConfig) -> _OpenAICompat
         llm.base_url,
     )
     api_key = _first_non_empty(
+        getattr(knowledge_graph_config, "embedding_api_key", None),
         getattr(settings, "lightrag_embedding_key", None),
         cfg_key,
         env_key,
@@ -333,7 +335,7 @@ def _create_and_init_rag():
         step("resolve llm config")
         llm = _resolve_llm_config()
         step("resolve embedding config")
-        embedding = _resolve_embedding_config(llm=llm)
+        embedding = _resolve_embedding_config(llm=llm, knowledge_graph_config=knowledge_graph_config)
         step("apply runtime env")
         _apply_runtime_env(
             llm=llm,

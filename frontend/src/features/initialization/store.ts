@@ -26,6 +26,7 @@ export interface RuntimeStorageDraft extends RuntimeStorageConfigResponse {
 }
 
 export interface RuntimeKnowledgeGraphDraft extends RuntimeKnowledgeGraphConfigResponse {
+  embeddingApiKey: string
   neo4jPassword: string
   rerankApiKey: string
   isDirty: boolean
@@ -163,12 +164,15 @@ function createEmptyKnowledgeGraphDraft(): RuntimeKnowledgeGraphDraft {
     llmModelName: '',
     embeddingModelId: null,
     embeddingModelName: '',
+    embeddingHost: '',
     rerankModel: '',
     rerankHost: '',
     rerankRequestFormat: 'standard',
     neo4jPasswordState: { configured: false },
+    embeddingApiKeyState: { configured: false },
     rerankApiKeyState: { configured: false },
     neo4jPassword: '',
+    embeddingApiKey: '',
     rerankApiKey: '',
     isDirty: false,
   }
@@ -248,6 +252,7 @@ function hydrateKnowledgeGraphDraft(
     llmModelName: incoming.llmModelName ?? '',
     embeddingModelName: incoming.embeddingModelName ?? '',
     neo4jPassword: '',
+    embeddingApiKey: '',
     rerankApiKey: '',
     isDirty: false,
   }
@@ -311,7 +316,7 @@ export const useInitializationWizardStore = create<InitializationWizardState>()(
   persist(
     (set) => ({
       ...initialState(getCurrentLocale()),
-      setStep: (step) => set({ step: Math.max(0, Math.min(step, 3)) }),
+      setStep: (step) => set({ step: Math.max(0, Math.min(step, 4)) }),
       setLocale: (locale) => set({ locale }),
       setAiCredential: (patch) =>
         set((state) => ({
@@ -437,7 +442,7 @@ export const useInitializationWizardStore = create<InitializationWizardState>()(
     }),
     {
       name: 'mindatlas-initialization-draft',
-      version: 3,
+      version: 4,
     }
   )
 )

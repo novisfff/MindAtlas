@@ -163,9 +163,9 @@
         "description": "我们已经准备了一组随语言切换的默认类型，你可以直接使用，也可以删改后再开始。"
       },
       "capabilities": {
-        "label": "能力中心",
-        "title": "按需补充系统运行能力",
-        "description": "对象存储、知识图谱、文档解析和自动化都可以在这里配置。它们不是首次启动的阻塞项，暂时跳过也没关系。"
+        "label": "扩展配置",
+        "title": "按能力分类补充 AI 配置",
+        "description": "把 LightRAG、Docling 这类扩展能力单独放在这里配置，主模型连接保持简洁，后续排查也更清晰。"
       },
       "review": {
         "label": "确认完成",
@@ -220,16 +220,39 @@
       }
     },
     "capabilities": {
-      "introTitle": "核心初始化已经够系统启动，下面这些能力可以按需补充",
-      "introDescription": "你可以直接进入每个模块配置，也可以先跳过，初始化完成后随时在 System Setup 中继续维护。",
-      "currentState": "当前状态",
-      "configure": "配置",
-      "skip": "稍后再说",
-      "undoSkip": "恢复配置",
-      "backToCenter": "返回能力中心",
-      "saveAndBack": "保存并返回",
-      "skipCurrent": "跳过当前模块",
-      "editing": "正在配置能力模块"
+      "emptyTitle": "当前部署没有需要单独调整的扩展 AI 配置",
+      "emptyDescription": "如果后续 Docker 或环境配置启用了 LightRAG / Docling 的更多能力，这里会自动出现对应的配置项。",
+      "sections": {
+        "lightrag": {
+          "description": "配置 LightRAG 的 Embedding 连接和可选的 Rerank 服务。"
+        },
+        "docling": {
+          "description": "配置 Docling 在解析附件时使用的 OCR 语言等行为。",
+          "empty": "当前部署下 Docling 没有额外可调项，系统会直接沿用部署默认值。"
+        }
+      },
+      "embeddingProvider": {
+        "label": "Embedding 服务来源",
+        "options": {
+          "shared": "复用主模型服务",
+          "custom": "使用单独 Embedding 服务"
+        }
+      },
+      "rerank": {
+        "label": "Rerank 服务",
+        "options": {
+          "disabled": "不单独配置",
+          "enabled": "配置独立 Rerank"
+        }
+      },
+      "ocr": {
+        "options": {
+          "auto": "自动识别",
+          "zh": "中文",
+          "en": "English",
+          "zh_en": "中文 + English"
+        }
+      }
     },
     "review": {
       "emptyValue": "未设置",
@@ -375,6 +398,14 @@
         "embeddingModelName": {
           "label": "LightRAG Embedding 模型",
           "placeholder": "例如 text-embedding-3-small"
+        },
+        "embeddingHost": {
+          "label": "Embedding 服务地址",
+          "placeholder": "例如 https://api.openai.com/v1"
+        },
+        "embeddingApiKey": {
+          "label": "Embedding API Key",
+          "placeholder": "输入单独的 Embedding Key"
         },
         "advanced": {
           "title": "Rerank 高级配置",
