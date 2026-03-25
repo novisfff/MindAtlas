@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "entryTypes": [
+    {
+      "code": "KNOWLEDGE",
+      "name": "Knowledge",
+      "description": "Concepts, ideas, and methods worth retaining",
+      "color": "#3B82F6",
+      "icon": "book",
+      "graphEnabled": true,
+      "aiEnabled": true,
+      "enabled": true
+    },
+    {
+      "code": "PROJECT",
+      "name": "Project",
+      "description": "Projects you are planning, building, or wrapping up",
+      "color": "#10B981",
+      "icon": "folder",
+      "graphEnabled": true,
+      "aiEnabled": true,
+      "enabled": true
+    },
+    {
+      "code": "COMPETITION",
+      "name": "Competition",
+      "description": "Competitions, challenges, and external evaluations",
+      "color": "#F59E0B",
+      "icon": "trophy",
+      "graphEnabled": true,
+      "aiEnabled": true,
+      "enabled": true
+    },
+    {
+      "code": "EXPERIENCE",
+      "name": "Experience",
+      "description": "Personal experiences, milestones, and process notes",
+      "color": "#8B5CF6",
+      "icon": "star",
+      "graphEnabled": true,
+      "aiEnabled": true,
+      "enabled": true
+    },
+    {
+      "code": "ACHIEVEMENT",
+      "name": "Achievement",
+      "description": "Outcomes, milestones, and results you can showcase",
+      "color": "#EF4444",
+      "icon": "award",
+      "graphEnabled": true,
+      "aiEnabled": true,
+      "enabled": true
+    },
+    {
+      "code": "TECHNOLOGY",
+      "name": "Technology",
+      "description": "Technologies, tools, and implementation know-how",
+      "color": "#06B6D4",
+      "icon": "code",
+      "graphEnabled": true,
+      "aiEnabled": true,
+      "enabled": true
+    },
+    {
+      "code": "DOCUMENT",
+      "name": "Document",
+      "description": "Reference material, documents, excerpts, and assets",
+      "color": "#6B7280",
+      "icon": "file",
+      "graphEnabled": true,
+      "aiEnabled": false,
+      "enabled": true
+    }
+  ]
+}

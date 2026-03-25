@@ -2,6 +2,7 @@ import { useState, useEffect, ReactNode } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { getSystemLocale, updateSystemLocale } from '@/features/settings/api/system-settings'
+import { getInitializationStatus } from '@/features/initialization/api/systemInitialization'
 import { useAppStore } from '@/stores/app-store'
 import { Toaster } from 'sonner'
 
@@ -15,6 +16,19 @@ function SystemLocaleBootstrap() {
     const sync = async () => {
       try {
         const currentLocale = useAppStore.getState().locale === 'zh' ? 'zh' : 'en'
+        const initialization = await getInitializationStatus()
+        if (cancelled) return
+
+        if (!initialization.initialized) {
+          if (initialization.locale !== useAppStore.getState().locale) {
+            setLocale(initialization.locale, { manual: false })
+          }
+          if (i18n.language !== initialization.locale) {
+            await i18n.changeLanguage(initialization.locale)
+          }
+          return
+        }
+
         const response = await getSystemLocale()
         if (cancelled) return
 

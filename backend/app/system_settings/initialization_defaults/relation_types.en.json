@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "relationTypes": [
+    {
+      "code": "BELONGS_TO",
+      "name": "Belongs To",
+      "inverseName": "Contains",
+      "description": "Represents a membership or categorization relationship",
+      "color": "#3B82F6",
+      "directed": true,
+      "enabled": true
+    },
+    {
+      "code": "USES",
+      "name": "Uses",
+      "inverseName": "Used By",
+      "description": "Represents that one item uses another item",
+      "color": "#10B981",
+      "directed": true,
+      "enabled": true
+    },
+    {
+      "code": "PARTICIPATES",
+      "name": "Participates In",
+      "inverseName": "Has Participant",
+      "description": "Represents participation, involvement, or collaboration",
+      "color": "#F59E0B",
+      "directed": true,
+      "enabled": true
+    },
+    {
+      "code": "RELATES_TO",
+      "name": "Relates To",
+      "inverseName": "Relates To",
+      "description": "Represents a general relationship between two items",
+      "color": "#8B5CF6",
+      "directed": false,
+      "enabled": true
+    },
+    {
+      "code": "DERIVES_FROM",
+      "name": "Derives From",
+      "inverseName": "Leads To",
+      "description": "Represents inheritance, evolution, or derivation",
+      "color": "#EF4444",
+      "directed": true,
+      "enabled": true
+    }
+  ]
+}

@@ -120,6 +120,112 @@
       }
     }
   },
+  "initialization": {
+    "eyebrow": "First-run setup",
+    "title": "Finish setting up your MindAtlas workspace",
+    "progressLabel": "Setup progress",
+    "loadingTitle": "Checking initialization status",
+    "loadingDescription": "We are confirming whether this system has already completed first-run setup before deciding if the wizard is needed.",
+    "statusErrorTitle": "Failed to load initialization status",
+    "statusErrorDescription": "We couldn't confirm whether first-run setup is complete yet. Please try again.",
+    "retry": "Retry",
+    "success": "Initialization complete. Welcome to MindAtlas.",
+    "submitError": "Initialization failed. Please try again.",
+    "actions": {
+      "back": "Back",
+      "next": "Next",
+      "finish": "Finish setup"
+    },
+    "validation": {
+      "discover": "Please fill in a valid Base URL and API key first.",
+      "step1": "Please choose a system language first.",
+      "step2": "Please finish the AI provider and model setup first.",
+      "step3": "Keep at least one entry type and give every entry type a name.",
+      "step4": "Please complete the previous steps first."
+    },
+    "steps": {
+      "language": {
+        "label": "System language",
+        "title": "Choose the system language first",
+        "description": "The setup UI, default entry types, and built-in system AI responses will follow the language you choose here.",
+        "options": {
+          "zh": "Use Chinese for the app UI, default templates, and built-in AI output.",
+          "en": "Ideal if you want the whole workspace and built-in AI defaults to speak English."
+        }
+      },
+      "ai": {
+        "label": "AI model",
+        "title": "Connect one working AI model",
+        "description": "Configure one OpenAI-compatible provider and one LLM. The assistant, workflow copilot, and LightRAG will all start with this model."
+      },
+      "entryTypes": {
+        "label": "Entry types",
+        "title": "Shape your default entry types",
+        "description": "We prepared a language-aware starter set for you. You can keep it, trim it, or add your own types before you start."
+      },
+      "review": {
+        "label": "Review",
+        "title": "Review the initialization summary",
+        "description": "Once you confirm, we will save the language, model bindings, entry types, and system defaults together."
+      }
+    },
+    "ai": {
+      "fields": {
+        "providerName": "Provider name",
+        "baseUrl": "Base URL",
+        "apiKey": "API key",
+        "modelName": "LLM model name"
+      },
+      "placeholders": {
+        "providerName": "For example OpenAI, OpenRouter, or SiliconFlow",
+        "modelName": "For example gpt-4.1-mini or deepseek-chat"
+      },
+      "discoverTitle": "Test the connection and discover models",
+      "discoverDescription": "If the provider exposes a standard model list endpoint, we'll fetch the available models for you. You can still type one manually if discovery fails.",
+      "discoverAction": "Test and discover models",
+      "discoverFailed": "Model discovery failed. Please check the service URL, API key, or try again later.",
+      "discoverEmpty": "The connection worked, but no LLM models were found. Please type the model name manually."
+    },
+    "entryTypes": {
+      "addCustom": "Add custom type",
+      "loading": "Loading default entry types...",
+      "remove": "Remove entry type",
+      "defaultHint": "System default template. If you leave it untouched, it can switch with the selected language.",
+      "customHint": "This is your own custom type and will be kept as-is.",
+      "origin": {
+        "default": "Default",
+        "custom": "Custom"
+      },
+      "fields": {
+        "name": "Name",
+        "icon": "Icon key",
+        "color": "Color",
+        "description": "Description"
+      },
+      "placeholders": {
+        "name": "For example Idea, Client, or Research Topic",
+        "icon": "For example lightbulb, users, or flask",
+        "description": "Describe what kind of content this entry type should hold"
+      },
+      "toggles": {
+        "enabled": "Enabled",
+        "graphEnabled": "Graph enabled",
+        "aiEnabled": "AI enabled"
+      }
+    },
+    "review": {
+      "emptyValue": "Not set",
+      "bindingValue": "Assistant, Workflow Copilot, and LightRAG LLM",
+      "cards": {
+        "language": "System language",
+        "model": "Default model",
+        "binding": "Default binding scope",
+        "entryTypes": "Entry type count"
+      },
+      "noteTitle": "You can finish the rest later",
+      "noteDescription": "LightRAG embedding is not a setup blocker. You can add an embedding model later from Settings."
+    }
+  },
   "tags": {
     "searchPlaceholder": "Search or create tags...",
     "create": "Create tag \"{{name}}\""

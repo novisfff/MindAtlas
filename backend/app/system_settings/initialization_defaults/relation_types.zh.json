@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "relationTypes": [
+    {
+      "code": "BELONGS_TO",
+      "name": "属于",
+      "inverseName": "包含",
+      "description": "表示从属或归类关系",
+      "color": "#3B82F6",
+      "directed": true,
+      "enabled": true
+    },
+    {
+      "code": "USES",
+      "name": "使用",
+      "inverseName": "被使用",
+      "description": "表示某项内容使用了另一项内容",
+      "color": "#10B981",
+      "directed": true,
+      "enabled": true
+    },
+    {
+      "code": "PARTICIPATES",
+      "name": "参与",
+      "inverseName": "参与者",
+      "description": "表示参与、加入或协作关系",
+      "color": "#F59E0B",
+      "directed": true,
+      "enabled": true
+    },
+    {
+      "code": "RELATES_TO",
+      "name": "关联",
+      "inverseName": "关联",
+      "description": "表示一般性的相关关系",
+      "color": "#8B5CF6",
+      "directed": false,
+      "enabled": true
+    },
+    {
+      "code": "DERIVES_FROM",
+      "name": "派生自",
+      "inverseName": "派生出",
+      "description": "表示继承、演化或推导关系",
+      "color": "#EF4444",
+      "directed": true,
+      "enabled": true
+    }
+  ]
+}

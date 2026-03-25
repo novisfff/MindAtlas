@@ -178,6 +178,13 @@ def reset_caches() -> None:
         pass
 
     try:
+        from app.system_settings.initialization_defaults_loader import clear_initialization_defaults_cache
+
+        clear_initialization_defaults_cache()
+    except Exception:
+        pass
+
+    try:
         from app.lightrag.manager import reset_lightrag_singletons_for_tests
 
         reset_lightrag_singletons_for_tests()

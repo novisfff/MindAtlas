@@ -1219,7 +1219,7 @@ class AssistantConfigService:
         self.db.flush()
         return binding
 
-    def ensure_system_behaviors(self) -> None:
+    def ensure_system_behaviors(self, *, commit: bool = True) -> None:
         changed = False
         locale = self._current_locale()
         for definition in list_system_behavior_definitions(locale=locale):
@@ -1240,7 +1240,7 @@ class AssistantConfigService:
             if binding_before is None:
                 changed = True
 
-        if not changed:
+        if not changed or not commit:
             return
 
         try:
@@ -1481,11 +1481,11 @@ class AssistantConfigService:
             raise ApiException(status_code=500, code=50034, message="System AI behavior binding missing after reset")
         return self._serialize_system_behavior(definition, refreshed)
 
-    def reset_all_system_behaviors(self, confirm: bool) -> dict[str, Any]:
+    def reset_all_system_behaviors(self, confirm: bool, *, commit: bool = True) -> dict[str, Any]:
         if not confirm:
             raise ApiException(status_code=400, code=40023, message="confirm=true required")
 
-        self.ensure_system_behaviors()
+        self.ensure_system_behaviors(commit=False)
         definitions = list_system_behavior_definitions(locale=self._current_locale())
         affected: list[dict[str, Any]] = []
         for definition in definitions:
@@ -1511,11 +1511,12 @@ class AssistantConfigService:
                 }
             )
 
-        try:
-            self.db.commit()
-        except IntegrityError as exc:
-            self.db.rollback()
-            raise ApiException(status_code=409, code=40965, message="Reset all system AI behaviors failed") from exc
+        if commit:
+            try:
+                self.db.commit()
+            except IntegrityError as exc:
+                self.db.rollback()
+                raise ApiException(status_code=409, code=40965, message="Reset all system AI behaviors failed") from exc
 
         return {
             "reset_count": len(affected),
@@ -2977,7 +2978,7 @@ class AssistantConfigService:
         self.db.delete(skill)
         self.db.commit()
 
-    def reset_all_system_skills(self, confirm: bool) -> dict:
+    def reset_all_system_skills(self, confirm: bool, *, commit: bool = True) -> dict:
         """重置所有系统技能到默认配置，并清理已下线的系统技能"""
         if not confirm:
             raise ApiException(status_code=400, code=40023, message="confirm=true required")
@@ -3039,11 +3040,12 @@ class AssistantConfigService:
                 created_count += 1
                 affected.append({"name": s.name, "id": None, "action": "created"})
 
-        try:
-            self.db.commit()
-        except IntegrityError as exc:
-            self.db.rollback()
-            raise ApiException(status_code=409, code=40923, message="Reset all skills failed") from exc
+        if commit:
+            try:
+                self.db.commit()
+            except IntegrityError as exc:
+                self.db.rollback()
+                raise ApiException(status_code=409, code=40923, message="Reset all skills failed") from exc
 
         return {
             "resetCount": reset_count,
