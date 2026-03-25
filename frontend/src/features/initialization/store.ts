@@ -312,11 +312,15 @@ function initialStatusSnapshot() {
   }
 }
 
+function sanitizeDraftLlmModelName(value: unknown) {
+  return typeof value === 'string' ? value : ''
+}
+
 export const useInitializationWizardStore = create<InitializationWizardState>()(
   persist(
     (set) => ({
       ...initialState(getCurrentLocale()),
-      setStep: (step) => set({ step: Math.max(0, Math.min(step, 4)) }),
+      setStep: (step) => set({ step: Math.max(0, Math.min(step, 5)) }),
       setLocale: (locale) => set({ locale }),
       setAiCredential: (patch) =>
         set((state) => ({
@@ -442,7 +446,20 @@ export const useInitializationWizardStore = create<InitializationWizardState>()(
     }),
     {
       name: 'mindatlas-initialization-draft',
-      version: 4,
+      version: 6,
+      migrate: (persistedState, version) => {
+        const state = (persistedState ?? {}) as Record<string, unknown>
+        const rawStep = typeof state.step === 'number' ? state.step : 0
+        const migratedStep =
+          version < 6 && rawStep >= 1
+            ? Math.min(rawStep + 1, 5)
+            : Math.max(0, Math.min(rawStep, 5))
+        return {
+          ...state,
+          step: migratedStep,
+          llmModelName: sanitizeDraftLlmModelName(state.llmModelName),
+        }
+      },
     }
   )
 )

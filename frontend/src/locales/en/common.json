@@ -139,9 +139,10 @@
     "validation": {
       "discover": "Please fill in a valid Base URL and API key first.",
       "step1": "Please choose a system language first.",
-      "step2": "Please finish the AI provider and model setup first.",
-      "step3": "Keep at least one entry type and give every entry type a name.",
-      "step4": "Please complete the previous steps first."
+      "step2": "Please review the system introduction before continuing.",
+      "step3": "Please finish the AI provider and model setup first.",
+      "step4": "Keep at least one entry type and give every entry type a name.",
+      "step5": "Please complete the previous steps first."
     },
     "steps": {
       "language": {
@@ -152,6 +153,11 @@
           "zh": "Use Chinese for the app UI, default templates, and built-in AI output.",
           "en": "Ideal if you want the whole workspace and built-in AI defaults to speak English."
         }
+      },
+      "intro": {
+        "label": "Overview",
+        "title": "Get a quick feel for MindAtlas first",
+        "description": "Before the actual setup begins, this step gives a concise overview of what MindAtlas does, what you will configure next, and whether two core capabilities are already enabled."
       },
       "ai": {
         "label": "AI model",
@@ -173,6 +179,45 @@
         "title": "Review the initialization summary",
         "description": "Once you confirm, we will save the language, model bindings, entry types, and system defaults together."
       }
+    },
+    "intro": {
+      "badge": "WELCOME TO MINDATLAS",
+      "systemTitle": "What MindAtlas is",
+      "systemDescription": "MindAtlas is a system for capturing, connecting, retrieving, and analyzing personal knowledge, experiences, and project context. It helps you turn scattered notes into structured records that AI can understand, relate, and review.",
+      "tags": {
+        "record": "Capture",
+        "connect": "Connect",
+        "analyze": "Analyze"
+      },
+      "setupTitle": "What happens next",
+      "setupDescription": "The remaining setup will configure your AI model, entry types, and optional extended capabilities. Once the core steps are done, the system is ready to use, and the extra capability settings can deepen the AI experience later.",
+      "highlights": {
+        "ai": {
+          "title": "Connect the default AI model",
+          "description": "Set up one working OpenAI-compatible provider and primary model. The assistant, workflow copilot, and graph features will reuse it immediately."
+        },
+        "entryTypes": {
+          "title": "Shape your entry types",
+          "description": "Confirm which default record categories the system starts with so your future inputs already have a clear structure."
+        },
+        "capabilities": {
+          "title": "Layer in extended capabilities",
+          "description": "Configure LightRAG and Docling when needed so graph reasoning, attachment parsing, and related AI features feel complete."
+        }
+      },
+      "statusTitle": "Current capability status",
+      "statusDescription": "These two status cards come from the current initialization defaults so you can quickly see which core capabilities this deployment is prepared to expose.",
+      "statusSource": "Based on current deployment defaults",
+      "cards": {
+        "lightrag": {
+          "description": "Powers knowledge graph retrieval, graph summaries, and part of the graph-aware AI experience."
+        },
+        "docling": {
+          "description": "Handles attachment parsing, OCR, and structured document processing before content enters the system."
+        }
+      },
+      "noteTitle": "Before you rely on them",
+      "note": "These capabilities only become available when the related services are running and their configuration switches are enabled."
     },
     "ai": {
       "fields": {
@@ -272,6 +317,8 @@
         "language": "System language",
         "model": "Default model",
         "binding": "Default binding scope",
+        "lightrag": "LightRAG",
+        "docling": "Docling",
         "entryTypes": "Entry type count",
         "advancedAi": "Advanced AI defaults",
         "rerank": "Rerank"

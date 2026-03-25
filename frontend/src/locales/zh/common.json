@@ -138,9 +138,10 @@
     "validation": {
       "discover": "请先填写可用的 Base URL 和 API Key",
       "step1": "请先选择系统语言",
-      "step2": "请先完成 AI 服务和大模型配置",
-      "step3": "请至少保留一个记录类型，并为每个记录类型填写名称",
-      "step4": "请先完成前面的配置步骤"
+      "step2": "请先查看系统简介后继续",
+      "step3": "请先完成 AI 服务和大模型配置",
+      "step4": "请至少保留一个记录类型，并为每个记录类型填写名称",
+      "step5": "请先完成前面的配置步骤"
     },
     "steps": {
       "language": {
@@ -151,6 +152,11 @@
           "zh": "适合以中文管理知识库、生成中文周报和月报。",
           "en": "Use English for the app UI, system defaults, and built-in AI output."
         }
+      },
+      "intro": {
+        "label": "系统简介",
+        "title": "先快速了解一下 MindAtlas",
+        "description": "继续配置前，我们先用一页简要说明系统定位、接下来的配置内容，以及当前部署里两项核心能力的开启状态。"
       },
       "ai": {
         "label": "AI 大模型",
@@ -172,6 +178,45 @@
         "title": "最后确认一下初始化结果",
         "description": "确认无误后，我们会一次性保存系统语言、模型绑定、记录类型和系统默认能力。"
       }
+    },
+    "intro": {
+      "badge": "WELCOME TO MINDATLAS",
+      "systemTitle": "MindAtlas 是什么",
+      "systemDescription": "MindAtlas 是一个用来记录、关联、检索和分析个人知识、经历与项目上下文的系统。你可以把零散的信息沉淀成结构化记录，再交给 AI 帮你理解、串联和复盘。",
+      "tags": {
+        "record": "记录",
+        "connect": "关联",
+        "analyze": "分析"
+      },
+      "setupTitle": "接下来会配置什么",
+      "setupDescription": "后续初始化会依次完成 AI 大模型、记录类型和扩展能力配置。核心步骤完成后系统就可以开始使用，扩展配置则用于补充更深入的 AI 能力。",
+      "highlights": {
+        "ai": {
+          "title": "连接默认 AI 大模型",
+          "description": "配置一个可用的 OpenAI-compatible 服务和主模型，系统助手、工作流 Copilot 和图谱能力会直接复用。"
+        },
+        "entryTypes": {
+          "title": "整理记录类型",
+          "description": "确认系统启动后默认有哪些记录类型，它们会成为你后续录入与组织信息的基础。"
+        },
+        "capabilities": {
+          "title": "补充扩展能力",
+          "description": "按需配置 LightRAG 与 Docling 相关能力，让知识图谱、附件解析等功能更完整。"
+        }
+      },
+      "statusTitle": "当前扩展能力状态",
+      "statusDescription": "下面两项状态来自当前部署的默认初始化数据，用来帮助你快速了解系统已经接通了哪些核心能力。",
+      "statusSource": "基于当前部署默认值",
+      "cards": {
+        "lightrag": {
+          "description": "负责知识图谱检索、图谱摘要和部分图谱 AI 分析能力。"
+        },
+        "docling": {
+          "description": "负责附件解析、OCR 以及文档内容进入系统前的结构化处理。"
+        }
+      },
+      "noteTitle": "使用前提醒",
+      "note": "这些能力需要对应服务单独启动，并在配置中开启相关开关后才会真正可用。"
     },
     "ai": {
       "fields": {
@@ -261,6 +306,8 @@
         "language": "系统语言",
         "model": "默认大模型",
         "binding": "默认绑定范围",
+        "lightrag": "LightRAG",
+        "docling": "Docling",
         "entryTypes": "记录类型数量",
         "advancedAi": "高级 AI 配置",
         "rerank": "Rerank"

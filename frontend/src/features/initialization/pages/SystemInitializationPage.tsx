@@ -8,7 +8,6 @@ import {
   Languages,
   Loader2,
   Plus,
-  Rocket,
   ShieldCheck,
   Sparkles,
   Trash2,
@@ -28,7 +27,7 @@ import {
 import { useAppStore, type Locale } from '@/stores/app-store'
 import { discoverModelsByKey } from '@/features/ai-providers/api/credentials'
 
-const STEP_KEYS = ['language', 'ai', 'entryTypes', 'capabilities', 'review'] as const
+const STEP_KEYS = ['language', 'intro', 'ai', 'entryTypes', 'capabilities', 'review'] as const
 
 const PROVIDER_PRESETS = [
   {
@@ -109,7 +108,7 @@ function StepIndicator({ currentStep }: { currentStep: number }) {
             style={{ width: `${((currentStep + 1) / STEP_KEYS.length) * 100}%` }}
           />
         </div>
-        <div className="grid gap-3 md:grid-cols-5">
+        <div className="grid gap-3 md:grid-cols-6">
           {STEP_KEYS.map((key, index) => {
             const active = index === currentStep
             const done = index < currentStep
@@ -303,6 +302,203 @@ function LanguageStep({
             </div>
           </button>
         ))}
+      </div>
+    </div>
+  )
+}
+
+function IntroStep({
+  lightRagEnabled,
+  doclingEnabled,
+}: {
+  lightRagEnabled: boolean
+  doclingEnabled: boolean
+}) {
+  const { t } = useTranslation()
+  const nextItems = [
+    {
+      key: 'ai',
+      title: t('initialization.intro.highlights.ai.title'),
+      description: t('initialization.intro.highlights.ai.description'),
+      icon: Sparkles,
+    },
+    {
+      key: 'entryTypes',
+      title: t('initialization.intro.highlights.entryTypes.title'),
+      description: t('initialization.intro.highlights.entryTypes.description'),
+      icon: Wand2,
+    },
+    {
+      key: 'capabilities',
+      title: t('initialization.intro.highlights.capabilities.title'),
+      description: t('initialization.intro.highlights.capabilities.description'),
+      icon: ShieldCheck,
+    },
+  ]
+  const statusCards = [
+    {
+      key: 'lightrag',
+      title: 'LightRAG',
+      description: t('initialization.intro.cards.lightrag.description'),
+      icon: Sparkles,
+      enabled: lightRagEnabled,
+    },
+    {
+      key: 'docling',
+      title: 'Docling',
+      description: t('initialization.intro.cards.docling.description'),
+      icon: ShieldCheck,
+      enabled: doclingEnabled,
+    },
+  ]
+
+  return (
+    <div className="space-y-6">
+      <div className="overflow-hidden rounded-[32px] border border-slate-900/10 bg-[radial-gradient(circle_at_top_right,_rgba(56,189,248,0.18),_transparent_32%),linear-gradient(135deg,_#0f172a,_#111827_52%,_#1e293b)] p-6 text-white shadow-[0_28px_70px_rgba(15,23,42,0.18)]">
+        <div className="inline-flex items-center rounded-full border border-white/15 bg-white/10 px-3 py-1 text-xs font-medium tracking-[0.16em] text-white/80">
+          {t('initialization.intro.badge')}
+        </div>
+
+        <div className="mt-5 flex flex-col gap-5">
+          <div className="flex items-start gap-4">
+            <div className="rounded-[24px] border border-white/10 bg-white/10 p-3.5 shadow-lg shadow-black/10">
+              <Logo className="h-8 w-8" />
+            </div>
+            <div className="min-w-0 space-y-2">
+              <h2 className="text-2xl font-semibold tracking-tight text-white">
+                {t('initialization.steps.intro.title')}
+              </h2>
+              <p className="max-w-2xl text-sm leading-6 text-slate-200">
+                {t('initialization.steps.intro.description')}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {['record', 'connect', 'analyze'].map((tag) => (
+              <span
+                key={tag}
+                className="inline-flex items-center rounded-full border border-white/10 bg-white/8 px-3 py-1.5 text-xs font-medium text-white/85"
+              >
+                {t(`initialization.intro.tags.${tag}`)}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+        <div className="space-y-2">
+          <p className="text-sm font-semibold text-slate-900">
+            {t('initialization.intro.systemTitle')}
+          </p>
+          <p className="text-sm leading-6 text-slate-600">
+            {t('initialization.intro.systemDescription')}
+          </p>
+        </div>
+
+        <div className="mt-5 rounded-[24px] border border-slate-200 bg-slate-50/80 p-4">
+          <div className="space-y-1">
+            <p className="text-sm font-semibold text-slate-900">
+              {t('initialization.intro.setupTitle')}
+            </p>
+            <p className="text-sm leading-6 text-slate-600">
+              {t('initialization.intro.setupDescription')}
+            </p>
+          </div>
+
+          <div className="mt-4 space-y-3">
+            {nextItems.map((item, index) => (
+              <div
+                key={item.key}
+                className="flex items-start gap-4 rounded-[20px] bg-white px-4 py-4 shadow-sm ring-1 ring-slate-100"
+              >
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-slate-900 text-sm font-semibold text-white">
+                  {index + 1}
+                </div>
+                <div className="flex min-w-0 gap-3">
+                  <div className="rounded-2xl bg-slate-100 p-2.5 text-slate-700">
+                    <item.icon className="h-4 w-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-slate-900">{item.title}</p>
+                    <p className="mt-1 text-sm leading-6 text-slate-600">{item.description}</p>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+          <div className="space-y-1">
+            <p className="text-sm font-semibold text-slate-900">
+              {t('initialization.intro.statusTitle')}
+            </p>
+            <p className="text-sm leading-6 text-slate-600">
+              {t('initialization.intro.statusDescription')}
+            </p>
+          </div>
+          <span className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
+            {t('initialization.intro.statusSource')}
+          </span>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-2">
+          {statusCards.map((card) => (
+            <div
+              key={card.key}
+              className={cn(
+                'rounded-[24px] border p-5 shadow-sm transition-colors',
+                card.enabled
+                  ? 'border-emerald-200/90 bg-emerald-50/70'
+                  : 'border-slate-200 bg-white'
+              )}
+            >
+              <div className="flex items-start gap-4">
+                <div
+                  className={cn(
+                    'rounded-2xl p-3',
+                    card.enabled
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : 'bg-slate-100 text-slate-500'
+                  )}
+                >
+                  <card.icon className="h-5 w-5" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <p className="text-base font-semibold text-slate-900">{card.title}</p>
+                    <span
+                      className={cn(
+                        'shrink-0 rounded-full px-3 py-1 text-xs font-medium',
+                        card.enabled
+                          ? 'bg-white text-emerald-700 ring-1 ring-emerald-200'
+                          : 'bg-slate-100 text-slate-600'
+                      )}
+                    >
+                      {card.enabled
+                        ? t('settings.skills.enabledStateOn')
+                        : t('settings.skills.enabledStateOff')}
+                    </span>
+                  </div>
+                  <p className="mt-2 text-sm leading-6 text-slate-600">{card.description}</p>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="rounded-[24px] border border-amber-200/80 bg-amber-50/85 px-5 py-4">
+        <p className="text-sm font-semibold text-amber-900">
+          {t('initialization.intro.noteTitle')}
+        </p>
+        <p className="mt-1 text-sm leading-6 text-amber-800">
+          {t('initialization.intro.note')}
+        </p>
       </div>
     </div>
   )
@@ -539,6 +735,9 @@ export function SystemInitializationPage() {
   const canContinueFromCurrentStep = () => {
     if (step === 0) return true
     if (step === 1) {
+      return true
+    }
+    if (step === 2) {
       return Boolean(
         aiCredential.name.trim() &&
         aiCredential.baseUrl.trim() &&
@@ -546,7 +745,7 @@ export function SystemInitializationPage() {
         llmModelName.trim()
       )
     }
-    if (step === 2) {
+    if (step === 3) {
       return entryTypes.length > 0 && entryTypes.every((item) => item.name.trim())
     }
     return true
@@ -611,6 +810,8 @@ export function SystemInitializationPage() {
     }
   }
 
+  const selectedLlmModelName = llmModelName.trim()
+  const doclingEnabledForSummary = runtimeConfigDraft.documentParsing.workerEnabled
   const summaryItems = [
     {
       key: 'locale',
@@ -621,13 +822,25 @@ export function SystemInitializationPage() {
     {
       key: 'model',
       title: t('initialization.review.cards.model'),
-      value: llmModelName || t('initialization.review.emptyValue'),
+      value: selectedLlmModelName || t('initialization.review.emptyValue'),
       icon: Sparkles,
     },
     {
       key: 'binding',
       title: t('initialization.review.cards.binding'),
       value: t('initialization.review.bindingValue'),
+      icon: ShieldCheck,
+    },
+    {
+      key: 'lightrag',
+      title: t('initialization.review.cards.lightrag'),
+      value: knowledgeGraphEnabled ? t('settings.skills.enabledStateOn') : t('settings.skills.enabledStateOff'),
+      icon: Sparkles,
+    },
+    {
+      key: 'docling',
+      title: t('initialization.review.cards.docling'),
+      value: doclingEnabledForSummary ? t('settings.skills.enabledStateOn') : t('settings.skills.enabledStateOff'),
       icon: ShieldCheck,
     },
     {
@@ -641,41 +854,18 @@ export function SystemInitializationPage() {
   const summaryLanguageValue =
     runtimeConfigDraft.knowledgeGraph.summaryLanguage.trim() || defaultSummaryLanguage
   const rerankEnabled = rerankMode === 'enabled'
-  const advancedConfigSummary = [
-    knowledgeGraphEnabled
-      ? `${t('initialization.ai.lightragLocaleLabel')}: ${summaryLanguageValue}`
-      : null,
-    knowledgeGraphEnabled && runtimeConfigDraft.knowledgeGraph.embeddingModelName?.trim()
-      ? `${t('systemSetup.forms.knowledgeGraph.embeddingModelName.label')}: ${runtimeConfigDraft.knowledgeGraph.embeddingModelName.trim()}`
-      : null,
-    knowledgeGraphEnabled && runtimeConfigDraft.knowledgeGraph.embeddingHost.trim()
-      ? `${t('systemSetup.forms.knowledgeGraph.embeddingHost.label')}: ${runtimeConfigDraft.knowledgeGraph.embeddingHost.trim()}`
-      : null,
-    ocrConfigEnabled && runtimeConfigDraft.documentParsing.ocrLangs.trim() &&
-    runtimeConfigDraft.documentParsing.ocrLangs.trim() !== 'auto'
-      ? `${t('systemSetup.forms.documentParsing.ocrLangs.label')}: ${runtimeConfigDraft.documentParsing.ocrLangs.trim()}`
-      : null,
-    pictureDescriptionEnabled && runtimeConfigDraft.documentParsing.pictureDescriptionModel.trim()
-      ? `${t('systemSetup.forms.documentParsing.pictureDescriptionModel.label')}: ${runtimeConfigDraft.documentParsing.pictureDescriptionModel.trim()}`
-      : null,
-    knowledgeGraphEnabled &&
-    (runtimeConfigDraft.knowledgeGraph.rerankModel.trim() || runtimeConfigDraft.knowledgeGraph.rerankHost.trim())
-      ? `${t('initialization.review.cards.rerank')}: ${runtimeConfigDraft.knowledgeGraph.rerankModel.trim() || runtimeConfigDraft.knowledgeGraph.rerankHost.trim()}`
-      : null,
-  ].filter(Boolean)
-  if (advancedConfigSummary.length) {
-    summaryItems.push({
-      key: 'advanced',
-      title: t('initialization.review.cards.advancedAi'),
-      value: advancedConfigSummary.join(' · '),
-      icon: Sparkles,
-    })
-  }
 
   let content: ReactNode
   if (step === 0) {
     content = <LanguageStep locale={locale} onSelect={handleLocaleSelect} />
   } else if (step === 1) {
+    content = (
+      <IntroStep
+        lightRagEnabled={runtimeConfigDraft.knowledgeGraph.enabled}
+        doclingEnabled={runtimeConfigDraft.documentParsing.workerEnabled}
+      />
+    )
+  } else if (step === 2) {
     content = (
       <div className="space-y-6">
         <div className="space-y-2">
@@ -802,7 +992,7 @@ export function SystemInitializationPage() {
         </div>
       </div>
     )
-  } else if (step === 2) {
+  } else if (step === 3) {
     content = (
       <div className="space-y-6">
         <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
@@ -839,7 +1029,7 @@ export function SystemInitializationPage() {
         </div>
       </div>
     )
-  } else if (step === 3) {
+  } else if (step === 4) {
     const renderLightRagSection = () => (
       <section className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
         <div className="space-y-5">
@@ -853,13 +1043,15 @@ export function SystemInitializationPage() {
           <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 p-4">
             <div className="space-y-2">
               <Label>{t('initialization.ai.lightragLocaleLabel')}</Label>
-              <input
-                value={runtimeConfigDraft.knowledgeGraph.summaryLanguage || defaultSummaryLanguage}
-                onChange={(event) =>
-                  updateRuntimeConfigGroup('knowledge_graph', { summaryLanguage: event.target.value })
+              <OptionButtonGroup
+                value={summaryLanguageValue}
+                onChange={(value) =>
+                  updateRuntimeConfigGroup('knowledge_graph', { summaryLanguage: value })
                 }
-                className={FIELD_CLASSNAME}
-                placeholder={defaultSummaryLanguage}
+                options={[
+                  { value: 'Chinese', label: 'Chinese' },
+                  { value: 'English', label: 'English' },
+                ]}
               />
               <p className="text-xs leading-5 text-amber-700">
                 {t('initialization.ai.lightragLocaleHint')}
@@ -1159,22 +1351,6 @@ export function SystemInitializationPage() {
               </div>
             </div>
           ))}
-        </div>
-
-        <div className="rounded-[24px] border border-sky-200 bg-sky-50/80 p-5">
-          <div className="flex items-start gap-3">
-            <div className="rounded-2xl bg-white p-2 text-sky-600 shadow-sm">
-              <Rocket className="h-5 w-5" />
-            </div>
-            <div>
-              <p className="text-sm font-semibold text-sky-900">
-                {t('initialization.review.noteTitle')}
-              </p>
-              <p className="mt-1 text-sm leading-6 text-sky-800">
-                {t('initialization.review.noteDescription')}
-              </p>
-            </div>
-          </div>
         </div>
       </div>
     )
