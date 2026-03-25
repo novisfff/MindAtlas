@@ -338,14 +338,6 @@ function OptionButtonGroup({
   )
 }
 
-function resolveEmbeddingProviderMode(knowledgeGraph: ReturnType<typeof useInitializationWizardStore.getState>['runtimeConfigDraft']['knowledgeGraph']) {
-  return knowledgeGraph.embeddingHost.trim() ||
-    knowledgeGraph.embeddingApiKey.trim() ||
-    knowledgeGraph.embeddingApiKeyState.configured
-    ? 'custom'
-    : 'shared'
-}
-
 function resolveRerankMode(knowledgeGraph: ReturnType<typeof useInitializationWizardStore.getState>['runtimeConfigDraft']['knowledgeGraph']) {
   return knowledgeGraph.rerankModel.trim() ||
     knowledgeGraph.rerankHost.trim() ||
@@ -366,6 +358,7 @@ function buildRuntimeConfigPayload(
   const ocrConfigEnabled =
     state.runtimeConfigDraft.documentParsing.workerEnabled &&
     state.runtimeConfigDraft.documentParsing.ocrEnabled
+  const pictureDescriptionEnabled = state.runtimeConfigDraft.documentParsing.pictureDescriptionEnabled
   const summaryLanguage = locale === 'zh' ? 'Chinese' : 'English'
   const embeddingModelName = (state.runtimeConfigDraft.knowledgeGraph.embeddingModelName || '').trim()
   const embeddingHost = state.runtimeConfigDraft.knowledgeGraph.embeddingHost.trim()
@@ -375,6 +368,10 @@ function buildRuntimeConfigPayload(
   const rerankApiKey = state.runtimeConfigDraft.knowledgeGraph.rerankApiKey.trim()
   const rerankRequestFormat = state.runtimeConfigDraft.knowledgeGraph.rerankRequestFormat.trim()
   const ocrLangs = state.runtimeConfigDraft.documentParsing.ocrLangs.trim()
+  const pictureDescriptionUrl = state.runtimeConfigDraft.documentParsing.pictureDescriptionUrl.trim()
+  const pictureDescriptionApiKey = state.runtimeConfigDraft.documentParsing.pictureDescriptionApiKey.trim()
+  const pictureDescriptionModel = state.runtimeConfigDraft.documentParsing.pictureDescriptionModel.trim()
+  const pictureDescriptionPrompt = state.runtimeConfigDraft.documentParsing.pictureDescriptionPrompt.trim()
 
   if (knowledgeGraphEnabled) {
     knowledgeGraphPayload.summaryLanguage = summaryLanguage
@@ -402,6 +399,21 @@ function buildRuntimeConfigPayload(
   }
   if (ocrConfigEnabled && ocrLangs && ocrLangs !== 'auto') {
     documentParsingPayload.ocrLangs = ocrLangs
+  }
+  if (pictureDescriptionEnabled !== undefined) {
+    documentParsingPayload.pictureDescriptionEnabled = pictureDescriptionEnabled
+  }
+  if (pictureDescriptionEnabled && pictureDescriptionUrl) {
+    documentParsingPayload.pictureDescriptionUrl = pictureDescriptionUrl
+  }
+  if (pictureDescriptionEnabled && pictureDescriptionApiKey) {
+    documentParsingPayload.pictureDescriptionApiKey = pictureDescriptionApiKey
+  }
+  if (pictureDescriptionEnabled && pictureDescriptionModel) {
+    documentParsingPayload.pictureDescriptionModel = pictureDescriptionModel
+  }
+  if (pictureDescriptionEnabled && pictureDescriptionPrompt) {
+    documentParsingPayload.pictureDescriptionPrompt = pictureDescriptionPrompt
   }
 
   const payload: Record<string, unknown> = {}
@@ -445,10 +457,6 @@ export function SystemInitializationPage() {
   const [discoveredModels, setDiscoveredModels] = useState<string[]>([])
   const [discoveredEmbeddingModels, setDiscoveredEmbeddingModels] = useState<string[]>([])
   const [discoverError, setDiscoverError] = useState<string | null>(null)
-  const [activeCapabilitySection, setActiveCapabilitySection] = useState<'lightrag' | 'docling'>('lightrag')
-  const [embeddingProviderMode, setEmbeddingProviderMode] = useState<'shared' | 'custom'>(() => {
-    return resolveEmbeddingProviderMode(useInitializationWizardStore.getState().runtimeConfigDraft.knowledgeGraph)
-  })
   const [rerankMode, setRerankMode] = useState<'enabled' | 'disabled'>(() => {
     return resolveRerankMode(useInitializationWizardStore.getState().runtimeConfigDraft.knowledgeGraph)
   })
@@ -464,7 +472,6 @@ export function SystemInitializationPage() {
     mergeDefaultEntryTypes(defaultsQuery.data.entryTypes, locale)
     hydrateCapabilityDefaults(defaultsQuery.data.capabilityModules, defaultsQuery.data.runtimeConfig)
     const nextKnowledgeGraph = useInitializationWizardStore.getState().runtimeConfigDraft.knowledgeGraph
-    setEmbeddingProviderMode(resolveEmbeddingProviderMode(nextKnowledgeGraph))
     setRerankMode(resolveRerankMode(nextKnowledgeGraph))
   }, [defaultsQuery.data, hydrateCapabilityDefaults, locale, mergeDefaultEntryTypes])
 
@@ -475,16 +482,7 @@ export function SystemInitializationPage() {
   const ocrConfigEnabled =
     runtimeConfigDraft.documentParsing.workerEnabled &&
     runtimeConfigDraft.documentParsing.ocrEnabled
-
-  useEffect(() => {
-    const nextSections: Array<'lightrag' | 'docling'> = []
-    if (knowledgeGraphEnabled) nextSections.push('lightrag')
-    if (doclingVisible) nextSections.push('docling')
-    if (!nextSections.length) return
-    if (!nextSections.includes(activeCapabilitySection)) {
-      setActiveCapabilitySection(nextSections[0])
-    }
-  }, [activeCapabilitySection, doclingVisible, knowledgeGraphEnabled])
+  const pictureDescriptionEnabled = runtimeConfigDraft.documentParsing.pictureDescriptionEnabled
 
   const handleLocaleSelect = async (nextLocale: Locale) => {
     setDraftLocale(nextLocale)
@@ -638,30 +636,6 @@ export function SystemInitializationPage() {
     },
   ]
   const defaultSummaryLanguage = locale === 'zh' ? 'Chinese' : 'English'
-  const capabilitySections = [
-    knowledgeGraphEnabled
-      ? {
-          key: 'lightrag' as const,
-          title: 'LightRAG',
-          description: t('initialization.capabilities.sections.lightrag.description'),
-        }
-      : null,
-    doclingVisible
-      ? {
-          key: 'docling' as const,
-          title: 'Docling',
-          description: t('initialization.capabilities.sections.docling.description'),
-        }
-      : null,
-  ].filter(Boolean) as Array<{ key: 'lightrag' | 'docling'; title: string; description: string }>
-  const embeddingModelOptions = Array.from(
-    new Set([
-      ...DEFAULT_EMBEDDING_MODELS,
-      ...discoveredEmbeddingModels,
-      runtimeConfigDraft.knowledgeGraph.embeddingModelName || '',
-    ].filter(Boolean))
-  )
-  const selectedEmbeddingModel = runtimeConfigDraft.knowledgeGraph.embeddingModelName || embeddingModelOptions[0] || ''
   const rerankEnabled = rerankMode === 'enabled'
   const advancedConfigSummary = [
     knowledgeGraphEnabled
@@ -676,6 +650,9 @@ export function SystemInitializationPage() {
     ocrConfigEnabled && runtimeConfigDraft.documentParsing.ocrLangs.trim() &&
     runtimeConfigDraft.documentParsing.ocrLangs.trim() !== 'auto'
       ? `${t('systemSetup.forms.documentParsing.ocrLangs.label')}: ${runtimeConfigDraft.documentParsing.ocrLangs.trim()}`
+      : null,
+    pictureDescriptionEnabled && runtimeConfigDraft.documentParsing.pictureDescriptionModel.trim()
+      ? `${t('systemSetup.forms.documentParsing.pictureDescriptionModel.label')}: ${runtimeConfigDraft.documentParsing.pictureDescriptionModel.trim()}`
       : null,
     knowledgeGraphEnabled &&
     (runtimeConfigDraft.knowledgeGraph.rerankModel.trim() || runtimeConfigDraft.knowledgeGraph.rerankHost.trim())
@@ -860,53 +837,49 @@ export function SystemInitializationPage() {
     )
   } else if (step === 3) {
     const renderLightRagSection = () => (
-      <div className="space-y-5">
-        <div className="space-y-2">
-          <h3 className="text-xl font-semibold text-slate-900">LightRAG</h3>
-          <p className="text-sm leading-6 text-slate-600">
-            {t('initialization.capabilities.sections.lightrag.description')}
-          </p>
-        </div>
+      <section className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+        <div className="space-y-5">
+          <div className="space-y-2">
+            <h3 className="text-xl font-semibold text-slate-900">LightRAG</h3>
+            <p className="text-sm leading-6 text-slate-600">
+              {t('initialization.capabilities.sections.lightrag.description')}
+            </p>
+          </div>
 
-        <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 px-4 py-3">
-          <p className="text-sm font-medium text-amber-900">
-            {t('initialization.ai.lightragLocaleLabel')}: {defaultSummaryLanguage}
-          </p>
-          <p className="mt-1 text-xs leading-5 text-amber-700">
-            {t('initialization.ai.lightragLocaleHint')}
-          </p>
-        </div>
+          <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 px-4 py-3">
+            <p className="text-sm font-medium text-amber-900">
+              {t('initialization.ai.lightragLocaleLabel')}: {defaultSummaryLanguage}
+            </p>
+            <p className="mt-1 text-xs leading-5 text-amber-700">
+              {t('initialization.ai.lightragLocaleHint')}
+            </p>
+          </div>
 
-        <div className="space-y-2">
-          <Label>{t('initialization.capabilities.embeddingProvider.label')}</Label>
-          <OptionButtonGroup
-            value={embeddingProviderMode}
-            onChange={(next) => {
-              setEmbeddingProviderMode(next as 'shared' | 'custom')
-              if (next === 'shared') {
-                updateRuntimeConfigGroup('knowledge_graph', {
-                  embeddingHost: '',
-                  embeddingApiKey: '',
-                })
+          <div className="space-y-2">
+            <Label>{t('systemSetup.forms.knowledgeGraph.embeddingModelName.label')}</Label>
+            <input
+              value={runtimeConfigDraft.knowledgeGraph.embeddingModelName || ''}
+              onChange={(event) =>
+                updateRuntimeConfigGroup('knowledge_graph', { embeddingModelName: event.target.value })
               }
-            }}
-            options={[
-              { value: 'shared', label: t('initialization.capabilities.embeddingProvider.options.shared') },
-              { value: 'custom', label: t('initialization.capabilities.embeddingProvider.options.custom') },
-            ]}
-          />
-        </div>
+              className={FIELD_CLASSNAME}
+              placeholder={t('systemSetup.forms.knowledgeGraph.embeddingModelName.placeholder')}
+              list="initialization-embedding-model-suggestions"
+            />
+            {discoveredEmbeddingModels.length || DEFAULT_EMBEDDING_MODELS.length ? (
+              <datalist id="initialization-embedding-model-suggestions">
+                {Array.from(
+                  new Set([
+                    ...DEFAULT_EMBEDDING_MODELS,
+                    ...discoveredEmbeddingModels,
+                  ].filter(Boolean))
+                ).map((item) => (
+                  <option key={item} value={item} />
+                ))}
+              </datalist>
+            ) : null}
+          </div>
 
-        <div className="space-y-2">
-          <Label>{t('systemSetup.forms.knowledgeGraph.embeddingModelName.label')}</Label>
-          <OptionButtonGroup
-            value={selectedEmbeddingModel}
-            onChange={(value) => updateRuntimeConfigGroup('knowledge_graph', { embeddingModelName: value })}
-            options={embeddingModelOptions.map((item) => ({ value: item, label: item }))}
-          />
-        </div>
-
-        {embeddingProviderMode === 'custom' ? (
           <div className="rounded-[22px] border border-slate-200 bg-slate-50/70 p-4">
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
@@ -935,114 +908,202 @@ export function SystemInitializationPage() {
               </div>
             </div>
           </div>
-        ) : null}
 
-        <div className="space-y-2">
-          <Label>{t('initialization.capabilities.rerank.label')}</Label>
-          <OptionButtonGroup
-            value={rerankMode}
-            onChange={(value) => {
-              setRerankMode(value as 'enabled' | 'disabled')
-              if (value === 'disabled') {
-                updateRuntimeConfigGroup('knowledge_graph', {
-                  rerankModel: '',
-                  rerankHost: '',
-                  rerankApiKey: '',
-                  rerankRequestFormat: 'standard',
-                })
-                return
-              }
-            }}
-            options={[
-              { value: 'disabled', label: t('initialization.capabilities.rerank.options.disabled') },
-              { value: 'enabled', label: t('initialization.capabilities.rerank.options.enabled') },
-            ]}
-          />
-        </div>
+          <div className="space-y-2">
+            <Label>{t('initialization.capabilities.rerank.label')}</Label>
+            <OptionButtonGroup
+              value={rerankMode}
+              onChange={(value) => {
+                setRerankMode(value as 'enabled' | 'disabled')
+                if (value === 'disabled') {
+                  updateRuntimeConfigGroup('knowledge_graph', {
+                    rerankModel: '',
+                    rerankHost: '',
+                    rerankApiKey: '',
+                    rerankRequestFormat: 'standard',
+                  })
+                  return
+                }
+              }}
+              options={[
+                { value: 'disabled', label: t('initialization.capabilities.rerank.options.disabled') },
+                { value: 'enabled', label: t('initialization.capabilities.rerank.options.enabled') },
+              ]}
+            />
+          </div>
 
-        {rerankEnabled ? (
-          <div className="rounded-[22px] border border-slate-200 bg-white p-4">
-            <div className="grid gap-4 md:grid-cols-2">
-              <div className="space-y-2">
-                <Label>{t('systemSetup.forms.knowledgeGraph.rerankModel.label')}</Label>
-                <input
-                  value={runtimeConfigDraft.knowledgeGraph.rerankModel}
-                  onChange={(event) =>
-                    updateRuntimeConfigGroup('knowledge_graph', { rerankModel: event.target.value })
-                  }
-                  className={FIELD_CLASSNAME}
-                  placeholder={t('systemSetup.forms.knowledgeGraph.rerankModel.placeholder')}
-                />
-              </div>
+          {rerankEnabled ? (
+            <div className="rounded-[22px] border border-slate-200 bg-white p-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>{t('systemSetup.forms.knowledgeGraph.rerankModel.label')}</Label>
+                  <input
+                    value={runtimeConfigDraft.knowledgeGraph.rerankModel}
+                    onChange={(event) =>
+                      updateRuntimeConfigGroup('knowledge_graph', { rerankModel: event.target.value })
+                    }
+                    className={FIELD_CLASSNAME}
+                    placeholder={t('systemSetup.forms.knowledgeGraph.rerankModel.placeholder')}
+                  />
+                </div>
 
-              <div className="space-y-2">
-                <Label>{t('systemSetup.forms.knowledgeGraph.rerankHost.label')}</Label>
-                <input
-                  value={runtimeConfigDraft.knowledgeGraph.rerankHost}
-                  onChange={(event) =>
-                    updateRuntimeConfigGroup('knowledge_graph', { rerankHost: event.target.value })
-                  }
-                  className={FIELD_CLASSNAME}
-                  placeholder="https://your-rerank-host/v1"
-                />
-              </div>
+                <div className="space-y-2">
+                  <Label>{t('systemSetup.forms.knowledgeGraph.rerankHost.label')}</Label>
+                  <input
+                    value={runtimeConfigDraft.knowledgeGraph.rerankHost}
+                    onChange={(event) =>
+                      updateRuntimeConfigGroup('knowledge_graph', { rerankHost: event.target.value })
+                    }
+                    className={FIELD_CLASSNAME}
+                    placeholder="https://your-rerank-host/v1"
+                  />
+                </div>
 
-              <div className="space-y-2">
-                <Label>{t('systemSetup.forms.knowledgeGraph.rerankApiKey.label')}</Label>
-                <input
-                  type="password"
-                  value={runtimeConfigDraft.knowledgeGraph.rerankApiKey}
-                  onChange={(event) =>
-                    updateRuntimeConfigGroup('knowledge_graph', { rerankApiKey: event.target.value })
-                  }
-                  className={FIELD_CLASSNAME}
-                  placeholder={t('systemSetup.forms.knowledgeGraph.rerankApiKey.placeholder')}
-                />
-              </div>
+                <div className="space-y-2">
+                  <Label>{t('systemSetup.forms.knowledgeGraph.rerankApiKey.label')}</Label>
+                  <input
+                    type="password"
+                    value={runtimeConfigDraft.knowledgeGraph.rerankApiKey}
+                    onChange={(event) =>
+                      updateRuntimeConfigGroup('knowledge_graph', { rerankApiKey: event.target.value })
+                    }
+                    className={FIELD_CLASSNAME}
+                    placeholder={t('systemSetup.forms.knowledgeGraph.rerankApiKey.placeholder')}
+                  />
+                </div>
 
-              <div className="space-y-2">
-                <Label>{t('systemSetup.forms.knowledgeGraph.rerankRequestFormat.label')}</Label>
-                <OptionButtonGroup
-                  value={runtimeConfigDraft.knowledgeGraph.rerankRequestFormat}
-                  onChange={(value) =>
-                    updateRuntimeConfigGroup('knowledge_graph', { rerankRequestFormat: value })
-                  }
-                  options={RERANK_REQUEST_FORMAT_OPTIONS.map((item) => ({ value: item, label: item }))}
-                />
+                <div className="space-y-2">
+                  <Label>{t('systemSetup.forms.knowledgeGraph.rerankRequestFormat.label')}</Label>
+                  <OptionButtonGroup
+                    value={runtimeConfigDraft.knowledgeGraph.rerankRequestFormat}
+                    onChange={(value) =>
+                      updateRuntimeConfigGroup('knowledge_graph', { rerankRequestFormat: value })
+                    }
+                    options={RERANK_REQUEST_FORMAT_OPTIONS.map((item) => ({ value: item, label: item }))}
+                  />
+                </div>
               </div>
             </div>
-          </div>
-        ) : null}
-      </div>
+          ) : null}
+        </div>
+      </section>
     )
 
     const renderDoclingSection = () => (
-      <div className="space-y-5">
-        <div className="space-y-2">
-          <h3 className="text-xl font-semibold text-slate-900">Docling</h3>
-          <p className="text-sm leading-6 text-slate-600">
-            {t('initialization.capabilities.sections.docling.description')}
-          </p>
-        </div>
-
-        {ocrConfigEnabled ? (
+      <section className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+        <div className="space-y-5">
           <div className="space-y-2">
-            <Label>{t('systemSetup.forms.documentParsing.ocrLangs.label')}</Label>
+            <h3 className="text-xl font-semibold text-slate-900">Docling</h3>
+            <p className="text-sm leading-6 text-slate-600">
+              {t('initialization.capabilities.sections.docling.description')}
+            </p>
+          </div>
+
+          {ocrConfigEnabled ? (
+            <div className="space-y-2">
+              <Label>{t('systemSetup.forms.documentParsing.ocrLangs.label')}</Label>
+              <OptionButtonGroup
+                value={runtimeConfigDraft.documentParsing.ocrLangs}
+                onChange={(value) => updateRuntimeConfigGroup('document_parsing', { ocrLangs: value })}
+                options={OCR_LANGUAGE_OPTIONS.map((item) => ({
+                  value: item,
+                  label: t(`initialization.capabilities.ocr.options.${item.replace(',', '_')}`),
+                }))}
+              />
+            </div>
+          ) : null}
+
+          <div className="space-y-2">
+            <Label>{t('systemSetup.forms.documentParsing.pictureDescriptionEnabled.label')}</Label>
             <OptionButtonGroup
-              value={runtimeConfigDraft.documentParsing.ocrLangs}
-              onChange={(value) => updateRuntimeConfigGroup('document_parsing', { ocrLangs: value })}
-              options={OCR_LANGUAGE_OPTIONS.map((item) => ({
-                value: item,
-                label: t(`initialization.capabilities.ocr.options.${item.replace(',', '_')}`),
-              }))}
+              value={pictureDescriptionEnabled ? 'enabled' : 'disabled'}
+              onChange={(value) =>
+                updateRuntimeConfigGroup('document_parsing', {
+                  pictureDescriptionEnabled: value === 'enabled',
+                })
+              }
+              options={[
+                { value: 'enabled', label: t('agentTargets.enabledStateOn') },
+                { value: 'disabled', label: t('agentTargets.enabledStateOff') },
+              ]}
             />
+            <p className="text-sm leading-6 text-slate-500">
+              {t('systemSetup.forms.documentParsing.pictureDescriptionEnabled.description')}
+            </p>
           </div>
-        ) : (
-          <div className="rounded-[22px] border border-slate-200 bg-slate-50/70 px-4 py-4 text-sm text-slate-600">
-            {t('initialization.capabilities.sections.docling.empty')}
-          </div>
-        )}
-      </div>
+
+          {pictureDescriptionEnabled ? (
+            <div className="rounded-[22px] border border-slate-200 bg-slate-50/70 p-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>{t('systemSetup.forms.documentParsing.pictureDescriptionUrl.label')}</Label>
+                  <input
+                    value={runtimeConfigDraft.documentParsing.pictureDescriptionUrl}
+                    onChange={(event) =>
+                      updateRuntimeConfigGroup('document_parsing', { pictureDescriptionUrl: event.target.value })
+                    }
+                    className={FIELD_CLASSNAME}
+                    placeholder="https://api.openai.com/v1"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label>{t('systemSetup.forms.documentParsing.pictureDescriptionModel.label')}</Label>
+                  <input
+                    value={runtimeConfigDraft.documentParsing.pictureDescriptionModel}
+                    onChange={(event) =>
+                      updateRuntimeConfigGroup('document_parsing', { pictureDescriptionModel: event.target.value })
+                    }
+                    className={FIELD_CLASSNAME}
+                    placeholder={t('systemSetup.forms.documentParsing.pictureDescriptionModel.placeholder')}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label>{t('systemSetup.forms.documentParsing.pictureDescriptionApiKey.label')}</Label>
+                  <input
+                    type="password"
+                    value={runtimeConfigDraft.documentParsing.pictureDescriptionApiKey}
+                    onChange={(event) =>
+                      updateRuntimeConfigGroup('document_parsing', { pictureDescriptionApiKey: event.target.value })
+                    }
+                    className={FIELD_CLASSNAME}
+                    placeholder={t('systemSetup.forms.documentParsing.pictureDescriptionApiKey.placeholder')}
+                  />
+                  {!runtimeConfigDraft.documentParsing.pictureDescriptionApiKey.trim() &&
+                  runtimeConfigDraft.documentParsing.pictureDescriptionApiKeyState.configured ? (
+                    <p className="text-xs leading-5 text-slate-500">
+                      {t('systemSetup.forms.secret.keepExisting')}
+                      {runtimeConfigDraft.documentParsing.pictureDescriptionApiKeyState.hint
+                        ? ` (${runtimeConfigDraft.documentParsing.pictureDescriptionApiKeyState.hint})`
+                        : ''}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="mt-4 space-y-2">
+                <Label>{t('systemSetup.forms.documentParsing.pictureDescriptionPrompt.label')}</Label>
+                <textarea
+                  value={runtimeConfigDraft.documentParsing.pictureDescriptionPrompt}
+                  onChange={(event) =>
+                    updateRuntimeConfigGroup('document_parsing', { pictureDescriptionPrompt: event.target.value })
+                  }
+                  className={TEXTAREA_CLASSNAME}
+                  rows={3}
+                  placeholder={t('systemSetup.forms.documentParsing.pictureDescriptionPrompt.placeholder')}
+                />
+              </div>
+            </div>
+          ) : null}
+
+          {!ocrConfigEnabled && !pictureDescriptionEnabled ? (
+            <div className="rounded-[22px] border border-slate-200 bg-slate-50/70 px-4 py-4 text-sm text-slate-600">
+              {t('initialization.capabilities.sections.docling.empty')}
+            </div>
+          ) : null}
+        </div>
+      </section>
     )
 
     content = (
@@ -1056,36 +1117,11 @@ export function SystemInitializationPage() {
           </p>
         </div>
 
-        {capabilitySections.length ? (
-          <>
-            <div className="grid gap-3 md:grid-cols-2">
-              {capabilitySections.map((section) => (
-                <button
-                  key={section.key}
-                  type="button"
-                  onClick={() => setActiveCapabilitySection(section.key)}
-                  className={cn(
-                    'rounded-[24px] border p-4 text-left transition-all',
-                    activeCapabilitySection === section.key
-                      ? 'border-slate-900 bg-slate-900 text-white shadow-lg shadow-slate-900/10'
-                      : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
-                  )}
-                >
-                  <p className="text-base font-semibold">{section.title}</p>
-                  <p className={cn(
-                    'mt-2 text-sm leading-6',
-                    activeCapabilitySection === section.key ? 'text-slate-200' : 'text-slate-500'
-                  )}>
-                    {section.description}
-                  </p>
-                </button>
-              ))}
-            </div>
-
-            <div className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
-              {activeCapabilitySection === 'docling' ? renderDoclingSection() : renderLightRagSection()}
-            </div>
-          </>
+        {knowledgeGraphEnabled || doclingVisible ? (
+          <div className="space-y-4">
+            {knowledgeGraphEnabled ? renderLightRagSection() : null}
+            {doclingVisible ? renderDoclingSection() : null}
+          </div>
         ) : (
           <div className="rounded-[24px] border border-slate-200 bg-white p-6 shadow-sm">
             <p className="text-sm font-semibold text-slate-900">
