@@ -21,6 +21,7 @@ from app.system_settings.initialization_defaults_loader import (
     load_initialization_relation_type_defaults,
 )
 from app.system_settings.models import AppSetting
+from app.system_settings.runtime_config_service import SystemRuntimeConfigService
 from app.system_settings.schemas import (
     InitializeSystemRequest,
     InitializationCompletionResponse,
@@ -39,6 +40,78 @@ from app.system_settings.service import (
 SYSTEM_INITIALIZATION_STATE_KEY = "system_initialization_state"
 SYSTEM_INITIALIZATION_VERSION = 1
 _INITIALIZATION_BINDING_COMPONENTS: tuple[str, str, str] = ("assistant", "lightrag", "workflow_copilot")
+_LEGACY_ZH_SEEDED_ENTRY_TYPES: tuple[dict[str, Any], ...] = (
+    {
+        "code": "KNOWLEDGE",
+        "name": "知识",
+        "description": "学习的知识点",
+        "color": "#3B82F6",
+        "icon": "book",
+        "graph_enabled": True,
+        "ai_enabled": True,
+        "enabled": True,
+    },
+    {
+        "code": "PROJECT",
+        "name": "项目",
+        "description": "参与的项目",
+        "color": "#10B981",
+        "icon": "folder",
+        "graph_enabled": True,
+        "ai_enabled": True,
+        "enabled": True,
+    },
+    {
+        "code": "COMPETITION",
+        "name": "比赛",
+        "description": "参加的比赛",
+        "color": "#F59E0B",
+        "icon": "trophy",
+        "graph_enabled": True,
+        "ai_enabled": True,
+        "enabled": True,
+    },
+    {
+        "code": "EXPERIENCE",
+        "name": "经历",
+        "description": "个人经历",
+        "color": "#8B5CF6",
+        "icon": "star",
+        "graph_enabled": True,
+        "ai_enabled": True,
+        "enabled": True,
+    },
+    {
+        "code": "ACHIEVEMENT",
+        "name": "成果",
+        "description": "取得的成果",
+        "color": "#EF4444",
+        "icon": "award",
+        "graph_enabled": True,
+        "ai_enabled": True,
+        "enabled": True,
+    },
+    {
+        "code": "TECHNOLOGY",
+        "name": "技术",
+        "description": "掌握的技术",
+        "color": "#06B6D4",
+        "icon": "code",
+        "graph_enabled": True,
+        "ai_enabled": True,
+        "enabled": True,
+    },
+    {
+        "code": "DOCUMENT",
+        "name": "资料",
+        "description": "收集的资料",
+        "color": "#6B7280",
+        "icon": "file",
+        "graph_enabled": True,
+        "ai_enabled": False,
+        "enabled": True,
+    },
+)
 
 
 class SystemInitializationService:
@@ -69,6 +142,12 @@ class SystemInitializationService:
         payload = dict(setting.value_json)
         return payload if payload.get("initialized") is True else None
 
+    def _delete_initialization_state(self) -> None:
+        setting = self._get_setting(SYSTEM_INITIALIZATION_STATE_KEY)
+        if setting is not None:
+            self.db.delete(setting)
+            self.db.flush()
+
     def _upsert_initialization_state(self, *, locale: SystemLocale, source: str) -> None:
         payload = {
             "initialized": True,
@@ -84,6 +163,12 @@ class SystemInitializationService:
 
     def _entry_types_match_defaults_for_locale(self, locale: str) -> bool:
         defaults = load_initialization_entry_type_defaults(locale)
+        return self._entry_types_match_defaults_snapshot(defaults)
+
+    def _entry_types_match_defaults_snapshot(
+        self,
+        defaults: list[InitializationDefaultEntryType] | tuple[dict[str, Any], ...],
+    ) -> bool:
         current_rows = self.db.query(EntryType).all()
         if not current_rows:
             return True
@@ -91,20 +176,30 @@ class SystemInitializationService:
             return False
 
         current_by_code = {str(item.code or "").strip(): item for item in current_rows}
-        default_by_code = {item.code: item for item in defaults}
+        default_by_code = {
+            str((item.code if isinstance(item, InitializationDefaultEntryType) else item["code"]) or "").strip(): item
+            for item in defaults
+        }
         if set(current_by_code) != set(default_by_code):
             return False
 
         for code, default in default_by_code.items():
             current = current_by_code[code]
+            default_name = default.name if isinstance(default, InitializationDefaultEntryType) else default["name"]
+            default_description = default.description if isinstance(default, InitializationDefaultEntryType) else default["description"]
+            default_color = default.color if isinstance(default, InitializationDefaultEntryType) else default["color"]
+            default_icon = default.icon if isinstance(default, InitializationDefaultEntryType) else default["icon"]
+            default_graph_enabled = default.graph_enabled if isinstance(default, InitializationDefaultEntryType) else default["graph_enabled"]
+            default_ai_enabled = default.ai_enabled if isinstance(default, InitializationDefaultEntryType) else default["ai_enabled"]
+            default_enabled = default.enabled if isinstance(default, InitializationDefaultEntryType) else default["enabled"]
             if (
-                (current.name or "").strip() != (default.name or "").strip()
-                or (current.description or "").strip() != (default.description or "").strip()
-                or (current.color or "").strip() != (default.color or "").strip()
-                or (current.icon or "").strip() != (default.icon or "").strip()
-                or bool(current.graph_enabled) != bool(default.graph_enabled)
-                or bool(current.ai_enabled) != bool(default.ai_enabled)
-                or bool(current.enabled) != bool(default.enabled)
+                (current.name or "").strip() != (default_name or "").strip()
+                or (current.description or "").strip() != (default_description or "").strip()
+                or (current.color or "").strip() != (default_color or "").strip()
+                or (current.icon or "").strip() != (default_icon or "").strip()
+                or bool(current.graph_enabled) != bool(default_graph_enabled)
+                or bool(current.ai_enabled) != bool(default_ai_enabled)
+                or bool(current.enabled) != bool(default_enabled)
             ):
                 return False
         return True
@@ -116,6 +211,7 @@ class SystemInitializationService:
         return not (
             self._entry_types_match_defaults_for_locale("zh")
             or self._entry_types_match_defaults_for_locale("en")
+            or self._entry_types_match_defaults_snapshot(_LEGACY_ZH_SEEDED_ENTRY_TYPES)
         )
 
     def _has_existing_entries(self) -> bool:
@@ -143,6 +239,14 @@ class SystemInitializationService:
     def get_initialization_status(self) -> InitializationStatusResponse:
         payload = self._initialization_payload()
         if payload is not None:
+            if str(payload.get("source") or "") == "legacy_auto_completed" and not self._should_auto_complete_legacy():
+                self._delete_initialization_state()
+                self.db.commit()
+                return InitializationStatusResponse(
+                    initialized=False,
+                    legacy_auto_completed=False,
+                    locale=self._current_locale(),
+                )
             locale = normalize_system_locale(payload.get("locale")) or self._current_locale()
             return InitializationStatusResponse(
                 initialized=True,
@@ -170,6 +274,8 @@ class SystemInitializationService:
     def get_initialization_defaults(self, locale: str | None = None) -> InitializationDefaultsResponse:
         normalized_locale = normalize_system_locale(locale) or get_default_system_locale()
         defaults = load_initialization_entry_type_defaults(normalized_locale)
+        runtime_service = SystemRuntimeConfigService(self.db)
+        runtime_config = runtime_service.get_runtime_config_response(locale=normalized_locale)
         return InitializationDefaultsResponse(
             locale=normalized_locale,
             entry_types=[
@@ -186,6 +292,8 @@ class SystemInitializationService:
                 )
                 for item in defaults
             ],
+            capability_modules=runtime_service.list_capability_module_summaries(locale=normalized_locale),
+            runtime_config=runtime_config,
         )
 
     def _ensure_can_initialize(self) -> SystemLocale:
@@ -379,6 +487,26 @@ class SystemInitializationService:
             assistant_config_service = AssistantConfigService(self.db)
             assistant_config_service.reset_all_system_skills(confirm=True, commit=False)
             assistant_config_service.reset_all_system_behaviors(confirm=True, commit=False)
+
+            runtime_service = SystemRuntimeConfigService(self.db)
+            if request.runtime_config is not None:
+                if request.runtime_config.storage is not None:
+                    runtime_service.update_storage_config(request.runtime_config.storage, commit=False)
+
+                if request.runtime_config.knowledge_graph is not None:
+                    if not request.runtime_config.knowledge_graph.summary_language:
+                        request.runtime_config.knowledge_graph.summary_language = "Chinese" if locale == "zh" else "English"
+                    runtime_service.update_knowledge_graph_config(
+                        request.runtime_config.knowledge_graph,
+                        commit=False,
+                        default_embedding_name="text-embedding-3-small",
+                    )
+
+                if request.runtime_config.document_parsing is not None:
+                    runtime_service.update_document_parsing_config(request.runtime_config.document_parsing, commit=False)
+
+                if request.runtime_config.automation is not None:
+                    runtime_service.update_automation_config(request.runtime_config.automation, commit=False)
 
             self._upsert_initialization_state(locale=locale, source="user")
             self.db.commit()

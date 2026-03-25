@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 from minio import Minio
 from minio.error import S3Error
 
-from app.config import get_settings
+from app.system_settings.runtime_config_service import resolve_runtime_storage_config
 
 
 class StorageError(Exception):
@@ -25,20 +25,20 @@ def get_minio_client() -> tuple[Minio, str]:
     Raises:
         StorageError: If MinIO is not configured or initialization fails
     """
-    settings = get_settings()
-    endpoint = (settings.minio_endpoint or "").strip()
+    config = resolve_runtime_storage_config()
+    endpoint = (config.endpoint or "").strip()
     if not endpoint:
         raise StorageError("MinIO endpoint is not configured")
 
-    secure = settings.minio_secure
+    secure = config.secure
     if endpoint.startswith("http://") or endpoint.startswith("https://"):
         parsed = urlparse(endpoint)
         secure = parsed.scheme == "https"
         endpoint = (parsed.netloc or parsed.path).rstrip("/")
 
-    access_key = (settings.minio_access_key or "").strip()
-    secret_key = (settings.minio_secret_key or "").strip()
-    bucket = (settings.minio_bucket or "").strip()
+    access_key = (config.access_key or "").strip()
+    secret_key = (config.secret_key or "").strip()
+    bucket = (config.bucket or "").strip()
     if not access_key or not secret_key or not bucket:
         raise StorageError("MinIO credentials/bucket are not configured")
 

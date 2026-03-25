@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 
 from app.config import get_settings
 from app.lightrag.errors import LightRagConfigError, LightRagDependencyError, LightRagNotEnabledError
+from app.system_settings.runtime_config_service import resolve_runtime_knowledge_graph_config
 
 logger = logging.getLogger(__name__)
 _INIT_LOCK = threading.Lock()
@@ -252,6 +253,7 @@ def _resolve_llm_config() -> _OpenAICompatModelConfig:
 
 def _resolve_embedding_config(*, llm: _OpenAICompatModelConfig) -> _OpenAICompatModelConfig:
     settings = get_settings()
+    source = (getattr(settings, "lightrag_ai_key_source", "env_or_db") or "env_or_db").strip().lower()
 
     cfg_model, cfg_host, cfg_key = _parse_openai_compat_model_spec(
         getattr(settings, "lightrag_embedding_model", None),
@@ -259,23 +261,38 @@ def _resolve_embedding_config(*, llm: _OpenAICompatModelConfig) -> _OpenAICompat
     )
     env_model, env_host, env_key = _parse_openai_compat_model_spec(os.environ.get("EMBEDDING_MODEL"), label="EMBEDDING_MODEL")
 
-    # Embedding configuration is always read from config/env (no DB binding lookup).
-    model = _first_non_empty(cfg_model, env_model, "text-embedding-3-small")
-    base_url = _first_non_empty(getattr(settings, "lightrag_embedding_host", None), cfg_host, env_host, llm.base_url)
-    api_key = _first_non_empty(getattr(settings, "lightrag_embedding_key", None), cfg_key, env_key, llm.api_key)
+    db_cfg = None if source == "env_only" else _try_resolve_db_model_binding(model_type="embedding")
+    model = _first_non_empty(getattr(db_cfg, "model", None), cfg_model, env_model, "text-embedding-3-small")
+    base_url = _first_non_empty(
+        getattr(settings, "lightrag_embedding_host", None),
+        cfg_host,
+        env_host,
+        getattr(db_cfg, "base_url", None),
+        llm.base_url,
+    )
+    api_key = _first_non_empty(
+        getattr(settings, "lightrag_embedding_key", None),
+        cfg_key,
+        env_key,
+        getattr(db_cfg, "api_key", None),
+        llm.api_key,
+    )
     if not api_key:
-        raise LightRagConfigError("Embedding API key missing (LIGHTRAG_EMBEDDING_KEY/AI_API_KEY/OPENAI_API_KEY)")
+        raise LightRagConfigError("Embedding API key missing (LIGHTRAG_EMBEDDING_KEY/AI_API_KEY/OPENAI_API_KEY/DB)")
     return _OpenAICompatModelConfig(api_key=api_key, base_url=base_url, model=model)
 
 
-def _apply_runtime_env(*, llm: _OpenAICompatModelConfig, embedding: _OpenAICompatModelConfig) -> None:
-    settings = get_settings()
-
+def _apply_runtime_env(
+    *,
+    llm: _OpenAICompatModelConfig,
+    embedding: _OpenAICompatModelConfig,
+    knowledge_graph_config,
+) -> None:
     # Neo4j (LightRAG uses NEO4J_USERNAME env var, while our settings use NEO4J_USER)
-    neo4j_uri = _normalize_neo4j_uri(settings.neo4j_uri)
-    neo4j_user = (settings.neo4j_user or "").strip()
-    neo4j_password = (settings.neo4j_password or "").strip()
-    neo4j_database = (getattr(settings, "neo4j_database", "") or "").strip()
+    neo4j_uri = _normalize_neo4j_uri(knowledge_graph_config.neo4j_uri)
+    neo4j_user = (knowledge_graph_config.neo4j_user or "").strip()
+    neo4j_password = (knowledge_graph_config.neo4j_password or "").strip()
+    neo4j_database = (knowledge_graph_config.neo4j_database or "").strip()
 
     if not neo4j_uri or not neo4j_user:
         raise LightRagConfigError("Neo4j is not configured (NEO4J_URI/NEO4J_USER)")
@@ -299,8 +316,11 @@ def _apply_runtime_env(*, llm: _OpenAICompatModelConfig, embedding: _OpenAICompa
 
 def _create_and_init_rag():
     settings = get_settings()
-    if not settings.lightrag_enabled:
-        raise LightRagNotEnabledError("LightRAG is not enabled (LIGHTRAG_ENABLED=false)")
+    knowledge_graph_config = resolve_runtime_knowledge_graph_config()
+    if not knowledge_graph_config.enabled:
+        raise LightRagNotEnabledError("Knowledge graph is not enabled")
+    if not knowledge_graph_config.configured:
+        raise LightRagConfigError("Knowledge graph configuration is incomplete")
 
     from app.lightrag.runtime import get_lightrag_runtime
 
@@ -315,12 +335,16 @@ def _create_and_init_rag():
         step("resolve embedding config")
         embedding = _resolve_embedding_config(llm=llm)
         step("apply runtime env")
-        _apply_runtime_env(llm=llm, embedding=embedding)
+        _apply_runtime_env(
+            llm=llm,
+            embedding=embedding,
+            knowledge_graph_config=knowledge_graph_config,
+        )
         step("resolve local settings")
 
         working_dir = (getattr(settings, "lightrag_working_dir", "") or "").strip() or "./lightrag_storage"
-        workspace = (getattr(settings, "lightrag_workspace", "") or "").strip()
-        graph_storage = (getattr(settings, "lightrag_graph_storage", "") or "").strip() or "Neo4JStorage"
+        workspace = (knowledge_graph_config.workspace or "").strip()
+        graph_storage = (knowledge_graph_config.graph_storage or "").strip() or "Neo4JStorage"
         embedding_dim = int(getattr(settings, "lightrag_embedding_dim", 1536) or 1536)
 
         logger.info(
@@ -390,7 +414,7 @@ def _create_and_init_rag():
         # Language for internal LightRAG prompts (summary/entity extraction).
         # Upstream env var name is SUMMARY_LANGUAGE; we prefer per-instance addon_params.
         summary_language = _first_non_empty(
-            getattr(settings, "lightrag_summary_language", None),
+            getattr(knowledge_graph_config, "summary_language", None),
             os.environ.get("SUMMARY_LANGUAGE"),
         )
         if summary_language:
@@ -399,15 +423,15 @@ def _create_and_init_rag():
         # Optional rerank model (standard rerank API; commonly provided by vLLM/LiteLLM proxies).
         # If configured, we enable rerank by default; otherwise disable it explicitly.
         rerank_model = _first_non_empty(
-            getattr(settings, "lightrag_rerank_model", None),
+            getattr(knowledge_graph_config, "rerank_model", None),
             os.environ.get("RERANK_MODEL"),
         )
         rerank_host = _first_non_empty(
-            getattr(settings, "lightrag_rerank_host", None),
+            getattr(knowledge_graph_config, "rerank_host", None),
             os.environ.get("RERANK_BINDING_HOST"),
         )
         rerank_key = _first_non_empty(
-            getattr(settings, "lightrag_rerank_key", None),
+            getattr(knowledge_graph_config, "rerank_api_key", None),
             os.environ.get("RERANK_BINDING_API_KEY"),
         )
         rerank_url = _normalize_rerank_url(rerank_host)
@@ -420,7 +444,7 @@ def _create_and_init_rag():
 
             rerank_timeout_sec = float(getattr(settings, "lightrag_rerank_timeout_sec", 15.0) or 15.0)
             rerank_request_format = _first_non_empty(
-                getattr(settings, "lightrag_rerank_request_format", None),
+                getattr(knowledge_graph_config, "rerank_request_format", None),
                 os.environ.get("RERANK_BINDING"),
             ).strip().lower() or "standard"
             rerank_enable_chunking = bool(getattr(settings, "lightrag_rerank_enable_chunking", False) or False)
@@ -492,6 +516,11 @@ def get_rag():
     """Get LightRAG singleton instance for the current process."""
     # Double-locking: lru_cache prevents duplicate work; this lock keeps initialization linearized and explicit.
     settings = get_settings()
+    knowledge_graph_config = resolve_runtime_knowledge_graph_config()
+    if not knowledge_graph_config.enabled:
+        raise LightRagNotEnabledError("Knowledge graph is not enabled")
+    if not knowledge_graph_config.configured:
+        raise LightRagConfigError("Knowledge graph configuration is incomplete")
     init_timeout_sec = float(getattr(settings, "lightrag_init_timeout_sec", 120.0) or 120.0)
     lock_timeout_sec = init_timeout_sec + 10.0
     wait_started = time.perf_counter()

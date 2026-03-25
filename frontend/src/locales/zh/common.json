@@ -162,6 +162,11 @@
         "title": "整理你的默认记录类型",
         "description": "我们已经准备了一组随语言切换的默认类型，你可以直接使用，也可以删改后再开始。"
       },
+      "capabilities": {
+        "label": "能力中心",
+        "title": "按需补充系统运行能力",
+        "description": "对象存储、知识图谱、文档解析和自动化都可以在这里配置。它们不是首次启动的阻塞项，暂时跳过也没关系。"
+      },
       "review": {
         "label": "确认完成",
         "title": "最后确认一下初始化结果",
@@ -212,6 +217,18 @@
         "aiEnabled": "参与 AI"
       }
     },
+    "capabilities": {
+      "introTitle": "核心初始化已经够系统启动，下面这些能力可以按需补充",
+      "introDescription": "你可以直接进入每个模块配置，也可以先跳过，初始化完成后随时在 System Setup 中继续维护。",
+      "currentState": "当前状态",
+      "configure": "配置",
+      "skip": "稍后再说",
+      "undoSkip": "恢复配置",
+      "backToCenter": "返回能力中心",
+      "saveAndBack": "保存并返回",
+      "skipCurrent": "跳过当前模块",
+      "editing": "正在配置能力模块"
+    },
     "review": {
       "emptyValue": "未设置",
       "bindingValue": "系统助手、工作流 Copilot、LightRAG LLM",
@@ -221,8 +238,211 @@
         "binding": "默认绑定范围",
         "entryTypes": "记录类型数量"
       },
+      "capabilitiesTitle": "能力配置摘要",
+      "capabilitiesDescription": "这些能力可以使用应用配置、沿用环境默认值，或继续保持跳过状态。",
       "noteTitle": "后续仍可继续补充",
       "noteDescription": "LightRAG 的 Embedding 模型不是初始化阻塞项，你可以在初始化完成后到设置里继续补充。"
+    }
+  },
+  "systemSetup": {
+    "eyebrow": "系统运行能力",
+    "title": "System Setup",
+    "description": "把系统真正跑起来的运行时能力统一放在这里维护。你可以单独保存每个模块，未填写的模块会继续回退到环境默认值或保持未配置状态。",
+    "runtimeTitle": "运行时能力中心",
+    "runtimeDescription": "这些模块控制对象存储、知识图谱、文档解析和自动化任务的实际可用性。敏感字段留空会保留现有密钥。",
+    "footerTitle": "系统内置 AI 行为也可以继续细化",
+    "footerDescription": "完成运行时能力配置后，你还可以到 System AI Behaviors 页面继续指定周报、月报等系统行为走哪个 Workflow 或 Agent。",
+    "footerAction": "前往系统 AI 行为",
+    "moduleTitles": {
+      "storage": "存储与附件",
+      "knowledgeGraph": "知识图谱",
+      "documentParsing": "文档解析",
+      "automation": "自动化任务"
+    },
+    "moduleDescriptions": {
+      "storage": "配置 MinIO 对象存储与附件上传限制。",
+      "knowledgeGraph": "配置 Neo4j、LightRAG 工作空间与图谱检索相关能力。",
+      "documentParsing": "配置 Docling、OCR 与图片描述等解析能力。",
+      "automation": "配置系统后台调度器，用于周报、月报等任务。"
+    },
+    "sources": {
+      "appConfig": "应用配置",
+      "environmentDefault": "环境默认",
+      "default": "未配置"
+    },
+    "status": {
+      "configured": "已配置",
+      "environmentDefault": "使用环境默认",
+      "skipped": "已跳过",
+      "notConfigured": "未配置",
+      "restartRequired": "部分进程需重载"
+    },
+    "actions": {
+      "configure": "配置模块",
+      "collapse": "收起",
+      "validate": "测试连接",
+      "save": "保存模块"
+    },
+    "messages": {
+      "saved": "模块配置已保存",
+      "validationPassed": "连接测试通过",
+      "validationFailed": "连接测试未通过"
+    },
+    "core": {
+      "language": "系统语言",
+      "languageHint": "如需切换系统语言，可继续使用右上角的语言切换并确认同步。",
+      "modelBindings": "默认模型绑定",
+      "modelBindingsHint": "系统助手、工作流 Copilot 与 LightRAG 会复用这里的默认模型绑定。",
+      "entryTypes": "记录类型",
+      "entryTypesValue": "到内容设置中继续维护",
+      "entryTypesHint": "初始化后的记录类型仍然可以随时调整。"
+    },
+    "forms": {
+      "secret": {
+        "keepExisting": "留空表示保留当前已保存的密钥"
+      },
+      "storage": {
+        "endpoint": {
+          "label": "MinIO Endpoint",
+          "placeholder": "例如 https://minio.example.com"
+        },
+        "bucket": {
+          "label": "Bucket",
+          "placeholder": "例如 mindatlas"
+        },
+        "accessKey": {
+          "label": "Access Key",
+          "placeholder": "输入新的 Access Key"
+        },
+        "secretKey": {
+          "label": "Secret Key",
+          "placeholder": "输入新的 Secret Key"
+        },
+        "secure": {
+          "label": "使用 HTTPS",
+          "description": "开启后会按安全连接方式访问对象存储。"
+        },
+        "advanced": {
+          "title": "附件限制",
+          "description": "这些限制会影响附件上传和解析时的大小边界。"
+        },
+        "maxFileSizeMb": {
+          "label": "最大文件大小（MB）"
+        },
+        "maxPdfPages": {
+          "label": "最大 PDF 页数"
+        }
+      },
+      "knowledgeGraph": {
+        "enabled": {
+          "label": "启用知识图谱",
+          "description": "关闭后，图谱视图和图谱检索将不可用。"
+        },
+        "neo4jUri": {
+          "label": "Neo4j URI"
+        },
+        "neo4jDatabase": {
+          "label": "Neo4j Database"
+        },
+        "neo4jUser": {
+          "label": "Neo4j 用户名"
+        },
+        "neo4jPassword": {
+          "label": "Neo4j 密码",
+          "placeholder": "输入新的 Neo4j 密码"
+        },
+        "workspace": {
+          "label": "LightRAG Workspace",
+          "placeholder": "例如 mindatlas"
+        },
+        "graphStorage": {
+          "label": "Graph Storage"
+        },
+        "summaryLanguage": {
+          "label": "摘要语言",
+          "placeholder": "例如 Chinese / English"
+        },
+        "llmModelName": {
+          "label": "LightRAG LLM 模型",
+          "placeholder": "留空时继续使用当前绑定"
+        },
+        "embeddingModelName": {
+          "label": "LightRAG Embedding 模型",
+          "placeholder": "例如 text-embedding-3-small"
+        },
+        "advanced": {
+          "title": "Rerank 高级配置",
+          "description": "仅在你确实需要独立 rerank 服务时再填写。"
+        },
+        "rerankModel": {
+          "label": "Rerank 模型",
+          "placeholder": "例如 bge-reranker-v2-m3"
+        },
+        "rerankHost": {
+          "label": "Rerank Host"
+        },
+        "rerankApiKey": {
+          "label": "Rerank API Key",
+          "placeholder": "输入新的 Rerank Key"
+        },
+        "rerankRequestFormat": {
+          "label": "请求格式"
+        }
+      },
+      "documentParsing": {
+        "workerEnabled": {
+          "label": "启用 Docling Worker",
+          "description": "开启后，附件上传后可以进入后台解析队列。"
+        },
+        "ocrEnabled": {
+          "label": "启用 OCR",
+          "description": "用于识别扫描件或图片中的文字内容。"
+        },
+        "ocrLangs": {
+          "label": "OCR 语言",
+          "placeholder": "例如 auto、chinese、english"
+        },
+        "pictureDescriptionEnabled": {
+          "label": "启用图片描述",
+          "description": "当附件中包含图片时，可调用外部模型生成图片描述。"
+        },
+        "pictureDescriptionUrl": {
+          "label": "图片描述服务地址"
+        },
+        "pictureDescriptionModel": {
+          "label": "图片描述模型",
+          "placeholder": "例如 gpt-4.1-mini"
+        },
+        "pictureDescriptionApiKey": {
+          "label": "图片描述 API Key",
+          "placeholder": "输入新的图片描述 Key"
+        },
+        "pictureDescriptionPrompt": {
+          "label": "图片描述 Prompt",
+          "placeholder": "说明希望模型如何描述图片内容"
+        },
+        "pictureDescriptionTimeoutSec": {
+          "label": "超时时间（秒）"
+        },
+        "pictureDescriptionParamsJson": {
+          "label": "额外参数（JSON）"
+        }
+      },
+      "automation": {
+        "schedulerEnabled": {
+          "label": "启用后台调度器",
+          "description": "关闭后，周报、月报等依赖后台计划任务的能力将不会自动执行。"
+        },
+        "note": "这项配置会立即持久化，但后台独立进程可能需要重新加载后才会完全生效。"
+      }
+    },
+    "emptyStates": {
+      "openSetup": "前往 System Setup",
+      "storageTitle": "附件上传尚不可用",
+      "storageUnconfigured": "系统还没有可用的对象存储配置，请先到 System Setup 完成存储与附件模块配置。",
+      "documentParsingUnavailable": "当前尚未启用文档解析能力，如需把附件索引进知识图谱，请先完成文档解析模块配置。",
+      "knowledgeGraphDisabled": "知识图谱当前处于关闭状态，请先在 System Setup 中启用并配置知识图谱模块。",
+      "knowledgeGraphIncomplete": "知识图谱还没有完成必需配置，请先在 System Setup 中补齐连接信息和模型绑定。"
     }
   },
   "tags": {
@@ -279,6 +499,8 @@
       "assistantTargetsDesc": "统一管理可复用的 Workflow 与 Agent 执行体",
       "systemAiBehaviors": "系统 AI 行为",
       "systemAiBehaviorsDesc": "配置周报、月报等系统内置 AI 行为实际走哪个 Workflow 或 Agent",
+      "systemSetup": "System Setup",
+      "systemSetupDesc": "统一维护对象存储、知识图谱、文档解析与自动化等系统运行能力",
       "assistantWorkflows": "助手工作流",
       "assistantWorkflowsDesc": "管理可复用的工作流执行体",
       "assistantAgents": "助手 Agent",

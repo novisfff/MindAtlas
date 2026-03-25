@@ -1,5 +1,10 @@
 import { apiClient } from '@/lib/api/client'
 import type { Locale } from '@/stores/app-store'
+import type {
+  CapabilityModuleSummary,
+  RuntimeConfigPayloadRequest,
+  RuntimeConfigResponse,
+} from '@/features/system-setup'
 
 export interface InitializationStatusResponse {
   initialized: boolean
@@ -22,6 +27,8 @@ export interface InitializationDefaultEntryType {
 export interface InitializationDefaultsResponse {
   locale: Locale
   entryTypes: InitializationDefaultEntryType[]
+  capabilityModules: CapabilityModuleSummary[]
+  runtimeConfig: RuntimeConfigResponse
 }
 
 export interface InitializeSystemRequest {
@@ -45,6 +52,7 @@ export interface InitializeSystemRequest {
     enabled: boolean
     origin: 'default' | 'custom'
   }>
+  runtimeConfig?: RuntimeConfigPayloadRequest
 }
 
 export interface InitializationCompletionResponse {

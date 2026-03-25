@@ -7,6 +7,7 @@ import { IndexStatusBadge } from './components/IndexStatusBadge'
 import { cn } from '@/lib/utils'
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 import { remarkCitation } from '@/features/assistant/components/remark-citation'
 import { CitationMarker } from '@/features/assistant/components/citation'
 import {
@@ -26,6 +27,8 @@ import {
   useRetryAttachmentParseMutation,
   useRetryAttachmentIndexMutation,
 } from '@/features/attachments'
+import { isApiError } from '@/lib/api/client'
+import { useRuntimeConfigQuery } from '@/features/system-setup'
 
 export function EntryDetailPage() {
   const { id } = useParams<{ id: string }>()
@@ -36,6 +39,7 @@ export function EntryDetailPage() {
   const deleteMutation = useDeleteEntryMutation()
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const { t } = useTranslation()
+  const runtimeConfigQuery = useRuntimeConfigQuery()
 
   // Relations
   const { data: relations = [] } = useEntryRelationsQuery(id || '')
@@ -49,6 +53,13 @@ export function EntryDetailPage() {
   const retryAttachmentParseMutation = useRetryAttachmentParseMutation(id || '')
   const retryAttachmentIndexMutation = useRetryAttachmentIndexMutation(id || '')
   const attachmentsRef = useRef<HTMLDivElement>(null)
+  const storageConfigured = runtimeConfigQuery.data ? Boolean(runtimeConfigQuery.data.storage.configured) : true
+  const knowledgeGraphReady = runtimeConfigQuery.data
+    ? Boolean(runtimeConfigQuery.data.knowledgeGraph.enabled && runtimeConfigQuery.data.knowledgeGraph.configured)
+    : true
+  const documentParsingReady = runtimeConfigQuery.data
+    ? Boolean(runtimeConfigQuery.data.documentParsing.workerEnabled)
+    : true
 
   useEffect(() => {
     if (location.hash === '#attachments' && attachmentsRef.current) {
@@ -281,18 +292,75 @@ export function EntryDetailPage() {
         <AttachmentList
           attachments={attachments}
           onDelete={(attachmentId) => deleteAttachmentMutation.mutate(attachmentId)}
-          onRetry={(attachmentId) => retryAttachmentParseMutation.mutate(attachmentId)}
-          onRetryIndex={(attachmentId) => retryAttachmentIndexMutation.mutate(attachmentId)}
+          onRetry={(attachmentId) =>
+            retryAttachmentParseMutation.mutate(attachmentId, {
+              onError: (error) => {
+                toast.error(error instanceof Error ? error.message : t('messages.error'))
+              },
+            })
+          }
+          onRetryIndex={(attachmentId) =>
+            retryAttachmentIndexMutation.mutate(attachmentId, {
+              onError: (error) => {
+                toast.error(error instanceof Error ? error.message : t('messages.error'))
+              },
+            })
+          }
           isDeleting={deleteAttachmentMutation.isPending}
           isRetrying={retryAttachmentParseMutation.isPending}
           isRetryingIndex={retryAttachmentIndexMutation.isPending}
         />
 
         <div className="mt-4">
-          <FileUpload
-            onUpload={(file, indexToKg) => uploadAttachmentMutation.mutate({ file, indexToKg })}
-            isUploading={uploadAttachmentMutation.isPending}
-          />
+          {!storageConfigured ? (
+            <div className="rounded-[24px] border border-amber-200 bg-amber-50 px-4 py-4">
+              <p className="text-sm font-semibold text-amber-900">{t('systemSetup.emptyStates.storageTitle')}</p>
+              <p className="mt-2 text-sm leading-6 text-amber-800">{t('systemSetup.emptyStates.storageUnconfigured')}</p>
+              <button
+                type="button"
+                onClick={() => navigate('/settings/system-setup')}
+                className="mt-4 inline-flex rounded-2xl border border-amber-300 bg-white px-4 py-2 text-sm font-medium text-amber-900 transition hover:bg-amber-100"
+              >
+                {t('systemSetup.emptyStates.openSetup')}
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <FileUpload
+                onUpload={(file, indexToKg) =>
+                  uploadAttachmentMutation.mutate(
+                    { file, indexToKg },
+                    {
+                      onError: (error) => {
+                        if (isApiError(error)) {
+                          if (error.code === 40981) {
+                            toast.error(t('systemSetup.emptyStates.storageUnconfigured'))
+                            return
+                          }
+                          if (error.code === 40982) {
+                            toast.error(t('systemSetup.emptyStates.documentParsingUnavailable'))
+                            return
+                          }
+                          if (error.code === 40983 || error.code === 40984) {
+                            toast.error(t('systemSetup.emptyStates.knowledgeGraphIncomplete'))
+                            return
+                          }
+                        }
+                        toast.error(error instanceof Error ? error.message : t('messages.error'))
+                      },
+                    }
+                  )
+                }
+                isUploading={uploadAttachmentMutation.isPending}
+              />
+
+              {(!documentParsingReady || !knowledgeGraphReady) ? (
+                <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 px-4 py-4 text-sm leading-6 text-slate-600">
+                  {!documentParsingReady ? t('systemSetup.emptyStates.documentParsingUnavailable') : t('systemSetup.emptyStates.knowledgeGraphIncomplete')}
+                </div>
+              ) : null}
+            </div>
+          )}
         </div>
       </div>
 

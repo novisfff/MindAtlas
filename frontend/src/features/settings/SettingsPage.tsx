@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { FileType, Tags, ChevronRight, Bot, Wrench, BrainCircuit, Network, Sparkles } from 'lucide-react'
+import { FileType, Tags, ChevronRight, Bot, Wrench, BrainCircuit, Network, Sparkles, Settings2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 export function SettingsPage() {
@@ -72,6 +72,15 @@ export function SettingsPage() {
       path: '/settings/system-ai-behaviors',
       color: 'text-amber-500',
       bgColor: 'bg-amber-500/10'
+    },
+    {
+      id: 'system-setup',
+      titleKey: 'pages.settings.systemSetup',
+      descKey: 'pages.settings.systemSetupDesc',
+      icon: Settings2,
+      path: '/settings/system-setup',
+      color: 'text-slate-700',
+      bgColor: 'bg-slate-500/10'
     }
   ]
 

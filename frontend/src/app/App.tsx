@@ -7,7 +7,7 @@ import { EntriesPage, EntryDetailPage, EntryNewPage, EntryEditPage } from '@/fea
 import { GraphPage } from '@/features/graph'
 import { DashboardPage } from '@/features/dashboard'
 import { CalendarPage } from '@/features/calendar'
-import { SettingsPage, EntryTypeSettings, TagSettings } from '@/features/settings'
+import { SettingsPage, EntryTypeSettings, TagSettings, SystemSetupSettingsPage } from '@/features/settings'
 import { AiProviderSettings } from '@/features/ai-providers'
 import { AssistantPage } from '@/features/assistant'
 import { ToolSettings, SkillSettings, AssistantTargetsSettings, SystemAiBehaviorsSettings } from '@/features/assistant-config'
@@ -64,6 +64,7 @@ export default function App() {
               <Route path="/settings/entry-types" element={<EntryTypeSettings />} />
               <Route path="/settings/tags" element={<TagSettings />} />
               <Route path="/settings/ai-providers" element={<AiProviderSettings />} />
+              <Route path="/settings/system-setup" element={<SystemSetupSettingsPage />} />
               <Route path="/settings/assistant-tools" element={<ToolSettings />} />
               <Route path="/settings/assistant-skills" element={<SkillSettings />} />
               <Route path="/settings/assistant-targets" element={<AssistantTargetsSettings />} />

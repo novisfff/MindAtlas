@@ -1,14 +1,15 @@
 import { useState, useEffect, ReactNode } from 'react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { getSystemLocale, updateSystemLocale } from '@/features/settings/api/system-settings'
-import { getInitializationStatus } from '@/features/initialization/api/systemInitialization'
+import { fetchInitializationStatus, initializationKeys } from '@/features/initialization/queries'
 import { useAppStore } from '@/stores/app-store'
 import { Toaster } from 'sonner'
 
 function SystemLocaleBootstrap() {
   const { i18n } = useTranslation()
   const setLocale = useAppStore((s) => s.setLocale)
+  const queryClient = useQueryClient()
 
   useEffect(() => {
     let cancelled = false
@@ -16,7 +17,11 @@ function SystemLocaleBootstrap() {
     const sync = async () => {
       try {
         const currentLocale = useAppStore.getState().locale === 'zh' ? 'zh' : 'en'
-        const initialization = await getInitializationStatus()
+        const initialization = await queryClient.fetchQuery({
+          queryKey: initializationKeys.status,
+          queryFn: fetchInitializationStatus,
+          staleTime: 0,
+        })
         if (cancelled) return
 
         if (!initialization.initialized) {
@@ -57,7 +62,7 @@ function SystemLocaleBootstrap() {
     return () => {
       cancelled = true
     }
-  }, [i18n, setLocale])
+  }, [i18n, queryClient, setLocale])
 
   return null
 }

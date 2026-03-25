@@ -71,6 +71,123 @@ class SystemInitializationServiceTests(unittest.TestCase):
         self.assertEqual(defaults.entry_types[0].origin, "default")
         self.assertEqual(defaults.entry_types[0].name, "Knowledge")
 
+    def test_legacy_seeded_entry_types_still_require_initialization(self) -> None:
+        from app.entry_type.models import EntryType
+        from app.system_settings.initialization_service import SystemInitializationService
+
+        legacy_seed_rows = [
+            {
+                "code": "KNOWLEDGE",
+                "name": "知识",
+                "description": "学习的知识点",
+                "color": "#3B82F6",
+                "icon": "book",
+                "graph_enabled": True,
+                "ai_enabled": True,
+                "enabled": True,
+            },
+            {
+                "code": "PROJECT",
+                "name": "项目",
+                "description": "参与的项目",
+                "color": "#10B981",
+                "icon": "folder",
+                "graph_enabled": True,
+                "ai_enabled": True,
+                "enabled": True,
+            },
+            {
+                "code": "COMPETITION",
+                "name": "比赛",
+                "description": "参加的比赛",
+                "color": "#F59E0B",
+                "icon": "trophy",
+                "graph_enabled": True,
+                "ai_enabled": True,
+                "enabled": True,
+            },
+            {
+                "code": "EXPERIENCE",
+                "name": "经历",
+                "description": "个人经历",
+                "color": "#8B5CF6",
+                "icon": "star",
+                "graph_enabled": True,
+                "ai_enabled": True,
+                "enabled": True,
+            },
+            {
+                "code": "ACHIEVEMENT",
+                "name": "成果",
+                "description": "取得的成果",
+                "color": "#EF4444",
+                "icon": "award",
+                "graph_enabled": True,
+                "ai_enabled": True,
+                "enabled": True,
+            },
+            {
+                "code": "TECHNOLOGY",
+                "name": "技术",
+                "description": "掌握的技术",
+                "color": "#06B6D4",
+                "icon": "code",
+                "graph_enabled": True,
+                "ai_enabled": True,
+                "enabled": True,
+            },
+            {
+                "code": "DOCUMENT",
+                "name": "资料",
+                "description": "收集的资料",
+                "color": "#6B7280",
+                "icon": "file",
+                "graph_enabled": True,
+                "ai_enabled": False,
+                "enabled": True,
+            },
+        ]
+        self.db.add_all(EntryType(**row) for row in legacy_seed_rows)
+        self.db.commit()
+
+        service = SystemInitializationService(self.db)
+        status = service.get_initialization_status()
+
+        self.assertFalse(status.initialized)
+        self.assertFalse(status.legacy_auto_completed)
+
+    def test_stale_legacy_auto_completed_state_is_recovered_for_empty_system(self) -> None:
+        from app.system_settings.initialization_service import (
+            SYSTEM_INITIALIZATION_STATE_KEY,
+            SystemInitializationService,
+        )
+        from app.system_settings.models import AppSetting
+
+        self.db.add(
+            AppSetting(
+                key=SYSTEM_INITIALIZATION_STATE_KEY,
+                value_json={
+                    "initialized": True,
+                    "locale": "zh",
+                    "version": 1,
+                    "source": "legacy_auto_completed",
+                },
+            )
+        )
+        self.db.commit()
+
+        service = SystemInitializationService(self.db)
+        status = service.get_initialization_status()
+        persisted = (
+            self.db.query(AppSetting)
+            .filter(AppSetting.key == SYSTEM_INITIALIZATION_STATE_KEY)
+            .first()
+        )
+
+        self.assertFalse(status.initialized)
+        self.assertFalse(status.legacy_auto_completed)
+        self.assertIsNone(persisted)
+
     def test_existing_ai_configuration_auto_completes_legacy_state(self) -> None:
         from app.ai_registry.models import AiCredential
         from app.system_settings.initialization_service import (

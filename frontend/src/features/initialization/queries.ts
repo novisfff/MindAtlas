@@ -5,6 +5,11 @@ import {
   initializeSystem,
   type InitializeSystemRequest,
 } from './api/systemInitialization'
+import {
+  getPersistedInitializationCheckedAt,
+  getPersistedInitializationStatus,
+  setPersistedInitializationStatus,
+} from './store'
 import type { Locale } from '@/stores/app-store'
 
 export const initializationKeys = {
@@ -12,10 +17,19 @@ export const initializationKeys = {
   defaults: (locale: Locale) => ['system-initialization-defaults', locale] as const,
 }
 
+export async function fetchInitializationStatus() {
+  const response = await getInitializationStatus()
+  setPersistedInitializationStatus(response)
+  return response
+}
+
 export function useInitializationStatusQuery() {
   return useQuery({
     queryKey: initializationKeys.status,
-    queryFn: getInitializationStatus,
+    queryFn: fetchInitializationStatus,
+    initialData: getPersistedInitializationStatus(),
+    initialDataUpdatedAt: getPersistedInitializationCheckedAt(),
+    staleTime: 0,
   })
 }
 

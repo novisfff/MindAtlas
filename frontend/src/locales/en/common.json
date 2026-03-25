@@ -163,6 +163,11 @@
         "title": "Shape your default entry types",
         "description": "We prepared a language-aware starter set for you. You can keep it, trim it, or add your own types before you start."
       },
+      "capabilities": {
+        "label": "Capability center",
+        "title": "Add runtime capabilities when you need them",
+        "description": "Storage, knowledge graph, document parsing, and automation can all be configured here. They are optional for first launch, so you can skip them for now."
+      },
       "review": {
         "label": "Review",
         "title": "Review the initialization summary",
@@ -213,6 +218,18 @@
         "aiEnabled": "AI enabled"
       }
     },
+    "capabilities": {
+      "introTitle": "The core setup is enough to get the system running, and the rest can be layered in when needed",
+      "introDescription": "You can open any module to configure it now, or skip it and come back later from System Setup.",
+      "currentState": "Current state",
+      "configure": "Configure",
+      "skip": "Maybe later",
+      "undoSkip": "Restore",
+      "backToCenter": "Back to capability center",
+      "saveAndBack": "Save and return",
+      "skipCurrent": "Skip this module",
+      "editing": "Editing capability module"
+    },
     "review": {
       "emptyValue": "Not set",
       "bindingValue": "Assistant, Workflow Copilot, and LightRAG LLM",
@@ -222,8 +239,211 @@
         "binding": "Default binding scope",
         "entryTypes": "Entry type count"
       },
+      "capabilitiesTitle": "Capability summary",
+      "capabilitiesDescription": "Each capability can use app config, keep an environment default, or stay skipped for now.",
       "noteTitle": "You can finish the rest later",
       "noteDescription": "LightRAG embedding is not a setup blocker. You can add an embedding model later from Settings."
+    }
+  },
+  "systemSetup": {
+    "eyebrow": "Runtime capabilities",
+    "title": "System Setup",
+    "description": "Manage the user-facing runtime capabilities that actually power the system here. Each module can be saved independently, and missing values continue to fall back to environment defaults or stay unconfigured.",
+    "runtimeTitle": "Runtime capability center",
+    "runtimeDescription": "These modules control storage, knowledge graph, document parsing, and background automation. Leaving a secret blank keeps the current saved key.",
+    "footerTitle": "System AI behaviors can be refined next",
+    "footerDescription": "Once runtime capabilities are in place, you can continue on to System AI Behaviors to decide which workflow or agent powers weekly reports, monthly reports, and other built-in system actions.",
+    "footerAction": "Open system AI behaviors",
+    "moduleTitles": {
+      "storage": "Storage & Attachments",
+      "knowledgeGraph": "Knowledge Graph",
+      "documentParsing": "Document Parsing",
+      "automation": "Automation"
+    },
+    "moduleDescriptions": {
+      "storage": "Configure MinIO object storage and attachment upload limits.",
+      "knowledgeGraph": "Configure Neo4j, LightRAG workspace settings, and graph retrieval capabilities.",
+      "documentParsing": "Configure Docling, OCR, and optional image description flows.",
+      "automation": "Configure the background scheduler used by system jobs."
+    },
+    "sources": {
+      "appConfig": "App Config",
+      "environmentDefault": "Environment Default",
+      "default": "Unconfigured"
+    },
+    "status": {
+      "configured": "Configured",
+      "environmentDefault": "Using environment default",
+      "skipped": "Skipped",
+      "notConfigured": "Not configured",
+      "restartRequired": "Some processes need reload"
+    },
+    "actions": {
+      "configure": "Configure module",
+      "collapse": "Collapse",
+      "validate": "Test connection",
+      "save": "Save module"
+    },
+    "messages": {
+      "saved": "Module settings saved",
+      "validationPassed": "Connection test passed",
+      "validationFailed": "Connection test failed"
+    },
+    "core": {
+      "language": "System language",
+      "languageHint": "You can continue using the top-right language switcher when you need to change the global system language.",
+      "modelBindings": "Default model bindings",
+      "modelBindingsHint": "The assistant, workflow copilot, and LightRAG reuse the default bindings shown here.",
+      "entryTypes": "Entry types",
+      "entryTypesValue": "Manage them from content settings",
+      "entryTypesHint": "Entry types remain editable after initialization."
+    },
+    "forms": {
+      "secret": {
+        "keepExisting": "Leave blank to keep the existing saved secret"
+      },
+      "storage": {
+        "endpoint": {
+          "label": "MinIO endpoint",
+          "placeholder": "For example https://minio.example.com"
+        },
+        "bucket": {
+          "label": "Bucket",
+          "placeholder": "For example mindatlas"
+        },
+        "accessKey": {
+          "label": "Access key",
+          "placeholder": "Enter a new access key"
+        },
+        "secretKey": {
+          "label": "Secret key",
+          "placeholder": "Enter a new secret key"
+        },
+        "secure": {
+          "label": "Use HTTPS",
+          "description": "Enable this when the object storage endpoint should be reached over a secure connection."
+        },
+        "advanced": {
+          "title": "Attachment limits",
+          "description": "These limits shape attachment upload and parsing boundaries."
+        },
+        "maxFileSizeMb": {
+          "label": "Max file size (MB)"
+        },
+        "maxPdfPages": {
+          "label": "Max PDF pages"
+        }
+      },
+      "knowledgeGraph": {
+        "enabled": {
+          "label": "Enable knowledge graph",
+          "description": "When disabled, graph view and graph-powered retrieval stay unavailable."
+        },
+        "neo4jUri": {
+          "label": "Neo4j URI"
+        },
+        "neo4jDatabase": {
+          "label": "Neo4j database"
+        },
+        "neo4jUser": {
+          "label": "Neo4j user"
+        },
+        "neo4jPassword": {
+          "label": "Neo4j password",
+          "placeholder": "Enter a new Neo4j password"
+        },
+        "workspace": {
+          "label": "LightRAG workspace",
+          "placeholder": "For example mindatlas"
+        },
+        "graphStorage": {
+          "label": "Graph storage"
+        },
+        "summaryLanguage": {
+          "label": "Summary language",
+          "placeholder": "For example Chinese or English"
+        },
+        "llmModelName": {
+          "label": "LightRAG LLM model",
+          "placeholder": "Leave blank to keep the current binding"
+        },
+        "embeddingModelName": {
+          "label": "LightRAG embedding model",
+          "placeholder": "For example text-embedding-3-small"
+        },
+        "advanced": {
+          "title": "Advanced rerank config",
+          "description": "Only fill this in if you actually run a separate rerank service."
+        },
+        "rerankModel": {
+          "label": "Rerank model",
+          "placeholder": "For example bge-reranker-v2-m3"
+        },
+        "rerankHost": {
+          "label": "Rerank host"
+        },
+        "rerankApiKey": {
+          "label": "Rerank API key",
+          "placeholder": "Enter a new rerank key"
+        },
+        "rerankRequestFormat": {
+          "label": "Request format"
+        }
+      },
+      "documentParsing": {
+        "workerEnabled": {
+          "label": "Enable Docling worker",
+          "description": "When enabled, uploaded attachments can enter the background parsing queue."
+        },
+        "ocrEnabled": {
+          "label": "Enable OCR",
+          "description": "Use OCR for scanned files or attachments that primarily contain images."
+        },
+        "ocrLangs": {
+          "label": "OCR languages",
+          "placeholder": "For example auto, chinese, english"
+        },
+        "pictureDescriptionEnabled": {
+          "label": "Enable image description",
+          "description": "Call an external model to describe images found inside attachments."
+        },
+        "pictureDescriptionUrl": {
+          "label": "Image description endpoint"
+        },
+        "pictureDescriptionModel": {
+          "label": "Image description model",
+          "placeholder": "For example gpt-4.1-mini"
+        },
+        "pictureDescriptionApiKey": {
+          "label": "Image description API key",
+          "placeholder": "Enter a new image description key"
+        },
+        "pictureDescriptionPrompt": {
+          "label": "Image description prompt",
+          "placeholder": "Explain how the model should describe images"
+        },
+        "pictureDescriptionTimeoutSec": {
+          "label": "Timeout (seconds)"
+        },
+        "pictureDescriptionParamsJson": {
+          "label": "Extra params (JSON)"
+        }
+      },
+      "automation": {
+        "schedulerEnabled": {
+          "label": "Enable background scheduler",
+          "description": "When disabled, weekly reports, monthly reports, and other scheduled background jobs will not run automatically."
+        },
+        "note": "This is persisted immediately, but separate background processes may need a reload before the change is fully applied."
+      }
+    },
+    "emptyStates": {
+      "openSetup": "Open System Setup",
+      "storageTitle": "Attachment upload is unavailable",
+      "storageUnconfigured": "The system does not have usable object storage yet. Open System Setup and finish the Storage & Attachments module first.",
+      "documentParsingUnavailable": "Document parsing is not enabled yet. Finish the Document Parsing module before indexing attachments into the knowledge graph.",
+      "knowledgeGraphDisabled": "The knowledge graph is currently disabled. Enable and configure it from System Setup first.",
+      "knowledgeGraphIncomplete": "The knowledge graph is missing required runtime settings. Open System Setup and complete its connection details and model bindings first."
     }
   },
   "tags": {
@@ -280,6 +500,8 @@
       "assistantTargetsDesc": "Manage reusable workflow and agent executables in one place",
       "systemAiBehaviors": "System AI Behaviors",
       "systemAiBehaviorsDesc": "Configure which workflow or agent powers built-in system AI behaviors like weekly and monthly reports",
+      "systemSetup": "System Setup",
+      "systemSetupDesc": "Maintain runtime capabilities like object storage, knowledge graph, parsing, and automation",
       "assistantWorkflows": "Assistant Workflows",
       "assistantWorkflowsDesc": "Manage reusable workflow executables",
       "assistantAgents": "Assistant Agents",

@@ -29,7 +29,7 @@ export function InitializationGate({ children }: { children: ReactNode }) {
   const statusQuery = useInitializationStatusQuery()
   const isInitializationRoute = location.pathname.startsWith('/initialize')
 
-  if (statusQuery.isLoading) {
+  if (statusQuery.isLoading && !statusQuery.data && !isInitializationRoute) {
     return (
       <FullScreenState
         title={t('initialization.loadingTitle')}
@@ -38,7 +38,7 @@ export function InitializationGate({ children }: { children: ReactNode }) {
     )
   }
 
-  if (statusQuery.isError || !statusQuery.data) {
+  if ((statusQuery.isError || !statusQuery.data) && !isInitializationRoute) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-50 px-6">
         <div className="max-w-md rounded-[28px] border border-red-100 bg-white p-8 shadow-sm">
@@ -61,6 +61,10 @@ export function InitializationGate({ children }: { children: ReactNode }) {
         </div>
       </div>
     )
+  }
+
+  if (!statusQuery.data) {
+    return <>{children}</>
   }
 
   if (!statusQuery.data.initialized && !isInitializationRoute) {

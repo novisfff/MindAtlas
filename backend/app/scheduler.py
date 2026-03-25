@@ -7,8 +7,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import text
 
-from app.config import get_settings
 from app.database import SessionLocal
+from app.system_settings.runtime_config_service import resolve_runtime_automation_config
 
 logger = logging.getLogger(__name__)
 
@@ -79,8 +79,8 @@ def generate_monthly_report_job():
 
 def setup_scheduler():
     """Setup and start the scheduler."""
-    settings = get_settings()
-    if not settings.scheduler_enabled:
+    automation_config = resolve_runtime_automation_config()
+    if not automation_config.scheduler_enabled:
         logger.info("Scheduler disabled")
         return
 

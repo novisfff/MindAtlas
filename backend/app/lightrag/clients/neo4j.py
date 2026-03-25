@@ -4,6 +4,8 @@ from __future__ import annotations
 from functools import lru_cache
 import logging
 
+from app.system_settings.runtime_config_service import resolve_runtime_knowledge_graph_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,19 +24,15 @@ def get_neo4j_driver():
     Raises:
         Neo4jClientError: If Neo4j is not configured or connection fails
     """
-    from app.config import get_settings
+    config = resolve_runtime_knowledge_graph_config()
+    if not config.enabled:
+        raise Neo4jClientError("Knowledge graph is not enabled")
+    if not config.configured:
+        raise Neo4jClientError("Knowledge graph configuration is incomplete")
 
-    settings = get_settings()
-
-    if not settings.lightrag_enabled:
-        raise Neo4jClientError("LightRAG is not enabled (LIGHTRAG_ENABLED=false)")
-
-    uri = settings.neo4j_uri.strip()
-    user = settings.neo4j_user.strip()
-    password = settings.neo4j_password.strip()
-
-    if not uri or not user:
-        raise Neo4jClientError("Neo4j URI or user is not configured")
+    uri = config.neo4j_uri.strip()
+    user = config.neo4j_user.strip()
+    password = config.neo4j_password.strip()
 
     try:
         from neo4j import GraphDatabase

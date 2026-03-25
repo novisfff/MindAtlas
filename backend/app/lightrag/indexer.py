@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import logging
 
-from app.config import get_settings
 from app.lightrag.errors import LightRagConfigError, LightRagDependencyError, LightRagNotEnabledError
 from app.lightrag.manager import get_rag
 from app.lightrag.types import IndexRequest, IndexResult
+from app.system_settings.runtime_config_service import resolve_runtime_knowledge_graph_config
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +44,9 @@ class Indexer:
                 detail=f"invalid op: {req.op}",
             )
 
-        settings = get_settings()
-        if not settings.lightrag_enabled:
-            return IndexResult(ok=True, retryable=False, detail="skipped: LIGHTRAG_ENABLED=false")
+        knowledge_graph_config = resolve_runtime_knowledge_graph_config()
+        if not knowledge_graph_config.enabled:
+            return IndexResult(ok=True, retryable=False, detail="skipped: knowledge graph disabled")
 
         logger.info(
             "indexer init start (outbox_id=%s entry_id=%s op=%s attempts=%s)",
@@ -110,9 +110,9 @@ class Indexer:
         """
         from app.lightrag.source_ids import build_attachment_doc_id, build_attachment_file_path
 
-        settings = get_settings()
-        if not settings.lightrag_enabled:
-            return IndexResult(ok=True, retryable=False, detail="skipped: LIGHTRAG_ENABLED=false")
+        knowledge_graph_config = resolve_runtime_knowledge_graph_config()
+        if not knowledge_graph_config.enabled:
+            return IndexResult(ok=True, retryable=False, detail="skipped: knowledge graph disabled")
 
         try:
             rag = get_rag()
@@ -153,9 +153,9 @@ class Indexer:
     def delete_attachment(self, *, attachment_id: str) -> IndexResult:
         from app.lightrag.source_ids import build_attachment_doc_id
 
-        settings = get_settings()
-        if not settings.lightrag_enabled:
-            return IndexResult(ok=True, retryable=False, detail="skipped: LIGHTRAG_ENABLED=false")
+        knowledge_graph_config = resolve_runtime_knowledge_graph_config()
+        if not knowledge_graph_config.enabled:
+            return IndexResult(ok=True, retryable=False, detail="skipped: knowledge graph disabled")
 
         try:
             rag = get_rag()
