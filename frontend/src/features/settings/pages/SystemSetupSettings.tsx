@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Bot, BrainCircuit, FileType2, Languages, Loader2, Network, Settings2, Sparkles } from 'lucide-react'
+import { ArrowLeft, Bot, BrainCircuit, FileType2, Languages, Loader2, Network, Settings2, Sparkles } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { useAppStore } from '@/stores/app-store'
@@ -28,6 +28,28 @@ interface CoreSummaryCard {
   description: string
   icon: typeof Languages
   path?: string
+}
+
+function getModuleSummary(
+  module: RuntimeStatusCard,
+  groupKey: RuntimeConfigGroupKey,
+  t: (key: string) => string
+) {
+  if (groupKey === 'knowledge_graph') {
+    const knowledgeGraph = module as RuntimeKnowledgeGraphConfigResponse
+    if (!knowledgeGraph.enabled) {
+      return t('systemSetup.detailPages.lightrag.notStartedSummary')
+    }
+  }
+
+  if (groupKey === 'document_parsing') {
+    const documentParsing = module as RuntimeDocumentParsingConfigResponse
+    if (!documentParsing.workerEnabled) {
+      return t('systemSetup.detailPages.docling.notStartedSummary')
+    }
+  }
+
+  return module.effectiveSummary
 }
 
 export function SystemSetupSettingsPage() {
@@ -121,9 +143,14 @@ export function SystemSetupSettingsPage() {
   return (
     <div className="mx-auto max-w-5xl space-y-8">
       <div className="space-y-3">
-        <div className="inline-flex rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">
-          {t('systemSetup.eyebrow')}
-        </div>
+        <button
+          type="button"
+          onClick={() => navigate('/settings')}
+          className="inline-flex items-center gap-2 text-sm text-slate-500 transition hover:text-slate-900"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          {t('common.back')}
+        </button>
         <div className="space-y-2">
           <h1 className="text-3xl font-semibold tracking-tight text-slate-900">
             {t('systemSetup.title')}
@@ -190,6 +217,7 @@ export function SystemSetupSettingsPage() {
           {runtimeModules.map((module) => {
             const current = moduleMap[module.groupKey]
             const detailRoute = moduleDetailRoutes[module.groupKey]
+            const summary = getModuleSummary(current, module.groupKey, t)
             return (
               <section key={module.groupKey} className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="space-y-4">
@@ -197,7 +225,7 @@ export function SystemSetupSettingsPage() {
                   <div className="space-y-2">
                     <h2 className="text-lg font-semibold text-slate-900">{module.title}</h2>
                     <p className="text-sm leading-6 text-slate-600">{module.description}</p>
-                    <p className="text-sm leading-6 text-slate-500">{current.effectiveSummary}</p>
+                    <p className="text-sm leading-6 text-slate-500">{summary}</p>
                   </div>
                   <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 px-4 py-4 text-sm leading-6 text-slate-600">
                     {t('systemSetup.managedHint')}

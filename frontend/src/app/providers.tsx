@@ -25,12 +25,8 @@ function SystemLocaleBootstrap() {
         if (cancelled) return
 
         if (!initialization.initialized) {
-          if (initialization.locale !== useAppStore.getState().locale) {
-            setLocale(initialization.locale, { manual: false })
-          }
-          if (i18n.language !== initialization.locale) {
-            await i18n.changeLanguage(initialization.locale)
-          }
+          // During initialization, the wizard owns the temporary locale choice.
+          // Do not snap the UI back to the backend fallback locale on refresh.
           return
         }
 

@@ -600,8 +600,8 @@ function buildRuntimeConfigPayload(
   if (knowledgeGraphEnabled && (rerankModel || rerankHost || rerankApiKey) && rerankRequestFormat) {
     knowledgeGraphPayload.rerankRequestFormat = rerankRequestFormat
   }
-  if (ocrConfigEnabled && ocrLangs && ocrLangs !== 'auto') {
-    documentParsingPayload.ocrLangs = ocrLangs
+  if (ocrConfigEnabled) {
+    documentParsingPayload.ocrLangs = ocrLangs || 'auto'
   }
   if (pictureDescriptionEnabled !== undefined) {
     documentParsingPayload.pictureDescriptionEnabled = pictureDescriptionEnabled
