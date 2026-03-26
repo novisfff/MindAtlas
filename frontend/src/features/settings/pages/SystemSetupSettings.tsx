@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Bot, FileType2, Languages, Loader2, Network, Settings2, Sparkles } from 'lucide-react'
+import { Bot, BrainCircuit, FileType2, Languages, Loader2, Network, Settings2, Sparkles } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { useAppStore } from '@/stores/app-store'
@@ -21,6 +21,15 @@ type RuntimeStatusCard =
   | RuntimeDocumentParsingConfigResponse
   | RuntimeAutomationConfigResponse
 
+interface CoreSummaryCard {
+  key: string
+  title: string
+  value: string
+  description: string
+  icon: typeof Languages
+  path?: string
+}
+
 export function SystemSetupSettingsPage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
@@ -33,6 +42,31 @@ export function SystemSetupSettingsPage() {
     bindingsQuery.data?.workflowCopilot?.llmModel?.name,
     bindingsQuery.data?.lightrag?.llmModel?.name,
   ].filter(Boolean)
+  const coreCards: CoreSummaryCard[] = [
+    {
+      key: 'language',
+      title: t('systemSetup.core.language'),
+      value: locale === 'zh' ? '中文' : 'English',
+      description: t('systemSetup.core.languageHint'),
+      icon: Languages,
+    },
+    {
+      key: 'bindings',
+      title: t('systemSetup.core.modelBindings'),
+      value: bindingSummary.length ? bindingSummary.join(' / ') : t('initialization.review.emptyValue'),
+      description: t('systemSetup.core.modelBindingsHint'),
+      icon: Bot,
+      path: '/settings/ai-providers',
+    },
+    {
+      key: 'entryTypes',
+      title: t('systemSetup.core.entryTypes'),
+      value: t('systemSetup.core.entryTypesValue'),
+      description: t('systemSetup.core.entryTypesHint'),
+      icon: FileType2,
+      path: '/settings/entry-types',
+    },
+  ]
 
   const runtimeModules = useMemo(
     () => [
@@ -59,6 +93,11 @@ export function SystemSetupSettingsPage() {
     ],
     [t]
   )
+  const moduleDetailRoutes: Partial<Record<RuntimeConfigGroupKey, string>> = {
+    automation: '/settings/automation',
+    knowledge_graph: '/settings/lightrag',
+    document_parsing: '/settings/docling',
+  }
 
   if (runtimeConfigQuery.isLoading) {
     return (
@@ -96,58 +135,42 @@ export function SystemSetupSettingsPage() {
       </div>
 
       <div className="grid gap-4 md:grid-cols-3">
-        <button
-          type="button"
-          onClick={() => navigate('/settings/ai-providers')}
-          className="rounded-[24px] border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
-        >
-          <div className="flex items-start gap-4">
-            <div className="rounded-2xl bg-slate-100 p-3 text-slate-700">
-              <Languages className="h-5 w-5" />
+        {coreCards.map((card) => {
+          const content = (
+            <div className="flex items-start gap-4">
+              <div className="rounded-2xl bg-slate-100 p-3 text-slate-700">
+                <card.icon className="h-5 w-5" />
+              </div>
+              <div className="space-y-2">
+                <p className="text-sm text-slate-500">{card.title}</p>
+                <p className="text-base font-semibold text-slate-900">{card.value}</p>
+                <p className="text-sm leading-6 text-slate-600">{card.description}</p>
+              </div>
             </div>
-            <div className="space-y-2">
-              <p className="text-sm text-slate-500">{t('systemSetup.core.language')}</p>
-              <p className="text-base font-semibold text-slate-900">{locale === 'zh' ? '中文' : 'English'}</p>
-              <p className="text-sm leading-6 text-slate-600">{t('systemSetup.core.languageHint')}</p>
-            </div>
-          </div>
-        </button>
+          )
 
-        <button
-          type="button"
-          onClick={() => navigate('/settings/ai-providers')}
-          className="rounded-[24px] border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
-        >
-          <div className="flex items-start gap-4">
-            <div className="rounded-2xl bg-slate-100 p-3 text-slate-700">
-              <Bot className="h-5 w-5" />
-            </div>
-            <div className="space-y-2">
-              <p className="text-sm text-slate-500">{t('systemSetup.core.modelBindings')}</p>
-              <p className="text-base font-semibold text-slate-900">
-                {bindingSummary.length ? bindingSummary.join(' / ') : t('initialization.review.emptyValue')}
-              </p>
-              <p className="text-sm leading-6 text-slate-600">{t('systemSetup.core.modelBindingsHint')}</p>
-            </div>
-          </div>
-        </button>
+          if (card.path) {
+            return (
+              <button
+                key={card.key}
+                type="button"
+                onClick={() => navigate(card.path!)}
+                className="rounded-[24px] border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
+              >
+                {content}
+              </button>
+            )
+          }
 
-        <button
-          type="button"
-          onClick={() => navigate('/settings/entry-types')}
-          className="rounded-[24px] border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
-        >
-          <div className="flex items-start gap-4">
-            <div className="rounded-2xl bg-slate-100 p-3 text-slate-700">
-              <FileType2 className="h-5 w-5" />
+          return (
+            <div
+              key={card.key}
+              className="rounded-[24px] border border-slate-200 bg-white p-5 text-left shadow-sm"
+            >
+              {content}
             </div>
-            <div className="space-y-2">
-              <p className="text-sm text-slate-500">{t('systemSetup.core.entryTypes')}</p>
-              <p className="text-base font-semibold text-slate-900">{t('systemSetup.core.entryTypesValue')}</p>
-              <p className="text-sm leading-6 text-slate-600">{t('systemSetup.core.entryTypesHint')}</p>
-            </div>
-          </div>
-        </button>
+          )
+        })}
       </div>
 
       <div className="rounded-[28px] border border-slate-200 bg-slate-50/70 p-5">
@@ -166,6 +189,7 @@ export function SystemSetupSettingsPage() {
         <div className="grid gap-4 md:grid-cols-2">
           {runtimeModules.map((module) => {
             const current = moduleMap[module.groupKey]
+            const detailRoute = moduleDetailRoutes[module.groupKey]
             return (
               <section key={module.groupKey} className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="space-y-4">
@@ -178,6 +202,16 @@ export function SystemSetupSettingsPage() {
                   <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 px-4 py-4 text-sm leading-6 text-slate-600">
                     {t('systemSetup.managedHint')}
                   </div>
+                  {detailRoute ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => navigate(detailRoute)}
+                      className="rounded-2xl"
+                    >
+                      {t('systemSetup.actions.openDetails')}
+                    </Button>
+                  ) : null}
                 </div>
               </section>
             )
@@ -201,9 +235,9 @@ export function SystemSetupSettingsPage() {
             </div>
 
             <div className="flex flex-wrap items-center gap-3">
-              <Button type="button" variant="outline" onClick={() => navigate('/settings/ai-providers')} className="rounded-2xl">
-                <Bot className="h-4 w-4" />
-                {t('systemSetup.actions.openAiProviders')}
+              <Button type="button" variant="outline" onClick={() => navigate('/settings/assistant-skills')} className="rounded-2xl">
+                <BrainCircuit className="h-4 w-4" />
+                {t('systemSetup.actions.openAiSkills')}
               </Button>
               <Button type="button" variant="outline" onClick={() => navigate('/settings/system-ai-behaviors')} className="rounded-2xl">
                 <Sparkles className="h-4 w-4" />

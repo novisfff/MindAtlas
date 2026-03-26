@@ -208,7 +208,7 @@ function createEmptyAutomationDraft(): RuntimeAutomationDraft {
     groupKey: 'automation',
     configured: false,
     source: 'default',
-    restartRequired: true,
+    restartRequired: false,
     hasSecrets: false,
     effectiveSummary: '',
     schedulerEnabled: false,

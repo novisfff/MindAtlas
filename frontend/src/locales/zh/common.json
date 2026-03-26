@@ -137,6 +137,7 @@
     },
     "validation": {
       "discover": "请先填写可用的 Base URL 和 API Key",
+      "completeField": "请先完成{{field}}",
       "step1": "请先选择系统语言",
       "step2": "请先查看系统简介后继续",
       "step3": "请先完成 AI 服务和大模型配置",
@@ -233,6 +234,7 @@
       "advancedDescription": "这里继续补充 Embedding、摘要语言和 Rerank 等逻辑配置，Docker 已接管的服务地址和开关不需要在这里重复填写。",
       "lightragLocaleLabel": "LightRAG 摘要语言",
       "lightragLocaleHint": "初始化时可以在这里单独设置；初始化完成后将固定下来，后续不支持再修改。",
+      "lightragEmbeddingHint": "LightRAG Embedding 模型也需要在初始化时确定；初始化完成后将固定下来，后续不支持再修改。",
       "discoverTitle": "测试连接并发现模型",
       "discoverDescription": "如果服务支持标准模型列表接口，我们会自动拉取可选模型；拉取失败时你仍然可以手动填写。",
       "discoverAction": "测试并发现模型",
@@ -274,6 +276,20 @@
         "docling": {
           "description": "配置 Docling 在解析附件时使用的 OCR 语言等行为。",
           "empty": "当前部署下 Docling 没有额外可调项，系统会直接沿用部署默认值。"
+        },
+        "automation": {
+          "description": "控制系统后台调度器是否自动执行周报、月报等定时任务。",
+          "note": "关闭后只会停止自动调度，手动触发周报和月报生成仍然可用。",
+          "jobs": {
+            "weekly": {
+              "title": "周报自动生成",
+              "schedule": "每周一 00:00（UTC）执行"
+            },
+            "monthly": {
+              "title": "月报自动生成",
+              "schedule": "每月 1 日 00:10（UTC）执行"
+            }
+          }
         }
       },
       "embeddingProvider": {
@@ -308,10 +324,13 @@
         "binding": "默认绑定范围",
         "lightrag": "LightRAG",
         "docling": "Docling",
+        "automation": "自动化调度",
         "entryTypes": "记录类型数量",
         "advancedAi": "高级 AI 配置",
         "rerank": "Rerank"
       },
+      "automationTitle": "自动化任务摘要",
+      "automationNote": "开启后系统会自动执行周报和月报等后台任务；关闭后只停止自动调度，手动生成周报和月报仍然可用。",
       "capabilitiesTitle": "能力配置摘要",
       "capabilitiesDescription": "这些能力可以使用应用配置、沿用环境默认值，或继续保持跳过状态。",
       "noteTitle": "部署能力会自动接管",
@@ -320,7 +339,7 @@
   },
   "systemSetup": {
     "eyebrow": "系统总览",
-    "title": "System Setup",
+    "title": "系统设置",
     "description": "在这里集中查看系统基础设置和部署能力状态。Docker Compose 部署会自动接管对象存储、知识图谱、文档解析和后台调度等服务，通常不需要手动填写运行时参数。",
     "runtimeTitle": "部署能力状态",
     "runtimeDescription": "以下能力默认由 Docker Compose 提供并接管。这里主要用于查看当前状态，而不是手动重新配置它们。",
@@ -357,7 +376,9 @@
       "collapse": "收起",
       "validate": "测试连接",
       "save": "保存模块",
-      "openAiProviders": "前往 AI 服务"
+      "openAiProviders": "前往 AI 服务",
+      "openAiSkills": "前往 AI 技能",
+      "openDetails": "查看详情"
     },
     "messages": {
       "saved": "模块配置已保存",
@@ -379,20 +400,20 @@
       },
       "storage": {
         "endpoint": {
-          "label": "MinIO Endpoint",
+          "label": "MinIO 地址",
           "placeholder": "例如 https://minio.example.com"
         },
         "bucket": {
-          "label": "Bucket",
+          "label": "存储桶",
           "placeholder": "例如 mindatlas"
         },
         "accessKey": {
-          "label": "Access Key",
-          "placeholder": "输入新的 Access Key"
+          "label": "访问密钥",
+          "placeholder": "输入新的访问密钥"
         },
         "secretKey": {
-          "label": "Secret Key",
-          "placeholder": "输入新的 Secret Key"
+          "label": "私有密钥",
+          "placeholder": "输入新的私有密钥"
         },
         "secure": {
           "label": "使用 HTTPS",
@@ -418,7 +439,7 @@
           "label": "Neo4j URI"
         },
         "neo4jDatabase": {
-          "label": "Neo4j Database"
+          "label": "Neo4j 数据库"
         },
         "neo4jUser": {
           "label": "Neo4j 用户名"
@@ -428,11 +449,11 @@
           "placeholder": "输入新的 Neo4j 密码"
         },
         "workspace": {
-          "label": "LightRAG Workspace",
+          "label": "LightRAG 工作区",
           "placeholder": "例如 mindatlas"
         },
         "graphStorage": {
-          "label": "Graph Storage"
+          "label": "图谱存储"
         },
         "summaryLanguage": {
           "label": "摘要语言",
@@ -451,8 +472,8 @@
           "placeholder": "例如 https://api.openai.com/v1"
         },
         "embeddingApiKey": {
-          "label": "Embedding API Key",
-          "placeholder": "输入单独的 Embedding Key"
+          "label": "Embedding API 密钥",
+          "placeholder": "输入单独的 Embedding 密钥"
         },
         "advanced": {
           "title": "Rerank 高级配置",
@@ -463,11 +484,11 @@
           "placeholder": "例如 bge-reranker-v2-m3"
         },
         "rerankHost": {
-          "label": "Rerank Host"
+          "label": "Rerank 服务地址"
         },
         "rerankApiKey": {
-          "label": "Rerank API Key",
-          "placeholder": "输入新的 Rerank Key"
+          "label": "Rerank API 密钥",
+          "placeholder": "输入新的 Rerank 密钥"
         },
         "rerankRequestFormat": {
           "label": "请求格式"
@@ -498,11 +519,11 @@
           "placeholder": "例如 gpt-4.1-mini"
         },
         "pictureDescriptionApiKey": {
-          "label": "图片描述 API Key",
-          "placeholder": "输入新的图片描述 Key"
+          "label": "图片描述 API 密钥",
+          "placeholder": "输入新的图片描述密钥"
         },
         "pictureDescriptionPrompt": {
-          "label": "图片描述 Prompt",
+          "label": "图片描述提示词",
           "placeholder": "说明希望模型如何描述图片内容"
         },
         "pictureDescriptionTimeoutSec": {
@@ -517,11 +538,69 @@
           "label": "启用后台调度器",
           "description": "关闭后，周报、月报等依赖后台计划任务的能力将不会自动执行。"
         },
-        "note": "这项配置会立即持久化，但后台独立进程可能需要重新加载后才会完全生效。"
+        "note": "当前实例会立即生效；如果你部署了多个后端实例，其它实例可能仍需要后续重载或重启。"
+      }
+    },
+    "detailPages": {
+      "effectiveSummary": "当前生效摘要",
+      "lockedBadge": "初始化锁定",
+      "status": {
+        "started": "已启动",
+        "notStarted": "未启动"
+      },
+      "lightrag": {
+        "sections": {
+          "runtime": "图谱运行配置",
+          "embedding": "Embedding",
+          "rerank": "Rerank 配置"
+        },
+        "runtimeHint": "这里只保留运行中仍需要调整的 LightRAG 配置项；连接和存储方式由部署环境统一管理。",
+        "embeddingHint": "Embedding 模型、语言和 Host 会在初始化阶段确定；初始化完成后这里保持只读。",
+        "summaryLanguageLocked": "这个值会在初始化阶段确定，初始化完成后保持只读。",
+        "embeddingModelLocked": "这个 Embedding 模型会在初始化阶段确定，初始化完成后保持只读。",
+        "embeddingHostLocked": "这个 Embedding Host 会在初始化阶段确定。如果当时为空，只允许后续补填一次；一旦保存后就会锁定。",
+        "rerankHint": "只有在你部署了独立 rerank 服务时，才需要填写这一组配置。",
+        "rerankToggleLabel": "启用独立 Rerank 服务",
+        "rerankToggleDescription": "只有在你确实部署了单独的 rerank 服务时才需要开启。",
+        "deploymentManaged": "LightRAG 是否启动、Neo4j 连接以及图存储后端由 Docker Compose 或环境配置决定，初始化完成后不在这里修改。",
+        "unavailableTitle": "LightRAG 当前未启动",
+        "unavailableDescription": "请先确认部署时已经开启 LightRAG，并检查相关容器和默认模型绑定是否正常；在未启动前，这里的运行配置不会生效。",
+        "notStartedSummary": "LightRAG 未启动"
+      },
+      "docling": {
+        "sections": {
+          "ocr": "OCR",
+          "pictureDescription": "图片描述"
+        },
+        "ocrHint": "OCR 开关和语言可以在 Docling worker 已启动后继续调整。",
+        "pictureDescriptionHint": "图片描述会在当前 Docling worker 运行时按这里的配置调用外部模型服务。",
+        "deploymentManaged": "Docling worker 是否启动由 Docker Compose 或环境配置决定。未启动时，下面的 OCR 与图片描述配置不会生效。",
+        "unavailableTitle": "Docling 当前未启动",
+        "unavailableDescription": "请先确认部署时已经开启 Docling worker，并检查相关容器状态；在 worker 未启动前，这里的配置不可用。",
+        "notStartedSummary": "Docling 未启动"
+      },
+      "automation": {
+        "applyHint": "在单实例部署下，保存后当前实例会立即启用或停止后台调度；多实例部署下，其它实例可能需要后续重载或重启。",
+        "jobsDescription": "当前后台调度器会影响以下系统内置自动化任务。",
+        "manualHint": "关闭后台调度器后，只会停止自动执行；周报和月报的手动生成接口仍然可以继续使用。",
+        "sections": {
+          "scheduler": "调度器开关",
+          "jobs": "当前系统任务"
+        },
+        "jobs": {
+          "weekly": {
+            "title": "周报自动生成",
+            "schedule": "每周一 00:00（UTC）执行"
+          },
+          "monthly": {
+            "title": "月报自动生成",
+            "schedule": "每月 1 日 00:10（UTC）执行"
+          }
+        }
       }
     },
     "emptyStates": {
-      "openSetup": "前往 System Setup",
+      "openSetup": "前往系统设置",
       "storageTitle": "附件上传尚不可用",
       "storageUnconfigured": "附件服务暂未就绪，请先检查 Docker Compose 中的对象存储服务是否正常运行。",
       "documentParsingUnavailable": "文档解析服务暂未就绪；如需把附件索引进知识图谱，请检查 `parse-worker` 服务和附件解析相关容器日志。",
@@ -569,6 +648,8 @@
       "contentSectionDesc": "管理内容结构、标签和基础组织方式。",
       "aiSection": "AI 与自动化",
       "aiSectionDesc": "集中配置模型、工具、技能、智能体以及系统内置 AI 行为。",
+      "runtimeSection": "运行能力",
+      "runtimeSectionDesc": "集中查看 Docker Compose 接管的系统能力，并分别配置 LightRAG、Docling、自动化任务等运行时设置。",
       "entryTypes": "记录类型",
       "entryTypesDesc": "管理内容类型、图标和属性",
       "tags": "标签",
@@ -583,7 +664,13 @@
       "assistantTargetsDesc": "统一管理可复用的 Workflow 与 Agent 执行体",
       "systemAiBehaviors": "系统 AI 行为",
       "systemAiBehaviorsDesc": "配置周报、月报等系统内置 AI 行为实际走哪个 Workflow 或 Agent",
-      "systemSetup": "System Setup",
+      "lightRag": "LightRAG",
+      "lightRagDesc": "查看 LightRAG 运行状态，并维护初始化后仍允许调整的配置项",
+      "docling": "Docling",
+      "doclingDesc": "查看 Docling worker 状态，并维护 OCR 与图片描述相关配置",
+      "automation": "自动化任务",
+      "automationDesc": "管理后台调度器开关，并查看当前会自动执行的系统任务",
+      "systemSetup": "系统设置",
       "systemSetupDesc": "查看系统基础设置与 Docker Compose 接管的服务状态",
       "assistantWorkflows": "助手工作流",
       "assistantWorkflowsDesc": "管理可复用的工作流执行体",

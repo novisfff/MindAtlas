@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 from tests._db import make_session
@@ -378,6 +379,33 @@ class SystemInitializationServiceTests(unittest.TestCase):
         self.assertNotIn("rerankApiKey", knowledge_graph_setting.value_json)
         self.assertIsNotNone(document_parsing_setting)
         self.assertEqual(document_parsing_setting.value_json["ocrLangs"], "zh,en")
+
+    def test_initialize_system_persists_automation_toggle_explicitly(self) -> None:
+        from app.system_settings.initialization_service import SystemInitializationService
+        from app.system_settings.models import AppSetting
+        from app.system_settings.schemas import RuntimeConfigPayloadRequest
+
+        request = self._make_request(locale="zh")
+        request.runtime_config = RuntimeConfigPayloadRequest.model_validate(
+            {
+                "automation": {
+                    "schedulerEnabled": False,
+                },
+            }
+        )
+
+        with patch("app.system_settings.initialization_service.sync_scheduler") as sync_scheduler_mock:
+            SystemInitializationService(self.db).initialize_system(request)
+
+        automation_setting = (
+            self.db.query(AppSetting)
+            .filter(AppSetting.key == "runtime_automation_config")
+            .first()
+        )
+
+        self.assertIsNotNone(automation_setting)
+        self.assertEqual(automation_setting.value_json["schedulerEnabled"], False)
+        sync_scheduler_mock.assert_called_once()
 
     def test_initialize_system_rolls_back_on_invalid_provider_url(self) -> None:
         from app.ai_registry.models import AiCredential

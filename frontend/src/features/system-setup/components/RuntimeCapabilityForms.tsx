@@ -28,27 +28,29 @@ export interface RuntimeDocumentParsingDraft extends RuntimeDocumentParsingConfi
 
 export interface RuntimeAutomationDraft extends RuntimeAutomationConfigResponse {}
 
-const FIELD_CLASSNAME =
+export const FIELD_CLASSNAME =
   'h-11 w-full rounded-2xl border border-slate-200 bg-white px-4 text-sm text-slate-900 shadow-sm outline-none transition focus:border-slate-900/50 focus:ring-4 focus:ring-slate-900/5'
-const TEXTAREA_CLASSNAME =
+export const TEXTAREA_CLASSNAME =
   'w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm outline-none transition focus:border-slate-900/50 focus:ring-4 focus:ring-slate-900/5'
 
-function Label({ children }: { children: ReactNode }) {
+export function Label({ children }: { children: ReactNode }) {
   return <label className="text-sm font-medium text-slate-800">{children}</label>
 }
 
-function InputField({
+export function InputField({
   label,
   value,
   onChange,
   placeholder,
   type = 'text',
+  disabled = false,
 }: {
   label: string
   value: string
   onChange: (value: string) => void
   placeholder?: string
   type?: string
+  disabled?: boolean
 }) {
   return (
     <div className="space-y-2">
@@ -59,23 +61,26 @@ function InputField({
         onChange={(event) => onChange(event.target.value)}
         className={FIELD_CLASSNAME}
         placeholder={placeholder}
+        disabled={disabled}
       />
     </div>
   )
 }
 
-function TextareaField({
+export function TextareaField({
   label,
   value,
   onChange,
   placeholder,
   rows = 4,
+  disabled = false,
 }: {
   label: string
   value: string
   onChange: (value: string) => void
   placeholder?: string
   rows?: number
+  disabled?: boolean
 }) {
   return (
     <div className="space-y-2">
@@ -86,21 +91,24 @@ function TextareaField({
         onChange={(event) => onChange(event.target.value)}
         className={TEXTAREA_CLASSNAME}
         placeholder={placeholder}
+        disabled={disabled}
       />
     </div>
   )
 }
 
-function ToggleCard({
+export function ToggleCard({
   label,
   description,
   checked,
   onCheckedChange,
+  disabled = false,
 }: {
   label: string
   description: string
   checked: boolean
   onCheckedChange: (checked: boolean) => void
+  disabled?: boolean
 }) {
   return (
     <div className="flex items-start justify-between gap-4 rounded-[24px] border border-slate-200 bg-slate-50/80 px-4 py-4">
@@ -108,12 +116,12 @@ function ToggleCard({
         <p className="text-sm font-semibold text-slate-900">{label}</p>
         <p className="text-sm leading-6 text-slate-600">{description}</p>
       </div>
-      <Switch checked={checked} onCheckedChange={onCheckedChange} />
+      <Switch checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} />
     </div>
   )
 }
 
-function SecretHint({
+export function SecretHint({
   value,
   state,
   hint,

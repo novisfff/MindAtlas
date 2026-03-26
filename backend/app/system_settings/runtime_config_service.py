@@ -28,12 +28,18 @@ from app.system_settings.schemas import (
     RuntimeStorageConfigResponse,
     SecretFieldStateResponse,
 )
-from app.system_settings.service import get_system_language_name, normalize_system_locale, resolve_system_locale
+from app.system_settings.service import (
+    get_default_system_locale,
+    get_system_language_name,
+    normalize_system_locale,
+    resolve_system_locale,
+)
 
 RUNTIME_STORAGE_CONFIG_KEY = "runtime_storage_config"
 RUNTIME_KNOWLEDGE_GRAPH_CONFIG_KEY = "runtime_knowledge_graph_config"
 RUNTIME_DOCUMENT_PARSING_CONFIG_KEY = "runtime_document_parsing_config"
 RUNTIME_AUTOMATION_CONFIG_KEY = "runtime_automation_config"
+SYSTEM_INITIALIZATION_STATE_KEY = "system_initialization_state"
 
 RUNTIME_SOURCE_APP = "app_config"
 RUNTIME_SOURCE_ENV = "environment_default"
@@ -225,6 +231,16 @@ class SystemRuntimeConfigService:
             return {}, False
         return dict(setting.value_json), True
 
+    def _initialization_state_payload(self) -> dict[str, Any] | None:
+        setting = self._get_setting(SYSTEM_INITIALIZATION_STATE_KEY)
+        if setting is None or not isinstance(setting.value_json, dict):
+            return None
+        return dict(setting.value_json)
+
+    def _is_system_initialized(self) -> bool:
+        payload = self._initialization_state_payload()
+        return bool(payload and payload.get("initialized") is True)
+
     def _upsert_setting_payload(self, key: str, payload: dict[str, Any] | None) -> None:
         existing = self._get_setting(key)
         normalized_payload = payload or {}
@@ -240,6 +256,201 @@ class SystemRuntimeConfigService:
         else:
             existing.value_json = normalized_payload
         self.db.flush()
+
+    def _apply_text_payload_updates(
+        self,
+        payload: dict[str, Any],
+        request: Any,
+        mapping: dict[str, str],
+    ) -> None:
+        for payload_key, request_field in mapping.items():
+            if request_field not in request.model_fields_set:
+                continue
+            normalized = _normalize_optional_text(getattr(request, request_field))
+            if normalized is None:
+                payload.pop(payload_key, None)
+            else:
+                payload[payload_key] = normalized
+
+    def _apply_secret_payload_update(
+        self,
+        payload: dict[str, Any],
+        request: Any,
+        *,
+        request_field: str,
+        encrypted_key: str,
+        hint_key: str,
+    ) -> None:
+        if request_field not in request.model_fields_set:
+            return
+
+        normalized = _normalize_optional_text(getattr(request, request_field))
+        if normalized is None:
+            payload.pop(encrypted_key, None)
+            payload.pop(hint_key, None)
+            return
+
+        payload[encrypted_key] = encrypt_api_key(normalized)
+        payload[hint_key] = api_key_hint(normalized)
+
+    def _assert_locked_field_change_allowed(
+        self,
+        *,
+        field_name: str,
+        current_value: str | None,
+        requested_value: str | None,
+    ) -> None:
+        normalized_current = _normalize_optional_text(current_value)
+        normalized_requested = _normalize_optional_text(requested_value)
+        if normalized_current is None:
+            return
+        if normalized_requested == normalized_current:
+            return
+        raise ApiException(
+            status_code=409,
+            code=40985,
+            message=f"{field_name} is locked after initialization and cannot be changed",
+        )
+
+    def _assert_fully_locked_text_field(
+        self,
+        *,
+        field_name: str,
+        current_value: str | None,
+        requested_value: str | None,
+    ) -> None:
+        normalized_current = _normalize_optional_text(current_value)
+        normalized_requested = _normalize_optional_text(requested_value)
+        if normalized_requested == normalized_current:
+            return
+        raise ApiException(
+            status_code=409,
+            code=40985,
+            message=f"{field_name} is locked after initialization and cannot be changed",
+        )
+
+    def _assert_fully_locked_boolean_field(
+        self,
+        *,
+        field_name: str,
+        current_value: bool,
+        requested_value: bool | None,
+    ) -> None:
+        if requested_value is None:
+            return
+        if bool(requested_value) == bool(current_value):
+            return
+        raise ApiException(
+            status_code=409,
+            code=40985,
+            message=f"{field_name} is locked after initialization and cannot be changed",
+        )
+
+    def _assert_locked_embedding_selection_allowed(
+        self,
+        request: RuntimeKnowledgeGraphConfigRequest,
+        current: RuntimeKnowledgeGraphConfigResponse,
+    ) -> None:
+        current_model_id = str(current.embedding_model_id) if current.embedding_model_id else None
+        current_model_name = _normalize_optional_text(current.embedding_model_name)
+
+        if "embedding_model_id" in request.model_fields_set:
+            requested_model_id = str(request.embedding_model_id) if request.embedding_model_id else None
+            if requested_model_id != current_model_id:
+                raise ApiException(
+                    status_code=409,
+                    code=40986,
+                    message="embeddingModelId is locked after initialization and cannot be changed",
+                )
+
+        if "embedding_model_name" in request.model_fields_set:
+            requested_model_name = _normalize_optional_text(request.embedding_model_name)
+            if requested_model_name != current_model_name:
+                raise ApiException(
+                    status_code=409,
+                    code=40987,
+                    message="embeddingModelName is locked after initialization and cannot be changed",
+                )
+
+    def _assert_initialized_knowledge_graph_lock(
+        self,
+        request: RuntimeKnowledgeGraphConfigRequest,
+    ) -> None:
+        if not self._is_system_initialized():
+            return
+
+        resolved_current, current = self._resolve_knowledge_graph_internal()
+
+        self._assert_fully_locked_boolean_field(
+            field_name="enabled",
+            current_value=current.enabled,
+            requested_value=request.enabled,
+        )
+
+        if "neo4j_uri" in request.model_fields_set:
+            self._assert_fully_locked_text_field(
+                field_name="neo4jUri",
+                current_value=current.neo4j_uri,
+                requested_value=request.neo4j_uri,
+            )
+
+        if "neo4j_user" in request.model_fields_set:
+            self._assert_fully_locked_text_field(
+                field_name="neo4jUser",
+                current_value=current.neo4j_user,
+                requested_value=request.neo4j_user,
+            )
+
+        if "neo4j_password" in request.model_fields_set:
+            self._assert_fully_locked_text_field(
+                field_name="neo4jPassword",
+                current_value=resolved_current.neo4j_password,
+                requested_value=request.neo4j_password,
+            )
+
+        if "neo4j_database" in request.model_fields_set:
+            self._assert_fully_locked_text_field(
+                field_name="neo4jDatabase",
+                current_value=current.neo4j_database,
+                requested_value=request.neo4j_database,
+            )
+
+        if "graph_storage" in request.model_fields_set:
+            self._assert_fully_locked_text_field(
+                field_name="graphStorage",
+                current_value=current.graph_storage,
+                requested_value=request.graph_storage,
+            )
+
+        if "summary_language" in request.model_fields_set:
+            self._assert_locked_field_change_allowed(
+                field_name="summaryLanguage",
+                current_value=current.summary_language,
+                requested_value=request.summary_language,
+            )
+
+        if "embedding_host" in request.model_fields_set:
+            self._assert_locked_field_change_allowed(
+                field_name="embeddingHost",
+                current_value=resolved_current.embedding_host,
+                requested_value=request.embedding_host,
+            )
+
+        self._assert_locked_embedding_selection_allowed(request, current)
+
+    def _assert_initialized_document_parsing_lock(
+        self,
+        request: RuntimeDocumentParsingConfigRequest,
+    ) -> None:
+        if not self._is_system_initialized():
+            return
+
+        _resolved_current, current = self._resolve_document_parsing_internal()
+        self._assert_fully_locked_boolean_field(
+            field_name="workerEnabled",
+            current_value=current.worker_enabled,
+            requested_value=request.worker_enabled,
+        )
 
     def _secret_state(
         self,
@@ -654,13 +865,26 @@ class SystemRuntimeConfigService:
         )
         return resolved, response
 
-    def _resolve_automation_internal(self) -> tuple[ResolvedAutomationRuntimeConfig, RuntimeAutomationConfigResponse]:
+    def _resolve_automation_internal(
+        self,
+        locale: str | None = None,
+    ) -> tuple[ResolvedAutomationRuntimeConfig, RuntimeAutomationConfigResponse]:
         settings = get_settings()
         payload, has_app_payload = self._get_setting_payload(RUNTIME_AUTOMATION_CONFIG_KEY)
         scheduler_enabled = bool(payload["schedulerEnabled"]) if "schedulerEnabled" in payload else bool(settings.scheduler_enabled)
-        configured = bool(scheduler_enabled)
+        configured = bool(has_app_payload or scheduler_enabled)
         source = RUNTIME_SOURCE_APP if has_app_payload else (RUNTIME_SOURCE_ENV if scheduler_enabled else RUNTIME_SOURCE_DEFAULT)
-        summary = "Scheduler enabled" if scheduler_enabled else "Disabled"
+        if locale is not None:
+            resolved_locale = normalize_system_locale(locale) or get_default_system_locale()
+        else:
+            try:
+                resolved_locale = resolve_system_locale(self.db)
+            except Exception:
+                resolved_locale = get_default_system_locale()
+        if resolved_locale == "en":
+            summary = "Scheduler enabled" if scheduler_enabled else "Disabled"
+        else:
+            summary = "已启用后台调度器" if scheduler_enabled else "未启用"
         resolved = ResolvedAutomationRuntimeConfig(
             scheduler_enabled=scheduler_enabled,
             configured=configured,
@@ -670,7 +894,7 @@ class SystemRuntimeConfigService:
             group_key="automation",
             configured=configured,
             source=source,
-            restart_required=True,
+            restart_required=False,
             has_secrets=False,
             effective_summary=summary,
             scheduler_enabled=scheduler_enabled,
@@ -681,7 +905,7 @@ class SystemRuntimeConfigService:
         _resolved_storage, storage = self._resolve_storage_internal()
         _resolved_kg, knowledge_graph = self._resolve_knowledge_graph_internal()
         _resolved_doc, document_parsing = self._resolve_document_parsing_internal()
-        _resolved_automation, automation = self._resolve_automation_internal()
+        _resolved_automation, automation = self._resolve_automation_internal(locale=locale)
         return RuntimeConfigResponse(
             storage=storage,
             knowledge_graph=knowledge_graph,
@@ -716,26 +940,28 @@ class SystemRuntimeConfigService:
     def update_storage_config(self, request: RuntimeStorageConfigRequest, *, commit: bool = True) -> RuntimeStorageConfigResponse:
         payload, _ = self._get_setting_payload(RUNTIME_STORAGE_CONFIG_KEY)
 
-        endpoint = _normalize_optional_text(request.endpoint)
-        if request.endpoint is not None:
-            if endpoint is None:
-                payload.pop("endpoint", None)
-            else:
-                payload["endpoint"] = endpoint
-
-        if request.access_key is not None and _normalize_optional_text(request.access_key):
-            payload["accessKeyEncrypted"] = encrypt_api_key(request.access_key)
-            payload["accessKeyHint"] = api_key_hint(request.access_key)
-        if request.secret_key is not None and _normalize_optional_text(request.secret_key):
-            payload["secretKeyEncrypted"] = encrypt_api_key(request.secret_key)
-            payload["secretKeyHint"] = api_key_hint(request.secret_key)
-
-        bucket = _normalize_optional_text(request.bucket)
-        if request.bucket is not None:
-            if bucket is None:
-                payload.pop("bucket", None)
-            else:
-                payload["bucket"] = bucket
+        self._apply_text_payload_updates(
+            payload,
+            request,
+            {
+                "endpoint": "endpoint",
+                "bucket": "bucket",
+            },
+        )
+        self._apply_secret_payload_update(
+            payload,
+            request,
+            request_field="access_key",
+            encrypted_key="accessKeyEncrypted",
+            hint_key="accessKeyHint",
+        )
+        self._apply_secret_payload_update(
+            payload,
+            request,
+            request_field="secret_key",
+            encrypted_key="secretKeyEncrypted",
+            hint_key="secretKeyHint",
+        )
 
         if request.secure is not None:
             payload["secure"] = bool(request.secure)
@@ -759,42 +985,49 @@ class SystemRuntimeConfigService:
         default_embedding_name: str | None = None,
     ) -> RuntimeKnowledgeGraphConfigResponse:
         payload, _ = self._get_setting_payload(RUNTIME_KNOWLEDGE_GRAPH_CONFIG_KEY)
+        self._assert_initialized_knowledge_graph_lock(request)
 
-        mapping = {
-            "neo4jUri": request.neo4j_uri,
-            "neo4jUser": request.neo4j_user,
-            "neo4jDatabase": request.neo4j_database,
-            "workspace": request.workspace,
-            "graphStorage": request.graph_storage,
-            "summaryLanguage": request.summary_language,
-            "embeddingHost": request.embedding_host,
-            "rerankModel": request.rerank_model,
-            "rerankHost": request.rerank_host,
-            "rerankRequestFormat": request.rerank_request_format,
-        }
-        for key, raw_value in mapping.items():
-            if raw_value is None:
-                continue
-            normalized = _normalize_optional_text(raw_value)
-            if normalized is None:
-                payload.pop(key, None)
-            else:
-                payload[key] = normalized
+        self._apply_text_payload_updates(
+            payload,
+            request,
+            {
+                "neo4jUri": "neo4j_uri",
+                "neo4jUser": "neo4j_user",
+                "neo4jDatabase": "neo4j_database",
+                "workspace": "workspace",
+                "graphStorage": "graph_storage",
+                "summaryLanguage": "summary_language",
+                "embeddingHost": "embedding_host",
+                "rerankModel": "rerank_model",
+                "rerankHost": "rerank_host",
+                "rerankRequestFormat": "rerank_request_format",
+            },
+        )
 
         if request.enabled is not None:
             payload["enabled"] = bool(request.enabled)
 
-        if request.neo4j_password is not None and _normalize_optional_text(request.neo4j_password):
-            payload["neo4jPasswordEncrypted"] = encrypt_api_key(request.neo4j_password)
-            payload["neo4jPasswordHint"] = api_key_hint(request.neo4j_password)
-
-        if request.embedding_api_key is not None and _normalize_optional_text(request.embedding_api_key):
-            payload["embeddingApiKeyEncrypted"] = encrypt_api_key(request.embedding_api_key)
-            payload["embeddingApiKeyHint"] = api_key_hint(request.embedding_api_key)
-
-        if request.rerank_api_key is not None and _normalize_optional_text(request.rerank_api_key):
-            payload["rerankApiKeyEncrypted"] = encrypt_api_key(request.rerank_api_key)
-            payload["rerankApiKeyHint"] = api_key_hint(request.rerank_api_key)
+        self._apply_secret_payload_update(
+            payload,
+            request,
+            request_field="neo4j_password",
+            encrypted_key="neo4jPasswordEncrypted",
+            hint_key="neo4jPasswordHint",
+        )
+        self._apply_secret_payload_update(
+            payload,
+            request,
+            request_field="embedding_api_key",
+            encrypted_key="embeddingApiKeyEncrypted",
+            hint_key="embeddingApiKeyHint",
+        )
+        self._apply_secret_payload_update(
+            payload,
+            request,
+            request_field="rerank_api_key",
+            encrypted_key="rerankApiKeyEncrypted",
+            hint_key="rerankApiKeyHint",
+        )
 
         self._upsert_setting_payload(RUNTIME_KNOWLEDGE_GRAPH_CONFIG_KEY, payload)
         self._apply_knowledge_graph_model_selection(
@@ -809,22 +1042,19 @@ class SystemRuntimeConfigService:
 
     def update_document_parsing_config(self, request: RuntimeDocumentParsingConfigRequest, *, commit: bool = True) -> RuntimeDocumentParsingConfigResponse:
         payload, _ = self._get_setting_payload(RUNTIME_DOCUMENT_PARSING_CONFIG_KEY)
+        self._assert_initialized_document_parsing_lock(request)
 
-        mapping = {
-            "ocrLangs": request.ocr_langs,
-            "pictureDescriptionUrl": request.picture_description_url,
-            "pictureDescriptionModel": request.picture_description_model,
-            "pictureDescriptionPrompt": request.picture_description_prompt,
-            "pictureDescriptionParamsJson": request.picture_description_params_json,
-        }
-        for key, raw_value in mapping.items():
-            if raw_value is None:
-                continue
-            normalized = _normalize_optional_text(raw_value)
-            if normalized is None:
-                payload.pop(key, None)
-            else:
-                payload[key] = normalized
+        self._apply_text_payload_updates(
+            payload,
+            request,
+            {
+                "ocrLangs": "ocr_langs",
+                "pictureDescriptionUrl": "picture_description_url",
+                "pictureDescriptionModel": "picture_description_model",
+                "pictureDescriptionPrompt": "picture_description_prompt",
+                "pictureDescriptionParamsJson": "picture_description_params_json",
+            },
+        )
 
         bool_mapping = {
             "workerEnabled": request.worker_enabled,
@@ -841,9 +1071,13 @@ class SystemRuntimeConfigService:
             payload["maxFileSizeMb"] = int(request.max_file_size_mb)
         if request.max_pdf_pages is not None:
             payload["maxPdfPages"] = int(request.max_pdf_pages)
-        if request.picture_description_api_key is not None and _normalize_optional_text(request.picture_description_api_key):
-            payload["pictureDescriptionApiKeyEncrypted"] = encrypt_api_key(request.picture_description_api_key)
-            payload["pictureDescriptionApiKeyHint"] = api_key_hint(request.picture_description_api_key)
+        self._apply_secret_payload_update(
+            payload,
+            request,
+            request_field="picture_description_api_key",
+            encrypted_key="pictureDescriptionApiKeyEncrypted",
+            hint_key="pictureDescriptionApiKeyHint",
+        )
 
         self._upsert_setting_payload(RUNTIME_DOCUMENT_PARSING_CONFIG_KEY, payload)
         if commit:
@@ -859,6 +1093,9 @@ class SystemRuntimeConfigService:
         if commit:
             self.db.commit()
             clear_runtime_config_caches()
+            from app.scheduler import sync_scheduler
+
+            sync_scheduler()
         return self.get_runtime_config_response().automation
 
     def update_group(self, group_key: str, request_data: dict[str, Any]) -> RuntimeConfigResponse:

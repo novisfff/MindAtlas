@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { FileType, Tags, ChevronRight, Bot, Wrench, BrainCircuit, Network, Sparkles, Settings2 } from 'lucide-react'
+import { FileType, Tags, ChevronRight, Bot, Wrench, BrainCircuit, Network, Sparkles, Settings2, Clock3 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 export function SettingsPage() {
@@ -72,6 +72,36 @@ export function SettingsPage() {
       path: '/settings/system-ai-behaviors',
       color: 'text-amber-500',
       bgColor: 'bg-amber-500/10'
+    }
+  ]
+
+  const runtimeCategories = [
+    {
+      id: 'lightrag',
+      titleKey: 'pages.settings.lightRag',
+      descKey: 'pages.settings.lightRagDesc',
+      icon: Network,
+      path: '/settings/lightrag',
+      color: 'text-cyan-600',
+      bgColor: 'bg-cyan-500/10'
+    },
+    {
+      id: 'docling',
+      titleKey: 'pages.settings.docling',
+      descKey: 'pages.settings.doclingDesc',
+      icon: Wrench,
+      path: '/settings/docling',
+      color: 'text-emerald-600',
+      bgColor: 'bg-emerald-500/10'
+    },
+    {
+      id: 'automation',
+      titleKey: 'pages.settings.automation',
+      descKey: 'pages.settings.automationDesc',
+      icon: Clock3,
+      path: '/settings/automation',
+      color: 'text-amber-600',
+      bgColor: 'bg-amber-500/10'
     },
     {
       id: 'system-setup',
@@ -98,6 +128,13 @@ export function SettingsPage() {
       descKey: 'pages.settings.aiSectionDesc',
       gridClassName: 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3',
       categories: aiCategories
+    },
+    {
+      id: 'runtime',
+      titleKey: 'pages.settings.runtimeSection',
+      descKey: 'pages.settings.runtimeSectionDesc',
+      gridClassName: 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3',
+      categories: runtimeCategories
     }
   ]
 

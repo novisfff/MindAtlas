@@ -22,7 +22,8 @@ from app.system_settings.initialization_defaults_loader import (
     load_initialization_relation_type_defaults,
 )
 from app.system_settings.models import AppSetting
-from app.system_settings.runtime_config_service import SystemRuntimeConfigService
+from app.scheduler import sync_scheduler
+from app.system_settings.runtime_config_service import SystemRuntimeConfigService, clear_runtime_config_caches
 from app.system_settings.schemas import (
     InitializeSystemRequest,
     InitializationCompletionResponse,
@@ -561,6 +562,8 @@ class SystemInitializationService:
 
             self._upsert_initialization_state(locale=locale, source="user")
             self.db.commit()
+            clear_runtime_config_caches()
+            sync_scheduler()
         except ApiException:
             self.db.rollback()
             raise

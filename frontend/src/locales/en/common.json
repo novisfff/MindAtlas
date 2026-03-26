@@ -138,6 +138,7 @@
     },
     "validation": {
       "discover": "Please fill in a valid Base URL and API key first.",
+      "completeField": "Please complete {{field}} first.",
       "step1": "Please choose a system language first.",
       "step2": "Please review the system introduction before continuing.",
       "step3": "Please finish the AI provider and model setup first.",
@@ -234,6 +235,7 @@
       "advancedDescription": "Use this area for logical defaults such as embedding, summary language, and rerank. Docker-managed service endpoints and switches stay out of the initialization flow.",
       "lightragLocaleLabel": "LightRAG summary language",
       "lightragLocaleHint": "You can configure it during initialization, but it becomes fixed after setup and cannot be changed later.",
+      "lightragEmbeddingHint": "The LightRAG embedding model must also be decided during initialization and cannot be changed later.",
       "discoverTitle": "Test the connection and discover models",
       "discoverDescription": "If the provider exposes a standard model list endpoint, we'll fetch the available models for you. You can still type one manually if discovery fails.",
       "discoverAction": "Test and discover models",
@@ -285,6 +287,20 @@
         "docling": {
           "description": "Configure OCR behavior and related attachment parsing defaults for Docling.",
           "empty": "Docling has no extra runtime options exposed in this deployment, so it will keep using the deployment defaults."
+        },
+        "automation": {
+          "description": "Control whether the system background scheduler runs weekly reports, monthly reports, and other built-in timed jobs.",
+          "note": "Disabling it only stops automatic scheduling. Manual weekly and monthly generation stays available.",
+          "jobs": {
+            "weekly": {
+              "title": "Weekly report generation",
+              "schedule": "Runs every Monday at 00:00 UTC"
+            },
+            "monthly": {
+              "title": "Monthly report generation",
+              "schedule": "Runs on the 1st day of each month at 00:10 UTC"
+            }
+          }
         }
       },
       "embeddingProvider": {
@@ -319,10 +335,13 @@
         "binding": "Default binding scope",
         "lightrag": "LightRAG",
         "docling": "Docling",
+        "automation": "Automation scheduler",
         "entryTypes": "Entry type count",
         "advancedAi": "Advanced AI defaults",
         "rerank": "Rerank"
       },
+      "automationTitle": "Automation summary",
+      "automationNote": "When enabled, the system will automatically run background jobs such as weekly and monthly reports. When disabled, only automatic scheduling stops; manual weekly and monthly generation still works.",
       "capabilitiesTitle": "Capability summary",
       "capabilitiesDescription": "Each capability can use app config, keep an environment default, or stay skipped for now.",
       "noteTitle": "Deployment services are already wired in",
@@ -368,7 +387,9 @@
       "collapse": "Collapse",
       "validate": "Test connection",
       "save": "Save module",
-      "openAiProviders": "Open AI providers"
+      "openAiProviders": "Open AI providers",
+      "openAiSkills": "Open AI skills",
+      "openDetails": "Open details"
     },
     "messages": {
       "saved": "Module settings saved",
@@ -528,7 +549,65 @@
           "label": "Enable background scheduler",
           "description": "When disabled, weekly reports, monthly reports, and other scheduled background jobs will not run automatically."
         },
-        "note": "This is persisted immediately, but separate background processes may need a reload before the change is fully applied."
+        "note": "The current instance applies this immediately. If you run multiple backend instances, the others may still need a reload or restart."
+      }
+    },
+    "detailPages": {
+      "effectiveSummary": "Current effective summary",
+      "lockedBadge": "Init locked",
+      "status": {
+        "started": "Started",
+        "notStarted": "Not started"
+      },
+      "lightrag": {
+        "sections": {
+          "runtime": "Graph runtime",
+          "embedding": "Embedding",
+          "rerank": "Rerank"
+        },
+        "runtimeHint": "Only the LightRAG settings that still matter at runtime stay editable here. Connection and storage values stay deployment-managed.",
+        "embeddingHint": "The embedding model, summary language, and host are decided during initialization and stay read-only afterward.",
+        "summaryLanguageLocked": "This value was fixed during initialization. After initialization it stays read-only.",
+        "embeddingModelLocked": "This embedding model is decided during initialization and stays read-only afterward.",
+        "embeddingHostLocked": "This embedding host was fixed during initialization. If it was empty you could fill it once, and it is now locked.",
+        "rerankHint": "Only configure this section when you run a dedicated rerank service.",
+        "rerankToggleLabel": "Enable rerank service",
+        "rerankToggleDescription": "Turn this on only when you really run a separate rerank endpoint.",
+        "deploymentManaged": "Whether LightRAG is started, how Neo4j is connected, and which graph storage backend is used are controlled by Docker Compose or environment settings and are not edited here after initialization.",
+        "unavailableTitle": "LightRAG is not started",
+        "unavailableDescription": "Enable LightRAG in deployment first, then check the related containers and default model bindings. Until the service is started, the runtime settings on this page stay unavailable.",
+        "notStartedSummary": "LightRAG not started"
+      },
+      "docling": {
+        "sections": {
+          "ocr": "OCR",
+          "pictureDescription": "Image description"
+        },
+        "ocrHint": "You can still tune OCR after the Docling worker is running.",
+        "pictureDescriptionHint": "Image description uses the external model service configured below while the current Docling worker is running.",
+        "deploymentManaged": "Whether the Docling worker is started is controlled by Docker Compose or environment settings. When the worker is not started, the OCR and image-description settings below cannot take effect.",
+        "unavailableTitle": "Docling is not started",
+        "unavailableDescription": "Start the Docling worker in deployment first and confirm the related containers are healthy. Until then, the configuration on this page stays unavailable.",
+        "notStartedSummary": "Docling not started"
+      },
+      "automation": {
+        "applyHint": "In a single-instance deployment, saving applies the scheduler change immediately on the current instance. In multi-instance deployments, other instances may still need a later reload or restart.",
+        "jobsDescription": "The current background scheduler affects these built-in system jobs.",
+        "manualHint": "Disabling the background scheduler only stops automatic execution. The manual weekly and monthly report generation APIs remain available.",
+        "sections": {
+          "scheduler": "Scheduler toggle",
+          "jobs": "Current system jobs"
+        },
+        "jobs": {
+          "weekly": {
+            "title": "Weekly report generation",
+            "schedule": "Runs every Monday at 00:00 UTC"
+          },
+          "monthly": {
+            "title": "Monthly report generation",
+            "schedule": "Runs on the 1st day of each month at 00:10 UTC"
+          }
+        }
       }
     },
     "emptyStates": {
@@ -580,6 +659,8 @@
       "contentSectionDesc": "Manage content structure, tags, and the core organization settings.",
       "aiSection": "AI & Automation",
       "aiSectionDesc": "Configure models, tools, skills, targets, and built-in system AI behaviors in one place.",
+      "runtimeSection": "Runtime Capabilities",
+      "runtimeSectionDesc": "Review deployment-managed services and separately maintain runtime settings such as LightRAG, Docling, and automation.",
       "entryTypes": "Entry Types",
       "entryTypesDesc": "Manage content types, icons, and properties",
       "tags": "Tags",
@@ -594,6 +675,12 @@
       "assistantTargetsDesc": "Manage reusable workflow and agent executables in one place",
       "systemAiBehaviors": "System AI Behaviors",
       "systemAiBehaviorsDesc": "Configure which workflow or agent powers built-in system AI behaviors like weekly and monthly reports",
+      "lightRag": "LightRAG",
+      "lightRagDesc": "Review LightRAG runtime status and maintain the settings that remain editable after initialization",
+      "docling": "Docling",
+      "doclingDesc": "Review the Docling worker status and maintain OCR and image description settings",
+      "automation": "Automation",
+      "automationDesc": "Manage the background scheduler toggle and review the system jobs it drives automatically",
       "systemSetup": "System Setup",
       "systemSetupDesc": "Review core setup and the status of Docker Compose managed services",
       "assistantWorkflows": "Assistant Workflows",

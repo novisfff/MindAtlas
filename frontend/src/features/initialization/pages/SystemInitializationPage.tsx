@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Clock3,
   Languages,
   Loader2,
   Plus,
@@ -26,6 +27,12 @@ import {
 } from '../store'
 import { useAppStore, type Locale } from '@/stores/app-store'
 import { discoverModelsByKey } from '@/features/ai-providers/api/credentials'
+import {
+  getDefaultLightRagSummaryLanguage,
+  isKnowledgeGraphRerankEnabled,
+  validateDocumentParsingCapability,
+  validateKnowledgeGraphCapability,
+} from '@/features/system-setup/runtimeRules'
 
 const STEP_KEYS = ['language', 'intro', 'ai', 'entryTypes', 'capabilities', 'review'] as const
 
@@ -535,12 +542,7 @@ function OptionButtonGroup({
 }
 
 function resolveRerankMode(knowledgeGraph: ReturnType<typeof useInitializationWizardStore.getState>['runtimeConfigDraft']['knowledgeGraph']) {
-  return knowledgeGraph.rerankModel.trim() ||
-    knowledgeGraph.rerankHost.trim() ||
-    knowledgeGraph.rerankApiKey.trim() ||
-    knowledgeGraph.rerankApiKeyState.configured
-    ? 'enabled'
-    : 'disabled'
+  return isKnowledgeGraphRerankEnabled(knowledgeGraph) ? 'enabled' : 'disabled'
 }
 
 function buildRuntimeConfigPayload(
@@ -549,6 +551,9 @@ function buildRuntimeConfigPayload(
 ) {
   const knowledgeGraphPayload: Record<string, unknown> = {}
   const documentParsingPayload: Record<string, unknown> = {}
+  const automationPayload: Record<string, unknown> = {
+    schedulerEnabled: Boolean(state.runtimeConfigDraft.automation.schedulerEnabled),
+  }
 
   const knowledgeGraphEnabled = state.runtimeConfigDraft.knowledgeGraph.enabled
   const ocrConfigEnabled =
@@ -614,14 +619,16 @@ function buildRuntimeConfigPayload(
     documentParsingPayload.pictureDescriptionPrompt = pictureDescriptionPrompt
   }
 
-  const payload: Record<string, unknown> = {}
+  const payload: Record<string, unknown> = {
+    automation: automationPayload,
+  }
   if (Object.keys(knowledgeGraphPayload).length) {
     payload.knowledgeGraph = knowledgeGraphPayload
   }
   if (Object.keys(documentParsingPayload).length) {
     payload.documentParsing = documentParsingPayload
   }
-  return Object.keys(payload).length ? payload : undefined
+  return payload
 }
 
 export function SystemInitializationPage() {
@@ -674,6 +681,7 @@ export function SystemInitializationPage() {
   }, [defaultsQuery.data, hydrateCapabilityDefaults, locale, mergeDefaultEntryTypes])
 
   const knowledgeGraphEnabled = runtimeConfigDraft.knowledgeGraph.enabled
+  const automationEnabled = runtimeConfigDraft.automation.schedulerEnabled
   const doclingVisible =
     runtimeConfigDraft.documentParsing.workerEnabled ||
     runtimeConfigDraft.documentParsing.pictureDescriptionEnabled
@@ -732,10 +740,34 @@ export function SystemInitializationPage() {
     }
   }
 
-  const canContinueFromCurrentStep = () => {
-    if (step === 0) return true
+  const getCapabilitiesValidationError = () => {
+    return (
+      validateKnowledgeGraphCapability(
+        runtimeConfigDraft.knowledgeGraph,
+        {
+          fieldLabel: (key) => t(key),
+          completeField: (field) => t('initialization.validation.completeField', { field }),
+        },
+        rerankEnabled
+      ) ||
+      validateDocumentParsingCapability(
+        {
+          ...runtimeConfigDraft.documentParsing,
+          ocrEnabled: ocrConfigEnabled,
+          pictureDescriptionEnabled,
+        },
+        {
+          fieldLabel: (key) => t(key),
+          completeField: (field) => t('initialization.validation.completeField', { field }),
+        }
+      )
+    )
+  }
+
+  const getCurrentStepValidationError = () => {
+    if (step === 0) return null
     if (step === 1) {
-      return true
+      return null
     }
     if (step === 2) {
       return Boolean(
@@ -744,16 +776,55 @@ export function SystemInitializationPage() {
         aiCredential.apiKey.trim() &&
         llmModelName.trim()
       )
+        ? null
+        : t('initialization.validation.step3')
     }
     if (step === 3) {
       return entryTypes.length > 0 && entryTypes.every((item) => item.name.trim())
+        ? null
+        : t('initialization.validation.step4')
     }
-    return true
+    if (step === 4) {
+      return getCapabilitiesValidationError()
+    }
+    return null
+  }
+
+  const getInitializationValidationState = () => {
+    if (
+      !aiCredential.name.trim() ||
+      !aiCredential.baseUrl.trim() ||
+      !aiCredential.apiKey.trim() ||
+      !llmModelName.trim()
+    ) {
+      return {
+        step: 2,
+        message: t('initialization.validation.step3'),
+      }
+    }
+
+    if (!(entryTypes.length > 0 && entryTypes.every((item) => item.name.trim()))) {
+      return {
+        step: 3,
+        message: t('initialization.validation.step4'),
+      }
+    }
+
+    const capabilitiesError = getCapabilitiesValidationError()
+    if (capabilitiesError) {
+      return {
+        step: 4,
+        message: capabilitiesError,
+      }
+    }
+
+    return null
   }
 
   const handleNext = () => {
-    if (!canContinueFromCurrentStep()) {
-      toast.error(t(`initialization.validation.step${step + 1}`))
+    const validationError = getCurrentStepValidationError()
+    if (validationError) {
+      toast.error(validationError)
       return
     }
     setStep(step + 1)
@@ -761,6 +832,13 @@ export function SystemInitializationPage() {
 
   const handleFinish = async () => {
     if (step < STEP_KEYS.length - 1) {
+      return
+    }
+
+    const validationState = getInitializationValidationState()
+    if (validationState) {
+      setStep(validationState.step)
+      toast.error(validationState.message)
       return
     }
 
@@ -844,13 +922,19 @@ export function SystemInitializationPage() {
       icon: ShieldCheck,
     },
     {
+      key: 'automation',
+      title: t('initialization.review.cards.automation'),
+      value: automationEnabled ? t('settings.skills.enabledStateOn') : t('settings.skills.enabledStateOff'),
+      icon: Clock3,
+    },
+    {
       key: 'entryTypes',
       title: t('initialization.review.cards.entryTypes'),
       value: String(entryTypes.length),
       icon: Wand2,
     },
   ]
-  const defaultSummaryLanguage = locale === 'zh' ? 'Chinese' : 'English'
+  const defaultSummaryLanguage = getDefaultLightRagSummaryLanguage(locale)
   const summaryLanguageValue =
     runtimeConfigDraft.knowledgeGraph.summaryLanguage.trim() || defaultSummaryLanguage
   const rerankEnabled = rerankMode === 'enabled'
@@ -1069,6 +1153,9 @@ export function SystemInitializationPage() {
               className={FIELD_CLASSNAME}
               placeholder={t('systemSetup.forms.knowledgeGraph.embeddingModelName.placeholder')}
             />
+            <p className="text-xs leading-5 text-slate-500">
+              {t('initialization.ai.lightragEmbeddingHint')}
+            </p>
           </div>
 
           <div className="rounded-[22px] border border-slate-200 bg-slate-50/70 p-4">
@@ -1096,6 +1183,15 @@ export function SystemInitializationPage() {
                   className={FIELD_CLASSNAME}
                   placeholder={t('systemSetup.forms.knowledgeGraph.embeddingApiKey.placeholder')}
                 />
+                {!runtimeConfigDraft.knowledgeGraph.embeddingApiKey.trim() &&
+                runtimeConfigDraft.knowledgeGraph.embeddingApiKeyState.configured ? (
+                  <p className="text-xs leading-5 text-slate-500">
+                    {t('systemSetup.forms.secret.keepExisting')}
+                    {runtimeConfigDraft.knowledgeGraph.embeddingApiKeyState.hint
+                      ? ` (${runtimeConfigDraft.knowledgeGraph.embeddingApiKeyState.hint})`
+                      : ''}
+                  </p>
+                ) : null}
               </div>
             </div>
           </div>
@@ -1161,6 +1257,15 @@ export function SystemInitializationPage() {
                     className={FIELD_CLASSNAME}
                     placeholder={t('systemSetup.forms.knowledgeGraph.rerankApiKey.placeholder')}
                   />
+                  {!runtimeConfigDraft.knowledgeGraph.rerankApiKey.trim() &&
+                  runtimeConfigDraft.knowledgeGraph.rerankApiKeyState.configured ? (
+                    <p className="text-xs leading-5 text-slate-500">
+                      {t('systemSetup.forms.secret.keepExisting')}
+                      {runtimeConfigDraft.knowledgeGraph.rerankApiKeyState.hint
+                        ? ` (${runtimeConfigDraft.knowledgeGraph.rerankApiKeyState.hint})`
+                        : ''}
+                    </p>
+                  ) : null}
                 </div>
 
                 <div className="space-y-2">
@@ -1297,6 +1402,71 @@ export function SystemInitializationPage() {
       </section>
     )
 
+    const renderAutomationSection = () => (
+      <section className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+        <div className="space-y-5">
+          <div className="space-y-2">
+            <h3 className="text-xl font-semibold text-slate-900">
+              {t('pages.settings.automation')}
+            </h3>
+            <p className="text-sm leading-6 text-slate-600">
+              {t('initialization.capabilities.sections.automation.description')}
+            </p>
+          </div>
+
+          <div className="rounded-[22px] border border-slate-200 bg-slate-50/70 p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <p className="text-sm font-semibold text-slate-900">
+                  {t('systemSetup.forms.automation.schedulerEnabled.label')}
+                </p>
+                <p className="text-sm leading-6 text-slate-600">
+                  {t('systemSetup.forms.automation.schedulerEnabled.description')}
+                </p>
+              </div>
+              <OptionButtonGroup
+                value={automationEnabled ? 'enabled' : 'disabled'}
+                onChange={(value) =>
+                  updateRuntimeConfigGroup('automation', {
+                    schedulerEnabled: value === 'enabled',
+                  })
+                }
+                options={[
+                  { value: 'enabled', label: t('settings.skills.enabledStateOn') },
+                  { value: 'disabled', label: t('settings.skills.enabledStateOff') },
+                ]}
+              />
+            </div>
+          </div>
+
+          <div className="rounded-[22px] border border-slate-200 bg-slate-50/60 p-4">
+            <div className="grid gap-3 md:grid-cols-2">
+              {[
+                {
+                  key: 'weekly',
+                  title: t('initialization.capabilities.sections.automation.jobs.weekly.title'),
+                  schedule: t('initialization.capabilities.sections.automation.jobs.weekly.schedule'),
+                },
+                {
+                  key: 'monthly',
+                  title: t('initialization.capabilities.sections.automation.jobs.monthly.title'),
+                  schedule: t('initialization.capabilities.sections.automation.jobs.monthly.schedule'),
+                },
+              ].map((item) => (
+                <div key={item.key} className="rounded-[20px] border border-slate-200 bg-white px-4 py-4 shadow-sm">
+                  <p className="text-sm font-semibold text-slate-900">{item.title}</p>
+                  <p className="mt-1 text-sm leading-6 text-slate-600">{item.schedule}</p>
+                </div>
+              ))}
+            </div>
+            <p className="mt-4 text-sm leading-6 text-slate-600">
+              {t('initialization.capabilities.sections.automation.note')}
+            </p>
+          </div>
+        </div>
+      </section>
+    )
+
     content = (
       <div className="space-y-6">
         <div className="space-y-2">
@@ -1308,21 +1478,21 @@ export function SystemInitializationPage() {
           </p>
         </div>
 
-        {knowledgeGraphEnabled || doclingVisible ? (
-          <div className="space-y-4">
-            {knowledgeGraphEnabled ? renderLightRagSection() : null}
-            {doclingVisible ? renderDoclingSection() : null}
-          </div>
-        ) : (
-          <div className="rounded-[24px] border border-slate-200 bg-white p-6 shadow-sm">
-            <p className="text-sm font-semibold text-slate-900">
-              {t('initialization.capabilities.emptyTitle')}
-            </p>
-            <p className="mt-2 text-sm leading-6 text-slate-600">
-              {t('initialization.capabilities.emptyDescription')}
-            </p>
-          </div>
-        )}
+        <div className="space-y-4">
+          {knowledgeGraphEnabled ? renderLightRagSection() : null}
+          {doclingVisible ? renderDoclingSection() : null}
+          {renderAutomationSection()}
+          {!knowledgeGraphEnabled && !doclingVisible ? (
+            <div className="rounded-[24px] border border-slate-200 bg-white p-6 shadow-sm">
+              <p className="text-sm font-semibold text-slate-900">
+                {t('initialization.capabilities.emptyTitle')}
+              </p>
+              <p className="mt-2 text-sm leading-6 text-slate-600">
+                {t('initialization.capabilities.emptyDescription')}
+              </p>
+            </div>
+          ) : null}
+        </div>
       </div>
     )
   } else {
@@ -1351,6 +1521,33 @@ export function SystemInitializationPage() {
               </div>
             </div>
           ))}
+        </div>
+
+        <div className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-sm font-semibold text-slate-900">
+            {t('initialization.review.automationTitle')}
+          </p>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <div className="rounded-[20px] border border-slate-200 bg-slate-50/70 px-4 py-4">
+              <p className="text-sm font-semibold text-slate-900">
+                {t('initialization.capabilities.sections.automation.jobs.weekly.title')}
+              </p>
+              <p className="mt-1 text-sm leading-6 text-slate-600">
+                {t('initialization.capabilities.sections.automation.jobs.weekly.schedule')}
+              </p>
+            </div>
+            <div className="rounded-[20px] border border-slate-200 bg-slate-50/70 px-4 py-4">
+              <p className="text-sm font-semibold text-slate-900">
+                {t('initialization.capabilities.sections.automation.jobs.monthly.title')}
+              </p>
+              <p className="mt-1 text-sm leading-6 text-slate-600">
+                {t('initialization.capabilities.sections.automation.jobs.monthly.schedule')}
+              </p>
+            </div>
+          </div>
+          <p className="mt-4 text-sm leading-6 text-slate-600">
+            {t('initialization.review.automationNote')}
+          </p>
         </div>
       </div>
     )
