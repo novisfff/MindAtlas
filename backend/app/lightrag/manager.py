@@ -262,7 +262,13 @@ def _resolve_embedding_config(*, llm: _OpenAICompatModelConfig, knowledge_graph_
     env_model, env_host, env_key = _parse_openai_compat_model_spec(os.environ.get("EMBEDDING_MODEL"), label="EMBEDDING_MODEL")
 
     db_cfg = None if source == "env_only" else _try_resolve_db_model_binding(model_type="embedding")
-    model = _first_non_empty(getattr(db_cfg, "model", None), cfg_model, env_model, "text-embedding-3-small")
+    model = _first_non_empty(
+        getattr(knowledge_graph_config, "embedding_model_name", None),
+        getattr(db_cfg, "model", None),
+        cfg_model,
+        env_model,
+        "text-embedding-3-small",
+    )
     base_url = _first_non_empty(
         getattr(knowledge_graph_config, "embedding_host", None),
         getattr(settings, "lightrag_embedding_host", None),
@@ -347,7 +353,11 @@ def _create_and_init_rag():
         working_dir = (getattr(settings, "lightrag_working_dir", "") or "").strip() or "./lightrag_storage"
         workspace = (knowledge_graph_config.workspace or "").strip()
         graph_storage = (knowledge_graph_config.graph_storage or "").strip() or "Neo4JStorage"
-        embedding_dim = int(getattr(settings, "lightrag_embedding_dim", 1536) or 1536)
+        embedding_dim = int(
+            getattr(knowledge_graph_config, "embedding_dim", 0)
+            or getattr(settings, "lightrag_embedding_dim", 1536)
+            or 1536
+        )
 
         logger.info(
             "lightrag init config neo4j_uri=%s graph_storage=%s working_dir=%s workspace=%s llm_model=%s llm_base=%s embedding_model=%s embedding_base=%s embedding_dim=%s",

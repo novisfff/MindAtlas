@@ -20,6 +20,7 @@ import {
 } from '@/features/system-setup'
 import {
   getDefaultLightRagSummaryLanguage,
+  isLightRagEmbeddingDimLocked,
   isKnowledgeGraphRerankEnabled,
   isLightRagEmbeddingHostLocked,
   isLightRagEmbeddingModelLocked,
@@ -140,6 +141,9 @@ export function LightRagSettingsPage() {
     : false
   const embeddingHostLocked = draft
     ? isLightRagEmbeddingHostLocked(initialized, draft.embeddingHost)
+    : false
+  const embeddingDimLocked = draft
+    ? isLightRagEmbeddingDimLocked(initialized, draft.embeddingDim)
     : false
 
   const patchDraft = (patch: Partial<LightRagDraft>) => {
@@ -383,6 +387,17 @@ export function LightRagSettingsPage() {
                   />
                 )}
 
+                {embeddingDimLocked ? (
+                  <LockedField
+                    label={t('systemSetup.forms.knowledgeGraph.embeddingDim.label')}
+                    value={draft.embeddingDim ? String(draft.embeddingDim) : '-'}
+                    hint={t('systemSetup.detailPages.lightrag.embeddingDimLocked')}
+                    lockLabel={t('systemSetup.detailPages.lockedBadge')}
+                  />
+                ) : null}
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
                 <div className="space-y-2">
                   <InputField
                     type="password"

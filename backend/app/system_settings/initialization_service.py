@@ -11,7 +11,6 @@ from app.ai_registry.models import AiComponentBinding, AiCredential, AiModel
 from app.assistant_config.service import AssistantConfigService
 from app.common.exceptions import ApiException
 from app.common.ssrf import validate_url_ssrf
-from app.config import get_settings
 from app.entry.models import Entry
 from app.entry_type.models import EntryType
 from app.relation.models import RelationType
@@ -357,38 +356,6 @@ class SystemInitializationService:
                 self.db.flush()
             binding.llm_model_id = model_id
 
-    def _bind_default_embedding_model(self, model_id: Any) -> None:
-        binding = (
-            self.db.query(AiComponentBinding)
-            .filter(AiComponentBinding.component == "lightrag")
-            .first()
-        )
-        if binding is None:
-            binding = AiComponentBinding(component="lightrag")
-            self.db.add(binding)
-            self.db.flush()
-        binding.embedding_model_id = model_id
-
-    def _create_and_bind_default_embedding_model(self, *, credential_id: Any, model_name: str | None = None) -> AiModel:
-        settings = get_settings()
-        resolved_model_name = str(model_name or "").strip() or str(settings.lightrag_embedding_model or "").strip() or "text-embedding-3-small"
-        existing = (
-            self.db.query(AiModel)
-            .filter(
-                AiModel.credential_id == credential_id,
-                AiModel.name == resolved_model_name,
-                AiModel.model_type == "embedding",
-            )
-            .first()
-        )
-        model = existing or self._create_ai_model(
-            credential_id=credential_id,
-            model_name=resolved_model_name,
-            model_type="embedding",
-        )
-        self._bind_default_embedding_model(model.id)
-        return model
-
     def _next_custom_code(self, used_codes: set[str]) -> str:
         index = 1
         while True:
@@ -523,16 +490,6 @@ class SystemInitializationService:
                 model_name=request.llm_model.name.strip(),
             )
             self._bind_llm_model(llm_model.id)
-            requested_embedding_name = None
-            if request.runtime_config is not None and request.runtime_config.knowledge_graph is not None:
-                requested_embedding_name = str(
-                    request.runtime_config.knowledge_graph.embedding_model_name or ""
-                ).strip() or None
-            effective_embedding_name = requested_embedding_name or None
-            embedding_model = self._create_and_bind_default_embedding_model(
-                credential_id=credential.id,
-                model_name=effective_embedding_name,
-            )
             self._align_entry_types(locale, request)
             self._align_relation_types(locale)
 
@@ -551,7 +508,6 @@ class SystemInitializationService:
                     runtime_service.update_knowledge_graph_config(
                         request.runtime_config.knowledge_graph,
                         commit=False,
-                        default_embedding_name=embedding_model.name,
                     )
 
                 if request.runtime_config.document_parsing is not None:

@@ -236,6 +236,7 @@
       "lightragLocaleLabel": "LightRAG summary language",
       "lightragLocaleHint": "You can configure it during initialization, but it becomes fixed after setup and cannot be changed later.",
       "lightragEmbeddingHint": "The LightRAG embedding model must also be decided during initialization and cannot be changed later.",
+      "lightragEmbeddingDimHint": "The LightRAG embedding dimension must also be decided during initialization and cannot be changed later.",
       "discoverTitle": "Test the connection and discover models",
       "discoverDescription": "If the provider exposes a standard model list endpoint, we'll fetch the available models for you. You can still type one manually if discovery fails.",
       "discoverAction": "Test and discover models",
@@ -482,6 +483,10 @@
           "label": "Embedding service URL",
           "placeholder": "For example https://api.openai.com/v1"
         },
+        "embeddingDim": {
+          "label": "Embedding dimension",
+          "placeholder": "For example 1536"
+        },
         "embeddingApiKey": {
           "label": "Embedding API key",
           "placeholder": "Enter a dedicated embedding key"
@@ -570,6 +575,7 @@
         "summaryLanguageLocked": "This value was fixed during initialization. After initialization it stays read-only.",
         "embeddingModelLocked": "This embedding model is decided during initialization and stays read-only afterward.",
         "embeddingHostLocked": "This embedding host was fixed during initialization. If it was empty you could fill it once, and it is now locked.",
+        "embeddingDimLocked": "This embedding dimension is decided during initialization and stays read-only afterward.",
         "rerankHint": "Only configure this section when you run a dedicated rerank service.",
         "rerankToggleLabel": "Enable rerank service",
         "rerankToggleDescription": "Turn this on only when you really run a separate rerank endpoint.",

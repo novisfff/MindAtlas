@@ -93,6 +93,14 @@ class RuntimeConfigServiceTests(unittest.TestCase):
             )
         self.assertEqual(enabled_error.exception.code, 40985)
 
+        with self.assertRaises(ApiException) as embedding_dim_error:
+            service.update_knowledge_graph_config(
+                RuntimeKnowledgeGraphConfigRequest.model_validate(
+                    {"embeddingDim": current.embedding_dim + 1}
+                )
+            )
+        self.assertEqual(embedding_dim_error.exception.code, 40985)
+
         with self.assertRaises(ApiException) as neo4j_error:
             service.update_knowledge_graph_config(
                 RuntimeKnowledgeGraphConfigRequest.model_validate(

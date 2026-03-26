@@ -46,6 +46,7 @@ export interface RuntimeKnowledgeGraphConfigResponse extends RuntimeConfigModule
   embeddingModelId?: string | null
   embeddingModelName?: string | null
   embeddingHost: string
+  embeddingDim: number | null
   rerankModel: string
   rerankHost: string
   rerankRequestFormat: string
@@ -110,6 +111,7 @@ export interface RuntimeKnowledgeGraphConfigRequest {
   embeddingModelId?: string | null
   embeddingModelName?: string
   embeddingHost?: string
+  embeddingDim?: number | null
   embeddingApiKey?: string
   rerankModel?: string
   rerankHost?: string

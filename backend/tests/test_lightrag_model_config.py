@@ -111,6 +111,33 @@ class LightRagModelConfigTests(unittest.TestCase):
         self.assertEqual(embedding.base_url, "http://emb-runtime/v1")
         self.assertEqual(embedding.api_key, "k-runtime")
 
+    def test_embedding_runtime_config_model_name_overrides_legacy_db_binding(self) -> None:
+        os.environ["LIGHTRAG_LLM_MODEL"] = '{"MODEL":"m1","HOST":"http://llm/v1","KEY":"k1"}'
+        reset_caches()
+
+        llm = _resolve_llm_config()
+
+        with unittest.mock.patch(
+            "app.lightrag.manager._try_resolve_db_model_binding",
+            return_value=SimpleNamespace(
+                model="legacy-embedding-model",
+                base_url="http://legacy/v1",
+                api_key="legacy-key",
+            ),
+        ):
+            embedding = _resolve_embedding_config(
+                llm=llm,
+                knowledge_graph_config=SimpleNamespace(
+                    embedding_model_name="runtime-embedding-model",
+                    embedding_host="http://emb-runtime/v1",
+                    embedding_api_key="k-runtime",
+                ),
+            )
+
+        self.assertEqual(embedding.model, "runtime-embedding-model")
+        self.assertEqual(embedding.base_url, "http://emb-runtime/v1")
+        self.assertEqual(embedding.api_key, "k-runtime")
+
     def test_llm_key_env_overrides_json(self) -> None:
         os.environ["LIGHTRAG_LLM_MODEL"] = '{"MODEL":"m1","HOST":"http://llm/v1","KEY":"k1"}'
         os.environ["LIGHTRAG_LLM_KEY"] = "k-override"

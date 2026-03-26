@@ -565,6 +565,7 @@ function buildRuntimeConfigPayload(
     (locale === 'zh' ? 'Chinese' : 'English')
   const embeddingModelName = (state.runtimeConfigDraft.knowledgeGraph.embeddingModelName || '').trim()
   const embeddingHost = state.runtimeConfigDraft.knowledgeGraph.embeddingHost.trim()
+  const embeddingDim = Number(state.runtimeConfigDraft.knowledgeGraph.embeddingDim || 0)
   const embeddingApiKey = state.runtimeConfigDraft.knowledgeGraph.embeddingApiKey.trim()
   const rerankModel = state.runtimeConfigDraft.knowledgeGraph.rerankModel.trim()
   const rerankHost = state.runtimeConfigDraft.knowledgeGraph.rerankHost.trim()
@@ -584,6 +585,9 @@ function buildRuntimeConfigPayload(
   }
   if (knowledgeGraphEnabled && embeddingHost) {
     knowledgeGraphPayload.embeddingHost = embeddingHost
+  }
+  if (knowledgeGraphEnabled && embeddingDim > 0) {
+    knowledgeGraphPayload.embeddingDim = embeddingDim
   }
   if (knowledgeGraphEnabled && embeddingApiKey) {
     knowledgeGraphPayload.embeddingApiKey = embeddingApiKey
@@ -1159,7 +1163,7 @@ export function SystemInitializationPage() {
           </div>
 
           <div className="rounded-[22px] border border-slate-200 bg-slate-50/70 p-4">
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid gap-4 md:grid-cols-3">
               <div className="space-y-2">
                 <Label>{t('systemSetup.forms.knowledgeGraph.embeddingHost.label')}</Label>
                 <input
@@ -1170,6 +1174,26 @@ export function SystemInitializationPage() {
                   className={FIELD_CLASSNAME}
                   placeholder={t('systemSetup.forms.knowledgeGraph.embeddingHost.placeholder')}
                 />
+              </div>
+
+              <div className="space-y-2">
+                <Label>{t('systemSetup.forms.knowledgeGraph.embeddingDim.label')}</Label>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={runtimeConfigDraft.knowledgeGraph.embeddingDim ?? ''}
+                  onChange={(event) =>
+                    updateRuntimeConfigGroup('knowledge_graph', {
+                      embeddingDim: event.target.value ? Number(event.target.value) : null,
+                    })
+                  }
+                  className={FIELD_CLASSNAME}
+                  placeholder={t('systemSetup.forms.knowledgeGraph.embeddingDim.placeholder')}
+                />
+                <p className="text-xs leading-5 text-slate-500">
+                  {t('initialization.ai.lightragEmbeddingDimHint')}
+                </p>
               </div>
 
               <div className="space-y-2">

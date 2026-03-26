@@ -12,7 +12,7 @@ interface RuntimeValidationMessageFactory {
 
 type KnowledgeGraphValidationDraft = Pick<
   RuntimeKnowledgeGraphConfigResponse,
-  'enabled' | 'embeddingModelId' | 'embeddingModelName' | 'embeddingHost' | 'rerankModel' | 'rerankHost'
+  'enabled' | 'embeddingModelId' | 'embeddingModelName' | 'embeddingHost' | 'embeddingDim' | 'rerankModel' | 'rerankHost'
 > & {
   embeddingApiKey: string
   embeddingApiKeyState: SecretFieldState
@@ -58,6 +58,10 @@ export function isLightRagEmbeddingHostLocked(initialized: boolean, embeddingHos
   return initialized && Boolean((embeddingHost ?? '').trim())
 }
 
+export function isLightRagEmbeddingDimLocked(initialized: boolean, embeddingDim?: number | null) {
+  return initialized && Number((embeddingDim ?? 0)) > 0
+}
+
 export function isKnowledgeGraphRerankEnabled(
   draft: Pick<KnowledgeGraphValidationDraft, 'rerankModel' | 'rerankHost' | 'rerankApiKey' | 'rerankApiKeyState'>
 ) {
@@ -87,6 +91,12 @@ export function validateKnowledgeGraphCapability(
   if (!draft.embeddingHost.trim()) {
     return messages.completeField(
       messages.fieldLabel('systemSetup.forms.knowledgeGraph.embeddingHost.label')
+    )
+  }
+
+  if (!draft.embeddingDim || draft.embeddingDim < 1) {
+    return messages.completeField(
+      messages.fieldLabel('systemSetup.forms.knowledgeGraph.embeddingDim.label')
     )
   }
 

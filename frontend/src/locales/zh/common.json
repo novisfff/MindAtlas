@@ -235,6 +235,7 @@
       "lightragLocaleLabel": "LightRAG 摘要语言",
       "lightragLocaleHint": "初始化时可以在这里单独设置；初始化完成后将固定下来，后续不支持再修改。",
       "lightragEmbeddingHint": "LightRAG Embedding 模型也需要在初始化时确定；初始化完成后将固定下来，后续不支持再修改。",
+      "lightragEmbeddingDimHint": "LightRAG Embedding 向量维度也需要在初始化时确定；初始化完成后将固定下来，后续不支持再修改。",
       "discoverTitle": "测试连接并发现模型",
       "discoverDescription": "如果服务支持标准模型列表接口，我们会自动拉取可选模型；拉取失败时你仍然可以手动填写。",
       "discoverAction": "测试并发现模型",
@@ -471,6 +472,10 @@
           "label": "Embedding 服务地址",
           "placeholder": "例如 https://api.openai.com/v1"
         },
+        "embeddingDim": {
+          "label": "Embedding 向量维度",
+          "placeholder": "例如 1536"
+        },
         "embeddingApiKey": {
           "label": "Embedding API 密钥",
           "placeholder": "输入单独的 Embedding 密钥"
@@ -559,6 +564,7 @@
         "summaryLanguageLocked": "这个值会在初始化阶段确定，初始化完成后保持只读。",
         "embeddingModelLocked": "这个 Embedding 模型会在初始化阶段确定，初始化完成后保持只读。",
         "embeddingHostLocked": "这个 Embedding Host 会在初始化阶段确定。如果当时为空，只允许后续补填一次；一旦保存后就会锁定。",
+        "embeddingDimLocked": "这个 Embedding 向量维度会在初始化阶段确定，初始化完成后保持只读。",
         "rerankHint": "只有在你部署了独立 rerank 服务时，才需要填写这一组配置。",
         "rerankToggleLabel": "启用独立 Rerank 服务",
         "rerankToggleDescription": "只有在你确实部署了单独的 rerank 服务时才需要开启。",

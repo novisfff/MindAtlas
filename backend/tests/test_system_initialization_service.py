@@ -246,7 +246,6 @@ class SystemInitializationServiceTests(unittest.TestCase):
     def test_initialize_system_writes_models_bindings_and_defaults(self) -> None:
         from app.ai_registry.models import AiComponentBinding, AiCredential, AiModel
         from app.assistant_config.models import AssistantSkill, AssistantSystemBehaviorBinding
-        from app.config import get_settings
         from app.entry_type.models import EntryType
         from app.relation.models import RelationType
         from app.system_settings.initialization_service import (
@@ -273,19 +272,15 @@ class SystemInitializationServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(len(credentials), 1)
-        self.assertEqual(len(models), 2)
+        self.assertEqual(len(models), 1)
         self.assertEqual(len(bindings), 3)
         llm_models = [item for item in models if item.model_type == "llm"]
         self.assertEqual(len(llm_models), 1)
         self.assertTrue(all(item.llm_model_id == llm_models[0].id for item in bindings))
         lightrag_binding = next(item for item in bindings if item.component == "lightrag")
         embedding_models = [item for item in models if item.model_type == "embedding"]
-        self.assertEqual(len(embedding_models), 1)
-        expected_embedding_name = (
-            str(get_settings().lightrag_embedding_model or "").strip() or "text-embedding-3-small"
-        )
-        self.assertEqual(embedding_models[0].name, expected_embedding_name)
-        self.assertEqual(lightrag_binding.embedding_model_id, embedding_models[0].id)
+        self.assertEqual(len(embedding_models), 0)
+        self.assertIsNone(lightrag_binding.embedding_model_id)
         self.assertEqual(entry_types["KNOWLEDGE"].name, "Knowledge")
         self.assertIn("CUSTOM_TYPE_1", entry_types)
         self.assertEqual(relation_types["BELONGS_TO"].name, "Belongs To")
@@ -320,6 +315,7 @@ class SystemInitializationServiceTests(unittest.TestCase):
         from app.ai_registry.models import AiComponentBinding, AiModel
         from app.system_settings.initialization_service import SystemInitializationService
         from app.system_settings.models import AppSetting
+        from app.system_settings.runtime_config_service import SystemRuntimeConfigService
         from app.system_settings.schemas import RuntimeConfigPayloadRequest
 
         request = self._make_request(locale="zh")
@@ -329,6 +325,7 @@ class SystemInitializationServiceTests(unittest.TestCase):
                     "summaryLanguage": "Chinese",
                     "embeddingModelName": "text-embedding-3-large",
                     "embeddingHost": "https://embedding.example/v1",
+                    "embeddingDim": 3072,
                     "embeddingApiKey": "embedding-secret-456",
                     "rerankModel": "bge-reranker-v2-m3",
                     "rerankHost": "https://rerank.example/v1",
@@ -362,14 +359,15 @@ class SystemInitializationServiceTests(unittest.TestCase):
             .first()
         )
 
-        self.assertEqual(len(models), 2)
-        self.assertEqual(len(embedding_models), 1)
-        self.assertEqual(embedding_models[0].name, "text-embedding-3-large")
+        self.assertEqual(len(models), 1)
+        self.assertEqual(len(embedding_models), 0)
         self.assertIsNotNone(lightrag_binding)
-        self.assertEqual(lightrag_binding.embedding_model_id, embedding_models[0].id)
+        self.assertIsNone(lightrag_binding.embedding_model_id)
         self.assertIsNotNone(knowledge_graph_setting)
+        self.assertEqual(knowledge_graph_setting.value_json["embeddingModelName"], "text-embedding-3-large")
         self.assertEqual(knowledge_graph_setting.value_json["summaryLanguage"], "Chinese")
         self.assertEqual(knowledge_graph_setting.value_json["embeddingHost"], "https://embedding.example/v1")
+        self.assertEqual(knowledge_graph_setting.value_json["embeddingDim"], 3072)
         self.assertEqual(knowledge_graph_setting.value_json["rerankModel"], "bge-reranker-v2-m3")
         self.assertEqual(knowledge_graph_setting.value_json["rerankHost"], "https://rerank.example/v1")
         self.assertEqual(knowledge_graph_setting.value_json["rerankRequestFormat"], "standard")
@@ -377,6 +375,10 @@ class SystemInitializationServiceTests(unittest.TestCase):
         self.assertNotIn("embeddingApiKey", knowledge_graph_setting.value_json)
         self.assertIn("rerankApiKeyEncrypted", knowledge_graph_setting.value_json)
         self.assertNotIn("rerankApiKey", knowledge_graph_setting.value_json)
+        self.assertEqual(
+            SystemRuntimeConfigService(self.db).get_runtime_config_response().knowledge_graph.embedding_dim,
+            3072,
+        )
         self.assertIsNotNone(document_parsing_setting)
         self.assertEqual(document_parsing_setting.value_json["ocrLangs"], "zh,en")
 

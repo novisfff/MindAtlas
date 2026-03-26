@@ -79,6 +79,7 @@ class ResolvedKnowledgeGraphRuntimeConfig:
     embedding_model_id: Any | None
     embedding_model_name: str | None
     embedding_host: str
+    embedding_dim: int
     embedding_api_key: str
     rerank_model: str
     rerank_host: str
@@ -346,6 +347,23 @@ class SystemRuntimeConfigService:
             message=f"{field_name} is locked after initialization and cannot be changed",
         )
 
+    def _assert_fully_locked_int_field(
+        self,
+        *,
+        field_name: str,
+        current_value: int,
+        requested_value: int | None,
+    ) -> None:
+        if requested_value is None:
+            return
+        if int(requested_value) == int(current_value):
+            return
+        raise ApiException(
+            status_code=409,
+            code=40985,
+            message=f"{field_name} is locked after initialization and cannot be changed",
+        )
+
     def _assert_locked_embedding_selection_allowed(
         self,
         request: RuntimeKnowledgeGraphConfigRequest,
@@ -434,6 +452,13 @@ class SystemRuntimeConfigService:
                 field_name="embeddingHost",
                 current_value=resolved_current.embedding_host,
                 requested_value=request.embedding_host,
+            )
+
+        if "embedding_dim" in request.model_fields_set:
+            self._assert_fully_locked_int_field(
+                field_name="embeddingDim",
+                current_value=resolved_current.embedding_dim,
+                requested_value=request.embedding_dim,
             )
 
         self._assert_locked_embedding_selection_allowed(request, current)
@@ -624,7 +649,6 @@ class SystemRuntimeConfigService:
         request: RuntimeKnowledgeGraphConfigRequest,
         *,
         commit: bool,
-        default_embedding_name: str | None = None,
     ) -> None:
         binding = self._get_binding("lightrag")
 
@@ -636,21 +660,12 @@ class SystemRuntimeConfigService:
                 model_name=request.llm_model_name,
             ).id
 
-        if request.embedding_model_id is not None:
+        if "embedding_model_id" in request.model_fields_set:
             binding.embedding_model_id = request.embedding_model_id
-        elif request.embedding_model_name is not None:
-            binding.embedding_model_id = self._resolve_or_create_model(
-                model_type="embedding",
-                model_name=request.embedding_model_name,
-            ).id
-        elif request.enabled:
-            current_embedding = self._find_model(binding.embedding_model_id)
-            if current_embedding is None:
-                fallback_embedding_name = default_embedding_name or get_settings().lightrag_embedding_model or "text-embedding-3-small"
-                binding.embedding_model_id = self._resolve_or_create_model(
-                    model_type="embedding",
-                    model_name=fallback_embedding_name,
-                ).id
+        elif "embedding_model_name" in request.model_fields_set:
+            # Embedding model selection is runtime-config owned so it can point to
+            # a provider different from the main AI credential.
+            binding.embedding_model_id = None
 
         self.db.flush()
         if commit:
@@ -685,6 +700,10 @@ class SystemRuntimeConfigService:
             or get_system_language_name(resolve_system_locale(self.db))
         )
         embedding_host = _normalize_optional_text(payload.get("embeddingHost")) or _normalize_optional_text(settings.lightrag_embedding_host) or ""
+        payload_embedding_model_name = _normalize_optional_text(payload.get("embeddingModelName"))
+        resolved_embedding_model_name = payload_embedding_model_name or (embedding_model.name if embedding_model is not None else None) or _normalize_optional_text(settings.lightrag_embedding_model)
+        resolved_embedding_model_id = None if payload_embedding_model_name else (embedding_model.id if embedding_model is not None else None)
+        embedding_dim = int(payload.get("embeddingDim") or settings.lightrag_embedding_dim or 1536)
         embedding_api_key, embedding_api_key_state = self._secret_state(
             payload=payload,
             encrypted_key="embeddingApiKeyEncrypted",
@@ -712,7 +731,7 @@ class SystemRuntimeConfigService:
             and neo4j_password
             and neo4j_database
             and llm_model is not None
-            and embedding_model is not None
+            and resolved_embedding_model_name
         )
         source = RUNTIME_SOURCE_APP if has_app_payload else (RUNTIME_SOURCE_ENV if bool(settings.lightrag_enabled) else RUNTIME_SOURCE_DEFAULT)
         if not enabled:
@@ -733,9 +752,10 @@ class SystemRuntimeConfigService:
             summary_language=summary_language,
             llm_model_id=llm_model.id if llm_model is not None else None,
             llm_model_name=llm_model.name if llm_model is not None else None,
-            embedding_model_id=embedding_model.id if embedding_model is not None else None,
-            embedding_model_name=embedding_model.name if embedding_model is not None else None,
+            embedding_model_id=resolved_embedding_model_id,
+            embedding_model_name=resolved_embedding_model_name,
             embedding_host=embedding_host,
+            embedding_dim=embedding_dim,
             embedding_api_key=embedding_api_key,
             rerank_model=rerank_model,
             rerank_host=rerank_host,
@@ -763,6 +783,7 @@ class SystemRuntimeConfigService:
             embedding_model_id=resolved.embedding_model_id,
             embedding_model_name=resolved.embedding_model_name,
             embedding_host=embedding_host,
+            embedding_dim=embedding_dim,
             rerank_model=rerank_model,
             rerank_host=rerank_host,
             rerank_request_format=rerank_request_format,
@@ -982,7 +1003,6 @@ class SystemRuntimeConfigService:
         request: RuntimeKnowledgeGraphConfigRequest,
         *,
         commit: bool = True,
-        default_embedding_name: str | None = None,
     ) -> RuntimeKnowledgeGraphConfigResponse:
         payload, _ = self._get_setting_payload(RUNTIME_KNOWLEDGE_GRAPH_CONFIG_KEY)
         self._assert_initialized_knowledge_graph_lock(request)
@@ -997,6 +1017,7 @@ class SystemRuntimeConfigService:
                 "workspace": "workspace",
                 "graphStorage": "graph_storage",
                 "summaryLanguage": "summary_language",
+                "embeddingModelName": "embedding_model_name",
                 "embeddingHost": "embedding_host",
                 "rerankModel": "rerank_model",
                 "rerankHost": "rerank_host",
@@ -1006,6 +1027,8 @@ class SystemRuntimeConfigService:
 
         if request.enabled is not None:
             payload["enabled"] = bool(request.enabled)
+        if request.embedding_dim is not None:
+            payload["embeddingDim"] = int(request.embedding_dim)
 
         self._apply_secret_payload_update(
             payload,
@@ -1033,7 +1056,6 @@ class SystemRuntimeConfigService:
         self._apply_knowledge_graph_model_selection(
             request,
             commit=False,
-            default_embedding_name=default_embedding_name,
         )
         if commit:
             self.db.commit()
