@@ -112,6 +112,10 @@ cp .env.example .env
 
 如果你不需要覆盖这些值，可以完全忽略 `.env`。
 
+补充说明：
+- `parse-worker` 镜像默认按 CPU-only 链路安装 PyTorch + Docling，不会再为纯 CPU 部署额外拉取一整套 CUDA/NVIDIA 运行时轮子。
+- 如果你确实需要改 PyTorch 版本，编辑 [backend/Dockerfile](/Users/zyf/IdeaProjects/MindAtlas/backend/Dockerfile) 里的 `TORCH_CPU_VERSION` 即可。
+
 ## 常用命令
 
 ### 查看服务状态

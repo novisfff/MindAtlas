@@ -75,6 +75,8 @@ FROM python:3.11-slim AS parse-worker-builder
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+ARG TORCH_CPU_VERSION=2.7.0
+
 WORKDIR /app
 
 RUN python -m venv /opt/venv
@@ -82,7 +84,9 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 COPY requirements.txt requirements-docling.txt ./
 RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt -r requirements-docling.txt
+    pip install --no-cache-dir "torch==${TORCH_CPU_VERSION}" --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir -r requirements-docling.txt
 
 FROM python:3.11-slim AS parse-worker
 
