@@ -25,7 +25,9 @@ Development link mode:
 openclaw plugins install -l ./integrations/openclaw-mindatlas
 ```
 
-After installation, restart the OpenClaw Gateway so the plugin can load and register tools.
+The install command only registers the plugin package. You can install first and fill in `baseUrl` / `integrationSecret` afterwards.
+
+After you add the plugin config, restart the OpenClaw Gateway so the plugin can load and register tools.
 
 ## Configuration
 
@@ -54,6 +56,7 @@ Notes:
 - `baseUrl` should point to the MindAtlas backend origin. A URL ending in `/api` is also accepted.
 - `integrationSecret` is generated from `MindAtlas > Settings > OpenClaw Integration`.
 - `catalogRefreshTtlSec` controls how often the plugin refreshes the remote capability catalog.
+- If you install the plugin before adding config, that is expected to work. The plugin will simply log that configuration is still missing and wait for `baseUrl` plus `integrationSecret`.
 
 ## MindAtlas Side Setup
 

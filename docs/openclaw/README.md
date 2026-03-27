@@ -14,7 +14,7 @@ Local install:
 openclaw plugins install ./integrations/openclaw-mindatlas
 ```
 
-After installation, restart the OpenClaw Gateway and configure:
+The install step should succeed even before `baseUrl` and `integrationSecret` are filled in. After installation, add the plugin config and then restart the OpenClaw Gateway:
 
 ```json
 {

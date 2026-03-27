@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createPlugin, OpenClawMindAtlasPluginRuntime, PLUGIN_ID } from '../src/index'
-import { extractPluginEntryConfig, resolvePluginConfig } from '../src/config'
+import { describePluginConfigIssue, extractPluginEntryConfig, resolvePluginConfig, validatePluginConfig } from '../src/config'
 
 interface MockTool {
   name: string
@@ -97,6 +97,50 @@ test('resolvePluginConfig reads nested plugin config and normalizes /api suffix'
     requestTimeoutMs: 15000,
     catalogRefreshTtlSec: 300,
   })
+})
+
+test('plugin config can be absent during install and yields a friendly setup warning', () => {
+  const raw = {
+    plugins: {
+      entries: {
+        [PLUGIN_ID]: {
+          enabled: true,
+          config: {},
+        },
+      },
+    },
+  }
+
+  assert.deepEqual(validatePluginConfig(raw), {
+    missingFields: ['baseUrl', 'integrationSecret'],
+  })
+  assert.equal(resolvePluginConfig(raw), null)
+  assert.match(
+    describePluginConfigIssue({
+      missingFields: ['baseUrl', 'integrationSecret'],
+    }),
+    /installed but not configured yet/,
+  )
+})
+
+test('plugin start skips registration when install-time config is still missing', async () => {
+  const { api, services, tools, logs } = createMockApi({
+    plugins: {
+      entries: {
+        [PLUGIN_ID]: {
+          enabled: true,
+          config: {},
+        },
+      },
+    },
+  })
+  const plugin = createPlugin(api)
+  plugin.register()
+
+  await services[0].start?.()
+
+  assert.equal(tools.length, 0)
+  assert.equal(logs.some((entry) => entry.level === 'warn' && /installed but not configured yet/.test(entry.message)), true)
 })
 
 test('plugin registers only available tools when the catalog loads', async () => {

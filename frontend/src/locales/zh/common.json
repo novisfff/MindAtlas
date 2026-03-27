@@ -645,9 +645,9 @@
         },
         "plugin": {
           "title": "3. 在 OpenClaw 配置插件",
-          "description": "先在 OpenClaw 所在机器安装仓库内自带插件，再把配置写进 OpenClaw 配置文件，校验无误后重启 Gateway，让 tool 注册真正生效。",
+          "description": "先在 OpenClaw 所在机器安装仓库内自带插件，然后再把配置写进 OpenClaw 配置文件，校验无误后重启 Gateway，让 tool 注册真正生效。",
           "details": {
-            "install": "在运行 OpenClaw 的那台机器上，从 MindAtlas 仓库安装自带的插件。如果 OpenClaw 在另一台服务器，请先把 `integrations/openclaw-mindatlas` 目录拷过去。",
+            "install": "在运行 OpenClaw 的那台机器上，从 MindAtlas 仓库安装自带的插件。如果 OpenClaw 在另一台服务器，请先把 `integrations/openclaw-mindatlas` 目录拷过去。安装命令本身不要求你先写好 `baseUrl` 和 `integrationSecret`。",
             "baseUrl": "在 OpenClaw 配置里把 `plugins.entries.openclaw-mindatlas.config.baseUrl` 指向 OpenClaw 能访问到的 MindAtlas 后端地址，再把 `integrationSecret` 设为本页生成的 Bearer 密钥。",
             "refresh": "目录项可用性变化可以由插件自动刷新感知；但如果 tool name、对外标题、对外描述或输入 schema 发生变化，需要重载 OpenClaw Gateway 或插件，重新注册 tool 元数据。"
           }
@@ -666,7 +666,7 @@
         },
         "install": {
           "title": "安装仓库内自带插件",
-          "description": "从本地文件系统安装 `openclaw-mindatlas` 原生插件，让 OpenClaw 可以加载它。"
+          "description": "从本地文件系统安装 `openclaw-mindatlas` 原生插件，让 OpenClaw 可以加载它。这一步可以先做，不需要等插件配置填写完成。"
         },
         "verify": {
           "title": "确认 OpenClaw 已看到这个插件",

@@ -1,4 +1,11 @@
-import { DEFAULT_CATALOG_REFRESH_TTL_SEC, PLUGIN_ID, resolvePluginConfig, type PluginConfig } from './config'
+import {
+  DEFAULT_CATALOG_REFRESH_TTL_SEC,
+  PLUGIN_ID,
+  describePluginConfigIssue,
+  resolvePluginConfig,
+  validatePluginConfig,
+  type PluginConfig,
+} from './config'
 import {
   createCatalogSnapshot,
   diffRegisteredToolMetadata,
@@ -94,10 +101,21 @@ export class OpenClawMindAtlasPluginRuntime {
   }
 
   async start() {
+    const validationIssue = validatePluginConfig(this.api.config)
+    if (validationIssue) {
+      log(this.logger, 'warn', describePluginConfigIssue(validationIssue))
+      this.config = null
+      return
+    }
+
     try {
       this.config = resolvePluginConfig(this.api.config)
     } catch (error) {
       log(this.logger, 'error', error instanceof Error ? error.message : 'Invalid plugin configuration.')
+      return
+    }
+    if (!this.config) {
+      log(this.logger, 'warn', 'openclaw-mindatlas did not receive a usable runtime config. No MindAtlas tools were registered.')
       return
     }
 

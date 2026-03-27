@@ -7,7 +7,6 @@
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "required": ["baseUrl", "integrationSecret"],
     "properties": {
       "baseUrl": {
         "type": "string",

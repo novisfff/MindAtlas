@@ -9,6 +9,10 @@ export interface PluginConfig {
   catalogRefreshTtlSec: number
 }
 
+export interface PluginConfigValidationIssue {
+  missingFields: Array<'baseUrl' | 'integrationSecret'>
+}
+
 function normalizeString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }
@@ -63,16 +67,40 @@ export function normalizeBaseUrl(value: string): string {
   return normalized
 }
 
-export function resolvePluginConfig(rawConfig: unknown): PluginConfig {
+export function describePluginConfigIssue(issue: PluginConfigValidationIssue): string {
+  const fields = issue.missingFields.join(', ')
+  return `openclaw-mindatlas is installed but not configured yet. Set plugins.entries.${PLUGIN_ID}.config.${fields} and then restart or reload OpenClaw.`
+}
+
+export function validatePluginConfig(rawConfig: unknown): PluginConfigValidationIssue | null {
   const config = extractPluginEntryConfig(rawConfig)
   const baseUrl = normalizeBaseUrl(normalizeString(config.baseUrl))
   const integrationSecret = normalizeString(config.integrationSecret)
 
+  if (!baseUrl && !integrationSecret) {
+    return {
+      missingFields: ['baseUrl', 'integrationSecret'],
+    }
+  }
+
+  const missingFields: Array<'baseUrl' | 'integrationSecret'> = []
   if (!baseUrl) {
-    throw new Error('MindAtlas baseUrl is required for openclaw-mindatlas.')
+    missingFields.push('baseUrl')
   }
   if (!integrationSecret) {
-    throw new Error('MindAtlas integrationSecret is required for openclaw-mindatlas.')
+    missingFields.push('integrationSecret')
+  }
+  return missingFields.length > 0 ? { missingFields } : null
+}
+
+export function resolvePluginConfig(rawConfig: unknown): PluginConfig | null {
+  const config = extractPluginEntryConfig(rawConfig)
+  const baseUrl = normalizeBaseUrl(normalizeString(config.baseUrl))
+  const integrationSecret = normalizeString(config.integrationSecret)
+  const issue = validatePluginConfig(rawConfig)
+
+  if (issue) {
+    return null
   }
 
   return {

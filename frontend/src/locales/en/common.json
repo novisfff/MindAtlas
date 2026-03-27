@@ -656,9 +656,9 @@
         },
         "plugin": {
           "title": "3. Configure the OpenClaw plugin",
-          "description": "Install the shipped plugin on the OpenClaw host, add the plugin config, validate the config, and then restart the Gateway so tool registration can take effect.",
+          "description": "Install the shipped plugin on the OpenClaw host first, then add the plugin config, validate it, and restart the Gateway so tool registration can take effect.",
           "details": {
-            "install": "Install the plugin from the MindAtlas repository on the same machine that runs OpenClaw. If OpenClaw runs on another server, copy the `integrations/openclaw-mindatlas` folder there first.",
+            "install": "Install the plugin from the MindAtlas repository on the same machine that runs OpenClaw. If OpenClaw runs on another server, copy the `integrations/openclaw-mindatlas` folder there first. The install command itself does not require `baseUrl` or `integrationSecret` yet.",
             "baseUrl": "Set `plugins.entries.openclaw-mindatlas.config.baseUrl` to the MindAtlas backend that OpenClaw can reach over the network, then paste the bearer secret generated on this page into `integrationSecret`.",
             "refresh": "Catalog availability changes can be picked up by the plugin refresh cycle. If a tool name, exported title, exported description, or input schema changes, reload the OpenClaw Gateway or plugin so registration metadata is rebuilt."
           }
@@ -677,7 +677,7 @@
         },
         "install": {
           "title": "Install the shipped plugin package",
-          "description": "Install the native `openclaw-mindatlas` plugin from the local filesystem so OpenClaw can load it."
+          "description": "Install the native `openclaw-mindatlas` plugin from the local filesystem so OpenClaw can load it. This step can be done before the plugin config is filled in."
         },
         "verify": {
           "title": "Confirm the plugin is visible to OpenClaw",
