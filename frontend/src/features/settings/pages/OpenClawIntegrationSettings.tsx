@@ -424,6 +424,56 @@ export function OpenClawIntegrationSettingsPage() {
     t('openclawIntegration.guide.notes.skillBoundary'),
     t('openclawIntegration.guide.notes.refresh'),
   ]
+  const pluginInstallBlocks = [
+    {
+      title: t('openclawIntegration.guide.installBlocks.locate.title'),
+      description: t('openclawIntegration.guide.installBlocks.locate.description'),
+      code: 'cd /path/to/MindAtlas',
+    },
+    {
+      title: t('openclawIntegration.guide.installBlocks.install.title'),
+      description: t('openclawIntegration.guide.installBlocks.install.description'),
+      code: 'openclaw plugins install ./integrations/openclaw-mindatlas',
+    },
+    {
+      title: t('openclawIntegration.guide.installBlocks.verify.title'),
+      description: t('openclawIntegration.guide.installBlocks.verify.description'),
+      code: 'openclaw plugins list',
+    },
+  ]
+  const pluginConfigExample = `{
+  "plugins": {
+    "entries": {
+      "openclaw-mindatlas": {
+        "enabled": true,
+        "config": {
+          "baseUrl": "http://your-mindatlas-host:8000",
+          "integrationSecret": "paste-the-secret-from-settings",
+          "requestTimeoutMs": 15000,
+          "catalogRefreshTtlSec": 300
+        }
+      }
+    }
+  }
+}`
+  const pluginConfigBlocks = [
+    {
+      title: t('openclawIntegration.guide.configBlocks.findConfig.title'),
+      description: t('openclawIntegration.guide.configBlocks.findConfig.description'),
+      code: 'openclaw config file',
+    },
+    {
+      title: t('openclawIntegration.guide.configBlocks.validate.title'),
+      description: t('openclawIntegration.guide.configBlocks.validate.description'),
+      code: 'openclaw config validate',
+    },
+  ]
+  const pluginVerifyChecklist = [
+    t('openclawIntegration.guide.verifyChecklist.secret'),
+    t('openclawIntegration.guide.verifyChecklist.catalog'),
+    t('openclawIntegration.guide.verifyChecklist.plugin'),
+    t('openclawIntegration.guide.verifyChecklist.call'),
+  ]
 
   function patchDraft(patch: Partial<CatalogItemDraft>) {
     setDraft((currentDraft) => ({ ...currentDraft, ...patch }))
@@ -807,6 +857,66 @@ export function OpenClawIntegrationSettingsPage() {
               ))}
             </div>
 
+            <div className="mt-5 grid gap-4 xl:grid-cols-2">
+              <div className="rounded-[24px] border border-slate-200 bg-slate-50/80 p-5">
+                <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
+                  {t('openclawIntegration.guide.installTitle')}
+                </p>
+                <p className="mt-3 text-sm leading-6 text-slate-700">
+                  {t('openclawIntegration.guide.installDescription')}
+                </p>
+                <div className="mt-4 space-y-4">
+                  {pluginInstallBlocks.map((block) => (
+                    <div key={block.title} className="rounded-2xl border border-slate-200 bg-white p-4">
+                      <p className="text-sm font-semibold text-slate-900">{block.title}</p>
+                      <p className="mt-1 text-sm leading-6 text-slate-600">{block.description}</p>
+                      <pre className="mt-3 overflow-x-auto rounded-2xl bg-slate-950 px-4 py-3 text-xs leading-6 text-slate-100">
+                        <code>{block.code}</code>
+                      </pre>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-[24px] border border-slate-200 bg-slate-50/80 p-5">
+                <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
+                  {t('openclawIntegration.guide.configTitle')}
+                </p>
+                <p className="mt-3 text-sm leading-6 text-slate-700">
+                  {t('openclawIntegration.guide.configDescription')}
+                </p>
+
+                <div className="mt-4 space-y-4">
+                  {pluginConfigBlocks.map((block) => (
+                    <div key={block.title} className="rounded-2xl border border-slate-200 bg-white p-4">
+                      <p className="text-sm font-semibold text-slate-900">{block.title}</p>
+                      <p className="mt-1 text-sm leading-6 text-slate-600">{block.description}</p>
+                      <pre className="mt-3 overflow-x-auto rounded-2xl bg-slate-950 px-4 py-3 text-xs leading-6 text-slate-100">
+                        <code>{block.code}</code>
+                      </pre>
+                    </div>
+                  ))}
+
+                  <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                    <p className="text-sm font-semibold text-slate-900">
+                      {t('openclawIntegration.guide.configExampleTitle')}
+                    </p>
+                    <p className="mt-1 text-sm leading-6 text-slate-600">
+                      {t('openclawIntegration.guide.configExampleDescription')}
+                    </p>
+                    <pre className="mt-3 overflow-x-auto rounded-2xl bg-slate-950 px-4 py-3 text-xs leading-6 text-slate-100">
+                      <code>{pluginConfigExample}</code>
+                    </pre>
+                  </div>
+
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50/80 p-4 text-sm leading-6 text-amber-900">
+                    <p className="font-semibold">{t('openclawIntegration.guide.restartTitle')}</p>
+                    <p className="mt-1">{t('openclawIntegration.guide.restartDescription')}</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)]">
               <div className="rounded-[24px] border border-slate-200 bg-slate-50/80 p-5">
                 <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
@@ -852,6 +962,20 @@ export function OpenClawIntegrationSettingsPage() {
                     </li>
                   ))}
                 </ul>
+
+                <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-4">
+                  <p className="text-sm font-semibold text-slate-900">
+                    {t('openclawIntegration.guide.verifyChecklistTitle')}
+                  </p>
+                  <ul className="mt-3 space-y-2 text-sm leading-6 text-slate-700">
+                    {pluginVerifyChecklist.map((item) => (
+                      <li key={item} className="flex items-start gap-3">
+                        <span className="mt-2 h-1.5 w-1.5 rounded-full bg-slate-400" />
+                        <span>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               </div>
             </div>
           </div>

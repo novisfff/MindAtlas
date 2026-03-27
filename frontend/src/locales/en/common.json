@@ -639,8 +639,8 @@
     },
     "guide": {
       "title": "Integration guide",
-      "description": "Collapsed by default. Expand this section when you want the shortest setup path for connecting OpenClaw to MindAtlas.",
-      "intro": "MindAtlas owns the capability catalog, knowledge data, and execution runtime. OpenClaw owns the chat entry, tool registration, and conversation orchestration. The recommended order is: generate secret, expose catalog items, configure the plugin, then verify runtime calls.",
+      "description": "Collapsed by default. Expand this section when you want a step-by-step path that can be followed directly from installation to verification.",
+      "intro": "MindAtlas owns the capability catalog, knowledge data, and execution runtime. OpenClaw owns the chat entry, tool registration, and conversation orchestration. Follow the sequence on this page from top to bottom: generate the secret, expose catalog items, install the plugin, paste the config, restart the Gateway, then verify one live call.",
       "actions": {
         "expand": "Expand guide",
         "collapse": "Collapse guide"
@@ -656,23 +656,62 @@
         },
         "plugin": {
           "title": "3. Configure the OpenClaw plugin",
-          "description": "Provide the MindAtlas base URL and integration secret in OpenClaw. The plugin should discover the catalog first and register one OpenClaw tool per exposed item.",
+          "description": "Install the shipped plugin on the OpenClaw host, add the plugin config, validate the config, and then restart the Gateway so tool registration can take effect.",
           "details": {
-            "install": "Run `openclaw plugins install ./integrations/openclaw-mindatlas` to install the shipped `openclaw-mindatlas` plugin, then restart the OpenClaw Gateway.",
-            "baseUrl": "Set `plugins.entries.openclaw-mindatlas.config.baseUrl` to the MindAtlas backend and `integrationSecret` to the bearer secret generated on this page. During startup, the plugin calls `/api/integrations/openclaw/capabilities` before registering tools.",
+            "install": "Install the plugin from the MindAtlas repository on the same machine that runs OpenClaw. If OpenClaw runs on another server, copy the `integrations/openclaw-mindatlas` folder there first.",
+            "baseUrl": "Set `plugins.entries.openclaw-mindatlas.config.baseUrl` to the MindAtlas backend that OpenClaw can reach over the network, then paste the bearer secret generated on this page into `integrationSecret`.",
             "refresh": "Catalog availability changes can be picked up by the plugin refresh cycle. If a tool name, exported title, exported description, or input schema changes, reload the OpenClaw Gateway or plugin so registration metadata is rebuilt."
           }
         },
         "verify": {
           "title": "4. Verify the runtime flow",
-          "description": "Refresh the capability catalog on the OpenClaw side, make sure the exposed items appear, then run one test call to verify both discovery and execution endpoints."
+          "description": "After the Gateway restarts, confirm that the plugin is loaded, the exposed catalog items appear in OpenClaw, and at least one tool call can reach MindAtlas successfully."
         }
       },
+      "installTitle": "Install the plugin on the OpenClaw host",
+      "installDescription": "These commands are meant to be run where your OpenClaw Gateway is installed. The plugin package lives in this MindAtlas repository.",
+      "installBlocks": {
+        "locate": {
+          "title": "Locate the MindAtlas repository or plugin folder",
+          "description": "Open a shell on the OpenClaw machine and enter the MindAtlas repository root. If OpenClaw is deployed on another machine, copy the `integrations/openclaw-mindatlas` folder there first."
+        },
+        "install": {
+          "title": "Install the shipped plugin package",
+          "description": "Install the native `openclaw-mindatlas` plugin from the local filesystem so OpenClaw can load it."
+        },
+        "verify": {
+          "title": "Confirm the plugin is visible to OpenClaw",
+          "description": "Check that OpenClaw can see the newly installed plugin before you continue with configuration."
+        }
+      },
+      "configTitle": "Fill in the OpenClaw plugin configuration",
+      "configDescription": "Use the config file managed by OpenClaw, add the `openclaw-mindatlas` entry, then validate the file before restarting the Gateway.",
+      "configBlocks": {
+        "findConfig": {
+          "title": "Find the active OpenClaw config file",
+          "description": "Run this first if you are not sure which config file your OpenClaw installation is using."
+        },
+        "validate": {
+          "title": "Validate the config after editing",
+          "description": "After you paste the plugin block below into the config file and replace the placeholders, validate the file before restarting."
+        }
+      },
+      "configExampleTitle": "Config example to paste into OpenClaw",
+      "configExampleDescription": "Replace `baseUrl` with the MindAtlas backend address that OpenClaw can access, and replace `integrationSecret` with the secret generated on this page.",
+      "restartTitle": "Restart the OpenClaw Gateway",
+      "restartDescription": "After the config validates, restart the OpenClaw Gateway process or service using your deployment method so the plugin can load and register tools.",
       "endpointsTitle": "Key endpoints",
       "endpoints": {
         "auth": "Auth header",
         "catalog": "Catalog discovery",
         "execute": "Capability execution"
+      },
+      "verifyChecklistTitle": "Final integration checklist",
+      "verifyChecklist": {
+        "secret": "The secret has been generated here and copied into the OpenClaw plugin config.",
+        "catalog": "At least one catalog item is exposed in MindAtlas and shows as available.",
+        "plugin": "The OpenClaw Gateway has been restarted after plugin installation or config changes.",
+        "call": "A live OpenClaw tool call can reach MindAtlas and return a result."
       },
       "notesTitle": "Important notes",
       "notes": {
