@@ -37,6 +37,7 @@ from app.lightrag.schemas import (
     LightRagQueryResponse,
     LightRagSource,
 )
+from app.system_settings.runtime_config_service import resolve_runtime_knowledge_graph_config
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,11 @@ def reset_lightrag_query_state_for_tests() -> None:
 
 def _sse_frame(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\\n\\n"
+
+
+def _ensure_knowledge_graph_runtime() -> None:
+    if not resolve_runtime_knowledge_graph_config().enabled:
+        raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled")
 
 
 def _normalize_score(value: Any) -> float | None:
@@ -1482,8 +1488,7 @@ def _parse_relation_recommendation_payload(
 class LightRagService:
     async def query(self, *, query: str, mode: LightRagQueryMode, top_k: int) -> LightRagQueryResponse:
         settings = get_settings()
-        if not settings.lightrag_enabled:
-            raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled")
+        _ensure_knowledge_graph_runtime()
 
         query_len = len((query or "").strip())
         cache_ttl = int(getattr(settings, "lightrag_query_cache_ttl_sec", 0) or 0)
@@ -1600,8 +1605,7 @@ class LightRagService:
         Note: mode is accepted for cache key consistency and future extensibility.
         """
         settings = get_settings()
-        if not settings.lightrag_enabled:
-            raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled")
+        _ensure_knowledge_graph_runtime()
 
         q = (query or "").strip()
         cache_ttl = int(getattr(settings, "lightrag_query_cache_ttl_sec", 0) or 0)
@@ -1681,8 +1685,7 @@ class LightRagService:
         The assistant should generate the final answer.
         """
         settings = get_settings()
-        if not settings.lightrag_enabled:
-            raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled")
+        _ensure_knowledge_graph_runtime()
 
         q = (query or "").strip()
         k = max(1, min(50, int(top_k or 1)))
@@ -1774,8 +1777,7 @@ class LightRagService:
             dict with keys: chunks, entities, relationships
         """
         settings = get_settings()
-        if not settings.lightrag_enabled:
-            raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled")
+        _ensure_knowledge_graph_runtime()
 
         q = (query or "").strip()
         k = max(1, min(50, int(top_k or 1)))
@@ -1833,8 +1835,7 @@ class LightRagService:
     async def llm_only_answer(self, *, prompt: str, mode: LightRagQueryMode) -> str:
         """Run LLM generation only (no extra vector recall in this codepath)."""
         settings = get_settings()
-        if not settings.lightrag_enabled:
-            raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled")
+        _ensure_knowledge_graph_runtime()
 
         q = (prompt or "").strip()
         cache_ttl = int(getattr(settings, "lightrag_query_cache_ttl_sec", 0) or 0)
@@ -1926,8 +1927,7 @@ class LightRagService:
             (llm_answer, graph_context) - graph_context has chunks/entities/relationships
         """
         settings = get_settings()
-        if not settings.lightrag_enabled:
-            raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled")
+        _ensure_knowledge_graph_runtime()
 
         q = (prompt or "").strip()
         k = max(1, min(50, int(top_k or 1)))
@@ -2133,8 +2133,7 @@ class LightRagService:
         from app.graph.schemas import GraphData
 
         settings = get_settings()
-        if not settings.lightrag_enabled:
-            raise ApiException(status_code=404, code=40410, message="LightRAG is not enabled")
+        _ensure_knowledge_graph_runtime()
 
         logger.info(
             "lightrag graph request start",

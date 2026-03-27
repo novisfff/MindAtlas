@@ -1,3 +1,7 @@
+export * from './pages/AutomationSettings'
 export * from './SettingsPage'
+export * from './pages/DoclingSettings'
 export * from './pages/EntryTypeSettings'
+export * from './pages/LightRagSettings'
+export * from './pages/SystemSetupSettings'
 export * from './pages/TagSettings'

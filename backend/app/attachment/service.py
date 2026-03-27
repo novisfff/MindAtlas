@@ -11,9 +11,13 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import ApiException
 from app.common.storage import get_minio_client, remove_object_safe, StorageError
+from app.system_settings.runtime_config_service import (
+    ensure_runtime_document_parsing_configured,
+    ensure_runtime_knowledge_graph_enabled,
+    ensure_runtime_storage_configured,
+)
 from app.attachment.models import Attachment, AttachmentParseOutbox
 from app.attachment.parser import SUPPORTED_EXTENSIONS as SUPPORTED_PARSE_EXTENSIONS
-from app.config import get_settings
 
 
 class AttachmentService:
@@ -74,7 +78,7 @@ class AttachmentService:
         *,
         index_to_knowledge_graph: bool = False,
     ) -> Attachment:
-        settings = get_settings()
+        storage_config = ensure_runtime_storage_configured()
         original_filename = file.filename or "file"
         file_ext = Path(original_filename).suffix
         ext_lower = file_ext.lower()
@@ -91,10 +95,12 @@ class AttachmentService:
                     code=40001,
                     message=f"Unsupported file type for indexing: {ext_lower}",
                 )
+            ensure_runtime_document_parsing_configured()
+            ensure_runtime_knowledge_graph_enabled(require_configured=True)
             should_index = True
 
         # Validate file size BEFORE upload
-        max_size_bytes = settings.docling_max_file_size_mb * 1024 * 1024
+        max_size_bytes = storage_config.max_file_size_mb * 1024 * 1024
         try:
             file.file.seek(0, 2)  # Seek to end
             file_size = file.file.tell()
@@ -106,7 +112,7 @@ class AttachmentService:
             raise ApiException(
                 status_code=413,
                 code=41300,
-                message=f"File too large. Maximum size is {settings.docling_max_file_size_mb}MB",
+                message=f"File too large. Maximum size is {storage_config.max_file_size_mb}MB",
             )
 
         try:
@@ -142,7 +148,7 @@ class AttachmentService:
                     raise ApiException(
                         status_code=413,
                         code=41300,
-                        message=f"File too large. Maximum size is {settings.docling_max_file_size_mb}MB",
+                        message=f"File too large. Maximum size is {storage_config.max_file_size_mb}MB",
                     )
             except S3Error:
                 pass
@@ -217,6 +223,7 @@ class AttachmentService:
 
     def retry_parse(self, id: UUID) -> Attachment:
         attachment = self.find_by_id(id)
+        ensure_runtime_document_parsing_configured()
 
         if attachment.parse_status != "failed":
             raise ApiException(
@@ -242,6 +249,7 @@ class AttachmentService:
     def retry_index(self, id: UUID) -> Attachment:
         """Re-enqueue LightRAG indexing for an already-parsed attachment."""
         attachment = self.find_by_id(id)
+        ensure_runtime_knowledge_graph_enabled(require_configured=True)
 
         if not bool(attachment.index_to_knowledge_graph):
             raise ApiException(
@@ -272,6 +280,7 @@ class AttachmentService:
         return attachment
 
     def get_object_stream(self, object_key: str):
+        ensure_runtime_storage_configured()
         try:
             client, bucket = get_minio_client()
         except StorageError as exc:
@@ -311,6 +320,7 @@ class AttachmentService:
 
     def read_text_content(self, object_key: str, max_size: int) -> str:
         """Read text content from storage with size limit."""
+        ensure_runtime_storage_configured()
         try:
             client, bucket = get_minio_client()
         except StorageError as exc:

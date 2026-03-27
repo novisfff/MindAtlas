@@ -52,6 +52,7 @@ def make_session() -> Session:
     from app.database import Base  # noqa: E402
 
     import app.ai_provider.models  # noqa: F401,E402
+    import app.ai_registry.models  # noqa: F401,E402
     import app.assistant.models  # noqa: F401,E402
     import app.assistant_config.models  # noqa: F401,E402
     import app.attachment.models  # noqa: F401,E402

@@ -11,29 +11,13 @@
 
 ## 快速开始
 
-### 1. 克隆代码
+### 1. 进入部署目录
 
 ```bash
-git clone <repository-url>
-cd MindAtlas
+cd MindAtlas/deploy
 ```
 
-### 2. 配置环境变量
-
-```bash
-cd deploy
-cp .env.example .env
-cp backend.env.example backend.env
-```
-
-根据需要编辑：
-- `.env`：基础设施配置（PostgreSQL / MinIO / Neo4j / 端口等）
-- `backend.env`：后端应用配置（Docker 部署下主要是 AI / LightRAG 等）
-
-说明：`DATABASE_URL`、`MINIO_ENDPOINT`、`NEO4J_URI` 等容器内地址由 `docker-compose.yml` 使用服务名（`db`/`minio`/`neo4j`）自动注入，通常不需要在 env 文件里手动配置。
-另外：Docker 部署下前端 Nginx 会反代 `/api/` 到后端（同源访问），一般不需要配置 CORS。
-
-### 3. 启动服务
+### 2. 直接启动服务
 
 ```bash
 docker compose up -d
@@ -45,13 +29,36 @@ docker compose up -d
 - 运行数据库迁移
 - 创建 MinIO 存储桶
 
-### 4. 访问应用
+不需要预先拷贝或修改任何 env 文件。`docker-compose.yml` 已经内置了可运行的默认值。
+
+### 3. 访问应用
 
 | 服务 | 地址 |
 |------|------|
 | 前端应用 | http://localhost:3000 |
 | MinIO 控制台 | http://localhost:9001 |
 | Neo4j Browser（LightRAG） | http://localhost:7474 |
+
+### 4. 如需覆盖默认值，再准备 `.env`
+
+```bash
+cp .env.example .env
+```
+
+复制后即使完全不修改，行为也与“不提供 `.env`”一致。只有在你想覆盖端口、密码或高级默认值时，才需要编辑它。
+
+## `.env` 是做什么的
+
+`deploy/.env` 是一个可选的 override 文件，不是 Docker 部署的前置条件。
+
+- 不提供 `.env`：直接使用 `docker-compose.yml` 里的默认值启动
+- 复制 `.env.example` 但不修改：行为与不提供 `.env` 相同
+- 编辑 `.env`：按你的改动覆盖默认值
+
+默认情况下：
+- `DATABASE_URL`、`MINIO_ENDPOINT`、`NEO4J_URI` 等容器内地址由 `docker-compose.yml` 使用服务名（`db` / `minio` / `neo4j`）自动注入
+- 对象存储、知识图谱、文档解析和后台调度器都会在 Compose 中自动启用
+- 前端 Nginx 会反代 `/api/` 到后端（同源访问），一般不需要额外配置 CORS
 
 ## 服务架构
 
@@ -81,7 +88,7 @@ docker compose up -d
 
 ## 环境变量说明
 
-### `.env`（部署/基础设施）
+### `.env`（可选覆盖项，不是必需文件）
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
@@ -96,17 +103,14 @@ docker compose up -d
 | `NEO4J_HTTP_PORT` | Neo4j HTTP 端口 | 7474 |
 | `NEO4J_BOLT_PORT` | Neo4j Bolt 端口 | 7687 |
 | `FRONTEND_PORT` | 前端访问端口 | 3000 |
+| `AI_PROVIDER_FERNET_KEY` | 可选覆盖 AI Key 的 DB 加密密钥 | Compose 内置默认值 |
+| `LIGHTRAG_ENABLED` | 可选覆盖知识图谱总开关 | true |
+| `LIGHTRAG_WORKER_ENABLED` | 可选覆盖索引 Worker 开关 | true |
+| `DOCLING_WORKER_ENABLED` | 可选覆盖附件解析 Worker 开关 | true |
+| `SCHEDULER_ENABLED` | 可选覆盖后台调度器开关 | true |
+| `LIGHTRAG_EMBEDDING_MODEL` | 可选覆盖默认 Embedding 模型名 | `text-embedding-3-small` |
 
-### `backend.env`（后端应用）
-
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `CORS_ORIGINS` | 允许跨域的来源（逗号分隔） | `http://localhost:3000` |
-| `AI_API_KEY` | AI API Key（OpenAI 兼容；LightRAG 需要） | - |
-| `AI_PROVIDER_FERNET_KEY` | 用于加密存储在 DB 的 API Key | - |
-| `LIGHTRAG_ENABLED` | 是否开启 LightRAG | true |
-| `LIGHTRAG_LLM_MODEL` | LightRAG LLM 模型 | `gpt-4o-mini` |
-| `LIGHTRAG_EMBEDDING_MODEL` | Embedding 模型 | `text-embedding-3-small` |
+如果你不需要覆盖这些值，可以完全忽略 `.env`。
 
 ## 常用命令
 
@@ -227,8 +231,9 @@ docker compose build --build-arg NPM_REGISTRY=https://registry.npmmirror.com
 
 ## 生产环境建议
 
-1. **修改默认密码**: 务必修改 `.env` 中的数据库和 MinIO 密码
+1. **修改默认密码**: 启动后建议尽快通过 `.env` 覆盖数据库、MinIO 和 Neo4j 的默认密码
 2. **配置 HTTPS**: 在 Nginx 前添加反向代理或使用 Let's Encrypt
 3. **定期备份**: 备份 `postgres_data` 和 `minio_data` 卷
 4. **监控日志**: 配置日志收集和监控告警
-5. **资源限制**: 在 docker-compose.yml 中添加 `deploy.resources` 限制
+5. **覆盖默认密钥**: 生产环境建议通过 `.env` 覆盖 `AI_PROVIDER_FERNET_KEY`
+6. **资源限制**: 在 docker-compose.yml 中添加 `deploy.resources` 限制

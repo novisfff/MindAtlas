@@ -165,14 +165,14 @@ npm run dev
 
 ```bash
 cd deploy
-cp .env.example .env
-cp backend.env.example backend.env
 docker compose up -d
 ```
 
+Docker 部署默认就是零配置启动：即使你不提前创建任何 env 文件，直接执行 `docker compose up -d` 也可以启动。如果你需要自定义端口、密码或高级覆盖项，再把 `deploy/.env.example` 复制成 `.env` 即可；即使复制后完全不修改，行为也与不提供 `.env` 一致。
+
 详细部署说明请参考 [deploy/README.md](deploy/README.md)（包含 Neo4j + LightRAG Worker）。
 
-## 环境变量
+## 后端环境变量（手动启动时使用）
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
@@ -188,7 +188,9 @@ docker compose up -d
 | `NEO4J_USER` | Neo4j 用户名 | `neo4j` |
 | `NEO4J_PASSWORD` | Neo4j 密码 | - |
 
-完整变量列表请参考 `backend/.env.example`。
+这些变量主要用于在 Docker Compose 之外手动启动 backend。对于 Docker 部署，请优先使用 `deploy/docker-compose.yml` 的内置默认值，以及 `deploy/.env.example` 中的可选覆盖项。
+
+完整的手动启动变量列表请参考 `backend/.env.example`。
 
 ## 文档
 

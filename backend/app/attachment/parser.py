@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
+from app.system_settings.runtime_config_service import (
+    resolve_runtime_document_parsing_config,
+    resolve_runtime_storage_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -323,27 +327,29 @@ def parse_document(file_path: str, content_type: str, *, max_pages: int | None =
         raise ParseError(f"Unsupported file type: {ext}", retryable=False)
 
     settings = get_settings()
-    resolved_max_pages = int(max_pages) if max_pages is not None else int(settings.docling_max_pdf_pages)
-    resolved_max_file_size = int(settings.docling_max_file_size_mb) * 1024 * 1024
+    document_config = resolve_runtime_document_parsing_config()
+    storage_config = resolve_runtime_storage_config()
+    resolved_max_pages = int(max_pages) if max_pages is not None else int(storage_config.max_pdf_pages)
+    resolved_max_file_size = int(storage_config.max_file_size_mb) * 1024 * 1024
 
     try:
         converter = _get_docling_converter(
-            ocr_enabled=bool(settings.docling_ocr_enabled),
+            ocr_enabled=bool(document_config.ocr_enabled),
             ocr_force_full_page_ocr=bool(settings.docling_ocr_force_full_page_ocr),
-            ocr_langs=str(settings.docling_ocr_langs or ""),
+            ocr_langs=str(document_config.ocr_langs or ""),
             ocr_det_model_path=str(settings.docling_ocr_det_model_path or ""),
             ocr_rec_model_path=str(settings.docling_ocr_rec_model_path or ""),
             ocr_cls_model_path=str(settings.docling_ocr_cls_model_path or ""),
             ocr_modelscope_enabled=bool(settings.docling_ocr_modelscope_enabled),
             ocr_modelscope_repo_id=str(settings.docling_ocr_modelscope_repo_id or ""),
-            picture_description_enabled=bool(settings.docling_picture_description_enabled),
-            picture_description_url=str(settings.docling_picture_description_url or ""),
-            picture_description_api_key=str(settings.docling_picture_description_api_key or ""),
-            picture_description_model=str(settings.docling_picture_description_model or ""),
-            picture_description_prompt=str(settings.docling_picture_description_prompt or ""),
-            picture_description_timeout_sec=float(settings.docling_picture_description_timeout_sec),
+            picture_description_enabled=bool(document_config.picture_description_enabled),
+            picture_description_url=str(document_config.picture_description_url or ""),
+            picture_description_api_key=str(document_config.picture_description_api_key or ""),
+            picture_description_model=str(document_config.picture_description_model or ""),
+            picture_description_prompt=str(document_config.picture_description_prompt or ""),
+            picture_description_timeout_sec=float(document_config.picture_description_timeout_sec),
             picture_description_concurrency=int(settings.docling_picture_description_concurrency),
-            picture_description_params_json=str(settings.docling_picture_description_params_json or ""),
+            picture_description_params_json=str(document_config.picture_description_params_json or ""),
         )
 
         result = converter.convert(

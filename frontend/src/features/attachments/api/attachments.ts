@@ -1,5 +1,4 @@
 import { apiClient } from '@/lib/api/client'
-import { withMindAtlasLocale } from '@/lib/api/locale'
 import type { Attachment, AttachmentMarkdownResponse } from '@/types'
 
 export async function getEntryAttachments(entryId: string): Promise<Attachment[]> {
@@ -15,18 +14,9 @@ export async function uploadAttachment(
   formData.append('file', file)
   formData.append('index_to_knowledge_graph', String(indexToKnowledgeGraph))
 
-  const response = await fetch(`/api/attachments/entry/${encodeURIComponent(entryId)}`, {
-    method: 'POST',
-    headers: withMindAtlasLocale(),
+  return apiClient.post<Attachment>(`/api/attachments/entry/${encodeURIComponent(entryId)}`, {
     body: formData,
   })
-
-  if (!response.ok) {
-    throw new Error('Upload failed')
-  }
-
-  const result = await response.json()
-  return result.data
 }
 
 export async function deleteAttachment(id: string): Promise<void> {

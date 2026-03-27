@@ -3,18 +3,22 @@ import { Loader2 } from 'lucide-react'
 import { KnowledgeGraph, useGraphDataQuery, useLightRagGraphQuery } from '@/features/graph'
 import { useTranslation } from 'react-i18next'
 import { GraphMode, ModeSwitch } from './components/ModeSwitch'
+import { useRuntimeConfigQuery } from '@/features/system-setup'
 
 export function GraphPage() {
   const { t } = useTranslation()
   const [mode, setMode] = useState<GraphMode>('system')
   const [dateRange, setDateRange] = useState<{ start: string; end: string }>({ start: '', end: '' })
+  const runtimeConfigQuery = useRuntimeConfigQuery()
+  const knowledgeGraphRuntime = runtimeConfigQuery.data?.knowledgeGraph
+  const lightragReady = Boolean(knowledgeGraphRuntime?.enabled && knowledgeGraphRuntime?.configured)
 
   const systemQuery = useGraphDataQuery({
     timeFrom: dateRange.start || undefined,
     timeTo: dateRange.end || undefined,
   })
 
-  const lightRagQuery = useLightRagGraphQuery({}, mode === 'lightrag')
+  const lightRagQuery = useLightRagGraphQuery({}, mode === 'lightrag' && lightragReady)
 
   const currentQuery = mode === 'system' ? systemQuery : lightRagQuery
   const { data, isLoading, error } = currentQuery
@@ -23,6 +27,22 @@ export function GraphPage() {
     return (
       <div className="flex items-center justify-center h-[600px]">
         <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+      </div>
+    )
+  }
+
+  if (mode === 'lightrag' && knowledgeGraphRuntime && !lightragReady) {
+    return (
+      <div className="border rounded-lg bg-card overflow-hidden h-[calc(100vh-200px)]">
+        <div className="flex items-center justify-center h-full flex-col px-6 text-center">
+          <h1 className="text-2xl font-bold mb-4">{t('pages.graph.title')}</h1>
+          <ModeSwitch mode={mode} onModeChange={setMode} />
+          <p className="mt-4 max-w-lg text-muted-foreground">
+            {!knowledgeGraphRuntime.enabled
+              ? t('systemSetup.emptyStates.knowledgeGraphDisabled')
+              : t('systemSetup.emptyStates.knowledgeGraphIncomplete')}
+          </p>
+        </div>
       </div>
     )
   }

@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import logging
-from contextlib import asynccontextmanager
+from threading import RLock
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import text
 
-from app.config import get_settings
 from app.database import SessionLocal
+from app.system_settings.runtime_config_service import resolve_runtime_automation_config
 
 logger = logging.getLogger(__name__)
 
-scheduler = AsyncIOScheduler()
+_scheduler_lock = RLock()
+_scheduler: BackgroundScheduler | None = None
 
 
 def generate_weekly_report_job():
@@ -77,13 +78,11 @@ def generate_monthly_report_job():
         db.close()
 
 
-def setup_scheduler():
-    """Setup and start the scheduler."""
-    settings = get_settings()
-    if not settings.scheduler_enabled:
-        logger.info("Scheduler disabled")
-        return
+def _build_scheduler() -> BackgroundScheduler:
+    return BackgroundScheduler(timezone="UTC")
 
+
+def _register_jobs(scheduler: BackgroundScheduler) -> None:
     scheduler.add_job(
         generate_weekly_report_job,
         CronTrigger(day_of_week="mon", hour=0, minute=0, timezone="UTC"),
@@ -102,12 +101,65 @@ def setup_scheduler():
         coalesce=True,
         misfire_grace_time=6 * 3600,
     )
-    scheduler.start()
-    logger.info("Scheduler started")
+
+
+def _clear_scheduler_locked() -> None:
+    global _scheduler
+
+    if _scheduler is None:
+        return
+
+    try:
+        _scheduler.remove_all_jobs()
+    except Exception:
+        logger.exception("Failed to clear scheduler jobs")
+
+    if _scheduler.running:
+        _scheduler.shutdown(wait=False)
+        logger.info("Scheduler stopped")
+
+    _scheduler = None
+
+
+def sync_scheduler() -> bool:
+    """Synchronize the current instance scheduler with persisted automation config."""
+    automation_config = resolve_runtime_automation_config()
+
+    with _scheduler_lock:
+        if not automation_config.scheduler_enabled:
+            _clear_scheduler_locked()
+            logger.info("Scheduler disabled")
+            return False
+
+        global _scheduler
+        if _scheduler is None:
+            _scheduler = _build_scheduler()
+
+        _register_jobs(_scheduler)
+        if not _scheduler.running:
+            _scheduler.start()
+            logger.info("Scheduler started")
+        return True
+
+
+def get_scheduler_job_ids() -> list[str]:
+    with _scheduler_lock:
+        if _scheduler is None:
+            return []
+        return sorted(job.id for job in _scheduler.get_jobs())
+
+
+def is_scheduler_running() -> bool:
+    with _scheduler_lock:
+        return bool(_scheduler is not None and _scheduler.running)
+
+
+def setup_scheduler():
+    """Setup and start the scheduler."""
+    sync_scheduler()
 
 
 def shutdown_scheduler():
     """Shutdown the scheduler."""
-    if scheduler.running:
-        scheduler.shutdown(wait=False)
-        logger.info("Scheduler stopped")
+    with _scheduler_lock:
+        _clear_scheduler_locked()

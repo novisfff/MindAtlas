@@ -48,13 +48,31 @@ class AttachmentServiceTests(unittest.IsolatedAsyncioTestCase):
         svc = AttachmentService(self.db)
         fake_file = SimpleNamespace(filename="a.txt", content_type="text/plain", file=io.BytesIO(b"x"))
 
-        with patch.object(
-            attachment_service_module, "get_minio_client", side_effect=attachment_service_module.StorageError("down")
+        with (
+            patch.object(attachment_service_module, "ensure_runtime_storage_configured", return_value=SimpleNamespace(max_file_size_mb=100)),
+            patch.object(attachment_service_module, "get_minio_client", side_effect=attachment_service_module.StorageError("down")),
         ):
             with self.assertRaises(ApiException) as ctx:
                 await svc.upload(self.entry.id, fake_file)
         self.assertEqual(ctx.exception.status_code, 500)
         self.assertEqual(ctx.exception.code, 50002)
+
+    async def test_upload_without_storage_configuration_raises_40981(self) -> None:
+        from app.attachment.service import AttachmentService  # noqa: E402
+        from app.attachment import service as attachment_service_module  # noqa: E402
+
+        svc = AttachmentService(self.db)
+        fake_file = SimpleNamespace(filename="a.txt", content_type="text/plain", file=io.BytesIO(b"x"))
+
+        with patch.object(
+            attachment_service_module,
+            "ensure_runtime_storage_configured",
+            side_effect=ApiException(status_code=409, code=40981, message="Object storage is not configured"),
+        ):
+            with self.assertRaises(ApiException) as ctx:
+                await svc.upload(self.entry.id, fake_file)
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.code, 40981)
 
     async def test_upload_put_object_error_raises_50001(self) -> None:
         from app.attachment.service import AttachmentService  # noqa: E402
@@ -72,6 +90,7 @@ class AttachmentServiceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(attachment_service_module, "S3Error", FakeS3Error),
+            patch.object(attachment_service_module, "ensure_runtime_storage_configured", return_value=SimpleNamespace(max_file_size_mb=100)),
             patch.object(attachment_service_module, "get_minio_client", return_value=(FakeClient(), "b")),
         ):
             with self.assertRaises(ApiException) as ctx:
@@ -99,6 +118,7 @@ class AttachmentServiceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(attachment_service_module, "S3Error", FakeS3Error),
+            patch.object(attachment_service_module, "ensure_runtime_storage_configured", return_value=SimpleNamespace(max_file_size_mb=100)),
             patch.object(attachment_service_module, "get_minio_client", return_value=(FakeClient(), "b")),
         ):
             att = await svc.upload(self.entry.id, fake_file)
@@ -123,6 +143,7 @@ class AttachmentServiceTests(unittest.IsolatedAsyncioTestCase):
 
         # Force DB commit to fail during metadata save.
         with (
+            patch.object(attachment_service_module, "ensure_runtime_storage_configured", return_value=SimpleNamespace(max_file_size_mb=100)),
             patch.object(attachment_service_module, "get_minio_client", return_value=(FakeClient(), "b")),
             patch.object(attachment_service_module, "remove_object_safe", return_value=True) as rm,
             patch.object(self.db, "commit", side_effect=Exception("db down")),
@@ -203,6 +224,7 @@ class AttachmentServiceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(attachment_service_module, "S3Error", FakeS3Error),
+            patch.object(attachment_service_module, "ensure_runtime_storage_configured", return_value=SimpleNamespace()),
             patch.object(attachment_service_module, "get_minio_client", return_value=(FakeClient(), "b")),
         ):
             with self.assertRaises(ApiException) as ctx:
@@ -227,6 +249,7 @@ class AttachmentServiceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(attachment_service_module, "S3Error", FakeS3Error),
+            patch.object(attachment_service_module, "ensure_runtime_storage_configured", return_value=SimpleNamespace()),
             patch.object(attachment_service_module, "get_minio_client", return_value=(FakeClient(), "b")),
         ):
             with self.assertRaises(ApiException) as ctx:

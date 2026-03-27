@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "entryTypes": [
+    {
+      "code": "KNOWLEDGE",
+      "name": "知识",
+      "description": "学习到的知识点、概念与方法",
+      "color": "#3B82F6",
+      "icon": "book",
+      "graphEnabled": true,
+      "aiEnabled": true,
+      "enabled": true
+    },
+    {
+      "code": "PROJECT",
+      "name": "项目",
+      "description": "正在推进或已经完成的项目",
+      "color": "#10B981",
+      "icon": "folder",
+      "graphEnabled": true,
+      "aiEnabled": true,
+      "enabled": true
+    },
+    {
+      "code": "COMPETITION",
+      "name": "比赛",
+      "description": "参加过的比赛、评选或挑战活动",
+      "color": "#F59E0B",
+      "icon": "trophy",
+      "graphEnabled": true,
+      "aiEnabled": true,
+      "enabled": true
+    },
+    {
+      "code": "EXPERIENCE",
+      "name": "经历",
+      "description": "个人经历、阶段总结与过程记录",
+      "color": "#8B5CF6",
+      "icon": "star",
+      "graphEnabled": true,
+      "aiEnabled": true,
+      "enabled": true
+    },
+    {
+      "code": "ACHIEVEMENT",
+      "name": "成果",
+      "description": "产出结果、里程碑与可展示成果",
+      "color": "#EF4444",
+      "icon": "award",
+      "graphEnabled": true,
+      "aiEnabled": true,
+      "enabled": true
+    },
+    {
+      "code": "TECHNOLOGY",
+      "name": "技术",
+      "description": "掌握的技术、工具与实践能力",
+      "color": "#06B6D4",
+      "icon": "code",
+      "graphEnabled": true,
+      "aiEnabled": true,
+      "enabled": true
+    },
+    {
+      "code": "DOCUMENT",
+      "name": "资料",
+      "description": "参考资料、文档、摘录与附件信息",
+      "color": "#6B7280",
+      "icon": "file",
+      "graphEnabled": true,
+      "aiEnabled": true,
+      "enabled": true
+    }
+  ]
+}

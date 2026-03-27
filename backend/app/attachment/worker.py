@@ -18,6 +18,7 @@ from typing import Callable
 from app.common.time import utcnow
 from app.config import get_settings
 from app.database import SessionLocal
+from app.system_settings.runtime_config_service import resolve_runtime_document_parsing_config
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +35,10 @@ class WorkerConfig:
 
 def build_worker_config() -> WorkerConfig:
     settings = get_settings()
+    document_config = resolve_runtime_document_parsing_config()
     worker_id = f"{socket.gethostname()}:{os.getpid()}"
     return WorkerConfig(
-        enabled=settings.docling_worker_enabled,
+        enabled=document_config.worker_enabled,
         poll_interval_ms=settings.docling_worker_poll_interval_ms,
         batch_size=settings.docling_worker_batch_size,
         max_attempts=settings.docling_worker_max_attempts,

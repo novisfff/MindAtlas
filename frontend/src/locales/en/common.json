@@ -120,6 +120,511 @@
       }
     }
   },
+  "initialization": {
+    "eyebrow": "First-run setup",
+    "title": "Finish setting up your MindAtlas workspace",
+    "progressLabel": "Setup progress",
+    "loadingTitle": "Checking initialization status",
+    "loadingDescription": "We are confirming whether this system has already completed first-run setup before deciding if the wizard is needed.",
+    "statusErrorTitle": "Failed to load initialization status",
+    "statusErrorDescription": "We couldn't confirm whether first-run setup is complete yet. Please try again.",
+    "retry": "Retry",
+    "success": "Initialization complete. Welcome to MindAtlas.",
+    "submitError": "Initialization failed. Please try again.",
+    "actions": {
+      "back": "Back",
+      "next": "Next",
+      "finish": "Finish setup"
+    },
+    "validation": {
+      "discover": "Please fill in a valid Base URL and API key first.",
+      "completeField": "Please complete {{field}} first.",
+      "step1": "Please choose a system language first.",
+      "step2": "Please review the system introduction before continuing.",
+      "step3": "Please finish the AI provider and model setup first.",
+      "step4": "Keep at least one entry type and give every entry type a name.",
+      "step5": "Please complete the previous steps first."
+    },
+    "steps": {
+      "language": {
+        "label": "System language",
+        "title": "Choose the system language first",
+        "description": "The setup UI, default entry types, and built-in system AI responses will follow the language you choose here.",
+        "options": {
+          "zh": "Use Chinese for the app UI, default templates, and built-in AI output.",
+          "en": "Ideal if you want the whole workspace and built-in AI defaults to speak English."
+        }
+      },
+      "intro": {
+        "label": "Overview",
+        "title": "Get a quick feel for MindAtlas first",
+        "description": "Before the actual setup begins, this step gives a concise overview of what MindAtlas does, what you will configure next, and whether two core capabilities are already enabled."
+      },
+      "ai": {
+        "label": "AI model",
+        "title": "Connect one working AI model",
+        "description": "Configure one OpenAI-compatible provider and one LLM. The assistant, workflow copilot, and LightRAG will all start with this model."
+      },
+      "entryTypes": {
+        "label": "Entry types",
+        "title": "Shape your default entry types",
+        "description": "We prepared a language-aware starter set for you. You can keep it, trim it, or add your own types before you start."
+      },
+      "capabilities": {
+        "label": "Capability center",
+        "title": "Configure AI capabilities by category",
+        "description": "Keep the main LLM setup simple, then configure LightRAG and Docling separately here when your deployment enables them."
+      },
+      "review": {
+        "label": "Review",
+        "title": "Review the initialization summary",
+        "description": "Once you confirm, we will save the language, model bindings, entry types, and system defaults together."
+      }
+    },
+    "intro": {
+      "badge": "WELCOME TO MINDATLAS",
+      "systemTitle": "What MindAtlas is",
+      "systemDescription": "MindAtlas is a system for capturing, connecting, retrieving, and analyzing personal knowledge, experiences, and project context. It helps you turn scattered notes into structured records that AI can understand, relate, and review.",
+      "tags": {
+        "record": "Capture",
+        "connect": "Connect",
+        "analyze": "Analyze"
+      },
+      "setupTitle": "What happens next",
+      "setupDescription": "The remaining setup will configure your AI model, entry types, and optional extended capabilities. Once the core steps are done, the system is ready to use, and the extra capability settings can deepen the AI experience later.",
+      "highlights": {
+        "ai": {
+          "title": "Connect the default AI model",
+          "description": "Set up one working OpenAI-compatible provider and primary model. The assistant, workflow copilot, and graph features will reuse it immediately."
+        },
+        "entryTypes": {
+          "title": "Shape your entry types",
+          "description": "Confirm which default record categories the system starts with so your future inputs already have a clear structure."
+        },
+        "capabilities": {
+          "title": "Layer in extended capabilities",
+          "description": "Configure LightRAG and Docling when needed so graph reasoning, attachment parsing, and related AI features feel complete."
+        }
+      },
+      "statusTitle": "Current capability status",
+      "statusDescription": "These two status cards come from the current initialization defaults so you can quickly see which core capabilities this deployment is prepared to expose.",
+      "statusSource": "Based on current deployment defaults",
+      "cards": {
+        "lightrag": {
+          "description": "Powers knowledge graph retrieval, graph summaries, and part of the graph-aware AI experience."
+        },
+        "docling": {
+          "description": "Handles attachment parsing, OCR, and structured document processing before content enters the system."
+        }
+      },
+      "noteTitle": "Before you rely on them",
+      "note": "These capabilities only become available when the related services are running and their configuration switches are enabled."
+    },
+    "ai": {
+      "fields": {
+        "providerName": "Provider name",
+        "baseUrl": "Base URL",
+        "apiKey": "API key",
+        "modelName": "LLM model name"
+      },
+      "placeholders": {
+        "providerName": "For example OpenAI, OpenRouter, or SiliconFlow",
+        "modelName": "For example gpt-4.1-mini or deepseek-chat"
+      },
+      "advancedTitle": "Advanced AI defaults",
+      "advancedDescription": "Use this area for logical defaults such as embedding, summary language, and rerank. Docker-managed service endpoints and switches stay out of the initialization flow.",
+      "lightragLocaleLabel": "LightRAG summary language",
+      "lightragLocaleHint": "You can configure it during initialization, but it becomes fixed after setup and cannot be changed later.",
+      "lightragEmbeddingHint": "The LightRAG embedding model must also be decided during initialization and cannot be changed later.",
+      "lightragEmbeddingDimHint": "The LightRAG embedding dimension must also be decided during initialization and cannot be changed later.",
+      "discoverTitle": "Test the connection and discover models",
+      "discoverDescription": "If the provider exposes a standard model list endpoint, we'll fetch the available models for you. You can still type one manually if discovery fails.",
+      "discoverAction": "Test and discover models",
+      "discoverFailed": "Model discovery failed. Please check the service URL, API key, or try again later.",
+      "discoverEmpty": "The connection worked, but no LLM models were found. Please type the model name manually.",
+      "showRerank": "Show rerank settings",
+      "hideRerank": "Hide rerank settings"
+    },
+    "entryTypes": {
+      "addCustom": "Add custom type",
+      "loading": "Loading default entry types...",
+      "remove": "Remove entry type",
+      "defaultHint": "System default template. If you leave it untouched, it can switch with the selected language.",
+      "customHint": "This is your own custom type and will be kept as-is.",
+      "defaultBehavior": "During initialization, every type stays enabled and participates in both graph and AI. You can fine-tune that later in settings.",
+      "origin": {
+        "default": "Default",
+        "custom": "Custom"
+      },
+      "fields": {
+        "name": "Name",
+        "icon": "Icon key",
+        "color": "Color",
+        "description": "Description"
+      },
+      "placeholders": {
+        "name": "For example Idea, Client, or Research Topic",
+        "icon": "For example lightbulb, users, or flask",
+        "description": "Describe what kind of content this entry type should hold"
+      }
+    },
+    "capabilities": {
+      "emptyTitle": "No extra AI capability settings are exposed by this deployment right now",
+      "emptyDescription": "If Docker or environment settings enable more LightRAG or Docling options later, the matching sections will appear here automatically.",
+      "introTitle": "The core setup is enough to get the system running, and the rest can be layered in when needed",
+      "introDescription": "You can open any module to configure it now, or skip it and come back later from System Setup.",
+      "currentState": "Current state",
+      "configure": "Configure",
+      "skip": "Maybe later",
+      "undoSkip": "Restore",
+      "backToCenter": "Back to capability center",
+      "saveAndBack": "Save and return",
+      "skipCurrent": "Skip this module",
+      "editing": "Editing capability module",
+      "sections": {
+        "lightrag": {
+          "description": "Configure LightRAG embedding connectivity and the optional rerank service."
+        },
+        "docling": {
+          "description": "Configure OCR behavior and related attachment parsing defaults for Docling.",
+          "empty": "Docling has no extra runtime options exposed in this deployment, so it will keep using the deployment defaults."
+        },
+        "automation": {
+          "description": "Control whether the system background scheduler runs weekly reports, monthly reports, and other built-in timed jobs.",
+          "note": "Disabling it only stops automatic scheduling. Manual weekly and monthly generation stays available.",
+          "jobs": {
+            "weekly": {
+              "title": "Weekly report generation",
+              "schedule": "Runs every Monday at 00:00 UTC"
+            },
+            "monthly": {
+              "title": "Monthly report generation",
+              "schedule": "Runs on the 1st day of each month at 00:10 UTC"
+            }
+          }
+        }
+      },
+      "embeddingProvider": {
+        "label": "Embedding provider source",
+        "options": {
+          "shared": "Reuse the main LLM provider",
+          "custom": "Use a dedicated embedding provider"
+        }
+      },
+      "rerank": {
+        "label": "Rerank service",
+        "options": {
+          "disabled": "Do not configure separately",
+          "enabled": "Configure a dedicated rerank service"
+        }
+      },
+      "ocr": {
+        "options": {
+          "auto": "Auto detect",
+          "zh": "Chinese",
+          "en": "English",
+          "zh_en": "Chinese + English"
+        }
+      }
+    },
+    "review": {
+      "emptyValue": "Not set",
+      "bindingValue": "Assistant, Workflow Copilot, and LightRAG LLM",
+      "cards": {
+        "language": "System language",
+        "model": "Default model",
+        "binding": "Default binding scope",
+        "lightrag": "LightRAG",
+        "docling": "Docling",
+        "automation": "Automation scheduler",
+        "entryTypes": "Entry type count",
+        "advancedAi": "Advanced AI defaults",
+        "rerank": "Rerank"
+      },
+      "automationTitle": "Automation summary",
+      "automationNote": "When enabled, the system will automatically run background jobs such as weekly and monthly reports. When disabled, only automatic scheduling stops; manual weekly and monthly generation still works.",
+      "capabilitiesTitle": "Capability summary",
+      "capabilitiesDescription": "Each capability can use app config, keep an environment default, or stay skipped for now.",
+      "noteTitle": "Deployment services are already wired in",
+      "noteDescription": "In Docker Compose deployments, object storage, the knowledge graph, document parsing, and the background scheduler all start with built-in defaults. Initialization only needs your language, model, and entry types."
+    }
+  },
+  "systemSetup": {
+    "eyebrow": "System overview",
+    "title": "System Setup",
+    "description": "Review the core system setup and the status of deployment-managed services here. In Docker Compose, MindAtlas wires object storage, the knowledge graph, document parsing, and background automation for you, so you usually do not need to edit runtime parameters manually.",
+    "runtimeTitle": "Deployment-managed services",
+    "runtimeDescription": "These capabilities are normally provided by Docker Compose out of the box. This page is mainly for visibility, not for re-entering infrastructure settings.",
+    "managedHint": "If you are running through Docker Compose, you usually do not need to edit these values manually. When something is unavailable, check container health, logs, and the default AI model bindings first.",
+    "footerTitle": "Need to adjust AI routing next?",
+    "footerDescription": "You can still continue to AI Providers or System AI Behaviors to refine the default model bindings and decide which workflow or agent powers built-in system actions.",
+    "footerAction": "Open system AI behaviors",
+    "moduleTitles": {
+      "storage": "Storage & Attachments",
+      "knowledgeGraph": "Knowledge Graph",
+      "documentParsing": "Document Parsing",
+      "automation": "Automation"
+    },
+    "moduleDescriptions": {
+      "storage": "Object storage behind attachment upload and preview.",
+      "knowledgeGraph": "Neo4j and LightRAG services that power graph retrieval and the AI graph view.",
+      "documentParsing": "Docling parsing, OCR, and attachment text extraction before graph indexing.",
+      "automation": "Background scheduling used by weekly reports, monthly reports, and other system jobs."
+    },
+    "sources": {
+      "appConfig": "App Config",
+      "environmentDefault": "Environment Default",
+      "default": "Unconfigured"
+    },
+    "status": {
+      "configured": "Configured",
+      "environmentDefault": "Using environment default",
+      "skipped": "Skipped",
+      "notConfigured": "Not configured",
+      "restartRequired": "Some processes need reload"
+    },
+    "actions": {
+      "configure": "Configure module",
+      "collapse": "Collapse",
+      "validate": "Test connection",
+      "save": "Save module",
+      "openAiProviders": "Open AI providers",
+      "openAiSkills": "Open AI skills",
+      "openDetails": "Open details"
+    },
+    "messages": {
+      "saved": "Module settings saved",
+      "validationPassed": "Connection test passed",
+      "validationFailed": "Connection test failed"
+    },
+    "core": {
+      "language": "System language",
+      "languageHint": "You can continue using the top-right language switcher when you need to change the global system language.",
+      "modelBindings": "Default model bindings",
+      "modelBindingsHint": "The assistant, workflow copilot, and LightRAG reuse the default bindings shown here.",
+      "entryTypes": "Entry types",
+      "entryTypesValue": "Manage them from content settings",
+      "entryTypesHint": "Entry types remain editable after initialization."
+    },
+    "forms": {
+      "secret": {
+        "keepExisting": "Leave blank to keep the existing saved secret"
+      },
+      "storage": {
+        "endpoint": {
+          "label": "MinIO endpoint",
+          "placeholder": "For example https://minio.example.com"
+        },
+        "bucket": {
+          "label": "Bucket",
+          "placeholder": "For example mindatlas"
+        },
+        "accessKey": {
+          "label": "Access key",
+          "placeholder": "Enter a new access key"
+        },
+        "secretKey": {
+          "label": "Secret key",
+          "placeholder": "Enter a new secret key"
+        },
+        "secure": {
+          "label": "Use HTTPS",
+          "description": "Enable this when the object storage endpoint should be reached over a secure connection."
+        },
+        "advanced": {
+          "title": "Attachment limits",
+          "description": "These limits shape attachment upload and parsing boundaries."
+        },
+        "maxFileSizeMb": {
+          "label": "Max file size (MB)"
+        },
+        "maxPdfPages": {
+          "label": "Max PDF pages"
+        }
+      },
+      "knowledgeGraph": {
+        "enabled": {
+          "label": "Enable knowledge graph",
+          "description": "When disabled, graph view and graph-powered retrieval stay unavailable."
+        },
+        "neo4jUri": {
+          "label": "Neo4j URI"
+        },
+        "neo4jDatabase": {
+          "label": "Neo4j database"
+        },
+        "neo4jUser": {
+          "label": "Neo4j user"
+        },
+        "neo4jPassword": {
+          "label": "Neo4j password",
+          "placeholder": "Enter a new Neo4j password"
+        },
+        "workspace": {
+          "label": "LightRAG workspace",
+          "placeholder": "For example mindatlas"
+        },
+        "graphStorage": {
+          "label": "Graph storage"
+        },
+        "summaryLanguage": {
+          "label": "Summary language",
+          "placeholder": "For example Chinese or English"
+        },
+        "llmModelName": {
+          "label": "LightRAG LLM model",
+          "placeholder": "Leave blank to keep the current binding"
+        },
+        "embeddingModelName": {
+          "label": "LightRAG embedding model",
+          "placeholder": "For example text-embedding-3-small"
+        },
+        "embeddingHost": {
+          "label": "Embedding service URL",
+          "placeholder": "For example https://api.openai.com/v1"
+        },
+        "embeddingDim": {
+          "label": "Embedding dimension",
+          "placeholder": "For example 1536"
+        },
+        "embeddingApiKey": {
+          "label": "Embedding API key",
+          "placeholder": "Enter a dedicated embedding key"
+        },
+        "advanced": {
+          "title": "Advanced rerank config",
+          "description": "Only fill this in if you actually run a separate rerank service."
+        },
+        "rerankModel": {
+          "label": "Rerank model",
+          "placeholder": "For example bge-reranker-v2-m3"
+        },
+        "rerankHost": {
+          "label": "Rerank host"
+        },
+        "rerankApiKey": {
+          "label": "Rerank API key",
+          "placeholder": "Enter a new rerank key"
+        },
+        "rerankRequestFormat": {
+          "label": "Request format"
+        }
+      },
+      "documentParsing": {
+        "workerEnabled": {
+          "label": "Enable Docling worker",
+          "description": "When enabled, uploaded attachments can enter the background parsing queue."
+        },
+        "ocrEnabled": {
+          "label": "Enable OCR",
+          "description": "Use OCR for scanned files or attachments that primarily contain images."
+        },
+        "ocrLangs": {
+          "label": "OCR languages",
+          "placeholder": "For example auto, chinese, english"
+        },
+        "pictureDescriptionEnabled": {
+          "label": "Enable image description",
+          "description": "Call an external model to describe images found inside attachments."
+        },
+        "pictureDescriptionUrl": {
+          "label": "Image description endpoint"
+        },
+        "pictureDescriptionModel": {
+          "label": "Image description model",
+          "placeholder": "For example gpt-4.1-mini"
+        },
+        "pictureDescriptionApiKey": {
+          "label": "Image description API key",
+          "placeholder": "Enter a new image description key"
+        },
+        "pictureDescriptionPrompt": {
+          "label": "Image description prompt",
+          "placeholder": "Explain how the model should describe images"
+        },
+        "pictureDescriptionTimeoutSec": {
+          "label": "Timeout (seconds)"
+        },
+        "pictureDescriptionParamsJson": {
+          "label": "Extra params (JSON)"
+        }
+      },
+      "automation": {
+        "schedulerEnabled": {
+          "label": "Enable background scheduler",
+          "description": "When disabled, weekly reports, monthly reports, and other scheduled background jobs will not run automatically."
+        },
+        "note": "The current instance applies this immediately. If you run multiple backend instances, the others may still need a reload or restart."
+      }
+    },
+    "detailPages": {
+      "effectiveSummary": "Current effective summary",
+      "lockedBadge": "Init locked",
+      "status": {
+        "started": "Started",
+        "notStarted": "Not started"
+      },
+      "lightrag": {
+        "sections": {
+          "runtime": "Graph runtime",
+          "embedding": "Embedding",
+          "rerank": "Rerank"
+        },
+        "runtimeHint": "Only the LightRAG settings that still matter at runtime stay editable here. Connection and storage values stay deployment-managed.",
+        "embeddingHint": "The embedding model, summary language, and host are decided during initialization and stay read-only afterward.",
+        "summaryLanguageLocked": "This value was fixed during initialization. After initialization it stays read-only.",
+        "embeddingModelLocked": "This embedding model is decided during initialization and stays read-only afterward.",
+        "embeddingHostLocked": "This embedding host was fixed during initialization. If it was empty you could fill it once, and it is now locked.",
+        "embeddingDimLocked": "This embedding dimension is decided during initialization and stays read-only afterward.",
+        "rerankHint": "Only configure this section when you run a dedicated rerank service.",
+        "rerankToggleLabel": "Enable rerank service",
+        "rerankToggleDescription": "Turn this on only when you really run a separate rerank endpoint.",
+        "deploymentManaged": "Whether LightRAG is started, how Neo4j is connected, and which graph storage backend is used are controlled by Docker Compose or environment settings and are not edited here after initialization.",
+        "unavailableTitle": "LightRAG is not started",
+        "unavailableDescription": "Enable LightRAG in deployment first, then check the related containers and default model bindings. Until the service is started, the runtime settings on this page stay unavailable.",
+        "notStartedSummary": "LightRAG not started"
+      },
+      "docling": {
+        "sections": {
+          "ocr": "OCR",
+          "pictureDescription": "Image description"
+        },
+        "ocrHint": "You can still tune OCR after the Docling worker is running.",
+        "pictureDescriptionHint": "Image description uses the external model service configured below while the current Docling worker is running.",
+        "deploymentManaged": "Whether the Docling worker is started is controlled by Docker Compose or environment settings. When the worker is not started, the OCR and image-description settings below cannot take effect.",
+        "unavailableTitle": "Docling is not started",
+        "unavailableDescription": "Start the Docling worker in deployment first and confirm the related containers are healthy. Until then, the configuration on this page stays unavailable.",
+        "notStartedSummary": "Docling not started"
+      },
+      "automation": {
+        "applyHint": "In a single-instance deployment, saving applies the scheduler change immediately on the current instance. In multi-instance deployments, other instances may still need a later reload or restart.",
+        "jobsDescription": "The current background scheduler affects these built-in system jobs.",
+        "manualHint": "Disabling the background scheduler only stops automatic execution. The manual weekly and monthly report generation APIs remain available.",
+        "sections": {
+          "scheduler": "Scheduler toggle",
+          "jobs": "Current system jobs"
+        },
+        "jobs": {
+          "weekly": {
+            "title": "Weekly report generation",
+            "schedule": "Runs every Monday at 00:00 UTC"
+          },
+          "monthly": {
+            "title": "Monthly report generation",
+            "schedule": "Runs on the 1st day of each month at 00:10 UTC"
+          }
+        }
+      }
+    },
+    "emptyStates": {
+      "openSetup": "Open System Setup",
+      "storageTitle": "Attachment upload is unavailable",
+      "storageUnconfigured": "Attachment services are not ready yet. Please check the object storage containers in your Docker Compose deployment.",
+      "documentParsingUnavailable": "Document parsing is not ready yet. Check the `parse-worker` service and related container logs before indexing attachments into the knowledge graph.",
+      "knowledgeGraphDisabled": "The knowledge graph service is currently disabled. Please check the LightRAG and Neo4j services in your Docker Compose deployment.",
+      "knowledgeGraphIncomplete": "The knowledge graph service is not fully ready yet. Please check Neo4j, the LightRAG worker, and the default AI model bindings."
+    }
+  },
   "tags": {
     "searchPlaceholder": "Search or create tags...",
     "create": "Create tag \"{{name}}\""
@@ -160,6 +665,8 @@
       "contentSectionDesc": "Manage content structure, tags, and the core organization settings.",
       "aiSection": "AI & Automation",
       "aiSectionDesc": "Configure models, tools, skills, targets, and built-in system AI behaviors in one place.",
+      "runtimeSection": "Runtime Capabilities",
+      "runtimeSectionDesc": "Review deployment-managed services and separately maintain runtime settings such as LightRAG, Docling, and automation.",
       "entryTypes": "Entry Types",
       "entryTypesDesc": "Manage content types, icons, and properties",
       "tags": "Tags",
@@ -174,6 +681,14 @@
       "assistantTargetsDesc": "Manage reusable workflow and agent executables in one place",
       "systemAiBehaviors": "System AI Behaviors",
       "systemAiBehaviorsDesc": "Configure which workflow or agent powers built-in system AI behaviors like weekly and monthly reports",
+      "lightRag": "LightRAG",
+      "lightRagDesc": "Review LightRAG runtime status and maintain the settings that remain editable after initialization",
+      "docling": "Docling",
+      "doclingDesc": "Review the Docling worker status and maintain OCR and image description settings",
+      "automation": "Automation",
+      "automationDesc": "Manage the background scheduler toggle and review the system jobs it drives automatically",
+      "systemSetup": "System Setup",
+      "systemSetupDesc": "Review core setup and the status of Docker Compose managed services",
       "assistantWorkflows": "Assistant Workflows",
       "assistantWorkflowsDesc": "Manage reusable workflow executables",
       "assistantAgents": "Assistant Agents",
