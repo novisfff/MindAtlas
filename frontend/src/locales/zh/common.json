@@ -614,6 +614,166 @@
       "knowledgeGraphIncomplete": "知识图谱服务尚未完全就绪，请检查 Neo4j、LightRAG worker，以及默认 AI 模型绑定是否已经完成。"
     }
   },
+  "openclawIntegration": {
+    "overview": {
+      "title": "OpenClaw 能力目录",
+      "description": "让 OpenClaw 只看到一层稳定、可配置的 MindAtlas 能力目录。系统预设会自动补齐，你也可以把工具、工作流和智能体包装成对外能力。",
+      "switchLabel": "启用 OpenClaw 集成",
+      "switchHint": "开启后，OpenClaw 会通过专用 integration API 读取这里暴露出去的能力目录，并按 tool name 调用它们。"
+    },
+    "summary": {
+      "systemPresets": "系统预设",
+      "customItems": "自定义目录项",
+      "runtimeApi": "运行时接口"
+    },
+    "guide": {
+      "title": "集成指南",
+      "description": "默认折叠，按需展开查看 OpenClaw 接入 MindAtlas 的最短路径。",
+      "intro": "MindAtlas 负责能力目录、知识数据和实际执行；OpenClaw 负责聊天入口、工具注册和对话调度。推荐按“生成密钥 -> 暴露目录项 -> 配置插件 -> 验证调用”这个顺序完成接入。",
+      "actions": {
+        "expand": "展开指南",
+        "collapse": "收起指南"
+      },
+      "steps": {
+        "secret": {
+          "title": "1. 生成集成密钥",
+          "description": "先在本页生成 Bearer 密钥。这个密钥要填到 OpenClaw 插件里，用来访问 MindAtlas 的 integration API。"
+        },
+        "catalog": {
+          "title": "2. 配置能力目录",
+          "description": "打开系统预设或新增自定义目录项，把你想暴露给 OpenClaw 的工具、工作流、智能体配置好，并确认它们已经对外暴露。"
+        },
+        "plugin": {
+          "title": "3. 在 OpenClaw 配置插件",
+          "description": "把 MindAtlas 的服务地址和集成密钥填到 OpenClaw 插件。插件会先读取能力目录，再把每个目录项注册成 OpenClaw tool。",
+          "details": {
+            "install": "先执行 `openclaw plugins install ./integrations/openclaw-mindatlas` 安装仓库内自带的 `openclaw-mindatlas` 插件，然后重启 OpenClaw Gateway。",
+            "baseUrl": "在 OpenClaw 配置里把 `plugins.entries.openclaw-mindatlas.config.baseUrl` 指向 MindAtlas 后端地址，再把 `integrationSecret` 设为本页生成的 Bearer 密钥；插件启动时会先调用 `/api/integrations/openclaw/capabilities` 拉取目录。",
+            "refresh": "目录项可用性变化可以由插件的自动刷新感知；但如果 tool name、对外标题、对外描述或输入 schema 发生变化，需要重载 OpenClaw Gateway 或插件，重新注册 tool 元数据。"
+          }
+        },
+        "verify": {
+          "title": "4. 验证调用链路",
+          "description": "在 OpenClaw 侧刷新能力目录，确认能读到这里暴露的目录项，然后发起一次调用，检查能力发现和执行接口都能正常返回。"
+        }
+      },
+      "endpointsTitle": "关键接口",
+      "endpoints": {
+        "auth": "鉴权 Header",
+        "catalog": "能力目录发现",
+        "execute": "能力执行"
+      },
+      "notesTitle": "接入要点",
+      "notes": {
+        "catalogOnly": "OpenClaw 只会看到当前已暴露的目录项；未暴露或当前不可用的项不会作为可调用能力出现。",
+        "skillBoundary": "MindAtlas 的 Skill 不会直接暴露给 OpenClaw。OpenClaw 看到的是更稳定的能力目录项，而不是内部意图层。",
+        "refresh": "新增、删除或修改目录项后，建议在 OpenClaw 侧重新拉取一次能力目录，避免继续使用旧缓存。"
+      }
+    },
+    "secret": {
+      "title": "集成密钥",
+      "description": "为外部 `openclaw-mindatlas` 插件生成独立 Bearer 密钥。原始密钥只会在生成或轮换后展示一次。",
+      "configured": "已配置密钥",
+      "configuredHint": "当前已经保存了一份运行时鉴权密钥。",
+      "notConfigured": "尚未配置密钥",
+      "missingHint": "请先生成密钥，再启用集成或配置 OpenClaw 插件。",
+      "revealedTitle": "请立即把这串密钥填入 OpenClaw 插件"
+    },
+    "types": {
+      "systemAdapter": "系统预设",
+      "tool": "工具",
+      "workflow": "工作流",
+      "agent": "智能体"
+    },
+    "labels": {
+      "system": "系统",
+      "user": "用户",
+      "input": "输入",
+      "output": "输出"
+    },
+    "status": {
+      "enabled": "已启用",
+      "disabled": "未启用",
+      "available": "当前可用",
+      "unavailable": "当前不可用",
+      "exposed": "已暴露",
+      "hidden": "未暴露"
+    },
+    "actions": {
+      "generateSecret": "生成密钥",
+      "rotateSecret": "轮换密钥",
+      "copySecret": "复制密钥",
+      "addCapability": "添加能力",
+      "resetSystemPresets": "重置系统预设"
+    },
+    "systemPresets": {
+      "title": "系统预设能力",
+      "description": "这部分由系统自动补齐，适合直接暴露 MindAtlas 的核心记录、图谱和报表能力。你可以禁用，也可以编辑对外标题和 tool name。"
+    },
+    "customItems": {
+      "title": "自定义能力目录",
+      "description": "把现有工具、工作流或智能体包装成 OpenClaw 可发现的能力目录项，并单独维护它们的对外文案与契约。",
+      "emptyTitle": "还没有自定义能力目录项",
+      "emptyDescription": "先从现有工具、工作流或智能体中挑一个来源，补齐对外展示文案和输入输出契约。"
+    },
+    "dialog": {
+      "createTitle": "添加能力目录项",
+      "createDescription": "先选择来源对象，再配置 OpenClaw 看到的 tool name、标题、描述和契约。",
+      "editTitle": "编辑能力目录项",
+      "editDescription": "更新对外暴露的名称、文案和契约配置。",
+      "editSystemPreset": "编辑系统预设能力",
+      "editSystemPresetDescription": "系统预设不允许改绑定来源和 schema，这里只调整启用状态、标题、描述和 tool name。"
+    },
+    "form": {
+      "sourceType": "来源类型",
+      "source": "来源对象",
+      "toolName": "OpenClaw Tool 名",
+      "title": "展示标题",
+      "description": "描述",
+      "exposed": "对外暴露",
+      "exposedHint": "关闭后，这个目录项不会出现在 OpenClaw runtime metadata 中。",
+      "inputSummary": "输入摘要",
+      "outputSummary": "输出摘要",
+      "toolResponseMode": "Tool 响应解释方式",
+      "inputSchema": "输入 Schema",
+      "outputSchema": "输出 Schema",
+      "readonlySchemaHint": "当前来源的 schema 由系统自动同步，这里只读展示。若底层 published contract 变化，请重新保存一次目录项完成同步。"
+    },
+    "sourceTypeDescriptions": {
+      "tool": "适合直接暴露已有工具，并在目录项里维护 OpenClaw-facing schema。",
+      "workflow": "只允许已发布且有结构化输入输出契约的工作流，schema 会自动同步。",
+      "agent": "绑定已发布智能体，并由目录项自己声明 OpenClaw-facing 结构化输入输出。"
+    },
+    "responseModes": {
+      "jsonSchema": "JSON Schema",
+      "textField": "单字段文本"
+    },
+    "responseModeDescriptions": {
+      "jsonSchema": "适合会返回 JSON 对象的工具，结果会按目录项 schema 校验。",
+      "textField": "适合返回纯文本的工具，系统会把文本包装进单字段对象里。"
+    },
+    "confirmRotate": {
+      "title": "确定轮换 OpenClaw 集成密钥吗？",
+      "description": "轮换后，旧的 OpenClaw 插件配置会立即失效，你需要把新密钥同步更新过去。"
+    },
+    "confirmReset": {
+      "title": "确定重置系统预设能力吗？",
+      "description": "这会把所有系统预设目录项恢复成默认标题、描述、tool name、schema 和启用状态。"
+    },
+    "confirmDelete": {
+      "title": "确定删除这个目录项吗？",
+      "description": "删除后，OpenClaw 将无法再调用“{{title}}”。"
+    },
+    "messages": {
+      "saved": "OpenClaw 集成设置已保存",
+      "secretGenerated": "新的集成密钥已生成",
+      "secretCopied": "集成密钥已复制",
+      "systemPresetsReset": "系统预设能力已重置",
+      "deleted": "目录项已删除",
+      "invalidSchemaJson": "Schema 必须是合法的 JSON。",
+      "invalidSchemaObject": "Schema 根节点必须是 JSON 对象。"
+    }
+  },
   "tags": {
     "searchPlaceholder": "搜索或创建标签...",
     "create": "创建标签“{{name}}”"
@@ -668,6 +828,8 @@
       "assistantSkillsDesc": "管理 AI 助手的技能配置",
       "assistantTargets": "助手智能体",
       "assistantTargetsDesc": "统一管理可复用的 Workflow 与 Agent 执行体",
+      "openClawIntegration": "OpenClaw 集成",
+      "openClawIntegrationDesc": "配置供 OpenClaw 发现和调用的 MindAtlas 专用能力网关",
       "systemAiBehaviors": "系统 AI 行为",
       "systemAiBehaviorsDesc": "配置周报、月报等系统内置 AI 行为实际走哪个 Workflow 或 Agent",
       "lightRag": "LightRAG",

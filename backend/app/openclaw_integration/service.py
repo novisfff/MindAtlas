@@ -1,0 +1,2248 @@
+from __future__ import annotations
+
+import json
+import logging
+import re
+import secrets
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+from uuid import UUID, uuid4
+
+from fastapi import Request
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, joinedload
+
+from app.ai_provider.crypto import api_key_hint, decrypt_api_key, encrypt_api_key
+from app.assistant.skill_catalog.base import (
+    ConditionExpression,
+    SkillDefinition,
+    SkillKBConfig,
+    WorkflowEdgeDefinition,
+    WorkflowNodeDefinition,
+)
+from app.assistant.tools import __all__ as assistant_tool_names
+from app.assistant_config.models import AssistantAgentProfile, AssistantTool, AssistantWorkflow
+from app.assistant_config.registry import ToolRegistry
+from app.assistant_config.schemas import AgentPublishDraftInput, WorkflowInput
+from app.assistant_config.service import AssistantConfigService
+from app.common.color_utils import pick_material_600_color
+from app.common.exceptions import ApiException
+from app.common.request_context import get_request_id
+from app.common.time import utcnow
+from app.entry.models import TimeMode
+from app.entry.schemas import EntryRequest, EntrySearchRequest, EntryResponse
+from app.entry.service import EntryService
+from app.entry_type.models import EntryType
+from app.lightrag.service import LightRagService
+from app.openclaw_integration.models import OpenClawCapabilityItem
+from app.openclaw_integration.registry import (
+    OpenClawSystemCapabilityDefinition,
+    get_openclaw_system_capability_definition,
+    list_openclaw_system_capability_definitions,
+)
+from app.openclaw_integration.schemas import (
+    OPENCLAW_SYSTEM_CAPABILITY_INPUT_MODELS,
+    OPENCLAW_SYSTEM_CAPABILITY_OUTPUT_MODELS,
+    OpenClawCapabilityCatalogResponse,
+    OpenClawCapabilityExecuteResponse,
+    OpenClawCapabilityItemCreateRequest,
+    OpenClawCapabilityItemResponse,
+    OpenClawCapabilityItemUpdateRequest,
+    OpenClawCapabilitySourceType,
+    OpenClawCatalogSourceListResponse,
+    OpenClawCatalogSourceResponse,
+    OpenClawCatalogSourceType,
+    OpenClawCaptureEntryRequest,
+    OpenClawCreateRelationRequest,
+    OpenClawEntryRecordResponse,
+    OpenClawGenerateMonthlyReportRequest,
+    OpenClawGenerateWeeklyReportRequest,
+    OpenClawGetEntryRequest,
+    OpenClawIntegrationSettingsResponse,
+    OpenClawIntegrationUpdateRequest,
+    OpenClawQueryKnowledgeGraphRequest,
+    OpenClawRelationRecordResponse,
+    OpenClawRotateSecretResponse,
+    OpenClawRuntimeCapabilityResponse,
+    OpenClawSearchEntriesRequest,
+    OpenClawSearchEntriesResponse,
+    OpenClawSystemCapabilityKey,
+    OpenClawToolResponseMode,
+)
+from app.relation.models import RelationType
+from app.relation.schemas import RelationRequest, RelationResponse
+from app.relation.service import RelationService
+from app.report.schemas import MonthlyReportResponse, WeeklyReportResponse
+from app.report.service import MonthlyReportService, WeeklyReportService
+from app.system_settings.models import AppSetting
+from app.system_settings.runtime_config_service import resolve_runtime_knowledge_graph_config
+from app.system_settings.service import resolve_system_locale
+from app.tag.models import Tag
+
+logger = logging.getLogger(__name__)
+
+OPENCLAW_INTEGRATION_CONFIG_KEY = "openclaw_integration_config"
+OPENCLAW_CAPABILITY_KEY_RE = re.compile(r"^[a-z0-9_]+$")
+
+OPENCLAW_AUTH_ERROR_CODE = 40161
+OPENCLAW_DISABLED_ERROR_CODE = 40361
+OPENCLAW_CAPABILITY_DISABLED_ERROR_CODE = 40362
+OPENCLAW_CAPABILITY_NOT_FOUND_ERROR_CODE = 40461
+OPENCLAW_SECRET_REQUIRED_ERROR_CODE = 40061
+OPENCLAW_INVALID_CAPABILITY_ERROR_CODE = 40062
+OPENCLAW_INVALID_SCHEMA_ERROR_CODE = 42261
+OPENCLAW_INVALID_SOURCE_ERROR_CODE = 42262
+OPENCLAW_SYSTEM_PRESET_DELETE_ERROR_CODE = 40063
+OPENCLAW_SYSTEM_PRESET_UPDATE_ERROR_CODE = 40064
+
+_EMPTY_OBJECT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": False,
+}
+
+
+@dataclass(frozen=True)
+class OpenClawRuntimeAuditContext:
+    source: str | None = None
+    channel: str | None = None
+    session: str | None = None
+    tool: str | None = None
+
+
+@dataclass(frozen=True)
+class _CatalogItemAvailability:
+    available: bool
+    reason: str | None
+    source_name: str | None
+    source_description: str | None
+    source_is_system: bool
+    source_enabled: bool | None
+    published_version_id: UUID | None
+    implementation_type: str
+
+
+@dataclass(frozen=True)
+class _ResolvedToolSource:
+    source_name: str
+    source_description: str
+    is_system: bool
+    enabled: bool
+    tool_model: AssistantTool | None
+    tool_runtime: Any | None
+
+
+@dataclass(frozen=True)
+class _WorkflowContractSnapshot:
+    input_schema: dict[str, Any]
+    output_schema: dict[str, Any]
+    input_summary: str
+    output_summary: str
+
+
+def _normalize_optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _localized_message(locale: str, *, zh: str, en: str) -> str:
+    return zh if locale == "zh" else en
+
+
+def _slugify_identifier(value: str, *, default_prefix: str) -> str:
+    lowered = re.sub(r"[^a-zA-Z0-9]+", "_", str(value or "").strip().lower())
+    lowered = re.sub(r"_+", "_", lowered).strip("_")
+    if not lowered:
+        lowered = default_prefix
+    if lowered[0].isdigit():
+        lowered = f"{default_prefix}_{lowered}"
+    return lowered[:128]
+
+
+def _schema_compact(value: dict[str, Any]) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _schema_type_from_param_type(param_type: str | None) -> str:
+    normalized = str(param_type or "string").strip().lower()
+    if normalized == "number":
+        return "number"
+    if normalized == "integer":
+        return "integer"
+    if normalized == "boolean":
+        return "boolean"
+    if normalized == "array":
+        return "array"
+    if normalized == "object":
+        return "object"
+    return "string"
+
+
+def _schema_from_field_definitions(
+    fields: list[dict[str, Any]],
+    *,
+    required_key: str = "required",
+    allow_nullable: bool = False,
+) -> dict[str, Any]:
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+
+    for raw_field in fields:
+        if not isinstance(raw_field, dict):
+            continue
+        name = str(raw_field.get("name", "") or "").strip()
+        if not name:
+            continue
+        field_type = _schema_type_from_param_type(raw_field.get("type"))
+        field_schema: dict[str, Any] = {"type": field_type}
+        description = _normalize_optional_text(raw_field.get("description"))
+        if description:
+            field_schema["description"] = description
+        if field_type == "array":
+            items_type = _schema_type_from_param_type(raw_field.get("items_type", raw_field.get("itemsType")))
+            field_schema["items"] = {"type": items_type or "string"}
+        if allow_nullable and bool(raw_field.get("nullable", False)):
+            field_schema["nullable"] = True
+        if isinstance(raw_field.get("enum"), list) and raw_field["enum"]:
+            field_schema["enum"] = [str(item) for item in raw_field["enum"]]
+        properties[name] = field_schema
+        if bool(raw_field.get(required_key, False)) or (allow_nullable and not bool(raw_field.get("nullable", False))):
+            required.append(name)
+
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+    }
+
+
+def _schema_from_tool_params(params: list[dict[str, Any]] | None) -> dict[str, Any]:
+    raw_fields = []
+    for param in params or []:
+        if not isinstance(param, dict):
+            continue
+        raw_fields.append(
+            {
+                "name": param.get("name"),
+                "type": param.get("param_type", param.get("type")),
+                "required": bool(param.get("required", False)),
+                "description": param.get("description"),
+            }
+        )
+    return _schema_from_field_definitions(raw_fields, required_key="required")
+
+
+def _text_field_output_schema(field_name: str = "text") -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            field_name: {
+                "type": "string",
+            }
+        },
+        "required": [field_name],
+        "additionalProperties": False,
+    }
+
+
+def _schema_summary(schema: dict[str, Any], *, locale: str = "en") -> str:
+    if not isinstance(schema, dict):
+        return ""
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or not properties:
+        return _localized_message(locale, zh="无结构化字段", en="No structured fields")
+    parts: list[str] = []
+    for name, raw_field in properties.items():
+        if not isinstance(raw_field, dict):
+            continue
+        field_type = str(raw_field.get("type", "string") or "string").strip().lower()
+        if field_type == "array":
+            item_type = str(
+                ((raw_field.get("items") or {}) if isinstance(raw_field.get("items"), dict) else {}).get("type", "string")
+            ).strip().lower()
+            field_type = f"array[{item_type}]"
+        parts.append(f"{name} ({field_type})")
+    return ", ".join(parts)
+
+
+def _normalize_json_object_schema(schema: dict[str, Any] | None, *, label: str) -> dict[str, Any]:
+    if not isinstance(schema, dict):
+        raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message=f"{label} schema must be an object")
+    if str(schema.get("type", "")).strip().lower() != "object":
+        raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message=f"{label} schema root type must be object")
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message=f"{label} schema requires object properties")
+    required = schema.get("required", [])
+    if required is None:
+        required = []
+    if not isinstance(required, list):
+        raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message=f"{label} schema required must be a list")
+    normalized_required: list[str] = []
+    normalized_properties: dict[str, Any] = {}
+
+    for raw_name, raw_prop in properties.items():
+        name = str(raw_name or "").strip()
+        if not name or not OPENCLAW_CAPABILITY_KEY_RE.fullmatch(name):
+            raise ApiException(
+                status_code=422,
+                code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE,
+                message=f"{label} schema field name is invalid: {raw_name}",
+            )
+        if not isinstance(raw_prop, dict):
+            raise ApiException(
+                status_code=422,
+                code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE,
+                message=f"{label} schema field '{name}' must be an object",
+            )
+        field_type = _schema_type_from_param_type(raw_prop.get("type"))
+        next_prop: dict[str, Any] = {"type": field_type}
+        description = _normalize_optional_text(raw_prop.get("description"))
+        if description:
+            next_prop["description"] = description
+        enum_values = raw_prop.get("enum")
+        if isinstance(enum_values, list) and enum_values:
+            next_prop["enum"] = [str(item) for item in enum_values]
+        if field_type == "array":
+            items = raw_prop.get("items")
+            item_type = "string"
+            if isinstance(items, dict):
+                item_type = _schema_type_from_param_type(items.get("type"))
+                next_prop["items"] = {"type": item_type}
+            else:
+                next_prop["items"] = {"type": "string"}
+        normalized_properties[name] = next_prop
+
+    for item in required:
+        name = str(item or "").strip()
+        if name and name in normalized_properties:
+            normalized_required.append(name)
+
+    return {
+        "type": "object",
+        "properties": normalized_properties,
+        "required": normalized_required,
+        "additionalProperties": bool(schema.get("additionalProperties", False)),
+    }
+
+
+def _validate_value_against_schema(schema: dict[str, Any], value: Any, *, label: str) -> None:
+    schema_type = str(schema.get("type", "object") or "object").strip().lower()
+    if schema_type == "object":
+        if not isinstance(value, dict):
+            raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message=f"{label} must be an object")
+        properties = schema.get("properties") or {}
+        required = set(schema.get("required") or [])
+        additional_allowed = bool(schema.get("additionalProperties", False))
+        if not isinstance(properties, dict):
+            raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message=f"{label} schema is invalid")
+        for required_name in required:
+            if required_name not in value:
+                raise ApiException(
+                    status_code=422,
+                    code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE,
+                    message=f"{label} is missing required field: {required_name}",
+                )
+        for key, item in value.items():
+            if key not in properties:
+                if additional_allowed:
+                    continue
+                raise ApiException(
+                    status_code=422,
+                    code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE,
+                    message=f"{label} contains unknown field: {key}",
+                )
+            _validate_value_against_schema(properties[key], item, label=f"{label}.{key}")
+        return
+
+    if value is None and bool(schema.get("nullable", False)):
+        return
+
+    if schema_type == "string":
+        if not isinstance(value, str):
+            raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message=f"{label} must be string")
+        return
+    if schema_type == "number":
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message=f"{label} must be number")
+        return
+    if schema_type == "integer":
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message=f"{label} must be integer")
+        return
+    if schema_type == "boolean":
+        if not isinstance(value, bool):
+            raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message=f"{label} must be boolean")
+        return
+    if schema_type == "array":
+        if not isinstance(value, list):
+            raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message=f"{label} must be array")
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for idx, item in enumerate(value):
+                _validate_value_against_schema(item_schema, item, label=f"{label}[{idx}]")
+        return
+    raise ApiException(
+        status_code=422,
+        code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE,
+        message=f"{label} schema type is unsupported: {schema_type}",
+    )
+
+
+def _normalize_result_object(value: Any) -> dict[str, Any]:
+    if hasattr(value, "model_dump"):
+        dumped = value.model_dump(by_alias=True)
+        if isinstance(dumped, dict):
+            return dumped
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            from app.assistant.workflow.engine.runtime_helpers import extract_json_object
+
+            parsed = extract_json_object(raw)
+            if isinstance(parsed, dict):
+                return parsed
+    raise ApiException(
+        status_code=422,
+        code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE,
+        message="Tool or target did not return a valid JSON object",
+    )
+
+
+class OpenClawIntegrationService:
+    def __init__(self, db: Session):
+        self.db = db
+        self.config_service = AssistantConfigService(db)
+        self.tool_registry = ToolRegistry(db)
+
+    def _get_setting(self) -> AppSetting | None:
+        return (
+            self.db.query(AppSetting)
+            .filter(AppSetting.key == OPENCLAW_INTEGRATION_CONFIG_KEY)
+            .first()
+        )
+
+    def _get_payload(self) -> dict[str, Any]:
+        setting = self._get_setting()
+        if setting is None or not isinstance(setting.value_json, dict):
+            return {}
+        return dict(setting.value_json)
+
+    def _upsert_payload(self, payload: dict[str, Any]) -> None:
+        setting = self._get_setting()
+        if setting is None:
+            setting = AppSetting(key=OPENCLAW_INTEGRATION_CONFIG_KEY, value_json=payload)
+            self.db.add(setting)
+        else:
+            setting.value_json = payload
+        self.db.flush()
+
+    def _current_locale(self, preferred_locale: str | None = None) -> str:
+        return resolve_system_locale(self.db, preferred_locale=preferred_locale)
+
+    def _secret_state(self, payload: dict[str, Any]) -> tuple[str | None, str | None, datetime | None]:
+        encrypted = _normalize_optional_text(payload.get("secretEncrypted"))
+        secret_hint = _normalize_optional_text(payload.get("secretHint"))
+        rotated_at_raw = payload.get("secretLastRotatedAt")
+        rotated_at: datetime | None = None
+        if isinstance(rotated_at_raw, str):
+            try:
+                rotated_at = datetime.fromisoformat(rotated_at_raw)
+            except ValueError:
+                rotated_at = None
+        if not encrypted:
+            return None, secret_hint, rotated_at
+        try:
+            return decrypt_api_key(encrypted), secret_hint, rotated_at
+        except Exception:
+            return None, secret_hint, rotated_at
+
+    def _tool_name_exists(self, tool_name: str, *, exclude_item_id: UUID | None = None) -> bool:
+        query = self.db.query(OpenClawCapabilityItem.id).filter(
+            func.lower(OpenClawCapabilityItem.tool_name) == str(tool_name or "").strip().lower()
+        )
+        if exclude_item_id is not None:
+            query = query.filter(OpenClawCapabilityItem.id != exclude_item_id)
+        return query.first() is not None
+
+    def _capability_key_exists(self, capability_key: str, *, exclude_item_id: UUID | None = None) -> bool:
+        query = self.db.query(OpenClawCapabilityItem.id).filter(
+            func.lower(OpenClawCapabilityItem.capability_key) == str(capability_key or "").strip().lower()
+        )
+        if exclude_item_id is not None:
+            query = query.filter(OpenClawCapabilityItem.id != exclude_item_id)
+        return query.first() is not None
+
+    def _next_available_capability_key(self, base_value: str, *, exclude_item_id: UUID | None = None) -> str:
+        base = _slugify_identifier(base_value, default_prefix="mindatlas_capability")
+        if not self._capability_key_exists(base, exclude_item_id=exclude_item_id):
+            return base
+        index = 2
+        while True:
+            candidate = _slugify_identifier(f"{base}_{index}", default_prefix="mindatlas_capability")
+            if not self._capability_key_exists(candidate, exclude_item_id=exclude_item_id):
+                return candidate
+            index += 1
+
+    def _normalize_openclaw_tool_name(self, value: str, *, exclude_item_id: UUID | None = None) -> str:
+        normalized = _slugify_identifier(value, default_prefix="mindatlas_tool")
+        if self._tool_name_exists(normalized, exclude_item_id=exclude_item_id):
+            raise ApiException(status_code=409, code=40971, message=f"OpenClaw tool name already exists: {normalized}")
+        return normalized
+
+    def _system_tool_definition_map(self) -> dict[str, Any]:
+        return {
+            definition.name: definition
+            for definition in ToolRegistry.list_system_tool_definitions()
+            if getattr(definition, "name", None)
+        }
+
+    def _resolve_tool_source(
+        self,
+        *,
+        tool_id: UUID | None,
+        source_tool_name: str | None,
+    ) -> _ResolvedToolSource | None:
+        if tool_id is not None:
+            tool_model = (
+                self.db.query(AssistantTool)
+                .filter(AssistantTool.id == tool_id)
+                .first()
+            )
+            if tool_model is not None:
+                runtime_tool = self.tool_registry.resolve(tool_model.name) if tool_model.enabled else None
+                return _ResolvedToolSource(
+                    source_name=tool_model.name,
+                    source_description=tool_model.description or "",
+                    is_system=bool(tool_model.is_system),
+                    enabled=bool(tool_model.enabled),
+                    tool_model=tool_model,
+                    tool_runtime=runtime_tool,
+                )
+
+        if source_tool_name:
+            system_map = self._system_tool_definition_map()
+            if source_tool_name in system_map:
+                definition = system_map[source_tool_name]
+                runtime_tool = self.tool_registry.resolve(source_tool_name)
+                return _ResolvedToolSource(
+                    source_name=definition.name,
+                    source_description=definition.description,
+                    is_system=True,
+                    enabled=runtime_tool is not None,
+                    tool_model=None,
+                    tool_runtime=runtime_tool,
+                )
+
+            tool_model = (
+                self.db.query(AssistantTool)
+                .filter(AssistantTool.name == source_tool_name)
+                .first()
+            )
+            if tool_model is not None:
+                runtime_tool = self.tool_registry.resolve(tool_model.name) if tool_model.enabled else None
+                return _ResolvedToolSource(
+                    source_name=tool_model.name,
+                    source_description=tool_model.description or "",
+                    is_system=bool(tool_model.is_system),
+                    enabled=bool(tool_model.enabled),
+                    tool_model=tool_model,
+                    tool_runtime=runtime_tool,
+                )
+
+        return None
+
+    def _workflow_contract_snapshot(self, workflow: AssistantWorkflow, *, locale: str = "en") -> _WorkflowContractSnapshot:
+        published_input = self.config_service._get_workflow_published_input(workflow)  # noqa: SLF001
+        if published_input is None:
+            raise ApiException(
+                status_code=422,
+                code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
+                message=f"Workflow has no published version: {workflow.name}",
+            )
+        if self.config_service._resolve_start_input_mode(published_input) != "structured":  # noqa: SLF001
+            raise ApiException(
+                status_code=422,
+                code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
+                message=f"Workflow does not use structured start input: {workflow.name}",
+            )
+
+        start_fields = []
+        for item in self.config_service._extract_structured_start_fields(published_input).values():  # noqa: SLF001
+            start_fields.append(
+                {
+                    "name": item.get("name"),
+                    "type": item.get("type", "string"),
+                    "required": bool(item.get("required", False)),
+                    "description": item.get("description"),
+                }
+            )
+        input_schema = _schema_from_field_definitions(start_fields, required_key="required")
+
+        structured_output_schemas: list[dict[str, Any]] = []
+        for node in published_input.nodes:
+            if node.node_type != "output":
+                continue
+            config = node.config if isinstance(node.config, dict) else {}
+            raw_mode = str(config.get("output_mode", config.get("outputMode", "text")) or "text").strip().lower()
+            output_mode = "structured" if raw_mode in {"structured", "json"} else "text"
+            if output_mode != "structured":
+                continue
+            raw_fields = config.get("output_fields", config.get("outputFields"))
+            if not isinstance(raw_fields, list) or not raw_fields:
+                continue
+            schema = _schema_from_field_definitions(raw_fields, allow_nullable=True)
+            structured_output_schemas.append(schema)
+
+        if not structured_output_schemas:
+            raise ApiException(
+                status_code=422,
+                code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
+                message=f"Workflow does not expose a structured output contract: {workflow.name}",
+            )
+
+        unique_output_schemas = {_schema_compact(item): item for item in structured_output_schemas}
+        if len(unique_output_schemas) > 1:
+            raise ApiException(
+                status_code=422,
+                code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
+                message=f"Workflow exposes ambiguous structured output contracts: {workflow.name}",
+            )
+
+        output_schema = next(iter(unique_output_schemas.values()))
+        return _WorkflowContractSnapshot(
+            input_schema=input_schema,
+            output_schema=output_schema,
+            input_summary=_schema_summary(input_schema, locale=locale),
+            output_summary=_schema_summary(output_schema, locale=locale),
+        )
+
+    def _build_workflow_skill_definition(
+        self,
+        *,
+        workflow: AssistantWorkflow,
+        workflow_input: WorkflowInput,
+    ) -> SkillDefinition:
+        workflow_nodes = [
+            WorkflowNodeDefinition(
+                node_id=node.node_id,
+                node_type=node.node_type,
+                label=node.label,
+                position_x=node.position_x,
+                position_y=node.position_y,
+                config=node.config or {},
+            )
+            for node in workflow_input.nodes
+        ]
+        workflow_edges: list[WorkflowEdgeDefinition] = []
+        for edge in workflow_input.edges:
+            condition_expr = None
+            if edge.condition_expr is not None:
+                condition_expr = ConditionExpression(
+                    id=edge.condition_expr.id,
+                    variable=edge.condition_expr.variable,
+                    operator=edge.condition_expr.operator,
+                    value=edge.condition_expr.value,
+                    handle=edge.condition_expr.handle,
+                )
+            workflow_edges.append(
+                WorkflowEdgeDefinition(
+                    edge_id=edge.edge_id,
+                    source_node_id=edge.source_node_id,
+                    target_node_id=edge.target_node_id,
+                    source_handle=edge.source_handle,
+                    target_handle=edge.target_handle,
+                    condition_type=edge.condition_type,
+                    condition_expr=condition_expr,
+                    label=edge.label,
+                )
+            )
+        tool_names = sorted(AssistantConfigService._collect_workflow_tool_names(workflow_nodes))  # noqa: SLF001
+        return SkillDefinition(
+            name=f"openclaw__{workflow.name}__workflow",
+            description=workflow.description or "",
+            intent_examples=[],
+            tools=tool_names,
+            mode="langgraph",
+            langgraph_pattern="workflow_dag",
+            workflow_nodes=workflow_nodes,
+            workflow_edges=workflow_edges,
+        )
+
+    def _build_agent_skill_definition(
+        self,
+        *,
+        agent_profile: AssistantAgentProfile,
+        draft: AgentPublishDraftInput,
+        output_schema: dict[str, Any],
+        locale: str,
+    ) -> SkillDefinition:
+        output_schema_json = json.dumps(output_schema, ensure_ascii=False, sort_keys=True)
+        base_prompt = (draft.system_prompt or "").strip()
+        contract_prompt = _localized_message(
+            locale,
+            zh=(
+                "你正在以 OpenClaw 能力的形式执行 MindAtlas 智能体。\n"
+                "请先遵循下面的基础提示词，然后严格遵守能力契约。\n\n"
+                f"{base_prompt}\n\n"
+                "额外规则：\n"
+                "- 用户输入会以 JSON 对象给出。\n"
+                f"- 最终必须返回一个 JSON 对象，并且严格匹配这个输出 schema：{output_schema_json}\n"
+                "- 不要输出 Markdown 代码块，不要输出额外解释。"
+            ),
+            en=(
+                "You are executing a MindAtlas agent as an OpenClaw capability.\n"
+                "Follow the base prompt first, then obey the capability contract.\n\n"
+                f"{base_prompt}\n\n"
+                "Additional rules:\n"
+                "- The user input will be provided as a JSON object.\n"
+                f"- Your final answer must be a JSON object that strictly matches this output schema: {output_schema_json}\n"
+                "- Do not wrap the result in Markdown or add extra explanation."
+            ),
+        )
+        normalized_kb = draft.kb_config if isinstance(draft.kb_config, dict) else {"enabled": False}
+        return SkillDefinition(
+            name=f"openclaw__{agent_profile.name}__agent",
+            description=agent_profile.description or "",
+            intent_examples=[],
+            tools=list(draft.tools or []),
+            mode="langgraph",
+            langgraph_pattern="agent_loop",
+            model_source=draft.model_source,
+            model_id=str(draft.model_id) if draft.model_id is not None else None,
+            system_prompt=contract_prompt,
+            kb=SkillKBConfig(enabled=bool(normalized_kb.get("enabled", False))),
+            workflow_nodes=[],
+            workflow_edges=[],
+        )
+
+    def _build_engine(self, skill: SkillDefinition) -> LangGraphEngine:
+        from app.assistant.workflow.engine.engine import LangGraphEngine
+
+        if skill.langgraph_pattern == "agent_loop" and getattr(skill, "model_source", "default") == "custom":
+            from app.ai_registry.runtime import resolve_openai_compat_config_by_model_id
+
+            selected_model_id = getattr(skill, "model_id", None)
+            cfg = resolve_openai_compat_config_by_model_id(
+                self.db,
+                model_id=selected_model_id or "",
+                model_type="llm",
+            )
+        else:
+            from app.ai_registry.runtime import resolve_openai_compat_config
+
+            cfg = resolve_openai_compat_config(self.db, component="assistant", model_type="llm")
+
+        if cfg is None:
+            raise ApiException(
+                status_code=409,
+                code=40965,
+                message="No available model configuration for OpenClaw capability execution",
+            )
+        return LangGraphEngine(
+            api_key=cfg.api_key,
+            base_url=cfg.base_url,
+            model=cfg.model,
+            db=self.db,
+        )
+
+    def _ensure_system_presets(self, *, preferred_locale: str | None = None, commit: bool = True) -> None:
+        locale = self._current_locale(preferred_locale)
+        payload = self._get_payload()
+        legacy_enabled_map = payload.get("capabilities") if isinstance(payload.get("capabilities"), dict) else {}
+        migrated = bool(payload.get("catalogMigrated", False))
+        changed = False
+
+        existing_by_key = {
+            item.system_capability_key: item
+            for item in self.db.query(OpenClawCapabilityItem)
+            .filter(
+                OpenClawCapabilityItem.source_type == "system_adapter",
+                OpenClawCapabilityItem.system_capability_key.isnot(None),
+            )
+            .all()
+            if item.system_capability_key
+        }
+
+        for definition in list_openclaw_system_capability_definitions(locale):
+            item = existing_by_key.get(definition.key)
+            if item is None:
+                enabled_value = (
+                    bool(legacy_enabled_map.get(definition.key))
+                    if definition.key in legacy_enabled_map
+                    else bool(definition.enabled_by_default)
+                )
+                item = OpenClawCapabilityItem(
+                    capability_key=definition.key,
+                    tool_name=definition.tool_name,
+                    title=definition.title,
+                    description=definition.description,
+                    source_type="system_adapter",
+                    system_capability_key=definition.key,
+                    enabled=enabled_value,
+                    is_system_preset=True,
+                    input_schema_json=definition.input_schema,
+                    output_schema_json=definition.output_schema,
+                    input_summary=definition.input_summary,
+                    output_summary=definition.output_summary,
+                    tool_response_mode="json_schema",
+                )
+                self.db.add(item)
+                changed = True
+                continue
+
+            if not bool(item.is_system_preset):
+                item.is_system_preset = True
+                changed = True
+            if item.source_type != "system_adapter":
+                item.source_type = "system_adapter"
+                changed = True
+            if item.system_capability_key != definition.key:
+                item.system_capability_key = definition.key
+                changed = True
+            if not migrated and definition.key in legacy_enabled_map and item.enabled != bool(legacy_enabled_map[definition.key]):
+                item.enabled = bool(legacy_enabled_map[definition.key])
+                changed = True
+            if item.input_schema_json is None or item.output_schema_json is None:
+                item.input_schema_json = definition.input_schema
+                item.output_schema_json = definition.output_schema
+                item.input_summary = definition.input_summary
+                item.output_summary = definition.output_summary
+                item.tool_response_mode = "json_schema"
+                changed = True
+
+        if not migrated and legacy_enabled_map:
+            payload["catalogMigrated"] = True
+            self._upsert_payload(payload)
+            changed = True
+
+        if changed and commit:
+            self.db.commit()
+
+    def _list_catalog_items(self) -> list[OpenClawCapabilityItem]:
+        return (
+            self.db.query(OpenClawCapabilityItem)
+            .options(
+                joinedload(OpenClawCapabilityItem.tool),
+                joinedload(OpenClawCapabilityItem.workflow),
+                joinedload(OpenClawCapabilityItem.agent_profile),
+            )
+            .order_by(OpenClawCapabilityItem.is_system_preset.desc(), OpenClawCapabilityItem.created_at.asc())
+            .all()
+        )
+
+    def _get_catalog_item(self, item_id: UUID) -> OpenClawCapabilityItem:
+        item = (
+            self.db.query(OpenClawCapabilityItem)
+            .options(
+                joinedload(OpenClawCapabilityItem.tool),
+                joinedload(OpenClawCapabilityItem.workflow),
+                joinedload(OpenClawCapabilityItem.agent_profile),
+            )
+            .filter(OpenClawCapabilityItem.id == item_id)
+            .first()
+        )
+        if item is None:
+            raise ApiException(status_code=404, code=40462, message=f"OpenClaw capability item not found: {item_id}")
+        return item
+
+    def _get_catalog_item_by_capability_key(self, capability_key: str) -> OpenClawCapabilityItem | None:
+        return (
+            self.db.query(OpenClawCapabilityItem)
+            .options(
+                joinedload(OpenClawCapabilityItem.tool),
+                joinedload(OpenClawCapabilityItem.workflow),
+                joinedload(OpenClawCapabilityItem.agent_profile),
+            )
+            .filter(OpenClawCapabilityItem.capability_key == capability_key)
+            .first()
+        )
+
+    def _availability_for_system_capability(
+        self,
+        definition: OpenClawSystemCapabilityDefinition,
+        *,
+        locale: str,
+    ) -> tuple[bool, str | None]:
+        if definition.key == "query_knowledge_graph":
+            config = resolve_runtime_knowledge_graph_config()
+            if not config.enabled:
+                return False, _localized_message(
+                    locale,
+                    zh="LightRAG 当前未启动。",
+                    en="LightRAG is not started.",
+                )
+            if not config.configured:
+                return False, _localized_message(
+                    locale,
+                    zh="LightRAG 配置尚未完整就绪。",
+                    en="LightRAG configuration is still incomplete.",
+                )
+        if definition.key in {"capture_entry", "search_entries", "get_entry"}:
+            has_entry_type = self.db.query(EntryType.id).filter(EntryType.enabled.is_(True)).first() is not None
+            if not has_entry_type:
+                return False, _localized_message(
+                    locale,
+                    zh="系统里还没有可用的记录类型。",
+                    en="No enabled entry types are available yet.",
+                )
+        if definition.key == "create_relation":
+            has_relation_type = (
+                self.db.query(RelationType.id)
+                .filter(RelationType.enabled.is_(True))
+                .first()
+                is not None
+            )
+            if not has_relation_type:
+                return False, _localized_message(
+                    locale,
+                    zh="系统里还没有可用的关系类型。",
+                    en="No enabled relation types are available yet.",
+                )
+        return True, None
+
+    def _availability_for_item(
+        self,
+        item: OpenClawCapabilityItem,
+        *,
+        locale: str,
+    ) -> _CatalogItemAvailability:
+        if item.source_type == "system_adapter":
+            definition = get_openclaw_system_capability_definition(item.system_capability_key or "", locale)
+            if definition is None:
+                return _CatalogItemAvailability(
+                    available=False,
+                    reason=_localized_message(
+                        locale,
+                        zh="系统预设能力定义不存在。",
+                        en="System preset capability definition is missing.",
+                    ),
+                    source_name=item.title,
+                    source_description=item.description,
+                    source_is_system=True,
+                    source_enabled=True,
+                    published_version_id=None,
+                    implementation_type="system_adapter",
+                )
+            available, reason = self._availability_for_system_capability(definition, locale=locale)
+            return _CatalogItemAvailability(
+                available=available,
+                reason=reason,
+                source_name=definition.title,
+                source_description=definition.description,
+                source_is_system=True,
+                source_enabled=True,
+                published_version_id=None,
+                implementation_type=definition.implementation_type,
+            )
+
+        if item.source_type == "tool":
+            resolved = self._resolve_tool_source(tool_id=item.tool_id, source_tool_name=item.source_tool_name)
+            if resolved is None:
+                return _CatalogItemAvailability(
+                    available=False,
+                    reason=_localized_message(
+                        locale,
+                        zh="绑定的 Tool 已不存在。",
+                        en="The bound tool no longer exists.",
+                    ),
+                    source_name=item.source_tool_name,
+                    source_description=None,
+                    source_is_system=False,
+                    source_enabled=None,
+                    published_version_id=None,
+                    implementation_type="tool",
+                )
+            if not resolved.enabled or resolved.tool_runtime is None:
+                return _CatalogItemAvailability(
+                    available=False,
+                    reason=_localized_message(
+                        locale,
+                        zh="绑定的 Tool 当前已禁用。",
+                        en="The bound tool is currently disabled.",
+                    ),
+                    source_name=resolved.source_name,
+                    source_description=resolved.source_description,
+                    source_is_system=resolved.is_system,
+                    source_enabled=False,
+                    published_version_id=None,
+                    implementation_type="tool",
+                )
+            return _CatalogItemAvailability(
+                available=True,
+                reason=None,
+                source_name=resolved.source_name,
+                source_description=resolved.source_description,
+                source_is_system=resolved.is_system,
+                source_enabled=True,
+                published_version_id=None,
+                implementation_type="tool",
+            )
+
+        if item.source_type == "workflow":
+            workflow = (
+                item.workflow
+                or (self.db.query(AssistantWorkflow).filter(AssistantWorkflow.id == item.workflow_id).first() if item.workflow_id else None)
+            )
+            if workflow is None:
+                return _CatalogItemAvailability(
+                    available=False,
+                    reason=_localized_message(locale, zh="绑定的 Workflow 已不存在。", en="The bound workflow no longer exists."),
+                    source_name=None,
+                    source_description=None,
+                    source_is_system=False,
+                    source_enabled=None,
+                    published_version_id=None,
+                    implementation_type="workflow",
+                )
+            if not workflow.enabled:
+                return _CatalogItemAvailability(
+                    available=False,
+                    reason=_localized_message(locale, zh="绑定的 Workflow 已禁用。", en="The bound workflow is disabled."),
+                    source_name=workflow.name,
+                    source_description=workflow.description,
+                    source_is_system=bool(workflow.is_system),
+                    source_enabled=False,
+                    published_version_id=workflow.published_version_id,
+                    implementation_type="workflow",
+                )
+            try:
+                snapshot = self._workflow_contract_snapshot(workflow)
+            except ApiException as exc:
+                return _CatalogItemAvailability(
+                    available=False,
+                    reason=exc.message,
+                    source_name=workflow.name,
+                    source_description=workflow.description,
+                    source_is_system=bool(workflow.is_system),
+                    source_enabled=True,
+                    published_version_id=workflow.published_version_id,
+                    implementation_type="workflow",
+                )
+            if _schema_compact(snapshot.input_schema) != _schema_compact(item.input_schema_json or _EMPTY_OBJECT_SCHEMA):
+                return _CatalogItemAvailability(
+                    available=False,
+                    reason=_localized_message(
+                        locale,
+                        zh="Workflow 的 published 输入契约已发生变化，请重新同步目录项。",
+                        en="The workflow published input contract has changed. Please resync the catalog item.",
+                    ),
+                    source_name=workflow.name,
+                    source_description=workflow.description,
+                    source_is_system=bool(workflow.is_system),
+                    source_enabled=True,
+                    published_version_id=workflow.published_version_id,
+                    implementation_type="workflow",
+                )
+            if _schema_compact(snapshot.output_schema) != _schema_compact(item.output_schema_json or _EMPTY_OBJECT_SCHEMA):
+                return _CatalogItemAvailability(
+                    available=False,
+                    reason=_localized_message(
+                        locale,
+                        zh="Workflow 的 published 输出契约已发生变化，请重新同步目录项。",
+                        en="The workflow published output contract has changed. Please resync the catalog item.",
+                    ),
+                    source_name=workflow.name,
+                    source_description=workflow.description,
+                    source_is_system=bool(workflow.is_system),
+                    source_enabled=True,
+                    published_version_id=workflow.published_version_id,
+                    implementation_type="workflow",
+                )
+            return _CatalogItemAvailability(
+                available=True,
+                reason=None,
+                source_name=workflow.name,
+                source_description=workflow.description,
+                source_is_system=bool(workflow.is_system),
+                source_enabled=True,
+                published_version_id=workflow.published_version_id,
+                implementation_type="workflow",
+            )
+
+        agent = (
+            item.agent_profile
+            or (
+                self.db.query(AssistantAgentProfile).filter(AssistantAgentProfile.id == item.agent_profile_id).first()
+                if item.agent_profile_id
+                else None
+            )
+        )
+        if agent is None:
+            return _CatalogItemAvailability(
+                available=False,
+                reason=_localized_message(locale, zh="绑定的 Agent 已不存在。", en="The bound agent no longer exists."),
+                source_name=None,
+                source_description=None,
+                source_is_system=False,
+                source_enabled=None,
+                published_version_id=None,
+                implementation_type="agent",
+            )
+        if not agent.enabled:
+            return _CatalogItemAvailability(
+                available=False,
+                reason=_localized_message(locale, zh="绑定的 Agent 已禁用。", en="The bound agent is disabled."),
+                source_name=agent.name,
+                source_description=agent.description,
+                source_is_system=bool(agent.is_system),
+                source_enabled=False,
+                published_version_id=agent.published_version_id,
+                implementation_type="agent",
+            )
+        if agent.published_version_id is None or self.config_service._get_agent_profile_published_draft(agent) is None:  # noqa: SLF001
+            return _CatalogItemAvailability(
+                available=False,
+                reason=_localized_message(
+                    locale,
+                    zh="绑定的 Agent 没有可用的 published 版本。",
+                    en="The bound agent does not have an available published version.",
+                ),
+                source_name=agent.name,
+                source_description=agent.description,
+                source_is_system=bool(agent.is_system),
+                source_enabled=True,
+                published_version_id=agent.published_version_id,
+                implementation_type="agent",
+            )
+        return _CatalogItemAvailability(
+            available=True,
+            reason=None,
+            source_name=agent.name,
+            source_description=agent.description,
+            source_is_system=bool(agent.is_system),
+            source_enabled=True,
+            published_version_id=agent.published_version_id,
+            implementation_type="agent",
+        )
+
+    def _serialize_catalog_item(
+        self,
+        item: OpenClawCapabilityItem,
+        *,
+        locale: str,
+    ) -> OpenClawCapabilityItemResponse:
+        availability = self._availability_for_item(item, locale=locale)
+        return OpenClawCapabilityItemResponse(
+            id=item.id,
+            capability_key=item.capability_key,
+            tool_name=item.tool_name,
+            title=item.title,
+            description=item.description or "",
+            source_type=item.source_type,
+            implementation_type=availability.implementation_type,
+            system_capability_key=item.system_capability_key,
+            source_tool_name=item.source_tool_name,
+            tool_id=item.tool_id,
+            workflow_id=item.workflow_id,
+            agent_profile_id=item.agent_profile_id,
+            source_name=availability.source_name,
+            source_description=availability.source_description,
+            source_is_system=availability.source_is_system,
+            source_enabled=availability.source_enabled,
+            published_version_id=availability.published_version_id,
+            enabled=bool(item.enabled),
+            is_system_preset=bool(item.is_system_preset),
+            available=availability.available,
+            availability_reason=availability.reason,
+            schema_editable=(item.source_type in {"tool", "agent"} and not bool(item.is_system_preset)),
+            input_summary=item.input_summary or "",
+            output_summary=item.output_summary or "",
+            input_schema=item.input_schema_json or _EMPTY_OBJECT_SCHEMA,
+            output_schema=item.output_schema_json or _EMPTY_OBJECT_SCHEMA,
+            tool_response_mode=item.tool_response_mode or "json_schema",
+            created_at=item.created_at,
+            updated_at=item.updated_at,
+        )
+
+    def get_settings_response(self, *, preferred_locale: str | None = None) -> OpenClawIntegrationSettingsResponse:
+        self._ensure_system_presets(preferred_locale=preferred_locale, commit=True)
+        locale = self._current_locale(preferred_locale)
+        payload = self._get_payload()
+        secret, secret_hint, rotated_at = self._secret_state(payload)
+        items = self._list_catalog_items()
+        return OpenClawIntegrationSettingsResponse(
+            enabled=bool(payload.get("enabled")),
+            secret_configured=secret is not None,
+            secret_hint=secret_hint,
+            secret_last_rotated_at=rotated_at,
+            catalog_items=[self._serialize_catalog_item(item, locale=locale) for item in items],
+        )
+
+    def update_settings(
+        self,
+        request: OpenClawIntegrationUpdateRequest,
+        *,
+        preferred_locale: str | None = None,
+    ) -> OpenClawIntegrationSettingsResponse:
+        locale = self._current_locale(preferred_locale)
+        payload = self._get_payload()
+        payload["enabled"] = bool(request.enabled)
+
+        secret, _secret_hint, _rotated_at = self._secret_state(payload)
+        if request.enabled and not secret:
+            raise ApiException(
+                status_code=400,
+                code=OPENCLAW_SECRET_REQUIRED_ERROR_CODE,
+                message=_localized_message(
+                    locale,
+                    zh="启用 OpenClaw 集成前请先生成集成密钥。",
+                    en="Generate an integration secret before enabling OpenClaw integration.",
+                ),
+            )
+
+        self._upsert_payload(payload)
+        self.db.commit()
+        return self.get_settings_response(preferred_locale=locale)
+
+    def rotate_secret(
+        self,
+        *,
+        preferred_locale: str | None = None,
+    ) -> OpenClawRotateSecretResponse:
+        locale = self._current_locale(preferred_locale)
+        payload = self._get_payload()
+        secret = secrets.token_urlsafe(32)
+        payload["secretEncrypted"] = encrypt_api_key(secret)
+        payload["secretHint"] = api_key_hint(secret)
+        payload["secretLastRotatedAt"] = utcnow().isoformat()
+        payload.setdefault("enabled", False)
+        self._upsert_payload(payload)
+        self.db.commit()
+        return OpenClawRotateSecretResponse(
+            secret=secret,
+            settings=self.get_settings_response(preferred_locale=locale),
+        )
+
+    def _default_source_contract_for_tool(
+        self,
+        *,
+        tool_id: UUID | None,
+        source_tool_name: str | None,
+    ) -> tuple[dict[str, Any], dict[str, Any], str, str, OpenClawToolResponseMode]:
+        resolved = self._resolve_tool_source(tool_id=tool_id, source_tool_name=source_tool_name)
+        if resolved is None:
+            raise ApiException(status_code=422, code=OPENCLAW_INVALID_SOURCE_ERROR_CODE, message="Tool source not found")
+        if not resolved.enabled:
+            raise ApiException(
+                status_code=422,
+                code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
+                message=f"Tool source is disabled: {resolved.source_name}",
+            )
+
+        system_definition = self._system_tool_definition_map().get(resolved.source_name)
+        if system_definition is not None:
+            input_schema = system_definition.json_schema or _schema_from_tool_params(
+                [
+                    {
+                        "name": param.name,
+                        "param_type": param.param_type,
+                        "required": param.required,
+                        "description": param.description,
+                    }
+                    for param in system_definition.input_params
+                ]
+            )
+            output_schema = _schema_from_tool_params(
+                [
+                    {
+                        "name": param.name,
+                        "param_type": param.param_type,
+                        "required": True,
+                        "description": param.description,
+                    }
+                    for param in system_definition.output_params
+                ]
+            )
+            return (
+                _normalize_json_object_schema(input_schema, label="input"),
+                _normalize_json_object_schema(output_schema, label="output"),
+                _schema_summary(input_schema),
+                _schema_summary(output_schema),
+                "json_schema",
+            )
+
+        input_schema = _schema_from_tool_params(resolved.tool_model.input_params if resolved.tool_model is not None else None)
+        output_schema = _text_field_output_schema()
+        return (
+            _normalize_json_object_schema(input_schema, label="input"),
+            output_schema,
+            _schema_summary(input_schema),
+            "text (string)",
+            "text_field",
+        )
+
+    def _merge_item_request(
+        self,
+        item: OpenClawCapabilityItem,
+        request: OpenClawCapabilityItemUpdateRequest,
+    ) -> OpenClawCapabilityItemCreateRequest:
+        fields_set = set(request.model_fields_set)
+        payload = {
+            "source_type": request.source_type if "source_type" in fields_set else item.source_type,
+            "tool_name": request.tool_name if "tool_name" in fields_set else item.tool_name,
+            "title": request.title if "title" in fields_set else item.title,
+            "description": request.description if "description" in fields_set else item.description,
+            "enabled": request.enabled if "enabled" in fields_set else item.enabled,
+            "input_summary": request.input_summary if "input_summary" in fields_set else item.input_summary,
+            "output_summary": request.output_summary if "output_summary" in fields_set else item.output_summary,
+            "input_schema": request.input_schema if "input_schema" in fields_set else item.input_schema_json,
+            "output_schema": request.output_schema if "output_schema" in fields_set else item.output_schema_json,
+            "tool_response_mode": request.tool_response_mode if "tool_response_mode" in fields_set else item.tool_response_mode,
+            "source_tool_name": request.source_tool_name if "source_tool_name" in fields_set else item.source_tool_name,
+            "tool_id": request.tool_id if "tool_id" in fields_set else item.tool_id,
+            "workflow_id": request.workflow_id if "workflow_id" in fields_set else item.workflow_id,
+            "agent_profile_id": request.agent_profile_id if "agent_profile_id" in fields_set else item.agent_profile_id,
+        }
+        return OpenClawCapabilityItemCreateRequest.model_validate(payload)
+
+    def _apply_user_item_request(
+        self,
+        item: OpenClawCapabilityItem | None,
+        request: OpenClawCapabilityItemCreateRequest,
+    ) -> OpenClawCapabilityItem:
+        normalized_tool_name = self._normalize_openclaw_tool_name(
+            request.tool_name,
+            exclude_item_id=item.id if item is not None else None,
+        )
+        capability_key = (
+            item.capability_key
+            if item is not None
+            else self._next_available_capability_key(normalized_tool_name)
+        )
+
+        if request.source_type == "workflow":
+            workflow = self.config_service.get_workflow(request.workflow_id)  # type: ignore[arg-type]
+            if not workflow.enabled:
+                raise ApiException(status_code=422, code=OPENCLAW_INVALID_SOURCE_ERROR_CODE, message=f"Workflow is disabled: {workflow.name}")
+            snapshot = self._workflow_contract_snapshot(workflow)
+            input_schema = snapshot.input_schema
+            output_schema = snapshot.output_schema
+            input_summary = snapshot.input_summary
+            output_summary = snapshot.output_summary
+            tool_response_mode: OpenClawToolResponseMode = "json_schema"
+            source_tool_name = None
+            tool_id = None
+            workflow_id = workflow.id
+            agent_profile_id = None
+        elif request.source_type == "agent":
+            agent_profile = self.config_service.get_agent_profile(request.agent_profile_id)  # type: ignore[arg-type]
+            if not agent_profile.enabled:
+                raise ApiException(status_code=422, code=OPENCLAW_INVALID_SOURCE_ERROR_CODE, message=f"Agent is disabled: {agent_profile.name}")
+            if agent_profile.published_version_id is None or self.config_service._get_agent_profile_published_draft(agent_profile) is None:  # noqa: SLF001
+                raise ApiException(
+                    status_code=422,
+                    code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
+                    message=f"Agent has no published version: {agent_profile.name}",
+                )
+            input_schema = _normalize_json_object_schema(request.input_schema, label="input")
+            output_schema = _normalize_json_object_schema(request.output_schema, label="output")
+            input_summary = str(request.input_summary or "").strip() or _schema_summary(input_schema)
+            output_summary = str(request.output_summary or "").strip() or _schema_summary(output_schema)
+            tool_response_mode = "json_schema"
+            source_tool_name = None
+            tool_id = None
+            workflow_id = None
+            agent_profile_id = agent_profile.id
+        else:
+            resolved = self._resolve_tool_source(tool_id=request.tool_id, source_tool_name=request.source_tool_name)
+            if resolved is None:
+                raise ApiException(status_code=422, code=OPENCLAW_INVALID_SOURCE_ERROR_CODE, message="Tool source not found")
+            if not resolved.enabled:
+                raise ApiException(
+                    status_code=422,
+                    code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
+                    message=f"Tool is disabled: {resolved.source_name}",
+                )
+            default_input_schema, default_output_schema, default_input_summary, default_output_summary, default_mode = (
+                self._default_source_contract_for_tool(
+                    tool_id=request.tool_id,
+                    source_tool_name=request.source_tool_name,
+                )
+            )
+            input_schema = _normalize_json_object_schema(request.input_schema or default_input_schema, label="input")
+            output_schema = _normalize_json_object_schema(request.output_schema or default_output_schema, label="output")
+            input_summary = str(request.input_summary or "").strip() or default_input_summary
+            output_summary = str(request.output_summary or "").strip() or default_output_summary
+            tool_response_mode = request.tool_response_mode or default_mode
+            source_tool_name = resolved.source_name
+            tool_id = resolved.tool_model.id if resolved.tool_model is not None else None
+            workflow_id = None
+            agent_profile_id = None
+
+        if tool_response_mode == "text_field":
+            properties = output_schema.get("properties") if isinstance(output_schema.get("properties"), dict) else {}
+            if len(properties) != 1:
+                raise ApiException(
+                    status_code=422,
+                    code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE,
+                    message="text_field mode requires exactly one output field",
+                )
+            field_schema = next(iter(properties.values()))
+            if not isinstance(field_schema, dict) or str(field_schema.get("type", "")).strip().lower() != "string":
+                raise ApiException(
+                    status_code=422,
+                    code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE,
+                    message="text_field mode requires a single string output field",
+                )
+
+        next_item = item or OpenClawCapabilityItem(
+            capability_key=capability_key,
+            source_type=request.source_type,
+            is_system_preset=False,
+            input_schema_json=input_schema,
+            output_schema_json=output_schema,
+        )
+        next_item.capability_key = capability_key
+        next_item.tool_name = normalized_tool_name
+        next_item.title = request.title
+        next_item.description = request.description or ""
+        next_item.source_type = request.source_type
+        next_item.system_capability_key = None
+        next_item.source_tool_name = source_tool_name
+        next_item.tool_id = tool_id
+        next_item.workflow_id = workflow_id
+        next_item.agent_profile_id = agent_profile_id
+        next_item.enabled = bool(request.enabled)
+        next_item.is_system_preset = False
+        next_item.input_schema_json = input_schema
+        next_item.output_schema_json = output_schema
+        next_item.input_summary = input_summary
+        next_item.output_summary = output_summary
+        next_item.tool_response_mode = tool_response_mode
+        return next_item
+
+    def list_catalog_sources(
+        self,
+        source_type: OpenClawCatalogSourceType,
+        *,
+        preferred_locale: str | None = None,
+    ) -> OpenClawCatalogSourceListResponse:
+        self._ensure_system_presets(preferred_locale=preferred_locale, commit=False)
+        locale = self._current_locale(preferred_locale)
+        items: list[OpenClawCatalogSourceResponse] = []
+
+        if source_type == "tool":
+            system_defs = ToolRegistry.list_system_tool_definitions()
+            disabled_tool_names = {
+                name
+                for name, enabled in self.db.query(AssistantTool.name, AssistantTool.enabled)
+                .filter(AssistantTool.name.in_(list(assistant_tool_names)))
+                .all()
+                if name and not enabled
+            }
+            for definition in system_defs:
+                is_disabled = definition.name in disabled_tool_names
+                default_input_schema = definition.json_schema or _schema_from_tool_params(
+                    [
+                        {
+                            "name": param.name,
+                            "param_type": param.param_type,
+                            "required": param.required,
+                            "description": param.description,
+                        }
+                        for param in definition.input_params
+                    ]
+                )
+                default_output_schema = _schema_from_tool_params(
+                    [
+                        {
+                            "name": param.name,
+                            "param_type": param.param_type,
+                            "required": True,
+                            "description": param.description,
+                        }
+                        for param in definition.output_params
+                    ]
+                )
+                items.append(
+                    OpenClawCatalogSourceResponse(
+                        source_type="tool",
+                        source_key=f"system:{definition.name}",
+                        title=definition.name,
+                        description=definition.description,
+                        is_system=True,
+                        enabled=not is_disabled,
+                        bindable=not is_disabled,
+                        unavailable_reason=(
+                            _localized_message(locale, zh="Tool 已禁用。", en="Tool is disabled.")
+                            if is_disabled
+                            else None
+                        ),
+                        schema_mode="editable",
+                        source_tool_name=definition.name,
+                        default_input_schema=_normalize_json_object_schema(default_input_schema, label="input"),
+                        default_output_schema=_normalize_json_object_schema(default_output_schema, label="output"),
+                        default_input_summary=_schema_summary(default_input_schema, locale=locale),
+                        default_output_summary=_schema_summary(default_output_schema, locale=locale),
+                        default_tool_response_mode="json_schema",
+                    )
+                )
+
+            remote_tools = (
+                self.db.query(AssistantTool)
+                .filter(AssistantTool.kind == "remote")
+                .order_by(AssistantTool.created_at.desc())
+                .all()
+            )
+            for tool in remote_tools:
+                default_input_schema = _schema_from_tool_params(tool.input_params)
+                default_output_schema = _text_field_output_schema()
+                items.append(
+                    OpenClawCatalogSourceResponse(
+                        source_type="tool",
+                        source_key=f"tool:{tool.id}",
+                        title=tool.name,
+                        description=tool.description or "",
+                        is_system=False,
+                        enabled=bool(tool.enabled),
+                        bindable=bool(tool.enabled),
+                        unavailable_reason=(
+                            None
+                            if tool.enabled
+                            else _localized_message(locale, zh="Tool 已禁用。", en="Tool is disabled.")
+                        ),
+                        schema_mode="editable",
+                        source_tool_name=tool.name,
+                        tool_id=tool.id,
+                        default_input_schema=default_input_schema,
+                        default_output_schema=default_output_schema,
+                        default_input_summary=_schema_summary(default_input_schema, locale=locale),
+                        default_output_summary=_localized_message(locale, zh="text（string）", en="text (string)"),
+                        default_tool_response_mode="text_field",
+                    )
+                )
+
+        elif source_type == "workflow":
+            workflows = self.config_service.list_workflows(include_disabled=True)
+            for workflow in workflows:
+                bindable = True
+                reason = None
+                default_input_schema = None
+                default_output_schema = None
+                default_input_summary = ""
+                default_output_summary = ""
+                try:
+                    snapshot = self._workflow_contract_snapshot(workflow, locale=locale)
+                    default_input_schema = snapshot.input_schema
+                    default_output_schema = snapshot.output_schema
+                    default_input_summary = snapshot.input_summary
+                    default_output_summary = snapshot.output_summary
+                except ApiException as exc:
+                    bindable = False
+                    reason = exc.message
+                items.append(
+                    OpenClawCatalogSourceResponse(
+                        source_type="workflow",
+                        source_key=f"workflow:{workflow.id}",
+                        title=workflow.name,
+                        description=workflow.description or "",
+                        is_system=bool(workflow.is_system),
+                        enabled=bool(workflow.enabled),
+                        bindable=bindable and bool(workflow.enabled),
+                        unavailable_reason=(
+                            reason
+                            if workflow.enabled
+                            else _localized_message(locale, zh="Workflow 已禁用。", en="Workflow is disabled.")
+                        ),
+                        schema_mode="readonly",
+                        workflow_id=workflow.id,
+                        published_version_id=workflow.published_version_id,
+                        default_input_schema=default_input_schema,
+                        default_output_schema=default_output_schema,
+                        default_input_summary=default_input_summary,
+                        default_output_summary=default_output_summary,
+                        default_tool_response_mode="json_schema",
+                    )
+                )
+
+        else:
+            agents = self.config_service.list_agent_profiles(include_disabled=True)
+            for agent in agents:
+                has_published = agent.published_version_id is not None and self.config_service._get_agent_profile_published_draft(agent) is not None  # noqa: SLF001
+                bindable = bool(agent.enabled and has_published)
+                reason = None
+                if not agent.enabled:
+                    reason = _localized_message(locale, zh="Agent 已禁用。", en="Agent is disabled.")
+                elif not has_published:
+                    reason = _localized_message(
+                        locale,
+                        zh="Agent 没有 published 版本。",
+                        en="Agent has no published version.",
+                    )
+                items.append(
+                    OpenClawCatalogSourceResponse(
+                        source_type="agent",
+                        source_key=f"agent:{agent.id}",
+                        title=agent.name,
+                        description=agent.description or "",
+                        is_system=bool(agent.is_system),
+                        enabled=bool(agent.enabled),
+                        bindable=bindable,
+                        unavailable_reason=reason,
+                        schema_mode="editable",
+                        agent_profile_id=agent.id,
+                        published_version_id=agent.published_version_id,
+                        default_input_schema=_EMPTY_OBJECT_SCHEMA,
+                        default_output_schema=_EMPTY_OBJECT_SCHEMA,
+                        default_input_summary="",
+                        default_output_summary="",
+                        default_tool_response_mode="json_schema",
+                    )
+                )
+
+        return OpenClawCatalogSourceListResponse(items=items)
+
+    def create_catalog_item(
+        self,
+        request: OpenClawCapabilityItemCreateRequest,
+        *,
+        preferred_locale: str | None = None,
+    ) -> OpenClawCapabilityItemResponse:
+        self._ensure_system_presets(preferred_locale=preferred_locale, commit=False)
+        item = self._apply_user_item_request(None, request)
+        self.db.add(item)
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40972, message="Create OpenClaw capability item failed") from exc
+        locale = self._current_locale(preferred_locale)
+        return self._serialize_catalog_item(self._get_catalog_item(item.id), locale=locale)
+
+    def update_catalog_item(
+        self,
+        item_id: UUID,
+        request: OpenClawCapabilityItemUpdateRequest,
+        *,
+        preferred_locale: str | None = None,
+    ) -> OpenClawCapabilityItemResponse:
+        self._ensure_system_presets(preferred_locale=preferred_locale, commit=False)
+        locale = self._current_locale(preferred_locale)
+        item = self._get_catalog_item(item_id)
+
+        if item.is_system_preset:
+            forbidden_fields = {
+                "source_type",
+                "input_schema",
+                "output_schema",
+                "input_summary",
+                "output_summary",
+                "tool_response_mode",
+                "tool_id",
+                "source_tool_name",
+                "workflow_id",
+                "agent_profile_id",
+            }
+            attempted = forbidden_fields.intersection(request.model_fields_set)
+            if attempted:
+                raise ApiException(
+                    status_code=400,
+                    code=OPENCLAW_SYSTEM_PRESET_UPDATE_ERROR_CODE,
+                    message="System preset capability only supports editing enabled, title, description, and tool name",
+                )
+            if "tool_name" in request.model_fields_set and request.tool_name is not None:
+                item.tool_name = self._normalize_openclaw_tool_name(request.tool_name, exclude_item_id=item.id)
+            if "title" in request.model_fields_set and request.title is not None:
+                item.title = request.title
+            if "description" in request.model_fields_set and request.description is not None:
+                item.description = request.description
+            if "enabled" in request.model_fields_set and request.enabled is not None:
+                item.enabled = bool(request.enabled)
+        else:
+            merged = self._merge_item_request(item, request)
+            self._apply_user_item_request(item, merged)
+
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40973, message="Update OpenClaw capability item failed") from exc
+        return self._serialize_catalog_item(self._get_catalog_item(item.id), locale=locale)
+
+    def delete_catalog_item(self, item_id: UUID) -> None:
+        item = self._get_catalog_item(item_id)
+        if item.is_system_preset:
+            raise ApiException(
+                status_code=400,
+                code=OPENCLAW_SYSTEM_PRESET_DELETE_ERROR_CODE,
+                message="System preset capability cannot be deleted",
+            )
+        self.db.delete(item)
+        self.db.commit()
+
+    def reset_system_presets(
+        self,
+        *,
+        preferred_locale: str | None = None,
+    ) -> OpenClawIntegrationSettingsResponse:
+        locale = self._current_locale(preferred_locale)
+        definitions = list_openclaw_system_capability_definitions(locale)
+        existing_by_key = {
+            item.system_capability_key: item
+            for item in self.db.query(OpenClawCapabilityItem)
+            .filter(
+                OpenClawCapabilityItem.source_type == "system_adapter",
+                OpenClawCapabilityItem.system_capability_key.isnot(None),
+            )
+            .all()
+            if item.system_capability_key
+        }
+        for definition in definitions:
+            item = existing_by_key.get(definition.key)
+            if item is None:
+                item = OpenClawCapabilityItem(
+                    capability_key=definition.key,
+                    system_capability_key=definition.key,
+                    source_type="system_adapter",
+                    is_system_preset=True,
+                    enabled=bool(definition.enabled_by_default),
+                    input_schema_json=definition.input_schema,
+                    output_schema_json=definition.output_schema,
+                    input_summary=definition.input_summary,
+                    output_summary=definition.output_summary,
+                    tool_response_mode="json_schema",
+                    title=definition.title,
+                    description=definition.description,
+                    tool_name=definition.tool_name,
+                )
+                self.db.add(item)
+                continue
+            item.capability_key = definition.key
+            item.tool_name = definition.tool_name
+            item.title = definition.title
+            item.description = definition.description
+            item.source_type = "system_adapter"
+            item.system_capability_key = definition.key
+            item.source_tool_name = None
+            item.tool_id = None
+            item.workflow_id = None
+            item.agent_profile_id = None
+            item.enabled = bool(definition.enabled_by_default)
+            item.is_system_preset = True
+            item.input_schema_json = definition.input_schema
+            item.output_schema_json = definition.output_schema
+            item.input_summary = definition.input_summary
+            item.output_summary = definition.output_summary
+            item.tool_response_mode = "json_schema"
+        self.db.commit()
+        return self.get_settings_response(preferred_locale=locale)
+
+    def authorize_runtime_request(
+        self,
+        request: Request,
+    ) -> OpenClawRuntimeAuditContext:
+        locale = self._current_locale(request.headers.get("x-mindatlas-locale"))
+        payload = self._get_payload()
+        if not bool(payload.get("enabled")):
+            raise ApiException(
+                status_code=403,
+                code=OPENCLAW_DISABLED_ERROR_CODE,
+                message=_localized_message(
+                    locale,
+                    zh="OpenClaw 集成尚未启用。",
+                    en="OpenClaw integration is not enabled.",
+                ),
+            )
+
+        expected_secret, _secret_hint, _rotated_at = self._secret_state(payload)
+        if not expected_secret:
+            raise ApiException(
+                status_code=401,
+                code=OPENCLAW_AUTH_ERROR_CODE,
+                message=_localized_message(
+                    locale,
+                    zh="OpenClaw 集成密钥尚未配置。",
+                    en="OpenClaw integration secret is not configured.",
+                ),
+            )
+
+        authorization = request.headers.get("authorization") or ""
+        scheme, _, presented_secret = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not presented_secret.strip():
+            raise ApiException(
+                status_code=401,
+                code=OPENCLAW_AUTH_ERROR_CODE,
+                message=_localized_message(
+                    locale,
+                    zh="缺少有效的 OpenClaw Bearer 凭证。",
+                    en="Missing a valid OpenClaw bearer credential.",
+                ),
+            )
+
+        if not secrets.compare_digest(presented_secret.strip(), expected_secret):
+            raise ApiException(
+                status_code=401,
+                code=OPENCLAW_AUTH_ERROR_CODE,
+                message=_localized_message(
+                    locale,
+                    zh="OpenClaw 集成密钥无效。",
+                    en="Invalid OpenClaw integration secret.",
+                ),
+            )
+
+        return OpenClawRuntimeAuditContext(
+            source=_normalize_optional_text(request.headers.get("x-openclaw-source")),
+            channel=_normalize_optional_text(request.headers.get("x-openclaw-channel")),
+            session=_normalize_optional_text(request.headers.get("x-openclaw-session")),
+            tool=_normalize_optional_text(request.headers.get("x-openclaw-tool")),
+        )
+
+    def get_runtime_catalog(
+        self,
+        *,
+        preferred_locale: str | None = None,
+    ) -> OpenClawCapabilityCatalogResponse:
+        self._ensure_system_presets(preferred_locale=preferred_locale, commit=False)
+        locale = self._current_locale(preferred_locale)
+        capabilities = []
+        for item in self._list_catalog_items():
+            if not item.enabled:
+                continue
+            serialized = self._serialize_catalog_item(item, locale=locale)
+            capabilities.append(
+                OpenClawRuntimeCapabilityResponse(
+                    capability_key=serialized.capability_key,
+                    tool_name=serialized.tool_name,
+                    title=serialized.title,
+                    description=serialized.description,
+                    source_type=serialized.source_type,
+                    implementation_type=serialized.implementation_type,
+                    available=serialized.available,
+                    availability_reason=serialized.availability_reason,
+                    input_summary=serialized.input_summary,
+                    output_summary=serialized.output_summary,
+                    input_schema=serialized.input_schema,
+                    output_schema=serialized.output_schema,
+                    tool_response_mode=serialized.tool_response_mode,
+                )
+            )
+        return OpenClawCapabilityCatalogResponse(
+            integration_name="MindAtlas",
+            capabilities=capabilities,
+        )
+
+    def _ensure_capability_exposed(
+        self,
+        *,
+        capability_key: str,
+        locale: str,
+    ) -> OpenClawCapabilityItem:
+        item = self._get_catalog_item_by_capability_key(capability_key)
+        if item is None:
+            raise ApiException(
+                status_code=404,
+                code=OPENCLAW_CAPABILITY_NOT_FOUND_ERROR_CODE,
+                message=f"Unknown OpenClaw capability: {capability_key}",
+            )
+        if not item.enabled:
+            raise ApiException(
+                status_code=403,
+                code=OPENCLAW_CAPABILITY_DISABLED_ERROR_CODE,
+                message=_localized_message(
+                    locale,
+                    zh=f"能力未对 OpenClaw 暴露：{capability_key}",
+                    en=f"Capability is not exposed to OpenClaw: {capability_key}",
+                ),
+            )
+        return item
+
+    def _serialize_entry(self, entry: Any) -> OpenClawEntryRecordResponse:
+        entry_response = EntryResponse.model_validate(entry)
+        return OpenClawEntryRecordResponse(
+            id=entry_response.id,
+            title=entry_response.title,
+            summary=entry_response.summary,
+            content=entry_response.content,
+            entry_type_code=entry_response.type.code,
+            entry_type_name=entry_response.type.name,
+            tag_names=[tag.name for tag in entry_response.tags],
+            time_mode=entry_response.time_mode.value,
+            time_at=entry_response.time_at,
+            time_from=entry_response.time_from,
+            time_to=entry_response.time_to,
+            created_at=entry_response.created_at,
+            updated_at=entry_response.updated_at,
+        )
+
+    def _serialize_relation(self, relation: Any) -> OpenClawRelationRecordResponse:
+        relation_response = RelationResponse.model_validate(relation)
+        return OpenClawRelationRecordResponse(
+            id=relation_response.id,
+            source_entry_id=relation_response.source_entry.id,
+            source_entry_title=relation_response.source_entry.title,
+            target_entry_id=relation_response.target_entry.id,
+            target_entry_title=relation_response.target_entry.title,
+            relation_type_code=relation_response.relation_type.code,
+            relation_type_name=relation_response.relation_type.name,
+            description=relation_response.description,
+        )
+
+    def _resolve_entry_type_id(self, value: str) -> UUID:
+        normalized = (value or "").strip()
+        if not normalized:
+            raise ApiException(status_code=400, code=40063, message="entryType is required")
+        row = (
+            self.db.query(EntryType)
+            .filter(
+                EntryType.enabled.is_(True),
+                (func.lower(EntryType.code) == normalized.lower()) | (func.lower(EntryType.name) == normalized.lower()),
+            )
+            .first()
+        )
+        if row is None:
+            available = [
+                {"code": item.code, "name": item.name}
+                for item in self.db.query(EntryType).filter(EntryType.enabled.is_(True)).all()
+            ]
+            raise ApiException(
+                status_code=400,
+                code=40064,
+                message=f"Unknown entry type: {normalized}",
+                details={"availableEntryTypes": available},
+            )
+        return row.id
+
+    def _resolve_relation_type_id(self, value: str) -> UUID:
+        normalized = (value or "").strip()
+        if not normalized:
+            raise ApiException(status_code=400, code=40065, message="relationType is required")
+        row = (
+            self.db.query(RelationType)
+            .filter(
+                RelationType.enabled.is_(True),
+                (func.lower(RelationType.code) == normalized.lower()) | (func.lower(RelationType.name) == normalized.lower()),
+            )
+            .first()
+        )
+        if row is None:
+            available = [
+                {"code": item.code, "name": item.name}
+                for item in self.db.query(RelationType).filter(RelationType.enabled.is_(True)).all()
+            ]
+            raise ApiException(
+                status_code=400,
+                code=40066,
+                message=f"Unknown relation type: {normalized}",
+                details={"availableRelationTypes": available},
+            )
+        return row.id
+
+    def _resolve_tag_ids(self, tag_names: list[str]) -> list[UUID]:
+        resolved_ids: list[UUID] = []
+        for tag_name in tag_names:
+            normalized = tag_name.strip()
+            if not normalized:
+                continue
+            existing = self.db.query(Tag).filter(func.lower(Tag.name) == normalized.lower()).first()
+            if existing is None:
+                existing = Tag(
+                    name=normalized,
+                    color=pick_material_600_color(normalized),
+                    description=None,
+                )
+                self.db.add(existing)
+                self.db.flush()
+            resolved_ids.append(existing.id)
+        return resolved_ids
+
+    def _execute_capture_entry(self, payload: OpenClawCaptureEntryRequest) -> OpenClawEntryRecordResponse:
+        time_mode = TimeMode.POINT
+        time_at = payload.time_at
+        time_from = payload.time_from
+        time_to = payload.time_to
+        if time_from is not None or time_to is not None:
+            if time_from is None or time_to is None:
+                raise ApiException(
+                    status_code=400,
+                    code=40067,
+                    message="timeFrom and timeTo must be provided together for a ranged entry",
+                )
+            time_mode = TimeMode.RANGE
+            time_at = None
+        elif time_at is None:
+            time_at = utcnow()
+
+        entry = EntryService(self.db).create(
+            EntryRequest.model_validate(
+                {
+                    "title": payload.title,
+                    "summary": payload.summary,
+                    "content": payload.content,
+                    "typeId": self._resolve_entry_type_id(payload.entry_type),
+                    "tagIds": self._resolve_tag_ids(payload.tag_names),
+                    "timeMode": time_mode.value,
+                    "timeAt": time_at,
+                    "timeFrom": time_from,
+                    "timeTo": time_to,
+                }
+            )
+        )
+        return self._serialize_entry(entry)
+
+    def _execute_search_entries(self, payload: OpenClawSearchEntriesRequest) -> OpenClawSearchEntriesResponse:
+        tag_ids: list[UUID] | None = None
+        if payload.tag_names:
+            tags = (
+                self.db.query(Tag)
+                .filter(func.lower(Tag.name).in_([name.lower() for name in payload.tag_names]))
+                .all()
+            )
+            if len(tags) != len(payload.tag_names):
+                return OpenClawSearchEntriesResponse(total=0, items=[])
+            tag_ids = [tag.id for tag in tags]
+        entry_type_id = self._resolve_entry_type_id(payload.entry_type) if payload.entry_type else None
+        result = EntryService(self.db).search(
+            EntrySearchRequest(
+                keyword=payload.query,
+                type_id=entry_type_id,
+                tag_ids=tag_ids,
+                time_from=payload.time_from,
+                time_to=payload.time_to,
+                page=0,
+                size=payload.limit,
+            )
+        )
+        return OpenClawSearchEntriesResponse(
+            total=result["total"],
+            items=[self._serialize_entry(entry) for entry in result["content"]],
+        )
+
+    def _execute_get_entry(self, payload: OpenClawGetEntryRequest) -> OpenClawEntryRecordResponse:
+        entry = EntryService(self.db).find_by_id(payload.entry_id)
+        return self._serialize_entry(entry)
+
+    def _execute_create_relation(self, payload: OpenClawCreateRelationRequest) -> OpenClawRelationRecordResponse:
+        relation = RelationService(self.db).create(
+            RelationRequest.model_validate(
+                {
+                    "sourceEntryId": payload.source_entry_id,
+                    "targetEntryId": payload.target_entry_id,
+                    "relationTypeId": self._resolve_relation_type_id(payload.relation_type),
+                    "description": payload.description,
+                }
+            )
+        )
+        return self._serialize_relation(relation)
+
+    async def _execute_query_knowledge_graph(self, payload: OpenClawQueryKnowledgeGraphRequest) -> Any:
+        return await LightRagService().query(
+            query=payload.query,
+            mode=payload.mode,
+            top_k=payload.top_k,
+        )
+
+    def _execute_generate_weekly_report(self, payload: OpenClawGenerateWeeklyReportRequest) -> WeeklyReportResponse:
+        service = WeeklyReportService(self.db)
+        week_start = payload.week_start or service.get_last_monday()
+        report = service.get_or_create_for_week(week_start)
+        if payload.force_regenerate or service.should_generate_report(report):
+            report = service.generate_report(report)
+        return WeeklyReportResponse.model_validate(report)
+
+    def _execute_generate_monthly_report(self, payload: OpenClawGenerateMonthlyReportRequest) -> MonthlyReportResponse:
+        service = MonthlyReportService(self.db)
+        month_start = payload.month_start or service.get_last_month_start()
+        report = service.get_or_create_for_month(month_start)
+        if payload.force_regenerate or service.should_generate_report(report):
+            report = service.generate_report(report)
+        return MonthlyReportResponse.model_validate(report)
+
+    async def _dispatch_system_capability(
+        self,
+        *,
+        capability_key: OpenClawSystemCapabilityKey,
+        payload: Any,
+    ) -> Any:
+        if capability_key == "capture_entry":
+            return self._execute_capture_entry(payload)
+        if capability_key == "search_entries":
+            return self._execute_search_entries(payload)
+        if capability_key == "get_entry":
+            return self._execute_get_entry(payload)
+        if capability_key == "create_relation":
+            return self._execute_create_relation(payload)
+        if capability_key == "query_knowledge_graph":
+            return await self._execute_query_knowledge_graph(payload)
+        if capability_key == "generate_weekly_report":
+            return self._execute_generate_weekly_report(payload)
+        if capability_key == "generate_monthly_report":
+            return self._execute_generate_monthly_report(payload)
+        raise ApiException(
+            status_code=404,
+            code=OPENCLAW_CAPABILITY_NOT_FOUND_ERROR_CODE,
+            message=f"Unknown OpenClaw capability: {capability_key}",
+        )
+
+    def _execute_tool_capability(self, item: OpenClawCapabilityItem, raw_payload: dict[str, Any]) -> dict[str, Any]:
+        resolved = self._resolve_tool_source(tool_id=item.tool_id, source_tool_name=item.source_tool_name)
+        if resolved is None or resolved.tool_runtime is None:
+            raise ApiException(status_code=409, code=40961, message="Bound tool is unavailable")
+        input_schema = item.input_schema_json or _EMPTY_OBJECT_SCHEMA
+        output_schema = item.output_schema_json or _EMPTY_OBJECT_SCHEMA
+        _validate_value_against_schema(input_schema, raw_payload, label="input")
+        from app.assistant.workflow.engine.runtime_helpers import stringify, wrap_tool_with_db
+
+        runner = wrap_tool_with_db(resolved.tool_runtime, self.db.get_bind())
+        result = runner(**raw_payload)
+        if item.tool_response_mode == "text_field":
+            properties = output_schema.get("properties") if isinstance(output_schema.get("properties"), dict) else {}
+            field_name = next(iter(properties.keys()), "text")
+            payload = {field_name: stringify(result)}
+            _validate_value_against_schema(output_schema, payload, label="output")
+            return payload
+        payload = _normalize_result_object(result)
+        _validate_value_against_schema(output_schema, payload, label="output")
+        return payload
+
+    def _execute_workflow_capability(
+        self,
+        item: OpenClawCapabilityItem,
+        raw_payload: dict[str, Any],
+        *,
+        locale: str,
+    ) -> dict[str, Any]:
+        workflow = self.config_service.get_workflow(item.workflow_id)  # type: ignore[arg-type]
+        snapshot = self._workflow_contract_snapshot(workflow)
+        if _schema_compact(snapshot.input_schema) != _schema_compact(item.input_schema_json or _EMPTY_OBJECT_SCHEMA):
+            raise ApiException(status_code=409, code=40961, message="Workflow contract drifted from the catalog item")
+        if _schema_compact(snapshot.output_schema) != _schema_compact(item.output_schema_json or _EMPTY_OBJECT_SCHEMA):
+            raise ApiException(status_code=409, code=40961, message="Workflow contract drifted from the catalog item")
+        _validate_value_against_schema(item.input_schema_json or _EMPTY_OBJECT_SCHEMA, raw_payload, label="input")
+        workflow_input = self.config_service._get_workflow_published_input(workflow)  # noqa: SLF001
+        if workflow_input is None:
+            raise ApiException(status_code=409, code=40961, message="Workflow published version is unavailable")
+        skill = self._build_workflow_skill_definition(workflow=workflow, workflow_input=workflow_input)
+        engine = self._build_engine(skill)
+        output = "".join(
+            engine.execute(
+                skill=skill,
+                user_input="",
+                history=[],
+                runtime_context={
+                    "stream_output": False,
+                    "conversation_id": f"openclaw_workflow:{item.capability_key}:{uuid4().hex}",
+                    "structured_input": raw_payload,
+                    "run_id": uuid4().hex,
+                    "channel_type": "openclaw_capability",
+                    "workflow_id": str(workflow.id),
+                    "locale": locale,
+                },
+            )
+        )
+        result = _normalize_result_object(output)
+        _validate_value_against_schema(item.output_schema_json or _EMPTY_OBJECT_SCHEMA, result, label="output")
+        return result
+
+    def _execute_agent_capability(
+        self,
+        item: OpenClawCapabilityItem,
+        raw_payload: dict[str, Any],
+        *,
+        locale: str,
+    ) -> dict[str, Any]:
+        agent_profile = self.config_service.get_agent_profile(item.agent_profile_id)  # type: ignore[arg-type]
+        draft = self.config_service._get_agent_profile_published_draft(agent_profile)  # noqa: SLF001
+        if draft is None:
+            raise ApiException(status_code=409, code=40961, message="Agent published version is unavailable")
+        _validate_value_against_schema(item.input_schema_json or _EMPTY_OBJECT_SCHEMA, raw_payload, label="input")
+        skill = self._build_agent_skill_definition(
+            agent_profile=agent_profile,
+            draft=draft,
+            output_schema=item.output_schema_json or _EMPTY_OBJECT_SCHEMA,
+            locale=locale,
+        )
+        engine = self._build_engine(skill)
+        output = "".join(
+            engine.execute(
+                skill=skill,
+                user_input=json.dumps(raw_payload, ensure_ascii=False),
+                history=[],
+                runtime_context={
+                    "stream_output": False,
+                    "conversation_id": f"openclaw_agent:{item.capability_key}:{uuid4().hex}",
+                    "run_id": uuid4().hex,
+                    "channel_type": "openclaw_capability",
+                    "locale": locale,
+                },
+            )
+        )
+        result = _normalize_result_object(output)
+        _validate_value_against_schema(item.output_schema_json or _EMPTY_OBJECT_SCHEMA, result, label="output")
+        return result
+
+    async def execute_capability(
+        self,
+        *,
+        capability_key: str,
+        raw_payload: dict[str, Any],
+        audit_context: OpenClawRuntimeAuditContext,
+        preferred_locale: str | None = None,
+    ) -> OpenClawCapabilityExecuteResponse:
+        self._ensure_system_presets(preferred_locale=preferred_locale, commit=False)
+        locale = self._current_locale(preferred_locale)
+        item = self._ensure_capability_exposed(capability_key=capability_key, locale=locale)
+        availability = self._availability_for_item(item, locale=locale)
+        if not availability.available:
+            raise ApiException(
+                status_code=409,
+                code=40961,
+                message=availability.reason or "Capability is currently unavailable",
+            )
+
+        request_id = get_request_id()
+        start = time.perf_counter()
+        status = "success"
+        try:
+            if item.source_type == "system_adapter":
+                definition = get_openclaw_system_capability_definition(item.system_capability_key or "", locale)
+                if definition is None:
+                    raise ApiException(status_code=404, code=OPENCLAW_CAPABILITY_NOT_FOUND_ERROR_CODE, message="System capability definition is missing")
+                input_model = OPENCLAW_SYSTEM_CAPABILITY_INPUT_MODELS[definition.key]
+                parsed_payload = input_model.model_validate(raw_payload or {})
+                raw_result = await self._dispatch_system_capability(capability_key=definition.key, payload=parsed_payload)
+                output_model = OPENCLAW_SYSTEM_CAPABILITY_OUTPUT_MODELS[definition.key]
+                result = output_model.model_validate(raw_result).model_dump(by_alias=True)
+            elif item.source_type == "tool":
+                result = self._execute_tool_capability(item, raw_payload or {})
+            elif item.source_type == "workflow":
+                result = self._execute_workflow_capability(item, raw_payload or {}, locale=locale)
+            else:
+                result = self._execute_agent_capability(item, raw_payload or {}, locale=locale)
+
+            return OpenClawCapabilityExecuteResponse(
+                capability_key=item.capability_key,
+                tool_name=item.tool_name,
+                result=result,
+            )
+        except Exception:
+            status = "failed"
+            raise
+        finally:
+            duration_ms = (time.perf_counter() - start) * 1000.0
+            logger.info(
+                "openclaw_capability_execution request_id=%s capability=%s tool=%s source=%s channel=%s session=%s status=%s duration_ms=%.2f",
+                request_id,
+                item.capability_key,
+                item.tool_name,
+                audit_context.source,
+                audit_context.channel,
+                audit_context.session,
+                status,
+                duration_ms,
+            )

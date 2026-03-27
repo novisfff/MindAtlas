@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { FileType, Tags, ChevronRight, Bot, Wrench, BrainCircuit, Network, Sparkles, Settings2, Clock3 } from 'lucide-react'
+import { FileType, Tags, ChevronRight, Bot, Wrench, BrainCircuit, Network, Sparkles, Settings2, Clock3, PlugZap } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 export function SettingsPage() {
@@ -54,6 +54,15 @@ export function SettingsPage() {
       path: '/settings/assistant-skills',
       color: 'text-purple-500',
       bgColor: 'bg-purple-500/10'
+    },
+    {
+      id: 'openclaw-integration',
+      titleKey: 'pages.settings.openClawIntegration',
+      descKey: 'pages.settings.openClawIntegrationDesc',
+      icon: PlugZap,
+      path: '/settings/openclaw-integration',
+      color: 'text-orange-600',
+      bgColor: 'bg-orange-500/10'
     },
     {
       id: 'assistant-targets',

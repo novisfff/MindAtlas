@@ -625,6 +625,166 @@
       "knowledgeGraphIncomplete": "The knowledge graph service is not fully ready yet. Please check Neo4j, the LightRAG worker, and the default AI model bindings."
     }
   },
+  "openclawIntegration": {
+    "overview": {
+      "title": "OpenClaw capability catalog",
+      "description": "Expose a stable, configurable MindAtlas capability catalog to OpenClaw. System presets are auto-seeded, and you can wrap existing tools, workflows, and agents as external capabilities.",
+      "switchLabel": "Enable OpenClaw integration",
+      "switchHint": "When enabled, OpenClaw reads this catalog through the dedicated integration API and invokes items by their exported tool names."
+    },
+    "summary": {
+      "systemPresets": "System presets",
+      "customItems": "Custom catalog items",
+      "runtimeApi": "Runtime API"
+    },
+    "guide": {
+      "title": "Integration guide",
+      "description": "Collapsed by default. Expand this section when you want the shortest setup path for connecting OpenClaw to MindAtlas.",
+      "intro": "MindAtlas owns the capability catalog, knowledge data, and execution runtime. OpenClaw owns the chat entry, tool registration, and conversation orchestration. The recommended order is: generate secret, expose catalog items, configure the plugin, then verify runtime calls.",
+      "actions": {
+        "expand": "Expand guide",
+        "collapse": "Collapse guide"
+      },
+      "steps": {
+        "secret": {
+          "title": "1. Generate the integration secret",
+          "description": "Generate the bearer secret on this page first. The OpenClaw plugin will use it to access the MindAtlas integration API."
+        },
+        "catalog": {
+          "title": "2. Expose capability catalog items",
+          "description": "Review system presets or add custom items, then expose the tools, workflows, and agents that you want OpenClaw to discover."
+        },
+        "plugin": {
+          "title": "3. Configure the OpenClaw plugin",
+          "description": "Provide the MindAtlas base URL and integration secret in OpenClaw. The plugin should discover the catalog first and register one OpenClaw tool per exposed item.",
+          "details": {
+            "install": "Run `openclaw plugins install ./integrations/openclaw-mindatlas` to install the shipped `openclaw-mindatlas` plugin, then restart the OpenClaw Gateway.",
+            "baseUrl": "Set `plugins.entries.openclaw-mindatlas.config.baseUrl` to the MindAtlas backend and `integrationSecret` to the bearer secret generated on this page. During startup, the plugin calls `/api/integrations/openclaw/capabilities` before registering tools.",
+            "refresh": "Catalog availability changes can be picked up by the plugin refresh cycle. If a tool name, exported title, exported description, or input schema changes, reload the OpenClaw Gateway or plugin so registration metadata is rebuilt."
+          }
+        },
+        "verify": {
+          "title": "4. Verify the runtime flow",
+          "description": "Refresh the capability catalog on the OpenClaw side, make sure the exposed items appear, then run one test call to verify both discovery and execution endpoints."
+        }
+      },
+      "endpointsTitle": "Key endpoints",
+      "endpoints": {
+        "auth": "Auth header",
+        "catalog": "Catalog discovery",
+        "execute": "Capability execution"
+      },
+      "notesTitle": "Important notes",
+      "notes": {
+        "catalogOnly": "OpenClaw only sees catalog items that are currently exposed. Hidden or currently unavailable items should not appear as callable tools.",
+        "skillBoundary": "MindAtlas skills are not exported directly to OpenClaw. OpenClaw consumes the more stable capability catalog instead of the internal intent layer.",
+        "refresh": "After creating, deleting, or editing catalog items, refresh the catalog on the OpenClaw side so it does not keep using stale metadata."
+      }
+    },
+    "secret": {
+      "title": "Integration secret",
+      "description": "Generate a dedicated bearer secret for the external `openclaw-mindatlas` plugin. The raw secret is shown only once after generation or rotation.",
+      "configured": "Secret configured",
+      "configuredHint": "A secret is already stored for runtime authentication.",
+      "notConfigured": "Secret not configured",
+      "missingHint": "Generate a secret before you enable the integration or wire the OpenClaw plugin.",
+      "revealedTitle": "Copy this secret into the OpenClaw plugin now"
+    },
+    "types": {
+      "systemAdapter": "System Preset",
+      "tool": "Tool",
+      "workflow": "Workflow",
+      "agent": "Agent"
+    },
+    "labels": {
+      "system": "System",
+      "user": "User",
+      "input": "Input",
+      "output": "Output"
+    },
+    "status": {
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "available": "Available",
+      "unavailable": "Unavailable",
+      "exposed": "Exposed",
+      "hidden": "Hidden"
+    },
+    "actions": {
+      "generateSecret": "Generate secret",
+      "rotateSecret": "Rotate secret",
+      "copySecret": "Copy secret",
+      "addCapability": "Add capability",
+      "resetSystemPresets": "Reset system presets"
+    },
+    "systemPresets": {
+      "title": "System preset capabilities",
+      "description": "These items are auto-seeded by MindAtlas and are a good fit for exposing core entry, graph, and report capabilities. You can disable them or adjust their exported title and tool name."
+    },
+    "customItems": {
+      "title": "Custom capability catalog",
+      "description": "Wrap existing tools, workflows, or agents as OpenClaw-facing catalog items and maintain their exported copy and contracts independently.",
+      "emptyTitle": "No custom capability items yet",
+      "emptyDescription": "Pick an existing tool, workflow, or agent first, then define the exported copy and structured contracts."
+    },
+    "dialog": {
+      "createTitle": "Add capability catalog item",
+      "createDescription": "Choose a source object first, then define the exported tool name, title, description, and contract.",
+      "editTitle": "Edit capability catalog item",
+      "editDescription": "Update the exported copy and contract configuration.",
+      "editSystemPreset": "Edit system preset capability",
+      "editSystemPresetDescription": "System presets cannot change their bound source or schema. Only enabled state, title, description, and tool name can be edited here."
+    },
+    "form": {
+      "sourceType": "Source type",
+      "source": "Source object",
+      "toolName": "OpenClaw tool name",
+      "title": "Display title",
+      "description": "Description",
+      "exposed": "Expose to OpenClaw",
+      "exposedHint": "When turned off, this catalog item disappears from OpenClaw runtime metadata.",
+      "inputSummary": "Input summary",
+      "outputSummary": "Output summary",
+      "toolResponseMode": "Tool response mode",
+      "inputSchema": "Input schema",
+      "outputSchema": "Output schema",
+      "readonlySchemaHint": "This source schema is system-managed and shown as read-only here. If the underlying published contract changes, resave the catalog item to sync it again."
+    },
+    "sourceTypeDescriptions": {
+      "tool": "Best for exposing existing tools while maintaining the OpenClaw-facing schema on the catalog item.",
+      "workflow": "Only published workflows with structured input and output contracts are allowed. Schemas are synced automatically.",
+      "agent": "Bind a published agent and declare the OpenClaw-facing structured input and output on the catalog item."
+    },
+    "responseModes": {
+      "jsonSchema": "JSON schema",
+      "textField": "Single text field"
+    },
+    "responseModeDescriptions": {
+      "jsonSchema": "Use this when the tool returns a JSON object and the result should be validated against the catalog schema.",
+      "textField": "Use this when the tool returns plain text and MindAtlas should wrap it into a single string field."
+    },
+    "confirmRotate": {
+      "title": "Rotate OpenClaw integration secret?",
+      "description": "The existing OpenClaw plugin will stop working until you update it with the new secret."
+    },
+    "confirmReset": {
+      "title": "Reset system preset capabilities?",
+      "description": "This will restore every system preset catalog item back to its default title, description, tool name, schema, and enabled state."
+    },
+    "confirmDelete": {
+      "title": "Delete this catalog item?",
+      "description": "After deletion, OpenClaw will no longer be able to call \"{{title}}\"."
+    },
+    "messages": {
+      "saved": "OpenClaw integration settings saved",
+      "secretGenerated": "A new integration secret has been generated",
+      "secretCopied": "Integration secret copied",
+      "systemPresetsReset": "System preset capabilities reset",
+      "deleted": "Catalog item deleted",
+      "invalidSchemaJson": "Schema must be valid JSON.",
+      "invalidSchemaObject": "Schema root must be a JSON object."
+    }
+  },
   "tags": {
     "searchPlaceholder": "Search or create tags...",
     "create": "Create tag \"{{name}}\""
@@ -679,6 +839,8 @@
       "assistantSkillsDesc": "Manage AI assistant skill configurations",
       "assistantTargets": "Assistant Targets",
       "assistantTargetsDesc": "Manage reusable workflow and agent executables in one place",
+      "openClawIntegration": "OpenClaw Integration",
+      "openClawIntegrationDesc": "Configure the dedicated MindAtlas capability gateway that OpenClaw can discover and call",
       "systemAiBehaviors": "System AI Behaviors",
       "systemAiBehaviorsDesc": "Configure which workflow or agent powers built-in system AI behaviors like weekly and monthly reports",
       "lightRag": "LightRAG",

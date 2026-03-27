@@ -1,0 +1,57 @@
+{
+  "id": "openclaw-mindatlas",
+  "name": "MindAtlas Capability Gateway",
+  "version": "0.1.0",
+  "description": "Discover MindAtlas capability catalog items and register them as OpenClaw tools.",
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["baseUrl", "integrationSecret"],
+    "properties": {
+      "baseUrl": {
+        "type": "string",
+        "minLength": 1,
+        "description": "MindAtlas backend base URL. You may use the server origin or an /api-suffixed URL."
+      },
+      "integrationSecret": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Bearer secret generated from MindAtlas Settings > OpenClaw Integration."
+      },
+      "requestTimeoutMs": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 15000,
+        "description": "HTTP request timeout in milliseconds."
+      },
+      "catalogRefreshTtlSec": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 300,
+        "description": "How often the plugin refreshes the remote MindAtlas catalog."
+      }
+    }
+  },
+  "uiHints": {
+    "baseUrl": {
+      "label": "MindAtlas Base URL",
+      "placeholder": "https://mindatlas.example.com",
+      "help": "Point this to the MindAtlas backend origin."
+    },
+    "integrationSecret": {
+      "label": "MindAtlas Integration Secret",
+      "placeholder": "Paste the Bearer secret generated in MindAtlas",
+      "sensitive": true
+    },
+    "requestTimeoutMs": {
+      "label": "Request Timeout (ms)",
+      "placeholder": "15000"
+    },
+    "catalogRefreshTtlSec": {
+      "label": "Catalog Refresh TTL (s)",
+      "placeholder": "300",
+      "help": "How often the plugin refreshes the MindAtlas capability catalog."
+    }
+  }
+}

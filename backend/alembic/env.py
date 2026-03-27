@@ -24,6 +24,7 @@ from app.ai_registry.models import AiCredential, AiModel, AiComponentBinding  # 
 from app.assistant.models import Conversation, Message  # noqa: E402, F401
 from app.assistant_config.models import AssistantTool, AssistantSkill, AssistantSkillNode, AssistantSkillEdge  # noqa: E402, F401
 from app.lightrag.models import EntryIndexOutbox  # noqa: E402, F401
+from app.openclaw_integration.models import OpenClawCapabilityItem  # noqa: E402, F401
 from app.report.models import MonthlyReport, WeeklyReport  # noqa: E402, F401
 from app.system_settings.models import AppSetting  # noqa: E402, F401
 

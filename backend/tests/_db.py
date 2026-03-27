@@ -58,6 +58,7 @@ def make_session() -> Session:
     import app.attachment.models  # noqa: F401,E402
     import app.entry.models  # noqa: F401,E402
     import app.entry_type.models  # noqa: F401,E402
+    import app.openclaw_integration.models  # noqa: F401,E402
     import app.relation.models  # noqa: F401,E402
     import app.tag.models  # noqa: F401,E402
     import app.lightrag.models  # noqa: F401,E402

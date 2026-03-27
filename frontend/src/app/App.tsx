@@ -12,6 +12,7 @@ import {
   DoclingSettingsPage,
   EntryTypeSettings,
   LightRagSettingsPage,
+  OpenClawIntegrationSettingsPage,
   SettingsPage,
   SystemSetupSettingsPage,
   TagSettings,
@@ -72,6 +73,7 @@ export default function App() {
               <Route path="/settings/entry-types" element={<EntryTypeSettings />} />
               <Route path="/settings/tags" element={<TagSettings />} />
               <Route path="/settings/ai-providers" element={<AiProviderSettings />} />
+              <Route path="/settings/openclaw-integration" element={<OpenClawIntegrationSettingsPage />} />
               <Route path="/settings/system-setup" element={<SystemSetupSettingsPage />} />
               <Route path="/settings/automation" element={<AutomationSettingsPage />} />
               <Route path="/settings/lightrag" element={<LightRagSettingsPage />} />
