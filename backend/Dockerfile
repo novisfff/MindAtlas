@@ -72,7 +72,10 @@ CMD ["python", "-m", "app.lightrag.worker"]
 FROM python:3.11-slim AS parse-worker-builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_INDEX_URL=https://pypi.org/simple \
+    PIP_EXTRA_INDEX_URL=
 
 ARG TORCH_CPU_VERSION=2.7.0
 
