@@ -1,0 +1,12 @@
+# Minimal runtime dependencies for the attachment parse worker.
+# Keep this list separate from the main backend requirements so the Docling
+# worker does not need to install the full API / LangChain / LightRAG stack.
+
+sqlalchemy
+psycopg2-binary
+pydantic
+pydantic-settings
+minio
+cryptography
+
+-r requirements-docling.txt

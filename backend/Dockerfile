@@ -17,8 +17,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 # Install dependencies
 COPY requirements.txt .
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Stage 2: Base - Common runtime configuration
 FROM python:3.11-slim AS base
@@ -82,11 +81,9 @@ WORKDIR /app
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-COPY requirements.txt requirements-docling.txt ./
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir "torch==${TORCH_CPU_VERSION}" --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir -r requirements-docling.txt
+COPY requirements-docling.txt requirements-parse-worker.txt ./
+RUN pip install --no-cache-dir "torch==${TORCH_CPU_VERSION}" --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir -r requirements-parse-worker.txt
 
 FROM python:3.11-slim AS parse-worker
 

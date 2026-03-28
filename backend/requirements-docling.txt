@@ -1,11 +1,17 @@
 # Docling document parsing dependencies
 # Used by the parse-worker service for attachment text extraction
 
-docling>=2.0.0,<3.0.0
+# Keep Docling on a known-good version so pip does not backtrack across the
+# entire 2.x range during image builds.
+docling==2.82.0
+
+# Docling requires SciPy. Pin a Linux cp311 wheel that is available on common
+# mirrors so the parse-worker build does not fail during dependency resolution.
+scipy==1.17.1
 
 # CPU-optimized OCR backend used by docling.datamodel.pipeline_options.RapidOcrOptions
 # Import module: rapidocr_onnxruntime
-rapidocr-onnxruntime
+rapidocr-onnxruntime==1.4.4
 
 # Optional: download RapidOCR models via ModelScope's snapshot_download
-modelscope
+modelscope==1.35.3
