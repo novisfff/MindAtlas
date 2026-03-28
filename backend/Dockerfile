@@ -72,21 +72,16 @@ CMD ["python", "-m", "app.lightrag.worker"]
 FROM python:3.11-slim AS parse-worker-builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_INDEX_URL=https://pypi.org/simple \
-    PIP_EXTRA_INDEX_URL=
-
-ARG TORCH_CPU_VERSION=2.7.0
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-COPY requirements-docling.txt requirements-parse-worker.txt ./
-RUN pip install --no-cache-dir "torch==${TORCH_CPU_VERSION}" --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir -r requirements-parse-worker.txt
+COPY requirements.txt requirements-docling.txt ./
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt -r requirements-docling.txt
 
 FROM python:3.11-slim AS parse-worker
 
