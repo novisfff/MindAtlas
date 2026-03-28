@@ -2,6 +2,43 @@
 
 This document defines the MindAtlas side of the `openclaw-mindatlas` integration.
 
+## Docs Navigation
+
+This directory also contains the phase plan and skill drafts used to shape how OpenClaw should understand and use MindAtlas.
+
+### Phase Plan
+
+- [Phase 1 Plan: Memory / Retrieval / Summary (ZH-CN)](./phase-1-memory-retrieval-summary-plan.zh-CN.md)
+  - First-phase implementation plan focused on three core loops:
+    - capture high-value experiences
+    - retrieve past records naturally
+    - summarize personal history through reports and topic-oriented synthesis
+
+### Skill Drafts
+
+- [MindAtlas Overview Skill Draft](./mindatlas-overview-skill.md)
+  - High-level positioning skill for when and why OpenClaw should use MindAtlas
+
+- [MindAtlas Auto Capture Skill Draft](./mindatlas-auto-capture-skill.md)
+  - Capture policy skill for deciding when to record durable experiences
+
+- [MindAtlas Retrieval Skill Draft](./mindatlas-retrieval-skill.md)
+  - Retrieval policy skill for routing search, detail lookup, and knowledge-graph querying
+
+- [MindAtlas Summary Skill Draft](./mindatlas-summary-skill.md)
+  - Summary policy skill for weekly, monthly, and topic-oriented summaries
+
+## Suggested Reading Order
+
+1. This integration contract
+2. `phase-1-memory-retrieval-summary-plan.zh-CN.md`
+3. `mindatlas-overview-skill.md`
+4. `mindatlas-auto-capture-skill.md`
+5. `mindatlas-retrieval-skill.md`
+6. `mindatlas-summary-skill.md`
+
+---
+
 ## Shipped Plugin Package
 
 This repository now ships the OpenClaw-side plugin package at:
@@ -258,22 +295,6 @@ The plugin should not invent passthrough routes for arbitrary workflows, skills,
 
 ## Error Semantics
 
-Runtime errors always use the standard MindAtlas API envelope:
-
-- Unauthorized or missing secret: `40161`
-- Integration disabled: `40361`
-- Capability disabled or not exposed: `40362`
-- Unknown capability key: `40461`
-
-Capability-specific validation errors may also return business-level `400xx` or `409xx` codes with `data` details.
-
-## Plugin Guidance
-
-The shipped `openclaw-mindatlas` plugin:
-
-1. Read the exposed catalog from MindAtlas.
-2. Register matching OpenClaw tools using each catalog item’s `toolName`.
-3. Preserve `capabilityKey` as the execute target behind each OpenClaw tool.
-4. Forward tool arguments directly to MindAtlas.
-5. Translate MindAtlas API errors into short user-friendly OpenClaw tool failures.
-6. Bundle the `MindAtlas Overview` skill from [mindatlas-overview-skill.md](./mindatlas-overview-skill.md).
+- Keep MindAtlas runtime errors stable and machine-readable.
+- Return actionable messages for auth failures, disabled capabilities, schema mismatch, or unavailable bindings.
+- Prefer explicit unavailability over silent degradation when a catalog item can no longer execute safely.

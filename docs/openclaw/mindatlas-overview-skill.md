@@ -1,6 +1,6 @@
 # MindAtlas Overview Skill Draft
 
-Use this as the source prompt for the shipped OpenClaw `MindAtlas Overview` skill.
+Use this as the source prompt for a future OpenClaw `mindatlas-overview` skill.
 
 ## Skill Intent
 
@@ -9,47 +9,75 @@ Teach the OpenClaw agent what MindAtlas is, what it is good at, and when it shou
 ## Suggested Skill Text
 
 ```md
-You can use MindAtlas as a personal knowledge and experience management system.
+You can use MindAtlas as the user's long-term knowledge and experience system.
 
 MindAtlas is best for:
 - Recording things the user wants to keep
-- Organizing experiences, knowledge, projects, and notes
-- Searching past entries
-- Building relations between entries
+- Storing experiences, notes, project progress, decisions, and reusable conclusions
+- Searching previously stored entries
+- Reading entry details later
+- Building relations between records
 - Querying the knowledge graph when that capability is available
-- Generating weekly or monthly reports from what the user has recorded
-- Running administrator-curated workflows or agent capabilities when their titles and descriptions clearly match the user's request
+- Generating weekly or monthly reports from stored records
+- Running administrator-exposed workflows or agent capabilities that are intentionally published through the MindAtlas OpenClaw catalog
 
 MindAtlas is not meant to be:
 - A generic cloud drive
-- A full task-management system
-- Unlimited passive memory with no structure
+- A replacement for every short-lived working memory need
+- An excuse to store every low-value chat fragment forever
+- A place to dump unstructured noise when the information has no durable value
 
-Prefer MindAtlas tools when the user says things like:
+## When to prefer MindAtlas
+
+Prefer MindAtlas when the user is trying to:
+- remember something for later
+- find something they recorded before
+- review what happened over time
+- summarize a period, project, or topic
+- connect related ideas, events, or records
+- query across stored knowledge rather than only the current conversation
+
+Typical requests include:
 - "记一下 / remember this"
-- "帮我整理一下 / organize this"
-- "我之前写过吗 / did I write about this before"
-- "帮我关联一下 / connect these two things"
-- "生成周报 / generate my weekly report"
-- "生成月报 / generate my monthly report"
-- "按我已经配置好的流程处理一下 / run the workflow or agent I configured in MindAtlas"
+- "我之前记过吗 / did I record this before"
+- "帮我搜一下 / search for this"
+- "总结一下我最近做了什么 / summarize what I've been doing"
+- "生成周报 / 月报"
+- "帮我关联一下这两条记录"
+- "按我在 MindAtlas 里配置好的流程处理一下"
+
+## How to think about MindAtlas
+
+Treat MindAtlas as a structured, durable system of record.
+It is more appropriate than ad-hoc conversation memory when the information:
+- should survive future sessions
+- may need to be searched later
+- belongs to a timeline, project, topic, or relationship graph
+- should contribute to future summaries or reports
+
+## Tool-use guidance
 
 Before calling a MindAtlas capability:
-- Read the capability catalog provided by MindAtlas
-- Only use the catalog items that are currently exposed
-- Respect `available` and `availabilityReason`
-- Prefer the catalog item's title, description, input summary, and output summary over guesswork
-- If a required type, relation name, or workflow parameter is unclear, ask the user briefly instead of guessing wildly
+- rely on the current capability catalog instead of assuming a fixed tool list
+- respect whether a capability is currently available
+- use the catalog item's title, description, input summary, and output summary to guide tool choice
+- ask a short clarifying question if a required parameter is unclear and guessing would likely be wrong
 
 When using MindAtlas:
-- Keep tool arguments concise and structured
-- Reuse returned IDs when you need follow-up detail or relation creation
-- Treat MindAtlas as the source of truth for stored knowledge
-- Do not assume a fixed built-in tool list; administrators may expose custom workflows, tools, or agents through the catalog
+- keep tool arguments concise and structured
+- prefer a stable type, title, summary, and a small number of useful tags
+- reuse returned IDs for follow-up detail lookup or relation creation
+- treat stored MindAtlas records as the source of truth for previously saved knowledge
+
+## Boundaries
+
+Do not force every conversation into MindAtlas.
+Prefer MindAtlas for durable memory, retrieval, reporting, and structured knowledge work.
+Use other tools or direct answers when the task does not benefit from long-term storage or structured recall.
 ```
 
 ## Notes
 
-- Keep this skill outside MindAtlas runtime logic; it belongs to the OpenClaw plugin bundle.
-- The runtime copy is shipped at `integrations/openclaw-mindatlas/skills/mindatlas-overview/SKILL.md`.
-- The skill should not embed the bearer secret or deployment-specific URLs.
+- This is the broad orientation skill for MindAtlas.
+- It should stay higher-level than `mindatlas-auto-capture`, `mindatlas-retrieval`, and `mindatlas-summary`.
+- The overview skill explains positioning and preference; the other skills define more specific behavior.
