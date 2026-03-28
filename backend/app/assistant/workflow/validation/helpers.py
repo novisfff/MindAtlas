@@ -332,6 +332,15 @@ def resolve_start_input_contract(cfg: dict) -> tuple[str, str, set[str], list[st
             errors.append(
                 f"start structured field '{field_name}' has invalid type: {field_type_raw}"
             )
+        if field_type == "array":
+            items_type_raw = raw_field.get("items_type", raw_field.get("itemsType"))
+            items_type = str(items_type_raw or "").strip().lower()
+            if not items_type:
+                errors.append(f"start structured field '{field_name}' array type requires itemsType")
+            elif items_type not in (_OUTPUT_FIELD_TYPES - {"array"}):
+                errors.append(
+                    f"start structured field '{field_name}' has invalid array items type: {items_type_raw}"
+                )
 
         required = raw_field.get("required", False)
         if not isinstance(required, bool):

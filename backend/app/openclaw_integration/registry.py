@@ -11,7 +11,21 @@ from app.openclaw_integration.schemas import (
 )
 from app.system_settings.service import get_default_system_locale, normalize_system_locale
 
-OpenClawSystemImplementationType = Literal["entry", "relation", "knowledge_graph", "report"]
+OpenClawSystemPresetSourceType = Literal["system_adapter", "workflow"]
+OpenClawSystemPresetKey = Literal[
+    "submit_context_capture",
+    "capture_entry",
+    "search_entries",
+    "get_entry",
+    "create_relation",
+    "query_knowledge_graph",
+    "generate_weekly_report",
+    "generate_monthly_report",
+]
+OpenClawSystemImplementationType = Literal["entry", "relation", "knowledge_graph", "report", "workflow"]
+
+OPENCLAW_CONTEXT_CAPTURE_PRESET_KEY: OpenClawSystemPresetKey = "submit_context_capture"
+OPENCLAW_CONTEXT_CAPTURE_WORKFLOW_NAME = "system_openclaw_context_capture__workflow"
 
 
 @dataclass(frozen=True)
@@ -49,16 +63,46 @@ class OpenClawSystemCapabilityDefinition:
     output_schema: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _WorkflowSystemPresetTemplate:
+    key: OpenClawSystemPresetKey
+    tool_name: str
+    enabled_by_default: bool
+    title: _LocalizedText
+    description: _LocalizedText
+    workflow_canonical_name: str
+    workflow_preset_file_zh: str
+    workflow_preset_file_en: str
+
+
+@dataclass(frozen=True)
+class OpenClawSystemPresetDefinition:
+    key: OpenClawSystemPresetKey
+    source_type: OpenClawSystemPresetSourceType
+    tool_name: str
+    enabled_by_default: bool
+    implementation_type: OpenClawSystemImplementationType
+    title: str
+    description: str
+    input_summary: str | None = None
+    output_summary: str | None = None
+    input_schema: dict[str, Any] | None = None
+    output_schema: dict[str, Any] | None = None
+    system_capability_key: OpenClawSystemCapabilityKey | None = None
+    workflow_canonical_name: str | None = None
+    workflow_preset_file: str | None = None
+
+
 _SYSTEM_CAPABILITY_TEMPLATES: tuple[_SystemCapabilityTemplate, ...] = (
     _SystemCapabilityTemplate(
         key="capture_entry",
         tool_name="mindatlas_capture_entry",
-        enabled_by_default=True,
+        enabled_by_default=False,
         implementation_type="entry",
-        title=_LocalizedText(zh="记录内容", en="Capture Entry"),
+        title=_LocalizedText(zh="字段级记录内容", en="Field-Level Capture Entry"),
         description=_LocalizedText(
-            zh="向 MindAtlas 新增一条记录，可附带类型、标签和时间信息。",
-            en="Create a new MindAtlas entry with type, tags, and time information.",
+            zh="按完整字段创建一条 MindAtlas 记录，适合管理员仍需显式拼装字段时使用。",
+            en="Create a MindAtlas entry from explicit fields when an administrator still needs field-level capture.",
         ),
         input_summary=_LocalizedText(
             zh="标题、类型，以及可选的摘要、正文、标签和时间。",
@@ -185,6 +229,22 @@ _SYSTEM_CAPABILITY_TEMPLATES: tuple[_SystemCapabilityTemplate, ...] = (
     ),
 )
 
+_WORKFLOW_SYSTEM_PRESET_TEMPLATES: tuple[_WorkflowSystemPresetTemplate, ...] = (
+    _WorkflowSystemPresetTemplate(
+        key=OPENCLAW_CONTEXT_CAPTURE_PRESET_KEY,
+        tool_name="mindatlas_submit_context_capture",
+        enabled_by_default=True,
+        title=_LocalizedText(zh="提交记录上下文", en="Submit Record Context"),
+        description=_LocalizedText(
+            zh="向 MindAtlas 提交轻量上下文，由系统工作流自动物化最终记录字段并完成入库。",
+            en="Submit thin context to MindAtlas so a system workflow can materialize the final record fields and persist them.",
+        ),
+        workflow_canonical_name=OPENCLAW_CONTEXT_CAPTURE_WORKFLOW_NAME,
+        workflow_preset_file_zh="workflows/openclaw_context_capture.json",
+        workflow_preset_file_en="workflows/openclaw_context_capture.en.json",
+    ),
+)
+
 
 def _normalize_registry_locale(locale: str | None) -> str:
     return normalize_system_locale(locale) or get_default_system_locale()
@@ -195,7 +255,7 @@ def _model_schema(model_cls: type[Any]) -> dict[str, Any]:
 
 
 @lru_cache(maxsize=4)
-def _registry(locale: str) -> dict[OpenClawSystemCapabilityKey, OpenClawSystemCapabilityDefinition]:
+def _capability_registry(locale: str) -> dict[OpenClawSystemCapabilityKey, OpenClawSystemCapabilityDefinition]:
     definitions: dict[OpenClawSystemCapabilityKey, OpenClawSystemCapabilityDefinition] = {}
     for template in _SYSTEM_CAPABILITY_TEMPLATES:
         definitions[template.key] = OpenClawSystemCapabilityDefinition(
@@ -213,11 +273,50 @@ def _registry(locale: str) -> dict[OpenClawSystemCapabilityKey, OpenClawSystemCa
     return definitions
 
 
+@lru_cache(maxsize=4)
+def _preset_registry(locale: str) -> dict[OpenClawSystemPresetKey, OpenClawSystemPresetDefinition]:
+    definitions: dict[OpenClawSystemPresetKey, OpenClawSystemPresetDefinition] = {}
+
+    for workflow_template in _WORKFLOW_SYSTEM_PRESET_TEMPLATES:
+        definitions[workflow_template.key] = OpenClawSystemPresetDefinition(
+            key=workflow_template.key,
+            source_type="workflow",
+            tool_name=workflow_template.tool_name,
+            enabled_by_default=workflow_template.enabled_by_default,
+            implementation_type="workflow",
+            title=workflow_template.title.resolve(locale),
+            description=workflow_template.description.resolve(locale),
+            workflow_canonical_name=workflow_template.workflow_canonical_name,
+            workflow_preset_file=(
+                workflow_template.workflow_preset_file_zh
+                if locale == "zh"
+                else workflow_template.workflow_preset_file_en
+            ),
+        )
+
+    for capability_definition in _capability_registry(locale).values():
+        definitions[capability_definition.key] = OpenClawSystemPresetDefinition(
+            key=capability_definition.key,
+            source_type="system_adapter",
+            tool_name=capability_definition.tool_name,
+            enabled_by_default=capability_definition.enabled_by_default,
+            implementation_type=capability_definition.implementation_type,
+            title=capability_definition.title,
+            description=capability_definition.description,
+            input_summary=capability_definition.input_summary,
+            output_summary=capability_definition.output_summary,
+            input_schema=capability_definition.input_schema,
+            output_schema=capability_definition.output_schema,
+            system_capability_key=capability_definition.key,
+        )
+    return definitions
+
+
 def list_openclaw_system_capability_definitions(
     locale: str | None = None,
 ) -> list[OpenClawSystemCapabilityDefinition]:
     normalized_locale = _normalize_registry_locale(locale)
-    return list(_registry(normalized_locale).values())
+    return list(_capability_registry(normalized_locale).values())
 
 
 def get_openclaw_system_capability_definition(
@@ -226,10 +325,29 @@ def get_openclaw_system_capability_definition(
 ) -> OpenClawSystemCapabilityDefinition | None:
     normalized_locale = _normalize_registry_locale(locale)
     try:
-        return _registry(normalized_locale)[key]  # type: ignore[index]
+        return _capability_registry(normalized_locale)[key]  # type: ignore[index]
+    except Exception:
+        return None
+
+
+def list_openclaw_system_preset_definitions(
+    locale: str | None = None,
+) -> list[OpenClawSystemPresetDefinition]:
+    normalized_locale = _normalize_registry_locale(locale)
+    return list(_preset_registry(normalized_locale).values())
+
+
+def get_openclaw_system_preset_definition(
+    key: str,
+    locale: str | None = None,
+) -> OpenClawSystemPresetDefinition | None:
+    normalized_locale = _normalize_registry_locale(locale)
+    try:
+        return _preset_registry(normalized_locale)[key]  # type: ignore[index]
     except Exception:
         return None
 
 
 def clear_openclaw_integration_registry_cache() -> None:
-    _registry.cache_clear()
+    _capability_registry.cache_clear()
+    _preset_registry.cache_clear()

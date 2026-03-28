@@ -309,5 +309,42 @@ def get_system_agent_baseline(name: str, locale: str | None = None):
     )
 
 
+def load_system_workflow_preset_file(preset_file: str):
+    from app.assistant_config.schemas import WorkflowInput
+
+    preset_path = _resolve_preset_path(_defaults_dir(), preset_file)
+    preset_payload = _read_json_file(preset_path)
+    workflow_preset = SystemDefaultWorkflowPreset.model_validate(preset_payload)
+    return WorkflowInput.model_validate(
+        {
+            "nodes": [
+                {
+                    "node_id": node.node_id,
+                    "node_type": node.node_type,
+                    "label": node.label,
+                    "position_x": node.position_x,
+                    "position_y": node.position_y,
+                    "config": node.config or {},
+                }
+                for node in workflow_preset.nodes
+            ],
+            "edges": [
+                {
+                    "edge_id": edge.edge_id,
+                    "source_node_id": edge.source_node_id,
+                    "target_node_id": edge.target_node_id,
+                    "source_handle": edge.source_handle,
+                    "target_handle": edge.target_handle,
+                    "condition_type": edge.condition_type,
+                    "condition_expr": edge.condition_expr,
+                    "label": edge.label,
+                }
+                for edge in workflow_preset.edges
+            ],
+            "viewport": workflow_preset.viewport,
+        }
+    )
+
+
 def clear_system_defaults_cache() -> None:
     _load_system_skill_defaults_cached.cache_clear()

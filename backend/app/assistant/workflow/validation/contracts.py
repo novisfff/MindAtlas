@@ -21,7 +21,7 @@ _IF_ELSE_LEGACY_OPERATOR_MAP = {
 }
 _SYS_FIELDS = {"date", "datetime", "conversation_id", "locale", "language"}
 _START_INPUT_MODES = {"text", "structured"}
-_START_INPUT_FIELD_TYPES = {"string", "number", "integer", "boolean"}
+_START_INPUT_FIELD_TYPES = {"string", "number", "integer", "boolean", "array"}
 _START_INPUT_FIELD_NAME_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 _START_MEMORY_MODES = {"auto", "off", "structured"}
 _START_MEMORY_STRUCTURED_FIELDS = {

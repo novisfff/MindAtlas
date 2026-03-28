@@ -1,0 +1,262 @@
+{
+  "nodes": [
+    {
+      "nodeId": "start",
+      "nodeType": "start",
+      "label": "Start",
+      "positionX": 80.0,
+      "positionY": 260.0,
+      "config": {
+        "inputMode": "structured",
+        "structuredFields": [
+          {
+            "name": "intent",
+            "type": "string",
+            "required": true,
+            "description": "本次记录意图，例如记录、沉淀、回顾。"
+          },
+          {
+            "name": "context",
+            "type": "string",
+            "required": true,
+            "description": "需要提交给 MindAtlas 的原始上下文。"
+          },
+          {
+            "name": "source",
+            "type": "string",
+            "required": false,
+            "description": "调用来源，例如 openclaw、chat。"
+          },
+          {
+            "name": "session",
+            "type": "string",
+            "required": false,
+            "description": "会话标识。"
+          },
+          {
+            "name": "channel",
+            "type": "string",
+            "required": false,
+            "description": "渠道标识，例如 telegram、feishu。"
+          },
+          {
+            "name": "taskHint",
+            "type": "string",
+            "required": false,
+            "description": "任务或场景提示。"
+          },
+          {
+            "name": "timeHint",
+            "type": "string",
+            "required": false,
+            "description": "时间线索，自然语言即可。"
+          },
+          {
+            "name": "tagHints",
+            "type": "array",
+            "itemsType": "string",
+            "required": false,
+            "description": "候选标签列表。"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_types",
+      "nodeType": "tool",
+      "label": "获取类型列表",
+      "positionX": 430.0,
+      "positionY": 180.0,
+      "config": {
+        "toolName": "list_entry_types",
+        "inputBindings": {}
+      }
+    },
+    {
+      "nodeId": "tool_tags",
+      "nodeType": "tool",
+      "label": "获取标签列表",
+      "positionX": 430.0,
+      "positionY": 340.0,
+      "config": {
+        "toolName": "list_tags",
+        "inputBindings": {}
+      }
+    },
+    {
+      "nodeId": "llm_materialize",
+      "nodeType": "llm",
+      "label": "物化记录字段",
+      "positionX": 860.0,
+      "positionY": 260.0,
+      "config": {
+        "systemPrompt": "你是 MindAtlas 的 OpenClaw 记录物化工作流，负责把外部提交的薄上下文整理成最终入库字段。\n\n目标：\n- 根据上下文生成最终可入库的 title、summary、content、type_code、tags、time_mode 与时间字段。\n- 不要要求调用方提供完整记录字段。\n- 不要编造用户没有表达过的事实，只能做结构化整理与轻度归纳。\n\n约束：\n- type_code 必须且只能从 {{tool_types.result}} 的 code 中选择；无法判断时选择第一个可用 code。\n- tags 优先复用 {{tool_tags.result}} 里的 name，并结合 tagHints；最多输出 5 个标签；宁缺毋滥；不要带 #。\n- content 要保留原始上下文中的关键信息，可整理成 Markdown，但不要扩写虚构事实。\n- summary 用 1 段 50-150 字概括核心信息。\n- title 精炼准确，控制在 30 个字以内。\n- 如果 timeHint 或 context 中没有明确时间，默认输出 time_mode=POINT 且 time_at=今天（YYYY-MM-DD）。\n- 如果能识别出时间区间，再输出 time_mode=RANGE 与 time_from/time_to；否则 RANGE 不要乱用。\n- 当 time_mode=POINT 时，time_from/time_to 必须为 null；当 time_mode=RANGE 时，time_at 必须为 null。",
+        "userInput": "intent: {{start.intent}}\nsource: {{start.source}}\nsession: {{start.session}}\nchannel: {{start.channel}}\ntaskHint: {{start.taskHint}}\ntimeHint: {{start.timeHint}}\ntagHints: {{start.tagHints}}\n\ncontext:\n{{start.context}}",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "title"
+          },
+          {
+            "name": "summary"
+          },
+          {
+            "name": "content"
+          },
+          {
+            "name": "type_code"
+          },
+          {
+            "name": "tags",
+            "type": "array",
+            "items_type": "string"
+          },
+          {
+            "name": "time_mode",
+            "enum": [
+              "POINT",
+              "RANGE"
+            ]
+          },
+          {
+            "name": "time_at",
+            "nullable": true
+          },
+          {
+            "name": "time_from",
+            "nullable": true
+          },
+          {
+            "name": "time_to",
+            "nullable": true
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_create",
+      "nodeType": "tool",
+      "label": "创建记录",
+      "positionX": 1290.0,
+      "positionY": 260.0,
+      "config": {
+        "toolName": "create_entry",
+        "inputBindings": {
+          "title": "{{llm_materialize.title}}",
+          "summary": "{{llm_materialize.summary}}",
+          "content": "{{llm_materialize.content}}",
+          "type_code": "{{llm_materialize.type_code}}",
+          "tags": "{{llm_materialize.tags}}",
+          "time_mode": "{{llm_materialize.time_mode}}",
+          "time_at": "{{llm_materialize.time_at}}",
+          "time_from": "{{llm_materialize.time_from}}",
+          "time_to": "{{llm_materialize.time_to}}"
+        }
+      }
+    },
+    {
+      "nodeId": "output_created",
+      "nodeType": "output",
+      "label": "结构化输出",
+      "positionX": 1700.0,
+      "positionY": 260.0,
+      "config": {
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "status",
+            "type": "string",
+            "value": "created"
+          },
+          {
+            "name": "entryId",
+            "type": "string",
+            "value": "{{tool_create.id}}"
+          },
+          {
+            "name": "entryTitle",
+            "type": "string",
+            "value": "{{tool_create.title}}"
+          },
+          {
+            "name": "entryTypeCode",
+            "type": "string",
+            "value": "{{tool_create.type_code}}"
+          },
+          {
+            "name": "entryTypeName",
+            "type": "string",
+            "value": "{{tool_create.type}}"
+          },
+          {
+            "name": "summary",
+            "type": "string",
+            "value": "{{tool_create.summary}}"
+          }
+        ]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edgeId": "e_start_types",
+      "sourceNodeId": "start",
+      "targetNodeId": "tool_types",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_start_tags",
+      "sourceNodeId": "start",
+      "targetNodeId": "tool_tags",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_types_materialize",
+      "sourceNodeId": "tool_types",
+      "targetNodeId": "llm_materialize",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_tags_materialize",
+      "sourceNodeId": "tool_tags",
+      "targetNodeId": "llm_materialize",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_materialize_create",
+      "sourceNodeId": "llm_materialize",
+      "targetNodeId": "tool_create",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_create_output",
+      "sourceNodeId": "tool_create",
+      "targetNodeId": "output_created",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    }
+  ]
+}

@@ -7,9 +7,20 @@
 - Reads `GET /api/integrations/openclaw/capabilities` from MindAtlas
 - Registers one OpenClaw tool per exposed catalog item
 - Forwards tool execution to `POST /api/integrations/openclaw/capabilities/{capabilityKey}/execute`
-- Bundles the `MindAtlas Overview` skill
+- Bundles 4 shipped MindAtlas skills that help OpenClaw understand when and how to use the catalog
 - Refreshes the remote catalog on a TTL
 - Warns when catalog structure changes require a Gateway / plugin reload
+
+## Shipped Skills
+
+The plugin ships these 4 skills together:
+
+- `mindatlas-overview`: high-level positioning for what MindAtlas is and when OpenClaw should prefer it
+- `mindatlas-auto-capture`: capture policy for durable memory and context submission
+- `mindatlas-retrieval`: retrieval routing across search, detail lookup, and graph-style queries
+- `mindatlas-summary`: summary routing for weekly, monthly, and topic-oriented reviews
+
+These skills ship with the plugin package. They guide OpenClaw's decision-making, while the actual callable tools still come from the live MindAtlas capability catalog.
 
 ## Local Install
 
@@ -27,7 +38,7 @@ openclaw plugins install -l ./integrations/openclaw-mindatlas
 
 The install command only registers the plugin package. You can install first and fill in `baseUrl` / `integrationSecret` afterwards.
 
-After you add the plugin config, restart the OpenClaw Gateway so the plugin can load and register tools.
+After you add the plugin config, restart the OpenClaw Gateway so the plugin can load, ship the 4 MindAtlas skills into OpenClaw, and register tools from the current MindAtlas catalog.
 
 ## Configuration
 
@@ -66,6 +77,9 @@ Notes:
 4. Review system preset capabilities.
 5. Add custom Tool / Workflow / Agent catalog items if needed.
 6. Make sure the items you want OpenClaw to see are marked as exposed.
+
+The capability catalog controls which tools OpenClaw can call.
+The shipped skills control how OpenClaw should think about MindAtlas positioning, capture policy, retrieval routing, and summary routing.
 
 ## Runtime Behavior
 

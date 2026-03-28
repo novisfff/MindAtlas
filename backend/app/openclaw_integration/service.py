@@ -40,8 +40,9 @@ from app.lightrag.service import LightRagService
 from app.openclaw_integration.models import OpenClawCapabilityItem
 from app.openclaw_integration.registry import (
     OpenClawSystemCapabilityDefinition,
+    OpenClawSystemPresetDefinition,
     get_openclaw_system_capability_definition,
-    list_openclaw_system_capability_definitions,
+    list_openclaw_system_preset_definitions,
 )
 from app.openclaw_integration.schemas import (
     OPENCLAW_SYSTEM_CAPABILITY_INPUT_MODELS,
@@ -86,6 +87,7 @@ logger = logging.getLogger(__name__)
 
 OPENCLAW_INTEGRATION_CONFIG_KEY = "openclaw_integration_config"
 OPENCLAW_CAPABILITY_KEY_RE = re.compile(r"^[a-z0-9_]+$")
+OPENCLAW_SYSTEM_PRESET_VERSION = 2
 
 OPENCLAW_AUTH_ERROR_CODE = 40161
 OPENCLAW_DISABLED_ERROR_CODE = 40361
@@ -455,6 +457,13 @@ class OpenClawIntegrationService:
     def _current_locale(self, preferred_locale: str | None = None) -> str:
         return resolve_system_locale(self.db, preferred_locale=preferred_locale)
 
+    @staticmethod
+    def _system_preset_version(payload: dict[str, Any]) -> int:
+        try:
+            return int(payload.get("systemPresetVersion") or 0)
+        except Exception:
+            return 0
+
     def _secret_state(self, payload: dict[str, Any]) -> tuple[str | None, str | None, datetime | None]:
         encrypted = _normalize_optional_text(payload.get("secretEncrypted"))
         secret_hint = _normalize_optional_text(payload.get("secretHint"))
@@ -471,6 +480,22 @@ class OpenClawIntegrationService:
             return decrypt_api_key(encrypted), secret_hint, rotated_at
         except Exception:
             return None, secret_hint, rotated_at
+
+    def _resolve_workflow_system_preset_contract(
+        self,
+        definition: OpenClawSystemPresetDefinition,
+        *,
+        locale: str,
+    ) -> tuple[AssistantWorkflow, _WorkflowContractSnapshot]:
+        if not definition.workflow_canonical_name or not definition.workflow_preset_file:
+            raise ApiException(status_code=500, code=50038, message=f"System workflow preset is incomplete: {definition.key}")
+        workflow = self.config_service.ensure_system_workflow_asset_from_preset(
+            canonical_name=definition.workflow_canonical_name,
+            preset_file=definition.workflow_preset_file,
+            description=definition.description,
+            enabled=True,
+        )
+        return workflow, self._workflow_contract_snapshot(workflow, locale=locale)
 
     def _tool_name_exists(self, tool_name: str, *, exclude_item_id: UUID | None = None) -> bool:
         query = self.db.query(OpenClawCapabilityItem.id).filter(
@@ -766,70 +791,131 @@ class OpenClawIntegrationService:
         payload = self._get_payload()
         legacy_enabled_map = payload.get("capabilities") if isinstance(payload.get("capabilities"), dict) else {}
         migrated = bool(payload.get("catalogMigrated", False))
+        preset_version = self._system_preset_version(payload)
         changed = False
 
         existing_by_key = {
             item.system_capability_key: item
             for item in self.db.query(OpenClawCapabilityItem)
             .filter(
-                OpenClawCapabilityItem.source_type == "system_adapter",
                 OpenClawCapabilityItem.system_capability_key.isnot(None),
+                OpenClawCapabilityItem.is_system_preset.is_(True),
             )
             .all()
             if item.system_capability_key
         }
 
-        for definition in list_openclaw_system_capability_definitions(locale):
+        for definition in list_openclaw_system_preset_definitions(locale):
+            input_schema = definition.input_schema or _EMPTY_OBJECT_SCHEMA
+            output_schema = definition.output_schema or _EMPTY_OBJECT_SCHEMA
+            input_summary = definition.input_summary or ""
+            output_summary = definition.output_summary or ""
+            workflow_id: UUID | None = None
+
+            if definition.source_type == "workflow":
+                workflow, snapshot = self._resolve_workflow_system_preset_contract(definition, locale=locale)
+                workflow_id = workflow.id
+                input_schema = snapshot.input_schema
+                output_schema = snapshot.output_schema
+                input_summary = snapshot.input_summary
+                output_summary = snapshot.output_summary
+
             item = existing_by_key.get(definition.key)
+            enabled_value = bool(definition.enabled_by_default)
+            if (
+                definition.source_type == "system_adapter"
+                and definition.key != "capture_entry"
+                and not migrated
+                and definition.key in legacy_enabled_map
+            ):
+                enabled_value = bool(legacy_enabled_map[definition.key])
+            if definition.key == "capture_entry" and preset_version < OPENCLAW_SYSTEM_PRESET_VERSION:
+                enabled_value = False
+
             if item is None:
-                enabled_value = (
-                    bool(legacy_enabled_map.get(definition.key))
-                    if definition.key in legacy_enabled_map
-                    else bool(definition.enabled_by_default)
-                )
                 item = OpenClawCapabilityItem(
                     capability_key=definition.key,
                     tool_name=definition.tool_name,
                     title=definition.title,
                     description=definition.description,
-                    source_type="system_adapter",
+                    source_type=definition.source_type,
                     system_capability_key=definition.key,
+                    source_tool_name=None,
+                    tool_id=None,
+                    workflow_id=workflow_id,
+                    agent_profile_id=None,
                     enabled=enabled_value,
                     is_system_preset=True,
-                    input_schema_json=definition.input_schema,
-                    output_schema_json=definition.output_schema,
-                    input_summary=definition.input_summary,
-                    output_summary=definition.output_summary,
+                    input_schema_json=input_schema,
+                    output_schema_json=output_schema,
+                    input_summary=input_summary,
+                    output_summary=output_summary,
                     tool_response_mode="json_schema",
                 )
                 self.db.add(item)
                 changed = True
                 continue
 
+            if item.capability_key != definition.key:
+                item.capability_key = definition.key
+                changed = True
             if not bool(item.is_system_preset):
                 item.is_system_preset = True
                 changed = True
-            if item.source_type != "system_adapter":
-                item.source_type = "system_adapter"
+            if item.source_type != definition.source_type:
+                item.source_type = definition.source_type
                 changed = True
             if item.system_capability_key != definition.key:
                 item.system_capability_key = definition.key
                 changed = True
-            if not migrated and definition.key in legacy_enabled_map and item.enabled != bool(legacy_enabled_map[definition.key]):
+            if item.source_tool_name is not None:
+                item.source_tool_name = None
+                changed = True
+            if item.tool_id is not None:
+                item.tool_id = None
+                changed = True
+            if item.agent_profile_id is not None:
+                item.agent_profile_id = None
+                changed = True
+            if item.workflow_id != workflow_id:
+                item.workflow_id = workflow_id
+                changed = True
+            if definition.key == "capture_entry" and preset_version < OPENCLAW_SYSTEM_PRESET_VERSION and item.enabled:
+                item.enabled = False
+                changed = True
+            elif (
+                definition.source_type == "system_adapter"
+                and definition.key != "capture_entry"
+                and not migrated
+                and definition.key in legacy_enabled_map
+                and item.enabled != bool(legacy_enabled_map[definition.key])
+            ):
                 item.enabled = bool(legacy_enabled_map[definition.key])
                 changed = True
-            if item.input_schema_json is None or item.output_schema_json is None:
-                item.input_schema_json = definition.input_schema
-                item.output_schema_json = definition.output_schema
-                item.input_summary = definition.input_summary
-                item.output_summary = definition.output_summary
+            if item.input_schema_json != input_schema:
+                item.input_schema_json = input_schema
+                changed = True
+            if item.output_schema_json != output_schema:
+                item.output_schema_json = output_schema
+                changed = True
+            if (item.input_summary or "") != input_summary:
+                item.input_summary = input_summary
+                changed = True
+            if (item.output_summary or "") != output_summary:
+                item.output_summary = output_summary
+                changed = True
+            if (item.tool_response_mode or "json_schema") != "json_schema":
                 item.tool_response_mode = "json_schema"
                 changed = True
 
         if not migrated and legacy_enabled_map:
             payload["catalogMigrated"] = True
-            self._upsert_payload(payload)
             changed = True
+        if preset_version < OPENCLAW_SYSTEM_PRESET_VERSION:
+            payload["systemPresetVersion"] = OPENCLAW_SYSTEM_PRESET_VERSION
+            changed = True
+        if changed:
+            self._upsert_payload(payload)
 
         if changed and commit:
             self.db.commit()
@@ -1692,30 +1778,48 @@ class OpenClawIntegrationService:
         preferred_locale: str | None = None,
     ) -> OpenClawIntegrationSettingsResponse:
         locale = self._current_locale(preferred_locale)
-        definitions = list_openclaw_system_capability_definitions(locale)
+        definitions = list_openclaw_system_preset_definitions(locale)
         existing_by_key = {
             item.system_capability_key: item
             for item in self.db.query(OpenClawCapabilityItem)
             .filter(
-                OpenClawCapabilityItem.source_type == "system_adapter",
                 OpenClawCapabilityItem.system_capability_key.isnot(None),
+                OpenClawCapabilityItem.is_system_preset.is_(True),
             )
             .all()
             if item.system_capability_key
         }
         for definition in definitions:
+            input_schema = definition.input_schema or _EMPTY_OBJECT_SCHEMA
+            output_schema = definition.output_schema or _EMPTY_OBJECT_SCHEMA
+            input_summary = definition.input_summary or ""
+            output_summary = definition.output_summary or ""
+            workflow_id: UUID | None = None
+
+            if definition.source_type == "workflow":
+                workflow, snapshot = self._resolve_workflow_system_preset_contract(definition, locale=locale)
+                workflow_id = workflow.id
+                input_schema = snapshot.input_schema
+                output_schema = snapshot.output_schema
+                input_summary = snapshot.input_summary
+                output_summary = snapshot.output_summary
+
             item = existing_by_key.get(definition.key)
             if item is None:
                 item = OpenClawCapabilityItem(
                     capability_key=definition.key,
                     system_capability_key=definition.key,
-                    source_type="system_adapter",
+                    source_type=definition.source_type,
                     is_system_preset=True,
                     enabled=bool(definition.enabled_by_default),
-                    input_schema_json=definition.input_schema,
-                    output_schema_json=definition.output_schema,
-                    input_summary=definition.input_summary,
-                    output_summary=definition.output_summary,
+                    source_tool_name=None,
+                    tool_id=None,
+                    workflow_id=workflow_id,
+                    agent_profile_id=None,
+                    input_schema_json=input_schema,
+                    output_schema_json=output_schema,
+                    input_summary=input_summary,
+                    output_summary=output_summary,
                     tool_response_mode="json_schema",
                     title=definition.title,
                     description=definition.description,
@@ -1727,19 +1831,23 @@ class OpenClawIntegrationService:
             item.tool_name = definition.tool_name
             item.title = definition.title
             item.description = definition.description
-            item.source_type = "system_adapter"
+            item.source_type = definition.source_type
             item.system_capability_key = definition.key
             item.source_tool_name = None
             item.tool_id = None
-            item.workflow_id = None
+            item.workflow_id = workflow_id
             item.agent_profile_id = None
             item.enabled = bool(definition.enabled_by_default)
             item.is_system_preset = True
-            item.input_schema_json = definition.input_schema
-            item.output_schema_json = definition.output_schema
-            item.input_summary = definition.input_summary
-            item.output_summary = definition.output_summary
+            item.input_schema_json = input_schema
+            item.output_schema_json = output_schema
+            item.input_summary = input_summary
+            item.output_summary = output_summary
             item.tool_response_mode = "json_schema"
+        payload = self._get_payload()
+        payload["catalogMigrated"] = True
+        payload["systemPresetVersion"] = OPENCLAW_SYSTEM_PRESET_VERSION
+        self._upsert_payload(payload)
         self.db.commit()
         return self.get_settings_response(preferred_locale=locale)
 

@@ -639,8 +639,8 @@
     },
     "guide": {
       "title": "Integration guide",
-      "description": "Collapsed by default. Expand this section when you want a step-by-step path that can be followed directly from installation to verification.",
-      "intro": "MindAtlas owns the capability catalog, knowledge data, and execution runtime. OpenClaw owns the chat entry, tool registration, and conversation orchestration. Follow the sequence on this page from top to bottom: generate the secret, expose catalog items, install the plugin, paste the config, restart the Gateway, then verify one live call.",
+      "description": "Collapsed by default. Expand this section for a step-by-step path from installation to verification. The plugin ships 4 MindAtlas skills together: overview, auto-capture, retrieval, and summary.",
+      "intro": "MindAtlas owns the capability catalog, knowledge data, and execution runtime. OpenClaw owns the chat entry, tool registration, and conversation orchestration. After installation, the plugin also ships the overview, auto-capture, retrieval, and summary MindAtlas skills. Those skills shape calling strategy and system positioning; the actual callable tools still come from the live MindAtlas capability catalog. Follow the sequence on this page from top to bottom: generate the secret, expose catalog items, install the plugin, paste the config, restart the Gateway, then verify one live call.",
       "actions": {
         "expand": "Expand guide",
         "collapse": "Collapse guide"
@@ -656,10 +656,10 @@
         },
         "plugin": {
           "title": "3. Configure the OpenClaw plugin",
-          "description": "Install the shipped plugin on the OpenClaw host first, then add the plugin config, validate it, and restart the Gateway so tool registration can take effect.",
+          "description": "Install the shipped plugin on the OpenClaw host first. The plugin also carries the overview, auto-capture, retrieval, and summary skills. Then add the plugin config, validate it, and restart the Gateway so skill loading and tool registration can take effect.",
           "details": {
-            "install": "Install the plugin from the MindAtlas repository on the same machine that runs OpenClaw. If OpenClaw runs on another server, copy the `integrations/openclaw-mindatlas` folder there first. The install command itself does not require `baseUrl` or `integrationSecret` yet.",
-            "baseUrl": "Set `plugins.entries.openclaw-mindatlas.config.baseUrl` to the MindAtlas backend that OpenClaw can reach over the network, then paste the bearer secret generated on this page into `integrationSecret`.",
+            "install": "Install the plugin from the MindAtlas repository on the same machine that runs OpenClaw. If OpenClaw runs on another server, copy the `integrations/openclaw-mindatlas` folder there first. The install command itself does not require `baseUrl` or `integrationSecret` yet, and you do not need to install the 4 shipped skills separately because they are bundled with the plugin.",
+            "baseUrl": "Set `plugins.entries.openclaw-mindatlas.config.baseUrl` to the MindAtlas backend that OpenClaw can reach over the network, then paste the bearer secret generated on this page into `integrationSecret`. The skills guide strategy; the actual exposed tools still depend on the MindAtlas capability catalog.",
             "refresh": "Catalog availability changes can be picked up by the plugin refresh cycle. If a tool name, exported title, exported description, or input schema changes, reload the OpenClaw Gateway or plugin so registration metadata is rebuilt."
           }
         },
@@ -669,7 +669,7 @@
         }
       },
       "installTitle": "Install the plugin on the OpenClaw host",
-      "installDescription": "These commands are meant to be run where your OpenClaw Gateway is installed. The plugin package lives in this MindAtlas repository.",
+      "installDescription": "These commands are meant to be run where your OpenClaw Gateway is installed. The plugin package lives in this MindAtlas repository, and installation also brings in the 4 shipped MindAtlas skills.",
       "installBlocks": {
         "locate": {
           "title": "Locate the MindAtlas repository or plugin folder",
@@ -677,15 +677,15 @@
         },
         "install": {
           "title": "Install the shipped plugin package",
-          "description": "Install the native `openclaw-mindatlas` plugin from the local filesystem so OpenClaw can load it. This step can be done before the plugin config is filled in."
+          "description": "Install the native `openclaw-mindatlas` plugin from the local filesystem so OpenClaw can load it. The 4 shipped MindAtlas skills come with the same package. This step can be done before the plugin config is filled in."
         },
         "verify": {
           "title": "Confirm the plugin is visible to OpenClaw",
-          "description": "Check that OpenClaw can see the newly installed plugin before you continue with configuration."
+          "description": "Check that OpenClaw can see the newly installed plugin before you continue with configuration. After the later Gateway restart, the plugin will load the shipped skills and register tools from the current MindAtlas catalog."
         }
       },
       "configTitle": "Fill in the OpenClaw plugin configuration",
-      "configDescription": "Use the config file managed by OpenClaw, add the `openclaw-mindatlas` entry, then validate the file before restarting the Gateway.",
+      "configDescription": "Use the config file managed by OpenClaw, add the `openclaw-mindatlas` entry, then validate the file before restarting the Gateway. The skills do not need separate configuration; this block configures how the plugin reaches MindAtlas runtime APIs.",
       "configBlocks": {
         "findConfig": {
           "title": "Find the active OpenClaw config file",
@@ -699,7 +699,7 @@
       "configExampleTitle": "Config example to paste into OpenClaw",
       "configExampleDescription": "Replace `baseUrl` with the MindAtlas backend address that OpenClaw can access, and replace `integrationSecret` with the secret generated on this page.",
       "restartTitle": "Restart the OpenClaw Gateway",
-      "restartDescription": "After the config validates, restart the OpenClaw Gateway process or service using your deployment method so the plugin can load and register tools.",
+      "restartDescription": "After the config validates, restart the OpenClaw Gateway process or service using your deployment method so the plugin, the 4 shipped skills, and the currently available catalog tools can all load correctly.",
       "endpointsTitle": "Key endpoints",
       "endpoints": {
         "auth": "Auth header",
@@ -710,14 +710,14 @@
       "verifyChecklist": {
         "secret": "The secret has been generated here and copied into the OpenClaw plugin config.",
         "catalog": "At least one catalog item is exposed in MindAtlas and shows as available.",
-        "plugin": "The OpenClaw Gateway has been restarted after plugin installation or config changes.",
+        "plugin": "The OpenClaw Gateway has been restarted after plugin installation and config changes, and `openclaw-mindatlas` plus its 4 shipped skills are loaded.",
         "call": "A live OpenClaw tool call can reach MindAtlas and return a result."
       },
       "notesTitle": "Important notes",
       "notes": {
         "catalogOnly": "OpenClaw only sees catalog items that are currently exposed. Hidden or currently unavailable items should not appear as callable tools.",
-        "skillBoundary": "MindAtlas skills are not exported directly to OpenClaw. OpenClaw consumes the more stable capability catalog instead of the internal intent layer.",
-        "refresh": "After creating, deleting, or editing catalog items, refresh the catalog on the OpenClaw side so it does not keep using stale metadata."
+        "skillBoundary": "The 4 shipped skills tell OpenClaw when it should call MindAtlas and which class of capability to prefer. The actual callable tools still come only from the currently exposed MindAtlas capability catalog.",
+        "refresh": "After creating, deleting, or editing catalog items, refresh the catalog on the OpenClaw side. If a tool name, exported title, exported description, or input schema changes structurally, reload the Gateway or plugin as well."
       }
     },
     "secret": {

@@ -517,6 +517,10 @@ def coerce_start_structured_field_value(field_name: str, field_type_raw: Any, va
         if isinstance(value, bool):
             return value
         raise ValueError(f"start structured field '{field_name}' must be boolean")
+    if field_type == "array":
+        if not isinstance(value, list):
+            raise ValueError(f"start structured field '{field_name}' must be array")
+        return list(value)
     raise ValueError(f"start structured field '{field_name}' has unsupported type: {field_type_raw}")
 
 

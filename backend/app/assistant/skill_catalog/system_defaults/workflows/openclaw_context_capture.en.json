@@ -1,0 +1,262 @@
+{
+  "nodes": [
+    {
+      "nodeId": "start",
+      "nodeType": "start",
+      "label": "Start",
+      "positionX": 80.0,
+      "positionY": 260.0,
+      "config": {
+        "inputMode": "structured",
+        "structuredFields": [
+          {
+            "name": "intent",
+            "type": "string",
+            "required": true,
+            "description": "High-level recording intent, such as capture or summarize."
+          },
+          {
+            "name": "context",
+            "type": "string",
+            "required": true,
+            "description": "Raw context that should be submitted into MindAtlas."
+          },
+          {
+            "name": "source",
+            "type": "string",
+            "required": false,
+            "description": "Caller source, such as openclaw or chat."
+          },
+          {
+            "name": "session",
+            "type": "string",
+            "required": false,
+            "description": "Conversation session identifier."
+          },
+          {
+            "name": "channel",
+            "type": "string",
+            "required": false,
+            "description": "Channel identifier such as telegram or feishu."
+          },
+          {
+            "name": "taskHint",
+            "type": "string",
+            "required": false,
+            "description": "Task or scenario hint."
+          },
+          {
+            "name": "timeHint",
+            "type": "string",
+            "required": false,
+            "description": "Natural-language time hint."
+          },
+          {
+            "name": "tagHints",
+            "type": "array",
+            "itemsType": "string",
+            "required": false,
+            "description": "Candidate tag list."
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_types",
+      "nodeType": "tool",
+      "label": "List Entry Types",
+      "positionX": 430.0,
+      "positionY": 180.0,
+      "config": {
+        "toolName": "list_entry_types",
+        "inputBindings": {}
+      }
+    },
+    {
+      "nodeId": "tool_tags",
+      "nodeType": "tool",
+      "label": "List Tags",
+      "positionX": 430.0,
+      "positionY": 340.0,
+      "config": {
+        "toolName": "list_tags",
+        "inputBindings": {}
+      }
+    },
+    {
+      "nodeId": "llm_materialize",
+      "nodeType": "llm",
+      "label": "Materialize Entry Fields",
+      "positionX": 860.0,
+      "positionY": 260.0,
+      "config": {
+        "systemPrompt": "You are MindAtlas's OpenClaw capture materialization workflow. Convert thin external context into final persistence fields.\n\nGoals:\n- Produce the final title, summary, content, type_code, tags, time_mode, and time fields.\n- Do not require the caller to assemble a complete entry schema.\n- Do not invent facts the user did not imply. You may only organize and lightly normalize the submitted context.\n\nConstraints:\n- type_code must be selected from the codes in {{tool_types.result}} only. If unsure, pick the first available code.\n- tags should prefer existing names from {{tool_tags.result}} and combine them with tagHints. Return at most 5 tags. Do not add # prefixes.\n- content should preserve the user's important details and may be organized as Markdown, but it must not fabricate new facts.\n- summary should be one concise paragraph of roughly 50-150 characters.\n- title should be accurate and stay within 30 characters when possible.\n- If timeHint and context do not provide a clear time, default to time_mode=POINT and set time_at=today in YYYY-MM-DD.\n- Use RANGE only when a real time span is present. When time_mode=POINT, time_from/time_to must be null. When time_mode=RANGE, time_at must be null.",
+        "userInput": "intent: {{start.intent}}\nsource: {{start.source}}\nsession: {{start.session}}\nchannel: {{start.channel}}\ntaskHint: {{start.taskHint}}\ntimeHint: {{start.timeHint}}\ntagHints: {{start.tagHints}}\n\ncontext:\n{{start.context}}",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "title"
+          },
+          {
+            "name": "summary"
+          },
+          {
+            "name": "content"
+          },
+          {
+            "name": "type_code"
+          },
+          {
+            "name": "tags",
+            "type": "array",
+            "items_type": "string"
+          },
+          {
+            "name": "time_mode",
+            "enum": [
+              "POINT",
+              "RANGE"
+            ]
+          },
+          {
+            "name": "time_at",
+            "nullable": true
+          },
+          {
+            "name": "time_from",
+            "nullable": true
+          },
+          {
+            "name": "time_to",
+            "nullable": true
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_create",
+      "nodeType": "tool",
+      "label": "Create Entry",
+      "positionX": 1290.0,
+      "positionY": 260.0,
+      "config": {
+        "toolName": "create_entry",
+        "inputBindings": {
+          "title": "{{llm_materialize.title}}",
+          "summary": "{{llm_materialize.summary}}",
+          "content": "{{llm_materialize.content}}",
+          "type_code": "{{llm_materialize.type_code}}",
+          "tags": "{{llm_materialize.tags}}",
+          "time_mode": "{{llm_materialize.time_mode}}",
+          "time_at": "{{llm_materialize.time_at}}",
+          "time_from": "{{llm_materialize.time_from}}",
+          "time_to": "{{llm_materialize.time_to}}"
+        }
+      }
+    },
+    {
+      "nodeId": "output_created",
+      "nodeType": "output",
+      "label": "Structured Output",
+      "positionX": 1700.0,
+      "positionY": 260.0,
+      "config": {
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "status",
+            "type": "string",
+            "value": "created"
+          },
+          {
+            "name": "entryId",
+            "type": "string",
+            "value": "{{tool_create.id}}"
+          },
+          {
+            "name": "entryTitle",
+            "type": "string",
+            "value": "{{tool_create.title}}"
+          },
+          {
+            "name": "entryTypeCode",
+            "type": "string",
+            "value": "{{tool_create.type_code}}"
+          },
+          {
+            "name": "entryTypeName",
+            "type": "string",
+            "value": "{{tool_create.type}}"
+          },
+          {
+            "name": "summary",
+            "type": "string",
+            "value": "{{tool_create.summary}}"
+          }
+        ]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edgeId": "e_start_types",
+      "sourceNodeId": "start",
+      "targetNodeId": "tool_types",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_start_tags",
+      "sourceNodeId": "start",
+      "targetNodeId": "tool_tags",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_types_materialize",
+      "sourceNodeId": "tool_types",
+      "targetNodeId": "llm_materialize",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_tags_materialize",
+      "sourceNodeId": "tool_tags",
+      "targetNodeId": "llm_materialize",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_materialize_create",
+      "sourceNodeId": "llm_materialize",
+      "targetNodeId": "tool_create",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_create_output",
+      "sourceNodeId": "tool_create",
+      "targetNodeId": "output_created",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    }
+  ]
+}

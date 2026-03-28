@@ -58,6 +58,7 @@ from app.assistant_config.system_behavior_registry import (
     get_system_behavior_definition,
     list_system_behavior_definitions,
 )
+from app.assistant.skill_catalog.defaults_loader import load_system_workflow_preset_file
 from app.common.exceptions import ApiException
 from app.system_settings.service import resolve_system_locale
 
@@ -2036,6 +2037,71 @@ class AssistantConfigService:
         workflow.is_system = True
         workflow.enabled = bool(enabled)
         workflow.description = default.description or ""
+        return workflow
+
+    def ensure_system_workflow_asset_from_preset(
+        self,
+        *,
+        canonical_name: str,
+        preset_file: str,
+        description: str,
+        enabled: bool = True,
+    ) -> AssistantWorkflow:
+        workflow = (
+            self.db.query(AssistantWorkflow)
+            .filter(
+                AssistantWorkflow.name == canonical_name,
+                AssistantWorkflow.is_system.is_(True),
+            )
+            .first()
+        )
+        if workflow is None:
+            conflicting = (
+                self.db.query(AssistantWorkflow)
+                .filter(AssistantWorkflow.name == canonical_name)
+                .first()
+            )
+            if conflicting is not None and not bool(conflicting.is_system):
+                raise ApiException(
+                    status_code=409,
+                    code=40946,
+                    message=f"Cannot create system workflow target due to custom name conflict: {canonical_name}",
+                )
+            workflow = AssistantWorkflow(
+                name=canonical_name,
+                description=description,
+                workflow_version=0,
+                workflow_viewport=None,
+                is_system=True,
+                enabled=bool(enabled),
+            )
+            self.db.add(workflow)
+            self.db.flush()
+
+        workflow_input = load_system_workflow_preset_file(preset_file)
+        current_input = self._get_workflow_published_input(workflow)
+        desired_snapshot = self._workflow_input_to_snapshot(workflow_input)
+        current_snapshot = self._workflow_input_to_snapshot(current_input) if current_input is not None else None
+
+        workflow.is_system = True
+        workflow.enabled = bool(enabled)
+        workflow.description = description or ""
+
+        if current_snapshot != desired_snapshot:
+            self._enforce_workflow_structured_input_constraints(
+                workflow=workflow,
+                workflow_input=workflow_input,
+                raise_error=True,
+            )
+            self._apply_workflow_to_workflow_entity(workflow, workflow_input, persist=True)
+            published = self._create_workflow_version(
+                workflow=workflow,
+                workflow_input=workflow_input,
+                version_source="publish",
+                version_name=None,
+            )
+            self._keep_only_workflow_version(workflow, published.id)
+
         return workflow
 
     def _resolve_or_create_system_agent_profile_for_reset(

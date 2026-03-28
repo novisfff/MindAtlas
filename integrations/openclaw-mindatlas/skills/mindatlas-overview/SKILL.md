@@ -1,39 +1,60 @@
 # MindAtlas Overview
 
-You can use MindAtlas as a personal knowledge and experience management system.
+You can use MindAtlas as the user's long-term knowledge and experience system.
+
+Treat the current integration as a personal single-user setup unless the administrator explicitly says otherwise.
 
 MindAtlas is best for:
 - Recording things the user wants to keep
-- Organizing experiences, knowledge, projects, and notes
-- Searching past entries
-- Building relations between entries
+- Storing experiences, notes, project progress, decisions, and reusable conclusions
+- Searching previously stored entries
+- Reading entry details later
+- Building relations between records
 - Querying the knowledge graph when that capability is available
-- Generating weekly or monthly reports from what the user has recorded
-- Running administrator-curated workflows or agent capabilities when their titles and descriptions clearly match the user's request
+- Generating weekly or monthly reports from stored records
+- Running administrator-exposed workflows or agent capabilities that are intentionally published through the MindAtlas OpenClaw catalog
 
 MindAtlas is not meant to be:
 - A generic cloud drive
-- A full task-management system
-- Unlimited passive memory with no structure
+- A replacement for every short-lived working memory need
+- An excuse to store every low-value chat fragment forever
+- A place to dump unstructured noise when the information has no durable value
 
-Prefer MindAtlas tools when the user says things like:
+Prefer MindAtlas when the user is trying to:
+- Remember something for later
+- Find something they recorded before
+- Review what happened over time
+- Summarize a period, project, or topic
+- Connect related ideas, events, or records
+- Query across stored knowledge instead of relying only on the current conversation
+
+Typical requests include:
 - "记一下 / remember this"
-- "帮我整理一下 / organize this"
-- "我之前写过吗 / did I write about this before"
-- "帮我关联一下 / connect these two things"
-- "生成周报 / generate my weekly report"
-- "生成月报 / generate my monthly report"
-- "按我已经配置好的流程处理一下 / run the workflow or agent I configured in MindAtlas"
+- "我之前记过吗 / did I record this before"
+- "帮我搜一下 / search for this"
+- "总结一下我最近做了什么 / summarize what I've been doing"
+- "生成周报 / generate a weekly report"
+- "生成月报 / generate a monthly report"
+- "帮我关联一下这两条记录 / connect these two records"
+- "按我在 MindAtlas 里配置好的流程处理一下 / run the workflow or agent I configured in MindAtlas"
 
 Before calling a MindAtlas capability:
 - Read the capability catalog provided by MindAtlas
 - Only use the catalog items that are currently exposed
 - Respect `available` and `availabilityReason`
 - Prefer the catalog item's title, description, input summary, and output summary over guesswork
-- If a required type, relation name, or workflow parameter is unclear, ask the user briefly instead of guessing wildly
+- If a required type, relation name, or workflow parameter is unclear, ask a short clarifying question instead of guessing wildly
 
 When using MindAtlas:
 - Keep tool arguments concise and structured
-- Reuse returned IDs when you need follow-up detail or relation creation
+- For recording, prefer a high-level capture capability or workflow-backed system preset that accepts thin context and lets MindAtlas materialize the final record
+- Do not assume you should assemble every final entry field yourself unless the exposed capability explicitly requires that
+- Reuse returned IDs when you need follow-up detail lookup or relation creation
 - Treat MindAtlas as the source of truth for stored knowledge
 - Do not assume a fixed built-in tool list; administrators may expose custom workflows, tools, or agents through the catalog
+- Automatic capture is a prompt-driven best-effort behavior, not a guaranteed system hook
+
+Boundaries:
+- Do not force every conversation into MindAtlas
+- Prefer MindAtlas for durable memory, retrieval, reporting, and structured knowledge work
+- Use other tools or direct answers when the task does not benefit from long-term storage or structured recall

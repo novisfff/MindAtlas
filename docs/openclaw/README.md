@@ -4,38 +4,49 @@ This document defines the MindAtlas side of the `openclaw-mindatlas` integration
 
 ## Docs Navigation
 
-This directory also contains the phase plan and skill drafts used to shape how OpenClaw should understand and use MindAtlas.
+This directory contains the MindAtlas-side OpenClaw contract, the current phase plan, and lightweight reference pages for the shipped MindAtlas skills.
 
 ### Phase Plan
 
 - [Phase 1 Plan: Memory / Retrieval / Summary (ZH-CN)](./phase-1-memory-retrieval-summary-plan.zh-CN.md)
   - First-phase implementation plan focused on three core loops:
-    - capture high-value experiences
+    - capture high-value experiences through context submission
     - retrieve past records naturally
     - summarize personal history through reports and topic-oriented synthesis
 
-### Skill Drafts
+### Shipped Skills
 
-- [MindAtlas Overview Skill Draft](./mindatlas-overview-skill.md)
-  - High-level positioning skill for when and why OpenClaw should use MindAtlas
+These are the canonical prompt sources that ship with the plugin package:
 
-- [MindAtlas Auto Capture Skill Draft](./mindatlas-auto-capture-skill.md)
-  - Capture policy skill for deciding when to record durable experiences
+- [MindAtlas Overview Skill](../../integrations/openclaw-mindatlas/skills/mindatlas-overview/SKILL.md)
+  - High-level positioning for what MindAtlas is and when OpenClaw should prefer it
 
-- [MindAtlas Retrieval Skill Draft](./mindatlas-retrieval-skill.md)
-  - Retrieval policy skill for routing search, detail lookup, and knowledge-graph querying
+- [MindAtlas Auto Capture Skill](../../integrations/openclaw-mindatlas/skills/mindatlas-auto-capture/SKILL.md)
+  - Capture policy for durable memory and context submission
 
-- [MindAtlas Summary Skill Draft](./mindatlas-summary-skill.md)
-  - Summary policy skill for weekly, monthly, and topic-oriented summaries
+- [MindAtlas Retrieval Skill](../../integrations/openclaw-mindatlas/skills/mindatlas-retrieval/SKILL.md)
+  - Retrieval routing across search, detail lookup, and graph-style recall
+
+- [MindAtlas Summary Skill](../../integrations/openclaw-mindatlas/skills/mindatlas-summary/SKILL.md)
+  - Summary routing for weekly, monthly, and topic-oriented reviews
+
+### Skill Reference Pages
+
+These docs pages are lightweight explainers only. They are not the prompt source of truth:
+
+- [Overview Skill Reference](./mindatlas-overview-skill.md)
+- [Auto Capture Skill Reference](./mindatlas-auto-capture-skill.md)
+- [Retrieval Skill Reference](./mindatlas-retrieval-skill.md)
+- [Summary Skill Reference](./mindatlas-summary-skill.md)
 
 ## Suggested Reading Order
 
 1. This integration contract
 2. `phase-1-memory-retrieval-summary-plan.zh-CN.md`
-3. `mindatlas-overview-skill.md`
-4. `mindatlas-auto-capture-skill.md`
-5. `mindatlas-retrieval-skill.md`
-6. `mindatlas-summary-skill.md`
+3. `integrations/openclaw-mindatlas/skills/mindatlas-overview/SKILL.md`
+4. `integrations/openclaw-mindatlas/skills/mindatlas-auto-capture/SKILL.md`
+5. `integrations/openclaw-mindatlas/skills/mindatlas-retrieval/SKILL.md`
+6. `integrations/openclaw-mindatlas/skills/mindatlas-summary/SKILL.md`
 
 ---
 
@@ -71,7 +82,14 @@ The install step should succeed even before `baseUrl` and `integrationSecret` ar
 }
 ```
 
-The plugin bundles the `MindAtlas Overview` skill from `integrations/openclaw-mindatlas/skills/mindatlas-overview/SKILL.md`.
+The plugin bundles 4 shipped MindAtlas skills:
+
+- `mindatlas-overview`
+- `mindatlas-auto-capture`
+- `mindatlas-retrieval`
+- `mindatlas-summary`
+
+These skills ship with the plugin package and guide OpenClaw's calling strategy. The actual callable tools still come from the live MindAtlas capability catalog.
 
 ## Positioning
 
@@ -79,6 +97,8 @@ The plugin bundles the `MindAtlas Overview` skill from `integrations/openclaw-mi
 - `MindAtlas`: capability backend, knowledge system of record, workflow/report execution backend.
 
 OpenClaw should not call MindAtlas frontend APIs directly. It should consume the dedicated OpenClaw integration facade.
+
+The current documentation assumes a personal single-user MindAtlas system. Multi-user identity mapping and tenant isolation are intentionally out of scope for this phase.
 
 ## Admin Model
 
@@ -100,6 +120,15 @@ MindAtlas exposes OpenClaw through a configurable capability catalog.
   - `agent`
 
 The plugin must not assume a fixed built-in tool list. It should always trust live discovery metadata from MindAtlas.
+
+## Current Implementation vs Recommended Phase 1 Path
+
+- The current runtime can expose field-level catalog items such as entry creation, search, relation creation, graph query, reports, custom tools, workflows, and agents.
+- The default system recording preset is now workflow-backed and accepts thin context submission instead of requiring full entry fields from OpenClaw.
+- For Phase 1 recording behavior, the recommended evolution is **not** to keep OpenClaw assembling every final entry field itself.
+- Instead, OpenClaw should prefer an administrator-exposed high-level recording capability or capture workflow that accepts relevant context, while MindAtlas internally materializes the final entry type, summary, content, tags, relations, and dedupe behavior.
+- If a field-level recording capability still exists, treat it as a transitional or manual-entry path rather than the preferred automatic capture interface. MindAtlas keeps the legacy `capture_entry` adapter for compatibility, but its system preset is disabled by default.
+- Automatic capture in this phase is a prompt-driven best-effort behavior, not a guaranteed system hook.
 
 ## Runtime Auth
 
@@ -202,6 +231,7 @@ Example discovery item:
 - Built-in MindAtlas capabilities such as entry capture, search, relation creation, LightRAG query, or weekly and monthly reports.
 - These are auto-seeded as system preset catalog items.
 - Presets can be disabled and reset, but not deleted.
+- The legacy field-level `capture_entry` adapter still belongs to this category, but it is no longer the default exposed recording path.
 
 ### `tool`
 
@@ -239,11 +269,8 @@ Example:
 
 ```json
 {
-  "title": "Read OpenClaw integration plan",
-  "summary": "整理接入边界",
-  "content": "OpenClaw handles chat entry. MindAtlas handles execution.",
-  "entryType": "KNOWLEDGE",
-  "tagNames": ["OpenClaw", "Integration"]
+  "projectId": "openclaw-integration",
+  "includeRisks": true
 }
 ```
 
@@ -255,8 +282,8 @@ MindAtlas returns:
   "code": 0,
   "message": "OK",
   "data": {
-    "capabilityKey": "capture_entry",
-    "toolName": "mindatlas_capture_entry",
+    "capabilityKey": "project_digest",
+    "toolName": "mindatlas_project_digest",
     "result": {
       "...": "..."
     }
@@ -292,6 +319,7 @@ The plugin should not invent passthrough routes for arbitrary workflows, skills,
 - OpenClaw should register only the currently exposed catalog items.
 - System preset items may exist alongside administrator-created custom items.
 - Tool names are catalog-driven. A user-created workflow or agent can appear as a first-class OpenClaw tool if an admin publishes it through the catalog.
+- Policy docs and prompts should therefore route by capability category and current catalog metadata, not by hard-coded tool names.
 
 ## Error Semantics
 
