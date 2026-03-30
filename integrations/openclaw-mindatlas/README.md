@@ -74,7 +74,7 @@ Notes:
 1. Open MindAtlas `Settings > OpenClaw Integration`.
 2. Generate or rotate the integration secret.
 3. Enable the integration switch.
-4. Review system preset capabilities.
+4. Review system items.
 5. Add custom Tool / Workflow / Agent catalog items if needed.
 6. Make sure the items you want OpenClaw to see are marked as exposed.
 

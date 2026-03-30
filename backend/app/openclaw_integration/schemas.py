@@ -19,7 +19,17 @@ OpenClawSystemCapabilityKey = Literal[
     "generate_weekly_report",
     "generate_monthly_report",
 ]
-OpenClawCapabilitySourceType = Literal["system_adapter", "tool", "workflow", "agent"]
+OpenClawSystemDefaultKey = Literal[
+    "submit_context_capture",
+    "capture_entry",
+    "search_entries",
+    "get_entry",
+    "create_relation",
+    "query_knowledge_graph",
+    "generate_weekly_report",
+    "generate_monthly_report",
+]
+OpenClawCapabilitySourceType = Literal["tool", "workflow", "agent"]
 OpenClawCatalogSourceType = Literal["tool", "workflow", "agent"]
 OpenClawToolResponseMode = Literal["json_schema", "text_field"]
 OpenClawSchemaMode = Literal["readonly", "editable"]
@@ -300,7 +310,7 @@ class OpenClawCapabilityItemResponse(CamelModel):
     description: str
     source_type: OpenClawCapabilitySourceType = Field(alias="sourceType")
     implementation_type: str = Field(alias="implementationType")
-    system_capability_key: str | None = Field(default=None, alias="systemCapabilityKey")
+    system_default_key: str | None = Field(default=None, alias="systemDefaultKey")
     source_tool_name: str | None = Field(default=None, alias="sourceToolName")
     tool_id: UUID | None = Field(default=None, alias="toolId")
     workflow_id: UUID | None = Field(default=None, alias="workflowId")
@@ -311,7 +321,7 @@ class OpenClawCapabilityItemResponse(CamelModel):
     source_enabled: bool | None = Field(default=None, alias="sourceEnabled")
     published_version_id: UUID | None = Field(default=None, alias="publishedVersionId")
     enabled: bool
-    is_system_preset: bool = Field(alias="isSystemPreset")
+    is_system_item: bool = Field(alias="isSystemItem")
     available: bool
     availability_reason: str | None = Field(default=None, alias="availabilityReason")
     schema_editable: bool = Field(alias="schemaEditable")

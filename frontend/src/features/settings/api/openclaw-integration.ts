@@ -1,6 +1,6 @@
 import { apiClient } from '@/lib/api/client'
 
-export type OpenClawCapabilitySourceType = 'system_adapter' | 'tool' | 'workflow' | 'agent'
+export type OpenClawCapabilitySourceType = 'tool' | 'workflow' | 'agent'
 export type OpenClawCatalogSourceType = 'tool' | 'workflow' | 'agent'
 export type OpenClawToolResponseMode = 'json_schema' | 'text_field'
 export type OpenClawSchemaMode = 'readonly' | 'editable'
@@ -13,7 +13,7 @@ export interface OpenClawCatalogItem {
   description: string
   sourceType: OpenClawCapabilitySourceType
   implementationType: string
-  systemCapabilityKey?: string | null
+  systemDefaultKey?: string | null
   sourceToolName?: string | null
   toolId?: string | null
   workflowId?: string | null
@@ -24,7 +24,7 @@ export interface OpenClawCatalogItem {
   sourceEnabled?: boolean | null
   publishedVersionId?: string | null
   enabled: boolean
-  isSystemPreset: boolean
+  isSystemItem: boolean
   available: boolean
   availabilityReason?: string | null
   schemaEditable: boolean
@@ -135,6 +135,6 @@ export function deleteOpenClawCatalogItem(itemId: string) {
   return apiClient.delete<{ deleted: boolean }>(`/api/system-settings/openclaw-integration/catalog-items/${itemId}`)
 }
 
-export function resetOpenClawSystemPresets() {
-  return apiClient.post<OpenClawIntegrationSettingsResponse>('/api/system-settings/openclaw-integration/reset-system-presets')
+export function resetOpenClawSystemItems() {
+  return apiClient.post<OpenClawIntegrationSettingsResponse>('/api/system-settings/openclaw-integration/reset-system-items')
 }

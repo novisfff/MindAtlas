@@ -17,7 +17,7 @@ class OpenClawCapabilityItem(UuidPrimaryKeyMixin, TimestampMixin, Base):
     description = Column(Text, nullable=False, default="")
 
     source_type = Column(String(32), nullable=False)
-    system_capability_key = Column(String(128), nullable=True)
+    system_default_key = Column(String(128), nullable=True)
     source_tool_name = Column(String(128), nullable=True)
     tool_id = Column(
         UUID(as_uuid=True),
@@ -39,7 +39,7 @@ class OpenClawCapabilityItem(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     enabled = Column(Boolean, nullable=False, default=True)
-    is_system_preset = Column(Boolean, nullable=False, default=False)
+    is_system_item = Column(Boolean, nullable=False, default=False)
     input_schema_json = Column(JSON, nullable=False)
     output_schema_json = Column(JSON, nullable=False)
     input_summary = Column(Text, nullable=False, default="")
@@ -52,7 +52,7 @@ class OpenClawCapabilityItem(UuidPrimaryKeyMixin, TimestampMixin, Base):
 
     __table_args__ = (
         CheckConstraint(
-            "source_type IN ('system_adapter','tool','workflow','agent')",
+            "source_type IN ('tool','workflow','agent')",
             name="ck_openclaw_capability_item_source_type",
         ),
         CheckConstraint(
@@ -61,19 +61,9 @@ class OpenClawCapabilityItem(UuidPrimaryKeyMixin, TimestampMixin, Base):
         ),
         CheckConstraint(
             "("
-            "source_type = 'system_adapter' "
-            "AND system_capability_key IS NOT NULL "
-            "AND source_tool_name IS NULL "
-            "AND tool_id IS NULL "
-            "AND workflow_id IS NULL "
-            "AND agent_profile_id IS NULL "
-            "AND is_system_preset = true"
-            ") OR ("
             "source_type = 'tool' "
-            "AND system_capability_key IS NULL "
             "AND workflow_id IS NULL "
             "AND agent_profile_id IS NULL "
-            "AND is_system_preset = false "
             "AND (tool_id IS NOT NULL OR source_tool_name IS NOT NULL)"
             ") OR ("
             "source_type = 'workflow' "
@@ -81,20 +71,18 @@ class OpenClawCapabilityItem(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "AND tool_id IS NULL "
             "AND workflow_id IS NOT NULL "
             "AND agent_profile_id IS NULL "
-            "AND ("
-            "(is_system_preset = true AND system_capability_key IS NOT NULL) "
-            "OR (is_system_preset = false AND system_capability_key IS NULL)"
-            ")"
             ") OR ("
             "source_type = 'agent' "
-            "AND system_capability_key IS NULL "
             "AND source_tool_name IS NULL "
             "AND tool_id IS NULL "
             "AND workflow_id IS NULL "
-            "AND agent_profile_id IS NOT NULL "
-            "AND is_system_preset = false"
+            "AND agent_profile_id IS NOT NULL"
             ")",
             name="ck_openclaw_capability_item_single_source",
         ),
-        Index("ix_openclaw_capability_item_system_capability_key", "system_capability_key"),
+        CheckConstraint(
+            "(system_default_key IS NULL) OR (is_system_item = true)",
+            name="ck_openclaw_capability_item_system_default_key_requires_system_item",
+        ),
+        Index("ix_openclaw_capability_item_system_default_key", "system_default_key"),
     )

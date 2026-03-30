@@ -99,13 +99,23 @@ def delete_openclaw_catalog_item(
     return ApiResponse.ok({"deleted": True})
 
 
-@settings_router.post("/reset-system-presets", response_model=ApiResponse)
-def reset_openclaw_system_presets(
+@settings_router.post("/reset-system-items", response_model=ApiResponse)
+def reset_openclaw_system_items(
     request: Request,
     db: Session = Depends(get_db),
 ) -> ApiResponse:
     service = OpenClawIntegrationService(db)
-    payload = service.reset_system_presets(preferred_locale=_preferred_locale_from_request(request))
+    payload = service.reset_system_items(preferred_locale=_preferred_locale_from_request(request))
+    return ApiResponse.ok(payload.model_dump(by_alias=True))
+
+
+@settings_router.post("/reset-system-presets", response_model=ApiResponse)
+def reset_openclaw_system_presets_alias(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = OpenClawIntegrationService(db)
+    payload = service.reset_system_items(preferred_locale=_preferred_locale_from_request(request))
     return ApiResponse.ok(payload.model_dump(by_alias=True))
 
 

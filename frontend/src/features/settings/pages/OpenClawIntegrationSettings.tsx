@@ -36,7 +36,7 @@ import {
   deleteOpenClawCatalogItem,
   getOpenClawCatalogSources,
   getOpenClawIntegrationSettings,
-  resetOpenClawSystemPresets,
+  resetOpenClawSystemItems,
   rotateOpenClawIntegrationSecret,
   updateOpenClawCatalogItem,
   updateOpenClawIntegrationSettings,
@@ -102,7 +102,7 @@ function buildSourceKey(item: Pick<OpenClawCatalogItem, 'sourceType' | 'toolId' 
 
 function createDraftFromItem(item: OpenClawCatalogItem): CatalogItemDraft {
   return {
-    sourceType: item.sourceType === 'system_adapter' ? 'tool' : item.sourceType,
+    sourceType: item.sourceType,
     toolName: item.toolName,
     title: item.title,
     description: item.description,
@@ -215,12 +215,12 @@ function CatalogItemCard({
               </CapabilityBadge>
               <CapabilityBadge
                 colorClassName={
-                  item.sourceIsSystem
+                  item.isSystemItem
                     ? 'border-cyan-200 bg-cyan-50 text-cyan-700'
                     : 'border-violet-200 bg-violet-50 text-violet-700'
                 }
               >
-                {item.sourceIsSystem ? systemLabel : userLabel}
+                {item.isSystemItem ? systemLabel : userLabel}
               </CapabilityBadge>
               <CapabilityBadge
                 colorClassName={
@@ -350,7 +350,7 @@ export function OpenClawIntegrationSettingsPage() {
   })
 
   const resetMutation = useMutation({
-    mutationFn: resetOpenClawSystemPresets,
+    mutationFn: resetOpenClawSystemItems,
     onSuccess: (data) => {
       queryClient.setQueryData(settingsQueryKey, data)
     },
@@ -359,27 +359,31 @@ export function OpenClawIntegrationSettingsPage() {
   const sourceQuery = useQuery({
     queryKey: ['openclaw-catalog-sources', draft.sourceType],
     queryFn: () => getOpenClawCatalogSources(draft.sourceType),
-    enabled: dialogOpen && !editingItem?.isSystemPreset,
+    enabled: dialogOpen,
   })
 
   const current = settingsQuery.data ?? null
   const systemItems = useMemo(
-    () => current?.catalogItems.filter((item) => item.isSystemPreset) ?? [],
+    () => current?.catalogItems.filter((item) => item.isSystemItem) ?? [],
     [current]
   )
   const customItems = useMemo(
-    () => current?.catalogItems.filter((item) => !item.isSystemPreset) ?? [],
+    () => current?.catalogItems.filter((item) => !item.isSystemItem) ?? [],
+    [current]
+  )
+  const catalogItems = useMemo(
+    () => current?.catalogItems ?? [],
     [current]
   )
   const currentSources = sourceQuery.data?.items ?? []
   useEffect(() => {
-    if (!dialogOpen || editingItem?.isSystemPreset) return
+    if (!dialogOpen) return
     if (selectedSourceKey) return
     const firstBindable = currentSources.find((item) => item.bindable)
     if (!firstBindable) return
     setSelectedSourceKey(firstBindable.sourceKey)
     patchDraftFromSource(firstBindable)
-  }, [currentSources, dialogOpen, editingItem?.isSystemPreset, selectedSourceKey])
+  }, [currentSources, dialogOpen, selectedSourceKey])
 
   const isBusy =
     settingsQuery.isLoading ||
@@ -391,7 +395,6 @@ export function OpenClawIntegrationSettingsPage() {
     resetMutation.isPending
 
   const typeLabels: Record<string, string> = {
-    system_adapter: t('openclawIntegration.types.systemAdapter'),
     tool: t('openclawIntegration.types.tool'),
     workflow: t('openclawIntegration.types.workflow'),
     agent: t('openclawIntegration.types.agent'),
@@ -563,11 +566,11 @@ export function OpenClawIntegrationSettingsPage() {
     }
   }
 
-  async function handleResetSystemPresets() {
+  async function handleResetSystemItems() {
     try {
       await resetMutation.mutateAsync()
       setShowResetConfirm(false)
-      toast.success(t('openclawIntegration.messages.systemPresetsReset'))
+      toast.success(t('openclawIntegration.messages.systemItemsReset'))
     } catch (error) {
       setShowResetConfirm(false)
       toast.error(isApiError(error) ? error.message : t('messages.error'))
@@ -587,59 +590,41 @@ export function OpenClawIntegrationSettingsPage() {
 
   async function handleSaveDialog() {
     try {
+      const inputSchema = parseSchemaText(
+        draft.inputSchemaText,
+        t('openclawIntegration.messages.invalidSchemaJson'),
+        t('openclawIntegration.messages.invalidSchemaObject')
+      )
+      const outputSchema = parseSchemaText(
+        draft.outputSchemaText,
+        t('openclawIntegration.messages.invalidSchemaJson'),
+        t('openclawIntegration.messages.invalidSchemaObject')
+      )
       const payload: OpenClawCatalogItemUpsertRequest = {
         sourceType: draft.sourceType,
         toolName: draft.toolName.trim(),
         title: draft.title.trim(),
         description: draft.description.trim(),
         enabled: draft.enabled,
+        inputSummary: draft.inputSummary.trim(),
+        outputSummary: draft.outputSummary.trim(),
+        inputSchema,
+        outputSchema,
+        toolResponseMode: draft.toolResponseMode,
         sourceToolName: draft.sourceToolName,
         toolId: draft.toolId,
         workflowId: draft.workflowId,
         agentProfileId: draft.agentProfileId,
       }
 
-      if (editingItem?.isSystemPreset) {
+      if (dialogMode === 'create') {
+        await createItemMutation.mutateAsync(payload)
+      } else {
+        if (!editingItem) return
         await updateItemMutation.mutateAsync({
           itemId: editingItem.id,
-          payload: {
-            enabled: draft.enabled,
-            toolName: draft.toolName.trim(),
-            title: draft.title.trim(),
-            description: draft.description.trim(),
-          },
+          payload,
         })
-      } else {
-        const inputSchema = parseSchemaText(
-          draft.inputSchemaText,
-          t('openclawIntegration.messages.invalidSchemaJson'),
-          t('openclawIntegration.messages.invalidSchemaObject')
-        )
-        const outputSchema = parseSchemaText(
-          draft.outputSchemaText,
-          t('openclawIntegration.messages.invalidSchemaJson'),
-          t('openclawIntegration.messages.invalidSchemaObject')
-        )
-        payload.inputSummary = draft.inputSummary.trim()
-        payload.outputSummary = draft.outputSummary.trim()
-        payload.inputSchema = inputSchema
-        payload.outputSchema = outputSchema
-        payload.toolResponseMode = draft.toolResponseMode
-
-        if (dialogMode === 'create') {
-          await createItemMutation.mutateAsync(payload)
-        } else if (editingItem) {
-          await updateItemMutation.mutateAsync({
-            itemId: editingItem.id,
-            payload: {
-              ...payload,
-              sourceToolName: draft.sourceToolName,
-              toolId: draft.toolId,
-              workflowId: draft.workflowId,
-              agentProfileId: draft.agentProfileId,
-            },
-          })
-        }
       }
 
       setDialogOpen(false)
@@ -726,7 +711,7 @@ export function OpenClawIntegrationSettingsPage() {
 
             <div className="grid gap-3 md:grid-cols-3">
               <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 p-4">
-                <p className="text-sm text-slate-500">{t('openclawIntegration.summary.systemPresets')}</p>
+                <p className="text-sm text-slate-500">{t('openclawIntegration.summary.systemItems')}</p>
                 <p className="mt-2 text-2xl font-semibold text-slate-900">{systemItems.length}</p>
               </div>
               <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 p-4">
@@ -984,52 +969,24 @@ export function OpenClawIntegrationSettingsPage() {
 
       <section className="rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
         <SectionHeader
-          title={t('openclawIntegration.systemPresets.title')}
-          description={t('openclawIntegration.systemPresets.description')}
+          title={t('openclawIntegration.catalog.title')}
+          description={t('openclawIntegration.catalog.description')}
           action={
-            <Button type="button" variant="outline" className="rounded-2xl" onClick={() => setShowResetConfirm(true)} disabled={isBusy}>
-              <RefreshCcw className="h-4 w-4" />
-              {t('openclawIntegration.actions.resetSystemPresets')}
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" variant="outline" className="rounded-2xl" onClick={() => setShowResetConfirm(true)} disabled={isBusy}>
+                <RefreshCcw className="h-4 w-4" />
+                {t('openclawIntegration.actions.resetSystemItems')}
+              </Button>
+              <Button type="button" className="rounded-2xl" onClick={() => openCreateDialog('tool')}>
+                <Plus className="h-4 w-4" />
+                {t('openclawIntegration.actions.addCapability')}
+              </Button>
+            </div>
           }
         />
-        <div className="mt-5 grid gap-4">
-          {systemItems.map((item) => (
-            <CatalogItemCard
-              key={item.id}
-              item={item}
-              onToggle={(enabled) => {
-                void handleToggleItem(item, enabled)
-              }}
-              onEdit={() => openEditDialog(item)}
-              typeLabel={typeLabels[item.sourceType] ?? item.sourceType}
-              systemLabel={t('openclawIntegration.labels.system')}
-              userLabel={t('openclawIntegration.labels.user')}
-              exposedLabel={t('openclawIntegration.status.exposed')}
-              hiddenLabel={t('openclawIntegration.status.hidden')}
-              availableLabel={t('openclawIntegration.status.available')}
-              unavailableLabel={t('openclawIntegration.status.unavailable')}
-              inputLabel={t('openclawIntegration.labels.input')}
-              outputLabel={t('openclawIntegration.labels.output')}
-            />
-          ))}
-        </div>
-      </section>
-
-      <section className="rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
-        <SectionHeader
-          title={t('openclawIntegration.customItems.title')}
-          description={t('openclawIntegration.customItems.description')}
-          action={
-            <Button type="button" className="rounded-2xl" onClick={() => openCreateDialog('tool')}>
-              <Plus className="h-4 w-4" />
-              {t('openclawIntegration.actions.addCapability')}
-            </Button>
-          }
-        />
-        {customItems.length ? (
+        {catalogItems.length ? (
           <div className="mt-5 grid gap-4">
-            {customItems.map((item) => (
+            {catalogItems.map((item) => (
               <CatalogItemCard
                 key={item.id}
                 item={item}
@@ -1056,10 +1013,10 @@ export function OpenClawIntegrationSettingsPage() {
               <Boxes className="h-6 w-6 text-slate-500" />
             </div>
             <p className="mt-4 text-base font-semibold text-slate-900">
-              {t('openclawIntegration.customItems.emptyTitle')}
+              {t('openclawIntegration.catalog.emptyTitle')}
             </p>
             <p className="mt-2 text-sm leading-6 text-slate-600">
-              {t('openclawIntegration.customItems.emptyDescription')}
+              {t('openclawIntegration.catalog.emptyDescription')}
             </p>
             <Button type="button" className="mt-5 rounded-2xl" onClick={() => openCreateDialog('tool')}>
               <Plus className="h-4 w-4" />
@@ -1073,119 +1030,115 @@ export function OpenClawIntegrationSettingsPage() {
         <DialogContent className="w-[min(100%,58rem)]">
           <DialogHeader>
             <DialogTitle>
-              {editingItem?.isSystemPreset
-                ? t('openclawIntegration.dialog.editSystemPreset')
-                : dialogMode === 'create'
-                  ? t('openclawIntegration.dialog.createTitle')
+              {dialogMode === 'create'
+                ? t('openclawIntegration.dialog.createTitle')
+                : editingItem?.isSystemItem
+                  ? t('openclawIntegration.dialog.editSystemItem')
                   : t('openclawIntegration.dialog.editTitle')}
             </DialogTitle>
             <DialogDescription>
-              {editingItem?.isSystemPreset
-                ? t('openclawIntegration.dialog.editSystemPresetDescription')
-                : dialogMode === 'create'
-                  ? t('openclawIntegration.dialog.createDescription')
+              {dialogMode === 'create'
+                ? t('openclawIntegration.dialog.createDescription')
+                : editingItem?.isSystemItem
+                  ? t('openclawIntegration.dialog.editSystemItemDescription')
                   : t('openclawIntegration.dialog.editDescription')}
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-5">
-            {!editingItem?.isSystemPreset ? (
-              <section className="space-y-3">
-                <Label>{t('openclawIntegration.form.sourceType')}</Label>
-                <div className="grid gap-3 sm:grid-cols-3">
-                  {(['tool', 'workflow', 'agent'] as const).map((sourceType) => (
+            <section className="space-y-3">
+              <Label>{t('openclawIntegration.form.sourceType')}</Label>
+              <div className="grid gap-3 sm:grid-cols-3">
+                {(['tool', 'workflow', 'agent'] as const).map((sourceType) => (
+                  <button
+                    key={sourceType}
+                    type="button"
+                    className={cn(
+                      'rounded-[22px] border px-4 py-4 text-left transition',
+                      draft.sourceType === sourceType
+                        ? 'border-slate-900 bg-slate-900 text-white shadow-lg shadow-slate-900/10'
+                        : 'border-slate-200 bg-slate-50/70 text-slate-700 hover:border-slate-300'
+                    )}
+                    onClick={() => {
+                      setSelectedSourceKey(null)
+                      setDraft(createEmptyDraft(sourceType))
+                    }}
+                  >
+                    <p className="text-sm font-semibold">
+                      {sourceType === 'tool'
+                        ? t('openclawIntegration.types.tool')
+                        : sourceType === 'workflow'
+                          ? t('openclawIntegration.types.workflow')
+                          : t('openclawIntegration.types.agent')}
+                    </p>
+                    <p className={cn('mt-1 text-xs leading-5', draft.sourceType === sourceType ? 'text-white/80' : 'text-slate-500')}>
+                      {t(`openclawIntegration.sourceTypeDescriptions.${sourceType}`)}
+                    </p>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <Label>{t('openclawIntegration.form.source')}</Label>
+                {sourceQuery.isFetching ? <Loader2 className="h-4 w-4 animate-spin text-slate-400" /> : null}
+              </div>
+              <div className="grid max-h-72 gap-3 overflow-y-auto pr-1">
+                {currentSources.map((source) => {
+                  const active = selectedSourceKey === source.sourceKey
+                  return (
                     <button
-                      key={sourceType}
+                      key={source.sourceKey}
                       type="button"
+                      onClick={() => {
+                        setSelectedSourceKey(source.sourceKey)
+                        patchDraftFromSource(source)
+                      }}
                       className={cn(
                         'rounded-[22px] border px-4 py-4 text-left transition',
-                        draft.sourceType === sourceType
+                        active
                           ? 'border-slate-900 bg-slate-900 text-white shadow-lg shadow-slate-900/10'
-                          : 'border-slate-200 bg-slate-50/70 text-slate-700 hover:border-slate-300'
+                          : 'border-slate-200 bg-slate-50/70 text-slate-800 hover:border-slate-300',
+                        !source.bindable && 'opacity-70'
                       )}
-                      onClick={() => {
-                        setSelectedSourceKey(null)
-                        setDraft(createEmptyDraft(sourceType))
-                      }}
                     >
-                      <p className="text-sm font-semibold">
-                        {sourceType === 'tool'
-                          ? t('openclawIntegration.types.tool')
-                          : sourceType === 'workflow'
-                            ? t('openclawIntegration.types.workflow')
-                            : t('openclawIntegration.types.agent')}
-                      </p>
-                      <p className={cn('mt-1 text-xs leading-5', draft.sourceType === sourceType ? 'text-white/80' : 'text-slate-500')}>
-                        {t(`openclawIntegration.sourceTypeDescriptions.${sourceType}`)}
-                      </p>
-                    </button>
-                  ))}
-                </div>
-              </section>
-            ) : null}
-
-            {!editingItem?.isSystemPreset ? (
-              <section className="space-y-3">
-                <div className="flex items-center justify-between gap-3">
-                  <Label>{t('openclawIntegration.form.source')}</Label>
-                  {sourceQuery.isFetching ? <Loader2 className="h-4 w-4 animate-spin text-slate-400" /> : null}
-                </div>
-                <div className="grid max-h-72 gap-3 overflow-y-auto pr-1">
-                  {currentSources.map((source) => {
-                    const active = selectedSourceKey === source.sourceKey
-                    return (
-                      <button
-                        key={source.sourceKey}
-                        type="button"
-                        onClick={() => {
-                          setSelectedSourceKey(source.sourceKey)
-                          patchDraftFromSource(source)
-                        }}
-                        className={cn(
-                          'rounded-[22px] border px-4 py-4 text-left transition',
-                          active
-                            ? 'border-slate-900 bg-slate-900 text-white shadow-lg shadow-slate-900/10'
-                            : 'border-slate-200 bg-slate-50/70 text-slate-800 hover:border-slate-300',
-                          !source.bindable && 'opacity-70'
-                        )}
-                      >
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="text-sm font-semibold">{source.title}</p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-semibold">{source.title}</p>
+                        <CapabilityBadge
+                          colorClassName={
+                            active
+                              ? 'border-white/25 bg-white/10 text-white'
+                              : source.isSystem
+                                ? 'border-cyan-200 bg-cyan-50 text-cyan-700'
+                                : 'border-violet-200 bg-violet-50 text-violet-700'
+                          }
+                        >
+                          {source.isSystem
+                            ? t('openclawIntegration.labels.system')
+                            : t('openclawIntegration.labels.user')}
+                        </CapabilityBadge>
+                        {!source.bindable ? (
                           <CapabilityBadge
-                            colorClassName={
-                              active
-                                ? 'border-white/25 bg-white/10 text-white'
-                                : source.isSystem
-                                  ? 'border-cyan-200 bg-cyan-50 text-cyan-700'
-                                  : 'border-violet-200 bg-violet-50 text-violet-700'
-                            }
+                            colorClassName={active ? 'border-white/25 bg-white/10 text-white' : 'border-amber-200 bg-amber-50 text-amber-700'}
                           >
-                            {source.isSystem
-                              ? t('openclawIntegration.labels.system')
-                              : t('openclawIntegration.labels.user')}
+                            {t('openclawIntegration.status.unavailable')}
                           </CapabilityBadge>
-                          {!source.bindable ? (
-                            <CapabilityBadge
-                              colorClassName={active ? 'border-white/25 bg-white/10 text-white' : 'border-amber-200 bg-amber-50 text-amber-700'}
-                            >
-                              {t('openclawIntegration.status.unavailable')}
-                            </CapabilityBadge>
-                          ) : null}
-                        </div>
-                        <p className={cn('mt-2 text-sm leading-6', active ? 'text-white/80' : 'text-slate-600')}>
-                          {source.description || '-'}
-                        </p>
-                        {!source.bindable && source.unavailableReason ? (
-                          <p className={cn('mt-2 text-xs leading-5', active ? 'text-white/70' : 'text-amber-700')}>
-                            {source.unavailableReason}
-                          </p>
                         ) : null}
-                      </button>
-                    )
-                  })}
-                </div>
-              </section>
-            ) : null}
+                      </div>
+                      <p className={cn('mt-2 text-sm leading-6', active ? 'text-white/80' : 'text-slate-600')}>
+                        {source.description || '-'}
+                      </p>
+                      {!source.bindable && source.unavailableReason ? (
+                        <p className={cn('mt-2 text-xs leading-5', active ? 'text-white/70' : 'text-amber-700')}>
+                          {source.unavailableReason}
+                        </p>
+                      ) : null}
+                    </button>
+                  )
+                })}
+              </div>
+            </section>
 
             <section className="grid gap-4 md:grid-cols-2">
               <InputField
@@ -1223,91 +1176,89 @@ export function OpenClawIntegrationSettingsPage() {
               </div>
             </section>
 
-            {!editingItem?.isSystemPreset ? (
-              <>
-                <section className="grid gap-4 md:grid-cols-2">
-                  <TextareaField
-                    label={t('openclawIntegration.form.inputSummary')}
-                    value={draft.inputSummary}
-                    onChange={(value) => patchDraft({ inputSummary: value })}
-                    rows={3}
-                    disabled={!draft.schemaEditable}
-                  />
-                  <TextareaField
-                    label={t('openclawIntegration.form.outputSummary')}
-                    value={draft.outputSummary}
-                    onChange={(value) => patchDraft({ outputSummary: value })}
-                    rows={3}
-                    disabled={!draft.schemaEditable}
-                  />
-                </section>
+            <>
+              <section className="grid gap-4 md:grid-cols-2">
+                <TextareaField
+                  label={t('openclawIntegration.form.inputSummary')}
+                  value={draft.inputSummary}
+                  onChange={(value) => patchDraft({ inputSummary: value })}
+                  rows={3}
+                  disabled={!draft.schemaEditable}
+                />
+                <TextareaField
+                  label={t('openclawIntegration.form.outputSummary')}
+                  value={draft.outputSummary}
+                  onChange={(value) => patchDraft({ outputSummary: value })}
+                  rows={3}
+                  disabled={!draft.schemaEditable}
+                />
+              </section>
 
-                {draft.sourceType === 'tool' ? (
-                  <section className="space-y-3">
-                    <Label>{t('openclawIntegration.form.toolResponseMode')}</Label>
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      {(['json_schema', 'text_field'] as const).map((mode) => (
-                        <button
-                          key={mode}
-                          type="button"
-                          className={cn(
-                            'rounded-[22px] border px-4 py-4 text-left transition',
-                            draft.toolResponseMode === mode
-                              ? 'border-slate-900 bg-slate-900 text-white shadow-lg shadow-slate-900/10'
-                              : 'border-slate-200 bg-slate-50/70 text-slate-700 hover:border-slate-300'
-                          )}
-                          onClick={() => patchDraft({ toolResponseMode: mode })}
-                        >
-                          <p className="text-sm font-semibold">
-                            {mode === 'json_schema'
-                              ? t('openclawIntegration.responseModes.jsonSchema')
-                              : t('openclawIntegration.responseModes.textField')}
-                          </p>
-                          <p className={cn('mt-1 text-xs leading-5', draft.toolResponseMode === mode ? 'text-white/80' : 'text-slate-500')}>
-                            {t(`openclawIntegration.responseModeDescriptions.${mode}`)}
-                          </p>
-                        </button>
-                      ))}
-                    </div>
-                  </section>
-                ) : null}
-
-                <section className="grid gap-4 lg:grid-cols-2">
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2">
-                      <Wrench className="h-4 w-4 text-slate-500" />
-                      <Label>{t('openclawIntegration.form.inputSchema')}</Label>
-                    </div>
-                    <textarea
-                      rows={12}
-                      value={draft.inputSchemaText}
-                      onChange={(event) => patchDraft({ inputSchemaText: event.target.value })}
-                      className={TEXTAREA_CLASSNAME}
-                      disabled={!draft.schemaEditable}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2">
-                      <ShieldCheck className="h-4 w-4 text-slate-500" />
-                      <Label>{t('openclawIntegration.form.outputSchema')}</Label>
-                    </div>
-                    <textarea
-                      rows={12}
-                      value={draft.outputSchemaText}
-                      onChange={(event) => patchDraft({ outputSchemaText: event.target.value })}
-                      className={TEXTAREA_CLASSNAME}
-                      disabled={!draft.schemaEditable}
-                    />
+              {draft.sourceType === 'tool' ? (
+                <section className="space-y-3">
+                  <Label>{t('openclawIntegration.form.toolResponseMode')}</Label>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {(['json_schema', 'text_field'] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        className={cn(
+                          'rounded-[22px] border px-4 py-4 text-left transition',
+                          draft.toolResponseMode === mode
+                            ? 'border-slate-900 bg-slate-900 text-white shadow-lg shadow-slate-900/10'
+                            : 'border-slate-200 bg-slate-50/70 text-slate-700 hover:border-slate-300'
+                        )}
+                        onClick={() => patchDraft({ toolResponseMode: mode })}
+                      >
+                        <p className="text-sm font-semibold">
+                          {mode === 'json_schema'
+                            ? t('openclawIntegration.responseModes.jsonSchema')
+                            : t('openclawIntegration.responseModes.textField')}
+                        </p>
+                        <p className={cn('mt-1 text-xs leading-5', draft.toolResponseMode === mode ? 'text-white/80' : 'text-slate-500')}>
+                          {t(`openclawIntegration.responseModeDescriptions.${mode}`)}
+                        </p>
+                      </button>
+                    ))}
                   </div>
                 </section>
+              ) : null}
 
-                {!draft.schemaEditable ? (
-                  <div className="rounded-[22px] border border-cyan-200 bg-cyan-50/80 px-4 py-3 text-sm leading-6 text-cyan-800">
-                    {t('openclawIntegration.form.readonlySchemaHint')}
+              <section className="grid gap-4 lg:grid-cols-2">
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Wrench className="h-4 w-4 text-slate-500" />
+                    <Label>{t('openclawIntegration.form.inputSchema')}</Label>
                   </div>
-                ) : null}
-              </>
-            ) : null}
+                  <textarea
+                    rows={12}
+                    value={draft.inputSchemaText}
+                    onChange={(event) => patchDraft({ inputSchemaText: event.target.value })}
+                    className={TEXTAREA_CLASSNAME}
+                    disabled={!draft.schemaEditable}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck className="h-4 w-4 text-slate-500" />
+                    <Label>{t('openclawIntegration.form.outputSchema')}</Label>
+                  </div>
+                  <textarea
+                    rows={12}
+                    value={draft.outputSchemaText}
+                    onChange={(event) => patchDraft({ outputSchemaText: event.target.value })}
+                    className={TEXTAREA_CLASSNAME}
+                    disabled={!draft.schemaEditable}
+                  />
+                </div>
+              </section>
+
+              {!draft.schemaEditable ? (
+                <div className="rounded-[22px] border border-cyan-200 bg-cyan-50/80 px-4 py-3 text-sm leading-6 text-cyan-800">
+                  {t('openclawIntegration.form.readonlySchemaHint')}
+                </div>
+              ) : null}
+            </>
           </div>
 
           <DialogFooter className="gap-2">
@@ -1342,10 +1293,10 @@ export function OpenClawIntegrationSettingsPage() {
         isOpen={showResetConfirm}
         title={t('openclawIntegration.confirmReset.title')}
         description={t('openclawIntegration.confirmReset.description')}
-        confirmText={t('openclawIntegration.actions.resetSystemPresets')}
+        confirmText={t('openclawIntegration.actions.resetSystemItems')}
         cancelText={t('common.cancel')}
         onConfirm={() => {
-          void handleResetSystemPresets()
+          void handleResetSystemItems()
         }}
         onCancel={() => setShowResetConfirm(false)}
       />

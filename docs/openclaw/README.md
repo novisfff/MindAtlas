@@ -114,20 +114,21 @@ MindAtlas exposes OpenClaw through a configurable capability catalog.
   - `inputSchema`
   - `outputSchema`
 - Each catalog item binds to one MindAtlas source:
-  - `system_adapter`
   - `tool`
   - `workflow`
   - `agent`
+- Shipped defaults are ordinary first-class system items with `isSystemItem = true` and a `systemDefaultKey`.
+- System items and custom items share the same catalog model; reset only restores shipped system item defaults.
 
 The plugin must not assume a fixed built-in tool list. It should always trust live discovery metadata from MindAtlas.
 
 ## Current Implementation vs Recommended Phase 1 Path
 
 - The current runtime can expose field-level catalog items such as entry creation, search, relation creation, graph query, reports, custom tools, workflows, and agents.
-- The default system recording preset is now workflow-backed and accepts thin context submission instead of requiring full entry fields from OpenClaw.
+- The default system recording item is now workflow-backed and accepts thin context submission instead of requiring full entry fields from OpenClaw.
 - For Phase 1 recording behavior, the recommended evolution is **not** to keep OpenClaw assembling every final entry field itself.
 - Instead, OpenClaw should prefer an administrator-exposed high-level recording capability or capture workflow that accepts relevant context, while MindAtlas internally materializes the final entry type, summary, content, tags, relations, and dedupe behavior.
-- If a field-level recording capability still exists, treat it as a transitional or manual-entry path rather than the preferred automatic capture interface. MindAtlas keeps the legacy `capture_entry` adapter for compatibility, but its system preset is disabled by default.
+- If a field-level recording capability still exists, treat it as a transitional or manual-entry path rather than the preferred automatic capture interface. MindAtlas keeps the legacy `capture_entry` tool-backed system item for compatibility, but it is disabled by default.
 - Automatic capture in this phase is a prompt-driven best-effort behavior, not a guaranteed system hook.
 
 ## Runtime Auth
@@ -226,16 +227,9 @@ Example discovery item:
 
 ## Catalog Source Semantics
 
-### `system_adapter`
-
-- Built-in MindAtlas capabilities such as entry capture, search, relation creation, LightRAG query, or weekly and monthly reports.
-- These are auto-seeded as system preset catalog items.
-- Presets can be disabled and reset, but not deleted.
-- The legacy field-level `capture_entry` adapter still belongs to this category, but it is no longer the default exposed recording path.
-
 ### `tool`
 
-- Binds to an Assistant Tool, including system tools and user-created tools.
+- Binds to an Assistant Tool, including shipped system tools and user-created tools.
 - The OpenClaw-facing input and output contract lives on the catalog item itself.
 - `toolResponseMode` controls how results are interpreted:
   - `json_schema`: the returned value must validate against `outputSchema`
@@ -295,7 +289,6 @@ The request body is always validated against the catalog item’s current `input
 
 Execution dispatch depends on the catalog item source:
 
-- `system_adapter`: run the built-in MindAtlas adapter
 - `tool`: run the bound Assistant Tool
 - `workflow`: run the bound published workflow
 - `agent`: run the bound published agent with catalog-owned structured contract enforcement
@@ -317,7 +310,7 @@ The plugin should not invent passthrough routes for arbitrary workflows, skills,
 
 - `Skill` stays inside MindAtlas and is not exported directly to OpenClaw.
 - OpenClaw should register only the currently exposed catalog items.
-- System preset items may exist alongside administrator-created custom items.
+- System items may exist alongside administrator-created custom items.
 - Tool names are catalog-driven. A user-created workflow or agent can appear as a first-class OpenClaw tool if an admin publishes it through the catalog.
 - Policy docs and prompts should therefore route by capability category and current catalog metadata, not by hard-coded tool names.
 

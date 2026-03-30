@@ -111,7 +111,7 @@ class OpenClawIntegrationTests(unittest.TestCase):
         workflow = next(item for item in workflows if item.name == "system_openclaw_context_capture__workflow")
         return str(workflow.id), workflow.name
 
-    def test_settings_defaults_seed_system_presets(self) -> None:
+    def test_settings_defaults_seed_system_items(self) -> None:
         response = self.client.get("/api/system-settings/openclaw-integration")
         self.assertEqual(response.status_code, 200)
         data = response.json()["data"]
@@ -133,16 +133,17 @@ class OpenClawIntegrationTests(unittest.TestCase):
                 "generate_monthly_report",
             },
         )
-        self.assertTrue(all(item["isSystemPreset"] for item in data["catalogItems"]))
+        self.assertTrue(all(item["isSystemItem"] for item in data["catalogItems"]))
         self.assertEqual(by_key["submit_context_capture"]["sourceType"], "workflow")
         self.assertIsNotNone(by_key["submit_context_capture"]["workflowId"])
         self.assertTrue(by_key["submit_context_capture"]["enabled"])
+        self.assertEqual(by_key["capture_entry"]["sourceType"], "tool")
         self.assertFalse(by_key["capture_entry"]["enabled"])
         workflow_id, workflow_name = self._get_openclaw_capture_workflow()
         self.assertEqual(workflow_name, "system_openclaw_context_capture__workflow")
         self.assertEqual(by_key["submit_context_capture"]["workflowId"], workflow_id)
 
-    def test_legacy_fixed_capability_flags_migrate_into_system_presets(self) -> None:
+    def test_legacy_fixed_capability_flags_migrate_into_system_items(self) -> None:
         self.db.add(
             AppSetting(
                 key="openclaw_integration_config",
@@ -162,20 +163,21 @@ class OpenClawIntegrationTests(unittest.TestCase):
         items = response.json()["data"]["catalogItems"]
         by_key = {item["capabilityKey"]: item for item in items}
         self.assertFalse(by_key["search_entries"]["enabled"])
-        self.assertFalse(by_key["capture_entry"]["enabled"])
+        self.assertTrue(by_key["capture_entry"]["enabled"])
         self.assertTrue(by_key["submit_context_capture"]["enabled"])
 
-    def test_existing_capture_entry_preset_is_disabled_during_upgrade(self) -> None:
+    def test_existing_system_item_is_preserved_during_seed(self) -> None:
         self.db.add(
             OpenClawCapabilityItem(
                 capability_key="capture_entry",
                 tool_name="mindatlas_capture_entry",
-                title="Capture Entry",
-                description="Legacy capture entry preset",
-                source_type="system_adapter",
-                system_capability_key="capture_entry",
+                title="Custom Capture Item",
+                description="Customized capture item",
+                source_type="tool",
+                system_default_key="capture_entry",
+                source_tool_name="openclaw_capture_entry",
                 enabled=True,
-                is_system_preset=True,
+                is_system_item=True,
                 input_schema_json={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
                 output_schema_json={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
                 input_summary="",
@@ -189,7 +191,8 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         items = response.json()["data"]["catalogItems"]
         by_key = {item["capabilityKey"]: item for item in items}
-        self.assertFalse(by_key["capture_entry"]["enabled"])
+        self.assertTrue(by_key["capture_entry"]["enabled"])
+        self.assertEqual(by_key["capture_entry"]["title"], "Custom Capture Item")
         self.assertIn("submit_context_capture", by_key)
 
     def test_update_requires_secret_before_enabling(self) -> None:
@@ -269,6 +272,58 @@ class OpenClawIntegrationTests(unittest.TestCase):
             "search_entries",
             {item["capabilityKey"] for item in metadata.json()["data"]["capabilities"]},
         )
+
+    def test_system_item_can_be_deleted_and_reset_restores_defaults(self) -> None:
+        self._initialize_system()
+
+        create_response = self.client.post(
+            "/api/system-settings/openclaw-integration/catalog-items",
+            json={
+                "sourceType": "tool",
+                "sourceToolName": "search_entries",
+                "toolName": "mindatlas_custom_search",
+                "title": "Custom Search",
+                "description": "Custom search item",
+                "enabled": True,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                "outputSchema": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                    "additionalProperties": False,
+                },
+                "toolResponseMode": "text_field",
+            },
+        )
+        self.assertEqual(create_response.status_code, 200, create_response.text)
+        custom_item_id = create_response.json()["data"]["id"]
+
+        settings = self.client.get("/api/system-settings/openclaw-integration").json()["data"]
+        search_item = next(item for item in settings["catalogItems"] if item["capabilityKey"] == "search_entries")
+
+        delete_response = self.client.delete(
+            f"/api/system-settings/openclaw-integration/catalog-items/{search_item['id']}"
+        )
+        self.assertEqual(delete_response.status_code, 200, delete_response.text)
+
+        after_delete = self.client.get("/api/system-settings/openclaw-integration").json()["data"]
+        self.assertNotIn("search_entries", {item["capabilityKey"] for item in after_delete["catalogItems"]})
+        self.assertIn(custom_item_id, {item["id"] for item in after_delete["catalogItems"]})
+
+        reset_response = self.client.post("/api/system-settings/openclaw-integration/reset-system-items")
+        self.assertEqual(reset_response.status_code, 200, reset_response.text)
+        after_reset = reset_response.json()["data"]
+        by_key = {item["capabilityKey"]: item for item in after_reset["catalogItems"]}
+        self.assertIn("search_entries", by_key)
+        self.assertEqual(by_key["search_entries"]["toolName"], "mindatlas_search_entries")
+        self.assertEqual(by_key["search_entries"]["sourceType"], "tool")
+        self.assertTrue(by_key["search_entries"]["isSystemItem"])
+        self.assertIn(custom_item_id, {item["id"] for item in after_reset["catalogItems"]})
 
     def test_workflow_catalog_item_executes_published_workflow(self) -> None:
         self._initialize_system()
@@ -456,7 +511,7 @@ class OpenClawIntegrationTests(unittest.TestCase):
             "app.openclaw_integration.service.resolve_runtime_knowledge_graph_config",
             return_value=type("Cfg", (), {"enabled": True, "configured": True})(),
         ), patch(
-            "app.openclaw_integration.service.LightRagService.query",
+            "app.assistant.tools.openclaw_tools.LightRagService.query",
             new=AsyncMock(return_value=fake_response),
         ):
             response = self.client.post(
@@ -467,6 +522,12 @@ class OpenClawIntegrationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["data"]["result"]["answer"], "这是图谱查询结果")
+        catalog = self.client.get(
+            "/api/integrations/openclaw/capabilities",
+            headers=self._auth_headers(secret),
+        ).json()["data"]["capabilities"]
+        query_item = next(item for item in catalog if item["capabilityKey"] == "query_knowledge_graph")
+        self.assertEqual(query_item["sourceType"], "tool")
 
     def test_create_relation_returns_404_when_target_entry_missing(self) -> None:
         from app.entry.models import Entry, TimeMode  # noqa: E402

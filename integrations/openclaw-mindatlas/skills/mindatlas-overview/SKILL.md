@@ -47,7 +47,7 @@ Before calling a MindAtlas capability:
 
 When using MindAtlas:
 - Keep tool arguments concise and structured
-- For recording, prefer a high-level capture capability or workflow-backed system preset that accepts thin context and lets MindAtlas materialize the final record
+- For recording, prefer a high-level capture capability or system item backed by a capture workflow or tool that accepts thin context and lets MindAtlas materialize the final record
 - Do not assume you should assemble every final entry field yourself unless the exposed capability explicitly requires that
 - Reuse returned IDs when you need follow-up detail lookup or relation creation
 - Treat MindAtlas as the source of truth for stored knowledge

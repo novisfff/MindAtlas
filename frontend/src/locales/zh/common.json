@@ -617,12 +617,13 @@
   "openclawIntegration": {
     "overview": {
       "title": "OpenClaw 能力目录",
-      "description": "让 OpenClaw 只看到一层稳定、可配置的 MindAtlas 能力目录。系统预设会自动补齐，你也可以把工具、工作流和智能体包装成对外能力。",
+      "description": "让 OpenClaw 只看到一层稳定、可配置的 MindAtlas 能力目录。系统项会自动补齐，你也可以把工具、工作流和智能体包装成对外能力。",
       "switchLabel": "启用 OpenClaw 集成",
       "switchHint": "开启后，OpenClaw 会通过专用 integration API 读取这里暴露出去的能力目录，并按 tool name 调用它们。"
     },
     "summary": {
-      "systemPresets": "系统预设",
+      "systemItems": "系统项",
+      "systemPresets": "系统项",
       "customItems": "自定义目录项",
       "runtimeApi": "运行时接口"
     },
@@ -641,7 +642,7 @@
         },
         "catalog": {
           "title": "2. 配置能力目录",
-          "description": "打开系统预设或新增自定义目录项，把你想暴露给 OpenClaw 的工具、工作流、智能体配置好，并确认它们已经对外暴露。"
+          "description": "检查系统项或新增自定义目录项，把你想暴露给 OpenClaw 的工具、工作流、智能体配置好，并确认它们已经对外暴露。"
         },
         "plugin": {
           "title": "3. 在 OpenClaw 配置插件",
@@ -719,7 +720,7 @@
       "revealedTitle": "请立即把这串密钥填入 OpenClaw 插件"
     },
     "types": {
-      "systemAdapter": "系统预设",
+      "systemAdapter": "系统项",
       "tool": "工具",
       "workflow": "工作流",
       "agent": "智能体"
@@ -743,11 +744,18 @@
       "rotateSecret": "轮换密钥",
       "copySecret": "复制密钥",
       "addCapability": "添加能力",
-      "resetSystemPresets": "重置系统预设"
+      "resetSystemItems": "重置系统项",
+      "resetSystemPresets": "重置系统项"
+    },
+    "catalog": {
+      "title": "能力目录",
+      "description": "系统项和自定义项共用同一份目录。两者都可以编辑、重新绑定、禁用或删除；重置只会恢复 shipped 系统默认项。",
+      "emptyTitle": "还没有能力目录项",
+      "emptyDescription": "先绑定一个工具、工作流或智能体，再定义对外暴露的文案和结构化契约。"
     },
     "systemPresets": {
-      "title": "系统预设能力",
-      "description": "这部分由系统自动补齐，适合直接暴露 MindAtlas 的核心记录、图谱和报表能力。你可以禁用，也可以编辑对外标题和 tool name。"
+      "title": "系统能力项",
+      "description": "这些 shipped 的系统项会由 MindAtlas 自动补齐，适合直接暴露核心记录、图谱和报表能力。你可以禁用，也可以编辑对外标题和 tool name。"
     },
     "customItems": {
       "title": "自定义能力目录",
@@ -760,8 +768,10 @@
       "createDescription": "先选择来源对象，再配置 OpenClaw 看到的 tool name、标题、描述和契约。",
       "editTitle": "编辑能力目录项",
       "editDescription": "更新对外暴露的名称、文案和契约配置。",
-      "editSystemPreset": "编辑系统预设能力",
-      "editSystemPresetDescription": "系统预设不允许改绑定来源和 schema，这里只调整启用状态、标题、描述和 tool name。"
+      "editSystemItem": "编辑系统能力项",
+      "editSystemItemDescription": "系统项和自定义项走同一套编辑流程；如果之后需要恢复 shipped 默认绑定、文案、schema 和启用状态，可以再执行重置。",
+      "editSystemPreset": "编辑系统能力项",
+      "editSystemPresetDescription": "系统项和自定义项走同一套编辑流程；如果之后需要恢复 shipped 默认绑定、文案、schema 和启用状态，可以再执行重置。"
     },
     "form": {
       "sourceType": "来源类型",
@@ -796,8 +806,8 @@
       "description": "轮换后，旧的 OpenClaw 插件配置会立即失效，你需要把新密钥同步更新过去。"
     },
     "confirmReset": {
-      "title": "确定重置系统预设能力吗？",
-      "description": "这会把所有系统预设目录项恢复成默认标题、描述、tool name、schema 和启用状态。"
+      "title": "确定重置系统项吗？",
+      "description": "这会把所有 shipped 系统项恢复成默认绑定来源、标题、描述、tool name、schema 和启用状态；不会影响任何自定义项。"
     },
     "confirmDelete": {
       "title": "确定删除这个目录项吗？",
@@ -807,7 +817,8 @@
       "saved": "OpenClaw 集成设置已保存",
       "secretGenerated": "新的集成密钥已生成",
       "secretCopied": "集成密钥已复制",
-      "systemPresetsReset": "系统预设能力已重置",
+      "systemItemsReset": "系统项已重置",
+      "systemPresetsReset": "系统项已重置",
       "deleted": "目录项已删除",
       "invalidSchemaJson": "Schema 必须是合法的 JSON。",
       "invalidSchemaObject": "Schema 根节点必须是 JSON 对象。"

@@ -6,7 +6,7 @@ export interface MindAtlasRuntimeCapability {
   toolName: string
   title: string
   description: string
-  sourceType: 'system_adapter' | 'tool' | 'workflow' | 'agent'
+  sourceType: 'tool' | 'workflow' | 'agent'
   implementationType: string
   available: boolean
   availabilityReason?: string | null

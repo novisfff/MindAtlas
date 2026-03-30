@@ -628,12 +628,13 @@
   "openclawIntegration": {
     "overview": {
       "title": "OpenClaw capability catalog",
-      "description": "Expose a stable, configurable MindAtlas capability catalog to OpenClaw. System presets are auto-seeded, and you can wrap existing tools, workflows, and agents as external capabilities.",
+      "description": "Expose a stable, configurable MindAtlas capability catalog to OpenClaw. System items are auto-seeded, and you can wrap existing tools, workflows, and agents as external capabilities.",
       "switchLabel": "Enable OpenClaw integration",
       "switchHint": "When enabled, OpenClaw reads this catalog through the dedicated integration API and invokes items by their exported tool names."
     },
     "summary": {
-      "systemPresets": "System presets",
+      "systemItems": "System items",
+      "systemPresets": "System items",
       "customItems": "Custom catalog items",
       "runtimeApi": "Runtime API"
     },
@@ -652,7 +653,7 @@
         },
         "catalog": {
           "title": "2. Expose capability catalog items",
-          "description": "Review system presets or add custom items, then expose the tools, workflows, and agents that you want OpenClaw to discover."
+          "description": "Review system items or add custom items, then expose the tools, workflows, and agents that you want OpenClaw to discover."
         },
         "plugin": {
           "title": "3. Configure the OpenClaw plugin",
@@ -730,7 +731,7 @@
       "revealedTitle": "Copy this secret into the OpenClaw plugin now"
     },
     "types": {
-      "systemAdapter": "System Preset",
+      "systemAdapter": "System item",
       "tool": "Tool",
       "workflow": "Workflow",
       "agent": "Agent"
@@ -754,11 +755,18 @@
       "rotateSecret": "Rotate secret",
       "copySecret": "Copy secret",
       "addCapability": "Add capability",
-      "resetSystemPresets": "Reset system presets"
+      "resetSystemItems": "Reset system items",
+      "resetSystemPresets": "Reset system items"
+    },
+    "catalog": {
+      "title": "Capability catalog",
+      "description": "System items and custom items live in one catalog. Both can be edited, rebound, disabled, or deleted; reset only restores the shipped system defaults.",
+      "emptyTitle": "No capability items yet",
+      "emptyDescription": "Add a tool, workflow, or agent binding first, then define the exported copy and structured contracts."
     },
     "systemPresets": {
-      "title": "System preset capabilities",
-      "description": "These items are auto-seeded by MindAtlas and are a good fit for exposing core entry, graph, and report capabilities. You can disable them or adjust their exported title and tool name."
+      "title": "System capability items",
+      "description": "These shipped system items are auto-seeded by MindAtlas and are a good fit for exposing core entry, graph, and report capabilities. You can disable them or adjust their exported title and tool name."
     },
     "customItems": {
       "title": "Custom capability catalog",
@@ -771,8 +779,10 @@
       "createDescription": "Choose a source object first, then define the exported tool name, title, description, and contract.",
       "editTitle": "Edit capability catalog item",
       "editDescription": "Update the exported copy and contract configuration.",
-      "editSystemPreset": "Edit system preset capability",
-      "editSystemPresetDescription": "System presets cannot change their bound source or schema. Only enabled state, title, description, and tool name can be edited here."
+      "editSystemItem": "Edit system capability item",
+      "editSystemItemDescription": "System items follow the same editing flow as custom items. Reset restores the shipped source binding, copy, schema, and enabled state later if needed.",
+      "editSystemPreset": "Edit system capability item",
+      "editSystemPresetDescription": "System items follow the same editing flow as custom items. Reset restores the shipped source binding, copy, schema, and enabled state later if needed."
     },
     "form": {
       "sourceType": "Source type",
@@ -807,8 +817,8 @@
       "description": "The existing OpenClaw plugin will stop working until you update it with the new secret."
     },
     "confirmReset": {
-      "title": "Reset system preset capabilities?",
-      "description": "This will restore every system preset catalog item back to its default title, description, tool name, schema, and enabled state."
+      "title": "Reset system items?",
+      "description": "This will restore every shipped system item back to its default source binding, title, description, tool name, schema, and enabled state. Custom items will stay untouched."
     },
     "confirmDelete": {
       "title": "Delete this catalog item?",
@@ -818,7 +828,8 @@
       "saved": "OpenClaw integration settings saved",
       "secretGenerated": "A new integration secret has been generated",
       "secretCopied": "Integration secret copied",
-      "systemPresetsReset": "System preset capabilities reset",
+      "systemItemsReset": "System items reset",
+      "systemPresetsReset": "System items reset",
       "deleted": "Catalog item deleted",
       "invalidSchemaJson": "Schema must be valid JSON.",
       "invalidSchemaObject": "Schema root must be a JSON object."
