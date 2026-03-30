@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
+from uuid import uuid4
 from unittest.mock import AsyncMock, patch
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
@@ -465,6 +467,43 @@ class OpenClawIntegrationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["data"]["result"]["answer"], "这是图谱查询结果")
+
+    def test_create_relation_returns_404_when_target_entry_missing(self) -> None:
+        from app.entry.models import Entry, TimeMode  # noqa: E402
+        from app.entry_type.models import EntryType  # noqa: E402
+
+        self._initialize_system()
+
+        entry_type = self.db.query(EntryType).filter(EntryType.code == "KNOWLEDGE").first()
+        self.assertIsNotNone(entry_type)
+
+        source = Entry(
+            title="Source Entry",
+            content="content",
+            type_id=entry_type.id,
+            time_mode=TimeMode.POINT,
+            time_at=datetime.now(timezone.utc),
+        )
+        self.db.add(source)
+        self.db.commit()
+
+        secret = self._rotate_secret()
+        self._enable_integration(secret)
+
+        missing_target_id = uuid4()
+        response = self.client.post(
+            "/api/integrations/openclaw/capabilities/create_relation/execute",
+            headers=self._auth_headers(secret),
+            json={
+                "sourceEntryId": str(source.id),
+                "targetEntryId": str(missing_target_id),
+                "relationType": "RELATES_TO",
+            },
+        )
+
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json()["code"], 40400)
+        self.assertEqual(response.json()["message"], f"Target entry not found: {missing_target_id}")
 
 
 if __name__ == "__main__":

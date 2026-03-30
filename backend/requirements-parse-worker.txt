@@ -1,0 +1,13 @@
+# Minimal runtime dependencies for the Docling parse worker.
+# Keep this separate from requirements.txt so the parser image does not
+# pull in the full API/LightRAG/LangChain stack.
+
+pydantic
+pydantic-settings
+sqlalchemy
+psycopg2-binary
+minio
+cryptography
+starlette
+
+-r requirements-docling.txt

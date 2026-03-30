@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timezone
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 from tests._db import make_session
@@ -210,3 +210,24 @@ class RelationServiceTests(unittest.TestCase):
         with self.assertRaises(ApiException) as ctx:
             svc.find_by_id(UUID("00000000-0000-0000-0000-000000000001"))
         self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_create_missing_target_entry_returns_404(self) -> None:
+        from app.relation.schemas import RelationRequest  # noqa: E402
+        from app.relation.service import RelationService  # noqa: E402
+
+        svc = RelationService(self.db)
+        missing_target_id = uuid4()
+
+        with self.assertRaises(ApiException) as ctx:
+            svc.create(
+                RelationRequest(
+                    source_entry_id=self.e1.id,
+                    target_entry_id=missing_target_id,
+                    relation_type_id=self.rt.id,
+                    description="d",
+                )
+            )
+
+        self.assertEqual(ctx.exception.status_code, 404)
+        self.assertEqual(ctx.exception.code, 40400)
+        self.assertEqual(ctx.exception.message, f"Target entry not found: {missing_target_id}")
