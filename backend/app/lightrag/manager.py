@@ -19,8 +19,10 @@ import sys
 import threading
 import time
 import traceback
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from functools import lru_cache, partial
+from typing import Any
 from urllib.parse import urlparse
 
 from app.config import get_settings
@@ -36,6 +38,246 @@ class _OpenAICompatModelConfig:
     api_key: str
     base_url: str
     model: str
+
+
+def _lightrag_openai_error_text(exc: BaseException) -> str:
+    parts: list[str] = []
+
+    message = str(exc).strip()
+    if message:
+        parts.append(message)
+
+    body = getattr(exc, "body", None)
+    if body:
+        parts.append(str(body).strip())
+
+    response = getattr(exc, "response", None)
+    if response is not None:
+        status_text = getattr(response, "text", None)
+        if isinstance(status_text, str) and status_text.strip():
+            parts.append(status_text.strip())
+
+    return " | ".join(part for part in parts if part)
+
+
+def _lightrag_openai_status_code(exc: BaseException) -> int | None:
+    for attr in ("status_code", "code"):
+        value = getattr(exc, attr, None)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+
+    value = getattr(response, "status_code", None)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _lightrag_requires_stream_mode(exc: BaseException) -> bool:
+    lowered = _lightrag_openai_error_text(exc).lower()
+    if "stream must be set to true" not in lowered:
+        return False
+
+    status_code = _lightrag_openai_status_code(exc)
+    return status_code in (None, 400)
+
+
+def _lightrag_response_format_maybe_unsupported(exc: BaseException) -> bool:
+    lowered = _lightrag_openai_error_text(exc).lower()
+    return "response_format" in lowered or "json_object" in lowered or "json_schema" in lowered
+
+
+def _coerce_stream_chunk_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                    continue
+            text_obj = getattr(item, "text", None)
+            if isinstance(text_obj, str):
+                parts.append(text_obj)
+        return "".join(parts)
+    return ""
+
+
+async def _collect_async_text(chunks: AsyncIterator[str]) -> str:
+    parts: list[str] = []
+    async for chunk in chunks:
+        if chunk:
+            parts.append(str(chunk))
+    return "".join(parts)
+
+
+async def _keyword_extraction_stream_fallback(
+    *,
+    client_factory: Callable[..., Any],
+    model: str,
+    prompt: str,
+    system_prompt: str | None = None,
+    history_messages: list[dict[str, Any]] | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    use_azure: bool = False,
+    azure_deployment: str | None = None,
+    api_version: str | None = None,
+    **kwargs: Any,
+) -> str:
+    history = list(history_messages or [])
+    messages = kwargs.pop("messages", None)
+    if messages is None:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.extend(history)
+        messages.append({"role": "user", "content": prompt})
+
+    kwargs.pop("hashing_kv", None)
+    kwargs.pop("keyword_extraction", None)
+    kwargs.pop("stream", None)
+
+    client_configs = dict(kwargs.pop("openai_client_configs", {}) or {})
+    timeout = kwargs.pop("timeout", None)
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+
+    response_format = kwargs.get("response_format")
+    if response_format is None:
+        kwargs["response_format"] = {"type": "json_object"}
+        response_format = kwargs["response_format"]
+
+    kwargs["stream"] = True
+
+    client = client_factory(
+        api_key=api_key,
+        base_url=base_url,
+        use_azure=use_azure,
+        azure_deployment=azure_deployment,
+        api_version=api_version,
+        timeout=timeout,
+        client_configs=client_configs,
+    )
+    api_model = azure_deployment if use_azure and azure_deployment else model
+    response = None
+
+    async def _send(api_kwargs: dict[str, Any]):
+        return await client.chat.completions.create(model=api_model, messages=messages, **api_kwargs)
+
+    try:
+        try:
+            response = await _send(kwargs)
+        except Exception as exc:
+            if response_format is None or not _lightrag_response_format_maybe_unsupported(exc):
+                raise
+            retry_kwargs = dict(kwargs)
+            retry_kwargs.pop("response_format", None)
+            response = await _send(retry_kwargs)
+
+        parts: list[str] = []
+        async for chunk in response:
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            delta = getattr(choices[0], "delta", None)
+            if delta is None:
+                continue
+            text = _coerce_stream_chunk_text(getattr(delta, "content", None))
+            if text:
+                parts.append(text)
+        return "".join(parts)
+    finally:
+        if response is not None and hasattr(response, "aclose"):
+            aclose = getattr(response, "aclose", None)
+            if callable(aclose):
+                try:
+                    await aclose()
+                except Exception:
+                    logger.debug("lightrag stream fallback response close failed", exc_info=True)
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                await close()
+            except Exception:
+                logger.debug("lightrag stream fallback client close failed", exc_info=True)
+
+
+async def _openai_complete_with_stream_compat(
+    *,
+    complete_func: Callable[..., Awaitable[Any]],
+    client_factory: Callable[..., Any],
+    model: str,
+    prompt: str,
+    system_prompt: str | None = None,
+    history_messages: list[dict[str, Any]] | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    **kwargs: Any,
+) -> Any:
+    try:
+        return await complete_func(
+            model,
+            prompt,
+            system_prompt=system_prompt,
+            history_messages=history_messages,
+            base_url=base_url,
+            api_key=api_key,
+            **kwargs,
+        )
+    except Exception as exc:
+        requested_stream = kwargs.get("stream") is True
+        if requested_stream or not _lightrag_requires_stream_mode(exc):
+            raise
+
+        logger.info(
+            "lightrag openai retry_with_stream model=%s base_url=%s keyword_extraction=%s",
+            model,
+            _redact_url(base_url or ""),
+            bool(kwargs.get("keyword_extraction")),
+        )
+
+        if kwargs.get("keyword_extraction"):
+            return await _keyword_extraction_stream_fallback(
+                client_factory=client_factory,
+                model=model,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                history_messages=history_messages,
+                base_url=base_url,
+                api_key=api_key,
+                **kwargs,
+            )
+
+        retry_kwargs = dict(kwargs)
+        retry_kwargs["stream"] = True
+        streamed = await complete_func(
+            model,
+            prompt,
+            system_prompt=system_prompt,
+            history_messages=history_messages,
+            base_url=base_url,
+            api_key=api_key,
+            **retry_kwargs,
+        )
+        if hasattr(streamed, "__aiter__"):
+            return await _collect_async_text(streamed)
+        return streamed
 
 
 def _first_non_empty(*values: str | None) -> str:
@@ -383,16 +625,18 @@ def _create_and_init_rag():
         step("import lightrag")
         try:
             from lightrag import LightRAG
-            from lightrag.llm.openai import openai_complete_if_cache, openai_embed
+            from lightrag.llm.openai import create_openai_async_client, openai_complete_if_cache, openai_embed
             from lightrag.utils import EmbeddingFunc
         except ImportError as e:
             raise LightRagDependencyError("lightrag-hku is not installed") from e
 
         step("build llm/embedding funcs")
-        async def llm_model_func(prompt, system_prompt=None, history_messages=None, **kwargs) -> str:
-            return await openai_complete_if_cache(
-                llm.model,
-                prompt,
+        async def llm_model_func(prompt, system_prompt=None, history_messages=None, **kwargs) -> str | AsyncIterator[str]:
+            return await _openai_complete_with_stream_compat(
+                complete_func=openai_complete_if_cache,
+                client_factory=create_openai_async_client,
+                model=llm.model,
+                prompt=prompt,
                 system_prompt=system_prompt,
                 history_messages=history_messages,
                 base_url=llm.base_url,
