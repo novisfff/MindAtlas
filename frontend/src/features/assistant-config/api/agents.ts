@@ -107,6 +107,9 @@ export const createAgentProfile = (data: CreateAgentProfileRequest) =>
 export const updateAgentProfile = (id: string, data: UpdateAgentProfileRequest) =>
   apiClient.put<AssistantAgentProfile>(`/api/assistant-config/agents/${id}`, { body: data })
 
+export const copyAgentProfile = (id: string) =>
+  apiClient.post<AssistantAgentProfile>(`/api/assistant-config/agents/${id}/copy`)
+
 export const listAgentVersions = (id: string) =>
   apiClient.get<AgentVersionListPayload>(`/api/assistant-config/agents/${id}/versions`)
 

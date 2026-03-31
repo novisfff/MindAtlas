@@ -310,6 +310,15 @@ def update_agent_profile(
     )
 
 
+@router.post("/agents/{id}/copy", response_model=ApiResponse)
+def copy_agent_profile(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
+    service = AssistantConfigService(db)
+    item = service.copy_agent_profile(id)
+    return ApiResponse.ok(
+        AssistantAgentProfileResponse.model_validate(service.serialize_agent_profile(item)).model_dump(by_alias=True)
+    )
+
+
 @router.get("/agents/{id}/versions", response_model=ApiResponse)
 def list_agent_profile_versions(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
     service = AssistantConfigService(db)
@@ -453,6 +462,15 @@ def update_workflow_entity(
 ) -> ApiResponse:
     service = AssistantConfigService(db)
     item = service.update_workflow_entity(id, request)
+    return ApiResponse.ok(
+        AssistantWorkflowResponse.model_validate(service.serialize_workflow(item)).model_dump(by_alias=True)
+    )
+
+
+@router.post("/workflows/{id}/copy", response_model=ApiResponse)
+def copy_workflow(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
+    service = AssistantConfigService(db)
+    item = service.copy_workflow(id)
     return ApiResponse.ok(
         AssistantWorkflowResponse.model_validate(service.serialize_workflow(item)).model_dump(by_alias=True)
     )

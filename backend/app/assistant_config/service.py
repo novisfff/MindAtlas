@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from uuid import UUID
 
 from app.assistant.skill_catalog.base import DEFAULT_SKILL_NAME
@@ -230,6 +230,11 @@ class AssistantConfigService:
             return value[:255]
         return AssistantConfigService._utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
+    def _default_agent_system_prompt(self) -> str:
+        if self._current_locale() == "zh":
+            return "你是 MindAtlas 的 AI 助手，友好地回复用户。"
+        return "You are MindAtlas's AI assistant. Respond helpfully and clearly."
+
     def _workflow_name_exists(self, name: str) -> bool:
         candidate = str(name or "").strip().lower()
         if not candidate:
@@ -237,6 +242,17 @@ class AssistantConfigService:
         existing = (
             self.db.query(AssistantWorkflow.id)
             .filter(func.lower(AssistantWorkflow.name) == candidate)
+            .first()
+        )
+        return existing is not None
+
+    def _agent_profile_name_exists(self, name: str) -> bool:
+        candidate = str(name or "").strip().lower()
+        if not candidate:
+            return False
+        existing = (
+            self.db.query(AssistantAgentProfile.id)
+            .filter(func.lower(AssistantAgentProfile.name) == candidate)
             .first()
         )
         return existing is not None
@@ -254,6 +270,45 @@ class AssistantConfigService:
             if not self._workflow_name_exists(candidate):
                 return candidate
             suffix += 1
+
+    def _next_available_agent_profile_name(self, base_name: str) -> str:
+        normalized = str(base_name or "").strip()
+        if not normalized:
+            raise ValueError("base_name is required")
+        if not self._agent_profile_name_exists(normalized):
+            return normalized
+
+        suffix = 2
+        while True:
+            candidate = f"{normalized}__{suffix}"
+            if not self._agent_profile_name_exists(candidate):
+                return candidate
+            suffix += 1
+
+    def _next_available_copy_name(
+        self,
+        base_name: str,
+        *,
+        exists: Callable[[str], bool],
+    ) -> str:
+        normalized = str(base_name or "").strip()
+        if not normalized:
+            raise ValueError("base_name is required")
+
+        locale = self._current_locale()
+        if locale == "zh":
+            def candidate_for(index: int) -> str:
+                return f"{normalized}（副本）" if index == 1 else f"{normalized}（副本 {index}）"
+        else:
+            def candidate_for(index: int) -> str:
+                return f"{normalized} (Copy)" if index == 1 else f"{normalized} (Copy {index})"
+
+        index = 1
+        while True:
+            candidate = candidate_for(index)
+            if not exists(candidate):
+                return candidate
+            index += 1
 
     @staticmethod
     def _workflow_input_to_snapshot(workflow: WorkflowInput) -> dict[str, Any]:
@@ -462,6 +517,21 @@ class AssistantConfigService:
             }
         )
 
+    def _agent_snapshot_from_draft(self, draft: AgentPublishDraftInput) -> dict[str, Any]:
+        normalized_kb = self._normalize_agent_kb_config(
+            kb_config=draft.kb_config,
+            model_source=draft.model_source,
+            model_id=draft.model_id,
+            existing_kb_config=draft.kb_config if isinstance(draft.kb_config, dict) else {"enabled": False},
+        )
+        return self._agent_snapshot_from_fields(
+            system_prompt=draft.system_prompt,
+            tools=draft.tools,
+            kb_config=normalized_kb,
+            model_source=draft.model_source,
+            model_id=draft.model_id,
+        )
+
     def _get_agent_profile_draft(self, agent_profile: AssistantAgentProfile) -> AgentPublishDraftInput:
         if agent_profile.draft_version_id:
             draft = (
@@ -562,6 +632,7 @@ class AssistantConfigService:
             return None
 
         from app.assistant.skill_catalog.defaults_loader import get_system_workflow_baseline
+        from app.openclaw_integration.registry import list_openclaw_system_item_definitions
 
         locale = self._current_locale()
         for linked_skill in (workflow.skills or []):
@@ -573,6 +644,24 @@ class AssistantConfigService:
             baseline = get_system_workflow_baseline(name, locale=locale)
             if baseline is not None:
                 return baseline
+
+        workflow_name = str(workflow.name or "").strip()
+        if workflow_name:
+            for definition in list_system_behavior_definitions(locale=locale):
+                if definition.default_target.target_type != "workflow":
+                    continue
+                if definition.default_target.canonical_name != workflow_name:
+                    continue
+                return get_system_behavior_default_workflow(definition, locale=locale)
+
+            for definition in list_openclaw_system_item_definitions(locale=locale):
+                if definition.source_type != "workflow":
+                    continue
+                if str(definition.workflow_canonical_name or "").strip() != workflow_name:
+                    continue
+                if not definition.workflow_preset_file:
+                    continue
+                return load_system_workflow_preset_file(definition.workflow_preset_file)
         return None
 
     def _resolve_system_agent_baseline_draft(self, agent_profile: AssistantAgentProfile) -> AgentPublishDraftInput | None:
@@ -606,6 +695,190 @@ class AssistantConfigService:
         if baseline and baseline[0] is not None:
             return baseline[0]
         return None
+
+    def _workflow_version_count(self, workflow_id: UUID) -> int:
+        return int(
+            self.db.query(func.count(AssistantWorkflowVersion.id))
+            .filter(AssistantWorkflowVersion.workflow_id == workflow_id)
+            .scalar()
+            or 0
+        )
+
+    def _agent_version_count(self, agent_profile_id: UUID) -> int:
+        return int(
+            self.db.query(func.count(AssistantAgentProfileVersion.id))
+            .filter(AssistantAgentProfileVersion.agent_profile_id == agent_profile_id)
+            .scalar()
+            or 0
+        )
+
+    @staticmethod
+    def _raise_system_workflow_readonly() -> None:
+        raise ApiException(
+            status_code=400,
+            code=40034,
+            message="System workflow is read-only. Copy it to a custom workflow before editing or managing versions.",
+        )
+
+    @staticmethod
+    def _raise_system_agent_readonly() -> None:
+        raise ApiException(
+            status_code=400,
+            code=40035,
+            message="System agent profile is read-only. Copy it to a custom agent before editing or managing versions.",
+        )
+
+    def _ensure_system_workflow_baseline_state(
+        self,
+        *,
+        workflow: AssistantWorkflow,
+        workflow_input: WorkflowInput,
+        description: str,
+        enabled: bool,
+        version_name: str | None = None,
+    ) -> bool:
+        changed = False
+        normalized_description = description or ""
+
+        if not bool(workflow.is_system):
+            workflow.is_system = True
+            changed = True
+        if bool(workflow.enabled) != bool(enabled):
+            workflow.enabled = bool(enabled)
+            changed = True
+        if (workflow.description or "") != normalized_description:
+            workflow.description = normalized_description
+            changed = True
+
+        current_published = self._get_workflow_published_input(workflow)
+        desired_snapshot = self._workflow_input_to_snapshot(workflow_input)
+        current_snapshot = self._workflow_input_to_snapshot(current_published) if current_published is not None else None
+        try:
+            current_entity_snapshot = self._workflow_input_to_snapshot(self._to_workflow_input_from_entity(workflow))
+        except Exception:
+            current_entity_snapshot = None
+
+        if current_snapshot != desired_snapshot or workflow.published_version_id is None:
+            self._enforce_workflow_structured_input_constraints(
+                workflow=workflow,
+                workflow_input=workflow_input,
+                raise_error=True,
+            )
+            self._apply_workflow_to_workflow_entity(workflow, workflow_input, persist=True)
+            published = self._create_workflow_version(
+                workflow=workflow,
+                workflow_input=workflow_input,
+                version_source="publish",
+                version_name=version_name,
+            )
+            self._keep_only_workflow_version(workflow, published.id)
+            return True
+
+        if current_entity_snapshot != desired_snapshot:
+            self._enforce_workflow_structured_input_constraints(
+                workflow=workflow,
+                workflow_input=workflow_input,
+                raise_error=True,
+            )
+            self._apply_workflow_to_workflow_entity(workflow, workflow_input, persist=True)
+            changed = True
+
+        keep_version_id = workflow.published_version_id
+        if keep_version_id is not None and (
+            workflow.draft_version_id != keep_version_id
+            or self._workflow_version_count(workflow.id) != 1
+        ):
+            self._keep_only_workflow_version(workflow, keep_version_id)
+            changed = True
+
+        return changed
+
+    def _ensure_system_agent_baseline_state(
+        self,
+        *,
+        agent_profile: AssistantAgentProfile,
+        draft: AgentPublishDraftInput,
+        description: str,
+        enabled: bool,
+        version_name: str | None = None,
+    ) -> bool:
+        changed = False
+        normalized_description = description or ""
+        normalized_kb = self._normalize_agent_kb_config(
+            kb_config=draft.kb_config,
+            model_source=draft.model_source,
+            model_id=draft.model_id,
+            existing_kb_config=draft.kb_config if isinstance(draft.kb_config, dict) else {"enabled": False},
+        )
+        self._validate_agent_tool_names(draft.tools)
+
+        if not bool(agent_profile.is_system):
+            agent_profile.is_system = True
+            changed = True
+        if bool(agent_profile.enabled) != bool(enabled):
+            agent_profile.enabled = bool(enabled)
+            changed = True
+        if (agent_profile.description or "") != normalized_description:
+            agent_profile.description = normalized_description
+            changed = True
+
+        current_published = self._get_agent_profile_published_draft(agent_profile)
+        desired_snapshot = self._agent_snapshot_from_fields(
+            system_prompt=draft.system_prompt,
+            tools=draft.tools,
+            kb_config=normalized_kb,
+            model_source=draft.model_source,
+            model_id=draft.model_id,
+        )
+        current_snapshot = self._agent_snapshot_from_draft(current_published) if current_published is not None else None
+        current_model_source, current_model_id = self._read_agent_model_config(
+            agent_profile.kb_config if isinstance(agent_profile.kb_config, dict) else {"enabled": False}
+        )
+        current_entity_snapshot = self._agent_snapshot_from_fields(
+            system_prompt=agent_profile.system_prompt or "",
+            tools=list(agent_profile.tools or []),
+            kb_config=agent_profile.kb_config if isinstance(agent_profile.kb_config, dict) else {"enabled": False},
+            model_source=current_model_source,
+            model_id=current_model_id,
+        )
+
+        if current_snapshot != desired_snapshot or agent_profile.published_version_id is None:
+            agent_profile.system_prompt = draft.system_prompt
+            agent_profile.tools = list(draft.tools or [])
+            agent_profile.kb_config = normalized_kb
+            published = self._create_agent_profile_version(
+                agent_profile=agent_profile,
+                draft=AgentPublishDraftInput.model_validate(
+                    {
+                        "system_prompt": agent_profile.system_prompt,
+                        "tools": agent_profile.tools or [],
+                        "kb_config": agent_profile.kb_config,
+                        "model_source": draft.model_source,
+                        "model_id": draft.model_id,
+                    }
+                ),
+                version_source="publish",
+                version_name=version_name,
+            )
+            self._keep_only_agent_version(agent_profile, published.id)
+            changed = True
+        elif current_entity_snapshot != desired_snapshot:
+            agent_profile.system_prompt = draft.system_prompt
+            agent_profile.tools = list(draft.tools or [])
+            agent_profile.kb_config = normalized_kb
+            changed = True
+        elif agent_profile.draft_version_id != agent_profile.published_version_id or self._agent_version_count(agent_profile.id) != 1:
+            if agent_profile.published_version_id is not None:
+                self._keep_only_agent_version(agent_profile, agent_profile.published_version_id)
+                changed = True
+
+        if changed:
+            for linked_skill in agent_profile.skills or []:
+                linked_skill.system_prompt = agent_profile.system_prompt
+                linked_skill.kb_config = agent_profile.kb_config
+                linked_skill.tools = list(agent_profile.tools or [])
+
+        return changed
 
     def _get_agent_system_baseline_version_id(self, agent_profile_id: UUID) -> UUID | None:
         baseline = (
@@ -1118,12 +1391,13 @@ class AssistantConfigService:
             }
         )
 
-    def _resolve_or_create_system_behavior_default_workflow(
+    def _ensure_system_behavior_default_workflow(
         self,
         definition: SystemBehaviorDefinition,
-    ) -> AssistantWorkflow:
+    ) -> tuple[AssistantWorkflow, bool]:
         locale = self._current_locale()
         expected_name = definition.default_target.canonical_name
+        changed = False
         workflow = (
             self.db.query(AssistantWorkflow)
             .options(joinedload(AssistantWorkflow.system_behavior_bindings))
@@ -1155,44 +1429,30 @@ class AssistantConfigService:
             )
             self.db.add(workflow)
             self.db.flush()
+            changed = True
 
-        workflow.is_system = True
-        workflow.enabled = True
+        workflow_input = get_system_behavior_default_workflow(definition, locale=locale)
+        changed = self._ensure_system_workflow_baseline_state(
+            workflow=workflow,
+            workflow_input=workflow_input,
+            description=definition.description,
+            enabled=True,
+            version_name="System Default",
+        ) or changed
+        return workflow, changed
 
-        if workflow.published_version_id is None:
-            workflow.description = definition.description
-            workflow_input = get_system_behavior_default_workflow(definition, locale=locale)
-            self._apply_workflow_to_workflow_entity(workflow, workflow_input, persist=True)
-            published = self._create_workflow_version(
-                workflow=workflow,
-                workflow_input=workflow_input,
-                version_source="publish",
-                version_name="System Default",
-            )
-            workflow.draft_version_id = published.id
-            workflow.published_version_id = published.id
-            self._trim_workflow_versions(workflow)
-
+    def _resolve_or_create_system_behavior_default_workflow(
+        self,
+        definition: SystemBehaviorDefinition,
+    ) -> AssistantWorkflow:
+        workflow, _ = self._ensure_system_behavior_default_workflow(definition)
         return workflow
 
     def _reset_system_behavior_default_workflow_to_preset(
         self,
         definition: SystemBehaviorDefinition,
     ) -> AssistantWorkflow:
-        locale = self._current_locale()
-        workflow = self._resolve_or_create_system_behavior_default_workflow(definition)
-        workflow_input = get_system_behavior_default_workflow(definition, locale=locale)
-        self._apply_workflow_to_workflow_entity(workflow, workflow_input, persist=True)
-        published = self._create_workflow_version(
-            workflow=workflow,
-            workflow_input=workflow_input,
-            version_source="publish",
-            version_name=None,
-        )
-        self._keep_only_workflow_version(workflow, published.id)
-        workflow.is_system = True
-        workflow.enabled = True
-        workflow.description = definition.description
+        workflow, _ = self._ensure_system_behavior_default_workflow(definition)
         return workflow
 
     def _ensure_system_behavior_binding_entity(
@@ -1225,16 +1485,8 @@ class AssistantConfigService:
         locale = self._current_locale()
         for definition in list_system_behavior_definitions(locale=locale):
             if definition.default_target.target_type == "workflow":
-                before = (
-                    self.db.query(AssistantWorkflow.id)
-                    .filter(
-                        AssistantWorkflow.name == definition.default_target.canonical_name,
-                        AssistantWorkflow.is_system.is_(True),
-                    )
-                    .first()
-                )
-                workflow = self._resolve_or_create_system_behavior_default_workflow(definition)
-                if before is None or workflow.published_version_id is None:
+                workflow, workflow_changed = self._ensure_system_behavior_default_workflow(definition)
+                if workflow_changed or workflow.published_version_id is None:
                     changed = True
             binding_before = self._get_system_behavior_binding(definition.key)
             binding = self._ensure_system_behavior_binding_entity(definition)
@@ -1358,16 +1610,11 @@ class AssistantConfigService:
         workflow_description = example_meta["description"] or (
             f"{definition.name}示例工作流。" if locale == "zh" else f"{definition.name} example workflow."
         )
-        preset_workflow = WorkflowInput.model_validate(
-            get_system_behavior_default_workflow(definition, locale=locale).model_dump(by_alias=True)
-        )
-        workflow = self._create_workflow_entity(
-            AssistantWorkflowCreateRequest(
-                name=workflow_name,
-                description=workflow_description,
-                enabled=True,
-                workflow=preset_workflow,
-            )
+        canonical_workflow = self._resolve_or_create_system_behavior_default_workflow(definition)
+        workflow = self._copy_workflow_entity(
+            canonical_workflow,
+            name_override=workflow_name,
+            description_override=workflow_description,
         )
 
         binding = self._ensure_system_behavior_binding_entity(definition)
@@ -1774,10 +2021,12 @@ class AssistantConfigService:
         if not persist:
             return workflow_tool_names
 
-        for old_node in list(getattr(workflow_model, "nodes", None) or []):
-            self.db.delete(old_node)
-        for old_edge in list(getattr(workflow_model, "edges", None) or []):
-            self.db.delete(old_edge)
+        # Clear persisted DAG children through the ORM relationship first so the
+        # in-memory collection and delete-orphan state stay aligned before the
+        # rebuilt nodes/edges are attached. This keeps repeated system-baseline
+        # restores from re-inserting stale edge rows and tripping uq_workflow_edge.
+        workflow_model.edges.clear()
+        workflow_model.nodes.clear()
         self.db.flush()
 
         workflow_model.nodes = [
@@ -1805,8 +2054,7 @@ class AssistantConfigService:
             for e in workflow.edges
         ]
         workflow_model.workflow_version = (workflow_model.workflow_version or 0) + 1
-        if workflow.viewport is not None:
-            workflow_model.workflow_viewport = workflow.viewport
+        workflow_model.workflow_viewport = workflow.viewport
         return workflow_tool_names
 
     def _bind_skill_to_workflow(
@@ -1892,7 +2140,7 @@ class AssistantConfigService:
         if agent_profile_id is not None:
             agent_profile = self.get_agent_profile(agent_profile_id)
         else:
-            system_prompt = (request_system_prompt or "").strip() or "你是 MindAtlas 的 AI 助手，友好地回复用户。"
+            system_prompt = (request_system_prompt or "").strip() or self._default_agent_system_prompt()
             normalized_kb = self._normalize_agent_kb_config(
                 kb_config=request_kb_config,
                 model_source=None,
@@ -1982,9 +2230,10 @@ class AssistantConfigService:
         kb_config = self._skill_default_kb_config(default)
         model_source = str(getattr(default, "model_source", "default") or "default")
         model_id = getattr(default, "model_id", None)
+        system_prompt = str(getattr(default, "system_prompt", "") or "").strip() or self._default_agent_system_prompt()
         return AgentPublishDraftInput.model_validate(
             {
-                "system_prompt": str(getattr(default, "system_prompt", "") or ""),
+                "system_prompt": system_prompt,
                 "tools": [str(item) for item in (getattr(default, "tools", None) or []) if str(item).strip()],
                 "kb_config": kb_config,
                 "model_source": model_source,
@@ -2327,180 +2576,59 @@ class AssistantConfigService:
             })
         return result
 
-    def sync_system_skills(self) -> None:
+    def sync_system_skills(self, *, commit: bool = True) -> None:
         """同步系统技能到数据库。
 
         Note:
         - 系统 Workflow 的节点坐标基线来自 JSON 默认定义（system_defaults）。
-        - 这些坐标仅在“首次创建系统目标执行体”时生效。
-        - 对于已存在且已绑定 workflow_id 的系统技能，sync 不覆盖图结构与坐标，
-          以避免覆盖用户已手动调整过的布局。
+        - sync 会强制把 shipped 系统执行体恢复为官方基线内容。
+        - 系统 Skill 的上层绑定会被保留为系统壳，但底层系统 Workflow / Agent 会压缩为单一基线发布版本。
         """
         system_skills = SkillRegistry.list_system_skills(locale=self._current_locale())
         if not system_skills:
             return
 
-        for s in system_skills:
-            target_type = self._derive_target_type(
-                langgraph_pattern=getattr(s, "langgraph_pattern", None),
-            )
-            kb_config_data = {"enabled": bool(getattr(getattr(s, "kb", None), "enabled", False))}
-            existing = (
-                self.db.query(AssistantSkill)
-                .filter(AssistantSkill.name == s.name)
-                .first()
-            )
-            if not existing:
-                skill = AssistantSkill(
-                    name=s.name,
-                    description=s.description,
-                    intent_examples=s.intent_examples,
-                    tools=s.tools,
-                    mode="langgraph",
-                    langgraph_pattern="workflow_dag" if target_type == "workflow" else "agent_loop",
-                    system_prompt=s.system_prompt,
-                    kb_config=kb_config_data,
-                    is_system=True,
-                    enabled=True,
-                )
-                self.db.add(skill)
-
-                if target_type == "workflow":
-                    workflow_input = self._build_default_workflow_input()
-                    if getattr(s, "workflow_nodes", None):
-                        workflow_input = WorkflowInput.model_validate(
-                            {
-                                "nodes": [
-                                    {
-                                        "node_id": n.node_id,
-                                        "node_type": n.node_type,
-                                        "label": n.label,
-                                        "position_x": n.position_x,
-                                        "position_y": n.position_y,
-                                        "config": n.config,
-                                    }
-                                    for n in s.workflow_nodes
-                                ],
-                                "edges": [
-                                    {
-                                        "edge_id": e.edge_id,
-                                        "source_node_id": e.source_node_id,
-                                        "target_node_id": e.target_node_id,
-                                        "source_handle": e.source_handle,
-                                        "target_handle": e.target_handle,
-                                        "condition_type": e.condition_type,
-                                        "condition_expr": e.condition_expr.model_dump() if e.condition_expr else None,
-                                        "label": e.label,
-                                    }
-                                    for e in (getattr(s, "workflow_edges", None) or [])
-                                ],
-                                "viewport": getattr(s, "workflow_viewport", None),
-                            }
-                        )
-                    self._bind_skill_to_workflow(
-                        skill=skill,
-                        workflow_id=None,
-                        request_workflow=workflow_input,
-                        default_name=s.name,
-                        description=s.description,
-                        enabled=True,
-                        is_system=True,
+        for attempt in range(2):
+            changed = False
+            try:
+                for s in system_skills:
+                    existing = (
+                        self.db.query(AssistantSkill)
+                        .filter(AssistantSkill.name == s.name)
+                        .first()
                     )
-                else:
-                    self._bind_skill_to_agent_profile(
-                        skill=skill,
-                        agent_profile_id=None,
-                        request_system_prompt=s.system_prompt,
-                        request_tools=s.tools,
-                        request_kb_config=kb_config_data,
-                        default_name=s.name,
-                        description=s.description,
-                        enabled=True,
-                        is_system=True,
-                    )
-            else:
-                # 不覆盖已存在记录的执行体配置（含工作流坐标），只确保系统标记与绑定语义正确
-                existing.is_system = True
-                existing.mode = "langgraph"
-
-                # 强制启用默认 Skill
-                if existing.name == DEFAULT_SKILL_NAME and not existing.enabled:
-                    existing.enabled = True
-
-                if target_type == "workflow":
-                    if existing.workflow_id is None:
-                        # Legacy system skills may still carry graph data on AssistantSkill nodes/edges.
-                        # Normalize old references before binding the graph into AssistantWorkflow.
-                        self._migrate_workflow_tool_text_refs(existing)
-                        if self._requires_system_workflow_output_migration(existing):
-                            self._replace_workflow_with_default(existing, s)
-                        fallback_workflow = self._build_default_workflow_input()
-                        if existing.nodes:
-                            fallback_workflow = WorkflowInput.model_validate(
-                                {
-                                    "nodes": [
-                                        {
-                                            "node_id": n.node_id,
-                                            "node_type": n.node_type,
-                                            "label": n.label,
-                                            "position_x": n.position_x,
-                                            "position_y": n.position_y,
-                                            "config": n.config,
-                                        }
-                                        for n in existing.nodes
-                                    ],
-                                    "edges": [
-                                        {
-                                            "edge_id": e.edge_id,
-                                            "source_node_id": e.source_node_id,
-                                            "target_node_id": e.target_node_id,
-                                            "source_handle": e.source_handle,
-                                            "target_handle": e.target_handle,
-                                            "condition_type": e.condition_type,
-                                            "condition_expr": e.condition_expr,
-                                            "label": e.label,
-                                        }
-                                        for e in (existing.edges or [])
-                                    ],
-                                    "viewport": existing.workflow_viewport,
-                                }
-                            )
-                        self._bind_skill_to_workflow(
-                            skill=existing,
-                            workflow_id=None,
-                            request_workflow=fallback_workflow,
-                            default_name=existing.name,
-                            description=existing.description,
-                            enabled=bool(existing.enabled),
+                    if not existing:
+                        existing = AssistantSkill(
+                            name=s.name,
+                            description=s.description,
+                            intent_examples=s.intent_examples,
+                            tools=s.tools,
+                            mode="langgraph",
+                            langgraph_pattern="workflow_dag" if self._derive_target_type(
+                                langgraph_pattern=getattr(s, "langgraph_pattern", None),
+                            ) == "workflow" else "agent_loop",
+                            system_prompt=s.system_prompt,
+                            kb_config=self._skill_default_kb_config(s),
                             is_system=True,
+                            enabled=True,
                         )
-                    existing.langgraph_pattern = "workflow_dag"
-                    existing.system_prompt = None
-                    existing.kb_config = {"enabled": False}
-                else:
-                    if existing.agent_profile_id is None:
-                        self._bind_skill_to_agent_profile(
-                            skill=existing,
-                            agent_profile_id=None,
-                            request_system_prompt=existing.system_prompt or s.system_prompt,
-                            request_tools=existing.tools or s.tools,
-                            request_kb_config=existing.kb_config or kb_config_data,
-                            default_name=existing.name,
-                            description=existing.description,
-                            enabled=bool(existing.enabled),
-                            is_system=True,
-                        )
-                    existing.langgraph_pattern = "agent_loop"
-                    if existing.agent_profile is not None:
-                        existing.system_prompt = existing.agent_profile.system_prompt
-                        existing.kb_config = existing.agent_profile.kb_config
-                        existing.tools = existing.agent_profile.tools
+                        changed = True
 
-        try:
-            self.db.commit()
-        except IntegrityError as exc:
-            self.db.rollback()
-            raise ApiException(status_code=409, code=40911, message="Sync system skills failed") from exc
+                    if self._reset_skill_to_default(existing, s):
+                        changed = True
+
+                    if existing not in self.db:
+                        self.db.add(existing)
+
+                if changed and commit:
+                    self.db.commit()
+                return
+            except IntegrityError as exc:
+                self.db.rollback()
+                if attempt == 0:
+                    self.db.expire_all()
+                    continue
+                raise ApiException(status_code=409, code=40920, message="Sync system skills failed") from exc
 
     @staticmethod
     def _replace_tool_text_refs_in_value(value: Any, tool_node_ids: set[str]) -> tuple[Any, bool]:
@@ -2596,10 +2724,8 @@ class AssistantConfigService:
 
     def _replace_workflow_with_default(self, skill: AssistantSkill, default) -> None:
         """Replace only workflow graph (nodes/edges) from system default definition."""
-        for old_node in list(getattr(skill, "nodes", None) or []):
-            self.db.delete(old_node)
-        for old_edge in list(getattr(skill, "edges", None) or []):
-            self.db.delete(old_edge)
+        skill.edges = []
+        skill.nodes = []
         self.db.flush()
 
         if getattr(default, "workflow_nodes", None):
@@ -3120,20 +3246,32 @@ class AssistantConfigService:
             "affected": affected,
         }
 
-    def _reset_skill_to_default(self, skill: AssistantSkill, default) -> None:
+    def _reset_skill_to_default(self, skill: AssistantSkill, default) -> bool:
         """内部方法：将技能重置到默认配置。
 
         对 workflow_dag 系统技能，reset 会按 JSON 默认定义（system_defaults）的节点坐标重建草稿并发布，
         因此会恢复到“系统默认布局基线”。
         """
+        changed = False
         # 保留 enabled 状态（general_chat 强制启用）
         enabled = skill.enabled
         if skill.name == DEFAULT_SKILL_NAME:
             enabled = True
 
-        skill.description = default.description or ""
-        skill.intent_examples = list(default.intent_examples or [])
-        skill.mode = "langgraph"
+        normalized_description = default.description or ""
+        normalized_intent_examples = list(default.intent_examples or [])
+        if (skill.description or "") != normalized_description:
+            skill.description = normalized_description
+            changed = True
+        if list(skill.intent_examples or []) != normalized_intent_examples:
+            skill.intent_examples = normalized_intent_examples
+            changed = True
+        if skill.mode != "langgraph":
+            skill.mode = "langgraph"
+            changed = True
+        if not bool(skill.is_system):
+            skill.is_system = True
+            changed = True
         target_type = self._derive_target_type(langgraph_pattern=getattr(default, "langgraph_pattern", None))
         kb_config_data = self._skill_default_kb_config(default)
 
@@ -3149,20 +3287,32 @@ class AssistantConfigService:
                 workflow_input=workflow_input,
                 raise_error=True,
             )
-            workflow_tool_names = self._apply_workflow_to_workflow_entity(workflow_model, workflow_input, persist=True)
-            published = self._create_workflow_version(
+            workflow_changed = self._ensure_system_workflow_baseline_state(
                 workflow=workflow_model,
                 workflow_input=workflow_input,
-                version_source="publish",
-                version_name=None,
+                description=default.description or "",
+                enabled=bool(enabled),
             )
-            self._keep_only_workflow_version(workflow_model, published.id)
-            skill.workflow_id = workflow_model.id
-            skill.agent_profile_id = None
-            skill.langgraph_pattern = "workflow_dag"
-            skill.system_prompt = None
-            skill.kb_config = {"enabled": False}
-            skill.tools = sorted(workflow_tool_names)
+            workflow_tool_names = sorted(self._collect_workflow_tool_names(workflow_input.nodes))
+            changed = workflow_changed or changed
+            if skill.workflow_id != workflow_model.id:
+                skill.workflow_id = workflow_model.id
+                changed = True
+            if skill.agent_profile_id is not None:
+                skill.agent_profile_id = None
+                changed = True
+            if skill.langgraph_pattern != "workflow_dag":
+                skill.langgraph_pattern = "workflow_dag"
+                changed = True
+            if skill.system_prompt is not None:
+                skill.system_prompt = None
+                changed = True
+            if skill.kb_config != {"enabled": False}:
+                skill.kb_config = {"enabled": False}
+                changed = True
+            if list(skill.tools or []) != workflow_tool_names:
+                skill.tools = workflow_tool_names
+                changed = True
         else:
             agent_profile = self._resolve_or_create_system_agent_profile_for_reset(
                 skill=skill,
@@ -3170,45 +3320,39 @@ class AssistantConfigService:
                 enabled=bool(enabled),
             )
             draft = self._agent_draft_from_skill_default(default)
-            normalized_kb = self._normalize_agent_kb_config(
-                kb_config=draft.kb_config,
-                model_source=draft.model_source,
-                model_id=draft.model_id,
-                existing_kb_config=draft.kb_config if isinstance(draft.kb_config, dict) else {"enabled": False},
-            )
-            self._validate_agent_tool_names(draft.tools)
-            agent_profile.system_prompt = draft.system_prompt
-            agent_profile.tools = list(draft.tools or [])
-            agent_profile.kb_config = normalized_kb
-            published = self._create_agent_profile_version(
+            profile_changed = self._ensure_system_agent_baseline_state(
                 agent_profile=agent_profile,
-                draft=AgentPublishDraftInput.model_validate(
-                    {
-                        "system_prompt": agent_profile.system_prompt,
-                        "tools": agent_profile.tools or [],
-                        "kb_config": agent_profile.kb_config,
-                        "model_source": draft.model_source,
-                        "model_id": draft.model_id,
-                    }
-                ),
-                version_source="publish",
-                version_name=None,
+                draft=draft,
+                description=default.description or "",
+                enabled=bool(enabled),
             )
-            self._keep_only_agent_version(agent_profile, published.id)
+            changed = profile_changed or changed
+            if skill.workflow_id is not None:
+                skill.workflow_id = None
+                changed = True
+            if skill.agent_profile_id != agent_profile.id:
+                skill.agent_profile_id = agent_profile.id
+                changed = True
+            if skill.langgraph_pattern != "agent_loop":
+                skill.langgraph_pattern = "agent_loop"
+                changed = True
+            if (skill.system_prompt or "") != (agent_profile.system_prompt or ""):
+                skill.system_prompt = agent_profile.system_prompt
+                changed = True
+            effective_kb = agent_profile.kb_config if isinstance(agent_profile.kb_config, dict) else kb_config_data
+            if skill.kb_config != effective_kb:
+                skill.kb_config = effective_kb
+                changed = True
+            next_tools = list(agent_profile.tools or [])
+            if list(skill.tools or []) != next_tools:
+                skill.tools = next_tools
+                changed = True
 
-            for linked_skill in agent_profile.skills or []:
-                linked_skill.system_prompt = agent_profile.system_prompt
-                linked_skill.kb_config = agent_profile.kb_config
-                linked_skill.tools = list(agent_profile.tools or [])
+        if bool(skill.enabled) != bool(enabled):
+            skill.enabled = enabled
+            changed = True
 
-            skill.workflow_id = None
-            skill.agent_profile_id = agent_profile.id
-            skill.langgraph_pattern = "agent_loop"
-            skill.system_prompt = agent_profile.system_prompt
-            skill.kb_config = agent_profile.kb_config if isinstance(agent_profile.kb_config, dict) else kb_config_data
-            skill.tools = list(agent_profile.tools or [])
-
-        skill.enabled = enabled
+        return changed
 
     def _apply_workflow_to_skill(self, skill: AssistantSkill, workflow) -> None:
         """Compatibility helper: apply workflow onto a skill's bound workflow target."""
@@ -3434,6 +3578,7 @@ class AssistantConfigService:
     # Workflows CRUD
     # -------------------------
     def list_workflows(self, include_disabled: bool = False) -> list[AssistantWorkflow]:
+        self.sync_system_skills()
         self.ensure_system_behaviors()
         q = (
             self.db.query(AssistantWorkflow)
@@ -3450,6 +3595,8 @@ class AssistantConfigService:
         return q.all()
 
     def get_workflow(self, workflow_id: UUID) -> AssistantWorkflow:
+        self.sync_system_skills()
+        self.ensure_system_behaviors()
         workflow = (
             self.db.query(AssistantWorkflow)
             .options(
@@ -3491,6 +3638,35 @@ class AssistantConfigService:
         self._trim_workflow_versions(workflow)
         return workflow
 
+    def _copy_workflow_entity(
+        self,
+        source_workflow: AssistantWorkflow,
+        *,
+        name_override: str | None = None,
+        description_override: str | None = None,
+    ) -> AssistantWorkflow:
+        name = name_override
+        if name is None:
+            base_name = self._display_workflow_name(source_workflow) or source_workflow.name
+            name = self._next_available_copy_name(base_name, exists=self._workflow_name_exists)
+
+        workflow_input = (
+            self._resolve_system_workflow_baseline_input(source_workflow)
+            if source_workflow.is_system
+            else None
+        ) or self._get_workflow_draft_input(source_workflow)
+        description = source_workflow.description or ""
+        if description_override is not None:
+            description = description_override
+        return self._create_workflow_entity(
+            AssistantWorkflowCreateRequest(
+                name=name,
+                description=description,
+                enabled=bool(source_workflow.enabled),
+                workflow=workflow_input,
+            )
+        )
+
     def create_workflow(self, request: AssistantWorkflowCreateRequest) -> AssistantWorkflow:
         workflow = self._create_workflow_entity(request)
 
@@ -3501,8 +3677,20 @@ class AssistantConfigService:
             raise ApiException(status_code=409, code=40930, message="Create workflow failed") from exc
         return self.get_workflow(workflow.id)
 
+    def copy_workflow(self, workflow_id: UUID) -> AssistantWorkflow:
+        source_workflow = self.get_workflow(workflow_id)
+        workflow = self._copy_workflow_entity(source_workflow)
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40936, message="Copy workflow failed") from exc
+        return self.get_workflow(workflow.id)
+
     def update_workflow_entity(self, workflow_id: UUID, request: AssistantWorkflowUpdateRequest) -> AssistantWorkflow:
         workflow = self.get_workflow(workflow_id)
+        if workflow.is_system:
+            self._raise_system_workflow_readonly()
         if request.name is not None:
             workflow.name = request.name
         if request.description is not None:
@@ -3554,6 +3742,8 @@ class AssistantConfigService:
 
     def publish_workflow(self, workflow_id: UUID, request: WorkflowPublishRequest) -> AssistantWorkflow:
         workflow = self.get_workflow(workflow_id)
+        if workflow.is_system:
+            self._raise_system_workflow_readonly()
         if request.description is not None:
             workflow.description = request.description
         self._enforce_workflow_structured_input_constraints(
@@ -3590,6 +3780,8 @@ class AssistantConfigService:
 
     def rollback_workflow_version(self, workflow_id: UUID, version_id: UUID) -> RollbackVersionResponse:
         workflow = self.get_workflow(workflow_id)
+        if workflow.is_system:
+            self._raise_system_workflow_readonly()
         version = (
             self.db.query(AssistantWorkflowVersion)
             .filter(
@@ -3633,6 +3825,8 @@ class AssistantConfigService:
 
     def delete_workflow_version(self, workflow_id: UUID, version_id: UUID) -> DeleteVersionResponse:
         workflow = self.get_workflow(workflow_id)
+        if workflow.is_system:
+            self._raise_system_workflow_readonly()
         version = (
             self.db.query(AssistantWorkflowVersion)
             .filter(
@@ -3669,6 +3863,8 @@ class AssistantConfigService:
 
     def clear_workflow_versions(self, workflow_id: UUID) -> ClearVersionsResponse:
         workflow = self.get_workflow(workflow_id)
+        if workflow.is_system:
+            self._raise_system_workflow_readonly()
         versions = (
             self.db.query(AssistantWorkflowVersion)
             .filter(AssistantWorkflowVersion.workflow_id == workflow.id)
@@ -3708,7 +3904,7 @@ class AssistantConfigService:
     def delete_workflow(self, workflow_id: UUID, *, confirm_rebind_system_behaviors: bool = False) -> None:
         workflow = self.get_workflow(workflow_id)
         if workflow.is_system:
-            raise ApiException(status_code=400, code=40031, message="System workflow cannot be deleted")
+            self._raise_system_workflow_readonly()
         if workflow.skills:
             skill_names = ", ".join(sorted(s.name for s in workflow.skills))
             raise ApiException(
@@ -3751,6 +3947,7 @@ class AssistantConfigService:
     # Agent Profiles CRUD
     # -------------------------
     def list_agent_profiles(self, include_disabled: bool = False) -> list[AssistantAgentProfile]:
+        self.sync_system_skills()
         self.ensure_system_behaviors()
         q = (
             self.db.query(AssistantAgentProfile)
@@ -3765,6 +3962,8 @@ class AssistantConfigService:
         return q.all()
 
     def get_agent_profile(self, agent_profile_id: UUID) -> AssistantAgentProfile:
+        self.sync_system_skills()
+        self.ensure_system_behaviors()
         profile = (
             self.db.query(AssistantAgentProfile)
             .options(
@@ -3825,8 +4024,48 @@ class AssistantConfigService:
             raise ApiException(status_code=409, code=40933, message="Create agent profile failed") from exc
         return self.get_agent_profile(profile.id)
 
+    def _copy_agent_profile_entity(
+        self,
+        source_profile: AssistantAgentProfile,
+        *,
+        name_override: str | None = None,
+        description_override: str | None = None,
+    ) -> AssistantAgentProfile:
+        name = name_override
+        if name is None:
+            base_name = self._display_agent_profile_name(source_profile) or source_profile.name
+            name = self._next_available_copy_name(base_name, exists=self._agent_profile_name_exists)
+
+        draft = (
+            self._resolve_system_agent_baseline_draft(source_profile)
+            if source_profile.is_system
+            else None
+        ) or self._get_agent_profile_draft(source_profile)
+        description = source_profile.description or ""
+        if description_override is not None:
+            description = description_override
+
+        return self.create_agent_profile(
+            AssistantAgentProfileCreateRequest(
+                name=name,
+                description=description,
+                system_prompt=draft.system_prompt,
+                tools=list(draft.tools or []),
+                kb_config=draft.kb_config if isinstance(draft.kb_config, dict) else {"enabled": False},
+                enabled=bool(source_profile.enabled),
+                model_source=draft.model_source,
+                model_id=draft.model_id,
+            )
+        )
+
+    def copy_agent_profile(self, agent_profile_id: UUID) -> AssistantAgentProfile:
+        source_profile = self.get_agent_profile(agent_profile_id)
+        return self._copy_agent_profile_entity(source_profile)
+
     def update_agent_profile(self, agent_profile_id: UUID, request: AssistantAgentProfileUpdateRequest) -> AssistantAgentProfile:
         profile = self.get_agent_profile(agent_profile_id)
+        if profile.is_system:
+            self._raise_system_agent_readonly()
         if request.name is not None:
             profile.name = request.name
         if request.description is not None:
@@ -3902,6 +4141,8 @@ class AssistantConfigService:
 
     def publish_agent_profile(self, agent_profile_id: UUID, request: AgentPublishRequest) -> AssistantAgentProfile:
         profile = self.get_agent_profile(agent_profile_id)
+        if profile.is_system:
+            self._raise_system_agent_readonly()
         normalized_kb = self._normalize_agent_kb_config(
             kb_config=request.draft.kb_config,
             model_source=request.draft.model_source,
@@ -3946,6 +4187,8 @@ class AssistantConfigService:
 
     def rollback_agent_profile_version(self, agent_profile_id: UUID, version_id: UUID) -> RollbackVersionResponse:
         profile = self.get_agent_profile(agent_profile_id)
+        if profile.is_system:
+            self._raise_system_agent_readonly()
         version = (
             self.db.query(AssistantAgentProfileVersion)
             .filter(
@@ -4003,6 +4246,8 @@ class AssistantConfigService:
 
     def delete_agent_profile_version(self, agent_profile_id: UUID, version_id: UUID) -> DeleteVersionResponse:
         profile = self.get_agent_profile(agent_profile_id)
+        if profile.is_system:
+            self._raise_system_agent_readonly()
         version = (
             self.db.query(AssistantAgentProfileVersion)
             .filter(
@@ -4039,6 +4284,8 @@ class AssistantConfigService:
 
     def clear_agent_profile_versions(self, agent_profile_id: UUID) -> ClearVersionsResponse:
         profile = self.get_agent_profile(agent_profile_id)
+        if profile.is_system:
+            self._raise_system_agent_readonly()
         versions = (
             self.db.query(AssistantAgentProfileVersion)
             .filter(AssistantAgentProfileVersion.agent_profile_id == profile.id)
@@ -4078,7 +4325,7 @@ class AssistantConfigService:
     def delete_agent_profile(self, agent_profile_id: UUID, *, confirm_rebind_system_behaviors: bool = False) -> None:
         profile = self.get_agent_profile(agent_profile_id)
         if profile.is_system:
-            raise ApiException(status_code=400, code=40033, message="System agent profile cannot be deleted")
+            self._raise_system_agent_readonly()
         if profile.skills:
             skill_names = ", ".join(sorted(s.name for s in profile.skills))
             raise ApiException(

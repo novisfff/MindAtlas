@@ -25,6 +25,8 @@ export interface OpenClawCatalogItem {
   publishedVersionId?: string | null
   enabled: boolean
   isSystemItem: boolean
+  retired: boolean
+  retirementReason?: string | null
   available: boolean
   availabilityReason?: string | null
   schemaEditable: boolean

@@ -1,18 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowLeft, ChevronDown, Loader2, Plus } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
   useAgentProfilesQuery,
+  useCopyAgentProfileMutation,
+  useCopyWorkflowMutation,
   useCreateAgentProfileMutation,
   useCreateWorkflowMutation,
   useDeleteAgentProfileMutation,
   useDeleteWorkflowMutation,
   useSkillsQuery,
-  useUpdateAgentProfileMutation,
-  useUpdateWorkflowMutation,
   useWorkflowsQuery,
 } from '../queries'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -29,15 +28,14 @@ type DeleteRebindConflict = {
 export function AssistantTargetsSettings() {
   const { t } = useTranslation()
   const navigate = useNavigate()
-  const qc = useQueryClient()
   const { data: workflows = [], isLoading: isLoadingWorkflows } = useWorkflowsQuery()
   const { data: agents = [], isLoading: isLoadingAgents } = useAgentProfilesQuery()
   const { data: skills = [] } = useSkillsQuery()
 
   const createWorkflowMutation = useCreateWorkflowMutation()
   const createAgentMutation = useCreateAgentProfileMutation()
-  const updateWorkflowMutation = useUpdateWorkflowMutation()
-  const updateAgentMutation = useUpdateAgentProfileMutation()
+  const copyWorkflowMutation = useCopyWorkflowMutation()
+  const copyAgentMutation = useCopyAgentProfileMutation()
   const deleteWorkflowMutation = useDeleteWorkflowMutation()
   const deleteAgentMutation = useDeleteAgentProfileMutation()
 
@@ -47,8 +45,7 @@ export function AssistantTargetsSettings() {
   const [deleteTarget, setDeleteTarget] = useState<AssistantExecutableTarget | null>(null)
   const [deleteRebindConflict, setDeleteRebindConflict] = useState<DeleteRebindConflict | null>(null)
   const [expandedTargetKey, setExpandedTargetKey] = useState<string | null>(null)
-  const normalizationDoneRef = useRef(false)
-  const normalizationInFlightRef = useRef(false)
+  const [copyingTargetKey, setCopyingTargetKey] = useState<string | null>(null)
 
   const targets = useMemo(() => {
     const systemDefaultSkill = skills.find((item) => item.name === 'general_chat')
@@ -129,8 +126,38 @@ export function AssistantTargetsSettings() {
     navigate(`/settings/agent-editor/${target.id}`)
   }
 
+  const handleCopy = async (target: AssistantExecutableTarget) => {
+    if (copyWorkflowMutation.isPending || copyAgentMutation.isPending) return
+
+    const loadingToastId = toast.loading(
+      target.type === 'workflow'
+        ? t('settings.skills.workflowCopying')
+        : t('settings.skills.agentCopying'),
+    )
+    setCopyingTargetKey(target.key)
+
+    try {
+      if (target.type === 'workflow') {
+        const copied = await copyWorkflowMutation.mutateAsync(target.id)
+        toast.success(t('settings.skills.workflowCopied'), { id: loadingToastId })
+        navigate(`/settings/workflow-editor/${copied.id}`)
+        return
+      }
+
+      const copied = await copyAgentMutation.mutateAsync(target.id)
+      toast.success(t('settings.skills.agentCopied'), { id: loadingToastId })
+      navigate(`/settings/agent-editor/${copied.id}`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t('messages.error')
+      toast.error(message, { id: loadingToastId })
+    } finally {
+      setCopyingTargetKey(null)
+    }
+  }
+
   const isLoading = isLoadingWorkflows || isLoadingAgents
   const isCreating = createWorkflowMutation.isPending || createAgentMutation.isPending
+  const isCopyingAny = copyWorkflowMutation.isPending || copyAgentMutation.isPending
 
   const executeDelete = (
     target: AssistantExecutableTarget,
@@ -172,58 +199,6 @@ export function AssistantTargetsSettings() {
       },
     )
   }
-
-  useEffect(() => {
-    if (isLoading) return
-    if (normalizationDoneRef.current || normalizationInFlightRef.current) return
-
-    const disabledWorkflows = workflows.filter((item) => !item.enabled)
-    const disabledAgents = agents.filter((item) => !item.enabled)
-    if (disabledWorkflows.length === 0 && disabledAgents.length === 0) {
-      normalizationDoneRef.current = true
-      return
-    }
-
-    normalizationInFlightRef.current = true
-      ; (async () => {
-        const failed: string[] = []
-
-        await Promise.all([
-          ...disabledWorkflows.map(async (item) => {
-            try {
-              await updateWorkflowMutation.mutateAsync({
-                id: item.id,
-                data: { enabled: true },
-              })
-            } catch {
-              failed.push(item.name)
-            }
-          }),
-          ...disabledAgents.map(async (item) => {
-            try {
-              await updateAgentMutation.mutateAsync({
-                id: item.id,
-                data: { enabled: true },
-              })
-            } catch {
-              failed.push(item.name)
-            }
-          }),
-        ])
-
-        await Promise.all([
-          qc.invalidateQueries({ queryKey: ['assistant-workflows'] }),
-          qc.invalidateQueries({ queryKey: ['assistant-agents'] }),
-        ])
-
-        if (failed.length > 0) {
-          toast.error(t('settings.skills.targetNormalizationError'))
-        }
-      })().finally(() => {
-        normalizationInFlightRef.current = false
-        normalizationDoneRef.current = true
-      })
-  }, [agents, isLoading, qc, t, updateAgentMutation, updateWorkflowMutation, workflows])
 
   return (
     <div className="max-w-5xl mx-auto py-8 px-6 space-y-8">
@@ -352,7 +327,10 @@ export function AssistantTargetsSettings() {
                   isExpanded={expandedTargetKey === target.key}
                   onToggleExpand={() => setExpandedTargetKey((prev) => (prev === target.key ? null : target.key))}
                   onEdit={() => handleEdit(target)}
+                  onCopy={() => void handleCopy(target)}
                   onDelete={() => setDeleteTarget(target)}
+                  isCopying={copyingTargetKey === target.key}
+                  disableCopy={isCopyingAny}
                   isDeleting={isDeleting}
                   disableDelete={disableDelete}
                 />

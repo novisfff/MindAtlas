@@ -58,7 +58,6 @@ import { autoLayoutWorkflowWithSubflows } from '../components/workflow/autoLayou
 import { NODE_CATALOG_ITEMS } from '../components/workflow/nodeCatalog'
 import { normalizeStartNodeConfig } from '../components/workflow/startNodeConfig'
 import { getStartNodeFromNodes, getWorkflowEnvVarsFromNodes, toStartConfigWithEnvVars } from '../components/workflow/workflowEnvVars'
-
 import {
   HoverCard,
   HoverCardContent,
@@ -385,7 +384,9 @@ export default function WorkflowEditorPage() {
   const versionPanelOpen = activeSurface === 'versionHistory'
   const envPanelOpen = activeSurface === 'envVars'
   const copilotOpen = activeSurface === 'copilot'
+  const isSystemWorkflow = Boolean(workflowEntity?.isSystem)
   const editorToolbarLocked = activeDialog !== null || (copilotOpen && copilotPreviewVisible)
+  const editorMutationLocked = editorToolbarLocked || isSystemWorkflow
   const activeCopilotProposalKey = useMemo(
     () => activeCopilotProposal ? buildCopilotProposalKey(activeCopilotProposal) : null,
     [activeCopilotProposal],
@@ -1043,12 +1044,14 @@ export default function WorkflowEditorPage() {
   })
 
   const handleSave = useCallback(() => {
+    if (isSystemWorkflow) return
     saveMutation.mutate()
-  }, [saveMutation])
+  }, [isSystemWorkflow, saveMutation])
 
   const handlePublish = useCallback((versionName: string) => {
+    if (isSystemWorkflow) return
     publishMutation.mutate(versionName)
-  }, [publishMutation])
+  }, [isSystemWorkflow, publishMutation])
 
   const handleDeleteVersion = useCallback((versionId: string) => {
     if (!window.confirm(t('settings.skills.versioning.deleteConfirm'))) return
@@ -1060,6 +1063,7 @@ export default function WorkflowEditorPage() {
   }, [clearVersionsMutation])
 
   const handleWorkflowEnvVarsChange = useCallback((nextVars: typeof workflowEnvVars) => {
+    if (isSystemWorkflow) return
     const startNode = getStartNodeFromNodes(store.nodes)
     if (!startNode) {
       toast.error(t('settings.skills.envVars.startNodeMissing'))
@@ -1070,7 +1074,7 @@ export default function WorkflowEditorPage() {
       nextVars,
     )
     store.updateNodeConfig(startNode.id, nextConfig as NodeConfig, { pushHistory: true })
-  }, [store, t, workflowEnvVars])
+  }, [isSystemWorkflow, store, t, workflowEnvVars])
 
   const handleBack = useCallback(() => {
     if (hasUnsavedChanges && !window.confirm(t('settings.skills.unsavedChanges'))) return
@@ -1078,11 +1082,12 @@ export default function WorkflowEditorPage() {
   }, [hasUnsavedChanges, navigate, t])
 
   const handleAutoLayout = useCallback(() => {
+    if (isSystemWorkflow) return
     if (store.nodes.length <= 1) return
     const laidOut = autoLayoutWorkflowWithSubflows(store.nodes, store.edges)
     store.pushHistory()
     store.setNodes(laidOut)
-  }, [store])
+  }, [isSystemWorkflow, store])
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -1093,21 +1098,24 @@ export default function WorkflowEditorPage() {
         return
       }
       if (mod && e.key === 's') {
+        if (isSystemWorkflow) return
         e.preventDefault()
         handleSave()
       }
       if (mod && e.key === 'z' && !e.shiftKey) {
+        if (isSystemWorkflow) return
         e.preventDefault()
         store.undo()
       }
       if (mod && e.key === 'z' && e.shiftKey) {
+        if (isSystemWorkflow) return
         e.preventDefault()
         store.redo()
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [copilotOpen, handleSave, store])
+  }, [copilotOpen, handleSave, isSystemWorkflow, store])
 
   // Warn on page unload
   useEffect(() => {
@@ -1137,7 +1145,7 @@ export default function WorkflowEditorPage() {
           <FlowCanvas
             tools={workflowTools}
             workflowDescription={workflowDescriptionDraft}
-            readOnly={activeDialog !== null || (copilotOpen && copilotPreviewVisible)}
+            readOnly={editorMutationLocked}
             floatingUiEpoch={floatingUiEpoch}
           />
         </div>
@@ -1160,7 +1168,7 @@ export default function WorkflowEditorPage() {
           <div className="pointer-events-auto flex items-center gap-1.5 rounded-2xl border border-white/50 bg-white/70 p-2 shadow-sm backdrop-blur-md">
             <button
               onClick={() => store.undo()}
-              disabled={!store.canUndo() || editorToolbarLocked}
+              disabled={!store.canUndo() || editorMutationLocked}
               className="rounded-xl p-2 transition-colors hover:bg-white/60 disabled:opacity-30"
               title={t('settings.skills.workflowActions.undo')}
             >
@@ -1168,7 +1176,7 @@ export default function WorkflowEditorPage() {
             </button>
             <button
               onClick={() => store.redo()}
-              disabled={!store.canRedo() || editorToolbarLocked}
+              disabled={!store.canRedo() || editorMutationLocked}
               className="rounded-xl p-2 transition-colors hover:bg-white/60 disabled:opacity-30"
               title={t('settings.skills.workflowActions.redo')}
             >
@@ -1176,7 +1184,7 @@ export default function WorkflowEditorPage() {
             </button>
             <button
               onClick={handleAutoLayout}
-              disabled={store.nodes.length <= 1 || editorToolbarLocked}
+              disabled={store.nodes.length <= 1 || editorMutationLocked}
               className="rounded-xl p-2 transition-colors hover:bg-white/60 disabled:opacity-30"
               title={t('settings.skills.workflowActions.autoLayout')}
             >
@@ -1284,6 +1292,7 @@ export default function WorkflowEditorPage() {
             </HoverCard>
             <button
               onClick={() => {
+                if (isSystemWorkflow) return
                 if (copilotOpen) {
                   handleCloseCopilot()
                   return
@@ -1298,7 +1307,7 @@ export default function WorkflowEditorPage() {
                   instruction: '',
                 })
               }}
-              disabled={editorToolbarLocked}
+              disabled={editorMutationLocked}
               className={`
                 flex items-center gap-2 rounded-xl border px-3 py-1.5 text-sm font-medium shadow-sm transition-all
                 ${copilotOpen
@@ -1331,7 +1340,7 @@ export default function WorkflowEditorPage() {
             </button>
             <button
               onClick={() => toggleSurface('envVars')}
-              disabled={editorToolbarLocked}
+              disabled={editorMutationLocked}
               className={`
                 flex items-center gap-2 rounded-xl border px-3 py-1.5 text-sm font-medium shadow-sm transition-all
                 ${envPanelOpen
@@ -1350,7 +1359,7 @@ export default function WorkflowEditorPage() {
                 closeFloatingUi()
                 setActiveDialog('publish')
               }}
-              disabled={publishMutation.isPending || editorToolbarLocked}
+              disabled={publishMutation.isPending || editorMutationLocked}
               className="flex items-center gap-2 rounded-xl border border-blue-700 bg-blue-600 px-4 py-1.5 text-sm font-medium text-white shadow-sm transition-all hover:bg-blue-700 disabled:opacity-50"
               title={t('settings.skills.workflowActions.saveAndPublish')}
             >
@@ -1363,7 +1372,7 @@ export default function WorkflowEditorPage() {
             </button>
             <button
               onClick={() => saveMutation.mutate()}
-              disabled={saveMutation.isPending || !hasUnsavedChanges || editorToolbarLocked}
+              disabled={saveMutation.isPending || !hasUnsavedChanges || editorMutationLocked}
               className={`
                 flex items-center gap-2 rounded-xl border px-4 py-1.5 text-sm font-medium shadow-sm transition-all
                 ${hasUnsavedChanges
@@ -1382,8 +1391,25 @@ export default function WorkflowEditorPage() {
           </div>
         </div>
 
+        {isSystemWorkflow ? (
+          <div className="absolute left-1/2 top-[5rem] z-10 w-[min(960px,calc(100vw-2rem))] -translate-x-1/2 pointer-events-none">
+            <div className="pointer-events-auto rounded-2xl border border-amber-200 bg-amber-50/95 px-4 py-3 shadow-sm backdrop-blur">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div className="space-y-1">
+                  <p className="text-sm font-semibold text-amber-900">
+                    {t('settings.skills.systemTargetReadonlyBannerTitle')}
+                  </p>
+                  <p className="text-sm leading-6 text-amber-800">
+                    {t('settings.skills.systemWorkflowReadonlyDescription')}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         <div className="absolute left-4 top-[4.75rem] bottom-24 z-10 flex w-fit min-h-0 flex-col justify-start pointer-events-none">
-          <div className={`min-h-0 flex flex-col ${editorToolbarLocked ? 'pointer-events-none opacity-60' : 'pointer-events-auto'}`}>
+          <div className={`min-h-0 flex flex-col ${editorMutationLocked ? 'pointer-events-none opacity-60' : 'pointer-events-auto'}`}>
             <NodePalette tools={workflowTools} />
           </div>
         </div>
@@ -1407,20 +1433,33 @@ export default function WorkflowEditorPage() {
                   className="h-full min-h-0 animate-in fade-in-50 slide-in-from-right-1 duration-150"
                 >
                   {visibleSurface === 'property' ? (
-                    <PropertyPanel
-                      tools={workflowTools}
-                      workflowDescription={workflowDescriptionDraft}
-                      onWorkflowDescriptionChange={setWorkflowDescriptionDraft}
-                      selectionTarget={activePropertyTarget}
-                      onClose={closeActiveSurface}
-                      onAskAiEdit={({ title, instruction, selection }) => openCopilot({
-                        mode: 'edit_selection',
-                        title,
-                        instruction,
-                        selection,
-                        restoreOnClose: true,
-                      })}
-                    />
+                    isSystemWorkflow ? (
+                      <div className="flex h-full min-h-0 flex-col rounded-[24px] border border-slate-200 bg-white p-6 shadow-sm">
+                        <div className="space-y-3">
+                          <p className="text-base font-semibold text-slate-900">
+                            {t('settings.skills.systemTargetReadonlyBannerTitle')}
+                          </p>
+                          <p className="text-sm leading-6 text-slate-600">
+                            {t('settings.skills.systemWorkflowReadonlyDescription')}
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      <PropertyPanel
+                        tools={workflowTools}
+                        workflowDescription={workflowDescriptionDraft}
+                        onWorkflowDescriptionChange={setWorkflowDescriptionDraft}
+                        selectionTarget={activePropertyTarget}
+                        onClose={closeActiveSurface}
+                        onAskAiEdit={({ title, instruction, selection }) => openCopilot({
+                          mode: 'edit_selection',
+                          title,
+                          instruction,
+                          selection,
+                          restoreOnClose: true,
+                        })}
+                      />
+                    )
                   ) : null}
                   {visibleSurface === 'validation' ? (
                     <WorkflowValidationChecklistPanel

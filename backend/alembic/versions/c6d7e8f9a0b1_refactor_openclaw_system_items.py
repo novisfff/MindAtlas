@@ -20,6 +20,7 @@ depends_on = None
 
 
 _TABLE_NAME = "openclaw_capability_item"
+_SYSTEM_DEFAULT_KEY_CONSTRAINT = "ck_oc_item_sys_default_key_req_sys_item"
 _TOOL_SOURCE_BY_DEFAULT_KEY = {
     "capture_entry": "openclaw_capture_entry",
     "search_entries": "openclaw_search_entries",
@@ -136,7 +137,7 @@ def upgrade() -> None:
         _NEW_SINGLE_SOURCE_CONSTRAINT,
     )
     op.create_check_constraint(
-        "ck_openclaw_capability_item_system_default_key_requires_system_item",
+        _SYSTEM_DEFAULT_KEY_CONSTRAINT,
         _TABLE_NAME,
         "(system_default_key IS NULL) OR (is_system_item = true)",
     )
@@ -151,7 +152,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_openclaw_capability_item_system_default_key", table_name=_TABLE_NAME)
     op.drop_constraint(
-        "ck_openclaw_capability_item_system_default_key_requires_system_item",
+        _SYSTEM_DEFAULT_KEY_CONSTRAINT,
         _TABLE_NAME,
         type_="check",
     )

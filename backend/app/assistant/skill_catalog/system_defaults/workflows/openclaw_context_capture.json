@@ -192,6 +192,37 @@
             "name": "summary",
             "type": "string",
             "value": "{{tool_create.summary}}"
+          },
+          {
+            "name": "tagNames",
+            "type": "array",
+            "itemsType": "string",
+            "value": "{{tool_create.tags}}"
+          },
+          {
+            "name": "timeMode",
+            "type": "string",
+            "value": "{{tool_create.time_mode}}"
+          },
+          {
+            "name": "timeAt",
+            "nullable": true,
+            "value": "{{tool_create.time_at}}"
+          },
+          {
+            "name": "timeFrom",
+            "nullable": true,
+            "value": "{{tool_create.time_from}}"
+          },
+          {
+            "name": "timeTo",
+            "nullable": true,
+            "value": "{{tool_create.time_to}}"
+          },
+          {
+            "name": "createdAt",
+            "type": "string",
+            "value": "{{tool_create.created_at}}"
           }
         ]
       }

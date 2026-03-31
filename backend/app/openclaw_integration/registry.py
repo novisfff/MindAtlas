@@ -18,7 +18,6 @@ OpenClawSystemImplementationType = Literal["entry", "relation", "knowledge_graph
 OPENCLAW_CONTEXT_CAPTURE_DEFAULT_KEY: OpenClawSystemDefaultKey = "submit_context_capture"
 OPENCLAW_CONTEXT_CAPTURE_WORKFLOW_NAME = "system_openclaw_context_capture__workflow"
 OPENCLAW_SYSTEM_DEFAULT_TOOL_SOURCE_NAMES: dict[OpenClawSystemCapabilityKey, str] = {
-    "capture_entry": "openclaw_capture_entry",
     "search_entries": "openclaw_search_entries",
     "get_entry": "openclaw_get_entry",
     "create_relation": "openclaw_create_relation",
@@ -80,25 +79,6 @@ class OpenClawSystemItemDefinition:
 
 
 _TOOL_SYSTEM_ITEM_TEMPLATES: tuple[_ToolSystemItemTemplate, ...] = (
-    _ToolSystemItemTemplate(
-        key="capture_entry",
-        tool_name="mindatlas_capture_entry",
-        enabled_by_default=False,
-        implementation_type="entry",
-        title=_LocalizedText(zh="字段级记录内容", en="Field-Level Capture Entry"),
-        description=_LocalizedText(
-            zh="按完整字段创建一条 MindAtlas 记录，适合管理员仍需显式拼装字段时使用。",
-            en="Create a MindAtlas entry from explicit fields when an administrator still needs field-level capture.",
-        ),
-        input_summary=_LocalizedText(
-            zh="标题、类型，以及可选的摘要、正文、标签和时间。",
-            en="Title, entry type, plus optional summary, content, tags, and time.",
-        ),
-        output_summary=_LocalizedText(
-            zh="返回新建记录的核心字段。",
-            en="Returns the core fields of the created entry.",
-        ),
-    ),
     _ToolSystemItemTemplate(
         key="search_entries",
         tool_name="mindatlas_search_entries",
@@ -217,10 +197,10 @@ _WORKFLOW_SYSTEM_ITEM_TEMPLATES: tuple[_WorkflowSystemItemTemplate, ...] = (
         key=OPENCLAW_CONTEXT_CAPTURE_DEFAULT_KEY,
         tool_name="mindatlas_submit_context_capture",
         enabled_by_default=True,
-        title=_LocalizedText(zh="提交记录上下文", en="Submit Record Context"),
+        title=_LocalizedText(zh="智能创建记录", en="Smart Create Entry"),
         description=_LocalizedText(
-            zh="向 MindAtlas 提交轻量上下文，由系统工作流自动物化最终记录字段并完成入库。",
-            en="Submit thin context to MindAtlas so a system workflow can materialize the final record fields and persist them.",
+            zh="向 MindAtlas 提交轻量上下文，由系统工作流自动物化最终记录字段并完成智能入库。",
+            en="Submit thin context to MindAtlas so a system workflow can materialize the final entry fields and save the record intelligently.",
         ),
         workflow_canonical_name=OPENCLAW_CONTEXT_CAPTURE_WORKFLOW_NAME,
         workflow_preset_file_zh="workflows/openclaw_context_capture.json",

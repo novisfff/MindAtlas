@@ -296,6 +296,46 @@ class SystemAiBehaviorBindingTests(unittest.TestCase):
         self.assertEqual(first["created_workflow"]["name"], "weekly_report_example__workflow")
         self.assertEqual(second["created_workflow"]["name"], "weekly_report_example__workflow__2")
 
+    def test_list_system_behaviors_reconciles_mutated_default_workflow(self) -> None:
+        from app.assistant_config.models import AssistantWorkflowVersion  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        defaults = svc.list_system_behaviors()
+        weekly_default_id = next(
+            item["canonical_default_target"]["id"]
+            for item in defaults
+            if item["behavior_key"] == "weekly_report_generation"
+        )
+
+        weekly_default = svc.get_workflow(weekly_default_id)
+        english_input = self._english_like_system_behavior_default_workflow_input("weekly_report_generation")
+        svc._apply_workflow_to_workflow_entity(weekly_default, english_input, persist=True)  # noqa: SLF001
+        mutated_version = svc._create_workflow_version(  # noqa: SLF001
+            workflow=weekly_default,
+            workflow_input=english_input,
+            version_source="publish",
+            version_name="Mutated English",
+        )
+        weekly_default.draft_version_id = mutated_version.id
+        weekly_default.published_version_id = mutated_version.id
+        self.db.commit()
+
+        items = svc.list_system_behaviors()
+        weekly = next(item for item in items if item["behavior_key"] == "weekly_report_generation")
+        self.assertTrue(weekly["current_binding"]["is_canonical_default"])
+
+        restored = svc.get_workflow(weekly_default_id)
+        self.assertEqual(self._node_by_id(restored, "tool_entries").label, "加载记录")
+        self.assertEqual(self._node_by_id(restored, "llm_report").label, "生成周报")
+        self.assertIn("请为 MindAtlas 生成一份简洁、扎实的中文周报", self._node_by_id(restored, "llm_report").config["systemPrompt"])
+        version_count = (
+            self.db.query(AssistantWorkflowVersion)
+            .filter(AssistantWorkflowVersion.workflow_id == weekly_default_id)
+            .count()
+        )
+        self.assertEqual(version_count, 1)
+
     def test_reset_system_behavior_binding_restores_latest_chinese_default_workflow(self) -> None:
         from app.assistant_config.models import AssistantWorkflowVersion  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -322,9 +362,8 @@ class SystemAiBehaviorBindingTests(unittest.TestCase):
         weekly_default.description = "English weekly default"
         self.db.commit()
 
-        mutated = svc.get_workflow(weekly_default_id)
-        self.assertEqual(self._node_by_id(mutated, "tool_entries").label, "Load Entries")
-        self.assertIn("Generate a concise weekly report", self._node_by_id(mutated, "llm_report").config["systemPrompt"])
+        self.assertEqual(weekly_default.description, "English weekly default")
+        self.assertEqual(self._node_by_id(weekly_default, "tool_entries").label, "Load Entries")
 
         svc.reset_system_behavior_binding("weekly_report_generation")
 

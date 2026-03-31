@@ -273,6 +273,8 @@ def wrap_tool_with_db(tool: Any, db_bind: Any) -> Callable:
             tool_func = getattr(tool, "func", None)
             if callable(tool_func):
                 return tool_func(**args)
+            if callable(tool):
+                return tool(**args)
             return tool.invoke(args)
         finally:
             session.close()

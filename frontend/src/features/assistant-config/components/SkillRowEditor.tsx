@@ -193,6 +193,12 @@ export function SkillRowEditor({
             </button>
           )}
         </div>
+
+        {selectedTarget?.isSystem && (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-800">
+            {t('settings.skills.systemTargetBindingHint')}
+          </div>
+        )}
       </div>
 
       <div className="space-y-3 p-5 rounded-2xl bg-slate-50 border shadow-inner">

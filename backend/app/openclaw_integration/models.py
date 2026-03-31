@@ -10,6 +10,7 @@ from app.database import Base
 
 class OpenClawCapabilityItem(UuidPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "openclaw_capability_item"
+    _SYSTEM_DEFAULT_KEY_CONSTRAINT = "ck_oc_item_sys_default_key_req_sys_item"
 
     capability_key = Column(String(128), nullable=False, unique=True, index=True)
     tool_name = Column(String(128), nullable=False, unique=True, index=True)
@@ -82,7 +83,7 @@ class OpenClawCapabilityItem(UuidPrimaryKeyMixin, TimestampMixin, Base):
         ),
         CheckConstraint(
             "(system_default_key IS NULL) OR (is_system_item = true)",
-            name="ck_openclaw_capability_item_system_default_key_requires_system_item",
+            name=_SYSTEM_DEFAULT_KEY_CONSTRAINT,
         ),
         Index("ix_openclaw_capability_item_system_default_key", "system_default_key"),
     )

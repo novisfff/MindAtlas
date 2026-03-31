@@ -4,12 +4,13 @@ import {
     Bot,
     ChevronDown,
     ChevronRight,
+    Copy,
     ExternalLink,
+    Loader2,
     Trash2,
     Workflow,
     Clock,
-    Hash,
-    MoreHorizontal
+    Hash
 } from 'lucide-react'
 import { WorkflowReadonlyPreview } from './workflow/WorkflowReadonlyPreview'
 import type { AssistantExecutableTarget } from './skillTargetOptions'
@@ -24,7 +25,10 @@ interface AssistantTargetCardProps {
     isExpanded: boolean
     onToggleExpand: () => void
     onEdit: () => void
+    onCopy: () => void
     onDelete: () => void
+    isCopying: boolean
+    disableCopy: boolean
     isDeleting: boolean
     disableDelete: boolean
 }
@@ -36,7 +40,10 @@ export const AssistantTargetCard = memo(function AssistantTargetCard({
     isExpanded,
     onToggleExpand,
     onEdit,
+    onCopy,
     onDelete,
+    isCopying,
+    disableCopy,
     isDeleting,
     disableDelete,
 }: AssistantTargetCardProps) {
@@ -112,7 +119,10 @@ export const AssistantTargetCard = memo(function AssistantTargetCard({
                 </div>
 
                 {/* Actions */}
-                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity focus-within:opacity-100">
+                <div className={cn(
+                    "flex items-center gap-1 transition-opacity focus-within:opacity-100",
+                    isCopying ? "opacity-100" : "opacity-0 group-hover:opacity-100",
+                )}>
                     <button
                         onClick={(e) => {
                             e.stopPropagation()
@@ -122,6 +132,26 @@ export const AssistantTargetCard = memo(function AssistantTargetCard({
                         title={t('settings.skills.editTarget')}
                     >
                         <ExternalLink className="w-4 h-4" />
+                    </button>
+                    <button
+                        onClick={(e) => {
+                            e.stopPropagation()
+                            onCopy()
+                        }}
+                        disabled={disableCopy}
+                        className={cn(
+                            "p-2 rounded-lg transition-colors",
+                            disableCopy
+                                ? "cursor-not-allowed opacity-50 text-muted-foreground"
+                                : "hover:bg-muted text-muted-foreground hover:text-foreground"
+                        )}
+                        title={isCopying ? t('messages.loading') : t('settings.skills.copyAsDuplicate')}
+                    >
+                        {isCopying ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                            <Copy className="w-4 h-4" />
+                        )}
                     </button>
 
                     <div className="w-px h-4 bg-border mx-1" />

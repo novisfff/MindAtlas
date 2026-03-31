@@ -21,6 +21,38 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.db.close()
 
+    def _system_workflow(self):
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        return svc, next(item for item in svc.list_workflows(include_disabled=True) if item.is_system)
+
+    def _system_agent(self):
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        return svc, next(item for item in svc.list_agent_profiles(include_disabled=True) if item.is_system)
+
+    def test_sync_system_skills_and_list_workflows_keep_system_workflow_edges_unique(self) -> None:
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+
+        for _ in range(3):
+            svc.sync_system_skills()
+            svc.list_workflows(include_disabled=True)
+
+        workflows = [item for item in svc.list_workflows(include_disabled=True) if item.is_system]
+        self.assertTrue(workflows)
+        for workflow in workflows:
+            edge_keys = {
+                (edge.source_node_id, edge.source_handle, edge.target_node_id, edge.target_handle)
+                for edge in workflow.edges
+            }
+            self.assertEqual(len(workflow.edges), len(edge_keys))
+
     def test_create_update_delete_remote_tool(self) -> None:
         from app.assistant_config.models import AssistantTool  # noqa: E402
         from app.assistant_config.schemas import AssistantToolCreateRequest, AssistantToolUpdateRequest  # noqa: E402
@@ -77,7 +109,8 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertEqual(updated.description, "d2")
 
         svc.delete_skill(created.id)
-        self.assertEqual(self.db.query(AssistantSkill).count(), 0)
+        self.assertIsNone(self.db.query(AssistantSkill).filter(AssistantSkill.id == created.id).first())
+        self.assertEqual(self.db.query(AssistantSkill).filter(AssistantSkill.is_system.is_(False)).count(), 0)
 
     def test_create_skill_langgraph_persists_pattern(self) -> None:
         from app.assistant_config.schemas import AssistantSkillCreateRequest  # noqa: E402
@@ -491,3 +524,190 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
 
         collected = AssistantConfigService._collect_workflow_custom_model_ids(workflow_nodes)
         self.assertEqual(collected, {main_model_id, body_model_id})
+
+    def test_system_workflow_mutations_are_readonly(self) -> None:
+        from app.assistant_config.schemas import AssistantWorkflowUpdateRequest, WorkflowPublishRequest  # noqa: E402
+        from app.common.exceptions import ApiException  # noqa: E402
+
+        svc, workflow = self._system_workflow()
+        version_id = svc.list_workflow_versions(workflow.id).versions[0].id
+        draft = svc._get_workflow_draft_input(workflow)  # noqa: SLF001
+
+        operations = [
+            lambda: svc.update_workflow_entity(
+                workflow.id,
+                AssistantWorkflowUpdateRequest(description="mutated"),
+            ),
+            lambda: svc.publish_workflow(
+                workflow.id,
+                WorkflowPublishRequest(workflow=draft),
+            ),
+            lambda: svc.rollback_workflow_version(workflow.id, version_id),
+            lambda: svc.delete_workflow_version(workflow.id, version_id),
+            lambda: svc.clear_workflow_versions(workflow.id),
+            lambda: svc.delete_workflow(workflow.id),
+        ]
+
+        for operation in operations:
+            with self.subTest(operation=operation):
+                with self.assertRaises(ApiException) as ctx:
+                    operation()
+                self.assertEqual(ctx.exception.status_code, 400)
+                self.assertEqual(ctx.exception.code, 40034)
+
+    def test_system_agent_mutations_are_readonly(self) -> None:
+        from app.assistant_config.schemas import AgentPublishDraftInput, AgentPublishRequest, AssistantAgentProfileUpdateRequest  # noqa: E402
+        from app.common.exceptions import ApiException  # noqa: E402
+
+        svc, profile = self._system_agent()
+        version_id = svc.list_agent_profile_versions(profile.id).versions[0].id
+        draft = svc._get_agent_profile_draft(profile)  # noqa: SLF001
+
+        operations = [
+            lambda: svc.update_agent_profile(
+                profile.id,
+                AssistantAgentProfileUpdateRequest(description="mutated"),
+            ),
+            lambda: svc.publish_agent_profile(
+                profile.id,
+                AgentPublishRequest(
+                    draft=AgentPublishDraftInput.model_validate(draft.model_dump()),
+                ),
+            ),
+            lambda: svc.rollback_agent_profile_version(profile.id, version_id),
+            lambda: svc.delete_agent_profile_version(profile.id, version_id),
+            lambda: svc.clear_agent_profile_versions(profile.id),
+            lambda: svc.delete_agent_profile(profile.id),
+        ]
+
+        for operation in operations:
+            with self.subTest(operation=operation):
+                with self.assertRaises(ApiException) as ctx:
+                    operation()
+                self.assertEqual(ctx.exception.status_code, 400)
+                self.assertEqual(ctx.exception.code, 40035)
+
+    def test_copy_custom_workflow_uses_current_draft(self) -> None:
+        from app.assistant_config.schemas import AssistantWorkflowCreateRequest, AssistantWorkflowUpdateRequest  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        created = svc.create_workflow(
+            AssistantWorkflowCreateRequest(
+                name="copy_custom_workflow",
+                description="initial",
+                enabled=True,
+            )
+        )
+        draft = svc._get_workflow_draft_input(created).model_copy(deep=True)  # noqa: SLF001
+        output_node = next(node for node in draft.nodes if node.node_id == "output_1")
+        output_node.label = "Draft Output"
+        svc.update_workflow_entity(
+            created.id,
+            AssistantWorkflowUpdateRequest(
+                description="draft description",
+                workflow=draft,
+            ),
+        )
+
+        copied = svc.copy_workflow(created.id)
+        copied_draft = svc._get_workflow_draft_input(copied)  # noqa: SLF001
+
+        self.assertFalse(copied.is_system)
+        self.assertEqual(copied.description, "draft description")
+        self.assertEqual(copied.draft_version_id, copied.published_version_id)
+        self.assertEqual(
+            svc._workflow_input_to_snapshot(copied_draft),  # noqa: SLF001
+            svc._workflow_input_to_snapshot(draft),  # noqa: SLF001
+        )
+
+    def test_copy_system_workflow_uses_canonical_baseline(self) -> None:
+        from app.assistant_config.models import AssistantWorkflowVersion  # noqa: E402
+
+        svc, workflow = self._system_workflow()
+        baseline = svc._resolve_system_workflow_baseline_input(workflow)  # noqa: SLF001
+        self.assertIsNotNone(baseline)
+
+        mutated = baseline.model_copy(deep=True)
+        mutated.nodes[0].label = "Mutated Baseline"
+        published = (
+            self.db.query(AssistantWorkflowVersion)
+            .filter(AssistantWorkflowVersion.id == workflow.published_version_id)
+            .first()
+        )
+        self.assertIsNotNone(published)
+        published.snapshot = svc._workflow_input_to_snapshot(mutated)  # noqa: SLF001
+        workflow.description = "mutated description"
+        self.db.commit()
+
+        copied = svc.copy_workflow(workflow.id)
+        refreshed_system = svc.get_workflow(workflow.id)
+
+        self.assertFalse(copied.is_system)
+        self.assertEqual(
+            svc._workflow_input_to_snapshot(svc._get_workflow_draft_input(copied)),  # noqa: SLF001
+            svc._workflow_input_to_snapshot(svc._get_workflow_draft_input(refreshed_system)),  # noqa: SLF001
+        )
+        self.assertNotEqual(copied.description, "mutated description")
+
+    def test_copy_custom_agent_uses_current_draft(self) -> None:
+        from app.assistant_config.schemas import AssistantAgentProfileCreateRequest, AssistantAgentProfileUpdateRequest  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        created = svc.create_agent_profile(
+            AssistantAgentProfileCreateRequest(
+                name="copy_custom_agent",
+                description="initial",
+                system_prompt="Initial prompt",
+                tools=[],
+                kb_config={"enabled": False},
+                enabled=True,
+                model_source="default",
+            )
+        )
+        svc.update_agent_profile(
+            created.id,
+            AssistantAgentProfileUpdateRequest(
+                description="draft description",
+                system_prompt="Draft prompt",
+            ),
+        )
+
+        copied = svc.copy_agent_profile(created.id)
+        copied_draft = svc._get_agent_profile_draft(copied)  # noqa: SLF001
+
+        self.assertFalse(copied.is_system)
+        self.assertEqual(copied.description, "draft description")
+        self.assertEqual(copied.system_prompt, "Draft prompt")
+        self.assertEqual(copied.draft_version_id, copied.published_version_id)
+        self.assertEqual(copied_draft.system_prompt, "Draft prompt")
+
+    def test_copy_system_agent_uses_canonical_baseline(self) -> None:
+        from app.assistant_config.models import AssistantAgentProfileVersion  # noqa: E402
+
+        svc, profile = self._system_agent()
+        baseline = svc._resolve_system_agent_baseline_draft(profile)  # noqa: SLF001
+        self.assertIsNotNone(baseline)
+
+        published = (
+            self.db.query(AssistantAgentProfileVersion)
+            .filter(AssistantAgentProfileVersion.id == profile.published_version_id)
+            .first()
+        )
+        self.assertIsNotNone(published)
+        mutated_snapshot = dict(published.snapshot or {})
+        mutated_snapshot["system_prompt"] = "Mutated prompt"
+        published.snapshot = mutated_snapshot
+        profile.description = "mutated description"
+        self.db.commit()
+
+        copied = svc.copy_agent_profile(profile.id)
+        refreshed_system = svc.get_agent_profile(profile.id)
+        copied_draft = svc._get_agent_profile_draft(copied)  # noqa: SLF001
+        system_draft = svc._get_agent_profile_draft(refreshed_system)  # noqa: SLF001
+
+        self.assertFalse(copied.is_system)
+        self.assertEqual(copied_draft.system_prompt, system_draft.system_prompt)
+        self.assertEqual(list(copied_draft.tools or []), list(system_draft.tools or []))
+        self.assertNotEqual(copied.description, "mutated description")

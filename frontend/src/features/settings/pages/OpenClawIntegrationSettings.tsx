@@ -184,6 +184,7 @@ function CatalogItemCard({
   userLabel,
   exposedLabel,
   hiddenLabel,
+  retiredLabel,
   availableLabel,
   unavailableLabel,
   inputLabel,
@@ -198,6 +199,7 @@ function CatalogItemCard({
   userLabel: string
   exposedLabel: string
   hiddenLabel: string
+  retiredLabel: string
   availableLabel: string
   unavailableLabel: string
   inputLabel: string
@@ -222,15 +224,21 @@ function CatalogItemCard({
               >
                 {item.isSystemItem ? systemLabel : userLabel}
               </CapabilityBadge>
-              <CapabilityBadge
-                colorClassName={
-                  item.available
-                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                    : 'border-amber-200 bg-amber-50 text-amber-700'
-                }
-              >
-                {item.available ? availableLabel : unavailableLabel}
-              </CapabilityBadge>
+              {item.retired ? (
+                <CapabilityBadge colorClassName="border-amber-200 bg-amber-50 text-amber-700">
+                  {retiredLabel}
+                </CapabilityBadge>
+              ) : (
+                <CapabilityBadge
+                  colorClassName={
+                    item.available
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                      : 'border-amber-200 bg-amber-50 text-amber-700'
+                  }
+                >
+                  {item.available ? availableLabel : unavailableLabel}
+                </CapabilityBadge>
+              )}
             </div>
             <p className="text-sm leading-6 text-slate-600">{item.description || '-'}</p>
             <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
@@ -243,20 +251,26 @@ function CatalogItemCard({
                 </span>
               ) : null}
               <span className="rounded-full bg-slate-100 px-2.5 py-1">
-                {item.enabled ? exposedLabel : hiddenLabel}
+                {item.retired ? retiredLabel : item.enabled ? exposedLabel : hiddenLabel}
               </span>
             </div>
           </div>
 
           <div className="flex items-center gap-2 self-start">
-            <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-3 py-2">
-              <div className="flex items-center gap-3">
-                <Switch checked={item.enabled} onCheckedChange={onToggle} />
-                <span className="text-sm font-medium text-slate-800">
-                  {item.enabled ? exposedLabel : hiddenLabel}
-                </span>
+            {item.retired ? (
+              <div className="rounded-[22px] border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800">
+                {retiredLabel}
               </div>
-            </div>
+            ) : (
+              <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-3 py-2">
+                <div className="flex items-center gap-3">
+                  <Switch checked={item.enabled} onCheckedChange={onToggle} />
+                  <span className="text-sm font-medium text-slate-800">
+                    {item.enabled ? exposedLabel : hiddenLabel}
+                  </span>
+                </div>
+              </div>
+            )}
             <Button type="button" variant="outline" className="rounded-2xl" onClick={onEdit}>
               <Pencil className="h-4 w-4" />
             </Button>
@@ -283,7 +297,13 @@ function CatalogItemCard({
           </div>
         </div>
 
-        {!item.available && item.availabilityReason ? (
+        {item.retired && item.retirementReason ? (
+          <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm leading-6 text-amber-800">
+            {item.retirementReason}
+          </div>
+        ) : null}
+
+        {!item.retired && !item.available && item.availabilityReason ? (
           <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm leading-6 text-amber-800">
             {item.availabilityReason}
           </div>
@@ -376,6 +396,11 @@ export function OpenClawIntegrationSettingsPage() {
     [current]
   )
   const currentSources = sourceQuery.data?.items ?? []
+  const selectedSource = useMemo(
+    () => currentSources.find((item) => item.sourceKey === selectedSourceKey) ?? null,
+    [currentSources, selectedSourceKey]
+  )
+  const editingRetiredItem = dialogMode === 'edit' && editingItem?.retired ? editingItem : null
   useEffect(() => {
     if (!dialogOpen) return
     if (selectedSourceKey) return
@@ -1000,6 +1025,7 @@ export function OpenClawIntegrationSettingsPage() {
                 userLabel={t('openclawIntegration.labels.user')}
                 exposedLabel={t('openclawIntegration.status.exposed')}
                 hiddenLabel={t('openclawIntegration.status.hidden')}
+                retiredLabel={t('openclawIntegration.status.retired')}
                 availableLabel={t('openclawIntegration.status.available')}
                 unavailableLabel={t('openclawIntegration.status.unavailable')}
                 inputLabel={t('openclawIntegration.labels.input')}
@@ -1138,6 +1164,16 @@ export function OpenClawIntegrationSettingsPage() {
                   )
                 })}
               </div>
+              {selectedSource?.isSystem && (draft.sourceType === 'workflow' || draft.sourceType === 'agent') ? (
+                <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm leading-6 text-amber-800">
+                  {t('settings.skills.systemTargetBindingHint')}
+                </div>
+              ) : null}
+              {editingRetiredItem?.retirementReason ? (
+                <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm leading-6 text-amber-800">
+                  {editingRetiredItem.retirementReason}
+                </div>
+              ) : null}
             </section>
 
             <section className="grid gap-4 md:grid-cols-2">
@@ -1168,10 +1204,16 @@ export function OpenClawIntegrationSettingsPage() {
                       {t('openclawIntegration.form.exposed')}
                     </p>
                     <p className="text-sm leading-6 text-slate-600">
-                      {t('openclawIntegration.form.exposedHint')}
+                      {editingRetiredItem
+                        ? t('openclawIntegration.form.retiredHint')
+                        : t('openclawIntegration.form.exposedHint')}
                     </p>
                   </div>
-                  <Switch checked={draft.enabled} onCheckedChange={(enabled) => patchDraft({ enabled })} />
+                  <Switch
+                    checked={editingRetiredItem ? false : draft.enabled}
+                    onCheckedChange={(enabled) => patchDraft({ enabled })}
+                    disabled={Boolean(editingRetiredItem)}
+                  />
                 </div>
               </div>
             </section>

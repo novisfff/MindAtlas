@@ -415,6 +415,11 @@ export function SystemAiBehaviorsSettings() {
                                 <br/>
                                 {t('settings.systemBehaviors.createExampleWorkflowHint')}
                               </p>
+                              {(behavior.currentBinding.isCanonicalDefault || currentTarget?.isSystem) && (
+                                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-[13px] leading-6 text-amber-800">
+                                  {t('settings.skills.systemTargetBindingHint')}
+                                </div>
+                              )}
                             </div>
                             <button
                               type="button"

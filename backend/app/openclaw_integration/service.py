@@ -75,7 +75,8 @@ logger = logging.getLogger(__name__)
 OPENCLAW_INTEGRATION_CONFIG_KEY = "openclaw_integration_config"
 OPENCLAW_CAPABILITY_KEY_RE = re.compile(r"^[a-z0-9_]+$")
 OPENCLAW_SCHEMA_FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-OPENCLAW_SYSTEM_ITEM_VERSION = 3
+OPENCLAW_SYSTEM_ITEM_VERSION = 4
+OPENCLAW_RETIRED_SOURCE_TOOL_NAMES = frozenset({"openclaw_capture_entry"})
 
 OPENCLAW_AUTH_ERROR_CODE = 40161
 OPENCLAW_DISABLED_ERROR_CODE = 40361
@@ -612,6 +613,30 @@ class OpenClawIntegrationService:
             if getattr(definition, "name", None)
         }
 
+    @staticmethod
+    def _is_retired_source_tool_name(source_tool_name: str | None) -> bool:
+        normalized = _normalize_optional_text(source_tool_name)
+        return bool(normalized and normalized.lower() in OPENCLAW_RETIRED_SOURCE_TOOL_NAMES)
+
+    def _retired_source_reason(self, *, locale: str) -> str:
+        return _localized_message(
+            locale,
+            zh="这个字段级创建记录来源已从 OpenClaw 官方能力目录中退役。请改用“智能创建记录（submit_context_capture）”系统能力，或重新绑定到其他来源。",
+            en="This field-level entry creation source has been retired from the official OpenClaw capability catalog. Use the smart create entry system capability instead, or rebind this item to another source.",
+        )
+
+    def _retired_catalog_item_state(
+        self,
+        item: OpenClawCapabilityItem,
+        *,
+        locale: str,
+    ) -> tuple[bool, str | None]:
+        if item.source_type != "tool":
+            return False, None
+        if self._is_retired_source_tool_name(item.source_tool_name):
+            return True, self._retired_source_reason(locale=locale)
+        return False, None
+
     def _resolve_tool_source(
         self,
         *,
@@ -870,18 +895,23 @@ class OpenClawIntegrationService:
         should_seed_missing = item_version < OPENCLAW_SYSTEM_ITEM_VERSION
         changed = False
 
-        existing_by_key = {
-            item.system_default_key: item
-            for item in self.db.query(OpenClawCapabilityItem)
+        definitions = list_openclaw_system_item_definitions(locale)
+        definition_keys = {definition.key for definition in definitions}
+        existing_system_items = (
+            self.db.query(OpenClawCapabilityItem)
             .filter(
                 OpenClawCapabilityItem.system_default_key.isnot(None),
                 OpenClawCapabilityItem.is_system_item.is_(True),
             )
             .all()
+        )
+        existing_by_key = {
+            item.system_default_key: item
+            for item in existing_system_items
             if item.system_default_key
         }
 
-        for definition in list_openclaw_system_item_definitions(locale):
+        for definition in definitions:
             input_schema = definition.input_schema or _EMPTY_OBJECT_SCHEMA
             output_schema = definition.output_schema or _EMPTY_OBJECT_SCHEMA
             input_summary = definition.input_summary or ""
@@ -942,6 +972,11 @@ class OpenClawIntegrationService:
                 changed = True
             if not migrated and definition.key in legacy_enabled_map and item.enabled != bool(legacy_enabled_map[definition.key]):
                 item.enabled = bool(legacy_enabled_map[definition.key])
+                changed = True
+
+        for item in existing_system_items:
+            if item.system_default_key and item.system_default_key not in definition_keys:
+                self.db.delete(item)
                 changed = True
 
         if not migrated and legacy_enabled_map:
@@ -1015,7 +1050,7 @@ class OpenClawIntegrationService:
                     zh="LightRAG 配置尚未完整就绪。",
                     en="LightRAG configuration is still incomplete.",
                 )
-        if definition.key in {"capture_entry", "search_entries", "get_entry"}:
+        if definition.key in {"submit_context_capture", "search_entries", "get_entry"}:
             has_entry_type = self.db.query(EntryType.id).filter(EntryType.enabled.is_(True)).first() is not None
             if not has_entry_type:
                 return False, _localized_message(
@@ -1044,6 +1079,19 @@ class OpenClawIntegrationService:
         *,
         locale: str,
     ) -> _CatalogItemAvailability:
+        retired, retirement_reason = self._retired_catalog_item_state(item, locale=locale)
+        if retired:
+            return _CatalogItemAvailability(
+                available=False,
+                reason=retirement_reason,
+                source_name=item.source_tool_name,
+                source_description=item.description or "",
+                source_is_system=True,
+                source_enabled=False,
+                published_version_id=None,
+                implementation_type="entry",
+            )
+
         if item.source_type == "tool":
             resolved = self._resolve_tool_source(tool_id=item.tool_id, source_tool_name=item.source_tool_name)
             if resolved is None:
@@ -1132,6 +1180,21 @@ class OpenClawIntegrationService:
                     published_version_id=workflow.published_version_id,
                     implementation_type="workflow",
                 )
+            if item.system_default_key:
+                system_definition = get_openclaw_system_item_definition(item.system_default_key, locale=locale)
+                if system_definition is not None:
+                    available, reason = self._availability_for_system_item_definition(system_definition, locale=locale)
+                    if not available:
+                        return _CatalogItemAvailability(
+                            available=False,
+                            reason=reason,
+                            source_name=system_definition.title,
+                            source_description=system_definition.description,
+                            source_is_system=True,
+                            source_enabled=True,
+                            published_version_id=workflow.published_version_id,
+                            implementation_type=system_definition.implementation_type,
+                        )
             try:
                 snapshot = self._workflow_contract_snapshot(workflow)
             except ApiException as exc:
@@ -1249,6 +1312,7 @@ class OpenClawIntegrationService:
         locale: str,
     ) -> OpenClawCapabilityItemResponse:
         availability = self._availability_for_item(item, locale=locale)
+        retired, retirement_reason = self._retired_catalog_item_state(item, locale=locale)
         input_schema = _normalize_json_object_schema(item.input_schema_json or _EMPTY_OBJECT_SCHEMA, label="input")
         output_schema = _normalize_json_object_schema(item.output_schema_json or _EMPTY_OBJECT_SCHEMA, label="output")
         return OpenClawCapabilityItemResponse(
@@ -1271,6 +1335,8 @@ class OpenClawIntegrationService:
             published_version_id=availability.published_version_id,
             enabled=bool(item.enabled),
             is_system_item=bool(item.is_system_item),
+            retired=retired,
+            retirement_reason=retirement_reason,
             available=availability.available,
             availability_reason=availability.reason,
             schema_editable=item.source_type in {"tool", "agent"},
@@ -1497,6 +1563,18 @@ class OpenClawIntegrationService:
                     code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
                     message=f"Tool is disabled: {resolved.source_name}",
                 )
+            keeps_existing_retired_binding = bool(
+                item is not None
+                and item.source_type == "tool"
+                and self._is_retired_source_tool_name(item.source_tool_name)
+                and resolved.source_name == item.source_tool_name
+            )
+            if self._is_retired_source_tool_name(resolved.source_name) and not keeps_existing_retired_binding:
+                raise ApiException(
+                    status_code=422,
+                    code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
+                    message=self._retired_source_reason(locale=locale),
+                )
             default_input_schema, default_output_schema, default_input_summary, default_output_summary, default_mode = (
                 self._default_source_contract_for_tool(
                     tool_id=request.tool_id,
@@ -1576,6 +1654,8 @@ class OpenClawIntegrationService:
                 if name and not enabled
             }
             for definition in system_defs:
+                if self._is_retired_source_tool_name(definition.name):
+                    continue
                 is_disabled = definition.name in disabled_tool_names
                 system_item_definition = get_openclaw_system_item_definition_by_source_tool_name(definition.name, locale=locale)
                 default_input_schema = definition.json_schema or _schema_from_tool_params(
@@ -1807,14 +1887,18 @@ class OpenClawIntegrationService:
     ) -> OpenClawIntegrationSettingsResponse:
         locale = self._current_locale(preferred_locale)
         definitions = list_openclaw_system_item_definitions(locale)
-        existing_by_key = {
-            item.system_default_key: item
-            for item in self.db.query(OpenClawCapabilityItem)
+        definition_keys = {definition.key for definition in definitions}
+        existing_system_items = (
+            self.db.query(OpenClawCapabilityItem)
             .filter(
                 OpenClawCapabilityItem.system_default_key.isnot(None),
                 OpenClawCapabilityItem.is_system_item.is_(True),
             )
             .all()
+        )
+        existing_by_key = {
+            item.system_default_key: item
+            for item in existing_system_items
             if item.system_default_key
         }
         for definition in definitions:
@@ -1878,6 +1962,9 @@ class OpenClawIntegrationService:
             item.input_summary = input_summary
             item.output_summary = output_summary
             item.tool_response_mode = "json_schema"
+        for item in existing_system_items:
+            if item.system_default_key and item.system_default_key not in definition_keys:
+                self.db.delete(item)
         payload = self._get_payload()
         payload["catalogMigrated"] = True
         payload["systemItemVersion"] = OPENCLAW_SYSTEM_ITEM_VERSION
@@ -1964,6 +2051,8 @@ class OpenClawIntegrationService:
             if not item.enabled:
                 continue
             serialized = self._serialize_catalog_item(item, locale=locale)
+            if serialized.retired:
+                continue
             capabilities.append(
                 OpenClawRuntimeCapabilityResponse(
                     capability_key=serialized.capability_key,
@@ -1998,6 +2087,17 @@ class OpenClawIntegrationService:
                 status_code=404,
                 code=OPENCLAW_CAPABILITY_NOT_FOUND_ERROR_CODE,
                 message=f"Unknown OpenClaw capability: {capability_key}",
+            )
+        retired, retirement_reason = self._retired_catalog_item_state(item, locale=locale)
+        if retired:
+            raise ApiException(
+                status_code=403,
+                code=OPENCLAW_CAPABILITY_DISABLED_ERROR_CODE,
+                message=retirement_reason or _localized_message(
+                    locale,
+                    zh=f"能力已从 OpenClaw 目录退役：{capability_key}",
+                    en=f"Capability has been retired from the OpenClaw catalog: {capability_key}",
+                ),
             )
         if not item.enabled:
             raise ApiException(

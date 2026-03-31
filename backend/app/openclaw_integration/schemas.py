@@ -11,7 +11,6 @@ from app.lightrag.schemas import LightRagQueryResponse
 from app.report.schemas import MonthlyReportResponse, WeeklyReportResponse
 
 OpenClawSystemCapabilityKey = Literal[
-    "capture_entry",
     "search_entries",
     "get_entry",
     "create_relation",
@@ -21,7 +20,6 @@ OpenClawSystemCapabilityKey = Literal[
 ]
 OpenClawSystemDefaultKey = Literal[
     "submit_context_capture",
-    "capture_entry",
     "search_entries",
     "get_entry",
     "create_relation",
@@ -322,6 +320,8 @@ class OpenClawCapabilityItemResponse(CamelModel):
     published_version_id: UUID | None = Field(default=None, alias="publishedVersionId")
     enabled: bool
     is_system_item: bool = Field(alias="isSystemItem")
+    retired: bool = False
+    retirement_reason: str | None = Field(default=None, alias="retirementReason")
     available: bool
     availability_reason: str | None = Field(default=None, alias="availabilityReason")
     schema_editable: bool = Field(alias="schemaEditable")
@@ -375,7 +375,6 @@ class OpenClawCapabilityExecuteResponse(CamelModel):
 
 
 OPENCLAW_SYSTEM_CAPABILITY_INPUT_MODELS: dict[OpenClawSystemCapabilityKey, type[CamelModel]] = {
-    "capture_entry": OpenClawCaptureEntryRequest,
     "search_entries": OpenClawSearchEntriesRequest,
     "get_entry": OpenClawGetEntryRequest,
     "create_relation": OpenClawCreateRelationRequest,
@@ -385,7 +384,6 @@ OPENCLAW_SYSTEM_CAPABILITY_INPUT_MODELS: dict[OpenClawSystemCapabilityKey, type[
 }
 
 OPENCLAW_SYSTEM_CAPABILITY_OUTPUT_MODELS: dict[OpenClawSystemCapabilityKey, type[Any]] = {
-    "capture_entry": OpenClawEntryRecordResponse,
     "search_entries": OpenClawSearchEntriesResponse,
     "get_entry": OpenClawEntryRecordResponse,
     "create_relation": OpenClawRelationRecordResponse,
