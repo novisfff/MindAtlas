@@ -1,8 +1,36 @@
-import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { createPlugin, OpenClawMindAtlasPluginRuntime, PLUGIN_ID } from '../src/index'
 import { describePluginConfigIssue, extractPluginEntryConfig, resolvePluginConfig, validatePluginConfig } from '../src/config'
+import { BUNDLED_SKILL_IDS, MANAGED_SKILL_MARKER_FILE, resolveManagedSkillsRoot, syncBundledSkills } from '../src/skills'
+
+const ORIGINAL_OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH
+const ORIGINAL_OPENCLAW_STATE_DIR = process.env.OPENCLAW_STATE_DIR
+const TEST_OPENCLAW_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-mindatlas-tests-'))
+
+process.env.OPENCLAW_CONFIG_PATH = path.join(TEST_OPENCLAW_ROOT, 'openclaw.json')
+delete process.env.OPENCLAW_STATE_DIR
+
+test.after(() => {
+  if (ORIGINAL_OPENCLAW_CONFIG_PATH === undefined) {
+    delete process.env.OPENCLAW_CONFIG_PATH
+  } else {
+    process.env.OPENCLAW_CONFIG_PATH = ORIGINAL_OPENCLAW_CONFIG_PATH
+  }
+
+  if (ORIGINAL_OPENCLAW_STATE_DIR === undefined) {
+    delete process.env.OPENCLAW_STATE_DIR
+  } else {
+    process.env.OPENCLAW_STATE_DIR = ORIGINAL_OPENCLAW_STATE_DIR
+  }
+
+  fs.rmSync(TEST_OPENCLAW_ROOT, { recursive: true, force: true })
+})
 
 interface MockTool {
   name: string
@@ -71,6 +99,66 @@ function createMockApi(config: unknown = createPluginConfig()) {
     logs,
   }
 }
+
+test('resolveManagedSkillsRoot prefers the active OpenClaw config directory', () => {
+  assert.equal(
+    resolveManagedSkillsRoot({
+      env: {
+        OPENCLAW_CONFIG_PATH: '/tmp/openclaw-profile/openclaw.json',
+        OPENCLAW_STATE_DIR: '/tmp/openclaw-state',
+      },
+      homeDir: '/tmp/openclaw-home',
+    }),
+    '/tmp/openclaw-profile/skills',
+  )
+})
+
+test('syncBundledSkills copies the shipped MindAtlas skills into the managed custom skill root', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mindatlas-skill-sync-'))
+  const sourceRootDir = fileURLToPath(new URL('../skills', import.meta.url))
+
+  try {
+    const result = syncBundledSkills({
+      sourceRootDir,
+      managedRootDir: path.join(tempRoot, 'skills'),
+    })
+
+    assert.deepEqual(result.syncedSkillIds, [...BUNDLED_SKILL_IDS])
+    assert.deepEqual(result.skippedSkillIds, [])
+    assert.deepEqual(result.warnings, [])
+
+    for (const skillId of BUNDLED_SKILL_IDS) {
+      const skillDir = path.join(result.managedRootDir, skillId)
+      assert.equal(fs.existsSync(path.join(skillDir, 'SKILL.md')), true)
+      assert.equal(fs.existsSync(path.join(skillDir, MANAGED_SKILL_MARKER_FILE)), true)
+    }
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true })
+  }
+})
+
+test('syncBundledSkills does not overwrite a same-named user-owned custom skill', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mindatlas-skill-conflict-'))
+  const sourceRootDir = fileURLToPath(new URL('../skills', import.meta.url))
+  const targetSkillDir = path.join(tempRoot, 'skills', 'mindatlas-overview')
+
+  try {
+    fs.mkdirSync(targetSkillDir, { recursive: true })
+    fs.writeFileSync(path.join(targetSkillDir, 'SKILL.md'), 'user-owned skill\n', 'utf8')
+
+    const result = syncBundledSkills({
+      sourceRootDir,
+      managedRootDir: path.join(tempRoot, 'skills'),
+    })
+
+    assert.equal(result.skippedSkillIds.includes('mindatlas-overview'), true)
+    assert.match(result.warnings.join('\n'), /not plugin-managed/)
+    assert.equal(fs.readFileSync(path.join(targetSkillDir, 'SKILL.md'), 'utf8'), 'user-owned skill\n')
+    assert.equal(result.syncedSkillIds.includes('mindatlas-summary'), true)
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true })
+  }
+})
 
 test('resolvePluginConfig reads nested plugin config and normalizes /api suffix', () => {
   const raw = {
@@ -212,6 +300,63 @@ test('plugin registers only available tools when the catalog loads', async () =>
   assert.equal(tools.length, 1)
   assert.equal(tools[0].name, 'mindatlas_capture_entry')
   assert.equal(tools[0].parameters.type, 'object')
+})
+
+test('catalog refresh logs a zero-tool warning when all discovered capabilities are unavailable', async () => {
+  const { api, services, tools, logs } = createMockApi()
+  const plugin = createPlugin(api)
+  plugin.register()
+
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () =>
+    createResponse({
+      success: true,
+      code: 0,
+      message: 'OK',
+      data: {
+        integrationName: 'MindAtlas',
+        capabilities: [
+          {
+            capabilityKey: 'query_knowledge_graph',
+            toolName: 'mindatlas_query_knowledge_graph',
+            title: 'Knowledge Graph',
+            description: 'Ask LightRAG',
+            sourceType: 'tool',
+            implementationType: 'knowledge_graph',
+            available: false,
+            availabilityReason: 'LightRAG is disabled',
+            inputSummary: 'query (string)',
+            outputSummary: 'answer (string)',
+            inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+            outputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+            toolResponseMode: 'json_schema',
+          },
+        ],
+      },
+    })
+
+  try {
+    await services[0].start?.()
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+
+  assert.equal(tools.length, 0)
+  assert.equal(logs.some((entry) => entry.level === 'info' && /MindAtlas catalog refresh succeeded/.test(entry.message)), true)
+  const zeroToolWarning = logs.find(
+    (entry) => entry.level === 'warn' && /all discovered capabilities are currently unavailable/.test(entry.message),
+  )
+  assert.ok(zeroToolWarning)
+  assert.deepEqual(zeroToolWarning.details, {
+    integrationName: 'MindAtlas',
+    unavailableCapabilities: [
+      {
+        capabilityKey: 'query_knowledge_graph',
+        toolName: 'mindatlas_query_knowledge_graph',
+        availabilityReason: 'LightRAG is disabled',
+      },
+    ],
+  })
 })
 
 test('tool execution forwards params and returns textified result', async () => {
@@ -365,7 +510,7 @@ test('structure drift marks removed tools as stale and asks for reload', async (
 
     await assert.rejects(
       () => tools[0].execute('tool-call-2', {}),
-      /Reload the OpenClaw plugin or Gateway/,
+      /Start a new session or reload the OpenClaw plugin or Gateway/,
     )
 
     const state = runtime.getState()
@@ -461,7 +606,7 @@ test('metadata drift marks existing tools as stale and asks for reload', async (
 
     await assert.rejects(
       () => tools[0].execute('tool-call-3', { title: 'hello' }),
-      /Reload the OpenClaw plugin or Gateway/,
+      /Start a new session or reload the OpenClaw plugin or Gateway/,
     )
 
     const state = runtime.getState()

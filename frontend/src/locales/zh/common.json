@@ -646,11 +646,11 @@
         },
         "plugin": {
           "title": "3. 在 OpenClaw 配置插件",
-          "description": "先在 OpenClaw 所在机器安装仓库内自带插件。插件会一起带上 overview、auto-capture、retrieval、summary 4 个 skills；再把配置写进 OpenClaw 配置文件，校验无误后重启 Gateway，让 skills 加载和 tool 注册真正生效。",
+          "description": "先在 OpenClaw 所在机器安装仓库内自带插件。插件会一起带上 overview、auto-capture、retrieval、summary 4 个 skills；再把配置写进 OpenClaw 配置文件，校验无误后重启 Gateway，让插件把这些 skills 同步进 OpenClaw，并注册当前 MindAtlas tools。",
           "details": {
-            "install": "在运行 OpenClaw 的那台机器上，从 MindAtlas 仓库安装自带的插件。如果 OpenClaw 在另一台服务器，请先把 `integrations/openclaw-mindatlas` 目录拷过去。安装命令本身不要求你先写好 `baseUrl` 和 `integrationSecret`，也不要求先手动安装这 4 个 skills，它们会随插件一起交付。",
-            "baseUrl": "在 OpenClaw 配置里把 `plugins.entries.openclaw-mindatlas.config.baseUrl` 指向 OpenClaw 能访问到的 MindAtlas 后端地址，再把 `integrationSecret` 设为本页生成的 Bearer 密钥。skills 负责调用策略，真正暴露哪些 tools 仍然取决于 MindAtlas 能力目录。",
-            "refresh": "目录项可用性变化可以由插件自动刷新感知；但如果 tool name、对外标题、对外描述或输入 schema 发生变化，需要重载 OpenClaw Gateway 或插件，重新注册 tool 元数据。"
+            "install": "在运行 OpenClaw 的那台机器上，从 MindAtlas 仓库安装自带的插件。如果 OpenClaw 在另一台服务器，请先把 `integrations/openclaw-mindatlas` 目录拷过去。安装命令本身不要求你先写好 `baseUrl` 和 `integrationSecret`，也不要求先手动安装这 4 个 skills；Gateway 启动时插件会把它们同步进 OpenClaw。",
+            "baseUrl": "在 OpenClaw 配置里把 `plugins.entries.openclaw-mindatlas.config.baseUrl` 指向 OpenClaw 实际能访问到的 MindAtlas 后端或反向代理地址，再把 `integrationSecret` 设为本页生成的 Bearer 密钥。skills 负责调用策略，真正暴露哪些 tools 仍然取决于 MindAtlas 能力目录。",
+            "refresh": "目录项可用性变化可以由插件自动刷新感知；但如果 tool name、对外标题、对外描述或输入 schema 发生变化，现有会话不会自动热刷新，需要新开会话或重载 OpenClaw Gateway / 插件，重新注册 tool 元数据。"
           }
         },
         "verify": {
@@ -659,7 +659,7 @@
         }
       },
       "installTitle": "在 OpenClaw 所在机器安装插件",
-      "installDescription": "下面这些命令都应该在安装了 OpenClaw Gateway 的机器上执行。插件包就在当前 MindAtlas 仓库里，安装后会一起带上 overview、auto-capture、retrieval、summary 4 个 shipped skills。",
+      "installDescription": "下面这些命令都应该在安装了 OpenClaw Gateway 的机器上执行。插件包就在当前 MindAtlas 仓库里，安装后会一起带上 overview、auto-capture、retrieval、summary 4 个 shipped skills，插件启动时会把它们同步进 OpenClaw。",
       "installBlocks": {
         "locate": {
           "title": "找到 MindAtlas 仓库或插件目录",
@@ -667,11 +667,11 @@
         },
         "install": {
           "title": "安装仓库内自带插件",
-          "description": "从本地文件系统安装 `openclaw-mindatlas` 原生插件，让 OpenClaw 可以加载它。插件安装完成后，4 个 MindAtlas shipped skills 也会随包可用。这一步可以先做，不需要等插件配置填写完成。"
+          "description": "从本地文件系统安装 `openclaw-mindatlas` 原生插件，让 OpenClaw 可以加载它。4 个 MindAtlas shipped skills 会随包一起交付，并在 Gateway 启动时由插件同步进 OpenClaw。这一步可以先做，不需要等插件配置填写完成。"
         },
         "verify": {
           "title": "确认 OpenClaw 已看到这个插件",
-          "description": "继续配置前，先检查 OpenClaw 能否识别刚安装的插件。后续重启 Gateway 后，插件会加载 shipped skills，并按 MindAtlas 当前目录注册可调用 tools。"
+          "description": "继续配置前，先检查 OpenClaw 能否识别刚安装的插件。后续重启 Gateway 后，插件会同步 shipped skills，并按 MindAtlas 当前目录注册可调用 tools。"
         }
       },
       "configTitle": "填写 OpenClaw 插件配置",
@@ -689,7 +689,7 @@
       "configExampleTitle": "可直接参考的 OpenClaw 配置示例",
       "configExampleDescription": "把 `baseUrl` 改成 OpenClaw 能访问到的 MindAtlas 后端地址，再把 `integrationSecret` 替换成你在本页生成的密钥。",
       "restartTitle": "重启 OpenClaw Gateway",
-      "restartDescription": "配置校验通过后，用你当前的部署方式重启 OpenClaw Gateway 进程或服务，让插件、4 个 shipped skills 和当前目录里的可用 tools 一起真正加载生效。",
+      "restartDescription": "配置校验通过后，用你当前的部署方式重启 OpenClaw Gateway 进程或服务，让插件把 4 个 shipped skills 同步进 OpenClaw，并注册当前目录里的可用 tools。如果你已经开着 OpenClaw 会话，重启后再新开一个会话。",
       "endpointsTitle": "关键接口",
       "endpoints": {
         "auth": "鉴权 Header",
@@ -700,14 +700,14 @@
       "verifyChecklist": {
         "secret": "本页生成的密钥已经填写到 OpenClaw 插件配置里。",
         "catalog": "MindAtlas 里至少有一个目录项已暴露，并且当前可用。",
-        "plugin": "安装插件、写入配置并重启后，OpenClaw Gateway 已经成功加载 openclaw-mindatlas 插件及其 4 个 shipped skills。",
+        "plugin": "安装插件、写入配置并重启后，OpenClaw Gateway 已经成功加载 openclaw-mindatlas，并把 4 个 shipped skills 同步进 OpenClaw。",
         "call": "OpenClaw 发起的一次真实 tool 调用已经能够成功到达 MindAtlas 并返回结果。"
       },
       "notesTitle": "接入要点",
       "notes": {
         "catalogOnly": "OpenClaw 只会看到当前已暴露的目录项；未暴露或当前不可用的项不会作为可调用能力出现。",
         "skillBoundary": "插件随包带上的 4 个 skills 负责告诉 OpenClaw 什么时候该调用 MindAtlas、优先走哪类能力；真正可调用的 tools 仍只来自 MindAtlas 当前暴露的能力目录。",
-        "refresh": "新增、删除或修改目录项后，建议在 OpenClaw 侧重新拉取一次能力目录；如果 tool name、标题、描述或输入 schema 发生结构性变化，还需要重载 Gateway 或插件。"
+        "refresh": "新增、删除或修改目录项后，建议在 OpenClaw 侧重新拉取一次能力目录；如果 tool name、标题、描述或输入 schema 发生结构性变化，现有会话仍不会自动热刷新，还需要新开会话或重载 Gateway / 插件。"
       }
     },
     "secret": {

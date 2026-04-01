@@ -14,7 +14,15 @@ import {
   type CatalogSnapshot,
   type MindAtlasRuntimeCapability,
 } from './catalog'
-import { createCapabilityToolRegistration, buildToolDescription, createTextResult, type ToolExecutionContextLike, type ToolRegistration, type ToolResult } from './tools'
+import { syncBundledSkills } from './skills'
+import {
+  buildToolDescription,
+  createCapabilityToolRegistration,
+  createTextResult,
+  type ToolExecutionContextLike,
+  type ToolRegistration,
+  type ToolResult,
+} from './tools'
 
 type LogMethod = 'info' | 'warn' | 'error' | 'debug'
 
@@ -101,6 +109,8 @@ export class OpenClawMindAtlasPluginRuntime {
   }
 
   async start() {
+    this.syncBundledSkillsIntoOpenClaw()
+
     const validationIssue = validatePluginConfig(this.api.config)
     if (validationIssue) {
       log(this.logger, 'warn', describePluginConfigIssue(validationIssue))
@@ -160,6 +170,32 @@ export class OpenClawMindAtlasPluginRuntime {
     }
   }
 
+  private syncBundledSkillsIntoOpenClaw() {
+    try {
+      const result = syncBundledSkills()
+      for (const warning of result.warnings) {
+        log(this.logger, 'warn', warning, {
+          skillsRoot: result.managedRootDir,
+        })
+      }
+      if (result.syncedSkillIds.length > 0) {
+        log(this.logger, 'info', 'Synced MindAtlas shipped skills into the active OpenClaw custom skills directory.', {
+          skillsRoot: result.managedRootDir,
+          skillIds: result.syncedSkillIds,
+          skippedSkillIds: result.skippedSkillIds,
+        })
+      }
+    } catch (error) {
+      log(
+        this.logger,
+        'warn',
+        error instanceof Error
+          ? `Failed to sync MindAtlas shipped skills into OpenClaw custom skills: ${error.message}`
+          : 'Failed to sync MindAtlas shipped skills into OpenClaw custom skills.',
+      )
+    }
+  }
+
   private async performRefresh() {
     if (!this.config) {
       return
@@ -171,6 +207,9 @@ export class OpenClawMindAtlasPluginRuntime {
       })
       const nextSnapshot = createCatalogSnapshot(response)
       const previousSnapshot = this.snapshot
+      const discoveredCapabilities = [...nextSnapshot.itemsByToolName.values()]
+      const availableCapabilities = discoveredCapabilities.filter((capability) => capability.available)
+      const unavailableCapabilities = discoveredCapabilities.filter((capability) => !capability.available)
       const nameDelta = diffToolNames(previousSnapshot.toolNames, nextSnapshot.toolNames)
       const metadataDelta = diffRegisteredToolMetadata(previousSnapshot, nextSnapshot, this.registeredToolNames)
       this.snapshot = nextSnapshot
@@ -190,7 +229,7 @@ export class OpenClawMindAtlasPluginRuntime {
         })
         if (warningKey !== this.lastStructureWarningKey) {
           this.lastStructureWarningKey = warningKey
-          log(this.logger, 'warn', 'MindAtlas catalog registration metadata changed. Reload OpenClaw to refresh tool registration.', {
+          log(this.logger, 'warn', 'MindAtlas catalog registration metadata changed. Active OpenClaw sessions will not hot-refresh. Start a new session or reload the OpenClaw Gateway/plugin to refresh tool registration.', {
             addedToolNames: nameDelta.added,
             removedToolNames: nameDelta.removed,
             changedToolNames: metadataDelta.changedToolNames,
@@ -198,13 +237,42 @@ export class OpenClawMindAtlasPluginRuntime {
         }
       }
 
-      const newlyAvailable = [...nextSnapshot.itemsByToolName.values()].filter(
+      const newlyAvailable = availableCapabilities.filter(
         (capability) => capability.available && !this.registeredToolNames.has(capability.toolName)
       )
 
       if (!this.reloadRequired && newlyAvailable.length > 0) {
         for (const capability of newlyAvailable) {
           this.registerCapabilityTool(capability)
+        }
+      }
+
+      const registeredToolNames = [...this.registeredToolNames].sort()
+      const availableToolNames = availableCapabilities.map((capability) => capability.toolName).sort()
+      log(this.logger, 'info', 'MindAtlas catalog refresh succeeded.', {
+        integrationName: nextSnapshot.integrationName,
+        totalCapabilities: discoveredCapabilities.length,
+        availableCapabilities: availableCapabilities.length,
+        unavailableCapabilities: unavailableCapabilities.length,
+        availableToolNames,
+        registeredToolNames,
+        reloadRequired: this.reloadRequired,
+      })
+
+      if (registeredToolNames.length === 0) {
+        if (discoveredCapabilities.length === 0) {
+          log(this.logger, 'warn', 'MindAtlas catalog refresh succeeded but returned no capabilities. No MindAtlas tools were registered.', {
+            integrationName: nextSnapshot.integrationName,
+          })
+        } else if (availableCapabilities.length === 0) {
+          log(this.logger, 'warn', 'MindAtlas catalog refresh succeeded but all discovered capabilities are currently unavailable. No MindAtlas tools were registered.', {
+            integrationName: nextSnapshot.integrationName,
+            unavailableCapabilities: unavailableCapabilities.map((capability) => ({
+              capabilityKey: capability.capabilityKey,
+              toolName: capability.toolName,
+              availabilityReason: capability.availabilityReason ?? null,
+            })),
+          })
         }
       }
     } catch (error) {

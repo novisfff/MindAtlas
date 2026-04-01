@@ -71,7 +71,7 @@ The install step should succeed even before `baseUrl` and `integrationSecret` ar
       "openclaw-mindatlas": {
         "enabled": true,
         "config": {
-          "baseUrl": "http://127.0.0.1:8000",
+          "baseUrl": "http://your-mindatlas-host",
           "integrationSecret": "paste-the-secret-from-mindatlas",
           "requestTimeoutMs": 15000,
           "catalogRefreshTtlSec": 300
@@ -90,6 +90,8 @@ The plugin bundles 4 shipped MindAtlas skills:
 - `mindatlas-summary`
 
 These skills ship with the plugin package and guide OpenClaw's calling strategy. The actual callable tools still come from the live MindAtlas capability catalog.
+
+Current OpenClaw releases may fail to surface plugin-manifest `skills` into the global skill registry. The MindAtlas plugin now works around that by syncing its 4 shipped skills into the active custom skills directory when the plugin service starts. Existing sessions still may need a new session or Gateway reload before refreshed skills or tools show up in the prompt surface.
 
 ## Positioning
 
@@ -182,7 +184,7 @@ Recommended plugin behavior:
 2. Register one OpenClaw tool per returned capability.
 3. Skip tools marked `available = false`, or register them with a graceful fallback message.
 4. Refresh the catalog after administrators change the MindAtlas catalog.
-5. If a tool name, exported title, exported description, or input schema changes, reload the OpenClaw Gateway / plugin so tool registration metadata is rebuilt.
+5. If a tool name, exported title, exported description, or input schema changes, start a new OpenClaw session or reload the OpenClaw Gateway / plugin so tool registration metadata is rebuilt.
 6. Never hard-code a built-in capability list on the OpenClaw side.
 
 Example discovery item:

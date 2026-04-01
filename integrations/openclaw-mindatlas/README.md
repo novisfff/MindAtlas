@@ -8,8 +8,9 @@
 - Registers one OpenClaw tool per exposed catalog item
 - Forwards tool execution to `POST /api/integrations/openclaw/capabilities/{capabilityKey}/execute`
 - Bundles 4 shipped MindAtlas skills that help OpenClaw understand when and how to use the catalog
+- Syncs those shipped skills into the active OpenClaw custom skills directory as a compatibility fallback when plugin-manifest skills are not surfaced by the current OpenClaw build
 - Refreshes the remote catalog on a TTL
-- Warns when catalog structure changes require a Gateway / plugin reload
+- Logs catalog refresh summaries and warns when catalog structure changes require a Gateway / plugin reload
 
 ## Shipped Skills
 
@@ -21,6 +22,8 @@ The plugin ships these 4 skills together:
 - `mindatlas-summary`: summary routing for weekly, monthly, and topic-oriented reviews
 
 These skills ship with the plugin package. They guide OpenClaw's decision-making, while the actual callable tools still come from the live MindAtlas capability catalog.
+
+Current OpenClaw releases do not always surface plugin-manifest `skills` into `openclaw skills list`. To keep the shipped MindAtlas skills usable, the plugin also syncs them into the active custom skills directory on startup. Existing sessions still may need a new session or Gateway reload before the refreshed skill surface appears.
 
 ## Local Install
 
@@ -38,7 +41,7 @@ openclaw plugins install -l ./integrations/openclaw-mindatlas
 
 The install command only registers the plugin package. You can install first and fill in `baseUrl` / `integrationSecret` afterwards.
 
-After you add the plugin config, restart the OpenClaw Gateway so the plugin can load, ship the 4 MindAtlas skills into OpenClaw, and register tools from the current MindAtlas catalog.
+After you add the plugin config, restart the OpenClaw Gateway so the plugin can sync the 4 MindAtlas skills into OpenClaw's active custom skills directory and register tools from the current MindAtlas catalog.
 
 ## Configuration
 
@@ -51,7 +54,7 @@ Configure the plugin under `plugins.entries.openclaw-mindatlas.config`.
       "openclaw-mindatlas": {
         "enabled": true,
         "config": {
-          "baseUrl": "http://127.0.0.1:8000",
+          "baseUrl": "http://your-mindatlas-host",
           "integrationSecret": "paste-the-secret-from-mindatlas",
           "requestTimeoutMs": 15000,
           "catalogRefreshTtlSec": 300
@@ -64,7 +67,7 @@ Configure the plugin under `plugins.entries.openclaw-mindatlas.config`.
 
 Notes:
 
-- `baseUrl` should point to the MindAtlas backend origin. A URL ending in `/api` is also accepted.
+- `baseUrl` should point to the MindAtlas backend origin or reverse-proxy origin that the OpenClaw host can actually reach. A URL ending in `/api` is also accepted.
 - `integrationSecret` is generated from `MindAtlas > Settings > OpenClaw Integration`.
 - `catalogRefreshTtlSec` controls how often the plugin refreshes the remote capability catalog.
 - If you install the plugin before adding config, that is expected to work. The plugin will simply log that configuration is still missing and wait for `baseUrl` plus `integrationSecret`.
@@ -85,12 +88,14 @@ The shipped skills control how OpenClaw should think about MindAtlas positioning
 
 - The plugin only registers capabilities that are `available = true`.
 - `available = false` items are skipped and logged.
+- After each successful refresh, the plugin logs a summary with discovered capability counts, available counts, and registered tool names.
+- If a refresh succeeds but registers zero tools, the plugin logs whether the catalog was empty or all discovered capabilities were unavailable.
 - On refresh, availability state and execute targets are updated in memory for unchanged tools.
 - If the remote tool-name set changes because of add / delete / rename, the plugin marks `reloadRequired` and logs a warning.
 - If an existing tool keeps the same `toolName` but its exported title, description, summaries, or input schema changes, the plugin also marks `reloadRequired`.
 - Existing unchanged tools continue to use the latest capability mapping.
-- Stale tools whose remote `toolName` disappeared start returning a clear “reload the plugin” error.
-- Stale tools whose exported metadata drifted under the same `toolName` also return a clear “reload the plugin” error.
+- Stale tools whose remote `toolName` disappeared start returning a clear “start a new session or reload the plugin” error.
+- Stale tools whose exported metadata drifted under the same `toolName` also return a clear “start a new session or reload the plugin” error.
 - The plugin does not auto-reload Gateway or auto-re-register renamed tools in v1.
 
 ## Development

@@ -13,7 +13,7 @@ export class MindAtlasApiError extends Error {
 }
 
 export function createCatalogReloadRequiredMessage(toolName: string): string {
-  return `MindAtlas capability catalog structure changed for "${toolName}". Reload the OpenClaw plugin or Gateway to refresh registered tools.`
+  return `MindAtlas capability catalog structure changed for "${toolName}". Active OpenClaw sessions will not hot-refresh. Start a new session or reload the OpenClaw plugin or Gateway to refresh registered tools.`
 }
 
 export function createCatalogNotReadyMessage(toolName: string): string {

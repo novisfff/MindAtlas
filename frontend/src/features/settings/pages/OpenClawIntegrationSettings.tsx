@@ -475,7 +475,7 @@ export function OpenClawIntegrationSettingsPage() {
       "openclaw-mindatlas": {
         "enabled": true,
         "config": {
-          "baseUrl": "http://your-mindatlas-host:8000",
+          "baseUrl": "http://your-mindatlas-host",
           "integrationSecret": "paste-the-secret-from-settings",
           "requestTimeoutMs": 15000,
           "catalogRefreshTtlSec": 300
