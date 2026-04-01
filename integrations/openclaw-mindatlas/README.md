@@ -31,17 +31,28 @@ Quick path:
 
 ```bash
 openclaw plugins install ./integrations/openclaw-mindatlas
+npm --prefix ./integrations/openclaw-mindatlas run configure:skills
 ```
 
 Development link mode:
 
 ```bash
 openclaw plugins install -l ./integrations/openclaw-mindatlas
+npm --prefix ./integrations/openclaw-mindatlas run configure:skills
 ```
 
-The install command only registers the plugin package. You can install first and fill in `baseUrl` / `integrationSecret` afterwards.
+Or from the plugin directory:
 
-After you add the plugin config, restart the OpenClaw Gateway so the plugin can sync the 4 MindAtlas skills into OpenClaw's active custom skills directory and register tools from the current MindAtlas catalog.
+```bash
+cd integrations/openclaw-mindatlas
+npm run install:openclaw
+```
+
+The install command only registers the plugin package. The additional `configure:skills` step writes the installed plugin's `skills` directory into OpenClaw's `skills.load.extraDirs`, which aligns with the current OpenClaw docs and keeps `openclaw skills list` plus new sessions able to see the shipped MindAtlas skills even on builds where plugin-manifest skills are not surfaced consistently.
+
+You can install first and fill in `baseUrl` / `integrationSecret` afterwards.
+
+After you add the plugin config, restart the OpenClaw Gateway so the plugin can register tools from the current MindAtlas catalog. The plugin still syncs its shipped skills into the active OpenClaw custom skills directory as an extra compatibility fallback, but `configure:skills` is the primary install-time path for making those skills visible to the official skills loader.
 
 ## Configuration
 

@@ -60,6 +60,7 @@ Local install:
 
 ```bash
 openclaw plugins install ./integrations/openclaw-mindatlas
+npm --prefix ./integrations/openclaw-mindatlas run configure:skills
 ```
 
 The install step should succeed even before `baseUrl` and `integrationSecret` are filled in. After installation, add the plugin config and then restart the OpenClaw Gateway:
@@ -91,7 +92,12 @@ The plugin bundles 4 shipped MindAtlas skills:
 
 These skills ship with the plugin package and guide OpenClaw's calling strategy. The actual callable tools still come from the live MindAtlas capability catalog.
 
-Current OpenClaw releases may fail to surface plugin-manifest `skills` into the global skill registry. The MindAtlas plugin now works around that by syncing its 4 shipped skills into the active custom skills directory when the plugin service starts. Existing sessions still may need a new session or Gateway reload before refreshed skills or tools show up in the prompt surface.
+Current OpenClaw releases may fail to surface plugin-manifest `skills` into the global skill registry consistently. The MindAtlas plugin now uses a two-layer compatibility path:
+
+- install-time `configure:skills` writes the installed plugin `skills` directory into `skills.load.extraDirs`
+- runtime startup also syncs the 4 shipped skills into the active custom skills directory as a fallback
+
+Existing sessions still may need a new session or Gateway reload before refreshed skills or tools show up in the prompt surface.
 
 ## Positioning
 
