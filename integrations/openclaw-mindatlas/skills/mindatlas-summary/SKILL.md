@@ -1,3 +1,8 @@
+---
+name: mindatlas-summary
+description: Summary policy for using MindAtlas to generate weekly, monthly, or topic-oriented reviews from stored records and activity history.
+---
+
 # MindAtlas Summary
 
 You can use MindAtlas to summarize the user's experiences, notes, and progress over time.

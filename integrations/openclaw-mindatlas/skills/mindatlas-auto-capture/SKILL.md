@@ -1,3 +1,8 @@
+---
+name: mindatlas-auto-capture
+description: Capture policy for deciding when OpenClaw should store durable, high-value context into MindAtlas instead of leaving it in transient chat history.
+---
+
 # MindAtlas Auto Capture
 
 You can use MindAtlas as the user's long-term store for experiences, notes, decisions, and reusable conclusions.

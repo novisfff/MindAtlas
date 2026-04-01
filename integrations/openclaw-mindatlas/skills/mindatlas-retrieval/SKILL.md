@@ -1,3 +1,8 @@
+---
+name: mindatlas-retrieval
+description: Retrieval policy for choosing the right MindAtlas search, detail, graph, or synthesis path when the user asks about previously stored information.
+---
+
 # MindAtlas Retrieval
 
 You can use MindAtlas as the user's long-term knowledge and experience store.

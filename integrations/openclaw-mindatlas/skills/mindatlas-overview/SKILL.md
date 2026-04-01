@@ -1,3 +1,8 @@
+---
+name: mindatlas-overview
+description: High-level guidance for when OpenClaw should use MindAtlas for durable memory, retrieval, reporting, and structured knowledge work.
+---
+
 # MindAtlas Overview
 
 You can use MindAtlas as the user's long-term knowledge and experience system.
