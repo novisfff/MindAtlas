@@ -10,9 +10,10 @@ The plugin copy is the only authoritative prompt source. Update that file first;
 
 ## Responsibility
 
+- Acts as the primary router for MindAtlas-related work
 - Introduces MindAtlas as the user's long-term knowledge and experience system
 - Explains when OpenClaw should prefer MindAtlas over transient chat memory
-- Enforces catalog-first tool selection instead of hard-coded tool names
+- Points the agent at the current session's visible `mindatlas_*` tool surface instead of abstract catalog-first wording
 - States the current product boundaries: single-user setup, context-submission-friendly recording, and prompt-driven best-effort capture
 
 ## Relationship To Other Shipped Skills

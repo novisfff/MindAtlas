@@ -17,6 +17,7 @@ The plugin copy is the only authoritative prompt source. Update that file first;
 
 ## Working Rules
 
-- Stay catalog-first and prefer the currently exposed recording capability that best matches the situation
+- Start from the current session's visible `mindatlas_*` tools
+- Prefer `mindatlas_submit_context_capture` or another visible capture workflow that best matches the situation
 - Let MindAtlas materialize final entry fields whenever the chosen capability supports that
 - Use field-level creation only for explicit manual-entry cases where the exposed capability requires structured fields

@@ -84,18 +84,18 @@ _TOOL_SYSTEM_ITEM_TEMPLATES: tuple[_ToolSystemItemTemplate, ...] = (
         tool_name="mindatlas_search_entries",
         enabled_by_default=True,
         implementation_type="entry",
-        title=_LocalizedText(zh="检索记录", en="Search Entries"),
+        title=_LocalizedText(zh="检索历史记录", en="Search Previous Records"),
         description=_LocalizedText(
-            zh="按关键词、类型、标签或时间范围检索 MindAtlas 记录。",
-            en="Search MindAtlas entries by keyword, type, tags, or time range.",
+            zh="在 MindAtlas 中搜索之前保存的记录，适合“我记过吗”“帮我搜一下”“最近记录了什么”这类按关键词、标签、类型或时间范围检索的问题。",
+            en="Search previously stored MindAtlas records for requests like 'did I record this before', 'search what I saved', or recent and time-bounded lookups by keyword, tags, type, or time range.",
         ),
         input_summary=_LocalizedText(
-            zh="关键词，以及可选的类型、标签、时间范围和结果数量。",
-            en="Keyword plus optional type, tags, time range, and result limit.",
+            zh="关键词，以及可选的类型、标签、时间范围和结果数量；适合最近一周、最近几天或指定时间段的检索。",
+            en="Keyword plus optional type, tags, time range, and result limit; useful for recent, last-week, and other time-bounded searches.",
         ),
         output_summary=_LocalizedText(
-            zh="返回匹配记录列表与总数。",
-            en="Returns matching entries and the total count.",
+            zh="返回匹配记录列表与总数，便于回答是否记过、列出最近记录，或继续查看详情。",
+            en="Returns matching entries and the total count so the agent can confirm whether something was recorded, list recent records, or continue to exact detail lookup.",
         ),
     ),
     _ToolSystemItemTemplate(
@@ -105,13 +105,16 @@ _TOOL_SYSTEM_ITEM_TEMPLATES: tuple[_ToolSystemItemTemplate, ...] = (
         implementation_type="entry",
         title=_LocalizedText(zh="查看记录详情", en="Get Entry"),
         description=_LocalizedText(
-            zh="读取指定 MindAtlas 记录的详细内容。",
-            en="Read the detailed content of a specific MindAtlas entry.",
+            zh="读取某条已命中的 MindAtlas 记录详情，适合已知记录 ID 或需要展开搜索结果中的某一条记录。",
+            en="Read the exact details of a specific MindAtlas record when the entry ID is known or a search hit needs to be expanded.",
         ),
-        input_summary=_LocalizedText(zh="记录 ID。", en="Entry ID."),
+        input_summary=_LocalizedText(
+            zh="记录 ID，通常来自上一轮检索结果。",
+            en="Entry ID, usually from a previous search result.",
+        ),
         output_summary=_LocalizedText(
-            zh="返回该记录的完整核心字段。",
-            en="Returns the complete core fields of the entry.",
+            zh="返回该记录的完整核心字段，便于继续总结、关联、核对或引用。",
+            en="Returns the complete core fields of the entry for follow-up summary, relation work, verification, or quoting.",
         ),
     ),
     _ToolSystemItemTemplate(
@@ -119,18 +122,18 @@ _TOOL_SYSTEM_ITEM_TEMPLATES: tuple[_ToolSystemItemTemplate, ...] = (
         tool_name="mindatlas_create_relation",
         enabled_by_default=True,
         implementation_type="relation",
-        title=_LocalizedText(zh="创建关联", en="Create Relation"),
+        title=_LocalizedText(zh="关联两条记录", en="Create Relation"),
         description=_LocalizedText(
-            zh="在两条 MindAtlas 记录之间建立一条关系。",
-            en="Create a relation between two MindAtlas entries.",
+            zh="在两条 MindAtlas 记录之间建立关系，适合“关联一下”“连接起来”“说明这两条为什么相关”这类任务。",
+            en="Create a relation between two MindAtlas records for requests like connect these items, link them, or make their relationship explicit.",
         ),
         input_summary=_LocalizedText(
             zh="源记录、目标记录、关系类型，以及可选说明。",
             en="Source entry, target entry, relation type, and optional description.",
         ),
         output_summary=_LocalizedText(
-            zh="返回新建关系的核心字段。",
-            en="Returns the core fields of the created relation.",
+            zh="返回新建关系的核心字段，便于后续检查、展示或继续图谱分析。",
+            en="Returns the core fields of the created relation for follow-up inspection, presentation, or graph analysis.",
         ),
     ),
     _ToolSystemItemTemplate(
@@ -138,18 +141,18 @@ _TOOL_SYSTEM_ITEM_TEMPLATES: tuple[_ToolSystemItemTemplate, ...] = (
         tool_name="mindatlas_query_knowledge_graph",
         enabled_by_default=True,
         implementation_type="knowledge_graph",
-        title=_LocalizedText(zh="查询知识图谱", en="Query Knowledge Graph"),
+        title=_LocalizedText(zh="查询跨记录关系", en="Query Knowledge Graph"),
         description=_LocalizedText(
-            zh="通过 LightRAG 查询 MindAtlas 的知识图谱和检索上下文。",
-            en="Query the MindAtlas knowledge graph and retrieval context through LightRAG.",
+            zh="通过 LightRAG 查询 MindAtlas 的跨记录关系、模式和检索上下文，适合“这些记录有什么关系”“为什么相关”“能综合回答吗”这类问题。",
+            en="Query MindAtlas cross-record relationships, patterns, and retrieval context through LightRAG for questions like what is related, why items are related, or what answer emerges across records.",
         ),
         input_summary=_LocalizedText(
-            zh="问题文本，以及可选的查询模式和 topK。",
-            en="Question text plus optional query mode and topK.",
+            zh="问题文本，以及可选的查询模式和 topK；适合关系、模式和综合知识问答。",
+            en="Question text plus optional query mode and topK for relation, pattern, and synthesized knowledge questions.",
         ),
         output_summary=_LocalizedText(
-            zh="返回回答、引用来源和查询元数据。",
-            en="Returns the answer, cited sources, and query metadata.",
+            zh="返回综合回答、引用来源和查询元数据。",
+            en="Returns a synthesized answer, cited sources, and query metadata.",
         ),
     ),
     _ToolSystemItemTemplate(
@@ -157,18 +160,18 @@ _TOOL_SYSTEM_ITEM_TEMPLATES: tuple[_ToolSystemItemTemplate, ...] = (
         tool_name="mindatlas_generate_weekly_report",
         enabled_by_default=True,
         implementation_type="report",
-        title=_LocalizedText(zh="生成周报", en="Generate Weekly Report"),
+        title=_LocalizedText(zh="生成本周/上周回顾", en="Generate Weekly Report"),
         description=_LocalizedText(
-            zh="生成或返回指定周的 MindAtlas 周报。",
-            en="Generate or return the MindAtlas weekly report for a given week.",
+            zh="生成或返回指定周的 MindAtlas 周报，适合“我最近一周干了啥”“上周我做了什么”“帮我做个周回顾”这类问题。",
+            en="Generate or return the MindAtlas weekly report for requests like what did I do this week, what did I do last week, or help me make a weekly recap.",
         ),
         input_summary=_LocalizedText(
             zh="可选周起始日期，以及是否强制重新生成。",
             en="Optional week start date and whether to force regeneration.",
         ),
         output_summary=_LocalizedText(
-            zh="返回周报状态、周期和生成内容。",
-            en="Returns weekly report status, period, and generated content.",
+            zh="返回周报状态、周期和结构化内容，便于输出 recap、digest 或工作回顾。",
+            en="Returns weekly report status, period, and structured content for recap, digest, or review output.",
         ),
     ),
     _ToolSystemItemTemplate(
@@ -176,18 +179,18 @@ _TOOL_SYSTEM_ITEM_TEMPLATES: tuple[_ToolSystemItemTemplate, ...] = (
         tool_name="mindatlas_generate_monthly_report",
         enabled_by_default=True,
         implementation_type="report",
-        title=_LocalizedText(zh="生成月报", en="Generate Monthly Report"),
+        title=_LocalizedText(zh="生成本月回顾", en="Generate Monthly Report"),
         description=_LocalizedText(
-            zh="生成或返回指定月份的 MindAtlas 月报。",
-            en="Generate or return the MindAtlas monthly report for a given month.",
+            zh="生成或返回指定月份的 MindAtlas 月报，适合“这个月我做了什么”“帮我做个月回顾”“给我一份月度 digest”这类问题。",
+            en="Generate or return the MindAtlas monthly report for requests like what did I do this month, help me make a monthly recap, or give me a monthly digest.",
         ),
         input_summary=_LocalizedText(
             zh="可选月起始日期，以及是否强制重新生成。",
             en="Optional month start date and whether to force regeneration.",
         ),
         output_summary=_LocalizedText(
-            zh="返回月报状态、周期和生成内容。",
-            en="Returns monthly report status, period, and generated content.",
+            zh="返回月报状态、周期和结构化内容，便于输出 recap、digest 或月度回顾。",
+            en="Returns monthly report status, period, and structured content for recap, digest, or monthly review output.",
         ),
     ),
 )
@@ -197,10 +200,10 @@ _WORKFLOW_SYSTEM_ITEM_TEMPLATES: tuple[_WorkflowSystemItemTemplate, ...] = (
         key=OPENCLAW_CONTEXT_CAPTURE_DEFAULT_KEY,
         tool_name="mindatlas_submit_context_capture",
         enabled_by_default=True,
-        title=_LocalizedText(zh="智能创建记录", en="Smart Create Entry"),
+        title=_LocalizedText(zh="智能记住并入库", en="Smart Save To MindAtlas"),
         description=_LocalizedText(
-            zh="向 MindAtlas 提交轻量上下文，由系统工作流自动物化最终记录字段并完成智能入库。",
-            en="Submit thin context to MindAtlas so a system workflow can materialize the final entry fields and save the record intelligently.",
+            zh="把要记住、保存、记录或存起来的高价值上下文提交给 MindAtlas，由系统工作流自动物化最终记录字段并完成智能入库。",
+            en="Submit high-value context that the user wants to remember, save, record, or store so a MindAtlas workflow can materialize the final entry and save it intelligently.",
         ),
         workflow_canonical_name=OPENCLAW_CONTEXT_CAPTURE_WORKFLOW_NAME,
         workflow_preset_file_zh="workflows/openclaw_context_capture.json",

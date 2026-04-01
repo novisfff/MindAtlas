@@ -19,16 +19,16 @@ This directory contains the MindAtlas-side OpenClaw contract, the current phase 
 These are the canonical prompt sources that ship with the plugin package:
 
 - [MindAtlas Overview Skill](../../integrations/openclaw-mindatlas/skills/mindatlas-overview/SKILL.md)
-  - High-level positioning for what MindAtlas is and when OpenClaw should prefer it
+  - The primary router for durable memory, historical recall, recap, relation, graph, and published MindAtlas workflow or agent tasks
 
 - [MindAtlas Auto Capture Skill](../../integrations/openclaw-mindatlas/skills/mindatlas-auto-capture/SKILL.md)
-  - Capture policy for durable memory and context submission
+  - Capture-only sub-strategy for durable memory submission and save / store requests
 
 - [MindAtlas Retrieval Skill](../../integrations/openclaw-mindatlas/skills/mindatlas-retrieval/SKILL.md)
-  - Retrieval routing across search, detail lookup, and graph-style recall
+  - Retrieval-only sub-strategy across search, detail lookup, and graph-style recall
 
 - [MindAtlas Summary Skill](../../integrations/openclaw-mindatlas/skills/mindatlas-summary/SKILL.md)
-  - Summary routing for weekly, monthly, and topic-oriented reviews
+  - Summary-only sub-strategy for weekly, monthly, recent-activity, and topic-oriented reviews
 
 ### Skill Reference Pages
 
@@ -90,7 +90,7 @@ The plugin bundles 4 shipped MindAtlas skills:
 - `mindatlas-retrieval`
 - `mindatlas-summary`
 
-These skills ship with the plugin package and guide OpenClaw's calling strategy. The actual callable tools still come from the live MindAtlas capability catalog.
+These skills ship with the plugin package and guide OpenClaw's calling strategy. `mindatlas-overview` is the main router skill, while the other 3 skills are narrower summary, retrieval, and capture policies. The actual callable tools still come from the live MindAtlas capability catalog.
 
 Current OpenClaw releases may fail to surface plugin-manifest `skills` into the global skill registry consistently. The MindAtlas plugin now uses a two-layer compatibility path:
 
@@ -98,6 +98,12 @@ Current OpenClaw releases may fail to surface plugin-manifest `skills` into the 
 - runtime startup also syncs the 4 shipped skills into the active custom skills directory as a fallback
 
 Existing sessions still may need a new session or Gateway reload before refreshed skills or tools show up in the prompt surface.
+
+Runtime routing facts:
+
+- Automatic MindAtlas routing only works in sessions that can actually see both the shipped `mindatlas-*` skills and the live `mindatlas_*` tools.
+- Existing sessions do not hot-refresh skills or tools after installation, catalog metadata changes, or plugin updates.
+- If a session exposes no `mindatlas_*` tools, the agent should explicitly say that MindAtlas is not exposed in the current session instead of silently treating generic memory as a MindAtlas substitute.
 
 ## Positioning
 
@@ -192,6 +198,12 @@ Recommended plugin behavior:
 4. Refresh the catalog after administrators change the MindAtlas catalog.
 5. If a tool name, exported title, exported description, or input schema changes, start a new OpenClaw session or reload the OpenClaw Gateway / plugin so tool registration metadata is rebuilt.
 6. Never hard-code a built-in capability list on the OpenClaw side.
+
+Agent-facing routing guidance:
+
+- For prompt routing, think in terms of the session-visible `mindatlas_*` tool surface first, not a separate in-session catalog tool.
+- `mindatlas-overview` is the broad router for durable memory, historical recall, recap, relation, graph, and published workflow or agent tasks.
+- `mindatlas-summary`, `mindatlas-retrieval`, and `mindatlas-auto-capture` are narrower follow-on strategies once the overview route is chosen.
 
 Example discovery item:
 

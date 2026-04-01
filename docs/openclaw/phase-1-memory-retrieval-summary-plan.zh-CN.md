@@ -87,7 +87,7 @@
 **职责**：
 - 告诉 OpenClaw MindAtlas 是什么系统
 - 告诉 OpenClaw 什么时候应该优先考虑 MindAtlas
-- 强调 catalog-first，而不是固定工具名优先
+- 强调以当前会话可见的 `mindatlas_*` tool surface 为先，而不是固定工具名优先
 
 ### 模块 B：OpenClaw Auto Capture Policy
 
@@ -226,7 +226,7 @@ MindAtlas 内部负责：
 
 目标：
 - 先让 OpenClaw 明白 MindAtlas 的定位
-- 统一 catalog-first 的路由方式
+- 统一“先看当前会话可见的 `mindatlas_*` tools” 的路由方式
 - 让记录、检索、总结三类策略不再互相冲突
 
 ### Step 2：定义高层记录入口

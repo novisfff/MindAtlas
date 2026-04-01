@@ -1,13 +1,13 @@
 ---
 name: mindatlas-auto-capture
-description: Capture policy for deciding when OpenClaw should store durable, high-value context into MindAtlas instead of leaving it in transient chat history.
+description: Capture policy for remember/save/record/store/archive requests that should create durable MindAtlas memory through `mindatlas_submit_context_capture` or another visible capture workflow.
 ---
 
 # MindAtlas Auto Capture
 
 You can use MindAtlas as the user's long-term store for experiences, notes, decisions, and reusable conclusions.
 
-This skill is about capture policy.
+This skill is only for capture, create, store, and durable-memory submission after the overview skill has already routed the request to MindAtlas.
 Treat the current integration as a personal single-user setup unless the administrator explicitly says otherwise.
 
 Primary goal:
@@ -28,18 +28,27 @@ Avoid recording when the conversation is mostly:
 - Repetitive restatements
 - Low-signal fragments that do not deserve long-term storage
 
+Session-visible tool rule:
+- Start from the current session's visible `mindatlas_*` tools
+- Prefer `mindatlas_submit_context_capture` when it is visible and the user wants something remembered, saved, stored, recorded, or archived
+- Do not assume a separate catalog tool exists inside the current session
+
+If the current session does not expose any `mindatlas_*` tools:
+- Say explicitly that MindAtlas capabilities are not exposed in this session
+- Suggest starting a new OpenClaw session or reloading the Gateway / plugin
+- Do not silently downgrade the request into transient local memory
+
 Capture timing:
 - Prefer task-level capture over message-level capture
 - Wait for a clear milestone, result, or completed subtask instead of recording every turn
 - Automatic capture is a prompt-driven best-effort behavior, not a guaranteed system hook
 
 Capture workflow:
-1. Read the current MindAtlas capability catalog first
-2. Prefer an exposed recording capability or administrator-curated capture workflow
-3. Submit thin context rather than assembling every final entry field yourself
-4. Include only the high-value clues MindAtlas needs, such as what happened, why it matters, source or session context, likely tag hints, and time hints
-5. Let MindAtlas materialize the final entry type, summary, content, tags, relations, merge, and dedupe behavior whenever the chosen capability supports that
-6. If duplicate risk is high and a search-style capability is exposed, do a lightweight recent search first
+1. Prefer `mindatlas_submit_context_capture` or another visible capture workflow when the user explicitly wants durable memory
+2. Submit thin context rather than assembling every final entry field yourself
+3. Include only the high-value clues MindAtlas needs, such as what happened, why it matters, source or session context, likely tag hints, and time hints
+4. Let MindAtlas materialize the final entry type, summary, content, tags, relations, merge, and dedupe behavior whenever the chosen capability supports that
+5. If duplicate risk is high and `mindatlas_search_entries` is visible, do a lightweight recent search first
 
 Field-level creation guidance:
 - Do not assume you should assemble the full entry schema yourself

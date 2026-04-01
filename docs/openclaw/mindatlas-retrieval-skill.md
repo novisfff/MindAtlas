@@ -11,7 +11,8 @@ The plugin copy is the only authoritative prompt source. Update that file first;
 ## Responsibility
 
 - Routes retrieval requests between search-style, detail-style, and graph-style MindAtlas capabilities
-- Keeps retrieval catalog-first instead of assuming fixed tool names
+- Works as a narrower retrieval strategy after the overview router chooses MindAtlas
+- Starts from the current session's visible `mindatlas_*` tools instead of assuming fixed tool names or a separate catalog tool
 - Guides result presentation so users get useful answers instead of raw payload dumps
 - Enforces honest behavior when evidence is weak, ambiguous, or absent
 
@@ -19,4 +20,5 @@ The plugin copy is the only authoritative prompt source. Update that file first;
 
 - Start with the lightest useful retrieval route
 - Prefer precision for exact lookups and broader recall for exploratory memory questions
+- Yield to summary when the request is really a weekly, monthly, or recap-style review and a report path is visible
 - Use record IDs and follow-up detail lookup only when needed

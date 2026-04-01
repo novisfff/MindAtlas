@@ -20,6 +20,7 @@ from app.assistant_config.service import AssistantConfigService  # noqa: E402
 from app.common.exceptions import register_exception_handlers  # noqa: E402
 from app.database import get_db  # noqa: E402
 from app.openclaw_integration.models import OpenClawCapabilityItem  # noqa: E402
+from app.openclaw_integration.registry import list_openclaw_system_item_definitions  # noqa: E402
 from app.openclaw_integration.router import runtime_router, settings_router  # noqa: E402
 from app.openclaw_integration.service import OPENCLAW_SYSTEM_ITEM_VERSION  # noqa: E402
 from app.system_settings.initialization_service import SystemInitializationService  # noqa: E402
@@ -483,6 +484,18 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(weekly_content["type"], "object")
         self.assertTrue(weekly_content["nullable"])
         self.assertEqual(set(weekly_content["properties"]), {"summary", "suggestions", "trends"})
+
+    def test_system_item_registry_uses_routing_oriented_metadata(self) -> None:
+        definitions = {item.key: item for item in list_openclaw_system_item_definitions(locale="en")}
+
+        self.assertEqual(definitions["submit_context_capture"].tool_name, "mindatlas_submit_context_capture")
+        self.assertIn("remember, save, record, or store", definitions["submit_context_capture"].description)
+        self.assertIn("recent and time-bounded lookups", definitions["search_entries"].description)
+        self.assertIn("entry ID is known", definitions["get_entry"].description)
+        self.assertIn("connect these items", definitions["create_relation"].description)
+        self.assertIn("patterns", definitions["query_knowledge_graph"].description)
+        self.assertIn("what did I do this week", definitions["generate_weekly_report"].description)
+        self.assertIn("what did I do this month", definitions["generate_monthly_report"].description)
 
     def test_generate_weekly_report_accepts_structured_content_object(self) -> None:
         secret = self._rotate_secret()

@@ -4,13 +4,13 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import {
+const {
   configureOpenClawSkills,
   ensureSkillsExtraDir,
   resolveInstalledPluginRoot,
   resolveOpenClawConfigPath,
   resolveOpenClawRoot,
-} from '../scripts/configure-openclaw-skills.mjs'
+} = await import('../scripts/configure-openclaw-skills.mjs')
 
 test('resolveOpenClawConfigPath prefers OPENCLAW_CONFIG_PATH', () => {
   assert.equal(
