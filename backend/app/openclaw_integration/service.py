@@ -75,7 +75,7 @@ logger = logging.getLogger(__name__)
 OPENCLAW_INTEGRATION_CONFIG_KEY = "openclaw_integration_config"
 OPENCLAW_CAPABILITY_KEY_RE = re.compile(r"^[a-z0-9_]+$")
 OPENCLAW_SCHEMA_FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-OPENCLAW_SYSTEM_ITEM_VERSION = 4
+OPENCLAW_SYSTEM_ITEM_VERSION = 5
 OPENCLAW_RETIRED_SOURCE_TOOL_NAMES = frozenset({"openclaw_capture_entry"})
 
 OPENCLAW_AUTH_ERROR_CODE = 40161
@@ -290,34 +290,43 @@ def _normalize_json_object_schema(schema: dict[str, Any] | None, *, label: str) 
             )
 
         working = dict(raw_schema)
-        ref = working.get("$ref")
-        if isinstance(ref, str):
-            resolved = _resolve_schema_reference(root_schema, ref, path=path)
-            resolved.update({key: value for key, value in working.items() if key != "$ref"})
-            working = resolved
+        nullable = False
+        while True:
+            progressed = False
 
-        nullable = bool(working.get("nullable", False))
-        any_of = working.get("anyOf")
-        if isinstance(any_of, list) and any_of:
-            saw_null = False
-            non_null_variants: list[dict[str, Any]] = []
-            for variant in any_of:
-                if not isinstance(variant, dict):
-                    continue
-                if str(variant.get("type", "")).strip().lower() == "null":
-                    saw_null = True
-                    continue
-                non_null_variants.append(variant)
-            if len(non_null_variants) != 1:
-                raise ApiException(
-                    status_code=422,
-                    code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE,
-                    message=f"{path} schema anyOf is unsupported",
-                )
-            merged = dict(non_null_variants[0])
-            merged.update({key: value for key, value in working.items() if key != "anyOf"})
-            working = merged
-            nullable = nullable or saw_null
+            ref = working.get("$ref")
+            if isinstance(ref, str):
+                resolved = _resolve_schema_reference(root_schema, ref, path=path)
+                resolved.update({key: value for key, value in working.items() if key != "$ref"})
+                working = resolved
+                progressed = True
+
+            nullable = nullable or bool(working.get("nullable", False))
+            any_of = working.get("anyOf")
+            if isinstance(any_of, list) and any_of:
+                saw_null = False
+                non_null_variants: list[dict[str, Any]] = []
+                for variant in any_of:
+                    if not isinstance(variant, dict):
+                        continue
+                    if str(variant.get("type", "")).strip().lower() == "null":
+                        saw_null = True
+                        continue
+                    non_null_variants.append(variant)
+                if len(non_null_variants) != 1:
+                    raise ApiException(
+                        status_code=422,
+                        code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE,
+                        message=f"{path} schema anyOf is unsupported",
+                    )
+                merged = dict(non_null_variants[0])
+                merged.update({key: value for key, value in working.items() if key != "anyOf"})
+                working = merged
+                nullable = nullable or saw_null
+                progressed = True
+
+            if not progressed:
+                break
 
         field_type_raw = working.get("type")
         if field_type_raw is None and isinstance(working.get("properties"), dict):
@@ -964,14 +973,60 @@ class OpenClawIntegrationService:
                 changed = True
                 continue
 
+            desired_enabled = item.enabled
+            if not migrated and definition.key in legacy_enabled_map:
+                desired_enabled = bool(legacy_enabled_map[definition.key])
+
             if not bool(item.is_system_item):
                 item.is_system_item = True
                 changed = True
             if item.system_default_key != definition.key:
                 item.system_default_key = definition.key
                 changed = True
-            if not migrated and definition.key in legacy_enabled_map and item.enabled != bool(legacy_enabled_map[definition.key]):
-                item.enabled = bool(legacy_enabled_map[definition.key])
+            if item.capability_key != definition.key:
+                item.capability_key = definition.key
+                changed = True
+            if item.tool_name != definition.tool_name:
+                item.tool_name = definition.tool_name
+                changed = True
+            if item.title != definition.title:
+                item.title = definition.title
+                changed = True
+            if item.description != definition.description:
+                item.description = definition.description
+                changed = True
+            if item.source_type != definition.source_type:
+                item.source_type = definition.source_type
+                changed = True
+            if item.source_tool_name != source_tool_name:
+                item.source_tool_name = source_tool_name
+                changed = True
+            if item.tool_id != tool_id:
+                item.tool_id = tool_id
+                changed = True
+            if item.workflow_id != workflow_id:
+                item.workflow_id = workflow_id
+                changed = True
+            if item.agent_profile_id != agent_profile_id:
+                item.agent_profile_id = agent_profile_id
+                changed = True
+            if _schema_compact(item.input_schema_json or _EMPTY_OBJECT_SCHEMA) != _schema_compact(input_schema):
+                item.input_schema_json = input_schema
+                changed = True
+            if _schema_compact(item.output_schema_json or _EMPTY_OBJECT_SCHEMA) != _schema_compact(output_schema):
+                item.output_schema_json = output_schema
+                changed = True
+            if item.input_summary != input_summary:
+                item.input_summary = input_summary
+                changed = True
+            if item.output_summary != output_summary:
+                item.output_summary = output_summary
+                changed = True
+            if item.tool_response_mode != "json_schema":
+                item.tool_response_mode = "json_schema"
+                changed = True
+            if item.enabled != desired_enabled:
+                item.enabled = desired_enabled
                 changed = True
 
         for item in existing_system_items:

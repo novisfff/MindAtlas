@@ -21,6 +21,7 @@ from app.common.exceptions import register_exception_handlers  # noqa: E402
 from app.database import get_db  # noqa: E402
 from app.openclaw_integration.models import OpenClawCapabilityItem  # noqa: E402
 from app.openclaw_integration.router import runtime_router, settings_router  # noqa: E402
+from app.openclaw_integration.service import OPENCLAW_SYSTEM_ITEM_VERSION  # noqa: E402
 from app.system_settings.initialization_service import SystemInitializationService  # noqa: E402
 from app.system_settings.models import AppSetting  # noqa: E402
 from app.system_settings.schemas import InitializeSystemRequest  # noqa: E402
@@ -418,6 +419,107 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(by_key["search_entries"]["sourceType"], "tool")
         self.assertTrue(by_key["search_entries"]["isSystemItem"])
         self.assertIn(custom_item_id, {item["id"] for item in after_reset["catalogItems"]})
+
+    def test_report_system_items_seed_structured_content_schema(self) -> None:
+        response = self.client.get("/api/system-settings/openclaw-integration")
+        self.assertEqual(response.status_code, 200, response.text)
+        items = response.json()["data"]["catalogItems"]
+        by_key = {item["capabilityKey"]: item for item in items}
+
+        weekly_content = by_key["generate_weekly_report"]["outputSchema"]["properties"]["content"]
+        monthly_content = by_key["generate_monthly_report"]["outputSchema"]["properties"]["content"]
+
+        self.assertEqual(weekly_content["type"], "object")
+        self.assertTrue(weekly_content["nullable"])
+        self.assertEqual(set(weekly_content["properties"]), {"summary", "suggestions", "trends"})
+        self.assertEqual(monthly_content["type"], "object")
+        self.assertTrue(monthly_content["nullable"])
+        self.assertEqual(set(monthly_content["properties"]), {"summary", "suggestions", "trends"})
+
+    def test_existing_report_system_item_schema_is_resynced(self) -> None:
+        self.db.add(
+            AppSetting(
+                key="openclaw_integration_config",
+                value_json={
+                    "enabled": False,
+                    "catalogMigrated": True,
+                    "systemItemVersion": OPENCLAW_SYSTEM_ITEM_VERSION,
+                },
+            )
+        )
+        self.db.add(
+            OpenClawCapabilityItem(
+                capability_key="generate_weekly_report",
+                tool_name="mindatlas_generate_weekly_report",
+                title="旧周报",
+                description="旧 schema",
+                source_type="tool",
+                system_default_key="generate_weekly_report",
+                source_tool_name="openclaw_generate_weekly_report",
+                enabled=True,
+                is_system_item=True,
+                input_schema_json={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+                output_schema_json={
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string"},
+                    },
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                input_summary="",
+                output_summary="",
+                tool_response_mode="json_schema",
+            )
+        )
+        self.db.commit()
+
+        response = self.client.get("/api/system-settings/openclaw-integration")
+        self.assertEqual(response.status_code, 200, response.text)
+        items = response.json()["data"]["catalogItems"]
+        weekly_item = next(item for item in items if item["capabilityKey"] == "generate_weekly_report")
+        weekly_content = weekly_item["outputSchema"]["properties"]["content"]
+
+        self.assertEqual(weekly_content["type"], "object")
+        self.assertTrue(weekly_content["nullable"])
+        self.assertEqual(set(weekly_content["properties"]), {"summary", "suggestions", "trends"})
+
+    def test_generate_weekly_report_accepts_structured_content_object(self) -> None:
+        secret = self._rotate_secret()
+        self._enable_integration(secret)
+
+        with patch(
+            "app.assistant.workflow.engine.runtime_helpers.wrap_tool_with_db",
+            return_value=lambda **kwargs: {
+                "id": str(uuid4()),
+                "weekStart": "2026-03-23",
+                "weekEnd": "2026-03-29",
+                "entryCount": 4,
+                "content": {
+                    "summary": "本周推进顺利",
+                    "suggestions": ["继续跟进自动化"],
+                    "trends": "活跃度上升",
+                },
+                "contentLocale": "zh",
+                "status": "ready",
+                "attempts": 1,
+                "lastError": None,
+                "generatedAt": "2026-03-31T09:00:00+00:00",
+                "createdAt": "2026-03-31T09:00:00+00:00",
+                "updatedAt": "2026-03-31T09:00:00+00:00",
+            },
+        ):
+            response = self.client.post(
+                "/api/integrations/openclaw/capabilities/generate_weekly_report/execute",
+                headers=self._auth_headers(secret),
+                json={"weekStart": "2026-03-23", "forceRegenerate": False},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()["data"]["result"]
+        self.assertEqual(result["content"]["summary"], "本周推进顺利")
+        self.assertEqual(result["content"]["suggestions"], ["继续跟进自动化"])
+        self.assertEqual(result["content"]["trends"], "活跃度上升")
 
     def test_workflow_catalog_item_executes_published_workflow(self) -> None:
         self._initialize_system()
