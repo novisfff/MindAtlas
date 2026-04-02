@@ -284,7 +284,7 @@ function QuickStartStep({
 }) {
   const isLast = step === '4'
   return (
-    <article className={cn('relative flex gap-6 pb-2', !isLast && 'pb-8', className)}>
+    <article className={cn('relative flex gap-4 pb-2 md:gap-6', !isLast && 'pb-8', className)}>
       <div className="flex flex-col items-center">
         <span className={cn(
             "relative z-10 flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-semibold shadow-sm transition-all",
@@ -294,7 +294,7 @@ function QuickStartStep({
         )}>
           {statusTone === 'success' ? <CheckCircle2 className="h-5 w-5" /> : step}
         </span>
-        {!isLast && <div className="absolute top-10 bottom-0 left-[1.15rem] w-[2px] bg-slate-100" />}
+        {!isLast && <div className="absolute top-10 bottom-0 left-[1.15rem] w-[2px] bg-gradient-to-b from-slate-200 via-slate-100 to-transparent" />}
       </div>
       <div className="flex flex-1 flex-col gap-5 pt-1.5 pb-2">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -327,6 +327,37 @@ function QuickStartStep({
   )
 }
 
+function GuideCallout({
+  icon,
+  tone = 'info',
+  children,
+}: {
+  icon: React.ReactNode
+  tone?: 'info' | 'warning'
+  children: React.ReactNode
+}) {
+  return (
+    <div
+      className={cn(
+        'flex items-start gap-3 rounded-[22px] border px-4 py-3.5 text-sm leading-6 shadow-sm',
+        tone === 'warning'
+          ? 'border-amber-200 bg-amber-50/80 text-amber-900 shadow-amber-900/5'
+          : 'border-cyan-200 bg-cyan-50/80 text-cyan-950 shadow-cyan-900/5'
+      )}
+    >
+      <div
+        className={cn(
+          'mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl',
+          tone === 'warning' ? 'bg-amber-100 text-amber-700' : 'bg-cyan-100 text-cyan-700'
+        )}
+      >
+        {icon}
+      </div>
+      <div className="min-w-0">{children}</div>
+    </div>
+  )
+}
+
 function CopyableCodeBlock({
   title,
   description,
@@ -340,21 +371,61 @@ function CopyableCodeBlock({
   copyLabel: string
   onCopy: (value: string) => void
 }) {
+  const singleLine = !code.includes('\n')
+
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="space-y-1">
-          <p className="text-sm font-semibold text-slate-900">{title}</p>
+    <div className="rounded-[24px] border border-slate-200 bg-gradient-to-b from-white to-slate-50/70 p-5 shadow-sm shadow-slate-900/5">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 space-y-1.5">
+          <p className="text-base font-semibold text-slate-900">{title}</p>
           <p className="text-sm leading-6 text-slate-600">{description}</p>
         </div>
-        <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => onCopy(code)}>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-10 shrink-0 rounded-full border-slate-200 bg-white px-4 shadow-sm hover:bg-slate-50"
+          onClick={() => onCopy(code)}
+        >
           <Copy className="h-4 w-4" />
           {copyLabel}
         </Button>
       </div>
-      <pre className="mt-3 overflow-x-auto rounded-2xl bg-slate-950 px-4 py-3 text-xs leading-6 text-slate-100">
-        <code>{code}</code>
-      </pre>
+      {singleLine ? (
+        <div className="mt-4 overflow-x-auto">
+          <div className="inline-flex min-w-full items-center rounded-[22px] bg-slate-950 px-5 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] sm:min-w-0">
+            <code className="whitespace-pre font-mono text-[0.95rem] leading-7 text-slate-100">{code}</code>
+          </div>
+        </div>
+      ) : (
+        <pre className="mt-4 max-h-[24rem] overflow-auto rounded-[22px] bg-slate-950 px-5 py-4 text-xs leading-6 text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+          <code>{code}</code>
+        </pre>
+      )}
+    </div>
+  )
+}
+
+function GuideChecklistCard({
+  title,
+  items,
+}: {
+  title: string
+  items: string[]
+}) {
+  return (
+    <div className="rounded-[24px] border border-slate-200 bg-gradient-to-b from-white to-slate-50/70 p-5 shadow-sm shadow-slate-900/5">
+      <p className="text-base font-semibold text-slate-900">{title}</p>
+      <ul className="mt-4 space-y-3 text-sm leading-6 text-slate-700">
+        {items.map((item) => (
+          <li key={item} className="flex items-start gap-3">
+            <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-slate-600">
+              <CheckCircle2 className="h-4 w-4" />
+            </div>
+            <span>{item}</span>
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }
@@ -1184,9 +1255,9 @@ export function OpenClawIntegrationSettingsPage() {
                 statusLabel={t('openclawIntegration.guide.stepStatus.manual')}
                 statusTone="neutral"
               >
-                <div className="rounded-[22px] border border-cyan-200 bg-cyan-50/80 px-4 py-3 text-sm leading-6 text-cyan-900">
+                <GuideCallout icon={<ShieldCheck className="h-4 w-4" />}>
                   {t('openclawIntegration.guide.steps.plugin.hostHint')}
-                </div>
+                </GuideCallout>
 
                 <div className="grid gap-4 lg:grid-cols-2">
                   {pluginInstallBlocks.map((block) => (
@@ -1233,25 +1304,13 @@ export function OpenClawIntegrationSettingsPage() {
                 statusLabel={t('openclawIntegration.guide.stepStatus.manual')}
                 statusTone="neutral"
               >
-                <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 p-4 text-sm leading-6 text-amber-900">
+                <GuideCallout icon={<AlertTriangle className="h-4 w-4" />} tone="warning">
                   <p className="font-semibold">{t('openclawIntegration.guide.restartTitle')}</p>
                   <p className="mt-1">{t('openclawIntegration.guide.restartDescription')}</p>
-                </div>
+                </GuideCallout>
 
                 <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.9fr)]">
-                  <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 p-4">
-                    <p className="text-sm font-semibold text-slate-900">
-                      {t('openclawIntegration.guide.verifyChecksTitle')}
-                    </p>
-                    <ul className="mt-3 space-y-2 text-sm leading-6 text-slate-700">
-                      {verificationChecks.map((item) => (
-                        <li key={item} className="flex items-start gap-3">
-                          <CheckCircle2 className="mt-1 h-4 w-4 text-slate-500" />
-                          <span>{item}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
+                  <GuideChecklistCard title={t('openclawIntegration.guide.verifyChecksTitle')} items={verificationChecks} />
 
                   <CopyableCodeBlock
                     title={t('openclawIntegration.guide.verifyPromptsTitle')}
