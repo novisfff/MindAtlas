@@ -48,7 +48,9 @@ cd integrations/openclaw-mindatlas
 npm run install:openclaw
 ```
 
-The install command only registers the plugin package. The additional `configure:skills` step writes the installed plugin's `skills` directory into OpenClaw's `skills.load.extraDirs`, which aligns with the current OpenClaw docs and keeps `openclaw skills list` plus new sessions able to see the shipped MindAtlas skills even on builds where plugin-manifest skills are not surfaced consistently.
+The install command only registers the plugin package. The additional `configure:skills` step writes the installed plugin's `skills` directory into `skills.load.extraDirs`, which keeps `openclaw skills list` plus new sessions able to see the shipped MindAtlas skills even on builds where plugin-manifest skills are not surfaced consistently.
+
+If the script detects old MindAtlas-specific `tools.allow` or `tools.profile` compatibility remnants, it prints a warning but does not delete user config. MindAtlas tool visibility should now come from the official OpenClaw SDK required-tool registration path instead of a manual allowlist.
 
 You can install first and fill in `baseUrl` / `integrationSecret` afterwards.
 
@@ -82,6 +84,7 @@ Notes:
 - `integrationSecret` is generated from `MindAtlas > Settings > OpenClaw Integration`.
 - `catalogRefreshTtlSec` controls how often the plugin refreshes the remote capability catalog.
 - If you install the plugin before adding config, that is expected to work. The plugin will simply log that configuration is still missing and wait for `baseUrl` plus `integrationSecret`.
+- The package now follows the official OpenClaw `definePluginEntry(...)` SDK path for `2026.4.1+`, so live MindAtlas tools should be exposed through `api.registerTool(...)` during plugin registration rather than through `tools.allow` or `tools.profile`.
 
 ## MindAtlas Side Setup
 
@@ -102,12 +105,14 @@ The shipped skills control how OpenClaw should think about MindAtlas positioning
 - After each successful refresh, the plugin logs a summary with discovered capability counts, available counts, and registered tool names.
 - If a refresh succeeds but registers zero tools, the plugin logs whether the catalog was empty or all discovered capabilities were unavailable.
 - On refresh, availability state and execute targets are updated in memory for unchanged tools.
+- If startup catalog registration fails, the plugin keeps Gateway startup alive but requires a Gateway reload after the config or network issue is fixed.
+- If a previously unavailable capability becomes available later, the plugin logs that a Gateway reload is required instead of late-registering the new tool.
 - If the remote tool-name set changes because of add / delete / rename, the plugin marks `reloadRequired` and logs a warning.
 - If an existing tool keeps the same `toolName` but its exported title, description, summaries, or input schema changes, the plugin also marks `reloadRequired`.
 - Existing unchanged tools continue to use the latest capability mapping.
 - Stale tools whose remote `toolName` disappeared start returning a clear “start a new session or reload the plugin” error.
 - Stale tools whose exported metadata drifted under the same `toolName` also return a clear “start a new session or reload the plugin” error.
-- The plugin does not auto-reload Gateway or auto-re-register renamed tools in v1.
+- The plugin does not auto-reload Gateway or late-register newly discovered tools in v1.
 
 ## Development
 

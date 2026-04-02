@@ -97,12 +97,15 @@ Current OpenClaw releases may fail to surface plugin-manifest `skills` into the 
 - install-time `configure:skills` writes the installed plugin `skills` directory into `skills.load.extraDirs`
 - runtime startup also syncs the 4 shipped skills into the active custom skills directory as a fallback
 
+If `configure:skills` detects legacy MindAtlas-specific `tools.allow` or `tools.profile` remnants, it warns but leaves user config untouched. MindAtlas tool visibility should now come from official SDK registration in the plugin entry itself.
+
 Existing sessions still may need a new session or Gateway reload before refreshed skills or tools show up in the prompt surface.
 
 Runtime routing facts:
 
 - Automatic MindAtlas routing only works in sessions that can actually see both the shipped `mindatlas-*` skills and the live `mindatlas_*` tools.
 - Existing sessions do not hot-refresh skills or tools after installation, catalog metadata changes, or plugin updates.
+- The supported plugin path is the official OpenClaw `definePluginEntry(...)` SDK flow on `2026.4.1+`, where `mindatlas_*` tools are registered during `register(api)`.
 - If a session exposes no `mindatlas_*` tools, the agent should explicitly say that MindAtlas is not exposed in the current session instead of silently treating generic memory as a MindAtlas substitute.
 
 ## Positioning

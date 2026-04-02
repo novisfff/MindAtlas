@@ -5,7 +5,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { createPlugin, OpenClawMindAtlasPluginRuntime, PLUGIN_ID } from '../src/index'
+import pluginEntry, { OpenClawMindAtlasPluginRuntime, PLUGIN_ID, registerMindAtlasPlugin } from '../src/index'
 import { describePluginConfigIssue, extractPluginEntryConfig, resolvePluginConfig, validatePluginConfig } from '../src/config'
 import { BUNDLED_SKILL_IDS, MANAGED_SKILL_MARKER_FILE, resolveManagedSkillsRoot, syncBundledSkills } from '../src/skills'
 
@@ -36,9 +36,15 @@ interface MockTool {
   name: string
   description: string
   parameters: Record<string, unknown>
-  execute: (id: string, params: Record<string, unknown>, context?: { channel?: string; session?: string }) => Promise<{
+  execute: (id: string, params: Record<string, unknown>, context?: Record<string, unknown>) => Promise<{
     content: Array<{ type: 'text'; text: string }>
   }>
+}
+
+interface MockService {
+  id: string
+  start?: (context?: unknown) => void | Promise<void>
+  stop?: (context?: unknown) => void | Promise<void>
 }
 
 function createResponse(body: unknown, init?: ResponseInit) {
@@ -70,35 +76,87 @@ function createPluginConfig() {
 
 function createMockApi(config: unknown = createPluginConfig()) {
   const tools: MockTool[] = []
-  const services: Array<{ id: string; start?: () => void | Promise<void>; stop?: () => void | Promise<void> }> = []
-  const logs: Array<{ level: string; message: string; details?: unknown }> = []
+  const services: MockService[] = []
+  const logs: Array<{ level: string; message: string }> = []
 
-  return {
-    api: {
-      config,
-      logger: {
-        info(message: string, details?: unknown) {
-          logs.push({ level: 'info', message, details })
-        },
-        warn(message: string, details?: unknown) {
-          logs.push({ level: 'warn', message, details })
-        },
-        error(message: string, details?: unknown) {
-          logs.push({ level: 'error', message, details })
-        },
+  const api = {
+    id: PLUGIN_ID,
+    name: 'MindAtlas Capability Gateway',
+    version: '0.1.0',
+    source: 'tests',
+    registrationMode: 'full',
+    config,
+    pluginConfig: extractPluginEntryConfig(config),
+    runtime: {},
+    logger: {
+      debug(message: string) {
+        logs.push({ level: 'debug', message })
       },
-      registerTool(tool: MockTool) {
-        tools.push(tool)
+      info(message: string) {
+        logs.push({ level: 'info', message })
       },
-      registerService(service: { id: string; start?: () => void | Promise<void>; stop?: () => void | Promise<void> }) {
-        services.push(service)
+      warn(message: string) {
+        logs.push({ level: 'warn', message })
+      },
+      error(message: string) {
+        logs.push({ level: 'error', message })
       },
     },
+    registerTool(tool: MockTool) {
+      tools.push(tool)
+    },
+    registerService(service: MockService) {
+      services.push(service)
+    },
+    registerHook() {},
+    registerHttpRoute() {},
+    registerChannel() {},
+    registerGatewayMethod() {},
+    registerCli() {},
+    registerCliBackend() {},
+    registerProvider() {},
+    registerSpeechProvider() {},
+    registerMediaUnderstandingProvider() {},
+    registerImageGenerationProvider() {},
+    registerWebSearchProvider() {},
+    registerInteractiveHandler() {},
+    onConversationBindingResolved() {},
+    registerCommand() {},
+    registerContextEngine() {},
+    registerMemoryPromptSection() {},
+    registerMemoryFlushPlan() {},
+    registerMemoryRuntime() {},
+    registerMemoryEmbeddingProvider() {},
+    resolvePath(input: string) {
+      return input
+    },
+    on() {},
+  }
+
+  return {
+    api,
     tools,
     services,
     logs,
   }
 }
+
+function createServiceContext() {
+  return {
+    config: createPluginConfig(),
+    stateDir: TEST_OPENCLAW_ROOT,
+    logger: {
+      info() {},
+      warn() {},
+      error() {},
+    },
+  }
+}
+
+test('plugin entry metadata matches the plugin manifest id', () => {
+  assert.equal(pluginEntry.id, PLUGIN_ID)
+  assert.equal(pluginEntry.name, 'MindAtlas Capability Gateway')
+})
 
 test('resolveManagedSkillsRoot prefers the active OpenClaw config directory', () => {
   assert.equal(
@@ -211,7 +269,7 @@ test('plugin config can be absent during install and yields a friendly setup war
   )
 })
 
-test('plugin start skips registration when install-time config is still missing', async () => {
+test('registerMindAtlasPlugin skips registration when install-time config is still missing', async () => {
   const { api, services, tools, logs } = createMockApi({
     plugins: {
       entries: {
@@ -222,21 +280,16 @@ test('plugin start skips registration when install-time config is still missing'
       },
     },
   })
-  const plugin = createPlugin(api)
-  plugin.register()
 
-  await services[0].start?.()
+  await registerMindAtlasPlugin(api as never)
 
   assert.equal(tools.length, 0)
+  assert.equal(services.length, 0)
   assert.equal(logs.some((entry) => entry.level === 'warn' && /installed but not configured yet/.test(entry.message)), true)
 })
 
-test('plugin registers only available tools when the catalog loads', async () => {
+test('plugin registers only available tools during the official register(api) phase', async () => {
   const { api, services, tools } = createMockApi()
-  const plugin = createPlugin(api)
-  plugin.register()
-
-  assert.equal(services.length, 1)
 
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () =>
@@ -292,77 +345,38 @@ test('plugin registers only available tools when the catalog loads', async () =>
     })
 
   try {
-    await services[0].start?.()
+    await pluginEntry.register?.(api as never)
   } finally {
     globalThis.fetch = originalFetch
   }
 
   assert.equal(tools.length, 1)
   assert.equal(tools[0].name, 'mindatlas_capture_entry')
-  assert.equal(tools[0].parameters.type, 'object')
+  assert.equal(services.length, 1)
 })
 
-test('catalog refresh logs a zero-tool warning when all discovered capabilities are unavailable', async () => {
+test('startup catalog failure does not register tools and tells operators to reload after fixing connectivity', async () => {
   const { api, services, tools, logs } = createMockApi()
-  const plugin = createPlugin(api)
-  plugin.register()
 
   const originalFetch = globalThis.fetch
-  globalThis.fetch = async () =>
-    createResponse({
-      success: true,
-      code: 0,
-      message: 'OK',
-      data: {
-        integrationName: 'MindAtlas',
-        capabilities: [
-          {
-            capabilityKey: 'query_knowledge_graph',
-            toolName: 'mindatlas_query_knowledge_graph',
-            title: 'Knowledge Graph',
-            description: 'Ask LightRAG',
-            sourceType: 'tool',
-            implementationType: 'knowledge_graph',
-            available: false,
-            availabilityReason: 'LightRAG is disabled',
-            inputSummary: 'query (string)',
-            outputSummary: 'answer (string)',
-            inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
-            outputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
-            toolResponseMode: 'json_schema',
-          },
-        ],
-      },
-    })
+  globalThis.fetch = async () => {
+    throw new Error('connect ECONNREFUSED 127.0.0.1:8000')
+  }
 
   try {
-    await services[0].start?.()
+    await registerMindAtlasPlugin(api as never)
   } finally {
     globalThis.fetch = originalFetch
   }
 
   assert.equal(tools.length, 0)
-  assert.equal(logs.some((entry) => entry.level === 'info' && /MindAtlas catalog refresh succeeded/.test(entry.message)), true)
-  const zeroToolWarning = logs.find(
-    (entry) => entry.level === 'warn' && /all discovered capabilities are currently unavailable/.test(entry.message),
-  )
-  assert.ok(zeroToolWarning)
-  assert.deepEqual(zeroToolWarning.details, {
-    integrationName: 'MindAtlas',
-    unavailableCapabilities: [
-      {
-        capabilityKey: 'query_knowledge_graph',
-        toolName: 'mindatlas_query_knowledge_graph',
-        availabilityReason: 'LightRAG is disabled',
-      },
-    ],
-  })
+  assert.equal(services.length, 1)
+  assert.equal(logs.some((entry) => entry.level === 'warn' && /reload the OpenClaw Gateway/i.test(entry.message)), true)
 })
 
 test('tool execution forwards params and returns textified result', async () => {
   const { api, services, tools } = createMockApi()
-  const runtime = new OpenClawMindAtlasPluginRuntime(api)
-  runtime.register()
+  const runtime = new OpenClawMindAtlasPluginRuntime(api as never)
 
   let calls = 0
   const originalFetch = globalThis.fetch
@@ -429,7 +443,8 @@ test('tool execution forwards params and returns textified result', async () => 
   }
 
   try {
-    await services[0].start?.()
+    await runtime.register()
+    await services[0].start?.(createServiceContext())
     const result = await tools[0].execute('tool-call-1', { title: 'hello' }, { channel: 'discord', session: 'session-42' })
     assert.equal(result.content[0]?.type, 'text')
     assert.match(result.content[0]?.text ?? '', /"id": "entry-1"/)
@@ -438,12 +453,11 @@ test('tool execution forwards params and returns textified result', async () => 
   }
 })
 
-test('structure drift marks removed tools as stale and asks for reload', async () => {
-  const { api, services, tools } = createMockApi()
-  const runtime = new OpenClawMindAtlasPluginRuntime(api)
-  runtime.register()
+test('ttl refresh marks newly available tools as reload-required instead of late-registering them', async () => {
+  const { api, tools, logs } = createMockApi()
+  const runtime = new OpenClawMindAtlasPluginRuntime(api as never)
 
-  let phase: 'initial' | 'drift' = 'initial'
+  let phase: 'initial' | 'refresh' = 'initial'
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () => {
     if (phase === 'initial') {
@@ -469,6 +483,21 @@ test('structure drift marks removed tools as stale and asks for reload', async (
               outputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
               toolResponseMode: 'json_schema',
             },
+            {
+              capabilityKey: 'generate_weekly_report',
+              toolName: 'mindatlas_generate_weekly_report',
+              title: 'Weekly Report',
+              description: 'Generate a weekly recap',
+              sourceType: 'tool',
+              implementationType: 'report',
+              available: false,
+              availabilityReason: 'Warm-up pending',
+              inputSummary: 'startDate (string)',
+              outputSummary: 'summary (string)',
+              inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+              outputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+              toolResponseMode: 'json_schema',
+            },
           ],
         },
       })
@@ -482,9 +511,9 @@ test('structure drift marks removed tools as stale and asks for reload', async (
         integrationName: 'MindAtlas',
         capabilities: [
           {
-            capabilityKey: 'renamed_capture_entry',
-            toolName: 'mindatlas_capture_entry_v2',
-            title: 'Capture Entry v2',
+            capabilityKey: 'capture_entry',
+            toolName: 'mindatlas_capture_entry',
+            title: 'Capture Entry',
             description: 'Save a new entry',
             sourceType: 'tool',
             implementationType: 'entry',
@@ -496,35 +525,44 @@ test('structure drift marks removed tools as stale and asks for reload', async (
             outputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
             toolResponseMode: 'json_schema',
           },
+          {
+            capabilityKey: 'generate_weekly_report',
+            toolName: 'mindatlas_generate_weekly_report',
+            title: 'Weekly Report',
+            description: 'Generate a weekly recap',
+            sourceType: 'tool',
+            implementationType: 'report',
+            available: true,
+            availabilityReason: null,
+            inputSummary: 'startDate (string)',
+            outputSummary: 'summary (string)',
+            inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+            outputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+            toolResponseMode: 'json_schema',
+          },
         ],
       },
     })
   }
 
   try {
-    await services[0].start?.()
+    await runtime.register()
     assert.equal(tools.length, 1)
 
-    phase = 'drift'
+    phase = 'refresh'
     await runtime.refreshCatalog()
 
-    await assert.rejects(
-      () => tools[0].execute('tool-call-2', {}),
-      /Start a new session or reload the OpenClaw plugin or Gateway/,
-    )
-
-    const state = runtime.getState()
-    assert.equal(state.reloadRequired, true)
-    assert.equal(state.staleToolNames.has('mindatlas_capture_entry'), true)
+    assert.equal(tools.length, 1)
+    assert.equal(runtime.getState().reloadRequired, true)
+    assert.equal(logs.some((entry) => /does not late-register tools/i.test(entry.message)), true)
   } finally {
     globalThis.fetch = originalFetch
   }
 })
 
 test('metadata drift marks existing tools as stale and asks for reload', async () => {
-  const { api, services, tools } = createMockApi()
-  const runtime = new OpenClawMindAtlasPluginRuntime(api)
-  runtime.register()
+  const { api, tools } = createMockApi()
+  const runtime = new OpenClawMindAtlasPluginRuntime(api as never)
 
   let phase: 'initial' | 'drift' = 'initial'
   const originalFetch = globalThis.fetch
@@ -598,7 +636,7 @@ test('metadata drift marks existing tools as stale and asks for reload', async (
   }
 
   try {
-    await services[0].start?.()
+    await runtime.register()
     assert.equal(tools.length, 1)
 
     phase = 'drift'

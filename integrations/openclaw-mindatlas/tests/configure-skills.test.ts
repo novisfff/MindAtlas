@@ -6,6 +6,7 @@ import test from 'node:test'
 
 const {
   configureOpenClawSkills,
+  detectLegacyMindAtlasToolPolicy,
   ensureSkillsExtraDir,
   resolveInstalledPluginRoot,
   resolveOpenClawConfigPath,
@@ -84,7 +85,20 @@ test('ensureSkillsExtraDir appends the MindAtlas skills directory only once', ()
   ])
 })
 
-test('configureOpenClawSkills writes the installed plugin skills path into openclaw.json', () => {
+test('detectLegacyMindAtlasToolPolicy warns on the deprecated tools allowlist/profile path', () => {
+  const warnings = detectLegacyMindAtlasToolPolicy({
+    tools: {
+      profile: 'full',
+      allow: ['feishu', 'openclaw-mindatlas', 'mindatlas_search_entries'],
+    },
+  })
+
+  assert.equal(warnings.length, 2)
+  assert.match(warnings[0], /tools\.allow/i)
+  assert.match(warnings[1], /tools\.profile/i)
+})
+
+test('configureOpenClawSkills writes only the installed plugin skills path into openclaw.json', () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mindatlas-configure-skills-'))
   const configPath = path.join(tempRoot, 'openclaw.json')
   const pluginRoot = path.join(tempRoot, 'extensions', 'openclaw-mindatlas')
@@ -115,6 +129,8 @@ test('configureOpenClawSkills writes the installed plugin skills path into openc
 
     assert.equal(result.skillsDir, skillsDir)
     assert.deepEqual(writtenConfig.skills.load.extraDirs, [skillsDir])
+    assert.equal(writtenConfig.tools, undefined)
+    assert.deepEqual(result.warnings, [])
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true })
   }
@@ -131,6 +147,51 @@ test('configureOpenClawSkills falls back to the local plugin skills directory wh
     assert.equal(path.basename(result.skillsDir), 'skills')
     assert.match(result.skillsDir, /openclaw-mindatlas[\\/]+skills$/)
     assert.deepEqual(writtenConfig.skills.load.extraDirs, [result.skillsDir])
+    assert.equal(writtenConfig.tools, undefined)
+    assert.deepEqual(result.warnings, [])
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true })
+  }
+})
+
+test('configureOpenClawSkills keeps legacy tool settings untouched but warns about them', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mindatlas-configure-skills-legacy-'))
+  const configPath = path.join(tempRoot, 'openclaw.json')
+  const pluginRoot = path.join(tempRoot, 'extensions', 'openclaw-mindatlas')
+  const skillsDir = path.join(pluginRoot, 'skills')
+
+  try {
+    fs.mkdirSync(skillsDir, { recursive: true })
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify(
+        {
+          tools: {
+            profile: 'full',
+            allow: ['openclaw-mindatlas', 'mindatlas_generate_weekly_report'],
+          },
+          plugins: {
+            installs: {
+              'openclaw-mindatlas': {
+                installPath: pluginRoot,
+              },
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    )
+
+    const result = configureOpenClawSkills({ configPath })
+    const writtenConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'))
+
+    assert.deepEqual(writtenConfig.tools, {
+      profile: 'full',
+      allow: ['openclaw-mindatlas', 'mindatlas_generate_weekly_report'],
+    })
+    assert.equal(result.warnings.length, 2)
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true })
   }

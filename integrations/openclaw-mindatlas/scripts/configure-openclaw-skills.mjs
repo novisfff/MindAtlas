@@ -79,6 +79,36 @@ export function ensureSkillsExtraDir(config, extraDir) {
   return nextConfig
 }
 
+export function detectLegacyMindAtlasToolPolicy(config) {
+  const tools = config?.tools
+  if (!tools || typeof tools !== 'object') {
+    return []
+  }
+
+  const allow = Array.isArray(tools.allow)
+    ? tools.allow.filter((entry) => typeof entry === 'string' && entry.trim())
+    : []
+  const profile = typeof tools.profile === 'string' ? tools.profile.trim() : ''
+  const hasMindAtlasAllow = allow.some((entry) => entry === PLUGIN_ID || entry.startsWith('mindatlas_'))
+
+  if (!hasMindAtlasAllow && profile !== 'full') {
+    return []
+  }
+
+  const warnings = []
+  if (hasMindAtlasAllow) {
+    warnings.push(
+      'Detected legacy MindAtlas tools.allow entries in OpenClaw config. MindAtlas tool visibility now comes from official SDK registration, so these allowlist entries are deprecated and no longer required.',
+    )
+  }
+  if (profile === 'full' && hasMindAtlasAllow) {
+    warnings.push(
+      'Detected the old MindAtlas tools.profile compatibility setting in OpenClaw config. `configure:skills` no longer manages tools.profile because MindAtlas tools should now appear through required SDK registration instead.',
+    )
+  }
+  return warnings
+}
+
 export function configureOpenClawSkills(options = {}) {
   const env = options.env ?? process.env
   const homeDir = options.homeDir ?? os.homedir()
@@ -95,6 +125,7 @@ export function configureOpenClawSkills(options = {}) {
     throw new Error(`MindAtlas plugin skills directory was not found: ${skillsDir}`)
   }
 
+  const warnings = detectLegacyMindAtlasToolPolicy(config)
   const nextConfig = ensureSkillsExtraDir(config, skillsDir)
   fs.mkdirSync(configDir, { recursive: true })
   fs.writeFileSync(configPath, `${JSON.stringify(nextConfig, null, 2)}\n`, 'utf8')
@@ -104,6 +135,7 @@ export function configureOpenClawSkills(options = {}) {
     pluginRoot,
     skillsDir,
     extraDirs: nextConfig.skills.load.extraDirs,
+    warnings,
   }
 }
 
@@ -122,6 +154,9 @@ if (isExecutedDirectly()) {
     console.log(`MindAtlas plugin root: ${result.pluginRoot}`)
     console.log(`MindAtlas skills dir: ${result.skillsDir}`)
     console.log(`Registered extra skill dirs: ${result.extraDirs.join(', ')}`)
+    for (const warning of result.warnings) {
+      console.warn(warning)
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to configure OpenClaw skills.'
     console.error(message)

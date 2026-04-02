@@ -5,7 +5,9 @@ import type { MindAtlasRuntimeCapability } from './catalog'
 
 export interface ToolExecutionContextLike {
   channel?: string
+  messageChannel?: string
   session?: string
+  sessionId?: string
 }
 
 export interface ToolContentItem {

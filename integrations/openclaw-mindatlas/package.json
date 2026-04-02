@@ -17,10 +17,19 @@
   "openclaw": {
     "extensions": [
       "./src/index.ts"
-    ]
+    ],
+    "compat": {
+      "pluginApi": ">=2026.4.1",
+      "minGatewayVersion": "2026.4.1"
+    },
+    "build": {
+      "openclawVersion": "2026.4.1",
+      "pluginSdkVersion": "2026.4.1"
+    }
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
+    "openclaw": "2026.4.1",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   }
