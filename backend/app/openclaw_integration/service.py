@@ -240,6 +240,15 @@ def _text_field_output_schema(field_name: str = "text") -> dict[str, Any]:
     }
 
 
+def _default_agent_input_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": True,
+    }
+
+
 def _schema_summary(schema: dict[str, Any], *, locale: str = "en") -> str:
     if not isinstance(schema, dict):
         return ""
@@ -509,6 +518,32 @@ def _normalize_result_object(value: Any) -> dict[str, Any]:
         code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE,
         message="Tool or target did not return a valid JSON object",
     )
+
+
+def _extract_entry_reference_id(payload: dict[str, Any]) -> str | None:
+    candidates: list[Any] = [
+        payload.get("entryId"),
+        payload.get("entry_id"),
+        payload.get("id"),
+    ]
+    for container_key in ("entry", "item", "record", "result"):
+        nested = payload.get(container_key)
+        if isinstance(nested, dict):
+            candidates.extend(
+                [
+                    nested.get("entryId"),
+                    nested.get("entry_id"),
+                    nested.get("id"),
+                ]
+            )
+
+    for candidate in candidates:
+        if isinstance(candidate, UUID):
+            return str(candidate)
+        normalized = _normalize_optional_text(candidate)
+        if normalized:
+            return normalized
+    return None
 
 
 class OpenClawIntegrationService:
@@ -1534,28 +1569,60 @@ class OpenClawIntegrationService:
             "text_field",
         )
 
+    def _default_source_contract_for_agent(
+        self,
+        *,
+        locale: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], str, str, OpenClawToolResponseMode]:
+        input_schema = _normalize_json_object_schema(_default_agent_input_schema(), label="input")
+        output_schema = _text_field_output_schema()
+        return (
+            input_schema,
+            output_schema,
+            _localized_message(locale, zh="允许任意对象输入", en="Any JSON object input"),
+            _localized_message(locale, zh="text（string）", en="text (string)"),
+            "text_field",
+        )
+
     def _merge_item_request(
         self,
         item: OpenClawCapabilityItem,
         request: OpenClawCapabilityItemUpdateRequest,
     ) -> OpenClawCapabilityItemCreateRequest:
         fields_set = set(request.model_fields_set)
+        source_binding_fields = {"source_type", "source_tool_name", "tool_id", "workflow_id", "agent_profile_id"}
+        source_binding_changed = bool(fields_set & source_binding_fields)
         payload = {
             "source_type": request.source_type if "source_type" in fields_set else item.source_type,
             "tool_name": request.tool_name if "tool_name" in fields_set else item.tool_name,
             "title": request.title if "title" in fields_set else item.title,
             "description": request.description if "description" in fields_set else item.description,
             "enabled": request.enabled if "enabled" in fields_set else item.enabled,
-            "input_summary": request.input_summary if "input_summary" in fields_set else item.input_summary,
-            "output_summary": request.output_summary if "output_summary" in fields_set else item.output_summary,
-            "input_schema": request.input_schema if "input_schema" in fields_set else item.input_schema_json,
-            "output_schema": request.output_schema if "output_schema" in fields_set else item.output_schema_json,
-            "tool_response_mode": request.tool_response_mode if "tool_response_mode" in fields_set else item.tool_response_mode,
             "source_tool_name": request.source_tool_name if "source_tool_name" in fields_set else item.source_tool_name,
             "tool_id": request.tool_id if "tool_id" in fields_set else item.tool_id,
             "workflow_id": request.workflow_id if "workflow_id" in fields_set else item.workflow_id,
             "agent_profile_id": request.agent_profile_id if "agent_profile_id" in fields_set else item.agent_profile_id,
         }
+        if "input_summary" in fields_set:
+            payload["input_summary"] = request.input_summary
+        elif not source_binding_changed:
+            payload["input_summary"] = item.input_summary
+        if "output_summary" in fields_set:
+            payload["output_summary"] = request.output_summary
+        elif not source_binding_changed:
+            payload["output_summary"] = item.output_summary
+        if "input_schema" in fields_set:
+            payload["input_schema"] = request.input_schema
+        elif not source_binding_changed:
+            payload["input_schema"] = item.input_schema_json
+        if "output_schema" in fields_set:
+            payload["output_schema"] = request.output_schema
+        elif not source_binding_changed:
+            payload["output_schema"] = item.output_schema_json
+        if "tool_response_mode" in fields_set:
+            payload["tool_response_mode"] = request.tool_response_mode
+        elif not source_binding_changed:
+            payload["tool_response_mode"] = item.tool_response_mode
         return OpenClawCapabilityItemCreateRequest.model_validate(payload)
 
     def _apply_user_item_request(
@@ -1599,11 +1666,20 @@ class OpenClawIntegrationService:
                     code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
                     message=f"Agent has no published version: {agent_profile.name}",
                 )
-            input_schema = _normalize_json_object_schema(request.input_schema, label="input")
-            output_schema = _normalize_json_object_schema(request.output_schema, label="output")
-            input_summary = str(request.input_summary or "").strip() or _schema_summary(input_schema, locale=locale)
-            output_summary = str(request.output_summary or "").strip() or _schema_summary(output_schema, locale=locale)
-            tool_response_mode = "json_schema"
+            default_input_schema, default_output_schema, default_input_summary, default_output_summary, default_mode = (
+                self._default_source_contract_for_agent(locale=locale)
+            )
+            input_schema = _normalize_json_object_schema(
+                request.input_schema if request.input_schema is not None else default_input_schema,
+                label="input",
+            )
+            output_schema = _normalize_json_object_schema(
+                request.output_schema if request.output_schema is not None else default_output_schema,
+                label="output",
+            )
+            input_summary = str(request.input_summary or "").strip() or default_input_summary
+            output_summary = str(request.output_summary or "").strip() or default_output_summary
+            tool_response_mode = request.tool_response_mode or default_mode
             source_tool_name = None
             tool_id = None
             workflow_id = None
@@ -1637,8 +1713,14 @@ class OpenClawIntegrationService:
                     locale=locale,
                 )
             )
-            input_schema = _normalize_json_object_schema(request.input_schema or default_input_schema, label="input")
-            output_schema = _normalize_json_object_schema(request.output_schema or default_output_schema, label="output")
+            input_schema = _normalize_json_object_schema(
+                request.input_schema if request.input_schema is not None else default_input_schema,
+                label="input",
+            )
+            output_schema = _normalize_json_object_schema(
+                request.output_schema if request.output_schema is not None else default_output_schema,
+                label="output",
+            )
             input_summary = str(request.input_summary or "").strip() or default_input_summary
             output_summary = str(request.output_summary or "").strip() or default_output_summary
             tool_response_mode = request.tool_response_mode or default_mode
@@ -1857,6 +1939,13 @@ class OpenClawIntegrationService:
                 )
 
         else:
+            (
+                default_agent_input_schema,
+                default_agent_output_schema,
+                default_agent_input_summary,
+                default_agent_output_summary,
+                default_agent_mode,
+            ) = self._default_source_contract_for_agent(locale=locale)
             agents = self.config_service.list_agent_profiles(include_disabled=True)
             for agent in agents:
                 has_published = agent.published_version_id is not None and self.config_service._get_agent_profile_published_draft(agent) is not None  # noqa: SLF001
@@ -1883,11 +1972,11 @@ class OpenClawIntegrationService:
                         schema_mode="editable",
                         agent_profile_id=agent.id,
                         published_version_id=agent.published_version_id,
-                        default_input_schema=_EMPTY_OBJECT_SCHEMA,
-                        default_output_schema=_EMPTY_OBJECT_SCHEMA,
-                        default_input_summary="",
-                        default_output_summary="",
-                        default_tool_response_mode="json_schema",
+                        default_input_schema=default_agent_input_schema,
+                        default_output_schema=default_agent_output_schema,
+                        default_input_summary=default_agent_input_summary,
+                        default_output_summary=default_agent_output_summary,
+                        default_tool_response_mode=default_agent_mode,
                     )
                 )
 
@@ -2170,13 +2259,18 @@ class OpenClawIntegrationService:
         resolved = self._resolve_tool_source(tool_id=item.tool_id, source_tool_name=item.source_tool_name)
         if resolved is None or resolved.tool_runtime is None:
             raise ApiException(status_code=409, code=40961, message="Bound tool is unavailable")
+        normalized_payload = raw_payload
+        if item.source_tool_name == "openclaw_get_entry":
+            entry_id = _extract_entry_reference_id(raw_payload)
+            if entry_id:
+                normalized_payload = {"entryId": entry_id}
         input_schema = _normalize_json_object_schema(item.input_schema_json or _EMPTY_OBJECT_SCHEMA, label="input")
         output_schema = _normalize_json_object_schema(item.output_schema_json or _EMPTY_OBJECT_SCHEMA, label="output")
-        _validate_value_against_schema(input_schema, raw_payload, label="input")
+        _validate_value_against_schema(input_schema, normalized_payload, label="input")
         from app.assistant.workflow.engine.runtime_helpers import stringify, wrap_tool_with_db
 
         runner = wrap_tool_with_db(resolved.tool_runtime, self.db.get_bind())
-        result = runner(**raw_payload)
+        result = runner(**normalized_payload)
         if item.tool_response_mode == "text_field":
             properties = output_schema.get("properties") if isinstance(output_schema.get("properties"), dict) else {}
             field_name = next(iter(properties.keys()), "text")

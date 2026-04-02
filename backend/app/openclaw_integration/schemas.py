@@ -194,7 +194,7 @@ class OpenClawCapabilityItemBaseRequest(CamelModel):
     output_summary: str = Field(default="", alias="outputSummary", max_length=4000)
     input_schema: dict[str, Any] | None = Field(default=None, alias="inputSchema")
     output_schema: dict[str, Any] | None = Field(default=None, alias="outputSchema")
-    tool_response_mode: OpenClawToolResponseMode = Field(default="json_schema", alias="toolResponseMode")
+    tool_response_mode: OpenClawToolResponseMode | None = Field(default=None, alias="toolResponseMode")
     source_tool_name: str | None = Field(default=None, alias="sourceToolName", max_length=128)
     tool_id: UUID | None = Field(default=None, alias="toolId")
     workflow_id: UUID | None = Field(default=None, alias="workflowId")

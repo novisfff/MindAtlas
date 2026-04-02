@@ -1,100 +1,54 @@
 # MindAtlas
 
-个人知识与经历管理系统 - 记录、关联、搜索、分析、总结你的知识与经历。
+可自托管的个人知识与经历管理系统，用于记录、关联、搜索与回顾真正重要的信息。
 
 [English](README.md)
 
-## 系统介绍
+## 概览
 
-MindAtlas 是一个可自托管的个人知识与经历管理系统，目标是把零散的信息沉淀为结构化、可连接、可检索的“知识地图”——并提供 AI 辅助写作与（可选）RAG 查询能力。
+MindAtlas 旨在把零散的笔记、项目记录和生活经历沉淀为结构化的个人知识地图。系统以 **Entry** 为核心，支持 Markdown 内容、时间信息、标签、类型化关系、附件以及图谱连接。
 
-系统以 **Entry**（Markdown 内容 + 可选时间信息）为核心，通过 **类型**、**标签** 与显式 **关系** 来组织内容。在此基础上，MindAtlas 还提供：
+当前系统已经不只是基础记录工具，还包含：
 
-- **AI 内容助手**：为 Entry 生成摘要、整理 Markdown、推荐标签
-- **AI 对话助手**：支持流式对话（SSE）、工具调用与可配置技能
-- **AI 注册表**：管理 OpenAI 兼容的凭据/模型，并绑定到不同组件（assistant / LightRAG）
-- **LightRAG + Neo4j（可选）**：对内容做索引，用于 RAG 查询、图谱浏览与关系推荐
-
-## 适用场景
-
-- 构建个人“第二大脑”：学习笔记、项目记录、研究资料、生活经历沉淀
-- 按时间维度管理经历（时间点 / 时间区间）
-- 用关系把人物/技能/项目/想法串起来，并以图谱方式可视化
-- 通过 MinIO（S3 兼容）存储与管理附件
-- 使用 AI 生成摘要/内容整理/标签建议（可选）
-- 以自然语言提问并获得流式回答（可选；启用 LightRAG 效果更佳）
-
-## 核心概念
-
-- **Entry**：一条记录，包含标题、Markdown 内容、可选时间、摘要
-- **Entry 类型**：Entry 的分类配置（图标/颜色等），便于统一管理
-- **标签**：多维度的灵活标注
-- **关系**：Entry 之间的有类型连接（构成“系统图谱”）
-- **附件**：与 Entry 关联的文件（存储在 MinIO）
-- **图谱**：显式关系的交互式可视化（以及可选的 LightRAG 图谱）
-- **AI 注册表**：凭据/模型管理 + 组件绑定（assistant / LightRAG）
-- **助手技能/工具**：对话助手可配置的能力集合
-
-## 功能特性
-
-- **Entry 管理** - 创建、编辑、搜索知识/经历记录，支持 Markdown 内容
-- **类型系统** - 自定义 Entry 类型（知识、项目、竞赛等），配置图标和颜色
-- **标签管理** - 灵活的标签分类系统
-- **关系网络** - 建立 Entry 之间的关联关系，支持多种关系类型
-- **附件存储** - 基于 MinIO 的文件附件管理
-- **知识图谱** - 可视化展示知识关联网络
-- **LightRAG（可选）** - 基于 LightRAG + Neo4j 的知识图谱索引与 RAG 查询（含后台 Worker）
-- **AI 内容生成** - 为 Entry 生成摘要、内容整理与标签建议
-- **AI 助手** - 基于 LangChain 的智能助手，支持工具调用和技能执行
-- **国际化** - 支持中文和英文界面切换
+- **结构化知识管理**：Entry 类型、标签、关系、附件、仪表盘、日历视图与图谱探索
+- **首次初始化向导**：首次进入时配置语言、默认类型、AI 服务商与运行时能力模块
+- **运行时系统设置**：初始化后继续管理存储、知识图谱、文档解析、自动化等模块
+- **AI 注册表与助手配置**：统一管理服务商、模型、工具、技能、目标、工作流、Agent 与系统 AI 行为
+- **可选的 LightRAG 知识图谱**：结合 Neo4j 做索引、RAG 查询与图谱辅助探索
+- **基于 Docling 的文档解析**：处理上传文件，支持 OCR 和可选图片描述能力
+- **定时 AI 报告**：支持周报、月报生成，并在仪表盘中查看结果
+- **OpenClaw 集成**：内置可配置能力目录，并在仓库中提供对应插件包
 
 ## 技术栈
 
 ### 后端
-- **框架**: FastAPI
-- **数据库**: PostgreSQL + SQLAlchemy
-- **迁移**: Alembic
-- **对象存储**: MinIO
-- **AI**: LangChain + OpenAI 兼容接口
-- **图数据库（可选）**: Neo4j（用于 LightRAG）
-- **RAG（可选）**: LightRAG（lightrag-hku）
+
+- FastAPI
+- PostgreSQL + SQLAlchemy
+- Alembic
+- MinIO（S3 兼容对象存储）
+- LangChain + OpenAI 兼容接口
+- LightRAG + Neo4j（可选）
+- APScheduler 后台调度
 
 ### 前端
-- **框架**: React 18 + TypeScript
-- **构建**: Vite
-- **状态管理**: Zustand + TanStack Query
-- **样式**: Tailwind CSS
-- **国际化**: react-i18next
+
+- React 18 + TypeScript
+- Vite
+- Zustand + TanStack Query
+- Tailwind CSS
+- react-i18next
 
 ## 项目结构
 
-```
+```text
 MindAtlas/
-├── backend/                 # Python FastAPI 后端
-│   ├── app/
-│   │   ├── entry/          # Entry 模块
-│   │   ├── entry_type/     # 类型配置
-│   │   ├── tag/            # 标签管理
-│   │   ├── relation/       # 关系管理
-│   │   ├── attachment/     # 附件管理
-│   │   ├── ai_provider/    # AI 服务商配置
-│   │   ├── ai_registry/    # AI Key/模型注册表
-│   │   ├── ai/             # AI 功能接口
-│   │   ├── assistant/      # AI 助手
-│   │   ├── assistant_config/ # 助手工具/技能配置
-│   │   ├── graph/          # 图谱接口
-│   │   ├── lightrag/       # LightRAG（可选）
-│   │   └── stats/          # 统计接口
-│   ├── alembic/            # 数据库迁移
-│   └── requirements.txt
-├── frontend/               # React 前端
-│   ├── src/
-│   │   ├── features/       # 功能模块
-│   │   ├── components/     # 公共组件
-│   │   ├── stores/         # 状态管理
-│   │   └── locales/        # 国际化文件
-│   └── package.json
-└── deploy/                 # Docker 部署配置
+├── backend/                         # FastAPI API、后台 Worker、调度器、运行时配置
+├── frontend/                        # React 应用、初始化流程、设置页、仪表盘
+├── deploy/                          # Docker Compose 部署与覆盖配置
+├── docs/                            # 用户手册与辅助文档
+├── integrations/openclaw-mindatlas/ # OpenClaw 插件包
+└── openspec/                        # 项目规格与变更记录
 ```
 
 ## 快速开始
@@ -104,10 +58,10 @@ MindAtlas/
 - Python 3.11+
 - Node.js 18+
 - PostgreSQL 15+
-- MinIO (或兼容 S3 的对象存储)
-- Neo4j 5+（可选；启用 LightRAG 时需要）
+- MinIO 或其他兼容 S3 的对象存储
+- 如果启用 LightRAG，需要 Neo4j 5+
 
-### 1. 克隆项目
+### 1. 克隆仓库
 
 ```bash
 git clone https://github.com/novisfff/MindAtlas
@@ -119,82 +73,76 @@ cd MindAtlas
 ```bash
 cd backend
 
-# 创建虚拟环境
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
-# 安装依赖
 pip install -r requirements.txt
 
-# 配置环境变量
 cp .env.example .env
-# 编辑 .env 配置数据库/MinIO，并可选配置 AI/LightRAG/Neo4j
+# 按需编辑 .env，配置数据库、对象存储，以及可选的 AI / LightRAG 参数
 
-# 数据库迁移
 alembic upgrade head
-
-# 启动服务
 uvicorn app.main:app --reload --port 8000
 ```
 
-### 2.1（可选）启动 LightRAG Worker
+API 文档地址为 `http://localhost:8000/docs`。
 
-当你设置 `LIGHTRAG_ENABLED=true` 时，建议在另一个终端启动后台 Worker：
+### 3. 可选 Worker
+
+如果启用了 LightRAG：
 
 ```bash
+cd backend
+source .venv/bin/activate
 python -m app.lightrag.worker
 ```
 
-### 3. 启动前端
+如果需要附件文档解析能力：
+
+```bash
+cd backend
+source .venv/bin/activate
+pip install -r requirements-docling.txt
+python -m app.attachment.worker
+```
+
+关于 Docling 依赖说明和更完整的后端启动信息，请参考 [`backend/README.md`](backend/README.md)。
+
+### 4. 启动前端
 
 ```bash
 cd frontend
-
-# 安装依赖
 npm install
-
-# 启动开发服务器
 npm run dev
 ```
 
-访问 http://localhost:3000 使用应用。
+打开 `http://localhost:3000`。
 
-## Docker 部署
+首次进入系统时，MindAtlas 会引导你完成初始化，并配置存储、知识图谱、文档解析、自动化等运行时模块。
 
-项目提供完整的 Docker Compose 配置，一键部署所有服务：
+### 5. Docker 快速启动
 
 ```bash
 cd deploy
 docker compose up -d
 ```
 
-Docker 部署默认就是零配置启动：即使你不提前创建任何 env 文件，直接执行 `docker compose up -d` 也可以启动。如果你需要自定义端口、密码或高级覆盖项，再把 `deploy/.env.example` 复制成 `.env` 即可；即使复制后完全不修改，行为也与不提供 `.env` 一致。
+Docker 部署默认即可零配置启动。如果你想覆盖端口、密码或其他运行时默认值，再将 `deploy/.env.example` 复制为 `deploy/.env` 并按需修改。
 
-详细部署说明请参考 [deploy/README.md](deploy/README.md)（包含 Neo4j + LightRAG Worker）。
+## 配置说明
 
-## 后端环境变量（手动启动时使用）
+- 手动开发运行时，环境变量以 [`backend/.env.example`](backend/.env.example) 为准。
+- 初始化完成后，可在 `Settings -> System Setup` 中管理运行时能力配置。
+- 自动化设置当前用于控制后台调度器，负责周报和月报等 AI 定时任务。
+- Docker 部署默认读取 [`deploy/docker-compose.yml`](deploy/docker-compose.yml) 的内置值，并支持通过 [`deploy/.env.example`](deploy/.env.example) 做可选覆盖。
 
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `DATABASE_URL` | PostgreSQL 连接串 | `postgresql://postgres:postgres@localhost:5432/mindatlas` |
-| `MINIO_ENDPOINT` | MinIO 地址 | `localhost:9000` |
-| `MINIO_ACCESS_KEY` | MinIO 访问密钥 | - |
-| `MINIO_SECRET_KEY` | MinIO 密钥 | - |
-| `MINIO_BUCKET` | MinIO 桶名 | `mindatlas` |
-| `AI_API_KEY` | OpenAI 兼容接口的 API Key（可选；LightRAG 需要） | - |
-| `AI_PROVIDER_FERNET_KEY` | API Key 加密密钥（用于 DB 存储的 Key） | - |
-| `LIGHTRAG_ENABLED` | 是否启用 LightRAG | `false` |
-| `NEO4J_URI` | Neo4j 连接（启用 LightRAG 时需要） | `bolt://localhost:7687` |
-| `NEO4J_USER` | Neo4j 用户名 | `neo4j` |
-| `NEO4J_PASSWORD` | Neo4j 密码 | - |
+## 后续阅读
 
-这些变量主要用于在 Docker Compose 之外手动启动 backend。对于 Docker 部署，请优先使用 `deploy/docker-compose.yml` 的内置默认值，以及 `deploy/.env.example` 中的可选覆盖项。
-
-完整的手动启动变量列表请参考 `backend/.env.example`。
-
-## 文档
-
-- [用户操作手册](docs/user-manual.zh-CN.md) - 完整用户指南
+- [`backend/README.md`](backend/README.md)：后端启动、Worker 与环境变量说明
+- [`deploy/README.md`](deploy/README.md)：Docker 部署指南
+- [`docs/user-manual.md`](docs/user-manual.md)：英文用户手册
+- [`docs/user-manual.zh-CN.md`](docs/user-manual.zh-CN.md)：中文用户手册
+- [`integrations/openclaw-mindatlas/README.md`](integrations/openclaw-mindatlas/README.md)：OpenClaw 插件包与集成说明
 
 ## 许可证
 

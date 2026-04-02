@@ -2,16 +2,20 @@ import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft,
+  Bot,
   Boxes,
+  Check,
   CheckCircle2,
   ChevronDown,
   Copy,
+  AlertTriangle,
   KeyRound,
   Loader2,
   Pencil,
   PlugZap,
   Plus,
   RefreshCcw,
+  Search,
   ShieldCheck,
   Trash2,
   Wrench,
@@ -30,6 +34,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Switch } from '@/components/ui/switch'
 import {
   createOpenClawCatalogItem,
@@ -54,6 +59,16 @@ import { InputField, Label, TEXTAREA_CLASSNAME, TextareaField } from '@/features
 const settingsQueryKey = ['openclaw-integration-settings'] as const
 
 type DraftMode = 'create' | 'edit'
+type ContractOrigin = 'pending' | 'source' | 'override'
+
+interface CatalogContractDraft {
+  inputSummary: string
+  outputSummary: string
+  inputSchemaText: string
+  outputSchemaText: string
+  toolResponseMode: OpenClawToolResponseMode
+  schemaEditable: boolean
+}
 
 interface CatalogItemDraft {
   sourceType: OpenClawCatalogSourceType
@@ -100,6 +115,12 @@ function buildSourceKey(item: Pick<OpenClawCatalogItem, 'sourceType' | 'toolId' 
   return null
 }
 
+function sourceTypeIcon(sourceType: OpenClawCatalogSourceType) {
+  if (sourceType === 'tool') return Wrench
+  if (sourceType === 'workflow') return Boxes
+  return Bot
+}
+
 function createDraftFromItem(item: OpenClawCatalogItem): CatalogItemDraft {
   return {
     sourceType: item.sourceType,
@@ -118,6 +139,39 @@ function createDraftFromItem(item: OpenClawCatalogItem): CatalogItemDraft {
     agentProfileId: item.agentProfileId ?? null,
     schemaEditable: item.schemaEditable,
   }
+}
+
+function createContractDraftFromSource(source: OpenClawCatalogSource): CatalogContractDraft {
+  return {
+    inputSummary: source.defaultInputSummary || '',
+    outputSummary: source.defaultOutputSummary || '',
+    inputSchemaText: stringifySchema(source.defaultInputSchema ?? {}),
+    outputSchemaText: stringifySchema(source.defaultOutputSchema ?? {}),
+    toolResponseMode: source.defaultToolResponseMode ?? 'json_schema',
+    schemaEditable: source.schemaMode === 'editable',
+  }
+}
+
+function pickContractDraft(draft: CatalogItemDraft): CatalogContractDraft {
+  return {
+    inputSummary: draft.inputSummary,
+    outputSummary: draft.outputSummary,
+    inputSchemaText: draft.inputSchemaText,
+    outputSchemaText: draft.outputSchemaText,
+    toolResponseMode: draft.toolResponseMode,
+    schemaEditable: draft.schemaEditable,
+  }
+}
+
+function contractsEqual(left: CatalogContractDraft, right: CatalogContractDraft) {
+  return (
+    left.inputSummary.trim() === right.inputSummary.trim() &&
+    left.outputSummary.trim() === right.outputSummary.trim() &&
+    left.inputSchemaText === right.inputSchemaText &&
+    left.outputSchemaText === right.outputSchemaText &&
+    left.toolResponseMode === right.toolResponseMode &&
+    left.schemaEditable === right.schemaEditable
+  )
 }
 
 function createEmptyDraft(sourceType: OpenClawCatalogSourceType): CatalogItemDraft {
@@ -174,6 +228,137 @@ function SectionHeader({
   )
 }
 
+function SummaryCard({
+  label,
+  value,
+  hint,
+  active,
+}: {
+  label: string
+  value: string
+  hint: string
+  active?: boolean
+}) {
+  return (
+    <div
+      className={cn(
+        'group relative overflow-hidden rounded-[24px] border p-5 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-md',
+        active
+          ? 'border-emerald-200 bg-emerald-50/50 shadow-sm shadow-emerald-900/5'
+          : 'border-slate-200 bg-white shadow-sm shadow-slate-900/5'
+      )}
+    >
+      {active && (
+        <div className="absolute inset-x-0 -top-px h-px bg-gradient-to-r from-transparent via-emerald-400 to-transparent opacity-50" />
+      )}
+      {!active && (
+        <div className="absolute inset-x-0 -top-px h-px bg-gradient-to-r from-transparent via-slate-300 to-transparent opacity-50" />
+      )}
+      <div className="relative">
+        <p className={cn('text-sm font-medium', active ? 'text-emerald-700' : 'text-slate-500')}>{label}</p>
+        <p className={cn('mt-2 text-2xl font-semibold tracking-tight', active ? 'text-emerald-950' : 'text-slate-900')}>{value}</p>
+        <p className={cn('mt-2 text-sm leading-6', active ? 'text-emerald-700/80' : 'text-slate-600')}>{hint}</p>
+      </div>
+    </div>
+  )
+}
+
+function QuickStartStep({
+  step,
+  title,
+  description,
+  statusLabel,
+  statusTone,
+  action,
+  className,
+  children,
+}: {
+  step: string
+  title: string
+  description: string
+  statusLabel: string
+  statusTone: 'success' | 'warning' | 'neutral'
+  action?: React.ReactNode
+  className?: string
+  children?: React.ReactNode
+}) {
+  const isLast = step === '4'
+  return (
+    <article className={cn('relative flex gap-6 pb-2', !isLast && 'pb-8', className)}>
+      <div className="flex flex-col items-center">
+        <span className={cn(
+            "relative z-10 flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-semibold shadow-sm transition-all",
+            statusTone === 'success' ? 'bg-emerald-500 text-white shadow-emerald-500/20 ring-4 ring-emerald-50' :
+            statusTone === 'warning' ? 'bg-amber-500 text-white shadow-amber-500/20 ring-4 ring-amber-50' : 
+            'bg-slate-900 text-white shadow-slate-900/10 ring-4 ring-slate-50'
+        )}>
+          {statusTone === 'success' ? <CheckCircle2 className="h-5 w-5" /> : step}
+        </span>
+        {!isLast && <div className="absolute top-10 bottom-0 left-[1.15rem] w-[2px] bg-slate-100" />}
+      </div>
+      <div className="flex flex-1 flex-col gap-5 pt-1.5 pb-2">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <h3 className="text-lg font-semibold text-slate-900">{title}</h3>
+              <CapabilityBadge
+                colorClassName={
+                  statusTone === 'success'
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                    : statusTone === 'warning'
+                      ? 'border-amber-200 bg-amber-50 text-amber-700'
+                      : 'border-slate-200 bg-slate-50 text-slate-700'
+                }
+              >
+                {statusLabel}
+              </CapabilityBadge>
+            </div>
+            <p className="max-w-2xl text-sm leading-6 text-slate-600">{description}</p>
+          </div>
+          {action && <div className="shrink-0 pt-1">{action}</div>}
+        </div>
+        {children && (
+          <div className="mt-2">
+            {children}
+          </div>
+        )}
+      </div>
+    </article>
+  )
+}
+
+function CopyableCodeBlock({
+  title,
+  description,
+  code,
+  copyLabel,
+  onCopy,
+}: {
+  title: string
+  description: string
+  code: string
+  copyLabel: string
+  onCopy: (value: string) => void
+}) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="space-y-1">
+          <p className="text-sm font-semibold text-slate-900">{title}</p>
+          <p className="text-sm leading-6 text-slate-600">{description}</p>
+        </div>
+        <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => onCopy(code)}>
+          <Copy className="h-4 w-4" />
+          {copyLabel}
+        </Button>
+      </div>
+      <pre className="mt-3 overflow-x-auto rounded-2xl bg-slate-950 px-4 py-3 text-xs leading-6 text-slate-100">
+        <code>{code}</code>
+      </pre>
+    </div>
+  )
+}
+
 function CatalogItemCard({
   item,
   onToggle,
@@ -206,10 +391,10 @@ function CatalogItemCard({
   outputLabel: string
 }) {
   return (
-    <article className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
-      <div className="flex flex-col gap-4">
+    <article className="group overflow-hidden rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:shadow-md">
+      <div className="flex flex-col gap-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="space-y-3">
+          <div className="space-y-3.5">
             <div className="flex flex-wrap items-center gap-2">
               <h3 className="text-lg font-semibold text-slate-900">{item.title}</h3>
               <CapabilityBadge colorClassName="border-slate-200 bg-slate-50 text-slate-700">
@@ -258,14 +443,14 @@ function CatalogItemCard({
 
           <div className="flex items-center gap-2 self-start">
             {item.retired ? (
-              <div className="rounded-[22px] border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800">
+              <div className="rounded-[24px] border border-amber-200/60 bg-amber-50/80 px-4 py-2.5 text-sm font-medium text-amber-800 shadow-sm transition-colors whitespace-nowrap">
                 {retiredLabel}
               </div>
             ) : (
-              <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-3 py-2">
+              <div className="rounded-[24px] border border-slate-200/80 bg-slate-50/80 px-4 py-2.5 shadow-sm transition-colors">
                 <div className="flex items-center gap-3">
-                  <Switch checked={item.enabled} onCheckedChange={onToggle} />
-                  <span className="text-sm font-medium text-slate-800">
+                  <Switch checked={item.enabled} onCheckedChange={onToggle} className="data-[state=checked]:bg-emerald-500" />
+                  <span className="whitespace-nowrap text-sm font-semibold text-slate-800">
                     {item.enabled ? exposedLabel : hiddenLabel}
                   </span>
                 </div>
@@ -282,18 +467,18 @@ function CatalogItemCard({
           </div>
         </div>
 
-        <div className="grid gap-3 lg:grid-cols-2">
-          <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 p-4">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+        <div className="grid gap-4 lg:grid-cols-2">
+          <div className="rounded-[24px] border border-slate-100 bg-slate-50/50 p-5 transition-colors group-hover:bg-slate-50">
+            <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">
               {inputLabel}
             </p>
-            <p className="mt-2 text-sm leading-6 text-slate-700">{item.inputSummary || '-'}</p>
+            <p className="mt-2.5 text-sm leading-relaxed text-slate-700">{item.inputSummary || '-'}</p>
           </div>
-          <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 p-4">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+          <div className="rounded-[24px] border border-slate-100 bg-slate-50/50 p-5 transition-colors group-hover:bg-slate-50">
+            <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">
               {outputLabel}
             </p>
-            <p className="mt-2 text-sm leading-6 text-slate-700">{item.outputSummary || '-'}</p>
+            <p className="mt-2.5 text-sm leading-relaxed text-slate-700">{item.outputSummary || '-'}</p>
           </div>
         </div>
 
@@ -331,6 +516,11 @@ export function OpenClawIntegrationSettingsPage() {
   const [editingItem, setEditingItem] = useState<OpenClawCatalogItem | null>(null)
   const [draft, setDraft] = useState<CatalogItemDraft>(createEmptyDraft('tool'))
   const [selectedSourceKey, setSelectedSourceKey] = useState<string | null>(null)
+  const [sourcePickerOpen, setSourcePickerOpen] = useState(false)
+  const [sourceSearch, setSourceSearch] = useState('')
+  const [contractAdvancedOpen, setContractAdvancedOpen] = useState(false)
+  const [contractOrigin, setContractOrigin] = useState<ContractOrigin>('source')
+  const [advancedOpen, setAdvancedOpen] = useState(false)
   const [guideOpen, setGuideOpen] = useState(false)
 
   const integrationMutation = useMutation({
@@ -383,16 +573,12 @@ export function OpenClawIntegrationSettingsPage() {
   })
 
   const current = settingsQuery.data ?? null
-  const systemItems = useMemo(
-    () => current?.catalogItems.filter((item) => item.isSystemItem) ?? [],
-    [current]
-  )
-  const customItems = useMemo(
-    () => current?.catalogItems.filter((item) => !item.isSystemItem) ?? [],
-    [current]
-  )
   const catalogItems = useMemo(
     () => current?.catalogItems ?? [],
+    [current]
+  )
+  const exposedAvailableItems = useMemo(
+    () => current?.catalogItems.filter((item) => item.enabled && item.available && !item.retired) ?? [],
     [current]
   )
   const currentSources = sourceQuery.data?.items ?? []
@@ -400,6 +586,37 @@ export function OpenClawIntegrationSettingsPage() {
     () => currentSources.find((item) => item.sourceKey === selectedSourceKey) ?? null,
     [currentSources, selectedSourceKey]
   )
+  const sourceDerivedContract = useMemo(
+    () => (selectedSource ? createContractDraftFromSource(selectedSource) : null),
+    [selectedSource]
+  )
+  const contractUsesOverride = useMemo(() => {
+    if (contractOrigin === 'override') return true
+    if (contractOrigin === 'source') return false
+    if (!sourceDerivedContract) return true
+    return !contractsEqual(pickContractDraft(draft), sourceDerivedContract)
+  }, [contractOrigin, draft, sourceDerivedContract])
+  const effectiveContract = useMemo(
+    () => (contractUsesOverride || !sourceDerivedContract ? pickContractDraft(draft) : sourceDerivedContract),
+    [contractUsesOverride, draft, sourceDerivedContract]
+  )
+  const SelectedSourceIcon = selectedSource ? sourceTypeIcon(selectedSource.sourceType) : Search
+  const filteredSources = useMemo(() => {
+    const keyword = sourceSearch.trim().toLowerCase()
+    if (!keyword) return currentSources
+    return currentSources.filter((source) => {
+      const haystack = [
+        source.title,
+        source.description,
+        source.sourceToolName,
+        source.sourceKey,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+      return haystack.includes(keyword)
+    })
+  }, [currentSources, sourceSearch])
   const editingRetiredItem = dialogMode === 'edit' && editingItem?.retired ? editingItem : null
   useEffect(() => {
     if (!dialogOpen) return
@@ -407,8 +624,35 @@ export function OpenClawIntegrationSettingsPage() {
     const firstBindable = currentSources.find((item) => item.bindable)
     if (!firstBindable) return
     setSelectedSourceKey(firstBindable.sourceKey)
-    patchDraftFromSource(firstBindable)
+    applySourceSelection(firstBindable)
   }, [currentSources, dialogOpen, selectedSourceKey])
+
+  useEffect(() => {
+    if (!dialogOpen) {
+      setSourcePickerOpen(false)
+      setSourceSearch('')
+      setContractAdvancedOpen(false)
+    }
+  }, [dialogOpen])
+
+  useEffect(() => {
+    if (!dialogOpen || contractOrigin !== 'pending' || !sourceDerivedContract) return
+    setContractOrigin(contractsEqual(pickContractDraft(draft), sourceDerivedContract) ? 'source' : 'override')
+    setDraft((currentDraft) =>
+      currentDraft.schemaEditable === sourceDerivedContract.schemaEditable
+        ? currentDraft
+        : { ...currentDraft, schemaEditable: sourceDerivedContract.schemaEditable }
+    )
+  }, [contractOrigin, dialogOpen, draft, sourceDerivedContract])
+
+  useEffect(() => {
+    if (!dialogOpen || contractOrigin !== 'source' || !sourceDerivedContract) return
+    setDraft((currentDraft) =>
+      contractsEqual(pickContractDraft(currentDraft), sourceDerivedContract)
+        ? currentDraft
+        : { ...currentDraft, ...sourceDerivedContract }
+    )
+  }, [contractOrigin, dialogOpen, sourceDerivedContract])
 
   const isBusy =
     settingsQuery.isLoading ||
@@ -424,29 +668,6 @@ export function OpenClawIntegrationSettingsPage() {
     workflow: t('openclawIntegration.types.workflow'),
     agent: t('openclawIntegration.types.agent'),
   }
-  const guideSteps = [
-    {
-      title: t('openclawIntegration.guide.steps.secret.title'),
-      description: t('openclawIntegration.guide.steps.secret.description'),
-    },
-    {
-      title: t('openclawIntegration.guide.steps.catalog.title'),
-      description: t('openclawIntegration.guide.steps.catalog.description'),
-    },
-    {
-      title: t('openclawIntegration.guide.steps.plugin.title'),
-      description: t('openclawIntegration.guide.steps.plugin.description'),
-      details: [
-        t('openclawIntegration.guide.steps.plugin.details.install'),
-        t('openclawIntegration.guide.steps.plugin.details.baseUrl'),
-        t('openclawIntegration.guide.steps.plugin.details.refresh'),
-      ],
-    },
-    {
-      title: t('openclawIntegration.guide.steps.verify.title'),
-      description: t('openclawIntegration.guide.steps.verify.description'),
-    },
-  ]
   const guideNotes = [
     t('openclawIntegration.guide.notes.catalogOnly'),
     t('openclawIntegration.guide.notes.skillBoundary'),
@@ -461,12 +682,7 @@ export function OpenClawIntegrationSettingsPage() {
     {
       title: t('openclawIntegration.guide.installBlocks.install.title'),
       description: t('openclawIntegration.guide.installBlocks.install.description'),
-      code: 'openclaw plugins install ./integrations/openclaw-mindatlas',
-    },
-    {
-      title: t('openclawIntegration.guide.installBlocks.verify.title'),
-      description: t('openclawIntegration.guide.installBlocks.verify.description'),
-      code: 'openclaw plugins list',
+      code: 'openclaw plugins install ./integrations/openclaw-mindatlas\nnpm --prefix ./integrations/openclaw-mindatlas run configure:skills',
     },
   ]
   const pluginConfigExample = `{
@@ -496,46 +712,61 @@ export function OpenClawIntegrationSettingsPage() {
       code: 'openclaw config validate',
     },
   ]
-  const pluginVerifyChecklist = [
-    t('openclawIntegration.guide.verifyChecklist.secret'),
-    t('openclawIntegration.guide.verifyChecklist.catalog'),
-    t('openclawIntegration.guide.verifyChecklist.plugin'),
-    t('openclawIntegration.guide.verifyChecklist.call'),
+  const verificationChecks = [
+    t('openclawIntegration.guide.verifyChecks.restart'),
+    t('openclawIntegration.guide.verifyChecks.session'),
+    t('openclawIntegration.guide.verifyChecks.failure'),
   ]
+  const verificationPrompts = [
+    t('openclawIntegration.guide.verifyPrompts.first'),
+    t('openclawIntegration.guide.verifyPrompts.second'),
+  ]
+  const exposedAvailableCount = exposedAvailableItems.length
+  const secretReady = Boolean(current?.secretConfigured)
+  const catalogReady = exposedAvailableCount > 0
 
   function patchDraft(patch: Partial<CatalogItemDraft>) {
     setDraft((currentDraft) => ({ ...currentDraft, ...patch }))
   }
 
-  function patchDraftFromSource(source: OpenClawCatalogSource) {
-    patchDraft({
+  function patchContractDraft(patch: Partial<CatalogContractDraft>) {
+    setContractOrigin('override')
+    setDraft((currentDraft) => ({ ...currentDraft, ...patch }))
+  }
+
+  function applySourceSelection(source: OpenClawCatalogSource) {
+    const nextContract = createContractDraftFromSource(source)
+    const preserveOverride = contractUsesOverride && nextContract.schemaEditable
+    setContractOrigin(preserveOverride ? 'override' : 'source')
+    setDraft((currentDraft) => ({
+      ...currentDraft,
       sourceType: source.sourceType,
       title: source.title,
       description: source.description,
-      inputSummary: source.defaultInputSummary || '',
-      outputSummary: source.defaultOutputSummary || '',
-      inputSchemaText: stringifySchema(source.defaultInputSchema ?? {}),
-      outputSchemaText: stringifySchema(source.defaultOutputSchema ?? {}),
-      toolResponseMode: source.defaultToolResponseMode ?? 'json_schema',
       sourceToolName: source.sourceToolName ?? null,
       toolId: source.toolId ?? null,
       workflowId: source.workflowId ?? null,
       agentProfileId: source.agentProfileId ?? null,
-      schemaEditable: source.schemaMode === 'editable',
+      schemaEditable: nextContract.schemaEditable,
       toolName:
-        draft.toolName.trim() ||
+        currentDraft.toolName.trim() ||
         source.title
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, '_')
           .replace(/^_+|_+$/g, '') ||
         '',
-    })
+      ...(preserveOverride ? {} : nextContract),
+    }))
   }
 
   function openCreateDialog(sourceType: OpenClawCatalogSourceType = 'tool') {
     setDialogMode('create')
     setEditingItem(null)
     setSelectedSourceKey(null)
+    setSourcePickerOpen(false)
+    setSourceSearch('')
+    setContractOrigin('source')
+    setContractAdvancedOpen(false)
     setDraft(createEmptyDraft(sourceType))
     setDialogOpen(true)
   }
@@ -545,6 +776,10 @@ export function OpenClawIntegrationSettingsPage() {
     setEditingItem(item)
     setDraft(createDraftFromItem(item))
     setSelectedSourceKey(buildSourceKey(item))
+    setSourcePickerOpen(false)
+    setSourceSearch('')
+    setContractOrigin('pending')
+    setContractAdvancedOpen(false)
     setDialogOpen(true)
   }
 
@@ -583,12 +818,23 @@ export function OpenClawIntegrationSettingsPage() {
 
   async function handleCopySecret() {
     if (!revealedSecret) return
+    await copyToClipboard(revealedSecret, t('openclawIntegration.messages.secretCopied'))
+  }
+
+  async function copyToClipboard(value: string, successMessage: string) {
     try {
-      await navigator.clipboard.writeText(revealedSecret)
-      toast.success(t('openclawIntegration.messages.secretCopied'))
+      await navigator.clipboard.writeText(value)
+      toast.success(successMessage)
     } catch {
       toast.error(t('messages.error'))
     }
+  }
+
+  function scrollToCatalog() {
+    document.getElementById('openclaw-catalog-section')?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start',
+    })
   }
 
   async function handleResetSystemItems() {
@@ -616,12 +862,12 @@ export function OpenClawIntegrationSettingsPage() {
   async function handleSaveDialog() {
     try {
       const inputSchema = parseSchemaText(
-        draft.inputSchemaText,
+        effectiveContract.inputSchemaText,
         t('openclawIntegration.messages.invalidSchemaJson'),
         t('openclawIntegration.messages.invalidSchemaObject')
       )
       const outputSchema = parseSchemaText(
-        draft.outputSchemaText,
+        effectiveContract.outputSchemaText,
         t('openclawIntegration.messages.invalidSchemaJson'),
         t('openclawIntegration.messages.invalidSchemaObject')
       )
@@ -631,11 +877,11 @@ export function OpenClawIntegrationSettingsPage() {
         title: draft.title.trim(),
         description: draft.description.trim(),
         enabled: draft.enabled,
-        inputSummary: draft.inputSummary.trim(),
-        outputSummary: draft.outputSummary.trim(),
+        inputSummary: effectiveContract.inputSummary.trim(),
+        outputSummary: effectiveContract.outputSummary.trim(),
         inputSchema,
         outputSchema,
-        toolResponseMode: draft.toolResponseMode,
+        toolResponseMode: effectiveContract.toolResponseMode,
         sourceToolName: draft.sourceToolName,
         toolId: draft.toolId,
         workflowId: draft.workflowId,
@@ -687,78 +933,102 @@ export function OpenClawIntegrationSettingsPage() {
           </p>
         </div>
       </div>
-
-      <section className="grid gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.9fr)]">
-        <div className="rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="flex flex-col gap-6">
-            <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-              <div className="flex items-start gap-4">
-                <div className="rounded-[24px] bg-slate-900 p-3 text-white shadow-lg shadow-slate-900/10">
-                  <PlugZap className="h-6 w-6" />
+      <section className="flex flex-col gap-6">
+        <div className="rounded-[32px] border border-slate-200 bg-white p-7 shadow-sm">
+          <div className="flex h-full flex-col gap-8">
+            <div className="flex items-start gap-5">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[20px] bg-slate-900 text-white shadow-sm shadow-slate-900/10">
+                <PlugZap className="h-6 w-6" />
+              </div>
+              <div className="flex flex-col gap-1.5 pt-0.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-xl font-semibold tracking-tight text-slate-900">
+                    {t('openclawIntegration.overview.title')}
+                  </h2>
+                  <CapabilityBadge
+                    colorClassName={
+                      current.enabled
+                        ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                        : 'border-slate-200 bg-slate-50 text-slate-600'
+                    }
+                  >
+                    {current.enabled
+                      ? t('openclawIntegration.status.enabled')
+                      : t('openclawIntegration.status.disabled')}
+                  </CapabilityBadge>
                 </div>
-                <div className="space-y-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h2 className="text-xl font-semibold text-slate-900">
-                      {t('openclawIntegration.overview.title')}
-                    </h2>
-                    <CapabilityBadge
-                      colorClassName={
-                        current.enabled
-                          ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                          : 'border-slate-200 bg-slate-50 text-slate-600'
-                      }
-                    >
-                      {current.enabled
-                        ? t('openclawIntegration.status.enabled')
-                        : t('openclawIntegration.status.disabled')}
-                    </CapabilityBadge>
-                  </div>
-                  <p className="max-w-2xl text-sm leading-6 text-slate-600">
-                    {t('openclawIntegration.overview.description')}
+                <p className="text-sm leading-6 text-slate-600">
+                  {t('openclawIntegration.overview.description')}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between rounded-[24px] border border-slate-200 bg-slate-50/50 px-5 py-4">
+              <div className="flex flex-col gap-1">
+                <p className="text-sm font-semibold text-slate-900">
+                  {t('openclawIntegration.overview.switchLabel')}
+                </p>
+                <p className="text-xs text-slate-500">
+                  {t('openclawIntegration.overview.switchHint')}
+                </p>
+              </div>
+              <Switch checked={current.enabled} onCheckedChange={handleToggleIntegration} disabled={isBusy} className="data-[state=checked]:bg-emerald-500" />
+            </div>
+
+            <div className="mt-auto grid gap-4 sm:grid-cols-3">
+              <SummaryCard
+                label={t('openclawIntegration.summary.integration')}
+                value={current.enabled ? t('openclawIntegration.status.enabled') : t('openclawIntegration.status.disabled')}
+                hint={
+                  current.enabled
+                    ? t('openclawIntegration.summary.integrationHintEnabled')
+                    : t('openclawIntegration.summary.integrationHintDisabled')
+                }
+                active={current.enabled}
+              />
+              <SummaryCard
+                label={t('openclawIntegration.summary.secret')}
+                value={secretReady ? t('openclawIntegration.secret.configured') : t('openclawIntegration.secret.notConfigured')}
+                hint={
+                  secretReady
+                    ? t('openclawIntegration.summary.secretHintConfigured')
+                    : t('openclawIntegration.summary.secretHintMissing')
+                }
+                active={secretReady}
+              />
+              <SummaryCard
+                label={t('openclawIntegration.summary.exposedAvailable')}
+                value={String(exposedAvailableCount)}
+                hint={
+                  catalogReady
+                    ? t('openclawIntegration.summary.catalogHintReady', { count: exposedAvailableCount })
+                    : t('openclawIntegration.summary.catalogHintMissing')
+                }
+                active={catalogReady}
+              />
+            </div>
+
+            {!current.enabled && (
+              <div className="rounded-[22px] border border-amber-200 bg-amber-50 px-5 py-4">
+                <div className="flex gap-3">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                  <p className="text-sm text-amber-900">
+                    {t('openclawIntegration.summary.integrationDisabledNotice')}
                   </p>
                 </div>
               </div>
-
-              <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-4 py-3">
-                <div className="flex items-center gap-3">
-                  <Switch checked={current.enabled} onCheckedChange={handleToggleIntegration} disabled={isBusy} />
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium text-slate-900">
-                      {t('openclawIntegration.overview.switchLabel')}
-                    </p>
-                    <p className="text-xs leading-5 text-slate-500">
-                      {t('openclawIntegration.overview.switchHint')}
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="grid gap-3 md:grid-cols-3">
-              <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 p-4">
-                <p className="text-sm text-slate-500">{t('openclawIntegration.summary.systemItems')}</p>
-                <p className="mt-2 text-2xl font-semibold text-slate-900">{systemItems.length}</p>
-              </div>
-              <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 p-4">
-                <p className="text-sm text-slate-500">{t('openclawIntegration.summary.customItems')}</p>
-                <p className="mt-2 text-2xl font-semibold text-slate-900">{customItems.length}</p>
-              </div>
-              <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 p-4">
-                <p className="text-sm text-slate-500">{t('openclawIntegration.summary.runtimeApi')}</p>
-                <p className="mt-2 text-sm font-medium text-slate-900">/api/integrations/openclaw/*</p>
-              </div>
-            </div>
+            )}
           </div>
         </div>
 
-        <div className="rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="space-y-4">
-            <div className="flex items-start gap-3">
-              <div className="rounded-2xl bg-amber-50 p-3 text-amber-700">
-                <KeyRound className="h-5 w-5" />
+        <div className="rounded-[32px] border border-slate-200 bg-white p-7 shadow-sm">
+          <div className="flex h-full flex-col gap-8">
+            <div className="flex items-start gap-5">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[20px] bg-amber-100 text-amber-700 shadow-sm shadow-amber-900/10">
+                <KeyRound className="h-6 w-6" />
               </div>
-              <div className="space-y-1">
-                <h2 className="text-lg font-semibold text-slate-900">
+              <div className="flex flex-col gap-1.5 pt-0.5">
+                <h2 className="text-xl font-semibold tracking-tight text-slate-900">
                   {t('openclawIntegration.secret.title')}
                 </h2>
                 <p className="text-sm leading-6 text-slate-600">
@@ -767,45 +1037,61 @@ export function OpenClawIntegrationSettingsPage() {
               </div>
             </div>
 
-            <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 p-4">
-              <p className="text-sm font-medium text-slate-900">
+            <div className="rounded-[24px] border border-slate-200 bg-slate-50/50 p-5 mt-auto">
+              <p className="text-sm font-semibold text-slate-900">
                 {current.secretConfigured
                   ? current.secretHint || t('openclawIntegration.secret.configured')
                   : t('openclawIntegration.secret.notConfigured')}
               </p>
-              <p className="mt-1 text-xs leading-5 text-slate-500">
+              <p className="mt-1.5 text-sm leading-relaxed text-slate-500">
                 {current.secretConfigured
                   ? t('openclawIntegration.secret.configuredHint')
                   : t('openclawIntegration.secret.missingHint')}
               </p>
             </div>
 
-            <div className="flex flex-wrap gap-2">
-              <Button type="button" className="rounded-2xl" onClick={() => setShowRotateConfirm(true)} disabled={isBusy}>
-                {rotateSecretMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+            <div className="flex flex-wrap items-center gap-3">
+              <Button 
+                type="button" 
+                variant={current.secretConfigured ? "outline" : "default"}
+                className={cn("rounded-2xl transition-all", current.secretConfigured ? "bg-white hover:bg-slate-50" : "bg-slate-900 hover:bg-slate-800")}
+                onClick={() => setShowRotateConfirm(true)} 
+                disabled={isBusy}
+              >
+                {rotateSecretMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : current.secretConfigured ? <RefreshCcw className="h-4 w-4" /> : <PlugZap className="h-4 w-4" />}
                 {current.secretConfigured
                   ? t('openclawIntegration.actions.rotateSecret')
                   : t('openclawIntegration.actions.generateSecret')}
               </Button>
-              {revealedSecret ? (
-                <Button type="button" variant="outline" className="rounded-2xl" onClick={handleCopySecret}>
+              {revealedSecret && (
+                <Button type="button" variant="secondary" className="rounded-2xl bg-emerald-100 text-emerald-800 hover:bg-emerald-200" onClick={handleCopySecret}>
                   <Copy className="h-4 w-4" />
                   {t('openclawIntegration.actions.copySecret')}
                 </Button>
-              ) : null}
+              )}
             </div>
 
-            {revealedSecret ? (
-              <div className="rounded-[22px] border border-emerald-200 bg-emerald-50/80 p-4">
-                <div className="flex items-center gap-2 text-emerald-700">
-                  <CheckCircle2 className="h-4 w-4" />
-                  <p className="text-sm font-semibold">{t('openclawIntegration.secret.revealedTitle')}</p>
+            {revealedSecret && (
+              <div className="animate-in fade-in slide-in-from-top-2 rounded-[24px] border border-emerald-200 bg-emerald-50/50 p-5 shadow-sm shadow-emerald-900/5">
+                <div className="flex flex-col gap-3">
+                  <div className="flex items-center gap-2.5 text-emerald-700">
+                    <CheckCircle2 className="h-5 w-5 fill-emerald-100" />
+                    <p className="text-sm font-semibold tracking-wide">{t('openclawIntegration.secret.revealedTitle')}</p>
+                  </div>
+                  <div className="relative group">
+                    <code className="block break-all rounded-[20px] bg-white border border-emerald-100 px-5 py-4 font-mono text-sm font-medium text-slate-800 shadow-sm transition-all group-hover:border-emerald-300">
+                      {revealedSecret}
+                    </code>
+                    <button 
+                      onClick={handleCopySecret}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full bg-slate-100 p-2 text-slate-500 opacity-0 transition-all hover:bg-emerald-100 hover:text-emerald-700 group-hover:opacity-100"
+                    >
+                      <Copy className="h-4 w-4" />
+                    </button>
+                  </div>
                 </div>
-                <code className="mt-3 block break-all rounded-2xl bg-white/80 px-4 py-3 text-xs text-slate-700">
-                  {revealedSecret}
-                </code>
               </div>
-            ) : null}
+            )}
           </div>
         </div>
       </section>
@@ -833,166 +1119,240 @@ export function OpenClawIntegrationSettingsPage() {
           <div className="flex shrink-0 items-center gap-3 self-start rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm text-slate-600">
             <span>
               {guideOpen
-                ? t('openclawIntegration.guide.actions.collapse')
-                : t('openclawIntegration.guide.actions.expand')}
+                ? t('actions.collapse')
+                : t('actions.expand')}
             </span>
             <ChevronDown className={cn('h-4 w-4 transition-transform', guideOpen && 'rotate-180')} />
           </div>
         </button>
 
         {guideOpen ? (
-          <div className="border-t border-slate-200 px-6 pb-6 pt-5">
-            <div className="rounded-[24px] border border-slate-200 bg-slate-50/80 p-5">
-              <p className="text-sm leading-7 text-slate-700">
-                {t('openclawIntegration.guide.intro')}
-              </p>
-            </div>
+          <div className="border-t border-slate-200 px-6 pb-6 pt-8 md:px-10">
+            <div className="mx-auto flex w-full max-w-4xl flex-col">
+              <QuickStartStep
+                step="1"
+                title={t('openclawIntegration.guide.steps.secret.title')}
+                description={t('openclawIntegration.guide.steps.secret.description')}
+                statusLabel={
+                  secretReady
+                    ? t('openclawIntegration.guide.stepStatus.done')
+                    : t('openclawIntegration.guide.stepStatus.actionNeeded')
+                }
+                statusTone={secretReady ? 'success' : 'warning'}
+              >
+                <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 px-4 py-3 text-sm leading-6 text-slate-700">
+                  {secretReady
+                    ? t('openclawIntegration.guide.steps.secret.ready')
+                    : t('openclawIntegration.guide.steps.secret.missing')}
+                </div>
+              </QuickStartStep>
 
-            <div className="mt-5 grid gap-4 lg:grid-cols-2">
-              {guideSteps.map((step) => (
-                <div key={step.title} className="rounded-[24px] border border-slate-200 bg-white p-5">
-                  <p className="text-base font-semibold text-slate-900">{step.title}</p>
-                  <p className="mt-2 text-sm leading-6 text-slate-600">{step.description}</p>
-                  {step.details?.length ? (
+              <QuickStartStep
+                step="2"
+                title={t('openclawIntegration.guide.steps.catalog.title')}
+                description={t('openclawIntegration.guide.steps.catalog.description')}
+                statusLabel={
+                  catalogReady
+                    ? t('openclawIntegration.guide.stepStatus.done')
+                    : t('openclawIntegration.guide.stepStatus.actionNeeded')
+                }
+                statusTone={catalogReady ? 'success' : 'warning'}
+                action={
+                  <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={scrollToCatalog}>
+                    {t('openclawIntegration.guide.actions.jumpToCatalog')}
+                  </Button>
+                }
+              >
+                <div
+                  className={cn(
+                    'rounded-[22px] px-4 py-3 text-sm leading-6',
+                    catalogReady
+                      ? 'border border-emerald-200 bg-emerald-50/80 text-emerald-800'
+                      : 'border border-amber-200 bg-amber-50/80 text-amber-900'
+                  )}
+                >
+                  {catalogReady
+                    ? t('openclawIntegration.guide.steps.catalog.ready', { count: exposedAvailableCount })
+                    : t('openclawIntegration.guide.steps.catalog.missing')}
+                </div>
+              </QuickStartStep>
+
+              <QuickStartStep
+                step="3"
+                title={t('openclawIntegration.guide.steps.plugin.title')}
+                description={t('openclawIntegration.guide.steps.plugin.description')}
+                statusLabel={t('openclawIntegration.guide.stepStatus.manual')}
+                statusTone="neutral"
+              >
+                <div className="rounded-[22px] border border-cyan-200 bg-cyan-50/80 px-4 py-3 text-sm leading-6 text-cyan-900">
+                  {t('openclawIntegration.guide.steps.plugin.hostHint')}
+                </div>
+
+                <div className="grid gap-4 lg:grid-cols-2">
+                  {pluginInstallBlocks.map((block) => (
+                    <CopyableCodeBlock
+                      key={block.title}
+                      title={block.title}
+                      description={block.description}
+                      code={block.code}
+                      copyLabel={t('openclawIntegration.guide.actions.copy')}
+                      onCopy={(value) => {
+                        void copyToClipboard(value, t('openclawIntegration.messages.copied'))
+                      }}
+                    />
+                  ))}
+                  {pluginConfigBlocks.map((block) => (
+                    <CopyableCodeBlock
+                      key={block.title}
+                      title={block.title}
+                      description={block.description}
+                      code={block.code}
+                      copyLabel={t('openclawIntegration.guide.actions.copy')}
+                      onCopy={(value) => {
+                        void copyToClipboard(value, t('openclawIntegration.messages.copied'))
+                      }}
+                    />
+                  ))}
+                </div>
+
+                <CopyableCodeBlock
+                  title={t('openclawIntegration.guide.configExampleTitle')}
+                  description={t('openclawIntegration.guide.configExampleDescription')}
+                  code={pluginConfigExample}
+                  copyLabel={t('openclawIntegration.guide.actions.copy')}
+                  onCopy={(value) => {
+                    void copyToClipboard(value, t('openclawIntegration.messages.copied'))
+                  }}
+                />
+              </QuickStartStep>
+
+              <QuickStartStep
+                step="4"
+                title={t('openclawIntegration.guide.steps.verify.title')}
+                description={t('openclawIntegration.guide.steps.verify.description')}
+                statusLabel={t('openclawIntegration.guide.stepStatus.manual')}
+                statusTone="neutral"
+              >
+                <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 p-4 text-sm leading-6 text-amber-900">
+                  <p className="font-semibold">{t('openclawIntegration.guide.restartTitle')}</p>
+                  <p className="mt-1">{t('openclawIntegration.guide.restartDescription')}</p>
+                </div>
+
+                <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.9fr)]">
+                  <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 p-4">
+                    <p className="text-sm font-semibold text-slate-900">
+                      {t('openclawIntegration.guide.verifyChecksTitle')}
+                    </p>
                     <ul className="mt-3 space-y-2 text-sm leading-6 text-slate-700">
-                      {step.details.map((detail) => (
-                        <li key={detail} className="flex items-start gap-3">
-                          <span className="mt-2 h-1.5 w-1.5 rounded-full bg-slate-400" />
-                          <span>{detail}</span>
+                      {verificationChecks.map((item) => (
+                        <li key={item} className="flex items-start gap-3">
+                          <CheckCircle2 className="mt-1 h-4 w-4 text-slate-500" />
+                          <span>{item}</span>
                         </li>
                       ))}
                     </ul>
-                  ) : null}
-                </div>
-              ))}
-            </div>
+                  </div>
 
-            <div className="mt-5 grid gap-4 xl:grid-cols-2">
-              <div className="rounded-[24px] border border-slate-200 bg-slate-50/80 p-5">
-                <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
-                  {t('openclawIntegration.guide.installTitle')}
-                </p>
-                <p className="mt-3 text-sm leading-6 text-slate-700">
-                  {t('openclawIntegration.guide.installDescription')}
-                </p>
-                <div className="mt-4 space-y-4">
-                  {pluginInstallBlocks.map((block) => (
-                    <div key={block.title} className="rounded-2xl border border-slate-200 bg-white p-4">
-                      <p className="text-sm font-semibold text-slate-900">{block.title}</p>
-                      <p className="mt-1 text-sm leading-6 text-slate-600">{block.description}</p>
-                      <pre className="mt-3 overflow-x-auto rounded-2xl bg-slate-950 px-4 py-3 text-xs leading-6 text-slate-100">
-                        <code>{block.code}</code>
-                      </pre>
+                  <CopyableCodeBlock
+                    title={t('openclawIntegration.guide.verifyPromptsTitle')}
+                    description={t('openclawIntegration.guide.verifyPromptsDescription')}
+                    code={verificationPrompts.join('\n')}
+                    copyLabel={t('openclawIntegration.guide.actions.copy')}
+                    onCopy={(value) => {
+                      void copyToClipboard(value, t('openclawIntegration.messages.copied'))
+                    }}
+                  />
+                </div>
+              </QuickStartStep>
+
+              <div className="mt-4 rounded-[28px] border border-slate-200 bg-slate-50/60 shadow-sm">
+                <button
+                  type="button"
+                  onClick={() => setAdvancedOpen((open) => !open)}
+                  className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left"
+                  aria-expanded={advancedOpen}
+                >
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-3">
+                      <div className="rounded-2xl bg-slate-100 p-2.5 text-slate-700">
+                        <AlertTriangle className="h-5 w-5" />
+                      </div>
+                      <h3 className="text-base font-semibold text-slate-900">
+                        {t('openclawIntegration.guide.advancedTitle')}
+                      </h3>
                     </div>
-                  ))}
-                </div>
-              </div>
+                    <p className="pl-[3.25rem] text-sm leading-6 text-slate-600">
+                      {t('openclawIntegration.guide.advancedDescription')}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-3 self-start rounded-full border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-600">
+                    <span>
+                      {advancedOpen
+                        ? t('openclawIntegration.guide.actions.collapse')
+                        : t('openclawIntegration.guide.actions.expand')}
+                    </span>
+                    <ChevronDown className={cn('h-4 w-4 transition-transform', advancedOpen && 'rotate-180')} />
+                  </div>
+                </button>
 
-              <div className="rounded-[24px] border border-slate-200 bg-slate-50/80 p-5">
-                <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
-                  {t('openclawIntegration.guide.configTitle')}
-                </p>
-                <p className="mt-3 text-sm leading-6 text-slate-700">
-                  {t('openclawIntegration.guide.configDescription')}
-                </p>
+                {advancedOpen ? (
+                  <div className="border-t border-slate-200 px-5 pb-5 pt-5">
+                    <div className="grid gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)]">
+                      <div className="rounded-[24px] border border-slate-200 bg-white p-5">
+                        <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
+                          {t('openclawIntegration.guide.endpointsTitle')}
+                        </p>
+                        <div className="mt-4 space-y-3">
+                          <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                            <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
+                              {t('openclawIntegration.guide.endpoints.auth')}
+                            </p>
+                            <code className="mt-2 block break-all text-sm text-slate-800">
+                              Authorization: Bearer {'<integration_secret>'}
+                            </code>
+                          </div>
+                          <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                            <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
+                              {t('openclawIntegration.guide.endpoints.catalog')}
+                            </p>
+                            <code className="mt-2 block break-all text-sm text-slate-800">
+                              GET /api/integrations/openclaw/capabilities
+                            </code>
+                          </div>
+                          <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                            <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
+                              {t('openclawIntegration.guide.endpoints.execute')}
+                            </p>
+                            <code className="mt-2 block break-all text-sm text-slate-800">
+                              POST /api/integrations/openclaw/capabilities/{'{capabilityKey}'}/execute
+                            </code>
+                          </div>
+                        </div>
+                      </div>
 
-                <div className="mt-4 space-y-4">
-                  {pluginConfigBlocks.map((block) => (
-                    <div key={block.title} className="rounded-2xl border border-slate-200 bg-white p-4">
-                      <p className="text-sm font-semibold text-slate-900">{block.title}</p>
-                      <p className="mt-1 text-sm leading-6 text-slate-600">{block.description}</p>
-                      <pre className="mt-3 overflow-x-auto rounded-2xl bg-slate-950 px-4 py-3 text-xs leading-6 text-slate-100">
-                        <code>{block.code}</code>
-                      </pre>
+                      <div className="rounded-[24px] border border-slate-200 bg-white p-5">
+                        <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
+                          {t('openclawIntegration.guide.notesTitle')}
+                        </p>
+                        <ul className="mt-4 space-y-3 text-sm leading-6 text-slate-700">
+                          {guideNotes.map((note) => (
+                            <li key={note} className="flex items-start gap-3">
+                              <span className="mt-2 h-1.5 w-1.5 rounded-full bg-slate-400" />
+                              <span>{note}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
                     </div>
-                  ))}
-
-                  <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                    <p className="text-sm font-semibold text-slate-900">
-                      {t('openclawIntegration.guide.configExampleTitle')}
-                    </p>
-                    <p className="mt-1 text-sm leading-6 text-slate-600">
-                      {t('openclawIntegration.guide.configExampleDescription')}
-                    </p>
-                    <pre className="mt-3 overflow-x-auto rounded-2xl bg-slate-950 px-4 py-3 text-xs leading-6 text-slate-100">
-                      <code>{pluginConfigExample}</code>
-                    </pre>
                   </div>
-
-                  <div className="rounded-2xl border border-amber-200 bg-amber-50/80 p-4 text-sm leading-6 text-amber-900">
-                    <p className="font-semibold">{t('openclawIntegration.guide.restartTitle')}</p>
-                    <p className="mt-1">{t('openclawIntegration.guide.restartDescription')}</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)]">
-              <div className="rounded-[24px] border border-slate-200 bg-slate-50/80 p-5">
-                <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
-                  {t('openclawIntegration.guide.endpointsTitle')}
-                </p>
-                <div className="mt-4 space-y-3">
-                  <div className="rounded-2xl bg-white px-4 py-3">
-                    <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
-                      {t('openclawIntegration.guide.endpoints.auth')}
-                    </p>
-                    <code className="mt-2 block break-all text-sm text-slate-800">
-                      Authorization: Bearer {'<integration_secret>'}
-                    </code>
-                  </div>
-                  <div className="rounded-2xl bg-white px-4 py-3">
-                    <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
-                      {t('openclawIntegration.guide.endpoints.catalog')}
-                    </p>
-                    <code className="mt-2 block break-all text-sm text-slate-800">
-                      GET /api/integrations/openclaw/capabilities
-                    </code>
-                  </div>
-                  <div className="rounded-2xl bg-white px-4 py-3">
-                    <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
-                      {t('openclawIntegration.guide.endpoints.execute')}
-                    </p>
-                    <code className="mt-2 block break-all text-sm text-slate-800">
-                      POST /api/integrations/openclaw/capabilities/{'{capabilityKey}'}/execute
-                    </code>
-                  </div>
-                </div>
-              </div>
-
-              <div className="rounded-[24px] border border-slate-200 bg-slate-50/80 p-5">
-                <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
-                  {t('openclawIntegration.guide.notesTitle')}
-                </p>
-                <ul className="mt-4 space-y-3 text-sm leading-6 text-slate-700">
-                  {guideNotes.map((note) => (
-                    <li key={note} className="flex items-start gap-3">
-                      <span className="mt-2 h-1.5 w-1.5 rounded-full bg-slate-400" />
-                      <span>{note}</span>
-                    </li>
-                  ))}
-                </ul>
-
-                <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-4">
-                  <p className="text-sm font-semibold text-slate-900">
-                    {t('openclawIntegration.guide.verifyChecklistTitle')}
-                  </p>
-                  <ul className="mt-3 space-y-2 text-sm leading-6 text-slate-700">
-                    {pluginVerifyChecklist.map((item) => (
-                      <li key={item} className="flex items-start gap-3">
-                        <span className="mt-2 h-1.5 w-1.5 rounded-full bg-slate-400" />
-                        <span>{item}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
+                ) : null}
               </div>
             </div>
           </div>
         ) : null}
       </section>
 
-      <section className="rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
+      <section id="openclaw-catalog-section" className="rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
         <SectionHeader
           title={t('openclawIntegration.catalog.title')}
           description={t('openclawIntegration.catalog.description')}
@@ -1009,6 +1369,12 @@ export function OpenClawIntegrationSettingsPage() {
             </div>
           }
         />
+        {!catalogReady ? (
+          <div className="mt-5 rounded-[24px] border border-amber-200 bg-amber-50/80 px-4 py-4 text-sm leading-6 text-amber-900">
+            <p className="font-semibold">{t('openclawIntegration.catalog.blockedTitle')}</p>
+            <p className="mt-1">{t('openclawIntegration.catalog.blockedDescription')}</p>
+          </div>
+        ) : null}
         {catalogItems.length ? (
           <div className="mt-5 grid gap-4">
             {catalogItems.map((item) => (
@@ -1085,10 +1451,14 @@ export function OpenClawIntegrationSettingsPage() {
                         ? 'border-slate-900 bg-slate-900 text-white shadow-lg shadow-slate-900/10'
                         : 'border-slate-200 bg-slate-50/70 text-slate-700 hover:border-slate-300'
                     )}
-                    onClick={() => {
-                      setSelectedSourceKey(null)
-                      setDraft(createEmptyDraft(sourceType))
-                    }}
+                      onClick={() => {
+                        setSelectedSourceKey(null)
+                        setSourcePickerOpen(false)
+                        setSourceSearch('')
+                        setContractOrigin('source')
+                        setContractAdvancedOpen(false)
+                        setDraft(createEmptyDraft(sourceType))
+                      }}
                   >
                     <p className="text-sm font-semibold">
                       {sourceType === 'tool'
@@ -1110,60 +1480,171 @@ export function OpenClawIntegrationSettingsPage() {
                 <Label>{t('openclawIntegration.form.source')}</Label>
                 {sourceQuery.isFetching ? <Loader2 className="h-4 w-4 animate-spin text-slate-400" /> : null}
               </div>
-              <div className="grid max-h-72 gap-3 overflow-y-auto pr-1">
-                {currentSources.map((source) => {
-                  const active = selectedSourceKey === source.sourceKey
-                  return (
-                    <button
-                      key={source.sourceKey}
-                      type="button"
-                      onClick={() => {
-                        setSelectedSourceKey(source.sourceKey)
-                        patchDraftFromSource(source)
-                      }}
-                      className={cn(
-                        'rounded-[22px] border px-4 py-4 text-left transition',
-                        active
-                          ? 'border-slate-900 bg-slate-900 text-white shadow-lg shadow-slate-900/10'
-                          : 'border-slate-200 bg-slate-50/70 text-slate-800 hover:border-slate-300',
-                        !source.bindable && 'opacity-70'
-                      )}
-                    >
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="text-sm font-semibold">{source.title}</p>
-                        <CapabilityBadge
-                          colorClassName={
-                            active
-                              ? 'border-white/25 bg-white/10 text-white'
-                              : source.isSystem
-                                ? 'border-cyan-200 bg-cyan-50 text-cyan-700'
-                                : 'border-violet-200 bg-violet-50 text-violet-700'
-                          }
-                        >
-                          {source.isSystem
-                            ? t('openclawIntegration.labels.system')
-                            : t('openclawIntegration.labels.user')}
-                        </CapabilityBadge>
-                        {!source.bindable ? (
-                          <CapabilityBadge
-                            colorClassName={active ? 'border-white/25 bg-white/10 text-white' : 'border-amber-200 bg-amber-50 text-amber-700'}
-                          >
-                            {t('openclawIntegration.status.unavailable')}
-                          </CapabilityBadge>
+              <Popover open={sourcePickerOpen} onOpenChange={setSourcePickerOpen}>
+                <PopoverTrigger asChild>
+                  <button
+                    type="button"
+                    className="group flex min-h-[92px] w-full items-center justify-between gap-4 rounded-[24px] border border-slate-200 bg-slate-50/60 px-5 py-4 text-left shadow-sm transition-all hover:border-slate-300 hover:bg-white hover:shadow-md"
+                  >
+                    <div className="flex min-w-0 items-center gap-4">
+                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[16px] border border-slate-200 bg-white text-slate-600 shadow-sm">
+                        <SelectedSourceIcon className="h-5 w-5" />
+                      </div>
+                      <div className="min-w-0 space-y-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="truncate text-sm font-semibold text-slate-900">
+                            {selectedSource?.title || t('openclawIntegration.form.sourcePickerEmpty')}
+                          </p>
+                          {selectedSource ? (
+                            <>
+                              <CapabilityBadge
+                                colorClassName={
+                                  selectedSource.isSystem
+                                    ? 'border-cyan-200 bg-cyan-50 text-cyan-700'
+                                    : 'border-violet-200 bg-violet-50 text-violet-700'
+                                }
+                              >
+                                {selectedSource.isSystem
+                                  ? t('openclawIntegration.labels.system')
+                                  : t('openclawIntegration.labels.user')}
+                              </CapabilityBadge>
+                              {!selectedSource.bindable ? (
+                                <CapabilityBadge colorClassName="border-amber-200 bg-amber-50 text-amber-700">
+                                  {t('openclawIntegration.status.unavailable')}
+                                </CapabilityBadge>
+                              ) : null}
+                            </>
+                          ) : null}
+                        </div>
+                        <p className="line-clamp-2 text-sm leading-6 text-slate-600">
+                          {selectedSource?.description || t('openclawIntegration.form.sourcePickerHint')}
+                        </p>
+                        {selectedSource?.unavailableReason ? (
+                          <p className="text-xs leading-5 text-amber-700">
+                            {selectedSource.unavailableReason}
+                          </p>
                         ) : null}
                       </div>
-                      <p className={cn('mt-2 text-sm leading-6', active ? 'text-white/80' : 'text-slate-600')}>
-                        {source.description || '-'}
-                      </p>
-                      {!source.bindable && source.unavailableReason ? (
-                        <p className={cn('mt-2 text-xs leading-5', active ? 'text-white/70' : 'text-amber-700')}>
-                          {source.unavailableReason}
+                    </div>
+
+                    <div className="flex shrink-0 items-center gap-3">
+                      <span className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-sm transition-colors group-hover:border-slate-300">
+                        {t('openclawIntegration.form.chooseSource')}
+                      </span>
+                      <div className="flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm transition-all group-hover:border-slate-300 group-hover:text-slate-700">
+                        <ChevronDown className={cn('h-4 w-4 transition-transform', sourcePickerOpen && 'rotate-180')} />
+                      </div>
+                    </div>
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent
+                  align="start"
+                  sideOffset={10}
+                  className="w-[min(780px,calc(100vw-3rem))] rounded-[28px] p-0 shadow-2xl"
+                >
+                  <div className="border-b border-slate-200 px-5 py-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="space-y-1">
+                        <p className="text-sm font-semibold text-slate-900">
+                          {t('openclawIntegration.form.sourcePickerTitle')}
                         </p>
-                      ) : null}
-                    </button>
-                  )
-                })}
-              </div>
+                        <p className="text-sm leading-6 text-slate-600">
+                          {t('openclawIntegration.form.sourcePickerDescription')}
+                        </p>
+                      </div>
+                      <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
+                        {filteredSources.length}
+                      </span>
+                    </div>
+
+                    <div className="relative mt-4">
+                      <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                      <input
+                        value={sourceSearch}
+                        onChange={(event) => setSourceSearch(event.target.value)}
+                        placeholder={t('openclawIntegration.form.sourceSearchPlaceholder')}
+                        className="h-11 w-full rounded-2xl border border-slate-200 bg-slate-50 pl-11 pr-4 text-sm text-slate-900 shadow-sm outline-none transition focus:border-slate-900/50 focus:ring-4 focus:ring-slate-900/5"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="max-h-[420px] space-y-2 overflow-y-auto p-3">
+                    {filteredSources.length ? filteredSources.map((source) => {
+                      const active = selectedSourceKey === source.sourceKey
+                      const Icon = sourceTypeIcon(source.sourceType)
+                      return (
+                        <button
+                          key={source.sourceKey}
+                          type="button"
+                          onClick={() => {
+                            setSelectedSourceKey(source.sourceKey)
+                            applySourceSelection(source)
+                            setSourcePickerOpen(false)
+                          }}
+                          className={cn(
+                            'flex w-full items-start gap-4 rounded-[22px] border px-4 py-4 text-left transition-all',
+                            active
+                              ? 'border-slate-900 bg-slate-900 text-white shadow-lg shadow-slate-900/10'
+                              : 'border-slate-200 bg-white text-slate-800 hover:border-slate-300 hover:bg-slate-50',
+                            !source.bindable && 'opacity-80'
+                          )}
+                        >
+                          <div
+                            className={cn(
+                              'mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-[14px] border',
+                              active
+                                ? 'border-white/15 bg-white/10 text-white'
+                                : 'border-slate-200 bg-slate-50 text-slate-600'
+                            )}
+                          >
+                            <Icon className="h-4 w-4" />
+                          </div>
+
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="text-sm font-semibold">{source.title}</p>
+                              <CapabilityBadge
+                                colorClassName={
+                                  active
+                                    ? 'border-white/25 bg-white/10 text-white'
+                                    : source.isSystem
+                                      ? 'border-cyan-200 bg-cyan-50 text-cyan-700'
+                                      : 'border-violet-200 bg-violet-50 text-violet-700'
+                                }
+                              >
+                                {source.isSystem
+                                  ? t('openclawIntegration.labels.system')
+                                  : t('openclawIntegration.labels.user')}
+                              </CapabilityBadge>
+                              {!source.bindable ? (
+                                <CapabilityBadge
+                                  colorClassName={active ? 'border-white/25 bg-white/10 text-white' : 'border-amber-200 bg-amber-50 text-amber-700'}
+                                >
+                                  {t('openclawIntegration.status.unavailable')}
+                                </CapabilityBadge>
+                              ) : null}
+                            </div>
+                            <p className={cn('mt-2 text-sm leading-6', active ? 'text-white/80' : 'text-slate-600')}>
+                              {source.description || '-'}
+                            </p>
+                            {!source.bindable && source.unavailableReason ? (
+                              <p className={cn('mt-2 text-xs leading-5', active ? 'text-white/70' : 'text-amber-700')}>
+                                {source.unavailableReason}
+                              </p>
+                            ) : null}
+                          </div>
+
+                          {active ? <Check className="mt-1 h-4 w-4 shrink-0 text-white" /> : null}
+                        </button>
+                      )
+                    }) : (
+                      <div className="rounded-[22px] border border-dashed border-slate-300 bg-slate-50/80 px-4 py-10 text-center text-sm text-slate-500">
+                        {t('openclawIntegration.form.sourceSearchEmpty')}
+                      </div>
+                    )}
+                  </div>
+                </PopoverContent>
+              </Popover>
               {selectedSource?.isSystem && (draft.sourceType === 'workflow' || draft.sourceType === 'agent') ? (
                 <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm leading-6 text-amber-800">
                   {t('settings.skills.systemTargetBindingHint')}
@@ -1213,93 +1694,231 @@ export function OpenClawIntegrationSettingsPage() {
                     checked={editingRetiredItem ? false : draft.enabled}
                     onCheckedChange={(enabled) => patchDraft({ enabled })}
                     disabled={Boolean(editingRetiredItem)}
+                    className="data-[state=checked]:bg-emerald-500"
                   />
                 </div>
               </div>
             </section>
 
             <>
-              <section className="grid gap-4 md:grid-cols-2">
-                <TextareaField
-                  label={t('openclawIntegration.form.inputSummary')}
-                  value={draft.inputSummary}
-                  onChange={(value) => patchDraft({ inputSummary: value })}
-                  rows={3}
-                  disabled={!draft.schemaEditable}
-                />
-                <TextareaField
-                  label={t('openclawIntegration.form.outputSummary')}
-                  value={draft.outputSummary}
-                  onChange={(value) => patchDraft({ outputSummary: value })}
-                  rows={3}
-                  disabled={!draft.schemaEditable}
-                />
-              </section>
-
-              {draft.sourceType === 'tool' ? (
-                <section className="space-y-3">
-                  <Label>{t('openclawIntegration.form.toolResponseMode')}</Label>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {(['json_schema', 'text_field'] as const).map((mode) => (
-                      <button
-                        key={mode}
-                        type="button"
-                        className={cn(
-                          'rounded-[22px] border px-4 py-4 text-left transition',
-                          draft.toolResponseMode === mode
-                            ? 'border-slate-900 bg-slate-900 text-white shadow-lg shadow-slate-900/10'
-                            : 'border-slate-200 bg-slate-50/70 text-slate-700 hover:border-slate-300'
-                        )}
-                        onClick={() => patchDraft({ toolResponseMode: mode })}
+              <section className="space-y-4 rounded-[28px] border border-slate-200 bg-slate-50/80 p-5">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Label>{t('openclawIntegration.form.contractPreviewTitle')}</Label>
+                      <CapabilityBadge
+                        colorClassName={
+                          contractUsesOverride
+                            ? 'border-amber-200 bg-amber-50 text-amber-700'
+                            : 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                        }
                       >
-                        <p className="text-sm font-semibold">
-                          {mode === 'json_schema'
-                            ? t('openclawIntegration.responseModes.jsonSchema')
-                            : t('openclawIntegration.responseModes.textField')}
-                        </p>
-                        <p className={cn('mt-1 text-xs leading-5', draft.toolResponseMode === mode ? 'text-white/80' : 'text-slate-500')}>
-                          {t(`openclawIntegration.responseModeDescriptions.${mode}`)}
-                        </p>
-                      </button>
-                    ))}
+                        {contractUsesOverride
+                          ? t('openclawIntegration.form.contractStatusOverride')
+                          : t('openclawIntegration.form.contractStatusDerived')}
+                      </CapabilityBadge>
+                    </div>
+                    <p className="max-w-3xl text-sm leading-6 text-slate-600">
+                      {contractUsesOverride
+                        ? t('openclawIntegration.form.contractManualNote')
+                        : draft.sourceType === 'workflow'
+                          ? t('openclawIntegration.form.contractWorkflowNote')
+                          : draft.sourceType === 'agent'
+                            ? t('openclawIntegration.form.agentAutoContractHint')
+                            : t('openclawIntegration.form.contractAutoNote')}
+                    </p>
                   </div>
-                </section>
-              ) : null}
 
-              <section className="grid gap-4 lg:grid-cols-2">
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <Wrench className="h-4 w-4 text-slate-500" />
-                    <Label>{t('openclawIntegration.form.inputSchema')}</Label>
-                  </div>
-                  <textarea
-                    rows={12}
-                    value={draft.inputSchemaText}
-                    onChange={(event) => patchDraft({ inputSchemaText: event.target.value })}
-                    className={TEXTAREA_CLASSNAME}
-                    disabled={!draft.schemaEditable}
+                  {contractUsesOverride && sourceDerivedContract && effectiveContract.schemaEditable ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="rounded-2xl"
+                      onClick={() => {
+                        setContractOrigin('source')
+                        setDraft((currentDraft) => ({ ...currentDraft, ...sourceDerivedContract }))
+                      }}
+                    >
+                      <RefreshCcw className="h-4 w-4" />
+                      {t('openclawIntegration.form.restoreSourceContract')}
+                    </Button>
+                  ) : null}
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-3">
+                  <SummaryCard
+                    label={t('openclawIntegration.form.contractStatus')}
+                    value={
+                      contractUsesOverride
+                        ? t('openclawIntegration.form.contractStatusOverride')
+                        : t('openclawIntegration.form.contractStatusDerived')
+                    }
+                    hint={
+                      contractUsesOverride
+                        ? t('openclawIntegration.form.contractStatusOverrideHint')
+                        : t('openclawIntegration.form.contractStatusDerivedHint')
+                    }
+                    active={!contractUsesOverride}
+                  />
+                  <SummaryCard
+                    label={t('openclawIntegration.form.contractSourceMode')}
+                    value={
+                      effectiveContract.schemaEditable
+                        ? t('openclawIntegration.form.contractSourceModeEditable')
+                        : t('openclawIntegration.form.contractSourceModeReadonly')
+                    }
+                    hint={
+                      effectiveContract.schemaEditable
+                        ? t('openclawIntegration.form.contractSourceModeEditableHint')
+                        : t('openclawIntegration.form.contractSourceModeReadonlyHint')
+                    }
+                    active={!effectiveContract.schemaEditable}
+                  />
+                  <SummaryCard
+                    label={t('openclawIntegration.form.toolResponseMode')}
+                    value={t(`openclawIntegration.responseModes.${effectiveContract.toolResponseMode}`)}
+                    hint={t(`openclawIntegration.responseModeDescriptions.${effectiveContract.toolResponseMode}`)}
                   />
                 </div>
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <ShieldCheck className="h-4 w-4 text-slate-500" />
-                    <Label>{t('openclawIntegration.form.outputSchema')}</Label>
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="rounded-[24px] border border-slate-200 bg-white px-5 py-4 shadow-sm shadow-slate-900/5">
+                    <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">
+                      {t('openclawIntegration.form.inputSummary')}
+                    </p>
+                    <p className="mt-3 text-sm leading-6 text-slate-700">
+                      {effectiveContract.inputSummary || '-'}
+                    </p>
                   </div>
-                  <textarea
-                    rows={12}
-                    value={draft.outputSchemaText}
-                    onChange={(event) => patchDraft({ outputSchemaText: event.target.value })}
-                    className={TEXTAREA_CLASSNAME}
-                    disabled={!draft.schemaEditable}
-                  />
+                  <div className="rounded-[24px] border border-slate-200 bg-white px-5 py-4 shadow-sm shadow-slate-900/5">
+                    <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">
+                      {t('openclawIntegration.form.outputSummary')}
+                    </p>
+                    <p className="mt-3 text-sm leading-6 text-slate-700">
+                      {effectiveContract.outputSummary || '-'}
+                    </p>
+                  </div>
                 </div>
               </section>
 
-              {!draft.schemaEditable ? (
-                <div className="rounded-[22px] border border-cyan-200 bg-cyan-50/80 px-4 py-3 text-sm leading-6 text-cyan-800">
-                  {t('openclawIntegration.form.readonlySchemaHint')}
-                </div>
-              ) : null}
+              <section className="overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-sm shadow-slate-900/5">
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left transition hover:bg-slate-50/80"
+                  onClick={() => setContractAdvancedOpen((open) => !open)}
+                  aria-expanded={contractAdvancedOpen}
+                >
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-semibold text-slate-900">
+                        {t('openclawIntegration.form.advancedContractTitle')}
+                      </p>
+                      {contractUsesOverride ? (
+                        <CapabilityBadge colorClassName="border-amber-200 bg-amber-50 text-amber-700">
+                          {t('openclawIntegration.form.contractStatusOverride')}
+                        </CapabilityBadge>
+                      ) : null}
+                    </div>
+                    <p className="text-sm leading-6 text-slate-600">
+                      {t('openclawIntegration.form.advancedContractDescription')}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3 text-sm font-medium text-slate-600">
+                    <span>
+                      {contractAdvancedOpen
+                        ? t('openclawIntegration.form.advancedContractHide')
+                        : t('openclawIntegration.form.advancedContractShow')}
+                    </span>
+                    <ChevronDown className={cn('h-4 w-4 transition-transform', contractAdvancedOpen && 'rotate-180')} />
+                  </div>
+                </button>
+
+                {contractAdvancedOpen ? (
+                  <div className="space-y-5 border-t border-slate-200 px-5 py-5">
+                    <section className="grid gap-4 md:grid-cols-2">
+                      <TextareaField
+                        label={t('openclawIntegration.form.inputSummary')}
+                        value={effectiveContract.inputSummary}
+                        onChange={(value) => patchContractDraft({ inputSummary: value })}
+                        rows={3}
+                        disabled={!effectiveContract.schemaEditable}
+                      />
+                      <TextareaField
+                        label={t('openclawIntegration.form.outputSummary')}
+                        value={effectiveContract.outputSummary}
+                        onChange={(value) => patchContractDraft({ outputSummary: value })}
+                        rows={3}
+                        disabled={!effectiveContract.schemaEditable}
+                      />
+                    </section>
+
+                    {draft.sourceType !== 'workflow' ? (
+                      <section className="space-y-3">
+                        <Label>{t('openclawIntegration.form.toolResponseMode')}</Label>
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          {(['json_schema', 'text_field'] as const).map((mode) => (
+                            <button
+                              key={mode}
+                              type="button"
+                              className={cn(
+                                'rounded-[22px] border px-4 py-4 text-left transition',
+                                effectiveContract.toolResponseMode === mode
+                                  ? 'border-slate-900 bg-slate-900 text-white shadow-lg shadow-slate-900/10'
+                                  : 'border-slate-200 bg-slate-50/70 text-slate-700 hover:border-slate-300',
+                                !effectiveContract.schemaEditable && 'cursor-not-allowed opacity-70'
+                              )}
+                              onClick={() => patchContractDraft({ toolResponseMode: mode })}
+                              disabled={!effectiveContract.schemaEditable}
+                            >
+                              <p className="text-sm font-semibold">
+                                {t(`openclawIntegration.responseModes.${mode}`)}
+                              </p>
+                              <p className={cn('mt-1 text-xs leading-5', effectiveContract.toolResponseMode === mode ? 'text-white/80' : 'text-slate-500')}>
+                                {t(`openclawIntegration.responseModeDescriptions.${mode}`)}
+                              </p>
+                            </button>
+                          ))}
+                        </div>
+                      </section>
+                    ) : null}
+
+                    <section className="grid gap-4 lg:grid-cols-2">
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <Wrench className="h-4 w-4 text-slate-500" />
+                          <Label>{t('openclawIntegration.form.inputSchema')}</Label>
+                        </div>
+                        <textarea
+                          rows={12}
+                          value={effectiveContract.inputSchemaText}
+                          onChange={(event) => patchContractDraft({ inputSchemaText: event.target.value })}
+                          className={TEXTAREA_CLASSNAME}
+                          disabled={!effectiveContract.schemaEditable}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <ShieldCheck className="h-4 w-4 text-slate-500" />
+                          <Label>{t('openclawIntegration.form.outputSchema')}</Label>
+                        </div>
+                        <textarea
+                          rows={12}
+                          value={effectiveContract.outputSchemaText}
+                          onChange={(event) => patchContractDraft({ outputSchemaText: event.target.value })}
+                          className={TEXTAREA_CLASSNAME}
+                          disabled={!effectiveContract.schemaEditable}
+                        />
+                      </div>
+                    </section>
+
+                    {!effectiveContract.schemaEditable ? (
+                      <div className="rounded-[22px] border border-cyan-200 bg-cyan-50/80 px-4 py-3 text-sm leading-6 text-cyan-800">
+                        {t('openclawIntegration.form.readonlySchemaHint')}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </section>
             </>
           </div>
 

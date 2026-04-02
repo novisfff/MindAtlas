@@ -534,6 +534,45 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(result["content"]["suggestions"], ["继续跟进自动化"])
         self.assertEqual(result["content"]["trends"], "活跃度上升")
 
+    def test_get_entry_accepts_search_hit_payload_with_top_level_id(self) -> None:
+        from app.entry.models import Entry, TimeMode  # noqa: E402
+        from app.entry_type.models import EntryType  # noqa: E402
+
+        self._initialize_system()
+        secret = self._rotate_secret()
+        self._enable_integration(secret)
+
+        entry_type = self.db.query(EntryType).filter(EntryType.code == "KNOWLEDGE").first()
+        self.assertIsNotNone(entry_type)
+
+        entry = Entry(
+            title="OpenClaw 详情测试",
+            summary="用于验证详情能力入参兼容。",
+            content="详情正文",
+            type_id=entry_type.id,
+            time_mode=TimeMode.POINT,
+        )
+        self.db.add(entry)
+        self.db.commit()
+        self.db.refresh(entry)
+
+        response = self.client.post(
+            "/api/integrations/openclaw/capabilities/get_entry/execute",
+            headers=self._auth_headers(secret),
+            json={
+                "id": str(entry.id),
+                "title": entry.title,
+                "summary": entry.summary,
+                "content": entry.content,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()["data"]["result"]
+        self.assertEqual(result["id"], str(entry.id))
+        self.assertEqual(result["title"], "OpenClaw 详情测试")
+        self.assertEqual(result["content"], "详情正文")
+
     def test_workflow_catalog_item_executes_published_workflow(self) -> None:
         self._initialize_system()
         workflow_id, workflow_name = self._get_system_workflow()

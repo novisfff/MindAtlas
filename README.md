@@ -1,100 +1,54 @@
 # MindAtlas
 
-Personal knowledge and experience management system - Record, connect, search, analyze, and summarize your knowledge and experiences.
+Self-hosted knowledge and experience management for capturing, connecting, searching, and reviewing what matters.
 
 [中文文档](README.zh-CN.md)
 
 ## Overview
 
-MindAtlas is a self-hosted knowledge & experience management system that helps you turn scattered notes into a structured, connected “atlas” — with AI-assisted writing and (optional) RAG querying.
+MindAtlas helps turn scattered notes, project records, and life events into a structured personal atlas. The core model is an **Entry** with Markdown content, optional time data, tags, typed relations, attachments, and graph connections.
 
-It centers around **Entries** (Markdown content + optional time), and lets you organize them with **types**, **tags**, and explicit **relations**. On top of that, MindAtlas includes:
+The current system goes beyond basic note CRUD:
 
-- **AI content assistant**: generate summaries, refine Markdown, and suggest tags for your entries
-- **AI chat assistant**: streaming chat with tool calling and configurable skills
-- **AI registry**: manage OpenAI-compatible credentials/models and bind them to components (assistant / LightRAG)
-- **LightRAG + Neo4j (optional)**: index your content for RAG-style querying, graph exploration, and relation recommendations
-
-## Use Cases
-
-- Build a “second brain” for learning notes, projects, research, and life events
-- Track experiences on a timeline (point-in-time or time range)
-- Connect people/skills/projects/ideas with typed relations and visualize the network
-- Store and retrieve attachments in S3-compatible storage (MinIO)
-- Use AI to summarize/refine entries and suggest tags (optional)
-- Ask natural-language questions with streaming answers (optional; best with LightRAG enabled)
-
-## Core Concepts
-
-- **Entry**: a record with title, Markdown content, optional time, and summary
-- **Entry Type**: category configuration (icon/color) for consistent organization
-- **Tag**: flexible multi-dimensional labels
-- **Relation**: typed links between Entries (the basis of the “system graph”)
-- **Attachment**: files associated with Entries (stored in MinIO)
-- **Graph**: interactive visualization of explicit relations (and optional LightRAG graph)
-- **AI Registry**: credentials/models + component bindings (assistant / LightRAG)
-- **Assistant Skills/Tools**: configurable capabilities used by the chat assistant
-
-## Features
-
-- **Entry Management** - Create, edit, and search knowledge/experience records with Markdown support
-- **Type System** - Customize Entry types (Knowledge, Project, Competition, etc.) with icons and colors
-- **Tag Management** - Flexible tagging system for multi-dimensional categorization
-- **Relation Network** - Build connections between Entries with various relation types
-- **Attachment Storage** - File attachment management powered by MinIO
-- **Knowledge Graph** - Visualize knowledge connections in an interactive graph
-- **LightRAG (Optional)** - Knowledge graph indexing + RAG query powered by LightRAG + Neo4j (with a background worker)
-- **AI Content Generation** - Summaries, refined Markdown, and tag suggestions for Entries
-- **AI Assistant** - LangChain-based intelligent assistant with tool calling and skill execution
-- **Internationalization** - Support for Chinese and English interfaces
+- **Structured knowledge capture** with entry types, tags, relations, attachments, dashboard views, calendar views, and graph exploration
+- **First-run initialization** for locale, default entry types, AI provider setup, and runtime capability modules
+- **Runtime system setup** for storage, knowledge graph, document parsing, and automation settings after initialization
+- **AI registry and assistant configuration** for providers, models, tools, skills, targets, workflows, agents, and system AI behaviors
+- **Optional LightRAG knowledge graph** backed by Neo4j for indexing, RAG-style querying, and graph-assisted exploration
+- **Docling-based document parsing** for uploaded files, including OCR and optional picture-description support
+- **Scheduled AI reports** with weekly and monthly report generation plus dashboard access
+- **OpenClaw integration** with a configurable capability catalog and a shipped plugin package in this repository
 
 ## Tech Stack
 
 ### Backend
-- **Framework**: FastAPI
-- **Database**: PostgreSQL + SQLAlchemy
-- **Migration**: Alembic
-- **Object Storage**: MinIO
-- **AI**: LangChain + OpenAI-compatible API
-- **Graph DB (Optional)**: Neo4j (for LightRAG)
-- **RAG (Optional)**: LightRAG (lightrag-hku)
+
+- FastAPI
+- PostgreSQL + SQLAlchemy
+- Alembic
+- MinIO (S3-compatible object storage)
+- LangChain + OpenAI-compatible APIs
+- LightRAG + Neo4j (optional)
+- APScheduler for background automation
 
 ### Frontend
-- **Framework**: React 18 + TypeScript
-- **Build Tool**: Vite
-- **State Management**: Zustand + TanStack Query
-- **Styling**: Tailwind CSS
-- **i18n**: react-i18next
 
-## Project Structure
+- React 18 + TypeScript
+- Vite
+- Zustand + TanStack Query
+- Tailwind CSS
+- react-i18next
 
-```
+## Project Layout
+
+```text
 MindAtlas/
-├── backend/                 # Python FastAPI backend
-│   ├── app/
-│   │   ├── entry/          # Entry module
-│   │   ├── entry_type/     # Type configuration
-│   │   ├── tag/            # Tag management
-│   │   ├── relation/       # Relation management
-│   │   ├── attachment/     # Attachment management
-│   │   ├── ai_provider/    # AI provider configuration
-│   │   ├── ai_registry/    # AI key/model registry
-│   │   ├── ai/             # AI features
-│   │   ├── assistant/      # AI assistant
-│   │   ├── assistant_config/ # Assistant tools/skills config
-│   │   ├── graph/          # Graph API
-│   │   ├── lightrag/       # LightRAG (optional)
-│   │   └── stats/          # Statistics API
-│   ├── alembic/            # Database migrations
-│   └── requirements.txt
-├── frontend/               # React frontend
-│   ├── src/
-│   │   ├── features/       # Feature modules
-│   │   ├── components/     # Shared components
-│   │   ├── stores/         # State management
-│   │   └── locales/        # i18n files
-│   └── package.json
-└── deploy/                 # Docker deployment config
+├── backend/                        # FastAPI API, workers, scheduler, runtime config
+├── frontend/                       # React app, initialization flow, settings pages, dashboard
+├── deploy/                         # Docker Compose deployment and overrides
+├── docs/                           # User manuals and supporting docs
+├── integrations/openclaw-mindatlas/ # OpenClaw plugin package
+└── openspec/                       # Project specs and change history
 ```
 
 ## Quick Start
@@ -104,97 +58,91 @@ MindAtlas/
 - Python 3.11+
 - Node.js 18+
 - PostgreSQL 15+
-- MinIO (or S3-compatible object storage)
-- Neo4j 5+ (optional; required when LightRAG is enabled)
+- MinIO or another S3-compatible object store
+- Neo4j 5+ if you enable LightRAG
 
-### 1. Clone the Repository
+### 1. Clone
 
 ```bash
 git clone https://github.com/novisfff/MindAtlas
 cd MindAtlas
 ```
 
-### 2. Start Backend
+### 2. Start the backend
 
 ```bash
 cd backend
 
-# Create virtual environment
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
-# Install dependencies
 pip install -r requirements.txt
 
-# Configure environment variables
 cp .env.example .env
-# Edit .env to configure database/MinIO, and optionally AI/LightRAG/Neo4j
+# Edit .env for database, storage, and any optional AI / LightRAG settings
 
-# Run database migrations
 alembic upgrade head
-
-# Start the server
 uvicorn app.main:app --reload --port 8000
 ```
 
-### 2.1 (Optional) Start LightRAG Worker
+The API docs are available at `http://localhost:8000/docs`.
 
-If you enable `LIGHTRAG_ENABLED=true`, start the background worker in another terminal:
+### 3. Optional workers
+
+If LightRAG is enabled:
 
 ```bash
+cd backend
+source .venv/bin/activate
 python -m app.lightrag.worker
 ```
 
-### 3. Start Frontend
+If you want attachment parsing with Docling:
+
+```bash
+cd backend
+source .venv/bin/activate
+pip install -r requirements-docling.txt
+python -m app.attachment.worker
+```
+
+See [`backend/README.md`](backend/README.md) for Docling dependency notes and full backend setup details.
+
+### 4. Start the frontend
 
 ```bash
 cd frontend
-
-# Install dependencies
 npm install
-
-# Start development server
 npm run dev
 ```
 
-Visit http://localhost:3000 to use the application.
+Open `http://localhost:3000`.
 
-## Docker Deployment
+On first run, MindAtlas will guide you through initialization and let you configure runtime modules such as storage, knowledge graph, document parsing, and automation.
 
-The project provides a complete Docker Compose configuration for one-click deployment:
+### 5. Docker quick start
 
 ```bash
 cd deploy
 docker compose up -d
 ```
 
-Docker deployment is zero-config by default: `docker compose up -d` works even if you do not pre-create any env files. If you want to customize ports, passwords, or advanced overrides, copy `deploy/.env.example` to `.env`. Copying it without edits keeps the same behavior.
+Docker deployment is zero-config by default. If you want to override ports, passwords, or other runtime defaults, copy `deploy/.env.example` to `deploy/.env` and edit only the values you need.
 
-See [deploy/README.md](deploy/README.md) for detailed deployment instructions (including Neo4j + LightRAG worker).
+## Configuration At A Glance
 
-## Backend Environment Variables (Manual Run)
+- Manual development setup reads from [`backend/.env.example`](backend/.env.example).
+- Runtime capability settings are managed in `Settings -> System Setup` after initialization.
+- Automation settings currently control the background scheduler used for weekly and monthly AI reports.
+- Docker deployment uses built-in defaults from [`deploy/docker-compose.yml`](deploy/docker-compose.yml) plus optional overrides from [`deploy/.env.example`](deploy/.env.example).
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DATABASE_URL` | PostgreSQL connection string | `postgresql://postgres:postgres@localhost:5432/mindatlas` |
-| `MINIO_ENDPOINT` | MinIO address | `localhost:9000` |
-| `MINIO_ACCESS_KEY` | MinIO access key | - |
-| `MINIO_SECRET_KEY` | MinIO secret key | - |
-| `MINIO_BUCKET` | MinIO bucket name | `mindatlas` |
-| `AI_API_KEY` | OpenAI-compatible API key (optional; required for LightRAG) | - |
-| `AI_PROVIDER_FERNET_KEY` | API Key encryption key (for DB-stored keys) | - |
-| `LIGHTRAG_ENABLED` | Enable LightRAG | `false` |
-| `NEO4J_URI` | Neo4j URI (required when LightRAG enabled) | `bolt://localhost:7687` |
-| `NEO4J_USER` | Neo4j username | `neo4j` |
-| `NEO4J_PASSWORD` | Neo4j password | - |
+## Where To Go Next
 
-These variables are mainly for running the backend manually outside Docker Compose. For Docker deployment, use the built-in defaults in `deploy/docker-compose.yml` and the optional overrides in `deploy/.env.example`.
-
-For the full manual-run list, see `backend/.env.example`.
-
-## Documentation
-
-- [User Manual](docs/user-manual.md) - Comprehensive user guide
+- [`backend/README.md`](backend/README.md): backend setup, workers, and environment details
+- [`deploy/README.md`](deploy/README.md): Docker deployment guide
+- [`docs/user-manual.md`](docs/user-manual.md): English user manual
+- [`docs/user-manual.zh-CN.md`](docs/user-manual.zh-CN.md): Chinese user manual
+- [`integrations/openclaw-mindatlas/README.md`](integrations/openclaw-mindatlas/README.md): OpenClaw plugin package and integration guide
 
 ## License
 
