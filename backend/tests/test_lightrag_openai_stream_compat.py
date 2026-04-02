@@ -5,6 +5,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from pydantic import BaseModel
+
 from tests._bootstrap import bootstrap_backend_imports
 
 
@@ -62,6 +64,18 @@ class _FakeClient:
 
 
 class LightRagOpenAiStreamCompatTests(unittest.TestCase):
+    def test_normalize_lightrag_response_format_converts_basemodel_class(self) -> None:
+        from app.lightrag.manager import _normalize_lightrag_response_format
+
+        class _KeywordFormat(BaseModel):
+            high_level_keywords: list[str]
+            low_level_keywords: list[str]
+
+        normalized = _normalize_lightrag_response_format(_KeywordFormat)
+
+        self.assertIsInstance(normalized, dict)
+        self.assertIn(normalized.get("type"), {"json_schema", "json_object"})
+
     def test_requires_stream_mode_detection_matches_provider_error(self) -> None:
         from app.lightrag.manager import _lightrag_requires_stream_mode
 
@@ -151,6 +165,35 @@ class LightRagOpenAiStreamCompatTests(unittest.TestCase):
         self.assertEqual(len(client.chat.completions.calls), 2)
         self.assertEqual(client.chat.completions.calls[0]["response_format"], {"type": "json_object"})
         self.assertNotIn("response_format", client.chat.completions.calls[1])
+        self.assertTrue(stream.closed)
+        self.assertTrue(client.closed)
+
+    def test_keyword_extraction_stream_fallback_normalizes_basemodel_response_format(self) -> None:
+        from app.lightrag.manager import _keyword_extraction_stream_fallback
+
+        class _KeywordFormat(BaseModel):
+            high_level_keywords: list[str]
+            low_level_keywords: list[str]
+
+        stream = _FakeStream(
+            [
+                SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content='{"high_level_keywords":[],"low_level_keywords":[]}'))]),
+            ]
+        )
+        client = _FakeClient([stream])
+
+        result = asyncio.run(
+            _keyword_extraction_stream_fallback(
+                client_factory=lambda **_: client,
+                model="gpt-test",
+                prompt="hi",
+                response_format=_KeywordFormat,
+            )
+        )
+
+        self.assertEqual(result, '{"high_level_keywords":[],"low_level_keywords":[]}')
+        self.assertIsInstance(client.chat.completions.calls[0]["response_format"], dict)
+        self.assertNotEqual(client.chat.completions.calls[0]["response_format"], _KeywordFormat)
         self.assertTrue(stream.closed)
         self.assertTrue(client.closed)
 

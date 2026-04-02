@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import socket
+import inspect
 import sys
 import threading
 import time
@@ -97,6 +98,30 @@ def _lightrag_response_format_maybe_unsupported(exc: BaseException) -> bool:
     return "response_format" in lowered or "json_object" in lowered or "json_schema" in lowered
 
 
+def _normalize_lightrag_response_format(response_format: Any) -> Any:
+    if response_format is None or isinstance(response_format, dict):
+        return response_format
+
+    if inspect.isclass(response_format):
+        try:
+            from openai.lib._parsing import type_to_response_format_param
+        except Exception:
+            logger.debug("lightrag response_format normalization unavailable", exc_info=True)
+            return {"type": "json_object"}
+
+        try:
+            normalized = type_to_response_format_param(response_format)
+        except Exception:
+            logger.debug("lightrag response_format normalization failed", exc_info=True)
+            return {"type": "json_object"}
+
+        if isinstance(normalized, dict):
+            return normalized
+        return {"type": "json_object"}
+
+    return response_format
+
+
 def _coerce_stream_chunk_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -158,10 +183,10 @@ async def _keyword_extraction_stream_fallback(
     if timeout is not None:
         kwargs["timeout"] = timeout
 
-    response_format = kwargs.get("response_format")
+    response_format = _normalize_lightrag_response_format(kwargs.get("response_format"))
     if response_format is None:
-        kwargs["response_format"] = {"type": "json_object"}
-        response_format = kwargs["response_format"]
+        response_format = {"type": "json_object"}
+    kwargs["response_format"] = response_format
 
     kwargs["stream"] = True
 
