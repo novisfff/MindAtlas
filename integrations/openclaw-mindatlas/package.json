@@ -5,6 +5,15 @@
   "type": "module",
   "description": "OpenClaw native plugin that exposes MindAtlas capability catalog items as OpenClaw tools.",
   "license": "MIT",
+  "files": [
+    "README.md",
+    "openclaw.plugin.json",
+    "package.json",
+    "scripts",
+    "skills",
+    "src",
+    "tsconfig.json"
+  ],
   "engines": {
     "node": ">=20"
   },

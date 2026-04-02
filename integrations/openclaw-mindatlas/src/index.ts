@@ -26,6 +26,11 @@ import {
 } from './tools'
 
 type LogMethod = 'info' | 'warn' | 'error' | 'debug'
+type BundledSkillSync = typeof syncBundledSkills
+
+interface RuntimeDependencies {
+  syncBundledSkills?: BundledSkillSync
+}
 
 function stableSerialize(value: unknown): string {
   try {
@@ -79,6 +84,7 @@ export class OpenClawMindAtlasPluginRuntime {
   private readonly api: OpenClawPluginApi
   private readonly logger: PluginLogger | undefined
   private readonly rawConfig: unknown
+  private readonly bundledSkillSync: BundledSkillSync
   private config: PluginConfig | null = null
   private snapshot: CatalogSnapshot = {
     integrationName: 'MindAtlas',
@@ -93,10 +99,11 @@ export class OpenClawMindAtlasPluginRuntime {
   private refreshServiceRegistered = false
   private lastReloadWarningKey = ''
 
-  constructor(api: OpenClawPluginApi) {
+  constructor(api: OpenClawPluginApi, dependencies: RuntimeDependencies = {}) {
     this.api = api
     this.logger = api.logger
     this.rawConfig = extractRuntimeConfig(api)
+    this.bundledSkillSync = dependencies.syncBundledSkills ?? syncBundledSkills
   }
 
   async register() {
@@ -200,7 +207,7 @@ export class OpenClawMindAtlasPluginRuntime {
 
   private syncBundledSkillsIntoOpenClaw() {
     try {
-      const result = syncBundledSkills()
+      const result = this.bundledSkillSync()
       for (const warning of result.warnings) {
         log(this.logger, 'warn', warning, {
           skillsRoot: result.managedRootDir,
@@ -404,8 +411,8 @@ export class OpenClawMindAtlasPluginRuntime {
   }
 }
 
-export async function registerMindAtlasPlugin(api: OpenClawPluginApi) {
-  const runtime = new OpenClawMindAtlasPluginRuntime(api)
+export async function registerMindAtlasPlugin(api: OpenClawPluginApi, dependencies: RuntimeDependencies = {}) {
+  const runtime = new OpenClawMindAtlasPluginRuntime(api, dependencies)
   await runtime.register()
   return runtime
 }

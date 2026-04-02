@@ -9,26 +9,9 @@ import pluginEntry, { OpenClawMindAtlasPluginRuntime, PLUGIN_ID, registerMindAtl
 import { describePluginConfigIssue, extractPluginEntryConfig, resolvePluginConfig, validatePluginConfig } from '../src/config'
 import { BUNDLED_SKILL_IDS, MANAGED_SKILL_MARKER_FILE, resolveManagedSkillsRoot, syncBundledSkills } from '../src/skills'
 
-const ORIGINAL_OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH
-const ORIGINAL_OPENCLAW_STATE_DIR = process.env.OPENCLAW_STATE_DIR
 const TEST_OPENCLAW_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-mindatlas-tests-'))
 
-process.env.OPENCLAW_CONFIG_PATH = path.join(TEST_OPENCLAW_ROOT, 'openclaw.json')
-delete process.env.OPENCLAW_STATE_DIR
-
 test.after(() => {
-  if (ORIGINAL_OPENCLAW_CONFIG_PATH === undefined) {
-    delete process.env.OPENCLAW_CONFIG_PATH
-  } else {
-    process.env.OPENCLAW_CONFIG_PATH = ORIGINAL_OPENCLAW_CONFIG_PATH
-  }
-
-  if (ORIGINAL_OPENCLAW_STATE_DIR === undefined) {
-    delete process.env.OPENCLAW_STATE_DIR
-  } else {
-    process.env.OPENCLAW_STATE_DIR = ORIGINAL_OPENCLAW_STATE_DIR
-  }
-
   fs.rmSync(TEST_OPENCLAW_ROOT, { recursive: true, force: true })
 })
 
@@ -151,6 +134,16 @@ function createServiceContext() {
       error() {},
     },
   }
+}
+
+function createBundledSkillSyncStub() {
+  return () => ({
+    sourceRootDir: path.join(TEST_OPENCLAW_ROOT, 'bundled-skills'),
+    managedRootDir: path.join(TEST_OPENCLAW_ROOT, 'managed-skills'),
+    syncedSkillIds: [],
+    skippedSkillIds: [],
+    warnings: [],
+  })
 }
 
 test('plugin entry metadata matches the plugin manifest id', () => {
@@ -281,7 +274,9 @@ test('registerMindAtlasPlugin skips registration when install-time config is sti
     },
   })
 
-  await registerMindAtlasPlugin(api as never)
+  await registerMindAtlasPlugin(api as never, {
+    syncBundledSkills: createBundledSkillSyncStub(),
+  })
 
   assert.equal(tools.length, 0)
   assert.equal(services.length, 0)
@@ -345,7 +340,9 @@ test('plugin registers only available tools during the official register(api) ph
     })
 
   try {
-    await pluginEntry.register?.(api as never)
+    await registerMindAtlasPlugin(api as never, {
+      syncBundledSkills: createBundledSkillSyncStub(),
+    })
   } finally {
     globalThis.fetch = originalFetch
   }
@@ -364,7 +361,9 @@ test('startup catalog failure does not register tools and tells operators to rel
   }
 
   try {
-    await registerMindAtlasPlugin(api as never)
+    await registerMindAtlasPlugin(api as never, {
+      syncBundledSkills: createBundledSkillSyncStub(),
+    })
   } finally {
     globalThis.fetch = originalFetch
   }
@@ -376,7 +375,9 @@ test('startup catalog failure does not register tools and tells operators to rel
 
 test('tool execution forwards params and returns textified result', async () => {
   const { api, services, tools } = createMockApi()
-  const runtime = new OpenClawMindAtlasPluginRuntime(api as never)
+  const runtime = new OpenClawMindAtlasPluginRuntime(api as never, {
+    syncBundledSkills: createBundledSkillSyncStub(),
+  })
 
   let calls = 0
   const originalFetch = globalThis.fetch
@@ -455,7 +456,9 @@ test('tool execution forwards params and returns textified result', async () => 
 
 test('ttl refresh marks newly available tools as reload-required instead of late-registering them', async () => {
   const { api, tools, logs } = createMockApi()
-  const runtime = new OpenClawMindAtlasPluginRuntime(api as never)
+  const runtime = new OpenClawMindAtlasPluginRuntime(api as never, {
+    syncBundledSkills: createBundledSkillSyncStub(),
+  })
 
   let phase: 'initial' | 'refresh' = 'initial'
   const originalFetch = globalThis.fetch
@@ -562,7 +565,9 @@ test('ttl refresh marks newly available tools as reload-required instead of late
 
 test('metadata drift marks existing tools as stale and asks for reload', async () => {
   const { api, tools } = createMockApi()
-  const runtime = new OpenClawMindAtlasPluginRuntime(api as never)
+  const runtime = new OpenClawMindAtlasPluginRuntime(api as never, {
+    syncBundledSkills: createBundledSkillSyncStub(),
+  })
 
   let phase: 'initial' | 'drift' = 'initial'
   const originalFetch = globalThis.fetch
