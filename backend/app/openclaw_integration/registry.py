@@ -58,6 +58,8 @@ class _WorkflowSystemItemTemplate:
     workflow_canonical_name: str
     workflow_preset_file_zh: str
     workflow_preset_file_en: str
+    input_summary: _LocalizedText | None = None
+    output_summary: _LocalizedText | None = None
 
 
 @dataclass(frozen=True)
@@ -202,8 +204,16 @@ _WORKFLOW_SYSTEM_ITEM_TEMPLATES: tuple[_WorkflowSystemItemTemplate, ...] = (
         enabled_by_default=True,
         title=_LocalizedText(zh="智能记住并入库", en="Smart Save To MindAtlas"),
         description=_LocalizedText(
-            zh="把要记住、保存、记录或存起来的高价值上下文提交给 MindAtlas，由系统工作流自动物化最终记录字段并完成智能入库。",
-            en="Submit high-value context that the user wants to remember, save, record, or store so a MindAtlas workflow can materialize the final entry and save it intelligently.",
+            zh="向 MindAtlas 提交一段高价值上下文，由系统工作流自动提取最终字段、判定是否应合并到已有记录，并结合 OpenClaw 请求元数据完成智能入库。",
+            en="Submit one high-value context block to MindAtlas so the system workflow can extract final fields, decide whether to merge into an existing entry, and save it intelligently with OpenClaw request metadata.",
+        ),
+        input_summary=_LocalizedText(
+            zh="只需提供 context（一段高价值上下文），其中尽量包含发生了什么、结果是什么、为什么值得记，以及明确的时间线索；source/channel/session/tool 等上下文由 OpenClaw 请求元数据自动提供。",
+            en="Provide only `context`: one high-value context block that ideally includes what happened, the result, why it matters later, and any clear time clues. Source/channel/session/tool context is provided automatically from OpenClaw request metadata.",
+        ),
+        output_summary=_LocalizedText(
+            zh="返回统一的 created/merged 结果，包含记录 ID、标题、类型、摘要、标签、时间字段，以及创建/更新时间。",
+            en="Returns a unified created-or-merged result with the entry id, title, type, summary, tags, time fields, and created/updated timestamps.",
         ),
         workflow_canonical_name=OPENCLAW_CONTEXT_CAPTURE_WORKFLOW_NAME,
         workflow_preset_file_zh="workflows/openclaw_context_capture.json",
@@ -233,6 +243,8 @@ def _system_item_registry(locale: str) -> dict[OpenClawSystemDefaultKey, OpenCla
             implementation_type="workflow",
             title=workflow_template.title.resolve(locale),
             description=workflow_template.description.resolve(locale),
+            input_summary=workflow_template.input_summary.resolve(locale) if workflow_template.input_summary else None,
+            output_summary=workflow_template.output_summary.resolve(locale) if workflow_template.output_summary else None,
             workflow_canonical_name=workflow_template.workflow_canonical_name,
             workflow_preset_file=(
                 workflow_template.workflow_preset_file_zh

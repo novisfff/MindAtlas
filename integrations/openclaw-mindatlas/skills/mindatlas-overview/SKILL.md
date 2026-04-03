@@ -53,7 +53,8 @@ Typical requests include:
 Primary routes:
 1. Remember / save / record / store / archive
 - Prefer `mindatlas_submit_context_capture` or another visible capture workflow / agent
-- Hand off thin, high-value context instead of over-assembling every final entry field
+- Hand off one thin, high-value `context` block instead of over-assembling every final entry field
+- Let OpenClaw request metadata provide source, channel, session, and tool context whenever the visible capability only asks for `context`
 
 2. Find previous records or ask "did I record this"
 - Prefer `mindatlas_search_entries`

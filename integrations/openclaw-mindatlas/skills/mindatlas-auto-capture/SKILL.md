@@ -45,10 +45,11 @@ Capture timing:
 
 Capture workflow:
 1. Prefer `mindatlas_submit_context_capture` or another visible capture workflow when the user explicitly wants durable memory
-2. Submit thin context rather than assembling every final entry field yourself
-3. Include only the high-value clues MindAtlas needs, such as what happened, why it matters, source or session context, likely tag hints, and time hints
-4. Let MindAtlas materialize the final entry type, summary, content, tags, relations, merge, and dedupe behavior whenever the chosen capability supports that
-5. If duplicate risk is high and `mindatlas_search_entries` is visible, do a lightweight recent search first
+2. When `mindatlas_submit_context_capture` is visible, submit one high-value `context` block instead of assembling every final entry field yourself
+3. In that `context`, include what happened, the result, why it matters later, and any clear time clues
+4. Do not manually pass source, channel, session, or tool fields when the capability only asks for `context`; OpenClaw provides that request metadata automatically
+5. Let MindAtlas materialize the final entry type, summary, content, tags, relations, merge, and dedupe behavior whenever the chosen capability supports that
+6. If duplicate risk is high and `mindatlas_search_entries` is visible, do a lightweight recent search first
 
 Field-level creation guidance:
 - Do not assume you should assemble the full entry schema yourself

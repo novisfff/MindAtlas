@@ -36,7 +36,7 @@ export interface RuntimeToolState {
 function buildRoutingHint(capability: MindAtlasRuntimeCapability): string {
   switch (capability.capabilityKey) {
     case 'submit_context_capture':
-      return 'MindAtlas route hint: prefer this for remember/save/record/store/archive requests and other durable-memory capture tasks.'
+      return 'MindAtlas route hint: prefer this for remember/save/record/store/archive requests and other durable-memory capture tasks. Submit one high-value context block and let OpenClaw request metadata carry source, channel, session, and tool context automatically.'
     case 'search_entries':
       return 'MindAtlas route hint: prefer this for search/look up/find previous records, "did I record this before", and recent or time-bounded searches.'
     case 'get_entry':

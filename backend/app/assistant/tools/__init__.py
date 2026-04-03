@@ -6,6 +6,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "search_entries": ("app.assistant.tools.entry_tools", "search_entries"),
     "get_entry_detail": ("app.assistant.tools.entry_tools", "get_entry_detail"),
     "create_entry": ("app.assistant.tools.entry_tools", "create_entry"),
+    "update_entry": ("app.assistant.tools.entry_tools", "update_entry"),
     "openclaw_capture_entry": ("app.assistant.tools.openclaw_tools", "openclaw_capture_entry"),
     "openclaw_search_entries": ("app.assistant.tools.openclaw_tools", "openclaw_search_entries"),
     "openclaw_get_entry": ("app.assistant.tools.openclaw_tools", "openclaw_get_entry"),

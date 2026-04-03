@@ -79,7 +79,7 @@ class ToolRegistry(_BaseRegistry):
     """工具注册表 - 解析系统本地工具和数据库自定义工具"""
 
     # 内部系统工具：不对外展示，但仍可在运行时被内部逻辑调用
-    INTERNAL_TOOL_NAMES: frozenset[str] = frozenset({"kb_search"})
+    INTERNAL_TOOL_NAMES: frozenset[str] = frozenset({"kb_search", "update_entry"})
     SYSTEM_TOOL_OUTPUT_PARAMS: dict[str, list[dict[str, str]]] = {
         "search_entries": [
             {
@@ -187,6 +187,21 @@ class ToolRegistry(_BaseRegistry):
             {"name": "time_from", "param_type": "string", "description": "RANGE 起始日期（YYYY-MM-DD 或 null）。"},
             {"name": "time_to", "param_type": "string", "description": "RANGE 结束日期（YYYY-MM-DD 或 null）。"},
             {"name": "created_at", "param_type": "string", "description": "创建时间（ISO8601）。"},
+            {"name": "updated_at", "param_type": "string", "description": "更新时间（ISO8601）。"},
+        ],
+        "update_entry": [
+            {"name": "id", "param_type": "string", "description": "更新记录 UUID。"},
+            {"name": "title", "param_type": "string", "description": "最终写入的标题。"},
+            {"name": "summary", "param_type": "string", "description": "最终写入的摘要。"},
+            {"name": "type", "param_type": "string", "description": "记录类型名称。"},
+            {"name": "type_code", "param_type": "string", "description": "记录类型编码。"},
+            {"name": "tags", "param_type": "array", "description": "标签名称数组。"},
+            {"name": "time_mode", "param_type": "string", "description": "时间模式（POINT/RANGE）。"},
+            {"name": "time_at", "param_type": "string", "description": "POINT 模式日期（YYYY-MM-DD 或 null）。"},
+            {"name": "time_from", "param_type": "string", "description": "RANGE 起始日期（YYYY-MM-DD 或 null）。"},
+            {"name": "time_to", "param_type": "string", "description": "RANGE 结束日期（YYYY-MM-DD 或 null）。"},
+            {"name": "created_at", "param_type": "string", "description": "创建时间（ISO8601）。"},
+            {"name": "updated_at", "param_type": "string", "description": "更新时间（ISO8601）。"},
         ],
         "get_statistics": [
             {"name": "total_entries", "param_type": "number", "description": "记录总数。"},

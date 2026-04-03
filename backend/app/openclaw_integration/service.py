@@ -75,7 +75,7 @@ logger = logging.getLogger(__name__)
 OPENCLAW_INTEGRATION_CONFIG_KEY = "openclaw_integration_config"
 OPENCLAW_CAPABILITY_KEY_RE = re.compile(r"^[a-z0-9_]+$")
 OPENCLAW_SCHEMA_FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-OPENCLAW_SYSTEM_ITEM_VERSION = 5
+OPENCLAW_SYSTEM_ITEM_VERSION = 6
 OPENCLAW_RETIRED_SOURCE_TOOL_NAMES = frozenset({"openclaw_capture_entry"})
 
 OPENCLAW_AUTH_ERROR_CODE = 40161
@@ -970,8 +970,8 @@ class OpenClawIntegrationService:
                 workflow_id = workflow.id
                 input_schema = snapshot.input_schema
                 output_schema = snapshot.output_schema
-                input_summary = snapshot.input_summary
-                output_summary = snapshot.output_summary
+                input_summary = definition.input_summary or snapshot.input_summary
+                output_summary = definition.output_summary or snapshot.output_summary
             else:
                 input_schema = _normalize_json_object_schema(input_schema, label="input")
                 output_schema = _normalize_json_object_schema(output_schema, label="output")
@@ -2060,8 +2060,8 @@ class OpenClawIntegrationService:
                 workflow_id = workflow.id
                 input_schema = snapshot.input_schema
                 output_schema = snapshot.output_schema
-                input_summary = snapshot.input_summary
-                output_summary = snapshot.output_summary
+                input_summary = definition.input_summary or snapshot.input_summary
+                output_summary = definition.output_summary or snapshot.output_summary
             else:
                 input_schema = _normalize_json_object_schema(input_schema, label="input")
                 output_schema = _normalize_json_object_schema(output_schema, label="output")
@@ -2287,6 +2287,7 @@ class OpenClawIntegrationService:
         raw_payload: dict[str, Any],
         *,
         locale: str,
+        audit_context: OpenClawRuntimeAuditContext,
     ) -> dict[str, Any]:
         workflow = self.config_service.get_workflow(item.workflow_id)  # type: ignore[arg-type]
         snapshot = self._workflow_contract_snapshot(workflow)
@@ -2315,6 +2316,10 @@ class OpenClawIntegrationService:
                     "channel_type": "openclaw_capability",
                     "workflow_id": str(workflow.id),
                     "locale": locale,
+                    "openclaw_source": audit_context.source,
+                    "openclaw_channel": audit_context.channel,
+                    "openclaw_session": audit_context.session,
+                    "openclaw_tool": audit_context.tool,
                 },
             )
         )
@@ -2387,7 +2392,12 @@ class OpenClawIntegrationService:
             if item.source_type == "tool":
                 result = self._execute_tool_capability(item, raw_payload or {})
             elif item.source_type == "workflow":
-                result = self._execute_workflow_capability(item, raw_payload or {}, locale=locale)
+                result = self._execute_workflow_capability(
+                    item,
+                    raw_payload or {},
+                    locale=locale,
+                    audit_context=audit_context,
+                )
             else:
                 result = self._execute_agent_capability(item, raw_payload or {}, locale=locale)
 

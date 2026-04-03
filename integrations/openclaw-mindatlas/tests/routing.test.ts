@@ -41,6 +41,16 @@ function readSkill(skillId: string): string {
 }
 
 test('buildToolDescription includes routing hints for search and weekly report capabilities', () => {
+  const captureDescription = buildToolDescription(
+    createCapability({
+      capabilityKey: 'submit_context_capture',
+      toolName: 'mindatlas_submit_context_capture',
+      title: 'Smart Save To MindAtlas',
+      description: 'Submit one high-value context block to MindAtlas.',
+      inputSummary: 'context (string)',
+      outputSummary: 'created/merged result',
+    }),
+  )
   const searchDescription = buildToolDescription(
     createCapability({
       capabilityKey: 'search_entries',
@@ -57,6 +67,9 @@ test('buildToolDescription includes routing hints for search and weekly report c
     }),
   )
 
+  assert.match(captureDescription, /high-value context block/i)
+  assert.match(captureDescription, /source, channel, session, and tool context automatically/i)
+  assert.match(captureDescription, /Input: context \(string\)/i)
   assert.match(searchDescription, /did I record this before/i)
   assert.match(searchDescription, /time-bounded searches/i)
   assert.match(weeklyDescription, /what did I do this week/i)
@@ -82,4 +95,6 @@ test('summary, retrieval, and auto-capture skills define narrower boundaries', (
   assert.match(retrieval, /If the request is primarily a recap, review, digest/)
   assert.match(autoCapture, /This skill is only for capture, create, store, and durable-memory submission/)
   assert.match(autoCapture, /Prefer `mindatlas_submit_context_capture` when it is visible/)
+  assert.match(autoCapture, /submit one high-value `context` block/i)
+  assert.match(autoCapture, /OpenClaw provides that request metadata automatically/i)
 })

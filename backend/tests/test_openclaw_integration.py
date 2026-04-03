@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -138,6 +139,11 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(by_key["submit_context_capture"]["sourceType"], "workflow")
         self.assertIsNotNone(by_key["submit_context_capture"]["workflowId"])
         self.assertTrue(by_key["submit_context_capture"]["enabled"])
+        capture_schema = by_key["submit_context_capture"]["inputSchema"]
+        self.assertEqual(set(capture_schema["properties"]), {"context"})
+        self.assertEqual(capture_schema["required"], ["context"])
+        self.assertFalse(capture_schema["additionalProperties"])
+        self.assertIn("context", by_key["submit_context_capture"]["inputSummary"])
         workflow_id, workflow_name = self._get_openclaw_capture_workflow()
         self.assertEqual(workflow_name, "system_openclaw_context_capture__workflow")
         self.assertEqual(by_key["submit_context_capture"]["workflowId"], workflow_id)
@@ -489,13 +495,52 @@ class OpenClawIntegrationTests(unittest.TestCase):
         definitions = {item.key: item for item in list_openclaw_system_item_definitions(locale="en")}
 
         self.assertEqual(definitions["submit_context_capture"].tool_name, "mindatlas_submit_context_capture")
-        self.assertIn("remember, save, record, or store", definitions["submit_context_capture"].description)
+        self.assertIn("high-value context block", definitions["submit_context_capture"].description)
+        self.assertIn("Provide only `context`", definitions["submit_context_capture"].input_summary or "")
         self.assertIn("recent and time-bounded lookups", definitions["search_entries"].description)
         self.assertIn("entry ID is known", definitions["get_entry"].description)
         self.assertIn("connect these items", definitions["create_relation"].description)
         self.assertIn("patterns", definitions["query_knowledge_graph"].description)
         self.assertIn("what did I do this week", definitions["generate_weekly_report"].description)
         self.assertIn("what did I do this month", definitions["generate_monthly_report"].description)
+
+    def test_submit_context_capture_runtime_schema_is_thin_context_only(self) -> None:
+        self._initialize_system(locale="en")
+        secret = self._rotate_secret()
+        self._enable_integration(secret)
+
+        response = self.client.get(
+            "/api/integrations/openclaw/capabilities",
+            headers=self._auth_headers(secret),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        capture_item = next(
+            item for item in response.json()["data"]["capabilities"] if item["capabilityKey"] == "submit_context_capture"
+        )
+
+        self.assertEqual(set(capture_item["inputSchema"]["properties"]), {"context"})
+        self.assertEqual(capture_item["inputSchema"]["required"], ["context"])
+        self.assertFalse(capture_item["inputSchema"]["additionalProperties"])
+        self.assertIn("Provide only `context`", capture_item["inputSummary"])
+
+    def test_submit_context_capture_rejects_legacy_field_level_payload(self) -> None:
+        self._initialize_system()
+        secret = self._rotate_secret()
+        self._enable_integration(secret)
+
+        response = self.client.post(
+            "/api/integrations/openclaw/capabilities/submit_context_capture/execute",
+            headers=self._auth_headers(secret),
+            json={
+                "context": "完成 OpenClaw 能力梳理并准备收敛到 workflow。",
+                "intent": "record",
+                "source": "openclaw",
+            },
+        )
+
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(response.json()["code"], 42261)
+        self.assertIn("unknown field: intent", response.json()["message"])
 
     def test_generate_weekly_report_accepts_structured_content_object(self) -> None:
         secret = self._rotate_secret()
@@ -635,31 +680,44 @@ class OpenClawIntegrationTests(unittest.TestCase):
             item for item in metadata.json()["data"]["capabilities"] if item["capabilityKey"] == "submit_context_capture"
         )
         self.assertEqual(capture_item["sourceType"], "workflow")
+        captured_runtime_context: dict[str, object] = {}
+
+        class Engine:
+            def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                runtime_context = kwargs["runtime_context"]
+                captured_runtime_context.update(runtime_context)
+                return iter(
+                    [
+                        json.dumps(
+                            {
+                                "status": "created",
+                                "entryId": "00000000-0000-0000-0000-000000000001",
+                                "entryTitle": "项目复盘",
+                                "entryTypeCode": "KNOWLEDGE",
+                                "entryTypeName": "知识",
+                                "summary": "记录已成功沉淀。",
+                                "tagNames": ["openclaw", "mindatlas"],
+                                "timeMode": "POINT",
+                                "timeAt": "2026-03-31",
+                                "timeFrom": None,
+                                "timeTo": None,
+                                "createdAt": "2026-03-31T09:00:00+00:00",
+                                "updatedAt": "2026-03-31T09:05:00+00:00",
+                            },
+                            ensure_ascii=False,
+                        )
+                    ]
+                )
 
         with patch(
             "app.openclaw_integration.service.OpenClawIntegrationService._build_engine",
-            return_value=type(
-                "Engine",
-                (),
-                {
-                    "execute": lambda _self, *args, **kwargs: iter([
-                        '{"status":"created","entryId":"00000000-0000-0000-0000-000000000001","entryTitle":"项目复盘","entryTypeCode":"KNOWLEDGE","entryTypeName":"知识","summary":"记录已成功沉淀。","tagNames":["openclaw","mindatlas"],"timeMode":"POINT","timeAt":"2026-03-31","timeFrom":null,"timeTo":null,"createdAt":"2026-03-31T09:00:00+00:00"}'
-                    ])
-                },
-            )(),
+            return_value=Engine(),
         ):
             response = self.client.post(
                 "/api/integrations/openclaw/capabilities/submit_context_capture/execute",
                 headers=self._auth_headers(secret),
                 json={
-                    "intent": "record",
                     "context": "今天完成了 OpenClaw 接入方案梳理，并确认后续要收口成 workflow preset。",
-                    "source": "openclaw",
-                    "session": "session-1",
-                    "channel": "cli",
-                    "taskHint": "phase-1 capture",
-                    "timeHint": "today",
-                    "tagHints": ["openclaw", "mindatlas"],
                 },
             )
 
@@ -674,6 +732,61 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertIsNone(result["timeFrom"])
         self.assertIsNone(result["timeTo"])
         self.assertEqual(result["createdAt"], "2026-03-31T09:00:00+00:00")
+        self.assertEqual(result["updatedAt"], "2026-03-31T09:05:00+00:00")
+        self.assertEqual(captured_runtime_context["structured_input"], {"context": "今天完成了 OpenClaw 接入方案梳理，并确认后续要收口成 workflow preset。"})
+        self.assertEqual(captured_runtime_context["openclaw_source"], "unit-test")
+        self.assertEqual(captured_runtime_context["openclaw_channel"], "cli")
+        self.assertEqual(captured_runtime_context["openclaw_session"], "session-1")
+        self.assertEqual(captured_runtime_context["openclaw_tool"], "tool-1")
+
+    def test_system_capture_workflow_accepts_merged_result_shape(self) -> None:
+        self._initialize_system()
+        secret = self._rotate_secret()
+        self._enable_integration(secret)
+
+        class Engine:
+            def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                return iter(
+                    [
+                        json.dumps(
+                            {
+                                "status": "merged",
+                                "entryId": "00000000-0000-0000-0000-000000000002",
+                                "entryTitle": "OpenClaw 接入记录",
+                                "entryTypeCode": "KNOWLEDGE",
+                                "entryTypeName": "知识",
+                                "summary": "已有记录已吸收新的 OpenClaw 上下文。",
+                                "tagNames": ["openclaw", "mindatlas"],
+                                "timeMode": "POINT",
+                                "timeAt": "2026-04-03",
+                                "timeFrom": None,
+                                "timeTo": None,
+                                "createdAt": "2026-04-02T09:00:00+00:00",
+                                "updatedAt": "2026-04-03T09:00:00+00:00",
+                            },
+                            ensure_ascii=False,
+                        )
+                    ]
+                )
+
+        with patch(
+            "app.openclaw_integration.service.OpenClawIntegrationService._build_engine",
+            return_value=Engine(),
+        ):
+            response = self.client.post(
+                "/api/integrations/openclaw/capabilities/submit_context_capture/execute",
+                headers=self._auth_headers(secret),
+                json={
+                    "context": "今天补齐了 OpenClaw stream-only 兼容，并确认相关能力已验证完成。",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()["data"]["result"]
+        self.assertEqual(result["status"], "merged")
+        self.assertEqual(result["entryId"], "00000000-0000-0000-0000-000000000002")
+        self.assertEqual(result["entryTitle"], "OpenClaw 接入记录")
+        self.assertEqual(result["updatedAt"], "2026-04-03T09:00:00+00:00")
 
     def test_agent_catalog_item_executes_published_agent(self) -> None:
         self._initialize_system()

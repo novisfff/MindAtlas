@@ -296,26 +296,26 @@ test('plugin registers only available tools during the official register(api) ph
         integrationName: 'MindAtlas',
         capabilities: [
           {
-            capabilityKey: 'capture_entry',
-            toolName: 'mindatlas_capture_entry',
-            title: 'Capture Entry',
-            description: 'Save a new entry',
+            capabilityKey: 'submit_context_capture',
+            toolName: 'mindatlas_submit_context_capture',
+            title: 'Smart Save To MindAtlas',
+            description: 'Submit one high-value context block for intelligent persistence.',
             sourceType: 'tool',
             implementationType: 'entry',
             available: true,
             availabilityReason: null,
-            inputSummary: 'title (string)',
-            outputSummary: 'id (string)',
+            inputSummary: 'context (string)',
+            outputSummary: 'created/merged result',
             inputSchema: {
               type: 'object',
-              properties: { title: { type: 'string' } },
-              required: ['title'],
+              properties: { context: { type: 'string' } },
+              required: ['context'],
               additionalProperties: false,
             },
             outputSchema: {
               type: 'object',
-              properties: { id: { type: 'string' } },
-              required: ['id'],
+              properties: { status: { type: 'string' }, entryId: { type: 'string' } },
+              required: ['status', 'entryId'],
               additionalProperties: false,
             },
             toolResponseMode: 'json_schema',
@@ -348,7 +348,7 @@ test('plugin registers only available tools during the official register(api) ph
   }
 
   assert.equal(tools.length, 1)
-  assert.equal(tools[0].name, 'mindatlas_capture_entry')
+  assert.equal(tools[0].name, 'mindatlas_submit_context_capture')
   assert.equal(services.length, 1)
 })
 
@@ -392,26 +392,26 @@ test('tool execution forwards params and returns textified result', async () => 
           integrationName: 'MindAtlas',
           capabilities: [
             {
-              capabilityKey: 'capture_entry',
-              toolName: 'mindatlas_capture_entry',
-              title: 'Capture Entry',
-              description: 'Save a new entry',
+              capabilityKey: 'submit_context_capture',
+              toolName: 'mindatlas_submit_context_capture',
+              title: 'Smart Save To MindAtlas',
+              description: 'Submit one high-value context block for intelligent persistence.',
               sourceType: 'tool',
               implementationType: 'entry',
               available: true,
               availabilityReason: null,
-              inputSummary: 'title (string)',
-              outputSummary: 'id (string)',
+              inputSummary: 'context (string)',
+              outputSummary: 'created/merged result',
               inputSchema: {
                 type: 'object',
-                properties: { title: { type: 'string' } },
-                required: ['title'],
+                properties: { context: { type: 'string' } },
+                required: ['context'],
                 additionalProperties: false,
               },
               outputSchema: {
                 type: 'object',
-                properties: { id: { type: 'string' } },
-                required: ['id'],
+                properties: { status: { type: 'string' }, entryId: { type: 'string' } },
+                required: ['status', 'entryId'],
                 additionalProperties: false,
               },
               toolResponseMode: 'json_schema',
@@ -421,23 +421,24 @@ test('tool execution forwards params and returns textified result', async () => 
       })
     }
 
-    assert.equal(String(input), 'http://127.0.0.1:8000/api/integrations/openclaw/capabilities/capture_entry/execute')
+    assert.equal(String(input), 'http://127.0.0.1:8000/api/integrations/openclaw/capabilities/submit_context_capture/execute')
     assert.equal((init?.headers as Record<string, string>).Authorization, 'Bearer secret-value')
-    assert.equal((init?.headers as Record<string, string>)['X-OpenClaw-Tool'], 'mindatlas_capture_entry')
+    assert.equal((init?.headers as Record<string, string>)['X-OpenClaw-Tool'], 'mindatlas_submit_context_capture')
     assert.equal((init?.headers as Record<string, string>)['X-OpenClaw-Channel'], 'discord')
     assert.equal((init?.headers as Record<string, string>)['X-OpenClaw-Session'], 'session-42')
-    assert.deepEqual(JSON.parse(String(init?.body)), { title: 'hello' })
+    assert.deepEqual(JSON.parse(String(init?.body)), { context: 'hello' })
 
     return createResponse({
       success: true,
       code: 0,
       message: 'OK',
       data: {
-        capabilityKey: 'capture_entry',
-        toolName: 'mindatlas_capture_entry',
+        capabilityKey: 'submit_context_capture',
+        toolName: 'mindatlas_submit_context_capture',
         result: {
-          id: 'entry-1',
-          title: 'hello',
+          status: 'created',
+          entryId: 'entry-1',
+          entryTitle: 'hello',
         },
       },
     })
@@ -446,9 +447,9 @@ test('tool execution forwards params and returns textified result', async () => 
   try {
     await runtime.register()
     await services[0].start?.(createServiceContext())
-    const result = await tools[0].execute('tool-call-1', { title: 'hello' }, { channel: 'discord', session: 'session-42' })
+    const result = await tools[0].execute('tool-call-1', { context: 'hello' }, { channel: 'discord', session: 'session-42' })
     assert.equal(result.content[0]?.type, 'text')
-    assert.match(result.content[0]?.text ?? '', /"id": "entry-1"/)
+    assert.match(result.content[0]?.text ?? '', /"entryId": "entry-1"/)
   } finally {
     globalThis.fetch = originalFetch
   }
@@ -472,16 +473,16 @@ test('ttl refresh marks newly available tools as reload-required instead of late
           integrationName: 'MindAtlas',
           capabilities: [
             {
-              capabilityKey: 'capture_entry',
-              toolName: 'mindatlas_capture_entry',
-              title: 'Capture Entry',
-              description: 'Save a new entry',
+              capabilityKey: 'submit_context_capture',
+              toolName: 'mindatlas_submit_context_capture',
+              title: 'Smart Save To MindAtlas',
+              description: 'Submit one high-value context block for intelligent persistence.',
               sourceType: 'tool',
               implementationType: 'entry',
               available: true,
               availabilityReason: null,
-              inputSummary: 'title (string)',
-              outputSummary: 'id (string)',
+              inputSummary: 'context (string)',
+              outputSummary: 'created/merged result',
               inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
               outputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
               toolResponseMode: 'json_schema',
@@ -514,16 +515,16 @@ test('ttl refresh marks newly available tools as reload-required instead of late
         integrationName: 'MindAtlas',
         capabilities: [
           {
-            capabilityKey: 'capture_entry',
-            toolName: 'mindatlas_capture_entry',
-            title: 'Capture Entry',
-            description: 'Save a new entry',
+            capabilityKey: 'submit_context_capture',
+            toolName: 'mindatlas_submit_context_capture',
+            title: 'Smart Save To MindAtlas',
+            description: 'Submit one high-value context block for intelligent persistence.',
             sourceType: 'tool',
             implementationType: 'entry',
             available: true,
             availabilityReason: null,
-            inputSummary: 'title (string)',
-            outputSummary: 'id (string)',
+            inputSummary: 'context (string)',
+            outputSummary: 'created/merged result',
             inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
             outputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
             toolResponseMode: 'json_schema',
@@ -581,20 +582,20 @@ test('metadata drift marks existing tools as stale and asks for reload', async (
           integrationName: 'MindAtlas',
           capabilities: [
             {
-              capabilityKey: 'capture_entry',
-              toolName: 'mindatlas_capture_entry',
-              title: 'Capture Entry',
-              description: 'Save a new entry',
+              capabilityKey: 'submit_context_capture',
+              toolName: 'mindatlas_submit_context_capture',
+              title: 'Smart Save To MindAtlas',
+              description: 'Submit one high-value context block for intelligent persistence.',
               sourceType: 'tool',
               implementationType: 'entry',
               available: true,
               availabilityReason: null,
-              inputSummary: 'title (string)',
-              outputSummary: 'id (string)',
+              inputSummary: 'context (string)',
+              outputSummary: 'created/merged result',
               inputSchema: {
                 type: 'object',
-                properties: { title: { type: 'string' } },
-                required: ['title'],
+                properties: { context: { type: 'string' } },
+                required: ['context'],
                 additionalProperties: false,
               },
               outputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
@@ -613,23 +614,22 @@ test('metadata drift marks existing tools as stale and asks for reload', async (
         integrationName: 'MindAtlas',
         capabilities: [
           {
-            capabilityKey: 'capture_entry',
-            toolName: 'mindatlas_capture_entry',
-            title: 'Capture Entry Updated',
-            description: 'Save a new entry with tags',
+            capabilityKey: 'submit_context_capture',
+            toolName: 'mindatlas_submit_context_capture',
+            title: 'Smart Save To MindAtlas Updated',
+            description: 'Submit one high-value context block and let MindAtlas merge it automatically.',
             sourceType: 'tool',
             implementationType: 'entry',
             available: true,
             availabilityReason: null,
-            inputSummary: 'title (string), tags (array[string])',
-            outputSummary: 'id (string)',
+            inputSummary: 'context (string) plus OpenClaw metadata headers',
+            outputSummary: 'created/merged result',
             inputSchema: {
               type: 'object',
               properties: {
-                title: { type: 'string' },
-                tags: { type: 'array', items: { type: 'string' } },
+                context: { type: 'string' },
               },
-              required: ['title'],
+              required: ['context'],
               additionalProperties: false,
             },
             outputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
@@ -648,13 +648,13 @@ test('metadata drift marks existing tools as stale and asks for reload', async (
     await runtime.refreshCatalog()
 
     await assert.rejects(
-      () => tools[0].execute('tool-call-3', { title: 'hello' }),
+      () => tools[0].execute('tool-call-3', { context: 'hello' }),
       /Start a new session or reload the OpenClaw plugin or Gateway/,
     )
 
     const state = runtime.getState()
     assert.equal(state.reloadRequired, true)
-    assert.equal(state.staleToolNames.has('mindatlas_capture_entry'), true)
+    assert.equal(state.staleToolNames.has('mindatlas_submit_context_capture'), true)
   } finally {
     globalThis.fetch = originalFetch
   }
