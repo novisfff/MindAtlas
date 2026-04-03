@@ -129,6 +129,23 @@ class ChatEventAdapterTests(unittest.TestCase):
         self.assertIn("durationMs", self.adapter.tool_results_data[0])
         self.assertIsInstance(self.adapter.tool_results_data[0]["durationMs"], int)
 
+    def test_tool_call_start_accepts_tool_name_keyword(self) -> None:
+        self.adapter.on_tool_call_start(
+            tool_call_id="tool_3",
+            tool_name="list_tags",
+            args={"query": "roadmap"},
+            node_id="agent_2",
+            unexpected_field="ignored",
+        )
+
+        self.assertEqual(self.adapter.tool_calls_data[0]["name"], "list_tags")
+        self.assertEqual(self.adapter.tool_calls_data[0]["nodeId"], "agent_2")
+
+        event, payload = self._last_event()
+        self.assertEqual(event, "tool_call_start")
+        self.assertEqual(payload["name"], "list_tags")
+        self.assertEqual(payload["toolCallId"], "tool_3")
+
 
 if __name__ == "__main__":
     unittest.main()

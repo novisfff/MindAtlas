@@ -114,8 +114,11 @@ class LightRagOpenAiStreamCompatTests(unittest.TestCase):
     def test_complete_wrapper_uses_keyword_extraction_stream_fallback(self) -> None:
         from app.lightrag.manager import _openai_complete_with_stream_compat
 
+        calls: list[dict] = []
+
         async def _fake_complete(model, prompt, **kwargs):
-            raise _FakeStreamRequiredError()
+            calls.append({"model": model, "prompt": prompt, **kwargs})
+            raise AssertionError("keyword extraction should bypass non-stream complete_func")
 
         with patch(
             "app.lightrag.manager._keyword_extraction_stream_fallback",
@@ -132,6 +135,7 @@ class LightRagOpenAiStreamCompatTests(unittest.TestCase):
             )
 
         self.assertEqual(result, '{"high_level_keywords":[],"low_level_keywords":[]}')
+        self.assertEqual(calls, [])
         mocked_fallback.assert_awaited_once()
 
     def test_keyword_extraction_stream_fallback_retries_without_response_format(self) -> None:

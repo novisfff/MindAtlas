@@ -255,6 +255,23 @@ async def _openai_complete_with_stream_compat(
     api_key: str | None = None,
     **kwargs: Any,
 ) -> Any:
+    if kwargs.get("keyword_extraction"):
+        logger.info(
+            "lightrag openai keyword_extraction_force_stream model=%s base_url=%s",
+            model,
+            _redact_url(base_url or ""),
+        )
+        return await _keyword_extraction_stream_fallback(
+            client_factory=client_factory,
+            model=model,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            history_messages=history_messages,
+            base_url=base_url,
+            api_key=api_key,
+            **kwargs,
+        )
+
     try:
         return await complete_func(
             model,
@@ -276,18 +293,6 @@ async def _openai_complete_with_stream_compat(
             _redact_url(base_url or ""),
             bool(kwargs.get("keyword_extraction")),
         )
-
-        if kwargs.get("keyword_extraction"):
-            return await _keyword_extraction_stream_fallback(
-                client_factory=client_factory,
-                model=model,
-                prompt=prompt,
-                system_prompt=system_prompt,
-                history_messages=history_messages,
-                base_url=base_url,
-                api_key=api_key,
-                **kwargs,
-            )
 
         retry_kwargs = dict(kwargs)
         retry_kwargs["stream"] = True

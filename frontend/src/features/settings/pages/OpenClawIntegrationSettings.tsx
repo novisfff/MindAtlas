@@ -318,7 +318,7 @@ function QuickStartStep({
           {action && <div className="shrink-0 pt-1">{action}</div>}
         </div>
         {children && (
-          <div className="mt-2">
+          <div className="mt-2 flex flex-col gap-4">
             {children}
           </div>
         )}
