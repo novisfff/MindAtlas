@@ -8,6 +8,7 @@ interface NodeHeaderProps {
     nodeType: NodeType
     label: string
     onLabelChange: (label: string) => void
+    readOnly?: boolean
 }
 
 const NODE_ICONS: Record<string, React.ElementType> = {
@@ -44,7 +45,7 @@ const NODE_COLORS: Record<string, string> = {
     output: 'bg-gradient-to-r from-rose-100/90 to-orange-100/90 border-rose-200 text-rose-700',
 }
 
-export function NodeHeader({ nodeType, label, onLabelChange }: NodeHeaderProps) {
+export function NodeHeader({ nodeType, label, onLabelChange, readOnly = false }: NodeHeaderProps) {
     const { t } = useTranslation()
     const [isEditing, setIsEditing] = useState(false)
     const [draftLabel, setDraftLabel] = useState(label)
@@ -58,6 +59,11 @@ export function NodeHeader({ nodeType, label, onLabelChange }: NodeHeaderProps) 
     const colorClass = NODE_COLORS[nodeType] || 'text-gray-600 bg-gray-50 border-gray-100'
 
     const handleBlur = () => {
+        if (readOnly) {
+            setIsEditing(false)
+            setDraftLabel(label)
+            return
+        }
         setIsEditing(false)
         if (draftLabel.trim() !== label) {
             onLabelChange(draftLabel)
@@ -81,7 +87,7 @@ export function NodeHeader({ nodeType, label, onLabelChange }: NodeHeaderProps) 
                     {t(`settings.skills.nodeTypes.${nodeType}`)}
                 </div>
 
-                {isEditing ? (
+                {isEditing && !readOnly ? (
                     <input
                         autoFocus
                         type="text"
@@ -93,9 +99,14 @@ export function NodeHeader({ nodeType, label, onLabelChange }: NodeHeaderProps) 
                     />
                 ) : (
                     <div
-                        className="text-sm font-bold text-foreground truncate cursor-text hover:bg-accent/50 rounded px-1 -ml-1 py-0.5 transition-colors"
-                        onClick={() => setIsEditing(true)}
-                        title="Click to edit label"
+                        className={`text-sm font-bold text-foreground truncate rounded px-1 -ml-1 py-0.5 transition-colors ${
+                            readOnly ? 'cursor-default' : 'cursor-text hover:bg-accent/50'
+                        }`}
+                        onClick={() => {
+                            if (readOnly) return
+                            setIsEditing(true)
+                        }}
+                        title={readOnly ? label : 'Click to edit label'}
                     >
                         {label}
                     </div>

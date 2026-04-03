@@ -42,6 +42,7 @@ interface PropertyPanelProps {
   onAskAiEdit?: (payload: { title?: string; instruction?: string; selection: WorkflowCopilotSelection }) => void
   selectionTarget?: PropertyPanelSelectionTarget | null
   onClose?: () => void
+  readOnly?: boolean
 }
 
 type ConfigEditSessionRef = {
@@ -367,6 +368,7 @@ export function PropertyPanel({
   onAskAiEdit,
   selectionTarget = null,
   onClose,
+  readOnly = false,
 }: PropertyPanelProps) {
   const { t } = useTranslation()
   const selectedNodeId = useWorkflowEditorStore((s) => s.selectedNodeId)
@@ -510,6 +512,7 @@ export function PropertyPanel({
   }
 
   const handleConfigUpdate = (updates: Record<string, unknown>) => {
+    if (readOnly) return
     const textEditing = isTextEditableElement(document.activeElement)
     let shouldPushHistory = false
     if (textEditing) {
@@ -569,6 +572,7 @@ export function PropertyPanel({
   }
 
   const handleLabelChange = (newLabel: string) => {
+    if (readOnly) return
     if (selectionContext.mode === 'main') {
       updateNodeLabel(selectionContext.node.id, newLabel)
       return
@@ -603,6 +607,7 @@ export function PropertyPanel({
   }
 
   const handleDeleteIfElseBranchEdges = (branchId: string) => {
+    if (readOnly) return
     if (nodeType !== 'if_else') return
 
     if (selectionContext.mode === 'main') {
@@ -652,7 +657,10 @@ export function PropertyPanel({
             config={config}
             onUpdate={handleConfigUpdate}
             workflowDescription={workflowDescription}
-            onWorkflowDescriptionChange={onWorkflowDescriptionChange}
+            onWorkflowDescriptionChange={(value) => {
+              if (readOnly) return
+              onWorkflowDescriptionChange(value)
+            }}
             isSubflowNode={selectionContext.mode === 'subflow'}
           />
         )
@@ -732,6 +740,7 @@ export function PropertyPanel({
           nodeType={nodeType as NodeType}
           label={label}
           onLabelChange={handleLabelChange}
+          readOnly={readOnly}
         />
       )}
       onClose={onClose ?? (() => {
@@ -743,7 +752,12 @@ export function PropertyPanel({
       })}
       bodyClassName="min-h-0 flex-1 overflow-y-auto bg-white px-6 py-5 custom-scrollbar"
     >
-      {onAskAiEdit && copilotSelection ? (
+      {readOnly ? (
+        <div className="mb-5 rounded-2xl border border-amber-200 bg-amber-50 px-3.5 py-3 text-xs leading-6 text-amber-800">
+          {t('settings.skills.systemWorkflowReadonlyDescription')}
+        </div>
+      ) : null}
+      {!readOnly && onAskAiEdit && copilotSelection ? (
         <button
           onClick={() => onAskAiEdit({
             title: copilotTitle,
@@ -764,6 +778,37 @@ export function PropertyPanel({
             targetKey: targetSessionKey,
             active: false,
           }
+        }}
+        onMouseDownCapture={(event) => {
+          if (!readOnly) return
+          const target = event.target
+          if (!(target instanceof Element)) return
+          if (!target.closest('input, textarea, select, button, [contenteditable], [role="textbox"], [role="switch"]')) return
+          event.preventDefault()
+          event.stopPropagation()
+        }}
+        onClickCapture={(event) => {
+          if (!readOnly) return
+          const target = event.target
+          if (!(target instanceof Element)) return
+          if (!target.closest('input, textarea, select, button, [contenteditable], [role="textbox"], [role="switch"]')) return
+          event.preventDefault()
+          event.stopPropagation()
+        }}
+        onKeyDownCapture={(event) => {
+          if (!readOnly) return
+          const target = event.target
+          if (!(target instanceof Element)) return
+          if (!target.closest('input, textarea, select, button, [contenteditable], [role="textbox"], [role="switch"]')) return
+          event.preventDefault()
+          event.stopPropagation()
+        }}
+        onFocusCapture={(event) => {
+          if (!readOnly) return
+          const target = event.target
+          if (!(target instanceof HTMLElement)) return
+          if (!target.closest('input, textarea, select, button, [contenteditable], [role="textbox"], [role="switch"]')) return
+          window.requestAnimationFrame(() => target.blur())
         }}
       >
         {renderContent()}

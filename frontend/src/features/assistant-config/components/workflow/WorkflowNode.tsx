@@ -396,6 +396,7 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
   const onQuickAdd = typeof (nodeData as { onQuickAdd?: unknown }).onQuickAdd === 'function'
     ? ((nodeData as { onQuickAdd?: (nodeId: string, handleId: string, payload: QuickAddPayload) => void }).onQuickAdd ?? null)
     : null
+  const isReadOnly = Boolean((nodeData as { readOnly?: unknown }).readOnly)
   const [openQuickAddHandle, setOpenQuickAddHandle] = useState<string | null>(null)
   const pointerDownRef = useRef<{ handleId: string; x: number; y: number } | null>(null)
   const nodeHandleTop = isContainer ? CONTAINER_HANDLE_TOP : HANDLE_TOP_OFFSET
@@ -559,6 +560,7 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
             floatingUiEpoch={floatingUiEpoch}
             canvasHeight={containerSize?.canvasHeight ?? 168}
             canvasWidth={containerSize?.width}
+            readOnly={isReadOnly}
             onSelectionChange={handleSubflowSelectionChange}
             onChange={(nextNodes, nextEdges) => persistContainerBody(nextNodes, nextEdges)}
           />

@@ -1433,33 +1433,21 @@ export default function WorkflowEditorPage() {
                   className="h-full min-h-0 animate-in fade-in-50 slide-in-from-right-1 duration-150"
                 >
                   {visibleSurface === 'property' ? (
-                    isSystemWorkflow ? (
-                      <div className="flex h-full min-h-0 flex-col rounded-[24px] border border-slate-200 bg-white p-6 shadow-sm">
-                        <div className="space-y-3">
-                          <p className="text-base font-semibold text-slate-900">
-                            {t('settings.skills.systemTargetReadonlyBannerTitle')}
-                          </p>
-                          <p className="text-sm leading-6 text-slate-600">
-                            {t('settings.skills.systemWorkflowReadonlyDescription')}
-                          </p>
-                        </div>
-                      </div>
-                    ) : (
-                      <PropertyPanel
-                        tools={workflowTools}
-                        workflowDescription={workflowDescriptionDraft}
-                        onWorkflowDescriptionChange={setWorkflowDescriptionDraft}
-                        selectionTarget={activePropertyTarget}
-                        onClose={closeActiveSurface}
-                        onAskAiEdit={({ title, instruction, selection }) => openCopilot({
-                          mode: 'edit_selection',
-                          title,
-                          instruction,
-                          selection,
-                          restoreOnClose: true,
-                        })}
-                      />
-                    )
+                    <PropertyPanel
+                      tools={workflowTools}
+                      workflowDescription={workflowDescriptionDraft}
+                      onWorkflowDescriptionChange={setWorkflowDescriptionDraft}
+                      selectionTarget={activePropertyTarget}
+                      onClose={closeActiveSurface}
+                      readOnly={isSystemWorkflow}
+                      onAskAiEdit={({ title, instruction, selection }) => openCopilot({
+                        mode: 'edit_selection',
+                        title,
+                        instruction,
+                        selection,
+                        restoreOnClose: true,
+                      })}
+                    />
                   ) : null}
                   {visibleSurface === 'validation' ? (
                     <WorkflowValidationChecklistPanel
