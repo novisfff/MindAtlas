@@ -353,7 +353,7 @@ export function FlowCanvas({ tools, workflowDescription, readOnly = false, float
             id: nextNodeId,
             nodeType: 'tool',
             position: { x: 0, y: 0 },
-            label: payload.toolName,
+            label: toolDef?.displayName ?? payload.toolName,
             toolName: payload.toolName,
             toolDef,
           })

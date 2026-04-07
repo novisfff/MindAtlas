@@ -63,8 +63,9 @@ export function AgentNodeSettings({
     const query = searchQuery.toLowerCase().trim()
     return unselectedTools.filter((t) => {
       const nameMatch = t.name.toLowerCase().includes(query)
+      const displayNameMatch = (t.displayName ?? '').toLowerCase().includes(query)
       const descMatch = (t.description || '').toLowerCase().includes(query)
-      return nameMatch || descMatch
+      return nameMatch || displayNameMatch || descMatch
     })
   }, [unselectedTools, searchQuery])
 
@@ -179,6 +180,7 @@ export function AgentNodeSettings({
               <div className="space-y-1.5">
                 {selectedToolNames.map((toolName) => {
                   const toolInfo = availableTools.find((t) => t.name === toolName)
+                  const displayName = toolInfo?.displayName ?? toolName
                   return (
                     <div
                       key={toolName}
@@ -189,7 +191,16 @@ export function AgentNodeSettings({
                           <div className="flex items-center justify-center w-6 h-6 rounded bg-indigo-50 text-indigo-500 shrink-0">
                             <WrenchIcon className="w-3.5 h-3.5" />
                           </div>
-                          <span className="text-[13px] font-medium text-slate-800 truncate">{toolName}</span>
+                          <div className="min-w-0">
+                            <span className="block truncate text-[13px] font-medium text-slate-800">
+                              {displayName}
+                            </span>
+                            {displayName !== toolName ? (
+                              <code className="block truncate text-[11px] text-slate-500">
+                                {toolName}
+                              </code>
+                            ) : null}
+                          </div>
                         </div>
                         <button
                           type="button"
@@ -260,7 +271,7 @@ export function AgentNodeSettings({
                               <WrenchIcon className="w-3 h-3" />
                             </div>
                             <span className="text-[13px] font-medium text-slate-800 transition-colors truncate">
-                              {tool.name}
+                              {tool.displayName ?? tool.name}
                             </span>
                           </div>
                           <span

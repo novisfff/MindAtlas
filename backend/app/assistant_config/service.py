@@ -2522,11 +2522,13 @@ class AssistantConfigService:
         *,
         include_disabled: bool = True,
         include_schema: bool = True,
+        preferred_locale: str | None = None,
     ) -> list[dict]:
         """返回系统工具完整定义：从代码提取，DB 仅用于 overlay enabled 状态。"""
         from app.assistant_config.schemas import InputParamSchema, OutputParamSchema
 
-        definitions = ToolRegistry.list_system_tool_definitions()
+        locale = self._current_locale(preferred_locale)
+        definitions = ToolRegistry.list_system_tool_definitions(locale=locale)
         names = [d.name for d in definitions]
 
         enabled_by_name: dict[str, bool] = {n: True for n in names}
@@ -2551,6 +2553,8 @@ class AssistantConfigService:
             result.append({
                 "name": d.name,
                 "description": d.description or None,
+                "display_name": d.display_name,
+                "display_description": d.display_description,
                 "kind": "local",
                 "is_system": True,
                 "enabled": enabled,
@@ -3467,12 +3471,6 @@ class AssistantConfigService:
         if not tool_names:
             return
 
-        system_names = {
-            t.name
-            for t in ToolRegistry.list_system_tools()
-            if getattr(t, "name", None)
-        }
-        system_names |= set(ToolRegistry.INTERNAL_TOOL_NAMES)
         disabled_names = {
             name
             for name, in self.db.query(AssistantTool.name).filter(AssistantTool.enabled.is_(False)).all()
@@ -3492,7 +3490,7 @@ class AssistantConfigService:
             if tool_name in disabled_names:
                 unavailable.append(f"{tool_name} (disabled)")
                 continue
-            if tool_name in system_names or tool_name in enabled_remote_names:
+            if ToolRegistry.has_system_tool(tool_name) or tool_name in enabled_remote_names:
                 continue
             unavailable.append(f"{tool_name} (not found)")
 
@@ -3538,12 +3536,6 @@ class AssistantConfigService:
         if not requested:
             return
 
-        system_names = {
-            t.name
-            for t in ToolRegistry.list_system_tools()
-            if getattr(t, "name", None)
-        }
-        system_names |= set(ToolRegistry.INTERNAL_TOOL_NAMES)
         enabled_remote_names = {
             name
             for name, in self.db.query(AssistantTool.name).filter(
@@ -3563,7 +3555,7 @@ class AssistantConfigService:
             if tool_name in disabled_names:
                 unavailable.append(f"{tool_name} (disabled)")
                 continue
-            if tool_name in system_names or tool_name in enabled_remote_names:
+            if ToolRegistry.has_system_tool(tool_name) or tool_name in enabled_remote_names:
                 continue
             unavailable.append(f"{tool_name} (not found)")
 

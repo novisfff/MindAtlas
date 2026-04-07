@@ -243,7 +243,7 @@ function getWorkbenchPanelWidthClass(surface: WorkflowEditorSurfaceId | 'propert
 export default function WorkflowEditorPage() {
   const { workflowId } = useParams<{ workflowId: string }>()
   const navigate = useNavigate()
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const qc = useQueryClient()
   const initialized = useRef(false)
 
@@ -293,7 +293,7 @@ export default function WorkflowEditorPage() {
     enabled: !!workflowId && activeWorkbenchTabKey === getSurfaceTabKey('versionHistory'),
   })
   const { data: systemToolDefs = [] } = useQuery({
-    queryKey: ['assistant-system-tool-definitions-workflow'],
+    queryKey: ['assistant-system-tool-definitions-workflow', i18n.language],
     queryFn: () => getSystemToolDefinitions({ includeDisabled: false, includeSchema: false }),
   })
   const { data: customTools = [] } = useQuery({
@@ -308,7 +308,8 @@ export default function WorkflowEditorPage() {
       if (!tool.enabled) return
       merged.set(tool.name, {
         name: tool.name,
-        description: tool.description,
+        displayName: tool.displayName || tool.name,
+        description: tool.displayDescription || tool.description,
         inputParams: tool.inputParams ?? [],
         outputParams: tool.outputParams ?? [],
       })
@@ -317,13 +318,16 @@ export default function WorkflowEditorPage() {
     customTools.forEach((tool) => {
       merged.set(tool.name, {
         name: tool.name,
+        displayName: tool.name,
         description: tool.description,
         inputParams: tool.inputParams ?? [],
         outputParams: tool.outputParams ?? [],
       })
     })
 
-    return Array.from(merged.values()).sort((a, b) => a.name.localeCompare(b.name))
+    return Array.from(merged.values()).sort((a, b) =>
+      (a.displayName ?? a.name).localeCompare(b.displayName ?? b.name),
+    )
   }, [customTools, systemToolDefs])
 
   const workflowInput = useMemo(

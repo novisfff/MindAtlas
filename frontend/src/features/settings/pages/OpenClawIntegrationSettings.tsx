@@ -129,6 +129,14 @@ function sourceTypeIcon(sourceType: OpenClawCatalogSourceType) {
   return Bot
 }
 
+function getCatalogSourceDisplayName(source: Pick<OpenClawCatalogSource, 'sourceName' | 'title'>) {
+  return source.sourceName?.trim() || source.title
+}
+
+function getCatalogSourceDisplayDescription(source: Pick<OpenClawCatalogSource, 'sourceDescription' | 'description'>) {
+  return source.sourceDescription?.trim() || source.description
+}
+
 function createDraftFromItem(item: OpenClawCatalogItem): CatalogItemDraft {
   return {
     sourceType: item.sourceType,
@@ -526,10 +534,18 @@ function CatalogItemCard({
                   {item.sourceName}
                 </span>
               ) : null}
+              {item.sourceToolName ? (
+                <code className="rounded-full bg-muted px-2.5 py-1 font-medium">
+                  {item.sourceToolName}
+                </code>
+              ) : null}
               <span className="rounded-full bg-muted px-2.5 py-1">
                 {item.retired ? retiredLabel : item.enabled ? exposedLabel : hiddenLabel}
               </span>
             </div>
+            {item.sourceDescription ? (
+              <p className="text-xs leading-5 text-muted-foreground">{item.sourceDescription}</p>
+            ) : null}
           </div>
 
           <div className="flex items-center gap-2 self-start">
@@ -591,10 +607,11 @@ function CatalogItemCard({
 
 export function OpenClawIntegrationSettingsPage() {
   const navigate = useNavigate()
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const queryClient = useQueryClient()
+  const localizedSettingsQueryKey = [...settingsQueryKey, i18n.language] as const
   const settingsQuery = useQuery({
-    queryKey: settingsQueryKey,
+    queryKey: localizedSettingsQueryKey,
     queryFn: getOpenClawIntegrationSettings,
   })
 
@@ -617,14 +634,14 @@ export function OpenClawIntegrationSettingsPage() {
   const integrationMutation = useMutation({
     mutationFn: updateOpenClawIntegrationSettings,
     onSuccess: (data) => {
-      queryClient.setQueryData(settingsQueryKey, data)
+      queryClient.setQueryData(localizedSettingsQueryKey, data)
     },
   })
 
   const rotateSecretMutation = useMutation({
     mutationFn: rotateOpenClawIntegrationSecret,
     onSuccess: (data) => {
-      queryClient.setQueryData(settingsQueryKey, data.settings)
+      queryClient.setQueryData(localizedSettingsQueryKey, data.settings)
     },
   })
 
@@ -653,12 +670,12 @@ export function OpenClawIntegrationSettingsPage() {
   const resetMutation = useMutation({
     mutationFn: resetOpenClawSystemItems,
     onSuccess: (data) => {
-      queryClient.setQueryData(settingsQueryKey, data)
+      queryClient.setQueryData(localizedSettingsQueryKey, data)
     },
   })
 
   const sourceQuery = useQuery({
-    queryKey: ['openclaw-catalog-sources', draft.sourceType],
+    queryKey: ['openclaw-catalog-sources', draft.sourceType, i18n.language],
     queryFn: () => getOpenClawCatalogSources(draft.sourceType),
     enabled: dialogOpen,
   })
@@ -703,8 +720,8 @@ export function OpenClawIntegrationSettingsPage() {
     if (!keyword) return currentSources
     return currentSources.filter((source) => {
       const haystack = [
-        source.title,
-        source.description,
+        getCatalogSourceDisplayName(source),
+        getCatalogSourceDisplayDescription(source),
         source.sourceToolName,
         source.sourceKey,
       ]
@@ -854,12 +871,15 @@ export function OpenClawIntegrationSettingsPage() {
   function applySourceSelection(source: OpenClawCatalogSource) {
     const nextContract = createContractDraftFromSource(source)
     const preserveOverride = contractUsesOverride && nextContract.schemaEditable
+    const displayName = getCatalogSourceDisplayName(source)
+    const displayDescription = getCatalogSourceDisplayDescription(source)
+    const toolNameSeed = source.sourceToolName || displayName
     setContractOrigin(preserveOverride ? 'override' : 'source')
     setDraft((currentDraft) => ({
       ...currentDraft,
       sourceType: source.sourceType,
-      title: source.title,
-      description: source.description,
+      title: displayName,
+      description: displayDescription,
       sourceToolName: source.sourceToolName ?? null,
       toolId: source.toolId ?? null,
       workflowId: source.workflowId ?? null,
@@ -867,7 +887,7 @@ export function OpenClawIntegrationSettingsPage() {
       schemaEditable: nextContract.schemaEditable,
       toolName:
         currentDraft.toolName.trim() ||
-        source.title
+        toolNameSeed
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, '_')
           .replace(/^_+|_+$/g, '') ||
@@ -1705,6 +1725,8 @@ export function OpenClawIntegrationSettingsPage() {
                     {filteredSources.length ? filteredSources.map((source) => {
                       const active = selectedSourceKey === source.sourceKey
                       const Icon = sourceTypeIcon(source.sourceType)
+                      const displayName = getCatalogSourceDisplayName(source)
+                      const displayDescription = getCatalogSourceDisplayDescription(source)
                       return (
                         <button
                           key={source.sourceKey}
@@ -1735,7 +1757,17 @@ export function OpenClawIntegrationSettingsPage() {
 
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-2">
-                              <p className="text-sm font-semibold">{source.title}</p>
+                              <p className="text-sm font-semibold">{displayName}</p>
+                              {source.sourceToolName ? (
+                                <code
+                                  className={cn(
+                                    'rounded-full px-2 py-0.5 text-[11px] font-medium',
+                                    active ? 'bg-white/10 text-white/90' : 'bg-slate-100 text-slate-600',
+                                  )}
+                                >
+                                  {source.sourceToolName}
+                                </code>
+                              ) : null}
                               <CapabilityBadge
                                 colorClassName={
                                   active
@@ -1758,7 +1790,7 @@ export function OpenClawIntegrationSettingsPage() {
                               ) : null}
                             </div>
                             <p className={cn('mt-2 text-sm leading-6', active ? 'text-white/80' : 'text-slate-600')}>
-                              {source.description || '-'}
+                              {displayDescription || '-'}
                             </p>
                             {!source.bindable && source.unavailableReason ? (
                               <p className={cn('mt-2 text-xs leading-5', active ? 'text-white/70' : 'text-amber-700')}>

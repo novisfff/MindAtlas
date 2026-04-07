@@ -93,6 +93,7 @@ export function QuickAddPopover({
     return tools.filter((tool) => {
       return (
         tool.name.toLowerCase().includes(normalized) ||
+        (tool.displayName ?? '').toLowerCase().includes(normalized) ||
         (tool.description ?? '').toLowerCase().includes(normalized)
       )
     })
@@ -191,7 +192,9 @@ export function QuickAddPopover({
                   <div className="p-1.5 rounded-md bg-white ring-1 ring-black/5">
                     <Wrench className="w-3.5 h-3.5 text-sky-500" />
                   </div>
-                  <span className="text-[18px] leading-none font-medium truncate">{tool.name}</span>
+                  <span className="text-[18px] leading-none font-medium truncate">
+                    {tool.displayName ?? tool.name}
+                  </span>
                 </button>
               ))}
               {visibleTools.length === 0 && (

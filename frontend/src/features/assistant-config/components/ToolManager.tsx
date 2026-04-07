@@ -55,6 +55,8 @@ function ToolStateBadge({ enabled }: { enabled: boolean }) {
 function SystemToolItem({ tool, onToggle, isToggling }: SystemToolItemProps) {
   const { t } = useTranslation()
   const [isExpanded, setIsExpanded] = useState(false)
+  const displayName = tool.displayName || tool.name
+  const displayDescription = tool.displayDescription || tool.description || t('settings.tools.noDescription')
   const hasDetailContent = Boolean(
     (tool.inputParams && tool.inputParams.length > 0)
     || (tool.outputParams && tool.outputParams.length > 0)
@@ -99,14 +101,19 @@ function SystemToolItem({ tool, onToggle, isToggling }: SystemToolItemProps) {
                 <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
               )
             ) : null}
-            <h4 className="truncate font-medium text-foreground">{tool.name}</h4>
+            <h4 className="truncate font-medium text-foreground">{displayName}</h4>
+            {displayName !== tool.name ? (
+              <code className="rounded-full border border-border/70 bg-background/90 px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
+                {tool.name}
+              </code>
+            ) : null}
             <ToolStateBadge enabled={tool.enabled} />
             <SettingsBadge>
               {t('settings.tools.system')}
             </SettingsBadge>
           </div>
           <p className={cn('mt-1 text-sm leading-6 text-muted-foreground', hasDetailContent ? 'pl-6' : '')}>
-            {tool.description || t('settings.tools.noDescription')}
+            {displayDescription}
           </p>
         </button>
       </div>

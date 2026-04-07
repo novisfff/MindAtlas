@@ -140,6 +140,12 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(by_key["submit_context_capture"]["sourceType"], "workflow")
         self.assertIsNotNone(by_key["submit_context_capture"]["workflowId"])
         self.assertTrue(by_key["submit_context_capture"]["enabled"])
+        self.assertEqual(by_key["search_entries"]["sourceToolName"], "search_entries")
+        self.assertEqual(by_key["get_entry"]["sourceToolName"], "get_entry_detail")
+        self.assertEqual(by_key["create_relation"]["sourceToolName"], "create_relation")
+        self.assertEqual(by_key["query_knowledge_graph"]["sourceToolName"], "query_knowledge_graph")
+        self.assertEqual(by_key["generate_weekly_report"]["sourceToolName"], "generate_weekly_report")
+        self.assertEqual(by_key["generate_monthly_report"]["sourceToolName"], "generate_monthly_report")
         capture_schema = by_key["submit_context_capture"]["inputSchema"]
         self.assertEqual(set(capture_schema["properties"]), {"context"})
         self.assertEqual(capture_schema["required"], ["context"])
@@ -271,6 +277,32 @@ class OpenClawIntegrationTests(unittest.TestCase):
         }
         self.assertIn("update_entry", by_source_tool_name)
         self.assertTrue(by_source_tool_name["update_entry"]["bindable"])
+
+    def test_tool_sources_and_catalog_items_reuse_system_tool_display_metadata(self) -> None:
+        response = self.client.get(
+            "/api/system-settings/openclaw-integration/catalog-sources",
+            params={"sourceType": "tool"},
+            headers={"X-MindAtlas-Locale": "zh"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        by_source = {
+            item["sourceToolName"]: item
+            for item in response.json()["data"]["items"]
+            if item.get("sourceToolName")
+        }
+        self.assertEqual(by_source["search_entries"]["title"], "搜索记录")
+        self.assertEqual(by_source["search_entries"]["sourceName"], "搜索记录")
+        self.assertTrue(by_source["search_entries"]["sourceDescription"])
+        self.assertNotEqual(by_source["search_entries"]["title"], "检索历史记录")
+
+        response = self.client.get(
+            "/api/system-settings/openclaw-integration",
+            headers={"X-MindAtlas-Locale": "zh"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        by_key = {item["capabilityKey"]: item for item in response.json()["data"]["catalogItems"]}
+        self.assertEqual(by_key["search_entries"]["sourceName"], "搜索记录")
+        self.assertEqual(by_key["search_entries"]["sourceToolName"], "search_entries")
 
     def test_settings_returns_sync_warning_when_system_item_sync_fails(self) -> None:
         with patch(
@@ -521,9 +553,37 @@ class OpenClawIntegrationTests(unittest.TestCase):
         weekly_item = next(item for item in items if item["capabilityKey"] == "generate_weekly_report")
         weekly_content = weekly_item["outputSchema"]["properties"]["content"]
 
+        self.assertEqual(weekly_item["sourceToolName"], "generate_weekly_report")
         self.assertEqual(weekly_content["type"], "object")
         self.assertTrue(weekly_content["nullable"])
         self.assertEqual(set(weekly_content["properties"]), {"summary", "suggestions", "trends"})
+
+    def test_legacy_custom_tool_binding_is_migrated_to_canonical_source_name(self) -> None:
+        self._initialize_system()
+        self.db.add(
+            OpenClawCapabilityItem(
+                capability_key="legacy_search_alias",
+                tool_name="mindatlas_legacy_search_alias",
+                title="Legacy Search Alias",
+                description="Legacy alias binding",
+                source_type="tool",
+                source_tool_name="openclaw_search_entries",
+                enabled=True,
+                is_system_item=False,
+                input_schema_json={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+                output_schema_json={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+                input_summary="",
+                output_summary="",
+                tool_response_mode="json_schema",
+            )
+        )
+        self.db.commit()
+
+        response = self.client.get("/api/system-settings/openclaw-integration")
+        self.assertEqual(response.status_code, 200, response.text)
+        items = response.json()["data"]["catalogItems"]
+        migrated_item = next(item for item in items if item["capabilityKey"] == "legacy_search_alias")
+        self.assertEqual(migrated_item["sourceToolName"], "search_entries")
 
     def test_system_item_registry_uses_routing_oriented_metadata(self) -> None:
         definitions = {item.key: item for item in list_openclaw_system_item_definitions(locale="en")}
@@ -912,7 +972,7 @@ class OpenClawIntegrationTests(unittest.TestCase):
             "app.openclaw_integration.service.resolve_runtime_knowledge_graph_config",
             return_value=type("Cfg", (), {"enabled": True, "configured": True})(),
         ), patch(
-            "app.assistant.tools.openclaw_tools.LightRagService.query",
+            "app.assistant.tools.kb_tools.LightRagService.query",
             new=AsyncMock(return_value=fake_response),
         ):
             response = self.client.post(

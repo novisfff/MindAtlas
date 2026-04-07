@@ -1011,11 +1011,18 @@
         "searchEntries": "Search Entries",
         "getEntryDetail": "Get Entry Detail",
         "createEntry": "Create Entry",
+        "updateEntry": "Update Entry",
+        "createRelation": "Create Relation",
+        "queryKnowledgeGraph": "Query Knowledge Graph",
+        "generateWeeklyReport": "Generate Weekly Report",
+        "generateMonthlyReport": "Generate Monthly Report",
         "getStatistics": "Get Statistics",
         "getEntriesByTimeRange": "Query by Time Range",
         "analyzeActivity": "Analyze Activity",
+        "getTagStatistics": "Get Tag Statistics",
         "listEntryTypes": "List Entry Types",
-        "listTags": "List Tags"
+        "listTags": "List Tags",
+        "kbRelationRecommendations": "Relation Recommendations"
       },
       "skills": {
         "searchEntries": "Search Entries",

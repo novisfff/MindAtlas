@@ -998,13 +998,20 @@
       "assistant": "助手",
       "tools": {
         "searchEntries": "搜索记录",
-        "getEntryDetail": "获取详情",
+        "getEntryDetail": "获取记录详情",
         "createEntry": "创建记录",
+        "updateEntry": "更新记录",
+        "createRelation": "创建关联",
+        "queryKnowledgeGraph": "查询知识图谱",
+        "generateWeeklyReport": "生成周报",
+        "generateMonthlyReport": "生成月报",
         "getStatistics": "获取统计",
         "getEntriesByTimeRange": "时间范围查询",
         "analyzeActivity": "活动分析",
-        "listEntryTypes": "列出类型",
-        "listTags": "列出标签"
+        "getTagStatistics": "标签统计",
+        "listEntryTypes": "列出记录类型",
+        "listTags": "列出标签",
+        "kbRelationRecommendations": "关系推荐"
       },
       "skills": {
         "searchEntries": "搜索记录",

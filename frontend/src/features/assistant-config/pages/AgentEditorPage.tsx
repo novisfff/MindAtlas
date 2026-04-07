@@ -53,6 +53,7 @@ import { TargetVersionPanel } from '../components/versioning/TargetVersionPanel'
 
 interface ToolOption {
   name: string
+  displayName: string
   description?: string
   enabled: boolean
 }
@@ -165,10 +166,20 @@ export default function AgentEditorPage() {
   const validTools = useMemo(() => {
     const all: ToolOption[] = []
     systemToolDefs.forEach((def) => {
-      all.push({ name: def.name, description: def.description || undefined, enabled: selectedTools.includes(def.name) })
+      all.push({
+        name: def.name,
+        displayName: def.displayName || def.name,
+        description: def.displayDescription || def.description || undefined,
+        enabled: selectedTools.includes(def.name),
+      })
     })
     customTools.forEach((ct) => {
-      all.push({ name: ct.name, description: ct.description || undefined, enabled: selectedTools.includes(ct.name) })
+      all.push({
+        name: ct.name,
+        displayName: ct.name,
+        description: ct.description || undefined,
+        enabled: selectedTools.includes(ct.name),
+      })
     })
     return all
   }, [systemToolDefs, customTools, selectedTools])
@@ -646,7 +657,7 @@ export default function AgentEditorPage() {
                                 <Zap className="w-4 h-4" />
                               </div>
                               <span className="text-sm font-medium text-emerald-700 dark:text-emerald-400 truncate">
-                                {tool.name}
+                                {tool.displayName}
                               </span>
                             </div>
                             {!isSystemAgent ? (
@@ -661,7 +672,12 @@ export default function AgentEditorPage() {
                             <div className="p-1.5 rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
                               <Zap className="w-4 h-4" />
                             </div>
-                            <h4 className="font-semibold text-sm truncate">{tool.name}</h4>
+                            <div className="min-w-0">
+                              <h4 className="truncate text-sm font-semibold">{tool.displayName}</h4>
+                              {tool.displayName !== tool.name ? (
+                                <code className="block truncate text-[11px] text-muted-foreground">{tool.name}</code>
+                              ) : null}
+                            </div>
                           </div>
                           <p className="text-sm text-muted-foreground leading-relaxed">
                             {tool.description || t('settings.skills.noToolDescription', { defaultValue: 'No description available for this tool.' })}
@@ -699,11 +715,16 @@ export default function AgentEditorPage() {
                                         <div className="p-1.5 rounded-md bg-muted group-hover:bg-primary/10 transition-colors">
                                           <Zap className="w-3.5 h-3.5 text-muted-foreground group-hover:text-primary transition-colors" />
                                         </div>
-                                        <span className="font-medium truncate">{tool.name}</span>
+                                        <span className="font-medium truncate">{tool.displayName}</span>
                                       </button>
                                     </HoverCardTrigger>
                                     <HoverCardContent side="right" align="start" className="w-72 p-3 space-y-1.5 shadow-lg z-50">
-                                      <h4 className="font-semibold text-sm truncate">{tool.name}</h4>
+                                      <div className="min-w-0">
+                                        <h4 className="truncate text-sm font-semibold">{tool.displayName}</h4>
+                                        {tool.displayName !== tool.name ? (
+                                          <code className="block truncate text-[11px] text-muted-foreground">{tool.name}</code>
+                                        ) : null}
+                                      </div>
                                       <p className="text-xs text-muted-foreground leading-relaxed line-clamp-3">
                                         {tool.description || t('settings.skills.noToolDescription', { defaultValue: 'No description available for this tool.' })}
                                       </p>

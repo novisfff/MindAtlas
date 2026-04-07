@@ -82,11 +82,6 @@ class AgentTestRunService:
         if not normalized:
             return []
 
-        system_names = {
-            t.name
-            for t in ToolRegistry.list_system_tools()
-            if getattr(t, "name", None)
-        }
         disabled_names = {
             name
             for name, in self.db.query(AssistantTool.name).filter(AssistantTool.enabled.is_(False)).all()
@@ -106,7 +101,7 @@ class AgentTestRunService:
             if tool_name in disabled_names:
                 unavailable.append(f"{tool_name} (disabled)")
                 continue
-            if tool_name in system_names or tool_name in enabled_remote_names:
+            if ToolRegistry.has_system_tool(tool_name) or tool_name in enabled_remote_names:
                 continue
             unavailable.append(f"{tool_name} (not found)")
 

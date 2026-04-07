@@ -20,12 +20,22 @@ class AssistantKnowledgeBaseToolsTests(unittest.TestCase):
 
         self.assertNotIn("kb_search", getattr(assistant_tools, "__all__", []))
         self.assertIn("update_entry", getattr(assistant_tools, "__all__", []))
+        self.assertIn("create_relation", getattr(assistant_tools, "__all__", []))
+        self.assertIn("query_knowledge_graph", getattr(assistant_tools, "__all__", []))
+        self.assertIn("generate_weekly_report", getattr(assistant_tools, "__all__", []))
+        self.assertIn("generate_monthly_report", getattr(assistant_tools, "__all__", []))
         self.assertIn("kb_relation_recommendations", getattr(assistant_tools, "__all__", []))
+        self.assertNotIn("openclaw_search_entries", getattr(assistant_tools, "__all__", []))
+        self.assertNotIn("openclaw_get_entry", getattr(assistant_tools, "__all__", []))
         self.assertNotIn("kb_graph_recall", getattr(assistant_tools, "__all__", []))
 
         # Tool objects created by @tool should expose `name`.
         self.assertEqual(self._tool_name(assistant_tools.kb_search), "kb_search")
         self.assertEqual(self._tool_name(assistant_tools.update_entry), "update_entry")
+        self.assertEqual(self._tool_name(assistant_tools.create_relation), "create_relation")
+        self.assertEqual(self._tool_name(assistant_tools.query_knowledge_graph), "query_knowledge_graph")
+        self.assertEqual(self._tool_name(assistant_tools.generate_weekly_report), "generate_weekly_report")
+        self.assertEqual(self._tool_name(assistant_tools.openclaw_search_entries), "openclaw_search_entries")
         self.assertEqual(
             self._tool_name(assistant_tools.kb_relation_recommendations),
             "kb_relation_recommendations",
@@ -35,8 +45,30 @@ class AssistantKnowledgeBaseToolsTests(unittest.TestCase):
         names = {t.name for t in ToolRegistry.list_system_tools()}
         self.assertNotIn("kb_search", names)
         self.assertIn("update_entry", names)
+        self.assertIn("create_relation", names)
+        self.assertIn("query_knowledge_graph", names)
+        self.assertIn("generate_weekly_report", names)
+        self.assertIn("generate_monthly_report", names)
         self.assertIn("kb_relation_recommendations", names)
+        self.assertNotIn("openclaw_search_entries", names)
+        self.assertNotIn("openclaw_get_entry", names)
         self.assertNotIn("kb_graph_recall", names)
+
+    def test_hidden_openclaw_aliases_still_validate_as_system_tools(self) -> None:
+        from app.assistant_config.registry import ToolRegistry  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+        from tests._db import make_session  # noqa: E402
+
+        self.assertTrue(ToolRegistry.has_system_tool("openclaw_search_entries"))
+        self.assertTrue(ToolRegistry.has_system_tool("openclaw_get_entry"))
+
+        db = make_session()
+        try:
+            service = AssistantConfigService(db)
+            service._validate_workflow_tool_names({"openclaw_search_entries", "openclaw_get_entry"})
+            service._validate_agent_tool_names(["openclaw_search_entries"])
+        finally:
+            db.close()
 
     def test_general_chat_includes_kb_tools(self) -> None:
         from app.assistant.skill_catalog.definitions import GENERAL_CHAT  # noqa: E402
@@ -63,3 +95,47 @@ class AssistantKnowledgeBaseToolsTests(unittest.TestCase):
                     tool.returns,
                     f"{tool.name} returns should include list item for {param.name}",
                 )
+
+    def test_system_tool_definitions_expose_display_metadata_with_locale(self) -> None:
+        from fastapi import FastAPI  # noqa: E402
+        from fastapi.testclient import TestClient  # noqa: E402
+
+        from app.assistant_config.router import router as assistant_config_router  # noqa: E402
+        from app.common.exceptions import register_exception_handlers  # noqa: E402
+        from app.database import get_db  # noqa: E402
+        from tests._db import make_session  # noqa: E402
+
+        db = make_session()
+        app = FastAPI()
+        register_exception_handlers(app)
+        app.include_router(assistant_config_router)
+
+        def _override_get_db():  # noqa: ANN001
+            yield db
+
+        app.dependency_overrides[get_db] = _override_get_db
+        client = TestClient(app)
+
+        try:
+            response = client.get(
+                "/api/assistant-config/system-tools/definitions",
+                headers={"X-MindAtlas-Locale": "zh"},
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            by_name = {item["name"]: item for item in response.json()["data"]}
+            self.assertEqual(by_name["search_entries"]["displayName"], "搜索记录")
+            self.assertEqual(by_name["update_entry"]["displayName"], "更新记录")
+            self.assertEqual(by_name["kb_relation_recommendations"]["displayName"], "关系推荐")
+            self.assertTrue(by_name["get_tag_statistics"]["displayDescription"])
+
+            response = client.get(
+                "/api/assistant-config/system-tools/definitions",
+                headers={"X-MindAtlas-Locale": "en"},
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            by_name = {item["name"]: item for item in response.json()["data"]}
+            self.assertEqual(by_name["search_entries"]["displayName"], "Search Entries")
+            self.assertEqual(by_name["update_entry"]["displayName"], "Update Entry")
+            self.assertEqual(by_name["kb_relation_recommendations"]["displayName"], "Relation Recommendations")
+        finally:
+            db.close()

@@ -18,6 +18,8 @@ from app.assistant_config.remote_tool import RemoteTool
 class SystemToolDefinition:
     name: str
     description: str
+    display_name: str
+    display_description: str | None = None
 
 
 @dataclass(frozen=True)
@@ -39,10 +41,18 @@ class SystemToolOutputDefinition:
 class SystemToolFullDefinition:
     name: str
     description: str
+    display_name: str
+    display_description: str | None
     input_params: list[SystemToolParamDefinition]
     output_params: list[SystemToolOutputDefinition]
     returns: str | None
     json_schema: dict | None
+
+
+@dataclass(frozen=True)
+class SystemToolDisplayDefinition:
+    display_name: str
+    display_description: str | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +85,160 @@ class _BaseRegistry:
         self.db = db
 
 
+_SYSTEM_TOOL_DISPLAY_METADATA: dict[str, dict[str, dict[str, str]]] = {
+    "search_entries": {
+        "zh": {
+            "source_name": "搜索记录",
+            "source_description": "按关键词、类型、标签或时间范围检索已保存的记录。",
+        },
+        "en": {
+            "source_name": "Search Entries",
+            "source_description": "Search saved entries by keyword, type, tags, or time range.",
+        },
+    },
+    "get_entry_detail": {
+        "zh": {
+            "source_name": "获取记录详情",
+            "source_description": "根据记录 ID 读取单条记录的完整详情。",
+        },
+        "en": {
+            "source_name": "Get Entry Detail",
+            "source_description": "Load the full details of a specific entry by entry ID.",
+        },
+    },
+    "create_entry": {
+        "zh": {
+            "source_name": "创建记录",
+            "source_description": "向 MindAtlas 新建一条结构化记录。",
+        },
+        "en": {
+            "source_name": "Create Entry",
+            "source_description": "Create a new structured entry in MindAtlas.",
+        },
+    },
+    "update_entry": {
+        "zh": {
+            "source_name": "更新记录",
+            "source_description": "根据记录 ID 更新一条已有记录的内容和字段。",
+        },
+        "en": {
+            "source_name": "Update Entry",
+            "source_description": "Update an existing entry by entry ID.",
+        },
+    },
+    "create_relation": {
+        "zh": {
+            "source_name": "创建关联",
+            "source_description": "在两条已有记录之间创建关系。",
+        },
+        "en": {
+            "source_name": "Create Relation",
+            "source_description": "Create a relation between two existing entries.",
+        },
+    },
+    "query_knowledge_graph": {
+        "zh": {
+            "source_name": "查询知识图谱",
+            "source_description": "查询跨记录关系并返回综合知识回答。",
+        },
+        "en": {
+            "source_name": "Query Knowledge Graph",
+            "source_description": "Query cross-entry relationships and return a synthesized knowledge answer.",
+        },
+    },
+    "generate_weekly_report": {
+        "zh": {
+            "source_name": "生成周报",
+            "source_description": "生成或读取指定周的结构化周报。",
+        },
+        "en": {
+            "source_name": "Generate Weekly Report",
+            "source_description": "Generate or retrieve a structured weekly report.",
+        },
+    },
+    "generate_monthly_report": {
+        "zh": {
+            "source_name": "生成月报",
+            "source_description": "生成或读取指定月份的结构化月报。",
+        },
+        "en": {
+            "source_name": "Generate Monthly Report",
+            "source_description": "Generate or retrieve a structured monthly report.",
+        },
+    },
+    "get_statistics": {
+        "zh": {
+            "source_name": "获取统计",
+            "source_description": "读取记录总量、类型分布等整体统计信息。",
+        },
+        "en": {
+            "source_name": "Get Statistics",
+            "source_description": "Read high-level statistics such as total entries and type distribution.",
+        },
+    },
+    "get_entries_by_time_range": {
+        "zh": {
+            "source_name": "时间范围查询",
+            "source_description": "按时间范围列出符合条件的记录。",
+        },
+        "en": {
+            "source_name": "Query by Time Range",
+            "source_description": "List entries that fall within a specific time range.",
+        },
+    },
+    "analyze_activity": {
+        "zh": {
+            "source_name": "活动分析",
+            "source_description": "分析记录活动的时间分布和行为模式。",
+        },
+        "en": {
+            "source_name": "Analyze Activity",
+            "source_description": "Analyze activity distribution and behavior patterns over time.",
+        },
+    },
+    "get_tag_statistics": {
+        "zh": {
+            "source_name": "标签统计",
+            "source_description": "汇总各标签下的记录数量与占比。",
+        },
+        "en": {
+            "source_name": "Get Tag Statistics",
+            "source_description": "Summarize entry counts and ratios for each tag.",
+        },
+    },
+    "list_entry_types": {
+        "zh": {
+            "source_name": "列出记录类型",
+            "source_description": "列出当前可用的记录类型。",
+        },
+        "en": {
+            "source_name": "List Entry Types",
+            "source_description": "List the currently available entry types.",
+        },
+    },
+    "list_tags": {
+        "zh": {
+            "source_name": "列出标签",
+            "source_description": "列出当前可用的标签。",
+        },
+        "en": {
+            "source_name": "List Tags",
+            "source_description": "List the currently available tags.",
+        },
+    },
+    "kb_relation_recommendations": {
+        "zh": {
+            "source_name": "关系推荐",
+            "source_description": "基于现有知识图谱推荐可能需要建立的记录关联。",
+        },
+        "en": {
+            "source_name": "Relation Recommendations",
+            "source_description": "Recommend likely entry relations from the current knowledge graph context.",
+        },
+    },
+}
+
+
 class ToolRegistry(_BaseRegistry):
     """工具注册表 - 解析系统本地工具和数据库自定义工具"""
 
@@ -82,11 +246,57 @@ class ToolRegistry(_BaseRegistry):
     INTERNAL_TOOL_NAMES: frozenset[str] = frozenset({"kb_search"})
     SYSTEM_TOOL_OUTPUT_PARAMS: dict[str, list[dict[str, str]]] = {
         "search_entries": [
+            {"name": "total", "param_type": "number", "description": "匹配记录总数。"},
             {
                 "name": "items",
                 "param_type": "array",
-                "description": "记录列表。元素字段：id(string), title(string), type(string), summary(string), tags(array[string])。",
+                "description": "记录列表。元素字段：id(string), title(string), content(string), type(string), type_code(string), summary(string), tags(array[string]), time_mode(string), time_at(string|null, ISO8601), time_from(string|null, ISO8601), time_to(string|null, ISO8601), created_at(string, ISO8601), updated_at(string, ISO8601)。",
             },
+        ],
+        "create_relation": [
+            {"name": "id", "param_type": "string", "description": "关系 UUID。"},
+            {"name": "source_entry_id", "param_type": "string", "description": "源记录 UUID。"},
+            {"name": "source_entry_title", "param_type": "string", "description": "源记录标题。"},
+            {"name": "target_entry_id", "param_type": "string", "description": "目标记录 UUID。"},
+            {"name": "target_entry_title", "param_type": "string", "description": "目标记录标题。"},
+            {"name": "relation_type_code", "param_type": "string", "description": "关系类型编码。"},
+            {"name": "relation_type_name", "param_type": "string", "description": "关系类型名称。"},
+            {"name": "description", "param_type": "string", "description": "关系说明。"},
+            {"name": "created_at", "param_type": "string", "description": "创建时间（ISO8601）。"},
+            {"name": "updated_at", "param_type": "string", "description": "更新时间（ISO8601）。"},
+        ],
+        "query_knowledge_graph": [
+            {"name": "answer", "param_type": "string", "description": "综合回答。"},
+            {"name": "sources", "param_type": "array", "description": "引用来源列表。"},
+            {"name": "metadata", "param_type": "object", "description": "查询元信息。"},
+        ],
+        "generate_weekly_report": [
+            {"name": "id", "param_type": "string", "description": "周报 UUID。"},
+            {"name": "week_start", "param_type": "string", "description": "周起始日期。"},
+            {"name": "week_end", "param_type": "string", "description": "周结束日期。"},
+            {"name": "entry_count", "param_type": "number", "description": "记录数量。"},
+            {"name": "content", "param_type": "object", "description": "周报内容对象。"},
+            {"name": "content_locale", "param_type": "string", "description": "内容语言。"},
+            {"name": "status", "param_type": "string", "description": "生成状态。"},
+            {"name": "attempts", "param_type": "number", "description": "生成尝试次数。"},
+            {"name": "last_error", "param_type": "string", "description": "最后一次错误。"},
+            {"name": "generated_at", "param_type": "string", "description": "生成时间。"},
+            {"name": "created_at", "param_type": "string", "description": "创建时间。"},
+            {"name": "updated_at", "param_type": "string", "description": "更新时间。"},
+        ],
+        "generate_monthly_report": [
+            {"name": "id", "param_type": "string", "description": "月报 UUID。"},
+            {"name": "month_start", "param_type": "string", "description": "月起始日期。"},
+            {"name": "month_end", "param_type": "string", "description": "月结束日期。"},
+            {"name": "entry_count", "param_type": "number", "description": "记录数量。"},
+            {"name": "content", "param_type": "object", "description": "月报内容对象。"},
+            {"name": "content_locale", "param_type": "string", "description": "内容语言。"},
+            {"name": "status", "param_type": "string", "description": "生成状态。"},
+            {"name": "attempts", "param_type": "number", "description": "生成尝试次数。"},
+            {"name": "last_error", "param_type": "string", "description": "最后一次错误。"},
+            {"name": "generated_at", "param_type": "string", "description": "生成时间。"},
+            {"name": "created_at", "param_type": "string", "description": "创建时间。"},
+            {"name": "updated_at", "param_type": "string", "description": "更新时间。"},
         ],
         "openclaw_capture_entry": [
             {"name": "id", "param_type": "string", "description": "新建记录 UUID。"},
@@ -173,7 +383,12 @@ class ToolRegistry(_BaseRegistry):
             {"name": "type_code", "param_type": "string", "description": "记录类型编码。"},
             {"name": "summary", "param_type": "string", "description": "记录摘要。"},
             {"name": "tags", "param_type": "array", "description": "标签名称数组。"},
+            {"name": "time_mode", "param_type": "string", "description": "时间模式（POINT/RANGE）。"},
+            {"name": "time_at", "param_type": "string", "description": "POINT 模式时间（ISO8601 或 null）。"},
+            {"name": "time_from", "param_type": "string", "description": "RANGE 起始时间（ISO8601 或 null）。"},
+            {"name": "time_to", "param_type": "string", "description": "RANGE 结束时间（ISO8601 或 null）。"},
             {"name": "created_at", "param_type": "string", "description": "创建时间（ISO8601）。"},
+            {"name": "updated_at", "param_type": "string", "description": "更新时间（ISO8601）。"},
         ],
         "create_entry": [
             {"name": "id", "param_type": "string", "description": "新建记录 UUID。"},
@@ -272,7 +487,34 @@ class ToolRegistry(_BaseRegistry):
     }
 
     @staticmethod
-    def list_system_tools() -> list[SystemToolDefinition]:
+    def _resolve_display_locale(locale: str | None) -> str:
+        from app.system_settings.service import get_default_system_locale, normalize_system_locale
+
+        return normalize_system_locale(locale) or get_default_system_locale()
+
+    @classmethod
+    def get_system_tool_display(
+        cls,
+        tool_name: str,
+        *,
+        locale: str | None = None,
+    ) -> SystemToolDisplayDefinition:
+        normalized_locale = cls._resolve_display_locale(locale)
+        localized = (
+            _SYSTEM_TOOL_DISPLAY_METADATA.get(tool_name, {}).get(normalized_locale)
+            or _SYSTEM_TOOL_DISPLAY_METADATA.get(tool_name, {}).get("zh")
+            or _SYSTEM_TOOL_DISPLAY_METADATA.get(tool_name, {}).get("en")
+            or {}
+        )
+        source_name = str(localized.get("source_name") or tool_name).strip() or tool_name
+        source_description = str(localized.get("source_description") or "").strip() or None
+        return SystemToolDisplayDefinition(
+            display_name=source_name,
+            display_description=source_description,
+        )
+
+    @staticmethod
+    def list_system_tools(locale: str | None = None) -> list[SystemToolDefinition]:
         from app.assistant import tools as assistant_tools
 
         results: list[SystemToolDefinition] = []
@@ -287,11 +529,19 @@ class ToolRegistry(_BaseRegistry):
                     or getattr(tool_obj, "__doc__", "")
                     or ""
                 ).strip()
-            results.append(SystemToolDefinition(name=tool_name, description=description))
+            display = ToolRegistry.get_system_tool_display(tool_name, locale=locale)
+            results.append(
+                SystemToolDefinition(
+                    name=tool_name,
+                    description=description,
+                    display_name=display.display_name,
+                    display_description=display.display_description,
+                )
+            )
         return results
 
     @staticmethod
-    def list_system_tool_definitions() -> list[SystemToolFullDefinition]:
+    def list_system_tool_definitions(locale: str | None = None) -> list[SystemToolFullDefinition]:
         """从代码定义获取系统工具完整信息（名称/描述/参数签名/JSON Schema）。"""
         from app.assistant import tools as assistant_tools
 
@@ -313,6 +563,7 @@ class ToolRegistry(_BaseRegistry):
                 or getattr(tool_obj, "__doc__", "")
                 or ""
             ).strip()
+            display = ToolRegistry.get_system_tool_display(tool_name, locale=locale)
 
             input_params, doc_returns, json_schema = ToolRegistry._extract_tool_params(tool_obj)
             output_params = ToolRegistry._extract_system_tool_output_params(tool_name)
@@ -320,6 +571,8 @@ class ToolRegistry(_BaseRegistry):
             results.append(SystemToolFullDefinition(
                 name=tool_name,
                 description=description,
+                display_name=display.display_name,
+                display_description=display.display_description,
                 input_params=input_params,
                 output_params=output_params,
                 returns=returns,
@@ -331,6 +584,15 @@ class ToolRegistry(_BaseRegistry):
     def resolve_system_tool(tool_name: str) -> Any | None:
         from app.assistant import tools as assistant_tools
         return getattr(assistant_tools, tool_name, None)
+
+    @classmethod
+    def has_system_tool(cls, tool_name: str) -> bool:
+        normalized = str(tool_name or "").strip()
+        if not normalized:
+            return False
+        if normalized in cls.INTERNAL_TOOL_NAMES:
+            return True
+        return cls.resolve_system_tool(normalized) is not None
 
     def list_db_tools(self, include_disabled: bool = False) -> list[AssistantTool]:
         """获取数据库中的工具配置。

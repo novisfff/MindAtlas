@@ -4,15 +4,16 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import date
-from typing import Optional
+from datetime import date, datetime
+from typing import Any, Optional
 from uuid import UUID
 
 from langchain_core.tools import tool
+from sqlalchemy import func
 
 from app.common.color_utils import pick_material_600_color
 from app.entry.models import Entry, TimeMode
-from app.entry.schemas import EntryRequest
+from app.entry.schemas import EntryRequest, EntrySearchRequest
 from app.entry.service import EntryService
 from app.entry_type.models import EntryType
 from app.tag.models import Tag
@@ -24,6 +25,108 @@ def _get_db():
     """获取数据库会话 - 由 agent 注入"""
     from app.assistant.tools._context import get_current_db
     return get_current_db()
+
+
+def _format_entry_datetime(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _serialize_entry_search_item(entry: Entry) -> dict[str, Any]:
+    return {
+        "id": str(entry.id),
+        "title": entry.title,
+        "content": entry.content or "",
+        "type": entry.type.name if entry.type else "未知",
+        "type_code": entry.type.code if entry.type else "",
+        "summary": entry.summary or "",
+        "tags": [t.name for t in entry.tags],
+        "time_mode": entry.time_mode.value if entry.time_mode else "NONE",
+        "time_at": _format_entry_datetime(entry.time_at),
+        "time_from": _format_entry_datetime(entry.time_from),
+        "time_to": _format_entry_datetime(entry.time_to),
+        "created_at": entry.created_at.isoformat() if entry.created_at else "",
+        "updated_at": entry.updated_at.isoformat() if entry.updated_at else "",
+    }
+
+
+def _resolve_search_type_id(db, type_code: Optional[str]) -> UUID | None:
+    normalized = str(type_code or "").strip()
+    if not normalized:
+        return None
+    row = (
+        db.query(EntryType)
+        .filter(func.lower(EntryType.code) == normalized.lower())
+        .first()
+    )
+    return row.id if row is not None else None
+
+
+def _resolve_search_tag_ids(db, tag_names: Optional[list[str]]) -> list[UUID] | None:
+    cleaned = [str(tag).strip() for tag in (tag_names or []) if str(tag).strip()]
+    if not cleaned:
+        return None
+    tags = (
+        db.query(Tag)
+        .filter(func.lower(Tag.name).in_([name.lower() for name in cleaned]))
+        .all()
+    )
+    if not tags:
+        return []
+    return [tag.id for tag in tags]
+
+
+def build_search_entries_payload(
+    *,
+    keyword: Optional[str] = None,
+    type_code: Optional[str] = None,
+    tag_names: Optional[list[str]] = None,
+    time_from: Optional[str] = None,
+    time_to: Optional[str] = None,
+    limit: int = 10,
+) -> dict[str, Any]:
+    db = _get_db()
+
+    if limit < 1:
+        limit = 10
+    elif limit > 100:
+        limit = 100
+
+    tag_ids = _resolve_search_tag_ids(db, tag_names)
+    if tag_ids == []:
+        return {"total": 0, "items": []}
+    type_id = _resolve_search_type_id(db, type_code)
+    if type_code and type_id is None:
+        return {"total": 0, "items": []}
+
+    result = EntryService(db).search(
+        EntrySearchRequest(
+            keyword=(keyword or "").strip() or None,
+            type_id=type_id,
+            tag_ids=tag_ids,
+            time_from=_parse_date_yyyy_mm_dd(time_from),
+            time_to=_parse_date_yyyy_mm_dd(time_to),
+            page=0,
+            size=limit,
+        )
+    )
+
+    return {
+        "total": int(result.get("total") or 0),
+        "items": [_serialize_entry_search_item(entry) for entry in result.get("content", [])],
+    }
+
+
+def build_entry_detail_payload(entry_id: str) -> dict[str, Any]:
+    db = _get_db()
+    try:
+        uid = UUID(entry_id)
+    except ValueError as exc:
+        raise ValueError(f"无效的记录ID: {entry_id}") from exc
+
+    entry = db.query(Entry).filter(Entry.id == uid).first()
+    if not entry:
+        raise ValueError(f"未找到记录: {entry_id}")
+    return _serialize_entry_search_item(entry)
 
 
 @tool
@@ -46,77 +149,17 @@ def search_entries(
         limit: 返回结果数量限制，默认10条
 
     Returns:
-        匹配的记录列表（JSON数组），包含id、标题、类型、摘要等信息
+        匹配结果对象（JSON格式），包含 total 与 items 字段
     """
-    db = _get_db()
-    query = db.query(Entry)
-
-    # limit 边界校验
-    if limit < 1:
-        limit = 10
-    elif limit > 100:
-        limit = 100
-
-    if keyword:
-        kw = f"%{keyword}%"
-        query = query.filter(
-            Entry.title.ilike(kw) | Entry.content.ilike(kw)
-        )
-
-    if type_code:
-        query = query.join(EntryType).filter(EntryType.code == type_code)
-
-    if tag_names:
-        cleaned = [t.strip() for t in tag_names if isinstance(t, str) and t.strip()]
-        if cleaned:
-            query = query.join(Entry.tags).filter(Tag.name.in_(cleaned)).distinct()
-
-    # Time intersection filter
-    def _parse_date(value: Optional[str]):
-        if not value or not isinstance(value, str):
-            return None
-        v = value.strip()
-        if not v:
-            return None
-        from datetime import datetime
-        try:
-            return datetime.strptime(v, "%Y-%m-%d")
-        except ValueError:
-            return None
-
-    q_from = _parse_date(time_from)
-    q_to = _parse_date(time_to)
-    if q_from or q_to:
-        point_clause = (Entry.time_mode == TimeMode.POINT) & Entry.time_at.isnot(None)
-        if q_from:
-            point_clause = point_clause & (Entry.time_at >= q_from)
-        if q_to:
-            point_clause = point_clause & (Entry.time_at <= q_to)
-
-        range_clause = (Entry.time_mode == TimeMode.RANGE) & Entry.time_from.isnot(None) & Entry.time_to.isnot(None)
-        if q_to:
-            range_clause = range_clause & (Entry.time_from <= q_to)
-        if q_from:
-            range_clause = range_clause & (Entry.time_to >= q_from)
-
-        query = query.filter(point_clause | range_clause)
-
-    entries = query.order_by(Entry.updated_at.desc()).limit(limit).all()
-
-    if not entries:
-        return json.dumps([], ensure_ascii=False, indent=2)
-
-    results = []
-    for e in entries:
-        results.append({
-            "id": str(e.id),
-            "title": e.title,
-            "type": e.type.name if e.type else "未知",
-            "summary": e.summary or "",
-            "tags": [t.name for t in e.tags],
-        })
-
-    return json.dumps(results, ensure_ascii=False, indent=2)
+    result = build_search_entries_payload(
+        keyword=keyword,
+        type_code=type_code,
+        tag_names=tag_names,
+        time_from=time_from,
+        time_to=time_to,
+        limit=limit,
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 def _remove_level1_headings(md: str) -> str:
@@ -353,26 +396,7 @@ def get_entry_detail(entry_id: str) -> str:
     Returns:
         记录的完整信息，包含内容、标签、关联等
     """
-    db = _get_db()
-    try:
-        uid = UUID(entry_id)
-    except ValueError:
-        raise ValueError(f"无效的记录ID: {entry_id}")
-
-    entry = db.query(Entry).filter(Entry.id == uid).first()
-    if not entry:
-        raise ValueError(f"未找到记录: {entry_id}")
-
-    result = {
-        "id": str(entry.id),
-        "title": entry.title,
-        "content": entry.content or "",
-        "type": entry.type.name if entry.type else "未知",
-        "type_code": entry.type.code if entry.type else "",
-        "summary": entry.summary or "",
-        "tags": [t.name for t in entry.tags],
-        "created_at": entry.created_at.isoformat() if entry.created_at else "",
-    }
+    result = build_entry_detail_payload(entry_id)
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 

@@ -276,6 +276,8 @@ class OpenClawCatalogSourceResponse(CamelModel):
     source_key: str = Field(alias="sourceKey")
     title: str
     description: str
+    source_name: str | None = Field(default=None, alias="sourceName")
+    source_description: str | None = Field(default=None, alias="sourceDescription")
     is_system: bool = Field(alias="isSystem")
     enabled: bool
     bindable: bool

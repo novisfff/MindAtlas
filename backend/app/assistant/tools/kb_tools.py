@@ -12,6 +12,8 @@ from langchain_core.tools import tool
 from app.assistant.tools._context import get_current_db
 from app.common.exceptions import ApiException
 from app.entry.models import Entry
+from app.lightrag.schemas import LightRagQueryResponse
+from app.lightrag.service import LightRagService
 
 T = TypeVar("T")
 
@@ -693,3 +695,35 @@ def kb_relation_recommendations(
             raise ValueError("LightRAG is not enabled") from exc
         raise
     return json.dumps(resp.model_dump(by_alias=True, exclude_none=True), ensure_ascii=False, indent=2, default=str)
+
+
+@tool
+def query_knowledge_graph(
+    query: str,
+    mode: str = "hybrid",
+    top_k: int = 5,
+) -> str:
+    """查询知识图谱并返回综合回答、来源与元信息。
+
+    Args:
+        query: 查询问题文本
+        mode: LightRAG 查询模式（naive/local/global/hybrid/mix）
+        top_k: 召回条数上限（1-50）
+
+    Returns:
+        知识图谱结构化查询结果（JSON格式）
+    """
+
+    normalized_query = str(query or "").strip()
+    if not normalized_query:
+        raise ValueError("query is required")
+
+    result = _run_async(
+        lambda: LightRagService().query(
+            query=normalized_query,
+            mode=_normalize_mode(mode),
+            top_k=_clamp_int(top_k, default=5, min_value=1, max_value=50),
+        )
+    )
+    payload = LightRagQueryResponse.model_validate(result).model_dump(mode="json")
+    return json.dumps(payload, ensure_ascii=False, indent=2, default=str)

@@ -44,6 +44,8 @@ export interface OpenClawCatalogSource {
   sourceKey: string
   title: string
   description: string
+  sourceName?: string | null
+  sourceDescription?: string | null
   isSystem: boolean
   enabled: boolean
   bindable: boolean

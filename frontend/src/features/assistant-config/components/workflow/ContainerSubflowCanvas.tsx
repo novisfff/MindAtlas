@@ -895,7 +895,7 @@ export function ContainerSubflowCanvas({
             nodeType: 'tool',
             positionX: position.x,
             positionY: position.y,
-            label: payload.toolName,
+            label: toolDef?.displayName ?? payload.toolName,
             toolName: payload.toolName,
             toolDef,
           })

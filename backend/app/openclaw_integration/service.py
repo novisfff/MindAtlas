@@ -7,10 +7,11 @@ import secrets
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 from uuid import UUID, uuid4
 
 from fastapi import Request
+from pydantic import ValidationError
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
@@ -28,15 +29,11 @@ from app.assistant_config.models import AssistantAgentProfile, AssistantTool, As
 from app.assistant_config.registry import ToolRegistry
 from app.assistant_config.schemas import AgentPublishDraftInput, WorkflowInput
 from app.assistant_config.service import AssistantConfigService
-from app.common.color_utils import pick_material_600_color
 from app.common.exceptions import ApiException
 from app.common.request_context import get_request_id
 from app.common.time import utcnow
-from app.entry.models import TimeMode
-from app.entry.schemas import EntryRequest, EntrySearchRequest, EntryResponse
-from app.entry.service import EntryService
 from app.entry_type.models import EntryType
-from app.lightrag.service import LightRagService
+from app.lightrag.schemas import LightRagQueryResponse
 from app.openclaw_integration.models import OpenClawCapabilityItem
 from app.openclaw_integration.registry import (
     OpenClawSystemItemDefinition,
@@ -54,29 +51,42 @@ from app.openclaw_integration.schemas import (
     OpenClawCatalogSourceListResponse,
     OpenClawCatalogSourceResponse,
     OpenClawCatalogSourceType,
+    OpenClawCreateRelationRequest,
+    OpenClawEntryRecordResponse,
+    OpenClawGenerateMonthlyReportRequest,
+    OpenClawGenerateWeeklyReportRequest,
+    OpenClawGetEntryRequest,
     OpenClawIntegrationSettingsResponse,
     OpenClawIntegrationUpdateRequest,
+    OpenClawQueryKnowledgeGraphRequest,
+    OpenClawRelationRecordResponse,
     OpenClawRotateSecretResponse,
     OpenClawRuntimeCapabilityResponse,
+    OpenClawSearchEntriesRequest,
+    OpenClawSearchEntriesResponse,
     OpenClawToolResponseMode,
 )
 from app.relation.models import RelationType
-from app.relation.schemas import RelationRequest, RelationResponse
-from app.relation.service import RelationService
 from app.report.schemas import MonthlyReportResponse, WeeklyReportResponse
-from app.report.service import MonthlyReportService, WeeklyReportService
 from app.system_settings.models import AppSetting
 from app.system_settings.runtime_config_service import resolve_runtime_knowledge_graph_config
 from app.system_settings.service import resolve_system_locale
-from app.tag.models import Tag
 
 logger = logging.getLogger(__name__)
 
 OPENCLAW_INTEGRATION_CONFIG_KEY = "openclaw_integration_config"
 OPENCLAW_CAPABILITY_KEY_RE = re.compile(r"^[a-z0-9_]+$")
 OPENCLAW_SCHEMA_FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-OPENCLAW_SYSTEM_ITEM_VERSION = 6
+OPENCLAW_SYSTEM_ITEM_VERSION = 7
 OPENCLAW_RETIRED_SOURCE_TOOL_NAMES = frozenset({"openclaw_capture_entry"})
+OPENCLAW_SOURCE_TOOL_ALIAS_MAP: dict[str, str] = {
+    "openclaw_search_entries": "search_entries",
+    "openclaw_get_entry": "get_entry_detail",
+    "openclaw_create_relation": "create_relation",
+    "openclaw_query_knowledge_graph": "query_knowledge_graph",
+    "openclaw_generate_weekly_report": "generate_weekly_report",
+    "openclaw_generate_monthly_report": "generate_monthly_report",
+}
 
 OPENCLAW_AUTH_ERROR_CODE = 40161
 OPENCLAW_DISABLED_ERROR_CODE = 40361
@@ -116,6 +126,7 @@ class _CatalogItemAvailability:
 
 @dataclass(frozen=True)
 class _ResolvedToolSource:
+    source_tool_name: str
     source_name: str
     source_description: str
     is_system: bool
@@ -132,11 +143,37 @@ class _WorkflowContractSnapshot:
     output_summary: str
 
 
+@dataclass(frozen=True)
+class _OpenClawToolContractAdapter:
+    runtime_tool_name: str
+    prepare_request: Callable[["OpenClawIntegrationService", dict[str, Any]], tuple[dict[str, Any], dict[str, Any]]]
+    build_response: Callable[[Any], dict[str, Any]]
+
+
 def _normalize_optional_text(value: Any) -> str | None:
     if value is None:
         return None
     normalized = str(value).strip()
     return normalized or None
+
+
+def _canonicalize_source_tool_name(source_tool_name: str | None) -> str | None:
+    normalized = _normalize_optional_text(source_tool_name)
+    if normalized is None:
+        return None
+    return OPENCLAW_SOURCE_TOOL_ALIAS_MAP.get(normalized, normalized)
+
+
+def _validate_openclaw_request_model(model_cls: type[Any], payload: dict[str, Any]) -> Any:
+    try:
+        return model_cls.model_validate(payload)
+    except ValidationError as exc:
+        raise ApiException(
+            status_code=422,
+            code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE,
+            message="Capability input payload is invalid",
+            details={"errors": exc.errors()},
+        ) from exc
 
 
 def _localized_message(locale: str, *, zh: str, en: str) -> str:
@@ -546,6 +583,246 @@ def _extract_entry_reference_id(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _load_tool_json_value(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except Exception:
+            from app.assistant.workflow.engine.runtime_helpers import extract_json_object
+
+            parsed = extract_json_object(raw)
+            if parsed is not None:
+                return parsed
+    raise ApiException(
+        status_code=422,
+        code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE,
+        message="Tool or target did not return valid JSON content",
+    )
+
+
+def _build_openclaw_entry_record(payload: dict[str, Any]) -> dict[str, Any]:
+    return OpenClawEntryRecordResponse.model_validate(
+        {
+            "id": payload.get("id"),
+            "title": payload.get("title"),
+            "summary": payload.get("summary"),
+            "content": payload.get("content"),
+            "entryTypeCode": payload.get("type_code", payload.get("entryTypeCode")),
+            "entryTypeName": payload.get("type", payload.get("entryTypeName")),
+            "tagNames": payload.get("tags", payload.get("tagNames", [])),
+            "timeMode": payload.get("time_mode", payload.get("timeMode", "NONE")),
+            "timeAt": payload.get("time_at", payload.get("timeAt")),
+            "timeFrom": payload.get("time_from", payload.get("timeFrom")),
+            "timeTo": payload.get("time_to", payload.get("timeTo")),
+            "createdAt": payload.get("created_at", payload.get("createdAt")),
+            "updatedAt": payload.get("updated_at", payload.get("updatedAt")),
+        }
+    ).model_dump(mode="json", by_alias=True)
+
+
+def _build_openclaw_relation_record(payload: dict[str, Any]) -> dict[str, Any]:
+    return OpenClawRelationRecordResponse.model_validate(
+        {
+            "id": payload.get("id"),
+            "sourceEntryId": payload.get("source_entry_id", payload.get("sourceEntryId")),
+            "sourceEntryTitle": payload.get("source_entry_title", payload.get("sourceEntryTitle")),
+            "targetEntryId": payload.get("target_entry_id", payload.get("targetEntryId")),
+            "targetEntryTitle": payload.get("target_entry_title", payload.get("targetEntryTitle")),
+            "relationTypeCode": payload.get("relation_type_code", payload.get("relationTypeCode")),
+            "relationTypeName": payload.get("relation_type_name", payload.get("relationTypeName")),
+            "description": payload.get("description"),
+        }
+    ).model_dump(mode="json", by_alias=True)
+
+
+def _resolve_openclaw_entry_type_code(service: "OpenClawIntegrationService", entry_type: str | None) -> str | None:
+    normalized = _normalize_optional_text(entry_type)
+    if normalized is None:
+        return None
+    row = (
+        service.db.query(EntryType)
+        .filter(
+            EntryType.enabled.is_(True),
+            (func.lower(EntryType.code) == normalized.lower()) | (func.lower(EntryType.name) == normalized.lower()),
+        )
+        .first()
+    )
+    if row is None:
+        raise ApiException(status_code=400, code=40064, message=f"Unknown entry type: {normalized}")
+    return row.code
+
+
+def _prepare_search_entries_request(
+    service: "OpenClawIntegrationService",
+    raw_payload: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    request = _validate_openclaw_request_model(OpenClawSearchEntriesRequest, raw_payload or {})
+    normalized_payload = request.model_dump(mode="json", by_alias=True)
+    return normalized_payload, {
+        "keyword": request.query,
+        "type_code": _resolve_openclaw_entry_type_code(service, request.entry_type),
+        "tag_names": request.tag_names,
+        "time_from": request.time_from.date().isoformat() if request.time_from else None,
+        "time_to": request.time_to.date().isoformat() if request.time_to else None,
+        "limit": request.limit,
+    }
+
+
+def _prepare_get_entry_request(
+    _service: "OpenClawIntegrationService",
+    raw_payload: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    entry_id = _extract_entry_reference_id(raw_payload or {})
+    request = _validate_openclaw_request_model(OpenClawGetEntryRequest, {"entryId": entry_id})
+    normalized_payload = request.model_dump(mode="json", by_alias=True)
+    return normalized_payload, {"entry_id": str(request.entry_id)}
+
+
+def _prepare_create_relation_request(
+    _service: "OpenClawIntegrationService",
+    raw_payload: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    request = _validate_openclaw_request_model(OpenClawCreateRelationRequest, raw_payload or {})
+    normalized_payload = request.model_dump(mode="json", by_alias=True)
+    return normalized_payload, {
+        "source_entry_id": str(request.source_entry_id),
+        "target_entry_id": str(request.target_entry_id),
+        "relation_type": request.relation_type,
+        "description": request.description,
+    }
+
+
+def _prepare_query_knowledge_graph_request(
+    _service: "OpenClawIntegrationService",
+    raw_payload: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    request = _validate_openclaw_request_model(OpenClawQueryKnowledgeGraphRequest, raw_payload or {})
+    normalized_payload = request.model_dump(mode="json", by_alias=True)
+    return normalized_payload, {
+        "query": request.query,
+        "mode": request.mode,
+        "top_k": request.top_k,
+    }
+
+
+def _prepare_weekly_report_request(
+    _service: "OpenClawIntegrationService",
+    raw_payload: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    request = _validate_openclaw_request_model(OpenClawGenerateWeeklyReportRequest, raw_payload or {})
+    normalized_payload = request.model_dump(mode="json", by_alias=True)
+    return normalized_payload, {
+        "week_start": request.week_start.isoformat() if request.week_start else None,
+        "force_regenerate": request.force_regenerate,
+    }
+
+
+def _prepare_monthly_report_request(
+    _service: "OpenClawIntegrationService",
+    raw_payload: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    request = _validate_openclaw_request_model(OpenClawGenerateMonthlyReportRequest, raw_payload or {})
+    normalized_payload = request.model_dump(mode="json", by_alias=True)
+    return normalized_payload, {
+        "month_start": request.month_start.isoformat() if request.month_start else None,
+        "force_regenerate": request.force_regenerate,
+    }
+
+
+def _build_search_entries_response(value: Any) -> dict[str, Any]:
+    payload = _load_tool_json_value(value)
+    if isinstance(payload, list):
+        items = payload
+        total = len(items)
+    elif isinstance(payload, dict):
+        items = payload.get("items", [])
+        total = payload.get("total", len(items) if isinstance(items, list) else 0)
+    else:
+        raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message="search_entries returned invalid JSON")
+    if not isinstance(items, list):
+        raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message="search_entries items must be a list")
+    return OpenClawSearchEntriesResponse(
+        total=int(total or 0),
+        items=[OpenClawEntryRecordResponse.model_validate(_build_openclaw_entry_record(item)) for item in items if isinstance(item, dict)],
+    ).model_dump(mode="json", by_alias=True)
+
+
+def _build_get_entry_response(value: Any) -> dict[str, Any]:
+    payload = _load_tool_json_value(value)
+    if not isinstance(payload, dict):
+        raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message="get_entry_detail returned invalid JSON")
+    return _build_openclaw_entry_record(payload)
+
+
+def _build_create_relation_response(value: Any) -> dict[str, Any]:
+    payload = _load_tool_json_value(value)
+    if not isinstance(payload, dict):
+        raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message="create_relation returned invalid JSON")
+    return _build_openclaw_relation_record(payload)
+
+
+def _build_query_knowledge_graph_response(value: Any) -> dict[str, Any]:
+    payload = _load_tool_json_value(value)
+    if not isinstance(payload, dict):
+        raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message="query_knowledge_graph returned invalid JSON")
+    return LightRagQueryResponse.model_validate(payload).model_dump(mode="json", by_alias=True)
+
+
+def _build_weekly_report_response(value: Any) -> dict[str, Any]:
+    payload = _load_tool_json_value(value)
+    if not isinstance(payload, dict):
+        raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message="generate_weekly_report returned invalid JSON")
+    return WeeklyReportResponse.model_validate(payload).model_dump(mode="json", by_alias=True)
+
+
+def _build_monthly_report_response(value: Any) -> dict[str, Any]:
+    payload = _load_tool_json_value(value)
+    if not isinstance(payload, dict):
+        raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message="generate_monthly_report returned invalid JSON")
+    return MonthlyReportResponse.model_validate(payload).model_dump(mode="json", by_alias=True)
+
+
+OPENCLAW_TOOL_CONTRACT_ADAPTERS: dict[str, _OpenClawToolContractAdapter] = {
+    "search_entries": _OpenClawToolContractAdapter(
+        runtime_tool_name="search_entries",
+        prepare_request=_prepare_search_entries_request,
+        build_response=_build_search_entries_response,
+    ),
+    "get_entry_detail": _OpenClawToolContractAdapter(
+        runtime_tool_name="get_entry_detail",
+        prepare_request=_prepare_get_entry_request,
+        build_response=_build_get_entry_response,
+    ),
+    "create_relation": _OpenClawToolContractAdapter(
+        runtime_tool_name="create_relation",
+        prepare_request=_prepare_create_relation_request,
+        build_response=_build_create_relation_response,
+    ),
+    "query_knowledge_graph": _OpenClawToolContractAdapter(
+        runtime_tool_name="query_knowledge_graph",
+        prepare_request=_prepare_query_knowledge_graph_request,
+        build_response=_build_query_knowledge_graph_response,
+    ),
+    "generate_weekly_report": _OpenClawToolContractAdapter(
+        runtime_tool_name="generate_weekly_report",
+        prepare_request=_prepare_weekly_report_request,
+        build_response=_build_weekly_report_response,
+    ),
+    "generate_monthly_report": _OpenClawToolContractAdapter(
+        runtime_tool_name="generate_monthly_report",
+        prepare_request=_prepare_monthly_report_request,
+        build_response=_build_monthly_report_response,
+    ),
+}
+
+
 class OpenClawIntegrationService:
     def __init__(self, db: Session):
         self.db = db
@@ -650,17 +927,45 @@ class OpenClawIntegrationService:
             raise ApiException(status_code=409, code=40971, message=f"OpenClaw tool name already exists: {normalized}")
         return normalized
 
-    def _system_tool_definition_map(self) -> dict[str, Any]:
+    def _system_tool_definition_map(self, *, locale: str | None = None) -> dict[str, Any]:
         return {
             definition.name: definition
-            for definition in ToolRegistry.list_system_tool_definitions()
+            for definition in ToolRegistry.list_system_tool_definitions(locale=locale)
             if getattr(definition, "name", None)
         }
+
+    @staticmethod
+    def _resolve_tool_contract_adapter(source_tool_name: str | None) -> _OpenClawToolContractAdapter | None:
+        canonical_name = _canonicalize_source_tool_name(source_tool_name)
+        if canonical_name is None:
+            return None
+        return OPENCLAW_TOOL_CONTRACT_ADAPTERS.get(canonical_name)
 
     @staticmethod
     def _is_retired_source_tool_name(source_tool_name: str | None) -> bool:
         normalized = _normalize_optional_text(source_tool_name)
         return bool(normalized and normalized.lower() in OPENCLAW_RETIRED_SOURCE_TOOL_NAMES)
+
+    def _migrate_legacy_source_tool_bindings(self) -> bool:
+        legacy_names = tuple(OPENCLAW_SOURCE_TOOL_ALIAS_MAP.keys())
+        if not legacy_names:
+            return False
+
+        changed = False
+        items = (
+            self.db.query(OpenClawCapabilityItem)
+            .filter(
+                OpenClawCapabilityItem.source_type == "tool",
+                OpenClawCapabilityItem.source_tool_name.in_(legacy_names),
+            )
+            .all()
+        )
+        for item in items:
+            canonical_name = _canonicalize_source_tool_name(item.source_tool_name)
+            if canonical_name and canonical_name != item.source_tool_name:
+                item.source_tool_name = canonical_name
+                changed = True
+        return changed
 
     def _retired_source_reason(self, *, locale: str) -> str:
         return _localized_message(
@@ -686,6 +991,7 @@ class OpenClawIntegrationService:
         *,
         tool_id: UUID | None,
         source_tool_name: str | None,
+        locale: str | None = None,
     ) -> _ResolvedToolSource | None:
         if tool_id is not None:
             tool_model = (
@@ -696,6 +1002,7 @@ class OpenClawIntegrationService:
             if tool_model is not None:
                 runtime_tool = self.tool_registry.resolve(tool_model.name) if tool_model.enabled else None
                 return _ResolvedToolSource(
+                    source_tool_name=tool_model.name,
                     source_name=tool_model.name,
                     source_description=tool_model.description or "",
                     is_system=bool(tool_model.is_system),
@@ -704,14 +1011,16 @@ class OpenClawIntegrationService:
                     tool_runtime=runtime_tool,
                 )
 
-        if source_tool_name:
-            system_map = self._system_tool_definition_map()
-            if source_tool_name in system_map:
-                definition = system_map[source_tool_name]
-                runtime_tool = self.tool_registry.resolve(source_tool_name)
+        resolved_source_tool_name = _canonicalize_source_tool_name(source_tool_name)
+        if resolved_source_tool_name:
+            system_map = self._system_tool_definition_map(locale=locale)
+            if resolved_source_tool_name in system_map:
+                definition = system_map[resolved_source_tool_name]
+                runtime_tool = self.tool_registry.resolve(resolved_source_tool_name)
                 return _ResolvedToolSource(
-                    source_name=definition.name,
-                    source_description=definition.description,
+                    source_tool_name=definition.name,
+                    source_name=definition.display_name,
+                    source_description=definition.display_description or definition.description,
                     is_system=True,
                     enabled=runtime_tool is not None,
                     tool_model=None,
@@ -720,12 +1029,13 @@ class OpenClawIntegrationService:
 
             tool_model = (
                 self.db.query(AssistantTool)
-                .filter(AssistantTool.name == source_tool_name)
+                .filter(AssistantTool.name == resolved_source_tool_name)
                 .first()
             )
             if tool_model is not None:
                 runtime_tool = self.tool_registry.resolve(tool_model.name) if tool_model.enabled else None
                 return _ResolvedToolSource(
+                    source_tool_name=tool_model.name,
                     source_name=tool_model.name,
                     source_description=tool_model.description or "",
                     is_system=bool(tool_model.is_system),
@@ -937,7 +1247,7 @@ class OpenClawIntegrationService:
         migrated = bool(payload.get("catalogMigrated", False))
         item_version = self._system_item_version(payload)
         should_seed_missing = item_version < OPENCLAW_SYSTEM_ITEM_VERSION
-        changed = False
+        changed = self._migrate_legacy_source_tool_bindings()
 
         definitions = list_openclaw_system_item_definitions(locale)
         definition_keys = {definition.key for definition in definitions}
@@ -1183,7 +1493,11 @@ class OpenClawIntegrationService:
             )
 
         if item.source_type == "tool":
-            resolved = self._resolve_tool_source(tool_id=item.tool_id, source_tool_name=item.source_tool_name)
+            resolved = self._resolve_tool_source(
+                tool_id=item.tool_id,
+                source_tool_name=item.source_tool_name,
+                locale=locale,
+            )
             if resolved is None:
                 return _CatalogItemAvailability(
                     available=False,
@@ -1214,16 +1528,19 @@ class OpenClawIntegrationService:
                     published_version_id=None,
                     implementation_type="tool",
                 )
-            system_definition = get_openclaw_system_item_definition_by_source_tool_name(resolved.source_name, locale=locale)
+            system_definition = get_openclaw_system_item_definition_by_source_tool_name(
+                resolved.source_tool_name,
+                locale=locale,
+            )
             if system_definition is not None:
                 available, reason = self._availability_for_system_item_definition(system_definition, locale=locale)
                 if not available:
                     return _CatalogItemAvailability(
                         available=False,
                         reason=reason,
-                        source_name=system_definition.title,
-                        source_description=system_definition.description,
-                        source_is_system=True,
+                        source_name=resolved.source_name,
+                        source_description=resolved.source_description,
+                        source_is_system=resolved.is_system,
                         source_enabled=True,
                         published_version_id=None,
                         implementation_type=system_definition.implementation_type,
@@ -1231,10 +1548,8 @@ class OpenClawIntegrationService:
             return _CatalogItemAvailability(
                 available=True,
                 reason=None,
-                source_name=system_definition.title if system_definition is not None else resolved.source_name,
-                source_description=(
-                    system_definition.description if system_definition is not None else resolved.source_description
-                ),
+                source_name=resolved.source_name,
+                source_description=resolved.source_description,
                 source_is_system=resolved.is_system,
                 source_enabled=True,
                 published_version_id=None,
@@ -1524,7 +1839,11 @@ class OpenClawIntegrationService:
         source_tool_name: str | None,
         locale: str,
     ) -> tuple[dict[str, Any], dict[str, Any], str, str, OpenClawToolResponseMode]:
-        resolved = self._resolve_tool_source(tool_id=tool_id, source_tool_name=source_tool_name)
+        resolved = self._resolve_tool_source(
+            tool_id=tool_id,
+            source_tool_name=source_tool_name,
+            locale=locale,
+        )
         if resolved is None:
             raise ApiException(status_code=422, code=OPENCLAW_INVALID_SOURCE_ERROR_CODE, message="Tool source not found")
         if not resolved.enabled:
@@ -1534,7 +1853,10 @@ class OpenClawIntegrationService:
                 message=f"Tool source is disabled: {resolved.source_name}",
             )
 
-        system_item_definition = get_openclaw_system_item_definition_by_source_tool_name(resolved.source_name, locale=locale)
+        system_item_definition = get_openclaw_system_item_definition_by_source_tool_name(
+            resolved.source_tool_name,
+            locale=locale,
+        )
         if system_item_definition is not None:
             input_schema = _normalize_json_object_schema(system_item_definition.input_schema, label="input")
             output_schema = _normalize_json_object_schema(system_item_definition.output_schema, label="output")
@@ -1546,7 +1868,7 @@ class OpenClawIntegrationService:
                 "json_schema",
             )
 
-        system_definition = self._system_tool_definition_map().get(resolved.source_name)
+        system_definition = self._system_tool_definition_map(locale=locale).get(resolved.source_tool_name)
         if system_definition is not None:
             input_schema = system_definition.json_schema or _schema_from_tool_params(
                 [
@@ -1704,7 +2026,28 @@ class OpenClawIntegrationService:
             workflow_id = None
             agent_profile_id = agent_profile.id
         else:
-            resolved = self._resolve_tool_source(tool_id=request.tool_id, source_tool_name=request.source_tool_name)
+            requested_source_tool_name = (
+                request.source_tool_name
+                if request.source_tool_name is not None
+                else (item.source_tool_name if item is not None else None)
+            )
+            keeps_existing_retired_binding = bool(
+                item is not None
+                and item.source_type == "tool"
+                and self._is_retired_source_tool_name(item.source_tool_name)
+                and requested_source_tool_name == item.source_tool_name
+            )
+            if self._is_retired_source_tool_name(requested_source_tool_name) and not keeps_existing_retired_binding:
+                raise ApiException(
+                    status_code=422,
+                    code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
+                    message=self._retired_source_reason(locale=locale),
+                )
+            resolved = self._resolve_tool_source(
+                tool_id=request.tool_id,
+                source_tool_name=request.source_tool_name,
+                locale=locale,
+            )
             if resolved is None:
                 raise ApiException(status_code=422, code=OPENCLAW_INVALID_SOURCE_ERROR_CODE, message="Tool source not found")
             if not resolved.enabled:
@@ -1713,13 +2056,7 @@ class OpenClawIntegrationService:
                     code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
                     message=f"Tool is disabled: {resolved.source_name}",
                 )
-            keeps_existing_retired_binding = bool(
-                item is not None
-                and item.source_type == "tool"
-                and self._is_retired_source_tool_name(item.source_tool_name)
-                and resolved.source_name == item.source_tool_name
-            )
-            if self._is_retired_source_tool_name(resolved.source_name) and not keeps_existing_retired_binding:
+            if self._is_retired_source_tool_name(resolved.source_tool_name) and not keeps_existing_retired_binding:
                 raise ApiException(
                     status_code=422,
                     code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
@@ -1743,7 +2080,7 @@ class OpenClawIntegrationService:
             input_summary = str(request.input_summary or "").strip() or default_input_summary
             output_summary = str(request.output_summary or "").strip() or default_output_summary
             tool_response_mode = request.tool_response_mode or default_mode
-            source_tool_name = resolved.source_name
+            source_tool_name = resolved.source_tool_name
             tool_id = resolved.tool_model.id if resolved.tool_model is not None else None
             workflow_id = None
             agent_profile_id = None
@@ -1801,7 +2138,7 @@ class OpenClawIntegrationService:
         items: list[OpenClawCatalogSourceResponse] = []
 
         if source_type == "tool":
-            system_defs = ToolRegistry.list_system_tool_definitions()
+            system_defs = ToolRegistry.list_system_tool_definitions(locale=locale)
             disabled_tool_names = {
                 name
                 for name, enabled in self.db.query(AssistantTool.name, AssistantTool.enabled)
@@ -1836,8 +2173,8 @@ class OpenClawIntegrationService:
                         for param in definition.output_params
                     ]
                 )
-                title = definition.name
-                description = definition.description
+                title = definition.display_name
+                description = definition.display_description or definition.description
                 unavailable_reason = (
                     _localized_message(locale, zh="Tool 已禁用。", en="Tool is disabled.")
                     if is_disabled
@@ -1849,8 +2186,6 @@ class OpenClawIntegrationService:
                 default_tool_response_mode: OpenClawToolResponseMode = "json_schema"
 
                 if system_item_definition is not None:
-                    title = system_item_definition.title
-                    description = system_item_definition.description
                     default_input_schema = system_item_definition.input_schema or default_input_schema
                     default_output_schema = system_item_definition.output_schema or default_output_schema
                     default_input_summary = system_item_definition.input_summary or default_input_summary
@@ -1866,6 +2201,8 @@ class OpenClawIntegrationService:
                         source_key=f"system:{definition.name}",
                         title=title,
                         description=description,
+                        source_name=title,
+                        source_description=description,
                         is_system=True,
                         enabled=not is_disabled,
                         bindable=bindable,
@@ -1895,6 +2232,8 @@ class OpenClawIntegrationService:
                         source_key=f"tool:{tool.id}",
                         title=tool.name,
                         description=tool.description or "",
+                        source_name=tool.name,
+                        source_description=tool.description or "",
                         is_system=False,
                         enabled=bool(tool.enabled),
                         bindable=bool(tool.enabled),
@@ -1938,6 +2277,8 @@ class OpenClawIntegrationService:
                         source_key=f"workflow:{workflow.id}",
                         title=workflow.name,
                         description=workflow.description or "",
+                        source_name=workflow.name,
+                        source_description=workflow.description or "",
                         is_system=bool(workflow.is_system),
                         enabled=bool(workflow.enabled),
                         bindable=bindable and bool(workflow.enabled),
@@ -1984,6 +2325,8 @@ class OpenClawIntegrationService:
                         source_key=f"agent:{agent.id}",
                         title=agent.name,
                         description=agent.description or "",
+                        source_name=agent.name,
+                        source_description=agent.description or "",
                         is_system=bool(agent.is_system),
                         enabled=bool(agent.enabled),
                         bindable=bindable,
@@ -2278,18 +2621,23 @@ class OpenClawIntegrationService:
         resolved = self._resolve_tool_source(tool_id=item.tool_id, source_tool_name=item.source_tool_name)
         if resolved is None or resolved.tool_runtime is None:
             raise ApiException(status_code=409, code=40961, message="Bound tool is unavailable")
-        normalized_payload = raw_payload
-        if item.source_tool_name == "openclaw_get_entry":
-            entry_id = _extract_entry_reference_id(raw_payload)
-            if entry_id:
-                normalized_payload = {"entryId": entry_id}
         input_schema = _normalize_json_object_schema(item.input_schema_json or _EMPTY_OBJECT_SCHEMA, label="input")
         output_schema = _normalize_json_object_schema(item.output_schema_json or _EMPTY_OBJECT_SCHEMA, label="output")
-        _validate_value_against_schema(input_schema, normalized_payload, label="input")
         from app.assistant.workflow.engine.runtime_helpers import stringify, wrap_tool_with_db
 
         runner = wrap_tool_with_db(resolved.tool_runtime, self.db.get_bind())
-        result = runner(**normalized_payload)
+        adapter = self._resolve_tool_contract_adapter(item.source_tool_name or resolved.source_tool_name)
+
+        if adapter is not None and resolved.is_system:
+            normalized_payload, tool_args = adapter.prepare_request(self, raw_payload or {})
+            _validate_value_against_schema(input_schema, normalized_payload, label="input")
+            result = runner(**tool_args)
+            payload = adapter.build_response(result)
+            _validate_value_against_schema(output_schema, payload, label="output")
+            return payload
+
+        _validate_value_against_schema(input_schema, raw_payload, label="input")
+        result = runner(**raw_payload)
         if item.tool_response_mode == "text_field":
             properties = output_schema.get("properties") if isinstance(output_schema.get("properties"), dict) else {}
             field_name = next(iter(properties.keys()), "text")

@@ -18,12 +18,12 @@ OpenClawSystemImplementationType = Literal["entry", "relation", "knowledge_graph
 OPENCLAW_CONTEXT_CAPTURE_DEFAULT_KEY: OpenClawSystemDefaultKey = "submit_context_capture"
 OPENCLAW_CONTEXT_CAPTURE_WORKFLOW_NAME = "system_openclaw_context_capture__workflow"
 OPENCLAW_SYSTEM_DEFAULT_TOOL_SOURCE_NAMES: dict[OpenClawSystemCapabilityKey, str] = {
-    "search_entries": "openclaw_search_entries",
-    "get_entry": "openclaw_get_entry",
-    "create_relation": "openclaw_create_relation",
-    "query_knowledge_graph": "openclaw_query_knowledge_graph",
-    "generate_weekly_report": "openclaw_generate_weekly_report",
-    "generate_monthly_report": "openclaw_generate_monthly_report",
+    "search_entries": "search_entries",
+    "get_entry": "get_entry_detail",
+    "create_relation": "create_relation",
+    "query_knowledge_graph": "query_knowledge_graph",
+    "generate_weekly_report": "generate_weekly_report",
+    "generate_monthly_report": "generate_monthly_report",
 }
 
 

@@ -1,4 +1,5 @@
 import { QueryClient, useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useTranslation } from 'react-i18next'
 import * as toolsApi from './api/tools'
 import * as skillsApi from './api/skills'
 import * as workflowsApi from './api/workflows'
@@ -51,10 +52,14 @@ export const useToolsQuery = () =>
 
 // 系统工具完整定义（从代码获取）
 export const useSystemToolDefinitionsQuery = () =>
-  useQuery({
-    queryKey: ['system-tool-definitions'],
-    queryFn: () => toolsApi.getSystemToolDefinitions({ includeSchema: false }),
-  })
+  {
+    const { i18n } = useTranslation()
+
+    return useQuery({
+      queryKey: ['system-tool-definitions', i18n.language],
+      queryFn: () => toolsApi.getSystemToolDefinitions({ includeSchema: false }),
+    })
+  }
 
 export const useUpdateSystemToolEnabledMutation = () => {
   const qc = useQueryClient()
