@@ -881,6 +881,8 @@
       "systemItemsReset": "系统项已重置",
       "systemPresetsReset": "系统项已重置",
       "deleted": "目录项已删除",
+      "syncWarningTitle": "系统项同步未完成",
+      "loadFailedDescription": "暂时无法加载 OpenClaw 集成设置。你可以先刷新重试，或检查后端日志。",
       "invalidSchemaJson": "Schema 必须是合法的 JSON。",
       "invalidSchemaObject": "Schema 根节点必须是 JSON 对象。"
     }
@@ -1111,6 +1113,8 @@
       "noDescription": "无描述",
       "enable": "启用",
       "disable": "禁用",
+      "enabledStateOn": "已启用",
+      "enabledStateOff": "已停用",
       "deleteTitle": "删除工具",
       "deleteDescription": "确定要删除此工具吗？此操作无法撤销。",
       "name": "名称",
@@ -2031,6 +2035,7 @@
       "sun": "日"
     },
     "noEntries": "该日期暂无记录",
+    "viewMore": "查看更多",
     "moreEvents": "还有 {{count}} 项"
   },
   "relations": {

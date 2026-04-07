@@ -355,6 +355,7 @@ class OpenClawIntegrationSettingsResponse(CamelModel):
     secret_configured: bool = Field(alias="secretConfigured")
     secret_hint: str | None = Field(default=None, alias="secretHint")
     secret_last_rotated_at: datetime | None = Field(default=None, alias="secretLastRotatedAt")
+    sync_warning: str | None = Field(default=None, alias="syncWarning")
     catalog_items: list[OpenClawCapabilityItemResponse] = Field(default_factory=list, alias="catalogItems")
 
 

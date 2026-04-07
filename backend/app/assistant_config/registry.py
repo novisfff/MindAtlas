@@ -78,8 +78,8 @@ class _BaseRegistry:
 class ToolRegistry(_BaseRegistry):
     """工具注册表 - 解析系统本地工具和数据库自定义工具"""
 
-    # 内部系统工具：不对外展示，但仍可在运行时被内部逻辑调用
-    INTERNAL_TOOL_NAMES: frozenset[str] = frozenset({"kb_search", "update_entry"})
+    # 内部系统工具：默认不对外展示，但仍可在运行时被内部逻辑调用
+    INTERNAL_TOOL_NAMES: frozenset[str] = frozenset({"kb_search"})
     SYSTEM_TOOL_OUTPUT_PARAMS: dict[str, list[dict[str, str]]] = {
         "search_entries": [
             {

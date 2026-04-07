@@ -1,13 +1,15 @@
 import { useEffect, useState, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Menu } from 'lucide-react'
+import { useSearchParams } from 'react-router-dom'
+import { uiChrome, uiRadius, uiSurface } from '@/components/ui/styles'
+import { cn } from '@/lib/utils'
 import { ChatWindow } from './components/ChatWindow'
 import { ConversationList } from './components/ConversationList'
 import { ChatStoreProvider } from './components/ChatStoreProvider'
 import { useConversationsQuery, useConversationQuery, useDeleteConversationMutation } from './queries'
 import { listPendingApprovals } from './api'
 import { useChatStore } from './stores/chat-store'
-import { useSearchParams } from 'react-router-dom'
 
 function AssistantPageContent() {
   const { t } = useTranslation()
@@ -203,9 +205,9 @@ function AssistantPageContent() {
   }
 
   return (
-    <div className="flex h-full">
+    <div className={cn(uiSurface.pageBackdrop, 'flex h-full min-h-0 gap-3 overflow-hidden p-3 sm:gap-4 sm:p-4 lg:p-5')}>
       {/* 左侧对话列表 */}
-      <div className="hidden w-64 shrink-0 border-r bg-muted/20 md:block">
+      <div className={cn(uiChrome.shell, 'hidden min-h-0 w-[288px] shrink-0 overflow-hidden md:flex md:flex-col')}>
         <ConversationList
           conversations={conversations}
           currentId={currentConversationId}
@@ -218,14 +220,17 @@ function AssistantPageContent() {
       {/* Mobile Sheet */}
       {isSheetOpen && (
         <div
-          className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm md:hidden"
+          className={cn(uiSurface.overlay, 'fixed inset-0 z-50 md:hidden')}
           onClick={() => setSheetOpen(false)}
           role="dialog"
           aria-modal="true"
           aria-label="Conversation list"
         >
           <div
-            className="fixed inset-y-0 left-0 z-50 w-64 border-r bg-background shadow-lg animate-in slide-in-from-left"
+            className={cn(
+              uiChrome.float,
+              'fixed inset-y-3 left-3 z-50 flex w-[min(320px,calc(100vw-1.5rem))] flex-col overflow-hidden animate-in slide-in-from-left md:hidden',
+            )}
             onClick={(e) => e.stopPropagation()}
           >
             <ConversationList
@@ -240,26 +245,26 @@ function AssistantPageContent() {
       )}
 
       {/* Right Chat Area */}
-      <div className="flex flex-1 flex-col overflow-hidden relative bg-gradient-to-b from-background to-muted/20 min-h-0">
-        <header className="flex items-center gap-3 border-b p-4 bg-background/95 backdrop-blur-xl sticky top-0 z-10 shrink-0 shadow-sm">
+      <div className={cn(uiChrome.shell, 'relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden')}>
+        <header className={cn(uiSurface.headerGlass, 'sticky top-0 z-10 flex shrink-0 items-center gap-3 border-b border-border/70 px-4 py-4 sm:px-5')}>
           <button
-            className="md:hidden p-2 -ml-2 hover:bg-muted rounded-full transition-colors"
+            className={cn(uiRadius.pill, '-ml-1 flex h-10 w-10 items-center justify-center text-muted-foreground transition-colors hover:bg-muted hover:text-foreground md:hidden')}
             onClick={() => setSheetOpen(true)}
             aria-label="Open menu"
           >
             <Menu className="h-5 w-5" />
           </button>
           <div>
-            <h1 className="text-xl font-semibold tracking-tight">
+            <h1 className="text-xl font-semibold tracking-tight text-foreground">
               {t('pages.assistant.title', 'AI Assistant')}
             </h1>
-            <p className="text-sm text-muted-foreground hidden sm:block">
+            <p className="hidden text-sm text-muted-foreground sm:block">
               {t('pages.assistant.subtitle', 'Ask me anything about your knowledge base')}
             </p>
           </div>
         </header>
 
-        <ChatWindow className="flex-1" />
+        <ChatWindow className="min-h-0 flex-1" />
       </div>
     </div>
   )

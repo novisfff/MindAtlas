@@ -22,6 +22,7 @@ import type { WeeklyReportContent, MonthlyReportContent } from '../api/reports'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { ReportHistoryDialog } from './ReportHistoryDialog'
+import { uiChrome, uiRadius } from '@/components/ui/styles'
 
 type ReportType = 'weekly' | 'monthly'
 
@@ -72,7 +73,7 @@ export function AIReportsContainer() {
 
   return (
     <>
-      <div className="rounded-xl border bg-card shadow-sm overflow-hidden">
+      <div className={cn(uiChrome.card, 'overflow-hidden')}>
         {/* Header */}
         <div className="flex items-center justify-between p-4">
           <div className="flex items-center gap-3">
@@ -80,11 +81,12 @@ export function AIReportsContainer() {
             <h3 className="font-semibold">{t('dashboard.reports.title')}</h3>
           </div>
           <div className="flex items-center gap-2">
-            <div className="flex items-center rounded-lg bg-muted p-1">
+            <div className={cn('flex items-center p-1', uiChrome.control)}>
               <button
                 onClick={() => setActiveTab('weekly')}
                 className={cn(
-                  'px-3 py-1 text-xs font-medium rounded-md transition-colors',
+                  'px-3 py-1 text-xs font-medium transition-colors',
+                  uiRadius.control,
                   activeTab === 'weekly'
                     ? 'bg-background text-foreground shadow-sm'
                     : 'text-muted-foreground hover:text-foreground'
@@ -95,7 +97,8 @@ export function AIReportsContainer() {
               <button
                 onClick={() => setActiveTab('monthly')}
                 className={cn(
-                  'px-3 py-1 text-xs font-medium rounded-md transition-colors',
+                  'px-3 py-1 text-xs font-medium transition-colors',
+                  uiRadius.control,
                   activeTab === 'monthly'
                     ? 'bg-background text-foreground shadow-sm'
                     : 'text-muted-foreground hover:text-foreground'
@@ -257,7 +260,7 @@ function FailedState({
   const isWeekly = type === 'weekly'
 
   return (
-    <div className="flex items-start gap-3 p-3 rounded-lg bg-destructive/10 text-destructive">
+    <div className={cn(uiRadius.control, 'flex items-start gap-3 bg-destructive/10 p-3 text-destructive')}>
       <AlertCircle className="h-5 w-5 mt-0.5 flex-shrink-0" />
       <div className="flex-1 min-w-0">
         <p className="text-sm font-medium">

@@ -4,6 +4,8 @@ import { useTranslation } from 'react-i18next'
 import { useEntryQuery, useUpdateEntryMutation } from './queries'
 import { EntryForm } from './components/EntryForm'
 import type { EntryUpsertRequest } from './api/entries'
+import { uiChrome, uiLayout } from '@/components/ui/styles'
+import { cn } from '@/lib/utils'
 
 export function EntryEditPage() {
   const { id } = useParams<{ id: string }>()
@@ -41,13 +43,17 @@ export function EntryEditPage() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto">
-      <h1 className="text-2xl font-bold mb-6">{t('pages.entryEdit.title')}</h1>
-      <EntryForm
-        entry={entry}
-        onSubmit={handleSubmit}
-        isSubmitting={updateMutation.isPending}
-      />
+    <div className={uiLayout.page6}>
+      <div className={uiLayout.headerBlock}>
+        <h1 className={uiLayout.headerTitle}>{t('pages.entryEdit.title')}</h1>
+      </div>
+      <div className={cn(uiChrome.shell, 'p-5 md:p-6')}>
+        <EntryForm
+          entry={entry}
+          onSubmit={handleSubmit}
+          isSubmitting={updateMutation.isPending}
+        />
+      </div>
     </div>
   )
 }

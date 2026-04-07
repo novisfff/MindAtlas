@@ -6,7 +6,15 @@ import {
     useDeleteCredentialMutation,
     useTestCredentialMutation,
 } from '../queries'
+import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { uiField } from '@/components/ui/styles'
+import {
+    SettingsBadge,
+    SettingsInset,
+    SettingsSectionHeader,
+} from '@/features/settings/components/SettingsShell'
+import { cn } from '@/lib/utils'
 import type { AiCredential } from '../api/credentials'
 
 interface ProviderConfigProps {
@@ -88,54 +96,69 @@ export function ProviderConfig({ credential, onDelete }: ProviderConfigProps) {
         formData.baseUrl !== credential.baseUrl ||
         formData.apiKey !== ''
 
+    const testBadgeClassName =
+        testStatus === 'success'
+            ? 'border-emerald-200/80 bg-emerald-50/80 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200'
+            : testStatus === 'error'
+                ? 'border-destructive/25 bg-destructive/8 text-destructive'
+                : 'border-border/80 bg-background/88 text-muted-foreground'
+
     return (
-        <div className="space-y-6 max-w-2xl">
-            <div className="flex items-center justify-between">
-                <div>
-                    <h2 className="text-lg font-medium">{t('aiProvider.providerConfig')}</h2>
-                    <p className="text-sm text-muted-foreground">{t('aiProvider.providerConfigDesc')}</p>
-                </div>
-                <div className="flex items-center gap-2">
-                    <button
-                        onClick={handleTest}
-                        disabled={testStatus === 'testing' || hasChanges}
-                        className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium border rounded-md transition-colors
-                    ${testStatus === 'success' ? 'bg-green-50 text-green-700 border-green-200' : ''}
-                    ${testStatus === 'error' ? 'bg-red-50 text-red-700 border-red-200' : ''}
-                    ${testStatus === 'idle' ? 'hover:bg-muted' : ''}
-                `}
-                        title={hasChanges ? t('aiProvider.saveBeforeTest') : t('aiProvider.testConnection')}
-                    >
-                        <Plug className={`w-4 h-4 ${testStatus === 'testing' ? 'animate-pulse' : ''}`} />
-                        {testStatus === 'testing' && t('aiProvider.testing')}
-                        {testStatus === 'success' && t('aiProvider.connected')}
-                        {testStatus === 'error' && t('aiProvider.failed')}
-                        {testStatus === 'idle' && t('aiProvider.testConnection')}
-                    </button>
-                    <button
-                        onClick={() => setDeleteId(credential.id)}
-                        className="p-2 text-destructive hover:bg-destructive/10 rounded-md transition-colors"
-                        title="Delete Provider"
-                    >
-                        <Trash2 className="w-4 h-4" />
-                    </button>
-                </div>
-            </div>
+        <div className="space-y-6">
+            <SettingsSectionHeader
+                title={t('aiProvider.providerConfig')}
+                description={t('aiProvider.providerConfigDesc')}
+                actions={
+                    <div className="flex flex-wrap items-center gap-2">
+                        <SettingsBadge>{credential.name}</SettingsBadge>
+                        <Button
+                            type="button"
+                            onClick={handleTest}
+                            disabled={testStatus === 'testing' || hasChanges}
+                            variant="outline"
+                            size="sm"
+                            title={hasChanges ? t('aiProvider.saveBeforeTest') : t('aiProvider.testConnection')}
+                        >
+                            <Plug className={cn('h-4 w-4', testStatus === 'testing' && 'animate-pulse')} />
+                            {testStatus === 'testing' && t('aiProvider.testing')}
+                            {testStatus === 'success' && t('aiProvider.connected')}
+                            {testStatus === 'error' && t('aiProvider.failed')}
+                            {testStatus === 'idle' && t('aiProvider.testConnection')}
+                        </Button>
+                        <Button
+                            type="button"
+                            onClick={() => setDeleteId(credential.id)}
+                            variant="ghost"
+                            size="icon"
+                            className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                            title="Delete Provider"
+                        >
+                            <Trash2 className="h-4 w-4" />
+                        </Button>
+                    </div>
+                }
+            />
+
+            {testStatus !== 'idle' ? (
+                <SettingsBadge className={cn('w-fit', testBadgeClassName)}>
+                    {testStatus === 'testing' ? t('aiProvider.testing') : testStatus === 'success' ? t('aiProvider.connected') : t('aiProvider.failed')}
+                </SettingsBadge>
+            ) : null}
 
             {testMessage && (
-                <div className="p-3 text-sm bg-destructive/10 text-destructive rounded-md">
+                <SettingsInset className="border-destructive/20 bg-destructive/5 text-destructive">
                     Error: {testMessage}
-                </div>
+                </SettingsInset>
             )}
 
-            <div className="grid gap-4 p-4 border rounded-xl bg-card">
+            <div className="grid gap-4">
                 <div className="grid gap-2">
                     <label className="text-sm font-medium">{t('labels.name')}</label>
                     <input
                         type="text"
                         value={formData.name}
                         onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                        className={uiField.input}
                     />
                 </div>
 
@@ -145,13 +168,13 @@ export function ProviderConfig({ credential, onDelete }: ProviderConfigProps) {
                         type="text"
                         value={formData.baseUrl}
                         onChange={(e) => setFormData({ ...formData, baseUrl: e.target.value })}
-                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                        className={uiField.input}
                     />
                 </div>
 
                 <div className="grid gap-2">
                     <label className="text-sm font-medium">
-                        API Key <span className="text-muted-foreground font-normal">({t('form.optional')})</span>
+                        API Key <span className="font-normal text-muted-foreground">({t('form.optional')})</span>
                     </label>
                     <div className="relative">
                         <input
@@ -159,7 +182,7 @@ export function ProviderConfig({ credential, onDelete }: ProviderConfigProps) {
                             value={formData.apiKey}
                             onChange={(e) => setFormData({ ...formData, apiKey: e.target.value })}
                             placeholder={t('settings.tools.leaveBlank')}
-                            className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 pr-10"
+                            className={cn(uiField.input, 'pr-10')}
                         />
                         <button
                             type="button"
@@ -171,15 +194,31 @@ export function ProviderConfig({ credential, onDelete }: ProviderConfigProps) {
                     </div>
                 </div>
 
+                <SettingsInset>
+                    <p className="text-sm leading-6 text-muted-foreground">
+                        {t('aiProvider.saveBeforeTest')}
+                    </p>
+                </SettingsInset>
+
                 <div className="flex justify-end pt-2">
-                    <button
+                    <Button
+                        type="button"
+                        onClick={handleTest}
+                        disabled={!hasChanges || updateMutation.isPending}
+                        variant="outline"
+                        className="mr-3"
+                    >
+                        <Plug className="h-4 w-4" />
+                        {t('aiProvider.testConnection')}
+                    </Button>
+                    <Button
+                        type="button"
                         onClick={handleSave}
                         disabled={!hasChanges || updateMutation.isPending}
-                        className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 transition-colors"
                     >
-                        <Save className="w-4 h-4" />
+                        <Save className="h-4 w-4" />
                         {updateMutation.isPending ? t('messages.loading') : t('actions.save')}
-                    </button>
+                    </Button>
                 </div>
             </div>
 

@@ -2,6 +2,8 @@ import { useTranslation } from 'react-i18next'
 import { Entry } from '@/types'
 import { EntryCard } from './EntryCard'
 import { FileText } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import { uiChrome, uiRadius } from '@/components/ui/styles'
 
 interface EntriesListProps {
   isLoading: boolean
@@ -11,7 +13,7 @@ interface EntriesListProps {
 
 function EntrySkeleton() {
   return (
-    <div className="h-[200px] rounded-lg border bg-card text-card-foreground shadow-sm animate-pulse p-4">
+    <div className={cn(uiChrome.card, 'h-[200px] animate-pulse p-4')}>
       <div className="h-6 w-2/3 bg-muted rounded mb-4" />
       <div className="h-4 w-full bg-muted rounded mb-2" />
       <div className="h-4 w-full bg-muted rounded mb-2" />
@@ -35,7 +37,12 @@ export function EntriesList({ isLoading, entries, onEntryClick }: EntriesListPro
 
   if (entries.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-center border rounded-lg border-dashed">
+      <div
+        className={cn(
+          uiChrome.card,
+          'flex flex-col items-center justify-center border-dashed py-16 text-center',
+        )}
+      >
         <FileText className="w-12 h-12 text-muted-foreground mb-4" />
         <h3 className="text-lg font-semibold text-foreground">{t('pages.entries.noEntries')}</h3>
         <p className="mt-2 text-sm text-muted-foreground max-w-sm">

@@ -1440,8 +1440,26 @@ class OpenClawIntegrationService:
         )
 
     def get_settings_response(self, *, preferred_locale: str | None = None) -> OpenClawIntegrationSettingsResponse:
-        self._ensure_system_items(preferred_locale=preferred_locale, commit=True)
         locale = self._current_locale(preferred_locale)
+        sync_warning: str | None = None
+        try:
+            self._ensure_system_items(preferred_locale=locale, commit=True)
+        except ApiException as exc:
+            self.db.rollback()
+            sync_warning = _localized_message(
+                locale,
+                zh=f"系统项同步未完成：{exc.message}。当前页面已回退到最近一次可用配置。",
+                en=f"System item sync did not complete: {exc.message}. The page has fallen back to the most recent usable configuration.",
+            )
+            logger.warning("OpenClaw settings sync skipped after API error: %s", exc.message)
+        except Exception:
+            self.db.rollback()
+            sync_warning = _localized_message(
+                locale,
+                zh="系统项同步未完成。当前页面已回退到最近一次可用配置，请稍后重试或检查后端日志。",
+                en="System item sync did not complete. The page has fallen back to the most recent usable configuration. Please retry later or inspect backend logs.",
+            )
+            logger.exception("OpenClaw settings sync failed unexpectedly")
         payload = self._get_payload()
         secret, secret_hint, rotated_at = self._secret_state(payload)
         items = self._list_catalog_items()
@@ -1450,6 +1468,7 @@ class OpenClawIntegrationService:
             secret_configured=secret is not None,
             secret_hint=secret_hint,
             secret_last_rotated_at=rotated_at,
+            sync_warning=sync_warning,
             catalog_items=[self._serialize_catalog_item(item, locale=locale) for item in items],
         )
 

@@ -1,6 +1,7 @@
 import { Plus, MessageSquare, Trash2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
+import { uiRadius, uiSurface } from '@/components/ui/styles'
 import { Conversation } from '../types'
 import { useState } from 'react'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -43,15 +44,14 @@ export function ConversationList({
   }
 
   return (
-    <div className="flex h-full flex-col bg-muted/10">
-      <div className="p-4 border-b bg-background/95 backdrop-blur-xl sticky top-0 z-10 transition-all">
+    <div className="flex h-full min-h-0 flex-col bg-transparent">
+      <div className={cn(uiSurface.headerGlass, 'sticky top-0 z-10 border-b border-border/70 p-4')}>
         <button
           onClick={onNew}
           className={cn(
-            'flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3',
-            'bg-gradient-to-r from-primary to-primary/80 text-primary-foreground',
-            'shadow-md hover:shadow-lg hover:from-primary/90 hover:to-primary/70',
-            'transition-all duration-200 font-medium'
+            uiRadius.control,
+            'flex w-full items-center justify-center gap-2 bg-primary px-4 py-3 text-sm font-medium text-primary-foreground',
+            'shadow-[0_12px_28px_rgba(15,23,42,0.14)] transition-all duration-200 hover:bg-primary/92'
           )}
         >
           <Plus className="h-5 w-5" />
@@ -59,10 +59,10 @@ export function ConversationList({
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-3 space-y-1 custom-scrollbar">
+      <div className="custom-scrollbar flex-1 space-y-2 overflow-y-auto p-3">
         {conversations.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-40 text-muted-foreground">
-            <MessageSquare className="h-8 w-8 mb-2 opacity-20" />
+          <div className="flex h-40 flex-col items-center justify-center text-muted-foreground">
+            <MessageSquare className="mb-2 h-8 w-8 opacity-20" />
             <p className="text-sm">{t('pages.assistant.noConversations')}</p>
           </div>
         ) : (
@@ -70,12 +70,11 @@ export function ConversationList({
             <div
               key={conv.id}
               className={cn(
-                'group relative flex items-center gap-3 rounded-lg px-3 py-3 cursor-pointer',
-                'border border-transparent transition-all duration-200',
-                'hover:bg-accent/50',
+                uiRadius.control,
+                'group relative flex cursor-pointer items-center gap-3 border px-3 py-3 transition-all duration-200',
                 currentId === conv.id
-                  ? 'bg-accent border-border/50 shadow-sm'
-                  : 'text-muted-foreground hover:text-foreground'
+                  ? 'border-border/70 bg-background/92 text-foreground shadow-[0_8px_22px_rgba(15,23,42,0.06)] dark:shadow-[0_10px_26px_rgba(2,6,23,0.24)]'
+                  : 'border-transparent text-muted-foreground hover:border-border/70 hover:bg-background/72 hover:text-foreground'
               )}
               onClick={() => onSelect(conv.id)}
             >
@@ -97,9 +96,8 @@ export function ConversationList({
                 onClick={(e) => handleDeleteClick(e, conv.id)}
                 disabled={deletingId === conv.id}
                 className={cn(
-                  "opacity-0 group-hover:opacity-100 transition-opacity",
-                  "p-1.5 hover:bg-destructive/10 hover:text-destructive rounded-md",
-                  "focus:opacity-100 focus:outline-none"
+                  'rounded-full p-1.5 transition-opacity hover:bg-destructive/10 hover:text-destructive focus:opacity-100 focus:outline-none',
+                  'opacity-0 group-hover:opacity-100'
                 )}
                 title={t('actions.delete', 'Delete')}
               >

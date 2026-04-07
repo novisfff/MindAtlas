@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { FolderOpen, Hash, Loader2, TrendingUp } from 'lucide-react'
 import { useHotnessQuery } from '../queries'
 import { cn } from '@/lib/utils'
+import { uiChrome, uiRadius } from '@/components/ui/styles'
 
 export function TypeTagHotness() {
   const { t } = useTranslation()
@@ -11,7 +12,7 @@ export function TypeTagHotness() {
 
   if (isLoading) {
     return (
-      <div className="rounded-xl border bg-card p-6 shadow-sm">
+      <div className={cn(uiChrome.card, 'p-6')}>
         <div className="flex items-center justify-center h-[400px]">
           <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
         </div>
@@ -23,8 +24,8 @@ export function TypeTagHotness() {
   const maxTagCount = Math.max(...(data?.topTags.map((t) => t.count) || [1]))
 
   return (
-    <div className="rounded-xl border bg-card shadow-sm h-full flex flex-col">
-      <div className="p-4 border-b bg-muted/10">
+    <div className={cn(uiChrome.card, 'h-full flex flex-col')}>
+      <div className="border-b bg-background/55 p-4">
         <div className="flex items-center gap-2 text-foreground/80">
           <TrendingUp className="w-4 h-4" />
           <h3 className="font-semibold text-sm">{t('dashboard.hotness.title', 'Popularity Trends')}</h3>
@@ -43,7 +44,7 @@ export function TypeTagHotness() {
 
           <div className="space-y-1">
             {data?.topTypes.length === 0 && (
-              <p className="text-xs text-muted-foreground py-2 text-center bg-muted/30 rounded-lg">
+              <p className={cn(uiRadius.control, 'bg-muted/30 py-2 text-center text-xs text-muted-foreground')}>
                 {t('dashboard.hotness.noData')}
               </p>
             )}
@@ -72,7 +73,7 @@ export function TypeTagHotness() {
 
           <div className="space-y-1">
             {data?.topTags.length === 0 && (
-              <p className="text-xs text-muted-foreground py-2 text-center bg-muted/30 rounded-lg">
+              <p className={cn(uiRadius.control, 'bg-muted/30 py-2 text-center text-xs text-muted-foreground')}>
                 {t('dashboard.hotness.noData')}
               </p>
             )}
@@ -123,11 +124,15 @@ function HotnessItem({
   return (
     <button
       onClick={onClick}
-      className="group w-full flex items-center gap-2.5 px-2 py-1 -mx-2 rounded-lg hover:bg-muted/50 transition-all duration-200 outline-none focus-visible:ring-2 focus-visible:ring-primary"
+      className={cn(
+        uiRadius.control,
+        'group -mx-2 flex w-full items-center gap-2.5 px-2 py-1 transition-all duration-200 outline-none hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-primary',
+      )}
     >
       {/* Rank Badge */}
       <div className={cn(
-        "flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[9px] font-bold shadow-sm ring-1 ring-inset ring-black/5 dark:ring-white/5",
+        "flex h-5 w-5 shrink-0 items-center justify-center text-[9px] font-bold shadow-sm ring-1 ring-inset ring-black/5 dark:ring-white/5",
+        uiRadius.inset,
         getRankStyle(rank)
       )}>
         {rank}
@@ -148,7 +153,7 @@ function HotnessItem({
               {label}
             </span>
           </div>
-          <span className="text-[10px] font-medium text-muted-foreground bg-muted/50 px-1.5 rounded-md min-w-[1.25rem] text-center">
+          <span className={cn(uiRadius.inset, 'min-w-[1.25rem] bg-muted/50 px-1.5 text-center text-[10px] font-medium text-muted-foreground')}>
             {count}
           </span>
         </div>

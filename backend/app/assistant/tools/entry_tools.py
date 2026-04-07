@@ -434,7 +434,7 @@ def update_entry(
     time_from: Optional[str] = None,
     time_to: Optional[str] = None,
 ) -> str:
-    """更新已有记录（仅供工作流内部使用）。
+    """更新已有记录（写入数据库）。
 
     Args:
         entry_id: 目标记录 UUID

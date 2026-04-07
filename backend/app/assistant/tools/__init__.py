@@ -28,6 +28,7 @@ __all__ = [
     "search_entries",
     "get_entry_detail",
     "create_entry",
+    "update_entry",
     "openclaw_capture_entry",
     "openclaw_search_entries",
     "openclaw_get_entry",

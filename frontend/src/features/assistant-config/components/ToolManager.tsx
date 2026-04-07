@@ -9,9 +9,17 @@ import {
   useUpdateSystemToolEnabledMutation,
   useDeleteToolMutation,
 } from '../queries'
+import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { ToolEditor } from './ToolEditor'
 import type { AssistantTool, SystemToolDefinition, CreateToolRequest, UpdateToolRequest } from '../api/tools'
+import { uiChrome } from '@/components/ui/styles'
+import {
+  SettingsBadge,
+  SettingsEmptyState,
+  SettingsInset,
+  SettingsSectionHeader,
+} from '@/features/settings/components/SettingsShell'
 import { cn } from '@/lib/utils'
 
 // 系统工具展示组件（支持展开/收起）
@@ -21,126 +29,159 @@ interface SystemToolItemProps {
   isToggling: boolean
 }
 
+function ToolStateBadge({ enabled }: { enabled: boolean }) {
+  const { t } = useTranslation()
+
+  return (
+    <SettingsBadge
+      className={cn(
+        'gap-1.5',
+        enabled
+          ? 'border-emerald-200/80 bg-emerald-50/90 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200'
+          : 'border-slate-200/80 bg-slate-100/90 text-slate-600 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-300',
+      )}
+    >
+      <span
+        className={cn(
+          'h-1.5 w-1.5 rounded-full',
+          enabled ? 'bg-emerald-500' : 'bg-slate-400 dark:bg-slate-500',
+        )}
+      />
+      {enabled ? t('settings.tools.enabledStateOn') : t('settings.tools.enabledStateOff')}
+    </SettingsBadge>
+  )
+}
+
 function SystemToolItem({ tool, onToggle, isToggling }: SystemToolItemProps) {
   const { t } = useTranslation()
   const [isExpanded, setIsExpanded] = useState(false)
+  const hasDetailContent = Boolean(
+    (tool.inputParams && tool.inputParams.length > 0)
+    || (tool.outputParams && tool.outputParams.length > 0)
+    || tool.returns
+  )
 
   return (
     <div
       className={cn(
-        'rounded-lg border transition-colors',
-        tool.enabled ? 'border-blue-500 bg-blue-50 dark:bg-blue-950/20' : 'hover:bg-muted/50'
+        uiChrome.card,
+        'overflow-hidden p-4 transition-colors',
+        'border-slate-200/80 bg-slate-50/40 hover:border-slate-300/80 dark:border-slate-800/80 dark:bg-white/[0.02]'
       )}
     >
-      {/* 主行 */}
-      <div className="flex items-center gap-4 p-4">
+      <div className="flex items-start gap-4">
         <button
+          type="button"
           onClick={onToggle}
           disabled={isToggling}
           title={tool.enabled ? t('settings.tools.disable') : t('settings.tools.enable')}
           className={cn(
-            'p-2 rounded-lg transition-colors',
+            uiChrome.control,
+            'flex h-11 w-11 items-center justify-center transition-colors shadow-none',
             tool.enabled
-              ? 'bg-blue-100 text-blue-600 dark:bg-blue-900 dark:text-blue-400'
-              : 'bg-muted text-muted-foreground hover:bg-primary/10 hover:text-primary'
+              ? 'border-emerald-200/80 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200'
+              : 'border-slate-200/80 bg-slate-100/90 text-slate-500 hover:bg-slate-200/70 hover:text-slate-700 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-300 dark:hover:bg-slate-700/80 dark:hover:text-slate-100'
           )}
         >
           <Power className={cn('w-5 h-5', isToggling && 'animate-pulse')} />
         </button>
 
         <button
+          type="button"
           onClick={() => setIsExpanded(!isExpanded)}
-          className="flex-1 min-w-0 text-left"
+          className="min-w-0 flex-1 text-left"
         >
-          <div className="flex items-center gap-2">
-            {isExpanded ? (
-              <ChevronDown className="w-4 h-4 text-muted-foreground flex-shrink-0" />
-            ) : (
-              <ChevronRight className="w-4 h-4 text-muted-foreground flex-shrink-0" />
-            )}
-            <h4 className="font-medium truncate">{tool.name}</h4>
-            <span className="text-xs px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+          <div className="flex flex-wrap items-center gap-2">
+            {hasDetailContent ? (
+              isExpanded ? (
+                <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+              ) : (
+                <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+              )
+            ) : null}
+            <h4 className="truncate font-medium text-foreground">{tool.name}</h4>
+            <ToolStateBadge enabled={tool.enabled} />
+            <SettingsBadge>
               {t('settings.tools.system')}
-            </span>
+            </SettingsBadge>
           </div>
-          <p className="text-sm text-muted-foreground line-clamp-2 ml-6">
+          <p className={cn('mt-1 text-sm leading-6 text-muted-foreground', hasDetailContent ? 'pl-6' : '')}>
             {tool.description || t('settings.tools.noDescription')}
           </p>
         </button>
       </div>
 
-      {/* 展开详情 */}
-      {isExpanded && (
-        ((tool.inputParams && tool.inputParams.length > 0)
-          || (tool.outputParams && tool.outputParams.length > 0)
-          || tool.returns)
-      ) && (
-        <div className="px-4 pb-4 pt-0 ml-6 border-t border-blue-500/10">
-          {tool.inputParams && tool.inputParams.length > 0 && (
-            <div className="mt-3">
-              <h5 className="text-xs font-medium text-muted-foreground mb-2">
-                {t('settings.tools.inputParams')}
-              </h5>
-              <div className="space-y-1.5">
-                {tool.inputParams.map((param) => (
-                  <div
-                    key={param.name}
-                    className="flex items-start gap-2 text-xs bg-muted/50 rounded px-2 py-1.5"
-                  >
-                    <code className="font-mono text-blue-600 dark:text-blue-400 flex-shrink-0">
-                      {param.name}
-                    </code>
-                    <span className="text-muted-foreground flex-shrink-0">
-                      ({param.paramType})
-                    </span>
-                    {param.required && (
-                      <span className="text-red-500 flex-shrink-0">*</span>
-                    )}
-                    {param.description && (
+      {isExpanded && hasDetailContent ? (
+        <div className="mt-4 border-t border-border/70 pt-4">
+          <SettingsInset className="space-y-4">
+            {tool.inputParams && tool.inputParams.length > 0 ? (
+              <div className="space-y-2">
+                <h5 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                  {t('settings.tools.inputParams')}
+                </h5>
+                <div className="space-y-1.5">
+                  {tool.inputParams.map((param) => (
+                    <div
+                      key={param.name}
+                      className="flex flex-wrap items-start gap-2 rounded-[12px] border border-border/70 bg-background/90 px-3 py-2 text-xs"
+                    >
+                      <code className="font-mono text-primary">
+                        {param.name}
+                      </code>
+                      <span className="text-muted-foreground">
+                        ({param.paramType})
+                      </span>
+                      {param.required && (
+                        <span className="text-red-500">*</span>
+                      )}
+                      {param.description && (
+                        <span className="text-foreground/70">{param.description}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {tool.outputParams && tool.outputParams.length > 0 ? (
+              <div className="space-y-2">
+                <h5 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                  {t('settings.tools.outputParams')}
+                </h5>
+                <div className="space-y-1.5">
+                  {tool.outputParams.map((param) => (
+                    <div
+                      key={param.name}
+                      className="flex flex-wrap items-start gap-2 rounded-[12px] border border-border/70 bg-background/90 px-3 py-2 text-xs"
+                    >
+                      <code className="font-mono text-primary">
+                        {param.name}
+                      </code>
+                      <span className="text-muted-foreground">
+                        ({param.paramType})
+                      </span>
+                      {param.description && (
                       <span className="text-foreground/70">{param.description}</span>
                     )}
                   </div>
-                ))}
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
-          {tool.outputParams && tool.outputParams.length > 0 && (
-            <div className="mt-3">
-              <h5 className="text-xs font-medium text-muted-foreground mb-2">
-                {t('settings.tools.outputParams')}
-              </h5>
-              <div className="space-y-1.5">
-                {tool.outputParams.map((param) => (
-                  <div
-                    key={param.name}
-                    className="flex items-start gap-2 text-xs bg-muted/50 rounded px-2 py-1.5"
-                  >
-                    <code className="font-mono text-blue-600 dark:text-blue-400 flex-shrink-0">
-                      {param.name}
-                    </code>
-                    <span className="text-muted-foreground flex-shrink-0">
-                      ({param.paramType})
-                    </span>
-                    {param.description && (
-                      <span className="text-foreground/70">{param.description}</span>
-                    )}
-                  </div>
-                ))}
+            ) : null}
+
+            {tool.returns && (!tool.outputParams || tool.outputParams.length === 0) ? (
+              <div className="space-y-2">
+                <h5 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                  {t('settings.tools.returns')}
+                </h5>
+                <div className="rounded-[12px] border border-border/70 bg-background/90 px-3 py-2 text-xs leading-6 text-foreground/70">
+                  {tool.returns}
+                </div>
               </div>
-            </div>
-          )}
-          {tool.returns && (!tool.outputParams || tool.outputParams.length === 0) && (
-            <div className="mt-3">
-              <h5 className="text-xs font-medium text-muted-foreground mb-2">
-                {t('settings.tools.returns')}
-              </h5>
-              <div className="text-xs bg-muted/50 rounded px-2 py-1.5 text-foreground/70">
-                {tool.returns}
-              </div>
-            </div>
-          )}
+            ) : null}
+          </SettingsInset>
         </div>
-      )}
+      ) : null}
     </div>
   )
 }
@@ -158,44 +199,45 @@ function ToolItem({ tool, onEdit, onDelete, onToggle, isToggling }: ToolItemProp
 
   return (
     <div
-      className={`flex items-center gap-4 p-4 rounded-lg border transition-colors ${tool.enabled
-        ? 'border-blue-500 bg-blue-50 dark:bg-blue-950/20'
-        : 'hover:bg-muted/50'
-        }`}
+      className={cn(
+        uiChrome.card,
+        'flex items-start gap-4 p-4 transition-colors',
+        'border-slate-200/80 bg-slate-50/40 hover:border-slate-300/80 dark:border-slate-800/80 dark:bg-white/[0.02]',
+      )}
     >
       <button
+        type="button"
         onClick={onToggle}
         disabled={isToggling}
         title={tool.enabled ? t('settings.tools.disable') : t('settings.tools.enable')}
-        className={`p-2 rounded-lg transition-colors ${tool.enabled
-          ? 'bg-blue-100 text-blue-600 dark:bg-blue-900 dark:text-blue-400'
-          : 'bg-muted text-muted-foreground hover:bg-primary/10 hover:text-primary'
-          }`}
+        className={cn(
+          uiChrome.control,
+          'flex h-11 w-11 items-center justify-center transition-colors shadow-none',
+          tool.enabled
+            ? 'border-emerald-200/80 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200'
+            : 'border-slate-200/80 bg-slate-100/90 text-slate-500 hover:bg-slate-200/70 hover:text-slate-700 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-300 dark:hover:bg-slate-700/80 dark:hover:text-slate-100',
+        )}
       >
         <Power className={`w-5 h-5 ${isToggling ? 'animate-pulse' : ''}`} />
       </button>
 
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <h4 className="font-medium truncate">{tool.name}</h4>
-          {tool.isSystem ? (
-            <span className="text-xs px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300">
-              {t('settings.tools.system')}
-            </span>
-          ) : (
-            <span className="text-xs px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300">
-              {t('settings.tools.custom')}
-            </span>
-          )}
+      <div className="min-w-0 flex-1 space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <h4 className="truncate font-medium text-foreground">{tool.name}</h4>
+          <ToolStateBadge enabled={tool.enabled} />
+          <SettingsBadge>{tool.isSystem ? t('settings.tools.system') : t('settings.tools.custom')}</SettingsBadge>
           {tool.kind === 'remote' && (
-            <Globe className="w-4 h-4 text-muted-foreground" />
+            <SettingsBadge className="gap-1">
+              <Globe className="h-3.5 w-3.5" />
+              Remote
+            </SettingsBadge>
           )}
         </div>
-        <p className="text-sm text-muted-foreground truncate">
+        <p className="line-clamp-2 text-sm leading-6 text-muted-foreground">
           {tool.description || t('settings.tools.noDescription')}
         </p>
         {tool.endpointUrl && (
-          <p className="text-xs text-muted-foreground font-mono truncate">
+          <p className="truncate font-mono text-xs text-muted-foreground">
             {tool.httpMethod || 'POST'} {tool.endpointUrl}
           </p>
         )}
@@ -204,20 +246,25 @@ function ToolItem({ tool, onEdit, onDelete, onToggle, isToggling }: ToolItemProp
       <div className="flex items-center gap-1">
         {!tool.isSystem && (
           <>
-            <button
+            <Button
+              type="button"
               onClick={onEdit}
               title={t('common.edit')}
-              className="p-2 rounded hover:bg-muted"
+              variant="ghost"
+              size="icon"
             >
-              <Pencil className="w-4 h-4 text-muted-foreground" />
-            </button>
-            <button
+              <Pencil className="h-4 w-4" />
+            </Button>
+            <Button
+              type="button"
               onClick={onDelete}
               title={t('common.delete')}
-              className="p-2 rounded hover:bg-red-100 text-red-500"
+              variant="ghost"
+              size="icon"
+              className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
             >
-              <Trash2 className="w-4 h-4" />
-            </button>
+              <Trash2 className="h-4 w-4" />
+            </Button>
           </>
         )}
       </div>
@@ -275,16 +322,16 @@ export function ToolManager() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h3 className="font-semibold">{t('settings.tools.title')}</h3>
-        <button
-          onClick={() => setIsAdding(true)}
-          disabled={isAdding}
-          className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-        >
-          <Plus className="w-4 h-4" /> {t('settings.tools.addTool')}
-        </button>
-      </div>
+      <SettingsSectionHeader
+        title={t('settings.tools.title')}
+        description={t('pages.settings.assistantToolsDesc')}
+        actions={
+          <Button onClick={() => setIsAdding(true)} disabled={isAdding}>
+            <Plus className="h-4 w-4" />
+            {t('settings.tools.addTool')}
+          </Button>
+        }
+      />
 
       {isAdding && (
         <ToolEditor
@@ -296,13 +343,15 @@ export function ToolManager() {
         />
       )}
 
-      {/* System Tools */}
       {systemToolDefs.length > 0 && (
-        <div className="space-y-2">
-          <h4 className="text-sm font-medium text-muted-foreground">
-            {t('settings.tools.systemTools')} ({systemToolDefs.length})
-          </h4>
-          <div className="space-y-2">
+        <div className="space-y-3">
+          <div className="flex items-center gap-3">
+            <h4 className="text-sm font-semibold text-foreground">
+              {t('settings.tools.systemTools')}
+            </h4>
+            <SettingsBadge>{systemToolDefs.length}</SettingsBadge>
+          </div>
+          <div className="space-y-3">
             {systemToolDefs.map((toolDef) => (
               <SystemToolItem
                 key={toolDef.name}
@@ -318,17 +367,26 @@ export function ToolManager() {
         </div>
       )}
 
-      {/* Custom Tools */}
-      <div className="space-y-2">
-        <h4 className="text-sm font-medium text-muted-foreground">
-          {t('settings.tools.customTools')} ({customTools.length})
-        </h4>
+      <div className="space-y-3">
+        <div className="flex items-center gap-3">
+          <h4 className="text-sm font-semibold text-foreground">
+            {t('settings.tools.customTools')}
+          </h4>
+          <SettingsBadge>{customTools.length}</SettingsBadge>
+        </div>
         {customTools.length === 0 && !isAdding ? (
-          <p className="text-sm text-muted-foreground py-4 text-center">
-            {t('settings.tools.noCustomTools')}
-          </p>
+          <SettingsEmptyState
+            title={t('settings.tools.noCustomTools')}
+            description={t('pages.settings.assistantToolsDesc')}
+            action={
+              <Button onClick={() => setIsAdding(true)}>
+                <Plus className="h-4 w-4" />
+                {t('settings.tools.addTool')}
+              </Button>
+            }
+          />
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-3">
             {customTools.map((tool) => (
               <div key={tool.id}>
                 {editingId === tool.id ? (
@@ -368,6 +426,15 @@ export function ToolManager() {
           </div>
         )}
       </div>
+
+      <SettingsInset className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm leading-6 text-muted-foreground">
+          {t('pages.settings.assistantToolsDesc')}
+        </p>
+        <SettingsBadge>
+          {t('settings.tools.customTools')}: {customTools.length}
+        </SettingsBadge>
+      </SettingsInset>
 
       <ConfirmDialog
         isOpen={!!deleteId}

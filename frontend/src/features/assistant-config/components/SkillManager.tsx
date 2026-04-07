@@ -12,12 +12,19 @@ import {
   useUpdateSkillMutation,
   useWorkflowsQuery,
 } from '../queries'
+import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { ResetDangerConfirmDialog } from './ResetDangerConfirmDialog'
 import { SkillRow } from './SkillRow'
 import { SkillCard } from './SkillCard'
 import type { AssistantSkill, CreateSkillRequest, UpdateSkillRequest } from '../api/skills'
 import { buildSkillBindingTargets } from './skillTargetOptions'
+import {
+  SettingsBadge,
+  SettingsEmptyState,
+  SettingsInset,
+  SettingsSectionHeader,
+} from '@/features/settings/components/SettingsShell'
 
 export function SkillManager() {
   const { t } = useTranslation()
@@ -91,21 +98,17 @@ export function SkillManager() {
   const resettingSkill = resetId ? skills.find((item) => item.id === resetId) : null
 
   return (
-    <div className="space-y-8">
-      {/* Header Actions */}
-      <div className="flex items-center justify-between">
-        <div className="space-y-1">
-          <h3 className="font-semibold text-lg">{t('settings.skills.title')}</h3>
-          <p className="text-sm text-muted-foreground">{t('settings.skills.description')}</p>
-        </div>
-        <button
-          onClick={() => handleOpenCreate('header')}
-          disabled={isAdding}
-          className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-xl bg-primary text-primary-foreground shadow-sm hover:bg-primary/90 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50"
-        >
-          <Plus className="w-4 h-4" /> {t('settings.skills.addSkill')}
-        </button>
-      </div>
+    <div className="space-y-6">
+      <SettingsSectionHeader
+        title={t('settings.skills.title')}
+        description={t('settings.skills.description')}
+        actions={
+          <Button onClick={() => handleOpenCreate('header')} disabled={isAdding}>
+            <Plus className="h-4 w-4" />
+            {t('settings.skills.addSkill')}
+          </Button>
+        }
+      />
 
       {isAdding && createPlacement === 'header' && (
         <div className="animate-in fade-in slide-in-from-top-4 duration-300">
@@ -119,25 +122,30 @@ export function SkillManager() {
         </div>
       )}
 
-      {/* System Skills Section */}
       {systemSkills.length > 0 && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between pb-2 border-b">
-            <h4 className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-              {t('settings.skills.systemSkills')}
-              <span className="px-1.5 py-0.5 rounded-full bg-muted text-xs">{systemSkills.length}</span>
-            </h4>
-            <button
-              onClick={() => setShowResetAllConfirm(true)}
-              className="group flex items-center gap-1.5 px-2 py-1 text-xs font-medium text-muted-foreground hover:text-orange-600 transition-colors"
-              title={t('settings.skills.reset')}
-            >
-              <RotateCcw className="w-3.5 h-3.5 group-hover:rotate-180 transition-transform duration-500" />
-              {t('settings.skills.resetAll')}
-            </button>
-          </div>
+          <SettingsSectionHeader
+            title={
+              <span className="flex items-center gap-3">
+                <span>{t('settings.skills.systemSkills')}</span>
+                <SettingsBadge>{systemSkills.length}</SettingsBadge>
+              </span>
+            }
+            description={t('settings.skills.systemSkillsDesc', { defaultValue: t('settings.skills.description') })}
+            actions={
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setShowResetAllConfirm(true)}
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                {t('settings.skills.resetAll')}
+              </Button>
+            }
+          />
 
-          <div className="grid gap-4">
+          <div className="grid gap-3">
             {systemSkills.map((skill) => (
               <div key={skill.id} className="transition-all duration-200">
                 {editingId === skill.id ? (
@@ -172,14 +180,16 @@ export function SkillManager() {
         </div>
       )}
 
-      {/* Custom Skills Section */}
       <div className="space-y-4">
-        <div className="flex items-center justify-between pb-2 border-b">
-          <h4 className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-            {t('settings.skills.customSkills')}
-            <span className="px-1.5 py-0.5 rounded-full bg-muted text-xs">{customSkills.length}</span>
-          </h4>
-        </div>
+        <SettingsSectionHeader
+          title={
+            <span className="flex items-center gap-3">
+              <span>{t('settings.skills.customSkills')}</span>
+              <SettingsBadge>{customSkills.length}</SettingsBadge>
+            </span>
+          }
+          description={t('settings.skills.noCustomSkills')}
+        />
 
         {isAdding && createPlacement === 'custom' && (
           <div className="animate-in fade-in slide-in-from-top-4 duration-300">
@@ -194,18 +204,18 @@ export function SkillManager() {
         )}
 
         {customSkills.length === 0 && !isAdding ? (
-          <button
-            type="button"
-            onClick={() => handleOpenCreate('custom')}
-            className="w-full py-12 border rounded-xl border-dashed bg-muted/10 flex flex-col items-center justify-center text-center gap-2 transition-colors hover:bg-muted/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-          >
-            <div className="p-3 rounded-full bg-muted/20">
-              <Plus className="w-6 h-6 text-muted-foreground/70" />
-            </div>
-            <p className="text-sm text-muted-foreground max-w-xs">{t('settings.skills.noCustomSkills')}</p>
-          </button>
+          <SettingsEmptyState
+            title={t('settings.skills.noCustomSkills')}
+            description={t('pages.settings.assistantSkillsDesc')}
+            action={
+              <Button type="button" onClick={() => handleOpenCreate('custom')}>
+                <Plus className="h-4 w-4" />
+                {t('settings.skills.addSkill')}
+              </Button>
+            }
+          />
         ) : (
-          <div className="grid gap-4">
+          <div className="grid gap-3">
             {customSkills.map((skill) => (
               <div key={skill.id} className="transition-all duration-200">
                 {editingId === skill.id ? (
@@ -238,6 +248,15 @@ export function SkillManager() {
           </div>
         )}
       </div>
+
+      <SettingsInset className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm leading-6 text-muted-foreground">
+          {t('settings.skills.description')}
+        </p>
+        <SettingsBadge>
+          {t('settings.skills.customSkills')}: {customSkills.length}
+        </SettingsBadge>
+      </SettingsInset>
 
       <ConfirmDialog
         isOpen={!!deleteId}

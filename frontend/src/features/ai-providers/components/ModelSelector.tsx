@@ -1,4 +1,5 @@
 import { useTranslation } from 'react-i18next'
+import { uiField } from '@/components/ui/styles'
 import { useModelsQuery, useCredentialsQuery } from '../queries'
 import type { AiModelType } from '../api/models'
 
@@ -20,12 +21,12 @@ export function ModelSelector({ modelType, value, onChange, disabled }: ModelSel
   }
 
   if (modelsLoading) {
-    return <div className="h-10 bg-muted animate-pulse rounded-md" />
+    return <div className="h-10 animate-pulse rounded-[16px] bg-muted" />
   }
 
   return (
     <select
-      className="w-full h-10 px-3 rounded-md border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
+      className={uiField.select}
       value={value ?? ''}
       onChange={(e) => onChange(e.target.value || null)}
       disabled={disabled}

@@ -4,13 +4,15 @@ import {
     Bot,
     ChevronDown,
     ChevronRight,
-    ExternalLink,
     Pencil,
     Power,
     Trash2,
     Workflow,
     Zap
 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { uiChrome } from '@/components/ui/styles'
+import { SettingsBadge, SettingsInset } from '@/features/settings/components/SettingsShell'
 import type { AssistantSkill } from '../api/skills'
 import { cn } from '@/lib/utils'
 
@@ -47,16 +49,17 @@ export const SkillCard = memo(function SkillCard({
     return (
         <div
             className={cn(
-                "group rounded-xl border bg-card transition-all duration-200 ease-in-out",
+                uiChrome.card,
+                "group overflow-hidden p-4 transition-all duration-200 ease-in-out",
                 skill.enabled
-                    ? "border-purple-500/30 bg-purple-50/30 dark:bg-purple-900/10"
-                    : "hover:border-primary/30 hover:shadow-sm",
-                isExpanded && "border-primary/50 shadow-md ring-1 ring-primary/10"
+                    ? "border-primary/20 bg-primary/[0.03]"
+                    : "hover:border-primary/20",
+                isExpanded && "border-primary/25 ring-1 ring-primary/10"
             )}
         >
-            <div className="flex items-center gap-4 p-4">
-                {/* Toggle Button */}
+            <div className="flex items-start gap-4">
                 <button
+                    type="button"
                     onClick={(e) => {
                         e.stopPropagation()
                         onToggleEnabled()
@@ -70,10 +73,11 @@ export const SkillCard = memo(function SkillCard({
                                 : t('settings.skills.enable')
                     }
                     className={cn(
-                        "flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border transition-all duration-200",
+                        uiChrome.control,
+                        "flex h-11 w-11 shrink-0 items-center justify-center border transition-colors shadow-none",
                         skill.enabled
-                            ? "bg-purple-100 text-purple-600 border-purple-200 dark:bg-purple-900/30 dark:text-purple-400 dark:border-purple-800/50"
-                            : "bg-muted text-muted-foreground border-transparent hover:bg-muted/80",
+                            ? "border-primary/15 bg-primary/10 text-primary"
+                            : "text-muted-foreground hover:bg-muted/60",
                         isGeneralChat && "opacity-50 cursor-not-allowed",
                         isToggling && "animate-pulse"
                     )}
@@ -81,77 +85,94 @@ export const SkillCard = memo(function SkillCard({
                     <Power className="w-5 h-5" />
                 </button>
 
-                {/* Content */}
                 <div
-                    className="flex-1 min-w-0 grid gap-1 cursor-pointer"
+                    role="button"
+                    tabIndex={0}
+                    className="min-w-0 flex-1 cursor-pointer space-y-3"
                     onClick={onToggleExpand}
+                    onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault()
+                            onToggleExpand()
+                        }
+                    }}
                 >
-                    <div className="flex items-center gap-2">
-                        <h3 className="font-semibold text-base truncate text-foreground flex items-center gap-2">
-                            {skill.name}
-                            {/* Target Type Icon */}
-                            {skill.targetType === 'workflow' ? (
-                                <Workflow className="w-3.5 h-3.5 text-muted-foreground/70" />
-                            ) : (
-                                <Bot className="w-3.5 h-3.5 text-muted-foreground/70" />
-                            )}
-                        </h3>
-                        <div className="flex items-center gap-1.5">
-                            <span className={cn(
-                                "inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ring-1 ring-inset",
-                                skill.isSystem
-                                    ? "bg-purple-50 text-purple-700 ring-purple-600/10 dark:bg-purple-400/10 dark:text-purple-400 dark:ring-purple-400/20"
-                                    : "bg-blue-50 text-blue-700 ring-blue-600/10 dark:bg-blue-400/10 dark:text-blue-400 dark:ring-blue-400/20"
-                            )}>
-                                {skill.isSystem ? t('settings.skills.system') : t('settings.skills.custom')}
-                            </span>
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0 space-y-2">
+                            <div className="flex flex-wrap items-center gap-2">
+                                <h3 className="truncate text-base font-semibold text-foreground">
+                                    {skill.name}
+                                </h3>
+                                <SettingsBadge className="capitalize">
+                                    {skill.isSystem ? t('settings.skills.system') : t('settings.skills.custom')}
+                                </SettingsBadge>
+                                <SettingsBadge className="gap-1">
+                                    {skill.targetType === 'workflow' ? (
+                                        <Workflow className="h-3.5 w-3.5" />
+                                    ) : (
+                                        <Bot className="h-3.5 w-3.5" />
+                                    )}
+                                    {targetLabel}
+                                </SettingsBadge>
+                            </div>
+
+                            <p className="line-clamp-2 text-sm leading-6 text-muted-foreground">
+                                {skill.description}
+                            </p>
+
+                            {!isExpanded ? (
+                                <p className="text-xs text-muted-foreground">
+                                    {t('settings.skills.boundTarget')}: {targetName}
+                                </p>
+                            ) : null}
                         </div>
-                    </div>
-
-                    <p className="text-sm text-muted-foreground truncate leading-relaxed">
-                        {skill.description}
-                    </p>
-                </div>
-
-                {/* Actions */}
-                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity focus-within:opacity-100">
-                    <button
-                        onClick={(e) => {
-                            e.stopPropagation()
-                            onEdit()
-                        }}
-                        className="p-2 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-                        title={t('common.edit')}
-                    >
-                        <Pencil className="w-4 h-4" />
-                    </button>
-
-                    {!skill.isSystem && (
-                        <>
-                            <div className="w-px h-4 bg-border mx-1" />
-                            <button
+                        <div className="flex items-center gap-2 self-start">
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
                                 onClick={(e) => {
                                     e.stopPropagation()
-                                    onDelete()
+                                    onEdit()
                                 }}
-                                title={t('common.delete')}
-                                className="p-2 rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
+                                title={t('common.edit')}
                             >
-                                <Trash2 className="w-4 h-4" />
-                            </button>
-                        </>
-                    )}
-                </div>
+                                <Pencil className="h-4 w-4" />
+                            </Button>
 
-                <button
-                    onClick={onToggleExpand}
-                    className="pl-2 text-muted-foreground hover:text-foreground transition-colors"
-                >
-                    {isExpanded ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
-                </button>
+                            {!skill.isSystem ? (
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    onClick={(e) => {
+                                        e.stopPropagation()
+                                        onDelete()
+                                    }}
+                                    title={t('common.delete')}
+                                    className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                                >
+                                    <Trash2 className="h-4 w-4" />
+                                </Button>
+                            ) : null}
+
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                onClick={(e) => {
+                                    e.stopPropagation()
+                                    onToggleExpand()
+                                }}
+                                title={t(isExpanded ? 'actions.collapse' : 'actions.expand')}
+                            >
+                                {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                            </Button>
+                        </div>
+                    </div>
+                </div>
             </div>
 
-            {/* Expanded Content */}
             <div
                 className={cn(
                     "grid transition-all duration-300 ease-in-out",
@@ -159,49 +180,47 @@ export const SkillCard = memo(function SkillCard({
                 )}
             >
                 <div className="overflow-hidden">
-                    <div className="p-4 pt-0 border-t border-border/50 bg-muted/5">
-                        <div className="pt-4 grid gap-4 md:grid-cols-2">
-                            {/* Bound Target Info */}
-                            <div className="space-y-2">
-                                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
+                    <div className="mt-4 border-t border-border/70 pt-4">
+                        <div className="grid gap-4 md:grid-cols-2">
+                            <SettingsInset className="space-y-3">
+                                <label className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
                                     <Zap className="w-3 h-3" />
                                     {t('settings.skills.boundTarget')}
                                 </label>
-                                <div className="text-sm p-3 rounded-lg bg-background border border-border/50 flex items-center justify-between group/target">
-                                    <div className="flex items-center gap-2">
+                                <div className={cn(uiChrome.control, "flex min-h-12 items-center justify-between gap-3 px-3 py-3 shadow-none")}>
+                                    <div className="min-w-0 flex items-center gap-2">
                                         {skill.targetType === 'workflow' ? (
-                                            <div className="p-1 rounded bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400">
+                                            <div className="rounded-full bg-primary/10 p-1.5 text-primary">
                                                 <Workflow className="w-3.5 h-3.5" />
                                             </div>
                                         ) : (
-                                            <div className="p-1 rounded bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400">
+                                            <div className="rounded-full bg-primary/10 p-1.5 text-primary">
                                                 <Bot className="w-3.5 h-3.5" />
                                             </div>
                                         )}
-                                        <span className="font-medium">{targetName}</span>
-                                        <span className="text-xs text-muted-foreground">({targetLabel})</span>
+                                        <span className="truncate font-medium">{targetName}</span>
                                     </div>
+                                    <span className="shrink-0 text-xs text-muted-foreground">({targetLabel})</span>
                                 </div>
-                            </div>
+                            </SettingsInset>
 
-                            {/* Intent Examples */}
-                            {skill.intentExamples && skill.intentExamples.length > 0 && (
-                                <div className="space-y-2">
-                                    <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                            {skill.intentExamples && skill.intentExamples.length > 0 ? (
+                                <SettingsInset className="space-y-3">
+                                    <label className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
                                         {t('settings.skills.intentExamples')}
                                     </label>
-                                    <div className="flex flex-wrap gap-1.5 p-3 rounded-lg bg-background border border-border/50 min-h-[46px]">
+                                    <div className="flex min-h-[52px] flex-wrap gap-2">
                                         {skill.intentExamples.map((ex, i) => (
                                             <span
                                                 key={i}
-                                                className="inline-flex items-center px-2 py-1 rounded-md text-xs bg-muted/50 text-foreground border border-border/50"
+                                                className="inline-flex items-center rounded-full border border-border/70 bg-background/92 px-3 py-1.5 text-xs text-foreground"
                                             >
                                                 {ex}
                                             </span>
                                         ))}
                                     </div>
-                                </div>
-                            )}
+                                </SettingsInset>
+                            ) : null}
                         </div>
                     </div>
                 </div>

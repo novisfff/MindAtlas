@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
+import { uiChrome, uiField, uiRadius } from '@/components/ui/styles'
 import { cn } from '@/lib/utils'
 import type {
   RuntimeAutomationConfigResponse,
@@ -28,13 +29,11 @@ export interface RuntimeDocumentParsingDraft extends RuntimeDocumentParsingConfi
 
 export interface RuntimeAutomationDraft extends RuntimeAutomationConfigResponse {}
 
-export const FIELD_CLASSNAME =
-  'h-11 w-full rounded-2xl border border-slate-200 bg-white px-4 text-sm text-slate-900 shadow-sm outline-none transition focus:border-slate-900/50 focus:ring-4 focus:ring-slate-900/5'
-export const TEXTAREA_CLASSNAME =
-  'w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm outline-none transition focus:border-slate-900/50 focus:ring-4 focus:ring-slate-900/5'
+export const FIELD_CLASSNAME = uiField.input
+export const TEXTAREA_CLASSNAME = uiField.textarea
 
 export function Label({ children }: { children: ReactNode }) {
-  return <label className="text-sm font-medium text-slate-800">{children}</label>
+  return <label className="text-sm font-medium text-foreground">{children}</label>
 }
 
 export function InputField({
@@ -111,10 +110,10 @@ export function ToggleCard({
   disabled?: boolean
 }) {
   return (
-    <div className="flex items-start justify-between gap-4 rounded-[24px] border border-slate-200 bg-slate-50/80 px-4 py-4">
+    <div className={cn(uiChrome.inset, 'flex items-start justify-between gap-4 px-4 py-4')}>
       <div className="space-y-1">
-        <p className="text-sm font-semibold text-slate-900">{label}</p>
-        <p className="text-sm leading-6 text-slate-600">{description}</p>
+        <p className="text-sm font-semibold text-foreground">{label}</p>
+        <p className="text-sm leading-6 text-muted-foreground">{description}</p>
       </div>
       <Switch checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} />
     </div>
@@ -133,7 +132,7 @@ export function SecretHint({
   if (value.trim()) return null
   if (!state.configured) return null
   return (
-    <p className="text-xs leading-5 text-slate-500">
+    <p className="text-xs leading-5 text-muted-foreground">
       {hint}
       {state.hint ? ` (${state.hint})` : ''}
     </p>
@@ -152,21 +151,21 @@ function AdvancedSection({
   const [open, setOpen] = useState(false)
 
   return (
-    <div className="rounded-[24px] border border-dashed border-slate-200 bg-slate-50/60">
+    <div className={cn(uiRadius.panel, 'border border-dashed border-border/75 bg-muted/30')}>
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}
         className="flex w-full items-center justify-between gap-4 px-4 py-4 text-left"
       >
         <div className="space-y-1">
-          <p className="text-sm font-semibold text-slate-900">{title}</p>
-          <p className="text-sm leading-6 text-slate-600">{description}</p>
+          <p className="text-sm font-semibold text-foreground">{title}</p>
+          <p className="text-sm leading-6 text-muted-foreground">{description}</p>
         </div>
-        <span className="text-base font-semibold text-slate-400">
+        <span className="text-base font-semibold text-muted-foreground">
           {open ? '−' : '+'}
         </span>
       </button>
-      {open ? <div className="border-t border-slate-200 px-4 py-4">{children}</div> : null}
+      {open ? <div className="border-t border-border/70 px-4 py-4">{children}</div> : null}
     </div>
   )
 }
@@ -188,24 +187,27 @@ export function getRuntimeCapabilityStatus(
   if (skipped) {
     return {
       label: t('systemSetup.status.skipped'),
-      className: 'border-slate-200 bg-slate-100 text-slate-700',
+      className: 'border-border bg-muted/80 text-muted-foreground',
     }
   }
   if (module.source === 'environment_default') {
     return {
       label: t('systemSetup.status.environmentDefault'),
-      className: 'border-sky-200 bg-sky-50 text-sky-700',
+      className:
+        'border-sky-200/80 bg-sky-50/80 text-sky-700 dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-200',
     }
   }
   if (module.configured) {
     return {
       label: t('systemSetup.status.configured'),
-      className: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+      className:
+        'border-emerald-200/80 bg-emerald-50/80 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200',
     }
   }
   return {
     label: t('systemSetup.status.notConfigured'),
-    className: 'border-amber-200 bg-amber-50 text-amber-700',
+    className:
+      'border-amber-200/80 bg-amber-50/80 text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200',
   }
 }
 
@@ -224,11 +226,11 @@ export function RuntimeCapabilityMeta({
       <span className={cn('inline-flex rounded-full border px-3 py-1 text-xs font-semibold', status.className)}>
         {status.label}
       </span>
-      <Badge variant="outline" className="rounded-full border-slate-200 px-3 py-1 text-slate-600">
+      <Badge variant="outline" className="px-3 py-1 text-[11px] font-medium text-muted-foreground">
         {getRuntimeConfigSourceLabel(module.source, t)}
       </Badge>
       {module.restartRequired ? (
-        <Badge variant="outline" className="rounded-full border-slate-200 px-3 py-1 text-slate-600">
+        <Badge variant="outline" className="px-3 py-1 text-[11px] font-medium text-muted-foreground">
           {t('systemSetup.status.restartRequired')}
         </Badge>
       ) : null}
@@ -501,7 +503,7 @@ export function DocumentParsingCapabilityFields({
       />
 
       {value.pictureDescriptionEnabled ? (
-        <div className="space-y-5 rounded-[24px] border border-slate-200 bg-slate-50/50 p-5">
+        <div className={cn(uiChrome.inset, 'space-y-5 p-5')}>
           <div className="grid gap-4 md:grid-cols-2">
             <InputField
               label={t('systemSetup.forms.documentParsing.pictureDescriptionUrl.label')}
@@ -578,7 +580,7 @@ export function AutomationCapabilityFields({
         onCheckedChange={(schedulerEnabled) => onChange({ schedulerEnabled })}
       />
 
-      <div className="rounded-[24px] border border-slate-200 bg-slate-50/80 px-4 py-4 text-sm leading-6 text-slate-600">
+      <div className={cn(uiChrome.inset, 'px-4 py-4 text-sm leading-6 text-muted-foreground')}>
         {t('systemSetup.forms.automation.note')}
       </div>
     </div>

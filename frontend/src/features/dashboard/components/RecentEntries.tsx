@@ -5,6 +5,8 @@ import type { Entry } from '@/types'
 import { useTranslation } from 'react-i18next'
 import { useEntryQuery } from '@/features/entries/queries'
 import { EntryDetailDialog } from '@/features/calendar/components/EntryDetailDialog'
+import { cn } from '@/lib/utils'
+import { uiChrome, uiRadius } from '@/components/ui/styles'
 
 function formatTimeAgo(dateString: string, t: (key: string, options?: any) => string): string {
   const date = new Date(dateString)
@@ -34,8 +36,18 @@ export function RecentEntries({ entries }: RecentEntriesProps) {
 
   if (entries.length === 0) {
     return (
-      <div className="rounded-xl border bg-card p-4 shadow-sm h-full flex flex-col items-center justify-center text-center">
-        <div className="h-11 w-11 rounded-full bg-primary/10 flex items-center justify-center mb-3">
+      <div
+        className={cn(
+          uiChrome.card,
+          'h-full flex flex-col items-center justify-center p-4 text-center',
+        )}
+      >
+        <div
+          className={cn(
+            uiRadius.pill,
+            'mb-3 flex h-11 w-11 items-center justify-center bg-primary/10',
+          )}
+        >
           <FileText className="h-5 w-5 text-primary" />
         </div>
         <h3 className="font-semibold mb-2">{t('dashboard.recentEntries.noEntries')}</h3>
@@ -44,7 +56,10 @@ export function RecentEntries({ entries }: RecentEntriesProps) {
         </p>
         <Link
           to="/entries/new"
-          className="inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+          className={cn(
+            uiChrome.control,
+            'inline-flex items-center justify-center bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/92',
+          )}
         >
           {t('dashboard.recentEntries.createEntry')} <ArrowRight className="ml-2 w-4 h-4" />
         </Link>
@@ -53,8 +68,8 @@ export function RecentEntries({ entries }: RecentEntriesProps) {
   }
 
   return (
-    <div className="rounded-xl border bg-card shadow-sm h-full flex flex-col min-h-0">
-      <div className="p-2.5 pb-2 flex items-center justify-between">
+    <div className={cn(uiChrome.card, 'h-full flex min-h-0 flex-col')}>
+      <div className="flex items-center justify-between p-3 pb-2.5">
         <h3 className="font-semibold">{t('dashboard.recentEntries.title')}</h3>
         <Link
           to="/entries"
@@ -63,17 +78,23 @@ export function RecentEntries({ entries }: RecentEntriesProps) {
           {t('dashboard.recentEntries.viewAll')} <ArrowRight className="w-3 h-3" />
         </Link>
       </div>
-      <div className="px-2.5 pb-2.5 pt-1 space-y-0.5 flex-1 min-h-0 overflow-auto">
+      <div className="flex-1 min-h-0 space-y-1 overflow-auto px-3 pb-3 pt-1 custom-scrollbar">
         {entries.map((entry) => (
           <button
             key={entry.id}
             type="button"
             onClick={() => setSelectedEntryId(entry.id)}
             aria-label={t('entry.card.viewEntryAria', { title: entry.title })}
-            className="group flex w-full items-center gap-2.5 p-1.5 rounded-lg hover:bg-muted/40 transition-colors border border-transparent hover:border-border/50"
+            className={cn(
+              uiRadius.control,
+              'group flex w-full items-center gap-2.5 border border-transparent p-2 transition-colors hover:border-border/50 hover:bg-background/88',
+            )}
           >
             <div
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-transform duration-200 group-hover:scale-105"
+              className={cn(
+                uiRadius.inset,
+                'flex h-8 w-8 shrink-0 items-center justify-center transition-transform duration-200 group-hover:scale-105',
+              )}
               style={{ backgroundColor: `${entry.type.color}15` }}
             >
               <FileText className="w-3.5 h-3.5" style={{ color: entry.type.color }} />
@@ -86,7 +107,10 @@ export function RecentEntries({ entries }: RecentEntriesProps) {
 
               <div className="ml-auto flex items-center gap-1.5 shrink-0">
                 <span
-                  className="inline-flex items-center rounded-md px-1.25 py-0.5 text-[10px] font-medium leading-none ring-1 ring-inset bg-background/50"
+                  className={cn(
+                    uiRadius.inset,
+                    'inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium leading-none ring-1 ring-inset bg-background/50',
+                  )}
                   style={{
                     color: entry.type.color,
                     boxShadow: `inset 0 0 0 1px ${entry.type.color}30`,

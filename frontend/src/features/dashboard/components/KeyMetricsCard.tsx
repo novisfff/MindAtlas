@@ -1,6 +1,8 @@
 import { useTranslation } from 'react-i18next'
 import { Loader2, FileText, Calendar, Database, GitBranch } from 'lucide-react'
 import { useWeeklyMetricsQuery } from '../queries'
+import { cn } from '@/lib/utils'
+import { uiChrome, uiRadius } from '@/components/ui/styles'
 
 export function KeyMetricsCard() {
   const { t } = useTranslation()
@@ -8,7 +10,7 @@ export function KeyMetricsCard() {
 
   if (isLoading) {
     return (
-      <div className="rounded-xl border bg-card p-4 shadow-sm">
+      <div className={cn(uiChrome.card, 'p-4')}>
         <div className="flex items-center justify-center h-24">
           <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
         </div>
@@ -44,15 +46,28 @@ export function KeyMetricsCard() {
   ]
 
   return (
-    <div className="rounded-xl border bg-card p-4 shadow-sm h-full">
-      <div className="grid grid-cols-2 gap-4">
+    <div className={cn(uiChrome.card, 'h-full overflow-hidden p-4')}>
+      <div className="grid h-full min-h-0 grid-cols-2 grid-rows-2 gap-3.5">
         {metrics.map((m) => (
-          <div key={m.label} className="flex flex-col items-center justify-center p-2 rounded-lg hover:bg-muted/50 transition-colors">
-            <div className={`p-2 rounded-full bg-background mb-2 ring-1 ring-border ${m.color}`}>
+          <div
+            key={m.label}
+            className={cn(
+              uiRadius.control,
+              'flex min-h-0 flex-col items-center justify-center overflow-hidden p-3 text-center transition-colors hover:bg-background/90 sm:p-4',
+            )}
+          >
+            <div
+              className={cn(
+                'mb-3 p-2.5 ring-1 ring-border/60',
+                uiRadius.pill,
+                m.color,
+              )}
+              style={{ backgroundColor: 'hsl(var(--background) / 0.86)' }}
+            >
               <m.icon className="w-5 h-5" />
             </div>
             <p className="text-2xl font-bold tracking-tight">{m.value}</p>
-            <p className="text-xs text-muted-foreground font-medium uppercase tracking-wider">{m.label}</p>
+            <p className="text-xs font-medium leading-5 text-muted-foreground">{m.label}</p>
           </div>
         ))}
       </div>

@@ -1,6 +1,6 @@
 import { useEffect, useCallback } from 'react'
 import { addDays, subDays, addWeeks, subWeeks } from 'date-fns'
-import type { CalendarViewMode } from '../CalendarPage'
+import type { CalendarViewMode } from '../types'
 
 interface UseCalendarKeyboardProps {
   currentDate: Date
@@ -21,7 +21,11 @@ function isEditableElement(target: EventTarget | null): boolean {
 function isInteractiveElement(target: EventTarget | null): boolean {
   if (!target || !(target instanceof HTMLElement)) return false
   const tagName = target.tagName.toLowerCase()
-  return tagName === 'button' || tagName === 'a' || target.getAttribute('role') === 'button'
+  return (
+    tagName === 'button' ||
+    tagName === 'a' ||
+    target.getAttribute('role') === 'button'
+  )
 }
 
 export function useCalendarKeyboard({
@@ -95,7 +99,7 @@ export function useCalendarKeyboard({
           break
       }
     },
-    [currentDate, viewMode, onDateChange, onViewChange]
+    [currentDate, viewMode, onDateChange, onViewChange],
   )
 
   useEffect(() => {

@@ -10,6 +10,9 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { remarkCitation } from '@/features/assistant/components/remark-citation'
 import { CitationMarker } from '@/features/assistant/components/citation'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import {
   RelationList,
   RelationSelector,
@@ -29,6 +32,7 @@ import {
 } from '@/features/attachments'
 import { isApiError } from '@/lib/api/client'
 import { useRuntimeConfigQuery } from '@/features/system-setup'
+import { uiChrome, uiLayout, uiRadius } from '@/components/ui/styles'
 
 export function EntryDetailPage() {
   const { id } = useParams<{ id: string }>()
@@ -130,42 +134,36 @@ export function EntryDetailPage() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
+    <div className={uiLayout.page6}>
+      <div className={uiLayout.headerRow}>
         <button
           onClick={() => navigate('/entries')}
-          className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors"
+          className={uiLayout.backLink}
         >
           <ArrowLeft className="w-4 h-4 mr-1" />
           {t('actions.backToEntries')}
         </button>
 
         <div className="flex items-center gap-2">
-          <button
+          <Button
+            variant="outline"
             onClick={() => navigate(`/entries/${id}/edit`)}
-            className={cn(
-              'inline-flex items-center px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
-              'border hover:bg-muted'
-            )}
           >
             <Edit className="w-4 h-4 mr-1.5" />
             {t('actions.edit')}
-          </button>
+          </Button>
 
-          <button
+          <Button
+            variant="destructive"
             onClick={() => setShowDeleteConfirm(true)}
-            className={cn(
-              'inline-flex items-center px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
-              'border border-destructive/30 text-destructive hover:bg-destructive hover:text-destructive-foreground'
-            )}
           >
             <Trash2 className="w-4 h-4 mr-1.5" />
             {t('actions.delete')}
-          </button>
+          </Button>
         </div>
       </div>
 
-      <article className="bg-card rounded-lg border shadow-sm overflow-hidden">
+      <article className={cn(uiChrome.shell, 'overflow-hidden')}>
         <div
           className="h-2"
           style={{ backgroundColor: entry.type?.color || '#cbd5e1' }}
@@ -174,8 +172,9 @@ export function EntryDetailPage() {
         <div className="p-6">
           <div className="flex items-start justify-between gap-4 mb-4">
             <h1 className="text-2xl font-bold">{entry.title}</h1>
-            <span
-              className="inline-flex items-center rounded-full border px-3 py-1 text-sm font-semibold shrink-0"
+            <Badge
+              variant="outline"
+              className="shrink-0 px-3 py-1 text-sm font-semibold"
               style={{
                 backgroundColor: entry.type?.color ? `${entry.type.color}20` : undefined,
                 borderColor: entry.type?.color || undefined,
@@ -183,7 +182,7 @@ export function EntryDetailPage() {
               }}
             >
               {entry.type?.name || t('labels.unknown')}
-            </span>
+            </Badge>
           </div>
 
           <div className="flex flex-wrap gap-4 text-sm text-muted-foreground mb-6">
@@ -200,7 +199,10 @@ export function EntryDetailPage() {
               {entry.tags.map((tag) => (
                 <span
                   key={tag.id}
-                  className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border transition-colors"
+                  className={cn(
+                    uiRadius.pill,
+                    'inline-flex items-center border px-2.5 py-0.5 text-xs font-medium transition-colors',
+                  )}
                   style={{
                     backgroundColor: tag.color ? `${tag.color}15` : undefined,
                     borderColor: tag.color ? `${tag.color}40` : undefined,
@@ -218,7 +220,7 @@ export function EntryDetailPage() {
           )}
 
           {entry.summary && (
-            <div className="mb-6 p-4 bg-muted/50 rounded-lg">
+            <div className={cn(uiChrome.inset, 'mb-6 p-4')}>
               <p className="text-sm font-medium mb-1">{t('labels.summary')}</p>
               <p className="text-muted-foreground">{entry.summary}</p>
             </div>
@@ -246,7 +248,7 @@ export function EntryDetailPage() {
       </article>
 
       {/* Relations Section */}
-      <div className="mt-6 bg-card rounded-lg border shadow-sm p-6">
+      <div className={cn(uiChrome.card, 'p-6')}>
         <div className="flex items-center gap-2 mb-4">
           <Link2 className="w-5 h-5 text-muted-foreground" />
           <h2 className="text-lg font-semibold">{t('labels.relations')}</h2>
@@ -282,7 +284,7 @@ export function EntryDetailPage() {
         ref={attachmentsRef}
         id="attachments"
         tabIndex={-1}
-        className="mt-6 bg-card rounded-lg border shadow-sm p-6 focus:outline-none"
+        className={cn(uiChrome.card, 'p-6 focus:outline-none')}
       >
         <div className="flex items-center gap-2 mb-4">
           <Paperclip className="w-5 h-5 text-muted-foreground" />
@@ -357,40 +359,19 @@ export function EntryDetailPage() {
         </div>
       </div>
 
-      {showDeleteConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
-          <div className="bg-card border rounded-lg shadow-lg p-6 max-w-md w-full mx-4">
-            <h2 className="text-lg font-semibold mb-2">{t('actions.delete')}</h2>
-            <p className="text-muted-foreground mb-6">
-              {t('messages.deleteEntryConfirm', { title: entry.title })}
-            </p>
-            <div className="flex justify-end gap-3">
-              <button
-                onClick={() => setShowDeleteConfirm(false)}
-                className="px-4 py-2 rounded-lg border hover:bg-muted transition-colors"
-                disabled={deleteMutation.isPending}
-              >
-                {t('actions.cancel')}
-              </button>
-              <button
-                onClick={handleDelete}
-                disabled={deleteMutation.isPending}
-                className={cn(
-                  'px-4 py-2 rounded-lg transition-colors',
-                  'bg-destructive text-destructive-foreground hover:bg-destructive/90',
-                  'disabled:opacity-50'
-                )}
-              >
-                {deleteMutation.isPending ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  t('actions.delete')
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog
+        isOpen={showDeleteConfirm}
+        title={t('actions.delete')}
+        description={t('messages.deleteEntryConfirm', { title: entry.title })}
+        confirmText={t('actions.delete')}
+        cancelText={t('actions.cancel')}
+        variant="destructive"
+        isLoading={deleteMutation.isPending}
+        onConfirm={() => {
+          void handleDelete()
+        }}
+        onCancel={() => setShowDeleteConfirm(false)}
+      />
     </div>
   )
 }

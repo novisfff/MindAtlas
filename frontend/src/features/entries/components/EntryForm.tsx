@@ -9,11 +9,10 @@ import { useEntryForm } from './useEntryForm'
 import { TagSuggestionPanel } from './TagSuggestionPanel'
 import { AiContentEditor } from './AiContentEditor'
 import { EntryTimeSection } from './EntryTimeSection'
+import { Button } from '@/components/ui/button'
+import { uiField, uiLayout } from '@/components/ui/styles'
 
-const inputClass = cn(
-  'w-full px-3 py-2 rounded-lg border bg-background',
-  'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2'
-)
+const inputClass = uiField.input
 
 interface EntryFormProps {
   entry?: Entry
@@ -54,20 +53,15 @@ export function EntryForm({ entry, defaultDate, onSubmit, isSubmitting }: EntryF
         <button
           type="button"
           onClick={() => navigate(-1)}
-          className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors"
+          className={uiLayout.backLink}
         >
           <ArrowLeft className="w-4 h-4 mr-1" />
           {t('actions.back')}
         </button>
 
-        <button
+        <Button
           type="submit"
           disabled={isSubmitting || !title.trim() || !typeId}
-          className={cn(
-            'inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium transition-colors',
-            'bg-primary text-primary-foreground hover:bg-primary/90',
-            'disabled:opacity-50 disabled:cursor-not-allowed'
-          )}
         >
           {isSubmitting ? (
             <>
@@ -80,7 +74,7 @@ export function EntryForm({ entry, defaultDate, onSubmit, isSubmitting }: EntryF
               {entry ? t('actions.update') : t('actions.create')}
             </>
           )}
-        </button>
+        </Button>
       </div>
 
       <div className="space-y-4">
@@ -122,7 +116,7 @@ export function EntryForm({ entry, defaultDate, onSubmit, isSubmitting }: EntryF
               value={typeId}
               onChange={(e) => setTypeId(e.target.value)}
               disabled={typesLoading}
-              className={inputClass}
+              className={uiField.select}
             >
               {typesLoading ? (
                 <option>{t('messages.loading')}</option>
@@ -150,7 +144,7 @@ export function EntryForm({ entry, defaultDate, onSubmit, isSubmitting }: EntryF
               id="entry-time-mode"
               value={timeMode}
               onChange={(e) => setTimeMode(e.target.value as EntryTimeMode)}
-              className={inputClass}
+              className={uiField.select}
             >
               <option value="POINT">{t('time.mode.point')}</option>
               <option value="RANGE">{t('time.mode.range')}</option>

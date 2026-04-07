@@ -5,11 +5,15 @@ import { ThemeProvider } from './ThemeProvider'
 import { useAppStore } from '@/stores/app-store'
 import { FloatingWidget } from '@/features/assistant'
 import { cn } from '@/lib/utils'
+import { uiSurface } from '@/components/ui/styles'
 
 export function AppLayout() {
   const location = useLocation()
   const sidebarOpen = useAppStore((s) => s.sidebarOpen)
   const toggleSidebar = useAppStore((s) => s.toggleSidebar)
+  const isAssistantRoute = location.pathname.startsWith('/assistant')
+  const isCalendarRoute = location.pathname.startsWith('/calendar')
+  const isFullBleedRoute = isAssistantRoute || isCalendarRoute
 
   return (
     <ThemeProvider>
@@ -30,16 +34,16 @@ export function AppLayout() {
           <Header />
           <main
             className={cn(
-              'flex-1',
-              location.pathname.startsWith('/assistant')
+              'flex-1 min-h-0',
+              isFullBleedRoute
                 ? 'overflow-hidden'
-                : 'overflow-y-auto p-4 md:p-6'
+                : cn(uiSurface.pageBackdrop, 'overflow-y-auto px-4 py-4 md:px-6 md:py-6'),
             )}
           >
             <Outlet />
           </main>
         </div>
-        {!location.pathname.startsWith('/assistant') && <FloatingWidget />}
+        {!isAssistantRoute && <FloatingWidget />}
       </div>
     </ThemeProvider>
   )

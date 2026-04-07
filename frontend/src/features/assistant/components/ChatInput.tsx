@@ -2,6 +2,7 @@ import { useState, KeyboardEvent, useEffect, useRef } from 'react'
 import { ArrowUp, Plus, Mic, Square } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
+import { uiChrome, uiRadius } from '@/components/ui/styles'
 
 interface ChatInputProps {
   onSend: (message: string) => void
@@ -56,18 +57,19 @@ export function ChatInput({ onSend, onStop, isLoading, conversationId = null, va
 
   return (
     <div className={cn(
-      "bg-transparent",
-      isCompact ? "px-2 py-2" : "px-4 py-4"
+      'bg-transparent',
+      isCompact ? 'px-2 py-2' : 'px-4 py-4'
     )}>
       <div className={cn(
-        "mx-auto max-w-3xl relative flex items-end gap-2 bg-background border shadow-sm transition-all focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary/50",
-        isCompact ? "p-1 pl-2 rounded-[20px]" : "p-1.5 pl-3 rounded-[26px]"
+        uiChrome.control,
+        'relative mx-auto flex max-w-3xl items-end gap-2 border-border/80 transition-all focus-within:border-primary/30 focus-within:ring-[3px] focus-within:ring-primary/10',
+        isCompact ? 'p-1 pl-2' : 'p-1.5 pl-3'
       )}>
 
         {/* Left Action Button (Placeholder) */}
         {!isCompact && (
           <button
-            className="mb-1.5 p-1.5 text-muted-foreground hover:bg-muted rounded-full transition-colors"
+            className="mb-1.5 rounded-full p-1.5 text-muted-foreground transition-colors hover:bg-muted"
             aria-label="Add attachment"
           >
             <Plus className="h-5 w-5" />
@@ -82,7 +84,8 @@ export function ChatInput({ onSend, onStop, isLoading, conversationId = null, va
           placeholder={t('pages.assistant.inputPlaceholder', 'Ask anything...')}
           aria-label="Chat message input"
           className={cn(
-            'flex-1 resize-none rounded-lg',
+            uiRadius.inset,
+            'flex-1 resize-none border-0 bg-transparent',
             'bg-transparent text-base md:text-sm leading-relaxed',
             'placeholder:text-muted-foreground/60',
             'focus:outline-none',
@@ -101,7 +104,7 @@ export function ChatInput({ onSend, onStop, isLoading, conversationId = null, va
           {/* Mic Button (Placeholder) */}
           {!input && (
             <button
-              className="p-2 text-muted-foreground hover:bg-muted rounded-full transition-colors"
+              className="rounded-full p-2 text-muted-foreground transition-colors hover:bg-muted"
               aria-label="Voice input"
             >
               <Mic className="h-5 w-5" />
@@ -142,7 +145,7 @@ export function ChatInput({ onSend, onStop, isLoading, conversationId = null, va
         </div>
       </div>
 
-      <div className="text-center text-[11px] text-muted-foreground/50 mt-3 select-none">
+      <div className="mt-3 select-none text-center text-[11px] text-muted-foreground/60">
         {t('pages.assistant.footer', 'AI can make mistakes. Check important info.')}
       </div>
     </div>

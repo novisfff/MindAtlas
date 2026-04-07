@@ -892,6 +892,8 @@
       "systemItemsReset": "System items reset",
       "systemPresetsReset": "System items reset",
       "deleted": "Catalog item deleted",
+      "syncWarningTitle": "System item sync incomplete",
+      "loadFailedDescription": "OpenClaw integration settings could not be loaded right now. Try refreshing the page or inspect the backend logs.",
       "invalidSchemaJson": "Schema must be valid JSON.",
       "invalidSchemaObject": "Schema root must be a JSON object."
     }
@@ -1123,6 +1125,8 @@
       "noDescription": "No description",
       "enable": "Enable",
       "disable": "Disable",
+      "enabledStateOn": "Enabled",
+      "enabledStateOff": "Disabled",
       "deleteTitle": "Delete Tool",
       "deleteDescription": "Are you sure you want to delete this tool? This action cannot be undone.",
       "name": "Name",
@@ -2041,6 +2045,7 @@
       "sun": "Sun"
     },
     "noEntries": "No entries for this date",
+    "viewMore": "View more",
     "moreEvents": "+{{count}} more"
   },
   "relations": {

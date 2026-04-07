@@ -66,6 +66,7 @@ export interface OpenClawIntegrationSettingsResponse {
   secretConfigured: boolean
   secretHint?: string | null
   secretLastRotatedAt?: string | null
+  syncWarning?: string | null
   catalogItems: OpenClawCatalogItem[]
 }
 

@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.assistant_config.schemas import AssistantAgentProfileCreateRequest  # noqa: E402
 from app.assistant_config.service import AssistantConfigService  # noqa: E402
 from app.common.exceptions import register_exception_handlers  # noqa: E402
+from app.common.exceptions import ApiException  # noqa: E402
 from app.database import get_db  # noqa: E402
 from app.openclaw_integration.models import OpenClawCapabilityItem  # noqa: E402
 from app.openclaw_integration.registry import list_openclaw_system_item_definitions  # noqa: E402
@@ -254,6 +255,39 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(item["sourceType"], "tool")
         self.assertEqual(item["sourceToolName"], "search_entries")
         self.assertTrue(item["schemaEditable"])
+
+    def test_catalog_sources_include_update_entry_system_tool(self) -> None:
+        self._initialize_system()
+        response = self.client.get(
+            "/api/system-settings/openclaw-integration/catalog-sources",
+            params={"sourceType": "tool"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        items = response.json()["data"]["items"]
+        by_source_tool_name = {
+            item["sourceToolName"]: item
+            for item in items
+            if item.get("sourceToolName")
+        }
+        self.assertIn("update_entry", by_source_tool_name)
+        self.assertTrue(by_source_tool_name["update_entry"]["bindable"])
+
+    def test_settings_returns_sync_warning_when_system_item_sync_fails(self) -> None:
+        with patch(
+            "app.openclaw_integration.service.OpenClawIntegrationService._ensure_system_items",
+            side_effect=ApiException(
+                status_code=422,
+                code=42203,
+                message="Workflow references unavailable tools: update_entry (not found)",
+            ),
+        ):
+            response = self.client.get("/api/system-settings/openclaw-integration")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()["data"]
+        self.assertIn("catalogItems", data)
+        self.assertIn("syncWarning", data)
+        self.assertIn("update_entry", data["syncWarning"])
 
     def test_retired_capture_source_is_not_listed_in_catalog_sources(self) -> None:
         self._initialize_system()

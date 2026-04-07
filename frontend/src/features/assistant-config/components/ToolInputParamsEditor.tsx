@@ -1,5 +1,8 @@
 import { Plus, Trash2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { Button } from '@/components/ui/button'
+import { uiChrome, uiField } from '@/components/ui/styles'
+import { cn } from '@/lib/utils'
 import type { InputParam } from '../api/tools'
 
 const PARAM_TYPES = ['string', 'number', 'boolean', 'array', 'object']
@@ -20,62 +23,62 @@ export function ToolInputParamsEditor({
   const { t } = useTranslation()
 
   return (
-    <div className="space-y-4 flex-1">
+    <div className="flex-1 space-y-4">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <h4 className="font-medium text-sm text-foreground/80">{t('settings.tools.inputParams')}</h4>
+          <h4 className="text-sm font-semibold text-foreground">{t('settings.tools.inputParams')}</h4>
           <div className="text-muted-foreground hover:text-foreground cursor-help" title="Parameters that the AI will generate and pass to this tool">
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><path d="M12 17h.01" /></svg>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={onAdd}
-          className="text-xs px-2.5 py-1.5 rounded-md border hover:bg-muted bg-background font-medium flex items-center gap-1 transition-colors"
-        >
-          <Plus className="w-3.5 h-3.5" />
+        <Button type="button" onClick={onAdd} variant="outline" size="sm">
+          <Plus className="h-3.5 w-3.5" />
           {t('common.add')}
-        </button>
+        </Button>
       </div>
 
       <div className="space-y-3">
         {inputParams.length === 0 ? (
-          <div className="text-sm text-muted-foreground italic text-center py-8 border-2 border-dashed rounded-lg bg-muted/20">
+          <div className="rounded-[12px] border border-dashed border-border/75 bg-muted/20 py-8 text-center text-sm text-muted-foreground">
             {t('settings.tools.noParams', 'No parameters defined')}
           </div>
         ) : (
           <div className="grid gap-3">
-            <div className="grid grid-cols-12 gap-2 text-xs font-medium text-muted-foreground px-1 uppercase tracking-wider">
-              <div className="col-span-3">Name</div>
-              <div className="col-span-6">Description</div>
-              <div className="col-span-3">Type</div>
-            </div>
             {inputParams.map((param, i) => (
-              <div key={i} className="group relative p-3 rounded-lg border bg-background hover:shadow-sm transition-all space-y-2">
-                <div className="grid grid-cols-12 gap-2">
-                  <div className="col-span-3">
+              <div key={i} className={cn(uiChrome.inset, 'group space-y-3 p-4')}>
+                <div className="grid gap-3 md:grid-cols-[minmax(0,0.9fr)_minmax(0,1.2fr)_160px]">
+                  <div className="space-y-2">
+                    <label className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                      Name
+                    </label>
                     <input
                       type="text"
                       value={param.name}
                       onChange={(e) => onUpdate(i, { name: e.target.value })}
                       placeholder="key"
-                      className="w-full px-2 py-1 text-sm rounded border-b border-transparent focus:border-primary bg-transparent focus:bg-muted/10 font-medium"
+                      className={uiField.input}
                     />
                   </div>
-                  <div className="col-span-6">
+                  <div className="space-y-2">
+                    <label className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                      Description
+                    </label>
                     <input
                       type="text"
                       value={param.description || ''}
                       onChange={(e) => onUpdate(i, { description: e.target.value })}
                       placeholder="desc"
-                      className="w-full px-2 py-1 text-sm rounded border-b border-transparent focus:border-primary bg-transparent focus:bg-muted/10 text-muted-foreground"
+                      className={uiField.input}
                     />
                   </div>
-                  <div className="col-span-3">
+                  <div className="space-y-2">
+                    <label className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                      Type
+                    </label>
                     <select
                       value={param.paramType}
                       onChange={(e) => onUpdate(i, { paramType: e.target.value })}
-                      className="w-full px-1 py-1 text-xs rounded border-none bg-muted/50 focus:ring-0 cursor-pointer"
+                      className={uiField.select}
                     >
                       {PARAM_TYPES.map((t) => (
                         <option key={t} value={t}>{t}</option>
@@ -84,7 +87,7 @@ export function ToolInputParamsEditor({
                   </div>
                 </div>
 
-                <div className="flex items-center justify-end gap-3 pt-1 border-t border-muted/30">
+                <div className="flex items-center justify-end gap-3 border-t border-border/70 pt-3">
                   <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none text-muted-foreground hover:text-foreground">
                     <input
                       type="checkbox"
@@ -97,7 +100,7 @@ export function ToolInputParamsEditor({
                   <button
                     type="button"
                     onClick={() => onRemove(i)}
-                    className="text-muted-foreground hover:text-destructive transition-colors p-1"
+                    className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>

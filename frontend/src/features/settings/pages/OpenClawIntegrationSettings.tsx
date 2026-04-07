@@ -36,6 +36,7 @@ import {
 } from '@/components/ui/dialog'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Switch } from '@/components/ui/switch'
+import { uiChrome, uiField } from '@/components/ui/styles'
 import {
   createOpenClawCatalogItem,
   deleteOpenClawCatalogItem,
@@ -55,6 +56,13 @@ import {
 import { isApiError } from '@/lib/api/client'
 import { cn } from '@/lib/utils'
 import { InputField, Label, TEXTAREA_CLASSNAME, TextareaField } from '@/features/system-setup'
+import {
+  SettingsBadge,
+  SettingsEmptyState,
+  SettingsInset,
+  SettingsPageHeader,
+  SettingsPageShell,
+} from '@/features/settings/components/SettingsShell'
 
 const settingsQueryKey = ['openclaw-integration-settings'] as const
 
@@ -202,9 +210,9 @@ function CapabilityBadge({
   children: React.ReactNode
 }) {
   return (
-    <Badge variant="outline" className={cn('rounded-full', colorClassName)}>
+    <SettingsBadge className={colorClassName}>
       {children}
-    </Badge>
+    </SettingsBadge>
   )
 }
 
@@ -220,8 +228,8 @@ function SectionHeader({
   return (
     <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
       <div className="space-y-1.5">
-        <h2 className="text-lg font-semibold text-slate-900">{title}</h2>
-        <p className="max-w-3xl text-sm leading-6 text-slate-600">{description}</p>
+        <h2 className="text-lg font-semibold text-foreground">{title}</h2>
+        <p className="max-w-3xl text-sm leading-6 text-muted-foreground">{description}</p>
       </div>
       {action}
     </div>
@@ -242,10 +250,11 @@ function SummaryCard({
   return (
     <div
       className={cn(
-        'group relative overflow-hidden rounded-[24px] border p-5 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-md',
+        uiChrome.card,
+        'group relative overflow-hidden p-5 transition-all duration-300',
         active
-          ? 'border-emerald-200 bg-emerald-50/50 shadow-sm shadow-emerald-900/5'
-          : 'border-slate-200 bg-white shadow-sm shadow-slate-900/5'
+          ? 'border-emerald-200/80 bg-emerald-50/50'
+          : 'border-border/80 bg-background/96'
       )}
     >
       {active && (
@@ -255,9 +264,9 @@ function SummaryCard({
         <div className="absolute inset-x-0 -top-px h-px bg-gradient-to-r from-transparent via-slate-300 to-transparent opacity-50" />
       )}
       <div className="relative">
-        <p className={cn('text-sm font-medium', active ? 'text-emerald-700' : 'text-slate-500')}>{label}</p>
-        <p className={cn('mt-2 text-2xl font-semibold tracking-tight', active ? 'text-emerald-950' : 'text-slate-900')}>{value}</p>
-        <p className={cn('mt-2 text-sm leading-6', active ? 'text-emerald-700/80' : 'text-slate-600')}>{hint}</p>
+        <p className={cn('text-sm font-medium', active ? 'text-emerald-700' : 'text-muted-foreground')}>{label}</p>
+        <p className={cn('mt-2 text-2xl font-semibold tracking-tight', active ? 'text-emerald-950 dark:text-emerald-100' : 'text-foreground')}>{value}</p>
+        <p className={cn('mt-2 text-sm leading-6', active ? 'text-emerald-700/80 dark:text-emerald-200/80' : 'text-muted-foreground')}>{hint}</p>
       </div>
     </div>
   )
@@ -339,16 +348,17 @@ function GuideCallout({
   return (
     <div
       className={cn(
-        'flex items-start gap-3 rounded-[22px] border px-4 py-3.5 text-sm leading-6 shadow-sm',
+        uiChrome.inset,
+        'flex items-start gap-3 px-4 py-3.5 text-sm leading-6 shadow-none',
         tone === 'warning'
-          ? 'border-amber-200 bg-amber-50/80 text-amber-900 shadow-amber-900/5'
-          : 'border-cyan-200 bg-cyan-50/80 text-cyan-950 shadow-cyan-900/5'
+          ? 'border-amber-200 bg-amber-50/80 text-amber-900 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-100'
+          : 'border-cyan-200 bg-cyan-50/80 text-cyan-950 dark:border-cyan-500/20 dark:bg-cyan-500/10 dark:text-cyan-100'
       )}
     >
       <div
         className={cn(
-          'mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl',
-          tone === 'warning' ? 'bg-amber-100 text-amber-700' : 'bg-cyan-100 text-cyan-700'
+          'mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-[12px]',
+          tone === 'warning' ? 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-100' : 'bg-cyan-100 text-cyan-700 dark:bg-cyan-500/15 dark:text-cyan-100'
         )}
       >
         {icon}
@@ -359,12 +369,14 @@ function GuideCallout({
 }
 
 function CopyableCodeBlock({
+  orderLabel,
   title,
   description,
   code,
   copyLabel,
   onCopy,
 }: {
+  orderLabel?: string
   title: string
   description: string
   code: string
@@ -372,19 +384,27 @@ function CopyableCodeBlock({
   onCopy: (value: string) => void
 }) {
   const singleLine = !code.includes('\n')
+  const compactCodeTextClass = 'font-mono text-[13px] leading-6 text-slate-100'
 
   return (
-    <div className="rounded-[24px] border border-slate-200 bg-gradient-to-b from-white to-slate-50/70 p-5 shadow-sm shadow-slate-900/5">
+    <div className={cn(uiChrome.card, 'p-5')}>
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 space-y-1.5">
-          <p className="text-base font-semibold text-slate-900">{title}</p>
-          <p className="text-sm leading-6 text-slate-600">{description}</p>
+          {orderLabel ? (
+            <div className="flex items-center gap-2">
+              <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-semibold tracking-[0.12em] text-slate-700">
+                {orderLabel}
+              </span>
+            </div>
+          ) : null}
+          <p className="text-base font-semibold text-foreground">{title}</p>
+          <p className="text-sm leading-6 text-muted-foreground">{description}</p>
         </div>
         <Button
           type="button"
           variant="outline"
           size="sm"
-          className="h-10 shrink-0 rounded-full border-slate-200 bg-white px-4 shadow-sm hover:bg-slate-50"
+          className="h-10 shrink-0 px-4"
           onClick={() => onCopy(code)}
         >
           <Copy className="h-4 w-4" />
@@ -392,14 +412,14 @@ function CopyableCodeBlock({
         </Button>
       </div>
       {singleLine ? (
-        <div className="mt-4 overflow-x-auto">
-          <div className="inline-flex min-w-full items-center rounded-[22px] bg-slate-950 px-5 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] sm:min-w-0">
-            <code className="whitespace-pre font-mono text-[0.95rem] leading-7 text-slate-100">{code}</code>
+        <div className="mt-4">
+          <div className="flex w-full overflow-x-auto rounded-[12px] bg-slate-950 px-5 py-4">
+            <code className={cn(compactCodeTextClass, 'whitespace-pre')}>{code}</code>
           </div>
         </div>
       ) : (
-        <pre className="mt-4 max-h-[24rem] overflow-auto rounded-[22px] bg-slate-950 px-5 py-4 text-xs leading-6 text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-          <code>{code}</code>
+        <pre className="mt-4 w-full max-h-[24rem] overflow-auto rounded-[12px] bg-slate-950 px-5 py-4">
+          <code className={cn(compactCodeTextClass, 'block whitespace-pre')}>{code}</code>
         </pre>
       )}
     </div>
@@ -414,12 +434,12 @@ function GuideChecklistCard({
   items: string[]
 }) {
   return (
-    <div className="rounded-[24px] border border-slate-200 bg-gradient-to-b from-white to-slate-50/70 p-5 shadow-sm shadow-slate-900/5">
-      <p className="text-base font-semibold text-slate-900">{title}</p>
-      <ul className="mt-4 space-y-3 text-sm leading-6 text-slate-700">
+    <div className={cn(uiChrome.card, 'p-5')}>
+      <p className="text-base font-semibold text-foreground">{title}</p>
+      <ul className="mt-4 space-y-3 text-sm leading-6 text-foreground/85">
         {items.map((item) => (
           <li key={item} className="flex items-start gap-3">
-            <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-slate-600">
+            <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-[12px] bg-muted text-muted-foreground">
               <CheckCircle2 className="h-4 w-4" />
             </div>
             <span>{item}</span>
@@ -462,12 +482,12 @@ function CatalogItemCard({
   outputLabel: string
 }) {
   return (
-    <article className="group overflow-hidden rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:shadow-md">
+    <article className={cn(uiChrome.card, 'group overflow-hidden p-6 transition-all duration-300')}>
       <div className="flex flex-col gap-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="space-y-3.5">
             <div className="flex flex-wrap items-center gap-2">
-              <h3 className="text-lg font-semibold text-slate-900">{item.title}</h3>
+              <h3 className="text-lg font-semibold text-foreground">{item.title}</h3>
               <CapabilityBadge colorClassName="border-slate-200 bg-slate-50 text-slate-700">
                 {typeLabel}
               </CapabilityBadge>
@@ -496,17 +516,17 @@ function CatalogItemCard({
                 </CapabilityBadge>
               )}
             </div>
-            <p className="text-sm leading-6 text-slate-600">{item.description || '-'}</p>
-            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-              <span className="rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-700">
+            <p className="text-sm leading-6 text-muted-foreground">{item.description || '-'}</p>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              <span className="rounded-full bg-muted px-2.5 py-1 font-medium text-foreground">
                 {item.toolName}
               </span>
               {item.sourceName ? (
-                <span className="rounded-full bg-slate-100 px-2.5 py-1">
+                <span className="rounded-full bg-muted px-2.5 py-1">
                   {item.sourceName}
                 </span>
               ) : null}
-              <span className="rounded-full bg-slate-100 px-2.5 py-1">
+              <span className="rounded-full bg-muted px-2.5 py-1">
                 {item.retired ? retiredLabel : item.enabled ? exposedLabel : hiddenLabel}
               </span>
             </div>
@@ -514,24 +534,24 @@ function CatalogItemCard({
 
           <div className="flex items-center gap-2 self-start">
             {item.retired ? (
-              <div className="rounded-[24px] border border-amber-200/60 bg-amber-50/80 px-4 py-2.5 text-sm font-medium text-amber-800 shadow-sm transition-colors whitespace-nowrap">
+              <div className="whitespace-nowrap rounded-[16px] border border-amber-200/60 bg-amber-50/80 px-4 py-2.5 text-sm font-medium text-amber-800">
                 {retiredLabel}
               </div>
             ) : (
-              <div className="rounded-[24px] border border-slate-200/80 bg-slate-50/80 px-4 py-2.5 shadow-sm transition-colors">
+              <div className={cn(uiChrome.inset, 'px-4 py-2.5')}>
                 <div className="flex items-center gap-3">
                   <Switch checked={item.enabled} onCheckedChange={onToggle} className="data-[state=checked]:bg-emerald-500" />
-                  <span className="whitespace-nowrap text-sm font-semibold text-slate-800">
+                  <span className="whitespace-nowrap text-sm font-semibold text-foreground">
                     {item.enabled ? exposedLabel : hiddenLabel}
                   </span>
                 </div>
               </div>
             )}
-            <Button type="button" variant="outline" className="rounded-2xl" onClick={onEdit}>
+            <Button type="button" variant="outline" onClick={onEdit}>
               <Pencil className="h-4 w-4" />
             </Button>
             {onDelete ? (
-              <Button type="button" variant="outline" className="rounded-2xl text-rose-600" onClick={onDelete}>
+              <Button type="button" variant="outline" className="text-rose-600" onClick={onDelete}>
                 <Trash2 className="h-4 w-4" />
               </Button>
             ) : null}
@@ -539,28 +559,28 @@ function CatalogItemCard({
         </div>
 
         <div className="grid gap-4 lg:grid-cols-2">
-          <div className="rounded-[24px] border border-slate-100 bg-slate-50/50 p-5 transition-colors group-hover:bg-slate-50">
-            <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">
+          <SettingsInset className="p-5">
+            <p className="text-xs font-semibold uppercase tracking-[0.15em] text-muted-foreground">
               {inputLabel}
             </p>
-            <p className="mt-2.5 text-sm leading-relaxed text-slate-700">{item.inputSummary || '-'}</p>
-          </div>
-          <div className="rounded-[24px] border border-slate-100 bg-slate-50/50 p-5 transition-colors group-hover:bg-slate-50">
-            <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">
+            <p className="mt-2.5 text-sm leading-relaxed text-foreground/85">{item.inputSummary || '-'}</p>
+          </SettingsInset>
+          <SettingsInset className="p-5">
+            <p className="text-xs font-semibold uppercase tracking-[0.15em] text-muted-foreground">
               {outputLabel}
             </p>
-            <p className="mt-2.5 text-sm leading-relaxed text-slate-700">{item.outputSummary || '-'}</p>
-          </div>
+            <p className="mt-2.5 text-sm leading-relaxed text-foreground/85">{item.outputSummary || '-'}</p>
+          </SettingsInset>
         </div>
 
         {item.retired && item.retirementReason ? (
-          <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm leading-6 text-amber-800">
+          <div className="rounded-[12px] border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm leading-6 text-amber-800">
             {item.retirementReason}
           </div>
         ) : null}
 
         {!item.retired && !item.available && item.availabilityReason ? (
-          <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm leading-6 text-amber-800">
+          <div className="rounded-[12px] border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm leading-6 text-amber-800">
             {item.availabilityReason}
           </div>
         ) : null}
@@ -644,6 +664,12 @@ export function OpenClawIntegrationSettingsPage() {
   })
 
   const current = settingsQuery.data ?? null
+  const loadErrorMessage =
+    settingsQuery.error && isApiError(settingsQuery.error)
+      ? settingsQuery.error.message
+      : settingsQuery.error instanceof Error
+        ? settingsQuery.error.message
+        : t('openclawIntegration.messages.loadFailedDescription')
   const catalogItems = useMemo(
     () => current?.catalogItems ?? [],
     [current]
@@ -746,11 +772,13 @@ export function OpenClawIntegrationSettingsPage() {
   ]
   const pluginInstallBlocks = [
     {
+      order: '3.1',
       title: t('openclawIntegration.guide.installBlocks.locate.title'),
       description: t('openclawIntegration.guide.installBlocks.locate.description'),
       code: 'cd /path/to/MindAtlas',
     },
     {
+      order: '3.2',
       title: t('openclawIntegration.guide.installBlocks.install.title'),
       description: t('openclawIntegration.guide.installBlocks.install.description'),
       code: 'openclaw plugins install ./integrations/openclaw-mindatlas\nnpm --prefix ./integrations/openclaw-mindatlas run configure:skills',
@@ -771,18 +799,36 @@ export function OpenClawIntegrationSettingsPage() {
     }
   }
 }`
+  const pluginConfigExampleBlock = {
+    order: '3.4',
+    title: t('openclawIntegration.guide.configExampleTitle'),
+    description: t('openclawIntegration.guide.configExampleDescription'),
+    code: pluginConfigExample,
+  }
   const pluginConfigBlocks = [
     {
+      order: '3.3',
       title: t('openclawIntegration.guide.configBlocks.findConfig.title'),
       description: t('openclawIntegration.guide.configBlocks.findConfig.description'),
       code: 'openclaw config file',
     },
     {
+      order: '3.5',
       title: t('openclawIntegration.guide.configBlocks.validate.title'),
       description: t('openclawIntegration.guide.configBlocks.validate.description'),
       code: 'openclaw config validate',
     },
   ]
+  const setupSequenceBlocks = [
+    ...pluginInstallBlocks,
+    pluginConfigBlocks[0],
+    pluginConfigExampleBlock,
+    pluginConfigBlocks[1],
+  ]
+  const orderedSetupCards = setupSequenceBlocks.map((block) => ({
+    ...block,
+    copyLabel: t('openclawIntegration.guide.actions.copy'),
+  }))
   const verificationChecks = [
     t('openclawIntegration.guide.verifyChecks.restart'),
     t('openclawIntegration.guide.verifyChecks.session'),
@@ -976,36 +1022,82 @@ export function OpenClawIntegrationSettingsPage() {
     }
   }
 
-  if (settingsQuery.isLoading || !current) {
+  if (settingsQuery.isLoading) {
     return (
-      <div className="flex h-64 items-center justify-center">
-        <Loader2 className="h-6 w-6 animate-spin text-slate-400" />
-      </div>
+      <SettingsPageShell>
+        <SettingsPageHeader
+          title={t('pages.settings.openClawIntegration')}
+          description={t('pages.settings.openClawIntegrationDesc')}
+          backAction={{ label: t('common.back'), onClick: () => navigate('/settings') }}
+        />
+        <div className={cn(uiChrome.card, 'flex h-64 items-center justify-center')}>
+          <Loader2 className="h-6 w-6 animate-spin text-slate-400" />
+        </div>
+      </SettingsPageShell>
+    )
+  }
+
+  if (settingsQuery.isError || !current) {
+    return (
+      <SettingsPageShell>
+        <SettingsPageHeader
+          title={t('pages.settings.openClawIntegration')}
+          description={t('pages.settings.openClawIntegrationDesc')}
+          backAction={{ label: t('common.back'), onClick: () => navigate('/settings') }}
+        />
+        <div className={cn(uiChrome.card, 'p-6')}>
+          <SettingsEmptyState
+            title={t('messages.failedToLoad')}
+            description={loadErrorMessage}
+            action={(
+              <Button type="button" variant="outline" onClick={() => void settingsQuery.refetch()}>
+                <RefreshCcw className="h-4 w-4" />
+                {t('actions.refresh')}
+              </Button>
+            )}
+          />
+        </div>
+      </SettingsPageShell>
     )
   }
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6">
-      <div className="flex flex-col gap-4">
-        <button
-          type="button"
-          onClick={() => navigate('/settings')}
-          className="inline-flex items-center gap-2 text-sm text-slate-500 transition hover:text-slate-900"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          {t('common.back')}
-        </button>
-        <div className="space-y-2">
-          <h1 className="text-3xl font-semibold tracking-tight text-slate-900">
-            {t('pages.settings.openClawIntegration')}
-          </h1>
-          <p className="max-w-3xl text-sm leading-7 text-slate-600">
-            {t('pages.settings.openClawIntegrationDesc')}
-          </p>
+    <SettingsPageShell>
+      <SettingsPageHeader
+        title={t('pages.settings.openClawIntegration')}
+        description={t('pages.settings.openClawIntegrationDesc')}
+        backAction={{ label: t('common.back'), onClick: () => navigate('/settings') }}
+      />
+      {current.syncWarning ? (
+        <div className="rounded-[16px] border border-amber-200/80 bg-amber-50/90 px-5 py-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+            <div className="flex min-w-0 items-start gap-3">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+              <div className="min-w-0 space-y-1">
+                <p className="text-sm font-semibold text-amber-900">
+                  {t('openclawIntegration.messages.syncWarningTitle')}
+                </p>
+                <p className="text-xs leading-6 text-amber-800/90">
+                  {current.syncWarning}
+                </p>
+              </div>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="border-amber-200 bg-white/80 text-amber-900 hover:bg-amber-100"
+              onClick={() => void settingsQuery.refetch()}
+              disabled={settingsQuery.isFetching}
+            >
+              {settingsQuery.isFetching ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+              {t('actions.refresh')}
+            </Button>
+          </div>
         </div>
-      </div>
+      ) : null}
       <section className="flex flex-col gap-6">
-        <div className="rounded-[32px] border border-slate-200 bg-white p-7 shadow-sm">
+        <div className={cn(uiChrome.shell, 'p-7')}>
           <div className="flex h-full flex-col gap-8">
             <div className="flex items-start gap-5">
               <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[20px] bg-slate-900 text-white shadow-sm shadow-slate-900/10">
@@ -1013,7 +1105,7 @@ export function OpenClawIntegrationSettingsPage() {
               </div>
               <div className="flex flex-col gap-1.5 pt-0.5">
                 <div className="flex flex-wrap items-center gap-2">
-                  <h2 className="text-xl font-semibold tracking-tight text-slate-900">
+                  <h2 className="text-xl font-semibold tracking-tight text-foreground">
                     {t('openclawIntegration.overview.title')}
                   </h2>
                   <CapabilityBadge
@@ -1028,18 +1120,18 @@ export function OpenClawIntegrationSettingsPage() {
                       : t('openclawIntegration.status.disabled')}
                   </CapabilityBadge>
                 </div>
-                <p className="text-sm leading-6 text-slate-600">
+                <p className="text-sm leading-6 text-muted-foreground">
                   {t('openclawIntegration.overview.description')}
                 </p>
               </div>
             </div>
 
-            <div className="flex items-center justify-between rounded-[24px] border border-slate-200 bg-slate-50/50 px-5 py-4">
+            <div className={cn(uiChrome.inset, 'flex items-center justify-between px-5 py-4')}>
               <div className="flex flex-col gap-1">
-                <p className="text-sm font-semibold text-slate-900">
+                <p className="text-sm font-semibold text-foreground">
                   {t('openclawIntegration.overview.switchLabel')}
                 </p>
-                <p className="text-xs text-slate-500">
+                <p className="text-xs text-muted-foreground">
                   {t('openclawIntegration.overview.switchHint')}
                 </p>
               </div>
@@ -1080,7 +1172,7 @@ export function OpenClawIntegrationSettingsPage() {
             </div>
 
             {!current.enabled && (
-              <div className="rounded-[22px] border border-amber-200 bg-amber-50 px-5 py-4">
+              <div className="rounded-[12px] border border-amber-200 bg-amber-50 px-5 py-4">
                 <div className="flex gap-3">
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
                   <p className="text-sm text-amber-900">
@@ -1092,7 +1184,7 @@ export function OpenClawIntegrationSettingsPage() {
           </div>
         </div>
 
-        <div className="rounded-[32px] border border-slate-200 bg-white p-7 shadow-sm">
+        <div className={cn(uiChrome.shell, 'p-7')}>
           <div className="flex h-full flex-col gap-8">
             <div className="flex items-start gap-5">
               <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[20px] bg-amber-100 text-amber-700 shadow-sm shadow-amber-900/10">
@@ -1108,7 +1200,7 @@ export function OpenClawIntegrationSettingsPage() {
               </div>
             </div>
 
-            <div className="rounded-[24px] border border-slate-200 bg-slate-50/50 p-5 mt-auto">
+            <div className={cn(uiChrome.inset, 'mt-auto p-5')}>
               <p className="text-sm font-semibold text-slate-900">
                 {current.secretConfigured
                   ? current.secretHint || t('openclawIntegration.secret.configured')
@@ -1125,7 +1217,7 @@ export function OpenClawIntegrationSettingsPage() {
               <Button 
                 type="button" 
                 variant={current.secretConfigured ? "outline" : "default"}
-                className={cn("rounded-2xl transition-all", current.secretConfigured ? "bg-white hover:bg-slate-50" : "bg-slate-900 hover:bg-slate-800")}
+                className={cn("transition-all", current.secretConfigured ? "bg-white hover:bg-slate-50" : "bg-slate-900 hover:bg-slate-800")}
                 onClick={() => setShowRotateConfirm(true)} 
                 disabled={isBusy}
               >
@@ -1135,7 +1227,7 @@ export function OpenClawIntegrationSettingsPage() {
                   : t('openclawIntegration.actions.generateSecret')}
               </Button>
               {revealedSecret && (
-                <Button type="button" variant="secondary" className="rounded-2xl bg-emerald-100 text-emerald-800 hover:bg-emerald-200" onClick={handleCopySecret}>
+                <Button type="button" variant="secondary" className="bg-emerald-100 text-emerald-800 hover:bg-emerald-200" onClick={handleCopySecret}>
                   <Copy className="h-4 w-4" />
                   {t('openclawIntegration.actions.copySecret')}
                 </Button>
@@ -1143,14 +1235,14 @@ export function OpenClawIntegrationSettingsPage() {
             </div>
 
             {revealedSecret && (
-              <div className="animate-in fade-in slide-in-from-top-2 rounded-[24px] border border-emerald-200 bg-emerald-50/50 p-5 shadow-sm shadow-emerald-900/5">
+              <div className="animate-in fade-in slide-in-from-top-2 rounded-[20px] border border-emerald-200 bg-emerald-50/50 p-5">
                 <div className="flex flex-col gap-3">
                   <div className="flex items-center gap-2.5 text-emerald-700">
                     <CheckCircle2 className="h-5 w-5 fill-emerald-100" />
                     <p className="text-sm font-semibold tracking-wide">{t('openclawIntegration.secret.revealedTitle')}</p>
                   </div>
                   <div className="relative group">
-                    <code className="block break-all rounded-[20px] bg-white border border-emerald-100 px-5 py-4 font-mono text-sm font-medium text-slate-800 shadow-sm transition-all group-hover:border-emerald-300">
+                    <code className="block break-all rounded-[12px] border border-emerald-100 bg-white px-5 py-4 font-mono text-sm font-medium text-slate-800 transition-all group-hover:border-emerald-300">
                       {revealedSecret}
                     </code>
                     <button 
@@ -1167,7 +1259,7 @@ export function OpenClawIntegrationSettingsPage() {
         </div>
       </section>
 
-      <section className="rounded-[32px] border border-slate-200 bg-white shadow-sm">
+      <section className={cn(uiChrome.shell, 'overflow-hidden')}>
         <button
           type="button"
           onClick={() => setGuideOpen((open) => !open)}
@@ -1176,7 +1268,7 @@ export function OpenClawIntegrationSettingsPage() {
         >
           <div className="space-y-1">
             <div className="flex items-center gap-3">
-              <div className="rounded-2xl bg-cyan-50 p-2.5 text-cyan-700">
+              <div className="rounded-[16px] bg-cyan-50 p-2.5 text-cyan-700">
                 <PlugZap className="h-5 w-5" />
               </div>
               <h2 className="text-lg font-semibold text-slate-900">
@@ -1187,7 +1279,7 @@ export function OpenClawIntegrationSettingsPage() {
               {t('openclawIntegration.guide.description')}
             </p>
           </div>
-          <div className="flex shrink-0 items-center gap-3 self-start rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm text-slate-600">
+          <div className={cn(uiChrome.control, 'flex shrink-0 items-center gap-3 self-start px-3 py-1.5 text-sm text-slate-600 shadow-none')}>
             <span>
               {guideOpen
                 ? t('actions.collapse')
@@ -1211,7 +1303,7 @@ export function OpenClawIntegrationSettingsPage() {
                 }
                 statusTone={secretReady ? 'success' : 'warning'}
               >
-                <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 px-4 py-3 text-sm leading-6 text-slate-700">
+                <div className={cn(uiChrome.inset, 'px-4 py-3 text-sm leading-6 text-foreground/85')}>
                   {secretReady
                     ? t('openclawIntegration.guide.steps.secret.ready')
                     : t('openclawIntegration.guide.steps.secret.missing')}
@@ -1229,14 +1321,14 @@ export function OpenClawIntegrationSettingsPage() {
                 }
                 statusTone={catalogReady ? 'success' : 'warning'}
                 action={
-                  <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={scrollToCatalog}>
-                    {t('openclawIntegration.guide.actions.jumpToCatalog')}
-                  </Button>
-                }
+                    <Button type="button" variant="outline" size="sm" onClick={scrollToCatalog}>
+                      {t('openclawIntegration.guide.actions.jumpToCatalog')}
+                    </Button>
+                  }
               >
                 <div
                   className={cn(
-                    'rounded-[22px] px-4 py-3 text-sm leading-6',
+                    'rounded-[12px] px-4 py-3 text-sm leading-6',
                     catalogReady
                       ? 'border border-emerald-200 bg-emerald-50/80 text-emerald-800'
                       : 'border border-amber-200 bg-amber-50/80 text-amber-900'
@@ -1259,42 +1351,21 @@ export function OpenClawIntegrationSettingsPage() {
                   {t('openclawIntegration.guide.steps.plugin.hostHint')}
                 </GuideCallout>
 
-                <div className="grid gap-4 lg:grid-cols-2">
-                  {pluginInstallBlocks.map((block) => (
+                <div className="space-y-4">
+                  {orderedSetupCards.map((block) => (
                     <CopyableCodeBlock
-                      key={block.title}
+                      key={block.order}
+                      orderLabel={block.order}
                       title={block.title}
                       description={block.description}
                       code={block.code}
-                      copyLabel={t('openclawIntegration.guide.actions.copy')}
-                      onCopy={(value) => {
-                        void copyToClipboard(value, t('openclawIntegration.messages.copied'))
-                      }}
-                    />
-                  ))}
-                  {pluginConfigBlocks.map((block) => (
-                    <CopyableCodeBlock
-                      key={block.title}
-                      title={block.title}
-                      description={block.description}
-                      code={block.code}
-                      copyLabel={t('openclawIntegration.guide.actions.copy')}
+                      copyLabel={block.copyLabel}
                       onCopy={(value) => {
                         void copyToClipboard(value, t('openclawIntegration.messages.copied'))
                       }}
                     />
                   ))}
                 </div>
-
-                <CopyableCodeBlock
-                  title={t('openclawIntegration.guide.configExampleTitle')}
-                  description={t('openclawIntegration.guide.configExampleDescription')}
-                  code={pluginConfigExample}
-                  copyLabel={t('openclawIntegration.guide.actions.copy')}
-                  onCopy={(value) => {
-                    void copyToClipboard(value, t('openclawIntegration.messages.copied'))
-                  }}
-                />
               </QuickStartStep>
 
               <QuickStartStep
@@ -1324,7 +1395,7 @@ export function OpenClawIntegrationSettingsPage() {
                 </div>
               </QuickStartStep>
 
-              <div className="mt-4 rounded-[28px] border border-slate-200 bg-slate-50/60 shadow-sm">
+              <div className={cn(uiChrome.inset, 'mt-4 overflow-hidden p-0')}>
                 <button
                   type="button"
                   onClick={() => setAdvancedOpen((open) => !open)}
@@ -1333,7 +1404,7 @@ export function OpenClawIntegrationSettingsPage() {
                 >
                   <div className="space-y-1">
                     <div className="flex items-center gap-3">
-                      <div className="rounded-2xl bg-slate-100 p-2.5 text-slate-700">
+                      <div className="rounded-[16px] bg-slate-100 p-2.5 text-slate-700">
                         <AlertTriangle className="h-5 w-5" />
                       </div>
                       <h3 className="text-base font-semibold text-slate-900">
@@ -1344,7 +1415,7 @@ export function OpenClawIntegrationSettingsPage() {
                       {t('openclawIntegration.guide.advancedDescription')}
                     </p>
                   </div>
-                  <div className="flex shrink-0 items-center gap-3 self-start rounded-full border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-600">
+                  <div className={cn(uiChrome.control, 'flex shrink-0 items-center gap-3 self-start px-3 py-1.5 text-sm text-slate-600 shadow-none')}>
                     <span>
                       {advancedOpen
                         ? t('openclawIntegration.guide.actions.collapse')
@@ -1357,12 +1428,12 @@ export function OpenClawIntegrationSettingsPage() {
                 {advancedOpen ? (
                   <div className="border-t border-slate-200 px-5 pb-5 pt-5">
                     <div className="grid gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)]">
-                      <div className="rounded-[24px] border border-slate-200 bg-white p-5">
+                      <div className={cn(uiChrome.card, 'p-5')}>
                         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
                           {t('openclawIntegration.guide.endpointsTitle')}
                         </p>
                         <div className="mt-4 space-y-3">
-                          <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                          <div className={cn(uiChrome.inset, 'px-4 py-3')}>
                             <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
                               {t('openclawIntegration.guide.endpoints.auth')}
                             </p>
@@ -1370,7 +1441,7 @@ export function OpenClawIntegrationSettingsPage() {
                               Authorization: Bearer {'<integration_secret>'}
                             </code>
                           </div>
-                          <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                          <div className={cn(uiChrome.inset, 'px-4 py-3')}>
                             <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
                               {t('openclawIntegration.guide.endpoints.catalog')}
                             </p>
@@ -1378,7 +1449,7 @@ export function OpenClawIntegrationSettingsPage() {
                               GET /api/integrations/openclaw/capabilities
                             </code>
                           </div>
-                          <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                          <div className={cn(uiChrome.inset, 'px-4 py-3')}>
                             <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
                               {t('openclawIntegration.guide.endpoints.execute')}
                             </p>
@@ -1389,7 +1460,7 @@ export function OpenClawIntegrationSettingsPage() {
                         </div>
                       </div>
 
-                      <div className="rounded-[24px] border border-slate-200 bg-white p-5">
+                      <div className={cn(uiChrome.card, 'p-5')}>
                         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
                           {t('openclawIntegration.guide.notesTitle')}
                         </p>
@@ -1411,17 +1482,17 @@ export function OpenClawIntegrationSettingsPage() {
         ) : null}
       </section>
 
-      <section id="openclaw-catalog-section" className="rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
+      <section id="openclaw-catalog-section" className={cn(uiChrome.shell, 'p-6')}>
         <SectionHeader
           title={t('openclawIntegration.catalog.title')}
           description={t('openclawIntegration.catalog.description')}
           action={
             <div className="flex flex-wrap gap-2">
-              <Button type="button" variant="outline" className="rounded-2xl" onClick={() => setShowResetConfirm(true)} disabled={isBusy}>
+              <Button type="button" variant="outline" onClick={() => setShowResetConfirm(true)} disabled={isBusy}>
                 <RefreshCcw className="h-4 w-4" />
                 {t('openclawIntegration.actions.resetSystemItems')}
               </Button>
-              <Button type="button" className="rounded-2xl" onClick={() => openCreateDialog('tool')}>
+              <Button type="button" onClick={() => openCreateDialog('tool')}>
                 <Plus className="h-4 w-4" />
                 {t('openclawIntegration.actions.addCapability')}
               </Button>
@@ -1429,7 +1500,7 @@ export function OpenClawIntegrationSettingsPage() {
           }
         />
         {!catalogReady ? (
-          <div className="mt-5 rounded-[24px] border border-amber-200 bg-amber-50/80 px-4 py-4 text-sm leading-6 text-amber-900">
+          <div className="mt-5 rounded-[12px] border border-amber-200 bg-amber-50/80 px-4 py-4 text-sm leading-6 text-amber-900">
             <p className="font-semibold">{t('openclawIntegration.catalog.blockedTitle')}</p>
             <p className="mt-1">{t('openclawIntegration.catalog.blockedDescription')}</p>
           </div>
@@ -1459,8 +1530,8 @@ export function OpenClawIntegrationSettingsPage() {
             ))}
           </div>
         ) : (
-          <div className="mt-5 rounded-[28px] border border-dashed border-slate-300 bg-slate-50/80 p-10 text-center">
-            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-white shadow-sm">
+          <div className="mt-5 rounded-[20px] border border-dashed border-slate-300 bg-slate-50/80 p-10 text-center">
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-[16px] bg-white shadow-sm">
               <Boxes className="h-6 w-6 text-slate-500" />
             </div>
             <p className="mt-4 text-base font-semibold text-slate-900">
@@ -1469,7 +1540,7 @@ export function OpenClawIntegrationSettingsPage() {
             <p className="mt-2 text-sm leading-6 text-slate-600">
               {t('openclawIntegration.catalog.emptyDescription')}
             </p>
-            <Button type="button" className="mt-5 rounded-2xl" onClick={() => openCreateDialog('tool')}>
+            <Button type="button" className="mt-5" onClick={() => openCreateDialog('tool')}>
               <Plus className="h-4 w-4" />
               {t('openclawIntegration.actions.addCapability')}
             </Button>
@@ -1505,7 +1576,7 @@ export function OpenClawIntegrationSettingsPage() {
                     key={sourceType}
                     type="button"
                     className={cn(
-                      'rounded-[22px] border px-4 py-4 text-left transition',
+                      'rounded-[16px] border px-4 py-4 text-left transition',
                       draft.sourceType === sourceType
                         ? 'border-slate-900 bg-slate-900 text-white shadow-lg shadow-slate-900/10'
                         : 'border-slate-200 bg-slate-50/70 text-slate-700 hover:border-slate-300'
@@ -1543,10 +1614,13 @@ export function OpenClawIntegrationSettingsPage() {
                 <PopoverTrigger asChild>
                   <button
                     type="button"
-                    className="group flex min-h-[92px] w-full items-center justify-between gap-4 rounded-[24px] border border-slate-200 bg-slate-50/60 px-5 py-4 text-left shadow-sm transition-all hover:border-slate-300 hover:bg-white hover:shadow-md"
+                    className={cn(
+                      uiChrome.inset,
+                      'group flex min-h-[92px] w-full items-center justify-between gap-4 px-5 py-4 text-left shadow-none transition-all hover:border-slate-300 hover:bg-white'
+                    )}
                   >
                     <div className="flex min-w-0 items-center gap-4">
-                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[16px] border border-slate-200 bg-white text-slate-600 shadow-sm">
+                      <div className={cn(uiChrome.control, 'flex h-12 w-12 shrink-0 items-center justify-center text-slate-600 shadow-none')}>
                         <SelectedSourceIcon className="h-5 w-5" />
                       </div>
                       <div className="min-w-0 space-y-2">
@@ -1587,10 +1661,10 @@ export function OpenClawIntegrationSettingsPage() {
                     </div>
 
                     <div className="flex shrink-0 items-center gap-3">
-                      <span className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-sm transition-colors group-hover:border-slate-300">
+                      <span className={cn(uiChrome.control, 'px-3 py-1.5 text-sm font-medium text-slate-700 shadow-none transition-colors group-hover:border-slate-300')}>
                         {t('openclawIntegration.form.chooseSource')}
                       </span>
-                      <div className="flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm transition-all group-hover:border-slate-300 group-hover:text-slate-700">
+                      <div className={cn(uiChrome.control, 'flex h-9 w-9 items-center justify-center rounded-full text-slate-500 shadow-none transition-all group-hover:border-slate-300 group-hover:text-slate-700')}>
                         <ChevronDown className={cn('h-4 w-4 transition-transform', sourcePickerOpen && 'rotate-180')} />
                       </div>
                     </div>
@@ -1599,7 +1673,7 @@ export function OpenClawIntegrationSettingsPage() {
                 <PopoverContent
                   align="start"
                   sideOffset={10}
-                  className="w-[min(780px,calc(100vw-3rem))] rounded-[28px] p-0 shadow-2xl"
+                  className="w-[min(780px,calc(100vw-3rem))] p-0"
                 >
                   <div className="border-b border-slate-200 px-5 py-4">
                     <div className="flex items-center justify-between gap-3">
@@ -1622,7 +1696,7 @@ export function OpenClawIntegrationSettingsPage() {
                         value={sourceSearch}
                         onChange={(event) => setSourceSearch(event.target.value)}
                         placeholder={t('openclawIntegration.form.sourceSearchPlaceholder')}
-                        className="h-11 w-full rounded-2xl border border-slate-200 bg-slate-50 pl-11 pr-4 text-sm text-slate-900 shadow-sm outline-none transition focus:border-slate-900/50 focus:ring-4 focus:ring-slate-900/5"
+                        className={cn(uiField.input, 'h-11 bg-slate-50 pl-11 pr-4')}
                       />
                     </div>
                   </div>
@@ -1641,7 +1715,7 @@ export function OpenClawIntegrationSettingsPage() {
                             setSourcePickerOpen(false)
                           }}
                           className={cn(
-                            'flex w-full items-start gap-4 rounded-[22px] border px-4 py-4 text-left transition-all',
+                            'flex w-full items-start gap-4 rounded-[16px] border px-4 py-4 text-left transition-all',
                             active
                               ? 'border-slate-900 bg-slate-900 text-white shadow-lg shadow-slate-900/10'
                               : 'border-slate-200 bg-white text-slate-800 hover:border-slate-300 hover:bg-slate-50',
@@ -1650,7 +1724,7 @@ export function OpenClawIntegrationSettingsPage() {
                         >
                           <div
                             className={cn(
-                              'mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-[14px] border',
+                              'mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] border',
                               active
                                 ? 'border-white/15 bg-white/10 text-white'
                                 : 'border-slate-200 bg-slate-50 text-slate-600'
@@ -1697,7 +1771,7 @@ export function OpenClawIntegrationSettingsPage() {
                         </button>
                       )
                     }) : (
-                      <div className="rounded-[22px] border border-dashed border-slate-300 bg-slate-50/80 px-4 py-10 text-center text-sm text-slate-500">
+                      <div className="rounded-[12px] border border-dashed border-slate-300 bg-slate-50/80 px-4 py-10 text-center text-sm text-slate-500">
                         {t('openclawIntegration.form.sourceSearchEmpty')}
                       </div>
                     )}
@@ -1705,12 +1779,12 @@ export function OpenClawIntegrationSettingsPage() {
                 </PopoverContent>
               </Popover>
               {selectedSource?.isSystem && (draft.sourceType === 'workflow' || draft.sourceType === 'agent') ? (
-                <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm leading-6 text-amber-800">
+                <div className="rounded-[12px] border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm leading-6 text-amber-800">
                   {t('settings.skills.systemTargetBindingHint')}
                 </div>
               ) : null}
               {editingRetiredItem?.retirementReason ? (
-                <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm leading-6 text-amber-800">
+                <div className="rounded-[12px] border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm leading-6 text-amber-800">
                   {editingRetiredItem.retirementReason}
                 </div>
               ) : null}
@@ -1760,7 +1834,7 @@ export function OpenClawIntegrationSettingsPage() {
             </section>
 
             <>
-              <section className="space-y-4 rounded-[28px] border border-slate-200 bg-slate-50/80 p-5">
+              <section className={cn(uiChrome.inset, 'space-y-4 p-5')}>
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                   <div className="space-y-2">
                     <div className="flex flex-wrap items-center gap-2">
@@ -1792,7 +1866,6 @@ export function OpenClawIntegrationSettingsPage() {
                     <Button
                       type="button"
                       variant="outline"
-                      className="rounded-2xl"
                       onClick={() => {
                         setContractOrigin('source')
                         setDraft((currentDraft) => ({ ...currentDraft, ...sourceDerivedContract }))
@@ -1841,7 +1914,7 @@ export function OpenClawIntegrationSettingsPage() {
                 </div>
 
                 <div className="grid gap-4 md:grid-cols-2">
-                  <div className="rounded-[24px] border border-slate-200 bg-white px-5 py-4 shadow-sm shadow-slate-900/5">
+                  <div className={cn(uiChrome.card, 'px-5 py-4')}>
                     <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">
                       {t('openclawIntegration.form.inputSummary')}
                     </p>
@@ -1849,7 +1922,7 @@ export function OpenClawIntegrationSettingsPage() {
                       {effectiveContract.inputSummary || '-'}
                     </p>
                   </div>
-                  <div className="rounded-[24px] border border-slate-200 bg-white px-5 py-4 shadow-sm shadow-slate-900/5">
+                  <div className={cn(uiChrome.card, 'px-5 py-4')}>
                     <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">
                       {t('openclawIntegration.form.outputSummary')}
                     </p>
@@ -1860,7 +1933,7 @@ export function OpenClawIntegrationSettingsPage() {
                 </div>
               </section>
 
-              <section className="overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-sm shadow-slate-900/5">
+              <section className={cn(uiChrome.card, 'overflow-hidden')}>
                 <button
                   type="button"
                   className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left transition hover:bg-slate-50/80"
@@ -1882,7 +1955,7 @@ export function OpenClawIntegrationSettingsPage() {
                       {t('openclawIntegration.form.advancedContractDescription')}
                     </p>
                   </div>
-                  <div className="flex items-center gap-3 text-sm font-medium text-slate-600">
+                  <div className={cn(uiChrome.control, 'flex items-center gap-3 px-3 py-1.5 text-sm font-medium text-slate-600 shadow-none')}>
                     <span>
                       {contractAdvancedOpen
                         ? t('openclawIntegration.form.advancedContractHide')
@@ -1920,7 +1993,7 @@ export function OpenClawIntegrationSettingsPage() {
                               key={mode}
                               type="button"
                               className={cn(
-                                'rounded-[22px] border px-4 py-4 text-left transition',
+                                'rounded-[16px] border px-4 py-4 text-left transition',
                                 effectiveContract.toolResponseMode === mode
                                   ? 'border-slate-900 bg-slate-900 text-white shadow-lg shadow-slate-900/10'
                                   : 'border-slate-200 bg-slate-50/70 text-slate-700 hover:border-slate-300',
@@ -1971,7 +2044,7 @@ export function OpenClawIntegrationSettingsPage() {
                     </section>
 
                     {!effectiveContract.schemaEditable ? (
-                      <div className="rounded-[22px] border border-cyan-200 bg-cyan-50/80 px-4 py-3 text-sm leading-6 text-cyan-800">
+                      <div className="rounded-[12px] border border-cyan-200 bg-cyan-50/80 px-4 py-3 text-sm leading-6 text-cyan-800">
                         {t('openclawIntegration.form.readonlySchemaHint')}
                       </div>
                     ) : null}
@@ -1982,10 +2055,10 @@ export function OpenClawIntegrationSettingsPage() {
           </div>
 
           <DialogFooter className="gap-2">
-            <Button type="button" variant="outline" className="rounded-2xl" onClick={() => setDialogOpen(false)}>
+            <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>
               {t('common.cancel')}
             </Button>
-            <Button type="button" className="rounded-2xl" onClick={() => void handleSaveDialog()} disabled={isBusy}>
+            <Button type="button" onClick={() => void handleSaveDialog()} disabled={isBusy}>
               {(createItemMutation.isPending || updateItemMutation.isPending) ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
@@ -2034,6 +2107,6 @@ export function OpenClawIntegrationSettingsPage() {
         }}
         onCancel={() => setDeleteTarget(null)}
       />
-    </div>
+    </SettingsPageShell>
   )
 }

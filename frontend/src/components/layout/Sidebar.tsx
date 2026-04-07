@@ -13,6 +13,7 @@ import { Logo } from '@/components/Logo'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { useAppStore } from '@/stores/app-store'
+import { uiRadius, uiSurface } from '@/components/ui/styles'
 
 const navItems = [
   { icon: LayoutDashboard, labelKey: 'navigation.dashboard', href: '/dashboard' },
@@ -31,7 +32,8 @@ export function Sidebar() {
   return (
     <aside
       className={cn(
-        "fixed inset-y-0 left-0 z-50 flex flex-col border-r bg-background transition-[width,transform] duration-300 md:relative",
+        "fixed inset-y-0 left-0 z-50 flex flex-col transition-[width,transform] duration-300 md:relative",
+        uiSurface.sidebar,
         sidebarOpen ? "w-64 translate-x-0" : "-translate-x-full md:w-16 md:translate-x-0"
       )}
     >
@@ -57,9 +59,10 @@ export function Sidebar() {
             to={item.href}
             aria-label={t(item.labelKey)}
             className={({ isActive }) => cn(
-              "flex items-center rounded-lg px-3 py-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
-              "text-muted-foreground hover:bg-muted hover:text-foreground",
-              isActive && "bg-primary/10 text-primary",
+              "flex items-center px-3 py-2.5 transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary/12",
+              uiRadius.control,
+              "text-muted-foreground hover:bg-muted/55 hover:text-foreground",
+              isActive && "bg-background/92 text-foreground shadow-sm ring-1 ring-border/60",
               !sidebarOpen && "md:justify-center md:px-2"
             )}
             title={!sidebarOpen ? t(item.labelKey) : undefined}
@@ -81,8 +84,9 @@ export function Sidebar() {
           onClick={toggleSidebar}
           aria-label={sidebarOpen ? t('actions.collapse') : t('actions.expand')}
           className={cn(
-            "flex w-full items-center rounded-lg px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
-            "text-muted-foreground hover:bg-muted hover:text-foreground",
+            "flex w-full items-center px-3 py-2.5 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary/12",
+            uiRadius.control,
+            "text-muted-foreground hover:bg-muted/55 hover:text-foreground",
             !sidebarOpen && "md:justify-center md:px-2"
           )}
         >

@@ -1,5 +1,8 @@
 import { useState } from 'react'
 import { Check, X, Pencil, Trash2 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { uiChrome, uiField, uiRadius } from '@/components/ui/styles'
+import { cn } from '@/lib/utils'
 import type { Tag } from '@/types'
 import { useTranslation } from 'react-i18next'
 import { getRandomColor } from '@/lib/colors'
@@ -22,31 +25,33 @@ export function TagRow({ tag, isNew, isEditing, onEdit, onCancel, onSave, onDele
 
   if (isNew || isEditing) {
     return (
-      <div className="flex items-center gap-3 p-3 rounded-lg border bg-muted/50">
+      <div className={cn(uiChrome.inset, 'flex flex-wrap items-center gap-3 p-3')}>
         <input
           type="color"
           value={color}
           onChange={(e) => setColor(e.target.value)}
-          className="w-8 h-8 rounded cursor-pointer"
+          className={cn(uiRadius.inset, 'h-10 w-10 cursor-pointer overflow-hidden border border-border bg-background p-1')}
         />
         <input
           type="text"
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder={t('settings.tags.placeholder')}
-          className="flex-1 px-2 py-1 rounded border bg-background"
+          className={cn(uiField.input, 'min-w-[180px] flex-1')}
           autoFocus
         />
-        <button
+        <Button
+          size="icon"
+          variant="secondary"
           onClick={() => onSave({ name, color })}
           disabled={isSaving || !name.trim()}
-          className="p-1.5 rounded hover:bg-green-100 text-green-600 disabled:opacity-50"
+          className="text-green-600"
         >
           <Check className="w-4 h-4" />
-        </button>
-        <button onClick={onCancel} className="p-1.5 rounded hover:bg-red-100 text-red-600">
+        </Button>
+        <Button size="icon" variant="ghost" onClick={onCancel} className="text-red-600">
           <X className="w-4 h-4" />
-        </button>
+        </Button>
       </div>
     )
   }
@@ -54,18 +59,20 @@ export function TagRow({ tag, isNew, isEditing, onEdit, onCancel, onSave, onDele
   if (!tag) return null
 
   return (
-    <div className="flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50">
+    <div className={cn(uiChrome.control, 'group flex items-center gap-3 px-3 py-3')}>
       <div
         className="w-4 h-4 rounded-full shrink-0"
         style={{ backgroundColor: tag.color || '#6B7280' }}
       />
-      <span className="flex-1 font-medium">{tag.name}</span>
-      <button onClick={onEdit} className="p-1.5 rounded hover:bg-muted">
-        <Pencil className="w-4 h-4 text-muted-foreground" />
-      </button>
-      <button onClick={onDelete} className="p-1.5 rounded hover:bg-red-100 text-red-500">
-        <Trash2 className="w-4 h-4" />
-      </button>
+      <span className="flex-1 font-medium text-foreground">{tag.name}</span>
+      <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+        <Button size="icon" variant="ghost" onClick={onEdit} className="h-8 w-8">
+          <Pencil className="w-4 h-4 text-muted-foreground" />
+        </Button>
+        <Button size="icon" variant="ghost" onClick={onDelete} className="h-8 w-8 text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30">
+          <Trash2 className="w-4 h-4" />
+        </Button>
+      </div>
     </div>
   )
 }

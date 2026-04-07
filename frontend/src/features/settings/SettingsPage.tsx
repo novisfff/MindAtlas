@@ -1,6 +1,14 @@
 import { useNavigate } from 'react-router-dom'
 import { FileType, Tags, ChevronRight, Bot, Wrench, BrainCircuit, Network, Sparkles, Settings2, Clock3, PlugZap } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { uiChrome, uiRadius } from '@/components/ui/styles'
+import {
+  SettingsPageHeader,
+  SettingsPageShell,
+  SettingsSection,
+  SettingsSectionHeader,
+} from '@/features/settings/components/SettingsShell'
+import { cn } from '@/lib/utils'
 
 export function SettingsPage() {
   const { t } = useTranslation()
@@ -128,7 +136,7 @@ export function SettingsPage() {
       id: 'content',
       titleKey: 'pages.settings.contentSection',
       descKey: 'pages.settings.contentSectionDesc',
-      gridClassName: 'grid-cols-1 md:grid-cols-2',
+      gridClassName: 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3',
       categories: contentCategories
     },
     {
@@ -148,39 +156,32 @@ export function SettingsPage() {
   ]
 
   return (
-    <div className="mx-auto max-w-6xl space-y-8">
-      <div className="space-y-2">
-        <h1 className="text-3xl font-bold tracking-tight text-foreground">
-          {t('pages.settings.title')}
-        </h1>
-        <p className="max-w-2xl text-base text-muted-foreground">
-          {t('pages.settings.subtitle')}
-        </p>
-      </div>
+    <SettingsPageShell>
+      <SettingsPageHeader
+        title={t('pages.settings.title')}
+        description={t('pages.settings.subtitle')}
+      />
 
       <div className="space-y-5">
         {sections.map((section) => (
-          <section
-            key={section.id}
-            className="rounded-2xl border bg-card/50 p-5 shadow-sm ring-1 ring-border/40"
-          >
-            <div className="mb-4 flex flex-col gap-1.5">
-              <h2 className="text-lg font-semibold text-foreground">
-                {t(section.titleKey)}
-              </h2>
-              <p className="text-sm text-muted-foreground">
-                {t(section.descKey)}
-              </p>
-            </div>
+          <SettingsSection key={section.id} className="space-y-5 p-5 sm:p-6">
+            <SettingsSectionHeader
+              title={t(section.titleKey)}
+              description={t(section.descKey)}
+            />
 
             <div className={`grid gap-4 ${section.gridClassName}`}>
               {section.categories.map((category) => (
                 <button
                   key={category.id}
                   onClick={() => navigate(category.path)}
-                  className="group flex min-h-[108px] items-center gap-4 rounded-2xl border bg-background/90 p-4 text-left shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-md"
+                  className={cn(
+                    uiChrome.control,
+                    'group flex min-h-[108px] items-center gap-4 p-4 text-left transition-all duration-200',
+                    'hover:border-primary/20 hover:bg-background',
+                  )}
                 >
-                  <div className={`rounded-xl p-3 ${category.bgColor} ${category.color}`}>
+                  <div className={cn(uiRadius.control, 'flex h-12 w-12 items-center justify-center p-3', category.bgColor, category.color)}>
                     <category.icon className="h-6 w-6" />
                   </div>
 
@@ -189,7 +190,7 @@ export function SettingsPage() {
                       <h3 className="text-lg font-semibold leading-6 text-foreground">
                         {t(category.titleKey)}
                       </h3>
-                      <div className="rounded-full bg-muted px-2.5 py-1 text-muted-foreground transition-colors group-hover:bg-primary/10 group-hover:text-primary">
+                      <div className={cn(uiChrome.control, 'flex h-8 w-8 items-center justify-center p-0 text-muted-foreground shadow-none transition-colors group-hover:border-primary/20 group-hover:text-primary')}>
                         <ChevronRight className="h-4 w-4" />
                       </div>
                     </div>
@@ -200,9 +201,9 @@ export function SettingsPage() {
                 </button>
               ))}
             </div>
-          </section>
+          </SettingsSection>
         ))}
       </div>
-    </div>
+    </SettingsPageShell>
   )
 }

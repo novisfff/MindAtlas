@@ -1,10 +1,11 @@
-import { MessageSquare, X, Maximize2, Plus, GripVertical } from 'lucide-react'
+import { MessageSquare, X, Maximize2, Plus } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useChatStore } from '../stores/chat-store'
 import { ChatWindow } from './ChatWindow'
 import { cn } from '@/lib/utils'
 import { useTranslation } from 'react-i18next'
 import { useState, useRef, useEffect } from 'react'
+import { uiChrome, uiRadius, uiSurface } from '@/components/ui/styles'
 
 export function FloatingWidget() {
   const { t } = useTranslation()
@@ -77,21 +78,21 @@ export function FloatingWidget() {
     >
       {isOpen && (
         <div className={cn(
-          'w-full sm:w-[350px] max-w-[90vw] h-[500px] flex flex-col overflow-hidden',
-          'rounded-lg border bg-background shadow-2xl',
+          uiChrome.float,
+          'flex h-[500px] w-full max-w-[90vw] flex-col overflow-hidden sm:w-[360px]',
           'animate-in slide-in-from-bottom-5 fade-in duration-200'
         )}
           role="dialog"
           aria-modal="true"
           aria-label={t('pages.assistant.title')}
         >
-          <div className="flex items-center justify-between border-b bg-background/80 backdrop-blur-md px-4 py-3 sticky top-0 z-10">
+          <div className={cn(uiSurface.headerGlass, 'sticky top-0 z-10 flex items-center justify-between border-b border-border/70 px-4 py-3')}>
             <h3 className="font-semibold text-sm">{t('pages.assistant.title')}</h3>
             <div className="flex items-center gap-2">
               <button
                 onClick={handleNewChat}
                 className={cn(
-                  'rounded-full p-1.5 hover:bg-background',
+                  `${uiRadius.pill} p-1.5 hover:bg-muted`,
                   'text-muted-foreground hover:text-foreground transition-colors'
                 )}
                 title={t('pages.assistant.newChat')}
@@ -101,7 +102,7 @@ export function FloatingWidget() {
               <Link
                 to={currentConversationId ? `/assistant?id=${currentConversationId}` : '/assistant'}
                 className={cn(
-                  'rounded-full p-1.5 hover:bg-background',
+                  `${uiRadius.pill} p-1.5 hover:bg-muted`,
                   'text-muted-foreground hover:text-foreground transition-colors'
                 )}
                 title={t('actions.openFullPage')}
@@ -111,7 +112,7 @@ export function FloatingWidget() {
               <button
                 onClick={toggleOpen}
                 className={cn(
-                  'rounded-full p-1.5 hover:bg-background',
+                  `${uiRadius.pill} p-1.5 hover:bg-muted`,
                   'text-muted-foreground hover:text-foreground transition-colors'
                 )}
                 aria-label={t('actions.closeChat')}
@@ -129,11 +130,11 @@ export function FloatingWidget() {
         onClick={handleToggle}
         style={{ cursor: isDragging ? 'grabbing' : 'pointer' }}
         className={cn(
-          'flex h-14 w-14 items-center justify-center rounded-full',
-          'shadow-lg transition-all hover:scale-105 active:scale-95',
+          'flex h-14 w-14 items-center justify-center border transition-all hover:scale-[1.03] active:scale-95',
+          uiRadius.pill,
           isOpen
-            ? 'bg-muted text-foreground'
-            : 'bg-primary text-primary-foreground'
+            ? 'border-border/70 bg-background/92 text-foreground shadow-[0_12px_32px_rgba(15,23,42,0.12)] backdrop-blur-md dark:shadow-[0_16px_38px_rgba(2,6,23,0.28)]'
+            : 'border-primary/30 bg-primary text-primary-foreground shadow-[0_14px_34px_rgba(15,23,42,0.22)]'
         )}
         aria-label={isOpen ? t('actions.closeChat') : t('actions.openChat')}
       >

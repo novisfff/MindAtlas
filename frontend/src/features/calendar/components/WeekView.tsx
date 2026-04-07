@@ -1,17 +1,20 @@
 import { useMemo, useRef } from 'react'
 import { format } from 'date-fns'
-import { zhCN, enUS } from 'date-fns/locale'
+import { enUS, zhCN } from 'date-fns/locale'
 import { useDroppable } from '@dnd-kit/core'
 import { Plus } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { getWeekDays, isToday } from '../utils/dateUtils'
 import { assignRows } from '../utils/layoutUtils'
 import { CalendarEvent } from './CalendarEvent'
+import { useCalendarResize } from '../hooks/useCalendarResize'
 import { cn } from '@/lib/utils'
 import type { Entry } from '@/types'
-import { useCalendarResize } from '../hooks/useCalendarResize'
+import type { CalendarDensity } from '../types'
+import { calendarRadius, calendarSurface } from '../styles'
 
 interface WeekViewProps {
+  density: CalendarDensity
   currentDate: Date
   entries: Entry[]
   onDateSelect: (date: Date) => void
@@ -20,12 +23,29 @@ interface WeekViewProps {
   onEntryUpdate?: (entry: Entry, start: Date, end: Date) => void
 }
 
-const ROW_HEIGHT_PX = 24
-const CONTENT_PADDING_TOP_PX = 8
-const CONTENT_PADDING_BOTTOM_PX = 8
-const MIN_BODY_HEIGHT_PX = 300
+const WEEK_VIEW_CONFIG = {
+  comfortable: {
+    rowHeight: 24,
+    contentPaddingTop: 10,
+    contentPaddingBottom: 12,
+    minBodyHeight: 320,
+    minHeightClass: 'min-h-[33rem]',
+    dayBadgeClass: 'h-10 w-10 text-base',
+    headerPaddingClass: 'py-3.5',
+  },
+  compact: {
+    rowHeight: 22,
+    contentPaddingTop: 8,
+    contentPaddingBottom: 10,
+    minBodyHeight: 280,
+    minHeightClass: 'min-h-[29rem]',
+    dayBadgeClass: 'h-9 w-9 text-sm',
+    headerPaddingClass: 'py-2.5',
+  },
+} as const
 
 export function WeekView({
+  density,
   currentDate,
   entries,
   onDateSelect,
@@ -37,16 +57,19 @@ export function WeekView({
   const locale = i18n.language === 'zh' ? zhCN : enUS
   const days = useMemo(() => getWeekDays(currentDate), [currentDate])
   const weekStart = days[0]
-
   const containerRef = useRef<HTMLDivElement>(null)
+  const config = WEEK_VIEW_CONFIG[density]
 
   const { resizePreviewMeta, handleResizeStart } = useCalendarResize(
     entries,
     onEntryUpdate,
-    containerRef
+    containerRef,
   )
 
-  const layout = useMemo(() => assignRows(entries, weekStart), [entries, weekStart])
+  const layout = useMemo(
+    () => assignRows(entries, weekStart),
+    [entries, weekStart],
+  )
   const rowCount = useMemo(() => {
     let maxRow = -1
     for (const item of layout) {
@@ -56,31 +79,44 @@ export function WeekView({
   }, [layout])
 
   const contentHeightPx = useMemo(() => {
-    const content = CONTENT_PADDING_TOP_PX + rowCount * ROW_HEIGHT_PX + CONTENT_PADDING_BOTTOM_PX
-    return Math.max(MIN_BODY_HEIGHT_PX, content)
-  }, [rowCount])
+    const content =
+      config.contentPaddingTop +
+      rowCount * config.rowHeight +
+      config.contentPaddingBottom
+    return Math.max(config.minBodyHeight, content)
+  }, [
+    config.contentPaddingBottom,
+    config.contentPaddingTop,
+    config.minBodyHeight,
+    config.rowHeight,
+    rowCount,
+  ])
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="grid grid-cols-7 border-b">
+    <div
+      className={cn(
+        'flex min-h-full flex-col overflow-hidden',
+        calendarRadius.shell,
+        calendarSurface.shell,
+        config.minHeightClass,
+      )}
+    >
+      <div className="grid grid-cols-7 border-b border-border/60 bg-background/82">
         {days.map((day) => (
           <div
             key={day.toISOString()}
             onClick={() => onDateSelect(day)}
             className={cn(
-              'group relative py-3 text-center cursor-pointer hover:bg-muted/50',
-              'border-r last:border-r-0'
+              'group relative cursor-pointer border-r border-border/60 px-2 text-center transition-colors hover:bg-background/95 last:border-r-0',
+              config.headerPaddingClass,
             )}
           >
             <button
               type="button"
               aria-label="Create entry"
               className={cn(
-                'absolute right-1 top-1 z-10',
-                'inline-flex h-6 w-6 items-center justify-center rounded-md',
-                'opacity-0 group-hover:opacity-100 transition-opacity',
-                'text-muted-foreground hover:text-foreground',
-                'hover:bg-muted'
+                'absolute right-1.5 top-1.5 z-10 inline-flex h-6 w-6 items-center justify-center border border-transparent text-muted-foreground opacity-0 transition-opacity hover:border-border/60 hover:bg-background hover:text-foreground group-hover:opacity-100',
+                calendarRadius.micro,
               )}
               onClick={(e) => {
                 e.preventDefault()
@@ -90,16 +126,21 @@ export function WeekView({
             >
               <Plus className="h-4 w-4" />
             </button>
-            <div className="text-xs text-muted-foreground">
+
+            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground/75">
               {format(day, 'EEE', { locale })}
             </div>
-            <div className="text-[11px] text-muted-foreground leading-none">
+            <div className="mt-1 text-[11px] text-muted-foreground">
               {format(day, 'MMM', { locale })}
             </div>
             <div
               className={cn(
-                'w-8 h-8 mx-auto flex items-center justify-center rounded-full',
-                isToday(day) && 'bg-primary text-primary-foreground'
+                'mx-auto mt-2 flex items-center justify-center font-semibold shadow-sm',
+                config.dayBadgeClass,
+                calendarRadius.pill,
+                isToday(day)
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-background/90 text-foreground ring-1 ring-border/60 dark:bg-background/70',
               )}
             >
               {format(day, 'd')}
@@ -107,14 +148,14 @@ export function WeekView({
           </div>
         ))}
       </div>
-      <div className="flex-1 overflow-auto">
+
+      <div className="relative flex-1 min-h-0">
         <div
           ref={containerRef}
-          className="relative border-l bg-background"
-          style={{ height: `max(100%, ${contentHeightPx}px)` }}
+          className="relative min-h-full border-l border-border/60 bg-background/30"
+          style={{ minHeight: `${contentHeightPx}px` }}
         >
-          {/* Background Layer: Droppable day columns */}
-          <div className="absolute inset-0 grid grid-cols-7 pointer-events-none">
+          <div className="pointer-events-none absolute inset-0 grid grid-cols-7">
             {days.map((day) => (
               <WeekDayDropZone
                 key={day.toISOString()}
@@ -124,13 +165,12 @@ export function WeekView({
             ))}
           </div>
 
-          {/* Events Layer */}
           <div
-            className="absolute inset-0 grid grid-cols-7 pointer-events-none overflow-visible"
+            className="pointer-events-none absolute inset-0 grid grid-cols-7 overflow-visible"
             style={{
-              paddingTop: `${CONTENT_PADDING_TOP_PX}px`,
-              paddingBottom: `${CONTENT_PADDING_BOTTOM_PX}px`,
-              gridAutoRows: `${ROW_HEIGHT_PX}px`,
+              paddingTop: `${config.contentPaddingTop}px`,
+              paddingBottom: `${config.contentPaddingBottom}px`,
+              gridAutoRows: `${config.rowHeight}px`,
             }}
           >
             {layout.map((item) => {
@@ -144,24 +184,31 @@ export function WeekView({
                     gridColumnEnd: `span ${item.span}`,
                     gridRowStart: item.row + 1,
                     ...(isResizing
-                      ? (resizeDirection === 'right'
+                      ? resizeDirection === 'right'
                         ? {
-                            width: 'calc(100% + var(--calendar-resize-delta-x))',
+                            width:
+                              'calc(100% + var(--calendar-resize-delta-x))',
                             willChange: 'width',
                           }
                         : {
-                            transform: 'translateX(var(--calendar-resize-delta-x))',
-                            width: 'calc(100% - var(--calendar-resize-delta-x))',
+                            transform:
+                              'translateX(var(--calendar-resize-delta-x))',
+                            width:
+                              'calc(100% - var(--calendar-resize-delta-x))',
                             willChange: 'transform, width',
-                          })
+                          }
                       : {}),
                   }}
-                  className={cn('pointer-events-auto overflow-visible', isResizing && 'z-20')}
+                  className={cn(
+                    'pointer-events-auto overflow-visible px-1',
+                    isResizing && 'z-20',
+                  )}
                 >
                   <CalendarEvent
                     entry={item.entry}
+                    density={density}
                     compact
-                    resizable={true}
+                    resizable
                     showStartIndicator={item.isStart}
                     onResizeStart={handleResizeStart}
                     onClick={() => onEntryClick?.(item.entry)}
@@ -176,7 +223,13 @@ export function WeekView({
   )
 }
 
-function WeekDayDropZone({ day, onDoubleClick }: { day: Date; onDoubleClick?: () => void }) {
+function WeekDayDropZone({
+  day,
+  onDoubleClick,
+}: {
+  day: Date
+  onDoubleClick?: () => void
+}) {
   const dateId = format(day, 'yyyy-MM-dd')
   const { setNodeRef, isOver } = useDroppable({ id: dateId })
 
@@ -185,9 +238,9 @@ function WeekDayDropZone({ day, onDoubleClick }: { day: Date; onDoubleClick?: ()
       ref={setNodeRef}
       onDoubleClick={onDoubleClick}
       className={cn(
-        'border-r last:border-r-0 pointer-events-auto',
-        isToday(day) && 'bg-primary/5',
-        isOver && 'bg-primary/10'
+        'border-r border-border/60 pointer-events-auto transition-colors last:border-r-0',
+        isToday(day) && 'bg-primary/[0.05]',
+        isOver && 'bg-primary/10',
       )}
     />
   )

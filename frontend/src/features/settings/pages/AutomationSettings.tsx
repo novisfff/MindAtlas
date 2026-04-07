@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
-import { ArrowLeft, Clock3, Loader2, Save } from 'lucide-react'
+import { Clock3, Loader2, Save } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
+import { uiChrome } from '@/components/ui/styles'
 import {
   RuntimeCapabilityMeta,
   ToggleCard,
@@ -12,6 +13,8 @@ import {
   type RuntimeAutomationConfigRequest,
   type RuntimeAutomationConfigResponse,
 } from '@/features/system-setup'
+import { SettingsPageHeader, SettingsPageShell } from '@/features/settings/components/SettingsShell'
+import { cn } from '@/lib/utils'
 
 interface AutomationDraft extends RuntimeAutomationConfigResponse {}
 
@@ -70,62 +73,47 @@ export function AutomationSettingsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="space-y-3">
-          <button
+    <SettingsPageShell>
+      <SettingsPageHeader
+        title={t('pages.settings.automation')}
+        description={t('pages.settings.automationDesc')}
+        backAction={{ label: t('common.back'), onClick: () => navigate('/settings') }}
+        actions={
+          <Button
             type="button"
-            onClick={() => navigate('/settings')}
-            className="inline-flex items-center gap-2 text-sm text-slate-500 transition hover:text-slate-900"
+            onClick={() => {
+              void handleSave()
+            }}
+            disabled={updateMutation.isPending || !isDirty}
           >
-            <ArrowLeft className="h-4 w-4" />
-            {t('common.back')}
-          </button>
-          <div className="space-y-2">
-            <h1 className="text-3xl font-semibold tracking-tight text-slate-900">
-              {t('pages.settings.automation')}
-            </h1>
-            <p className="max-w-3xl text-sm leading-7 text-slate-600">
-              {t('pages.settings.automationDesc')}
-            </p>
-          </div>
-        </div>
+            {updateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+            {t('common.save')}
+          </Button>
+        }
+      />
 
-        <Button
-          type="button"
-          onClick={() => {
-            void handleSave()
-          }}
-          disabled={updateMutation.isPending || !isDirty}
-          className="rounded-2xl"
-        >
-          {updateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-          {t('common.save')}
-        </Button>
-      </div>
-
-      <section className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+      <section className={cn(uiChrome.card, 'p-6')}>
         <div className="space-y-4">
           <RuntimeCapabilityMeta module={current} skipped={false} t={t} />
           <div className="space-y-2">
-            <p className="text-sm font-semibold text-slate-900">
+            <p className="text-sm font-semibold text-foreground">
               {t('systemSetup.detailPages.effectiveSummary')}
             </p>
-            <p className="text-sm leading-6 text-slate-600">{current.effectiveSummary}</p>
+            <p className="text-sm leading-6 text-muted-foreground">{current.effectiveSummary}</p>
           </div>
-          <p className="text-sm leading-6 text-slate-600">
+          <p className="text-sm leading-6 text-muted-foreground">
             {t('systemSetup.detailPages.automation.applyHint')}
           </p>
         </div>
       </section>
 
-      <section className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+      <section className={cn(uiChrome.card, 'p-6')}>
         <div className="space-y-5">
           <div className="space-y-2">
-            <h2 className="text-lg font-semibold text-slate-900">
+            <h2 className="text-lg font-semibold text-foreground">
               {t('systemSetup.detailPages.automation.sections.scheduler')}
             </h2>
-            <p className="text-sm leading-6 text-slate-600">
+            <p className="text-sm leading-6 text-muted-foreground">
               {t('systemSetup.moduleDescriptions.automation')}
             </p>
           </div>
@@ -139,13 +127,13 @@ export function AutomationSettingsPage() {
         </div>
       </section>
 
-      <section className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+      <section className={cn(uiChrome.card, 'p-6')}>
         <div className="space-y-5">
           <div className="space-y-2">
-            <h2 className="text-lg font-semibold text-slate-900">
+            <h2 className="text-lg font-semibold text-foreground">
               {t('systemSetup.detailPages.automation.sections.jobs')}
             </h2>
-            <p className="text-sm leading-6 text-slate-600">
+            <p className="text-sm leading-6 text-muted-foreground">
               {t('systemSetup.detailPages.automation.jobsDescription')}
             </p>
           </div>
@@ -163,25 +151,25 @@ export function AutomationSettingsPage() {
                 schedule: t('systemSetup.detailPages.automation.jobs.monthly.schedule'),
               },
             ].map((item) => (
-              <div key={item.key} className="rounded-[24px] border border-slate-200 bg-slate-50/60 p-5">
+              <div key={item.key} className={cn(uiChrome.inset, 'p-5')}>
                 <div className="flex items-start gap-3">
-                  <div className="rounded-2xl bg-white p-3 text-slate-700 shadow-sm">
+                  <div className={cn(uiChrome.control, 'p-3 text-foreground shadow-none')}>
                     <Clock3 className="h-5 w-5" />
                   </div>
                   <div className="space-y-1">
-                    <p className="text-sm font-semibold text-slate-900">{item.title}</p>
-                    <p className="text-sm leading-6 text-slate-600">{item.schedule}</p>
+                    <p className="text-sm font-semibold text-foreground">{item.title}</p>
+                    <p className="text-sm leading-6 text-muted-foreground">{item.schedule}</p>
                   </div>
                 </div>
               </div>
             ))}
           </div>
 
-          <div className="rounded-[24px] border border-slate-200 bg-slate-50/60 px-4 py-4 text-sm leading-6 text-slate-600">
+          <div className={cn(uiChrome.inset, 'px-4 py-4 text-sm leading-6 text-muted-foreground')}>
             {t('systemSetup.detailPages.automation.manualHint')}
           </div>
         </div>
       </section>
-    </div>
+    </SettingsPageShell>
   )
 }

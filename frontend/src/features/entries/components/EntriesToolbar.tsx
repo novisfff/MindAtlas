@@ -2,6 +2,9 @@ import { Search, Plus, Filter, Calendar } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { EntryType } from '@/types'
 import { TagSelector } from '@/features/tags/components/TagSelector'
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import { uiChrome, uiField, uiRadius } from '@/components/ui/styles'
 
 interface EntriesToolbarProps {
   searchTerm: string
@@ -46,7 +49,7 @@ export function EntriesToolbar({
               type="text"
               placeholder={t('pages.entries.searchPlaceholder')}
               aria-label={t('actions.search')}
-              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 pl-9"
+              className={cn(uiField.input, 'pl-9')}
               value={searchTerm}
               onChange={(e) => onSearchChange(e.target.value)}
             />
@@ -56,7 +59,7 @@ export function EntriesToolbar({
             <Filter className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground pointer-events-none" aria-hidden="true" />
             <select
               aria-label={t('labels.allTypes')}
-              className="flex h-9 w-full items-center justify-between rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50 pl-9 appearance-none cursor-pointer"
+              className={cn(uiField.select, 'cursor-pointer pl-9')}
               value={selectedType}
               onChange={(e) => onTypeChange(e.target.value)}
               disabled={isTypesLoading}
@@ -71,16 +74,16 @@ export function EntriesToolbar({
           </div>
         </div>
 
-        <button
+        <Button
           onClick={onCreateClick}
-          className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground shadow hover:bg-primary/90 h-9 px-4 py-2 w-full sm:w-auto"
+          className="w-full sm:w-auto"
         >
           <Plus className="mr-2 h-4 w-4" />
           {t('actions.newEntry')}
-        </button>
+        </Button>
       </div>
 
-      <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center p-4 bg-muted/20 rounded-lg border">
+      <div className={cn(uiChrome.card, 'flex flex-col gap-4 p-4 sm:flex-row sm:items-center')}>
         <div className="flex-1 space-y-2 w-full">
           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('labels.tags')}</span>
           <TagSelector value={selectedTags} onChange={onTagsChange} />
@@ -93,7 +96,7 @@ export function EntriesToolbar({
               <Calendar className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground pointer-events-none" aria-hidden="true" />
               <input
                 type="date"
-                className="flex h-9 w-[150px] rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 pl-9"
+                className={cn(uiField.input, 'w-[150px] pl-9')}
                 value={timeFrom}
                 onChange={(e) => onTimeFromChange(e.target.value)}
               />
@@ -105,7 +108,7 @@ export function EntriesToolbar({
               <Calendar className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground pointer-events-none" aria-hidden="true" />
               <input
                 type="date"
-                className="flex h-9 w-[150px] rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 pl-9"
+                className={cn(uiField.input, 'w-[150px] pl-9')}
                 value={timeTo}
                 onChange={(e) => onTimeToChange(e.target.value)}
               />
