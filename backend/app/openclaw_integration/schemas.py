@@ -33,6 +33,20 @@ OpenClawToolResponseMode = Literal["json_schema", "text_field"]
 OpenClawSchemaMode = Literal["readonly", "editable"]
 
 
+def _normalize_optional_text_input(value: Any) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _normalize_optional_temporal_input(value: Any) -> Any:
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or None
+    return value
+
+
 class OpenClawEntryRecordResponse(CamelModel):
     id: UUID
     title: str
@@ -50,20 +64,63 @@ class OpenClawEntryRecordResponse(CamelModel):
 
 
 class OpenClawSearchEntriesRequest(CamelModel):
-    query: str | None = Field(default=None, max_length=2000)
-    entry_type: str | None = Field(default=None, max_length=128, alias="entryType")
-    tag_names: list[str] = Field(default_factory=list, alias="tagNames")
-    time_from: datetime | None = Field(default=None, alias="timeFrom")
-    time_to: datetime | None = Field(default=None, alias="timeTo")
-    limit: int = Field(default=10, ge=1, le=50)
+    query: str | None = Field(
+        default=None,
+        max_length=2000,
+        description="Optional keyword query. Omit or pass null to search broadly without a keyword.",
+        examples=["weekly review"],
+    )
+    entry_type: str | None = Field(
+        default=None,
+        max_length=128,
+        alias="entryType",
+        description=(
+            "Optional entry type filter. Must exactly match an existing enabled entry type code or name. "
+            "Omit or pass null when not filtering. Do not pass placeholders like '.' or an empty string."
+        ),
+        examples=["PROJECT", "Knowledge"],
+    )
+    tag_names: list[str] = Field(
+        default_factory=list,
+        alias="tagNames",
+        description="Optional tag-name list. Pass an array of tag names, or omit/use [] when not filtering by tags.",
+        examples=[["work", "planning"]],
+    )
+    time_from: datetime | None = Field(
+        default=None,
+        alias="timeFrom",
+        description=(
+            "Optional ISO 8601 datetime lower bound. Omit or pass null when unused. "
+            "Do not pass an empty string."
+        ),
+        examples=["2026-04-01T00:00:00+08:00"],
+    )
+    time_to: datetime | None = Field(
+        default=None,
+        alias="timeTo",
+        description=(
+            "Optional ISO 8601 datetime upper bound. Omit or pass null when unused. "
+            "Do not pass an empty string."
+        ),
+        examples=["2026-04-30T23:59:59+08:00"],
+    )
+    limit: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Maximum number of matched entries to return. Must be an integer between 1 and 50.",
+        examples=[10],
+    )
 
     @field_validator("query", "entry_type", mode="before")
     @classmethod
     def _normalize_optional_text(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        normalized = str(value).strip()
-        return normalized or None
+        return _normalize_optional_text_input(value)
+
+    @field_validator("time_from", "time_to", mode="before")
+    @classmethod
+    def _normalize_optional_temporal_fields(cls, value: Any) -> Any:
+        return _normalize_optional_temporal_input(value)
 
     @field_validator("tag_names", mode="before")
     @classmethod
@@ -90,7 +147,10 @@ class OpenClawSearchEntriesResponse(CamelModel):
 
 
 class OpenClawGetEntryRequest(CamelModel):
-    entry_id: UUID = Field(alias="entryId")
+    entry_id: UUID = Field(
+        alias="entryId",
+        description="Required entry ID. Usually comes from a previous search result or an exact known record.",
+    )
 
 
 class OpenClawCaptureEntryRequest(CamelModel):
@@ -131,10 +191,28 @@ class OpenClawCaptureEntryRequest(CamelModel):
 
 
 class OpenClawCreateRelationRequest(CamelModel):
-    source_entry_id: UUID = Field(alias="sourceEntryId")
-    target_entry_id: UUID = Field(alias="targetEntryId")
-    relation_type: str = Field(min_length=1, max_length=128, alias="relationType")
-    description: str | None = Field(default=None, max_length=512)
+    source_entry_id: UUID = Field(
+        alias="sourceEntryId",
+        description="Required source entry ID.",
+    )
+    target_entry_id: UUID = Field(
+        alias="targetEntryId",
+        description="Required target entry ID.",
+    )
+    relation_type: str = Field(
+        min_length=1,
+        max_length=128,
+        alias="relationType",
+        description=(
+            "Required relation type. Must exactly match an existing enabled relation type code or name."
+        ),
+        examples=["RELATED_TO"],
+    )
+    description: str | None = Field(
+        default=None,
+        max_length=512,
+        description="Optional short explanation for why the two entries are related.",
+    )
 
     @field_validator("relation_type", "description", mode="before")
     @classmethod
@@ -157,9 +235,23 @@ class OpenClawRelationRecordResponse(CamelModel):
 
 
 class OpenClawQueryKnowledgeGraphRequest(CamelModel):
-    query: str = Field(min_length=1, max_length=4000)
-    mode: Literal["naive", "local", "global", "hybrid", "mix"] = "hybrid"
-    top_k: int = Field(default=5, ge=1, le=20, alias="topK")
+    query: str = Field(
+        min_length=1,
+        max_length=4000,
+        description="Required natural-language question for the knowledge graph.",
+        examples=["What connects my recent project and hiring notes?"],
+    )
+    mode: Literal["naive", "local", "global", "hybrid", "mix"] = Field(
+        default="hybrid",
+        description="Optional retrieval mode. Supported values: naive, local, global, hybrid, mix.",
+    )
+    top_k: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        alias="topK",
+        description="Maximum number of source items to retrieve. Must be an integer between 1 and 20.",
+    )
 
     @field_validator("query", mode="before")
     @classmethod
@@ -171,13 +263,47 @@ class OpenClawQueryKnowledgeGraphRequest(CamelModel):
 
 
 class OpenClawGenerateWeeklyReportRequest(CamelModel):
-    week_start: date | None = Field(default=None, alias="weekStart")
-    force_regenerate: bool = Field(default=False, alias="forceRegenerate")
+    week_start: date | None = Field(
+        default=None,
+        alias="weekStart",
+        description=(
+            "Optional report week start date. Omit or pass null to use the default/latest completed week. "
+            "Do not pass an empty string. Format: YYYY-MM-DD."
+        ),
+        examples=["2026-03-23"],
+    )
+    force_regenerate: bool = Field(
+        default=False,
+        alias="forceRegenerate",
+        description="Whether to regenerate the report even if a cached report already exists.",
+    )
+
+    @field_validator("week_start", mode="before")
+    @classmethod
+    def _normalize_optional_week_start(cls, value: Any) -> Any:
+        return _normalize_optional_temporal_input(value)
 
 
 class OpenClawGenerateMonthlyReportRequest(CamelModel):
-    month_start: date | None = Field(default=None, alias="monthStart")
-    force_regenerate: bool = Field(default=False, alias="forceRegenerate")
+    month_start: date | None = Field(
+        default=None,
+        alias="monthStart",
+        description=(
+            "Optional report month start date. Omit or pass null to use the default/current target month. "
+            "Do not pass an empty string. Format: YYYY-MM-DD."
+        ),
+        examples=["2026-04-01"],
+    )
+    force_regenerate: bool = Field(
+        default=False,
+        alias="forceRegenerate",
+        description="Whether to regenerate the report even if a cached report already exists.",
+    )
+
+    @field_validator("month_start", mode="before")
+    @classmethod
+    def _normalize_optional_month_start(cls, value: Any) -> Any:
+        return _normalize_optional_temporal_input(value)
 
 
 class OpenClawIntegrationUpdateRequest(CamelModel):

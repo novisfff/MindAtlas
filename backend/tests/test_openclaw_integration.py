@@ -636,6 +636,32 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(response.json()["code"], 42261)
         self.assertIn("unknown field: intent", response.json()["message"])
 
+    def test_runtime_capability_schema_describes_strict_search_and_report_inputs(self) -> None:
+        self._initialize_system(locale="en")
+        secret = self._rotate_secret()
+        self._enable_integration(secret)
+
+        response = self.client.get(
+            "/api/integrations/openclaw/capabilities",
+            headers=self._auth_headers(secret),
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        by_key = {item["capabilityKey"]: item for item in response.json()["data"]["capabilities"]}
+
+        search_item = by_key["search_entries"]
+        search_properties = search_item["inputSchema"]["properties"]
+        self.assertIn("enabled entry type code or name", search_properties["entryType"]["description"])
+        self.assertIn("Do not pass placeholders like '.'", search_properties["entryType"]["description"])
+        self.assertIn("ISO 8601 datetime", search_properties["timeFrom"]["description"])
+        self.assertIn("omit or pass null", search_item["inputSummary"].lower())
+
+        monthly_item = by_key["generate_monthly_report"]
+        monthly_properties = monthly_item["inputSchema"]["properties"]
+        self.assertIn("Omit or pass null", monthly_properties["monthStart"]["description"])
+        self.assertIn("Do not pass an empty string", monthly_properties["monthStart"]["description"])
+        self.assertIn("do not send an empty string", monthly_item["inputSummary"].lower())
+
     def test_generate_weekly_report_accepts_structured_content_object(self) -> None:
         secret = self._rotate_secret()
         self._enable_integration(secret)
@@ -672,6 +698,50 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(result["content"]["summary"], "本周推进顺利")
         self.assertEqual(result["content"]["suggestions"], ["继续跟进自动化"])
         self.assertEqual(result["content"]["trends"], "活跃度上升")
+
+    def test_generate_monthly_report_treats_blank_month_start_as_default_month(self) -> None:
+        self._initialize_system()
+        secret = self._rotate_secret()
+        self._enable_integration(secret)
+
+        captured_args: dict[str, object] = {}
+
+        def _fake_runner(**kwargs):  # noqa: ANN003
+            captured_args.update(kwargs)
+            return {
+                "id": str(uuid4()),
+                "monthStart": "2026-03-01",
+                "monthEnd": "2026-03-31",
+                "entryCount": 6,
+                "content": {
+                    "summary": "本月推进顺利",
+                    "suggestions": ["继续完善工具说明"],
+                    "trends": "使用频率上升",
+                },
+                "contentLocale": "zh",
+                "status": "ready",
+                "attempts": 1,
+                "lastError": None,
+                "generatedAt": "2026-04-01T09:00:00+00:00",
+                "createdAt": "2026-04-01T09:00:00+00:00",
+                "updatedAt": "2026-04-01T09:00:00+00:00",
+            }
+
+        with patch(
+            "app.assistant.workflow.engine.runtime_helpers.wrap_tool_with_db",
+            return_value=_fake_runner,
+        ):
+            response = self.client.post(
+                "/api/integrations/openclaw/capabilities/generate_monthly_report/execute",
+                headers=self._auth_headers(secret),
+                json={"monthStart": "", "forceRegenerate": False},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIsNone(captured_args["month_start"])
+        result = response.json()["data"]["result"]
+        self.assertEqual(result["content"]["summary"], "本月推进顺利")
+        self.assertEqual(result["monthStart"], "2026-03-01")
 
     def test_get_entry_accepts_search_hit_payload_with_top_level_id(self) -> None:
         from app.entry.models import Entry, TimeMode  # noqa: E402
