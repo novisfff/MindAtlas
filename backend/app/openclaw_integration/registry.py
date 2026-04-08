@@ -92,8 +92,8 @@ _TOOL_SYSTEM_ITEM_TEMPLATES: tuple[_ToolSystemItemTemplate, ...] = (
             en="Search previously stored MindAtlas records for requests like 'did I record this before', 'search what I saved', or recent and time-bounded lookups by keyword, tags, type, or time range.",
         ),
         input_summary=_LocalizedText(
-            zh="关键词，以及可选的类型、标签、时间范围和结果数量；entryType 必须精确匹配系统中已启用的类型编码或名称，不筛选时请省略或传 null，不要传 '.' 或空字符串；timeFrom/timeTo 使用 ISO 8601。",
-            en="Keyword plus optional type, tags, time range, and result limit. entryType must exactly match an enabled entry type code or name; omit or pass null when unused, and do not send placeholders like '.' or empty strings. timeFrom/timeTo use ISO 8601 datetimes.",
+            zh="关键词，以及可选的类型编码、标签、时间范围和结果数量。推荐省略或传 null 表示不筛选；空字符串目前也兼容为空值，但不是推荐写法。entryType 优先传当前启用的 type code，名称仅作兼容；query 中的 '.' 或 '*' 不表示查询全部。timeFrom/timeTo 推荐 YYYY-MM-DD，也兼容完整 ISO 8601 时间。",
+            en="Keyword plus optional type code, tags, time range, and result limit. Prefer omitting fields or passing null for no filter; empty strings are still accepted as compatibility inputs but are not the recommended contract. Prefer current enabled type codes for entryType; names remain compatibility-only. '.' and '*' in query are literal keywords, not match-all syntax. Prefer YYYY-MM-DD for timeFrom/timeTo, though full ISO 8601 datetimes are also accepted.",
         ),
         output_summary=_LocalizedText(
             zh="返回匹配记录列表与总数，便于回答是否记过、列出最近记录，或继续查看详情。",
@@ -111,8 +111,8 @@ _TOOL_SYSTEM_ITEM_TEMPLATES: tuple[_ToolSystemItemTemplate, ...] = (
             en="Read the exact details of a specific MindAtlas record when the entry ID is known or a search hit needs to be expanded.",
         ),
         input_summary=_LocalizedText(
-            zh="记录 ID，通常来自上一轮检索结果。",
-            en="Entry ID, usually from a previous search result.",
+            zh="记录 ID（entryId），通常来自上一轮检索结果。这是规范输入；携带 id 的搜索结果对象目前也兼容，但不作为主契约推荐。",
+            en="Entry ID (`entryId`), usually from a previous search result. This is the canonical input. A search-hit object that includes id may still work for compatibility, but it is not the primary contract.",
         ),
         output_summary=_LocalizedText(
             zh="返回该记录的完整核心字段，便于继续总结、关联、核对或引用。",
@@ -130,8 +130,8 @@ _TOOL_SYSTEM_ITEM_TEMPLATES: tuple[_ToolSystemItemTemplate, ...] = (
             en="Create a relation between two MindAtlas records for requests like connect these items, link them, or make their relationship explicit.",
         ),
         input_summary=_LocalizedText(
-            zh="源记录、目标记录、关系类型，以及可选说明。",
-            en="Source entry, target entry, relation type, and optional description.",
+            zh="源记录、目标记录、关系类型编码，以及可选说明。relationType 优先传当前启用的关系 type code；名称仅作兼容输入。",
+            en="Source entry, target entry, relation type code, and an optional description. Prefer current enabled relation type codes for relationType; names remain compatibility-only.",
         ),
         output_summary=_LocalizedText(
             zh="返回新建关系的核心字段，便于后续检查、展示或继续图谱分析。",
@@ -168,8 +168,8 @@ _TOOL_SYSTEM_ITEM_TEMPLATES: tuple[_ToolSystemItemTemplate, ...] = (
             en="Generate or return the MindAtlas weekly report for requests like what did I do this week, what did I do last week, or help me make a weekly recap.",
         ),
         input_summary=_LocalizedText(
-            zh="可选 weekStart（YYYY-MM-DD）以及是否强制重新生成；不指定时请省略或传 null，不要传空字符串。",
-            en="Optional weekStart (YYYY-MM-DD) and whether to force regeneration. Omit or pass null when you want the default week, and do not send an empty string.",
+            zh="可选 weekStart（YYYY-MM-DD）以及是否强制重新生成。推荐省略或传 null 走默认周；空字符串目前也兼容为未提供，但不是推荐写法。",
+            en="Optional weekStart (YYYY-MM-DD) and whether to force regeneration. Prefer omitting it or passing null for the default week; an empty string is still accepted as a compatibility input but is not the recommended contract.",
         ),
         output_summary=_LocalizedText(
             zh="返回周报状态、周期和结构化内容，便于输出 recap、digest 或工作回顾。",
@@ -187,8 +187,8 @@ _TOOL_SYSTEM_ITEM_TEMPLATES: tuple[_ToolSystemItemTemplate, ...] = (
             en="Generate or return the MindAtlas monthly report for requests like what did I do this month, help me make a monthly recap, or give me a monthly digest.",
         ),
         input_summary=_LocalizedText(
-            zh="可选 monthStart（YYYY-MM-DD）以及是否强制重新生成；不指定时请省略或传 null，不要传空字符串。",
-            en="Optional monthStart (YYYY-MM-DD) and whether to force regeneration. Omit or pass null when you want the default month, and do not send an empty string.",
+            zh="可选 monthStart（YYYY-MM-DD）以及是否强制重新生成。推荐省略或传 null 走默认月份；空字符串目前也兼容为未提供，但不是推荐写法。",
+            en="Optional monthStart (YYYY-MM-DD) and whether to force regeneration. Prefer omitting it or passing null for the default month; an empty string is still accepted as a compatibility input but is not the recommended contract.",
         ),
         output_summary=_LocalizedText(
             zh="返回月报状态、周期和结构化内容，便于输出 recap、digest 或月度回顾。",

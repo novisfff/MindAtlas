@@ -67,7 +67,11 @@ class OpenClawSearchEntriesRequest(CamelModel):
     query: str | None = Field(
         default=None,
         max_length=2000,
-        description="Optional keyword query. Omit or pass null to search broadly without a keyword.",
+        description=(
+            "Optional keyword query. Prefer omitting this field or passing null for an unrestricted search. "
+            "An empty string is also accepted as a compatibility input and becomes no keyword. "
+            "'.' and '*' are treated as literal keywords, not match-all syntax."
+        ),
         examples=["weekly review"],
     )
     entry_type: str | None = Field(
@@ -75,23 +79,29 @@ class OpenClawSearchEntriesRequest(CamelModel):
         max_length=128,
         alias="entryType",
         description=(
-            "Optional entry type filter. Must exactly match an existing enabled entry type code or name. "
-            "Omit or pass null when not filtering. Do not pass placeholders like '.' or an empty string."
+            "Optional entry type filter. Prefer one of the enabled entry type codes exposed below. "
+            "Omit or pass null when not filtering. An empty string is also accepted as a compatibility input and "
+            "becomes no filter. Localized entry type names may still be accepted for compatibility, but stable "
+            "codes are the canonical contract. Do not pass placeholders like '.' or '*'."
         ),
-        examples=["PROJECT", "Knowledge"],
+        examples=["KNOWLEDGE"],
     )
     tag_names: list[str] = Field(
         default_factory=list,
         alias="tagNames",
-        description="Optional tag-name list. Pass an array of tag names, or omit/use [] when not filtering by tags.",
+        description=(
+            "Optional array of tag names. Prefer existing tag names. Omit this field or use [] when not filtering "
+            "by tags. Unknown tag names do not raise input errors, but usually return zero matches."
+        ),
         examples=[["work", "planning"]],
     )
     time_from: datetime | None = Field(
         default=None,
         alias="timeFrom",
         description=(
-            "Optional ISO 8601 datetime lower bound. Omit or pass null when unused. "
-            "Do not pass an empty string."
+            "Optional lower time bound. Prefer YYYY-MM-DD. Full ISO 8601 datetimes are also accepted. "
+            "Omit or pass null when unused. An empty string is also accepted as a compatibility input and becomes "
+            "no lower bound. Filtering ultimately uses only the date portion."
         ),
         examples=["2026-04-01T00:00:00+08:00"],
     )
@@ -99,8 +109,9 @@ class OpenClawSearchEntriesRequest(CamelModel):
         default=None,
         alias="timeTo",
         description=(
-            "Optional ISO 8601 datetime upper bound. Omit or pass null when unused. "
-            "Do not pass an empty string."
+            "Optional upper time bound. Prefer YYYY-MM-DD. Full ISO 8601 datetimes are also accepted. "
+            "Omit or pass null when unused. An empty string is also accepted as a compatibility input and becomes "
+            "no upper bound. Filtering ultimately uses only the date portion."
         ),
         examples=["2026-04-30T23:59:59+08:00"],
     )
@@ -149,7 +160,12 @@ class OpenClawSearchEntriesResponse(CamelModel):
 class OpenClawGetEntryRequest(CamelModel):
     entry_id: UUID = Field(
         alias="entryId",
-        description="Required entry ID. Usually comes from a previous search result or an exact known record.",
+        description=(
+            "Required entry ID. This is the canonical input. Usually use the id from a previous search result or "
+            "an exact known record. Compatibility note: the capability may also accept a search-hit object that "
+            "contains id, but entryId remains the primary contract."
+        ),
+        examples=["123e4567-e89b-12d3-a456-426614174000"],
     )
 
 
@@ -193,18 +209,22 @@ class OpenClawCaptureEntryRequest(CamelModel):
 class OpenClawCreateRelationRequest(CamelModel):
     source_entry_id: UUID = Field(
         alias="sourceEntryId",
-        description="Required source entry ID.",
+        description="Required source entry ID, usually taken from a previous search result.",
+        examples=["123e4567-e89b-12d3-a456-426614174000"],
     )
     target_entry_id: UUID = Field(
         alias="targetEntryId",
-        description="Required target entry ID.",
+        description="Required target entry ID, usually taken from a previous search result.",
+        examples=["123e4567-e89b-12d3-a456-426614174001"],
     )
     relation_type: str = Field(
         min_length=1,
         max_length=128,
         alias="relationType",
         description=(
-            "Required relation type. Must exactly match an existing enabled relation type code or name."
+            "Required relation type. Prefer one of the enabled relation type codes exposed below. "
+            "Localized relation type names may still be accepted for compatibility, but stable codes are the "
+            "canonical contract."
         ),
         examples=["RELATED_TO"],
     )
@@ -251,6 +271,7 @@ class OpenClawQueryKnowledgeGraphRequest(CamelModel):
         le=20,
         alias="topK",
         description="Maximum number of source items to retrieve. Must be an integer between 1 and 20.",
+        examples=[5],
     )
 
     @field_validator("query", mode="before")
@@ -267,8 +288,9 @@ class OpenClawGenerateWeeklyReportRequest(CamelModel):
         default=None,
         alias="weekStart",
         description=(
-            "Optional report week start date. Omit or pass null to use the default/latest completed week. "
-            "Do not pass an empty string. Format: YYYY-MM-DD."
+            "Optional report week start date. Prefer omitting this field or passing null to use the default/latest "
+            "completed week. An empty string is also accepted as a compatibility input and is treated as not "
+            "provided. Format: YYYY-MM-DD."
         ),
         examples=["2026-03-23"],
     )
@@ -289,8 +311,9 @@ class OpenClawGenerateMonthlyReportRequest(CamelModel):
         default=None,
         alias="monthStart",
         description=(
-            "Optional report month start date. Omit or pass null to use the default/current target month. "
-            "Do not pass an empty string. Format: YYYY-MM-DD."
+            "Optional report month start date. Prefer omitting this field or passing null to use the default "
+            "target month. An empty string is also accepted as a compatibility input and is treated as not "
+            "provided. Format: YYYY-MM-DD."
         ),
         examples=["2026-04-01"],
     )
