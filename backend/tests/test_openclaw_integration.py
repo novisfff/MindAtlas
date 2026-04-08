@@ -636,7 +636,10 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(response.json()["code"], 42261)
         self.assertIn("unknown field: intent", response.json()["message"])
 
-    def test_runtime_capability_schema_describes_strict_search_and_report_inputs(self) -> None:
+    def test_runtime_capability_schema_exposes_dynamic_enums_and_guidance_metadata(self) -> None:
+        from app.entry_type.models import EntryType  # noqa: E402
+        from app.relation.models import RelationType  # noqa: E402
+
         self._initialize_system(locale="en")
         secret = self._rotate_secret()
         self._enable_integration(secret)
@@ -649,18 +652,81 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         by_key = {item["capabilityKey"]: item for item in response.json()["data"]["capabilities"]}
 
+        capture_item = by_key["submit_context_capture"]
+        capture_properties = capture_item["inputSchema"]["properties"]
+        self.assertIn("High-value context", capture_properties["context"]["description"])
+
+        enabled_entry_type_codes = [
+            row.code
+            for row in self.db.query(EntryType).filter(EntryType.enabled.is_(True)).order_by(EntryType.code.asc()).all()
+        ]
         search_item = by_key["search_entries"]
         search_properties = search_item["inputSchema"]["properties"]
-        self.assertIn("enabled entry type code or name", search_properties["entryType"]["description"])
-        self.assertIn("Do not pass placeholders like '.'", search_properties["entryType"]["description"])
-        self.assertIn("ISO 8601 datetime", search_properties["timeFrom"]["description"])
-        self.assertIn("omit or pass null", search_item["inputSummary"].lower())
+        self.assertEqual(search_properties["entryType"]["enum"], enabled_entry_type_codes)
+        self.assertIn("'.' and '*' are treated as literal keywords", search_properties["query"]["description"])
+        self.assertIn("compatibility input", search_properties["entryType"]["description"])
+        self.assertEqual(search_properties["timeFrom"]["format"], "date-time")
+        self.assertEqual(search_properties["timeTo"]["format"], "date-time")
+        self.assertEqual(search_properties["limit"]["minimum"], 1)
+        self.assertEqual(search_properties["limit"]["maximum"], 50)
+        self.assertEqual(search_properties["limit"]["default"], 10)
+        self.assertEqual(search_properties["limit"]["examples"], [10])
+        self.assertIn("not the recommended contract", search_item["inputSummary"])
+
+        get_entry_item = by_key["get_entry"]
+        get_entry_properties = get_entry_item["inputSchema"]["properties"]
+        self.assertIn("canonical input", get_entry_properties["entryId"]["description"])
+        self.assertEqual(get_entry_properties["entryId"]["examples"], ["123e4567-e89b-12d3-a456-426614174000"])
+
+        enabled_relation_type_codes = [
+            row.code
+            for row in self.db.query(RelationType).filter(RelationType.enabled.is_(True)).order_by(RelationType.code.asc()).all()
+        ]
+        relation_item = by_key["create_relation"]
+        relation_properties = relation_item["inputSchema"]["properties"]
+        self.assertEqual(relation_properties["relationType"]["enum"], enabled_relation_type_codes)
+        self.assertIn("canonical contract", relation_properties["relationType"]["description"])
+
+        graph_item = by_key["query_knowledge_graph"]
+        graph_properties = graph_item["inputSchema"]["properties"]
+        self.assertEqual(graph_properties["mode"]["enum"], ["naive", "local", "global", "hybrid", "mix"])
+        self.assertEqual(graph_properties["topK"]["minimum"], 1)
+        self.assertEqual(graph_properties["topK"]["maximum"], 20)
+        self.assertEqual(graph_properties["topK"]["default"], 5)
+        self.assertEqual(graph_properties["topK"]["examples"], [5])
+
+        weekly_item = by_key["generate_weekly_report"]
+        weekly_properties = weekly_item["inputSchema"]["properties"]
+        self.assertEqual(weekly_properties["weekStart"]["format"], "date")
+        self.assertEqual(weekly_properties["forceRegenerate"]["default"], False)
+        self.assertIn("compatibility input", weekly_properties["weekStart"]["description"])
 
         monthly_item = by_key["generate_monthly_report"]
         monthly_properties = monthly_item["inputSchema"]["properties"]
-        self.assertIn("Omit or pass null", monthly_properties["monthStart"]["description"])
-        self.assertIn("Do not pass an empty string", monthly_properties["monthStart"]["description"])
-        self.assertIn("do not send an empty string", monthly_item["inputSummary"].lower())
+        self.assertEqual(monthly_properties["monthStart"]["format"], "date")
+        self.assertEqual(monthly_properties["forceRegenerate"]["default"], False)
+        self.assertIn("compatibility input", monthly_properties["monthStart"]["description"])
+        self.assertIn("not the recommended contract", monthly_item["inputSummary"])
+
+    def test_settings_catalog_items_include_same_schema_enrichment(self) -> None:
+        from app.entry_type.models import EntryType  # noqa: E402
+
+        self._initialize_system(locale="en")
+
+        response = self.client.get("/api/system-settings/openclaw-integration")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        by_key = {item["capabilityKey"]: item for item in response.json()["data"]["catalogItems"]}
+        enabled_entry_type_codes = [
+            row.code
+            for row in self.db.query(EntryType).filter(EntryType.enabled.is_(True)).order_by(EntryType.code.asc()).all()
+        ]
+        search_properties = by_key["search_entries"]["inputSchema"]["properties"]
+        self.assertEqual(search_properties["entryType"]["enum"], enabled_entry_type_codes)
+        self.assertEqual(search_properties["limit"]["minimum"], 1)
+        self.assertEqual(search_properties["limit"]["maximum"], 50)
+        self.assertEqual(search_properties["timeFrom"]["format"], "date-time")
+        self.assertIn("'.' and '*'", search_properties["query"]["description"])
 
     def test_generate_weekly_report_accepts_structured_content_object(self) -> None:
         secret = self._rotate_secret()
@@ -742,6 +808,88 @@ class OpenClawIntegrationTests(unittest.TestCase):
         result = response.json()["data"]["result"]
         self.assertEqual(result["content"]["summary"], "本月推进顺利")
         self.assertEqual(result["monthStart"], "2026-03-01")
+
+    def test_search_entries_treats_blank_optional_filters_as_unset(self) -> None:
+        self._initialize_system()
+        secret = self._rotate_secret()
+        self._enable_integration(secret)
+
+        captured_args: dict[str, object] = {}
+
+        def _fake_runner(**kwargs):  # noqa: ANN003
+            captured_args.update(kwargs)
+            return {"total": 0, "items": []}
+
+        with patch(
+            "app.assistant.workflow.engine.runtime_helpers.wrap_tool_with_db",
+            return_value=_fake_runner,
+        ):
+            response = self.client.post(
+                "/api/integrations/openclaw/capabilities/search_entries/execute",
+                headers=self._auth_headers(secret),
+                json={
+                    "query": "",
+                    "entryType": "",
+                    "timeFrom": "",
+                    "timeTo": "",
+                    "limit": 10,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIsNone(captured_args["keyword"])
+        self.assertIsNone(captured_args["type_code"])
+        self.assertIsNone(captured_args["time_from"])
+        self.assertIsNone(captured_args["time_to"])
+        self.assertEqual(captured_args["limit"], 10)
+
+    def test_search_entries_treats_dot_query_as_literal_and_rejects_dot_entry_type(self) -> None:
+        self._initialize_system()
+        secret = self._rotate_secret()
+        self._enable_integration(secret)
+
+        captured_args: dict[str, object] = {}
+
+        def _fake_runner(**kwargs):  # noqa: ANN003
+            captured_args.update(kwargs)
+            return {"total": 0, "items": []}
+
+        with patch(
+            "app.assistant.workflow.engine.runtime_helpers.wrap_tool_with_db",
+            return_value=_fake_runner,
+        ):
+            response = self.client.post(
+                "/api/integrations/openclaw/capabilities/search_entries/execute",
+                headers=self._auth_headers(secret),
+                json={"query": "."},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(captured_args["keyword"], ".")
+
+        invalid_response = self.client.post(
+            "/api/integrations/openclaw/capabilities/search_entries/execute",
+            headers=self._auth_headers(secret),
+            json={"entryType": "."},
+        )
+        self.assertEqual(invalid_response.status_code, 400, invalid_response.text)
+        self.assertEqual(invalid_response.json()["message"], "Unknown entry type: .")
+
+    def test_search_entries_unknown_tag_names_return_empty_results_without_schema_error(self) -> None:
+        self._initialize_system()
+        secret = self._rotate_secret()
+        self._enable_integration(secret)
+
+        response = self.client.post(
+            "/api/integrations/openclaw/capabilities/search_entries/execute",
+            headers=self._auth_headers(secret),
+            json={"tagNames": ["not-a-real-tag"]},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()["data"]["result"]
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["items"], [])
 
     def test_get_entry_accepts_search_hit_payload_with_top_level_id(self) -> None:
         from app.entry.models import Entry, TimeMode  # noqa: E402

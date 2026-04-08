@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -78,7 +79,7 @@ logger = logging.getLogger(__name__)
 OPENCLAW_INTEGRATION_CONFIG_KEY = "openclaw_integration_config"
 OPENCLAW_CAPABILITY_KEY_RE = re.compile(r"^[a-z0-9_]+$")
 OPENCLAW_SCHEMA_FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-OPENCLAW_SYSTEM_ITEM_VERSION = 7
+OPENCLAW_SYSTEM_ITEM_VERSION = 8
 OPENCLAW_RETIRED_SOURCE_TOOL_NAMES = frozenset({"openclaw_capture_entry"})
 OPENCLAW_SOURCE_TOOL_ALIAS_MAP: dict[str, str] = {
     "openclaw_search_entries": "search_entries",
@@ -389,6 +390,26 @@ def _normalize_json_object_schema(schema: dict[str, Any] | None, *, label: str) 
             normalized["description"] = description
         if nullable:
             normalized["nullable"] = True
+        schema_format = _normalize_optional_text(working.get("format"))
+        if schema_format:
+            normalized["format"] = schema_format
+        if "default" in working:
+            normalized["default"] = working.get("default")
+        examples = working.get("examples")
+        if isinstance(examples, list) and examples:
+            normalized["examples"] = [item for item in examples]
+        minimum = working.get("minimum")
+        if isinstance(minimum, (int, float)) and not isinstance(minimum, bool):
+            normalized["minimum"] = minimum
+        maximum = working.get("maximum")
+        if isinstance(maximum, (int, float)) and not isinstance(maximum, bool):
+            normalized["maximum"] = maximum
+        min_length = working.get("minLength")
+        if isinstance(min_length, int) and not isinstance(min_length, bool):
+            normalized["minLength"] = min_length
+        max_length = working.get("maxLength")
+        if isinstance(max_length, int) and not isinstance(max_length, bool):
+            normalized["maxLength"] = max_length
         enum_values = working.get("enum")
         if isinstance(enum_values, list) and enum_values:
             normalized["enum"] = [item for item in enum_values]
@@ -1362,6 +1383,24 @@ class OpenClawIntegrationService:
             .all()
         )
 
+    def _list_enabled_entry_type_codes(self) -> list[str]:
+        rows = (
+            self.db.query(EntryType.code)
+            .filter(EntryType.enabled.is_(True))
+            .order_by(func.lower(EntryType.code))
+            .all()
+        )
+        return [str(row[0]).strip() for row in rows if row and str(row[0]).strip()]
+
+    def _list_enabled_relation_type_codes(self) -> list[str]:
+        rows = (
+            self.db.query(RelationType.code)
+            .filter(RelationType.enabled.is_(True))
+            .order_by(func.lower(RelationType.code))
+            .all()
+        )
+        return [str(row[0]).strip() for row in rows if row and str(row[0]).strip()]
+
     def _get_catalog_item(self, item_id: UUID) -> OpenClawCapabilityItem:
         item = (
             self.db.query(OpenClawCapabilityItem)
@@ -1669,6 +1708,36 @@ class OpenClawIntegrationService:
             implementation_type="agent",
         )
 
+    def _enrich_runtime_input_schema(
+        self,
+        item: OpenClawCapabilityItem,
+        *,
+        input_schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        enriched = copy.deepcopy(input_schema)
+        if item.source_type != "tool":
+            return enriched
+
+        properties = enriched.get("properties")
+        if not isinstance(properties, dict):
+            return enriched
+
+        source_tool_name = _canonicalize_source_tool_name(item.source_tool_name)
+        if source_tool_name == "search_entries":
+            entry_type_schema = properties.get("entryType")
+            if isinstance(entry_type_schema, dict):
+                entry_type_codes = self._list_enabled_entry_type_codes()
+                if entry_type_codes:
+                    entry_type_schema["enum"] = entry_type_codes
+        elif source_tool_name == "create_relation":
+            relation_type_schema = properties.get("relationType")
+            if isinstance(relation_type_schema, dict):
+                relation_type_codes = self._list_enabled_relation_type_codes()
+                if relation_type_codes:
+                    relation_type_schema["enum"] = relation_type_codes
+
+        return enriched
+
     def _serialize_catalog_item(
         self,
         item: OpenClawCapabilityItem,
@@ -1677,7 +1746,10 @@ class OpenClawIntegrationService:
     ) -> OpenClawCapabilityItemResponse:
         availability = self._availability_for_item(item, locale=locale)
         retired, retirement_reason = self._retired_catalog_item_state(item, locale=locale)
-        input_schema = _normalize_json_object_schema(item.input_schema_json or _EMPTY_OBJECT_SCHEMA, label="input")
+        input_schema = self._enrich_runtime_input_schema(
+            item,
+            input_schema=_normalize_json_object_schema(item.input_schema_json or _EMPTY_OBJECT_SCHEMA, label="input"),
+        )
         output_schema = _normalize_json_object_schema(item.output_schema_json or _EMPTY_OBJECT_SCHEMA, label="output")
         return OpenClawCapabilityItemResponse(
             id=item.id,
