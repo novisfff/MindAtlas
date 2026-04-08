@@ -103,11 +103,16 @@ export interface WorkflowContractParam {
   enum?: string[] | null
 }
 
+export type WorkflowContractInputMode = 'text' | 'structured'
+export type WorkflowContractOutputMode = 'text' | 'structured'
+
 export interface CallableWorkflowVersion {
   id: string
   sequenceNo: number
   versionName: string
   versionSource: 'publish' | 'save'
+  inputMode: WorkflowContractInputMode
+  outputMode: WorkflowContractOutputMode
   inputParams: WorkflowContractParam[]
   outputParams: WorkflowContractParam[]
   createdAt: string
@@ -119,6 +124,8 @@ export interface CallableWorkflow {
   name: string
   description: string | null
   publishedVersionId: string
+  inputMode: WorkflowContractInputMode
+  outputMode: WorkflowContractOutputMode
   inputParams: WorkflowContractParam[]
   outputParams: WorkflowContractParam[]
   availableVersions: CallableWorkflowVersion[]

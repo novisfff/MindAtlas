@@ -32,6 +32,8 @@ class WorkflowContractField:
 
 @dataclass(frozen=True)
 class WorkflowContractSnapshot:
+    input_mode: str
+    output_mode: str
     input_fields: list[WorkflowContractField]
     output_fields: list[WorkflowContractField]
     input_schema: dict[str, Any]
@@ -133,6 +135,27 @@ def field_specs_to_params(fields: list[WorkflowContractField]) -> list[dict[str,
     return [field.to_param_dict() for field in fields]
 
 
+def _text_input_field() -> WorkflowContractField:
+    return WorkflowContractField(
+        name="user_input",
+        param_type="string",
+        required=True,
+    )
+
+
+def _text_output_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "response": {
+                "type": "string",
+            }
+        },
+        "required": ["response"],
+        "additionalProperties": False,
+    }
+
+
 def workflow_contract_from_input(workflow_input: WorkflowInput) -> WorkflowContractSnapshot:
     start_node_cfg: dict[str, Any] | None = None
     for node in workflow_input.nodes:
@@ -145,43 +168,56 @@ def workflow_contract_from_input(workflow_input: WorkflowInput) -> WorkflowContr
         raise WorkflowContractError("missing_start", "Workflow has no start node")
 
     raw_input_mode = str(start_node_cfg.get("input_mode", start_node_cfg.get("inputMode", "text")) or "text").strip().lower()
-    if raw_input_mode != "structured":
-        raise WorkflowContractError("structured_start_required", "Workflow does not use structured start input")
+    input_mode = "structured" if raw_input_mode == "structured" else "text"
 
-    start_fields_raw = start_node_cfg.get("structured_fields", start_node_cfg.get("structuredFields"))
-    if not isinstance(start_fields_raw, list) or not start_fields_raw:
-        raise WorkflowContractError("missing_structured_start_fields", "Workflow structured start input has no fields")
+    if input_mode == "structured":
+        start_fields_raw = start_node_cfg.get("structured_fields", start_node_cfg.get("structuredFields"))
+        if not isinstance(start_fields_raw, list) or not start_fields_raw:
+            raise WorkflowContractError("missing_structured_start_fields", "Workflow structured start input has no fields")
 
-    input_fields: list[WorkflowContractField] = []
-    for raw_field in start_fields_raw:
-        if not isinstance(raw_field, dict):
-            continue
-        name = str(raw_field.get("name", "") or "").strip()
-        if not name:
-            continue
-        input_fields.append(
-            WorkflowContractField(
-                name=name,
-                param_type=schema_type_from_param_type(raw_field.get("type")),
-                required=bool(raw_field.get("required", False)),
-                description=normalize_optional_text(raw_field.get("description")),
-                items_type=schema_type_from_param_type(raw_field.get("items_type", raw_field.get("itemsType")))
-                if schema_type_from_param_type(raw_field.get("type")) == "array"
-                else None,
-                enum=[str(item) for item in raw_field.get("enum", [])] if isinstance(raw_field.get("enum"), list) else None,
+        input_fields: list[WorkflowContractField] = []
+        for raw_field in start_fields_raw:
+            if not isinstance(raw_field, dict):
+                continue
+            name = str(raw_field.get("name", "") or "").strip()
+            if not name:
+                continue
+            input_fields.append(
+                WorkflowContractField(
+                    name=name,
+                    param_type=schema_type_from_param_type(raw_field.get("type")),
+                    required=bool(raw_field.get("required", False)),
+                    description=normalize_optional_text(raw_field.get("description")),
+                    items_type=schema_type_from_param_type(raw_field.get("items_type", raw_field.get("itemsType")))
+                    if schema_type_from_param_type(raw_field.get("type")) == "array"
+                    else None,
+                    enum=[str(item) for item in raw_field.get("enum", [])] if isinstance(raw_field.get("enum"), list) else None,
+                )
             )
-        )
 
-    input_schema = schema_from_field_definitions(start_fields_raw, required_key="required")
+        input_schema = schema_from_field_definitions(start_fields_raw, required_key="required")
+    else:
+        input_fields = [_text_input_field()]
+        input_schema = {
+            "type": "object",
+            "properties": {
+                "user_input": {
+                    "type": "string",
+                }
+            },
+            "required": ["user_input"],
+            "additionalProperties": False,
+        }
 
-    structured_outputs: list[tuple[list[WorkflowContractField], dict[str, Any]]] = []
+    output_contracts: list[tuple[str, list[WorkflowContractField], dict[str, Any]]] = []
     for node in workflow_input.nodes:
         if node.node_type != "output":
             continue
         config = node.config if isinstance(node.config, dict) else {}
         raw_mode = str(config.get("output_mode", config.get("outputMode", "text")) or "text").strip().lower()
         output_mode = "structured" if raw_mode in {"structured", "json"} else "text"
-        if output_mode != "structured":
+        if output_mode == "text":
+            output_contracts.append(("text", [], _text_output_schema()))
             continue
         raw_fields = config.get("output_fields", config.get("outputFields"))
         if not isinstance(raw_fields, list) or not raw_fields:
@@ -207,25 +243,32 @@ def workflow_contract_from_input(workflow_input: WorkflowInput) -> WorkflowContr
                     enum=[str(item) for item in raw_field.get("enum", [])] if isinstance(raw_field.get("enum"), list) else None,
                 )
             )
-        structured_outputs.append(
+        output_contracts.append(
             (
+                "structured",
                 output_fields,
                 schema_from_field_definitions(raw_fields, allow_nullable=True),
             )
         )
 
-    if not structured_outputs:
-        raise WorkflowContractError("missing_structured_output", "Workflow does not expose a structured output contract")
+    if not output_contracts:
+        raise WorkflowContractError("missing_output_contract", "Workflow does not expose an output contract")
 
-    unique_output_schemas: dict[str, tuple[list[WorkflowContractField], dict[str, Any]]] = {}
-    for output_fields, output_schema in structured_outputs:
-        unique_output_schemas[schema_compact(output_schema)] = (output_fields, output_schema)
+    unique_output_contracts: dict[str, tuple[str, list[WorkflowContractField], dict[str, Any]]] = {}
+    for output_mode, output_fields, output_schema in output_contracts:
+        unique_output_contracts[f"{output_mode}:{schema_compact(output_schema)}"] = (
+            output_mode,
+            output_fields,
+            output_schema,
+        )
 
-    if len(unique_output_schemas) > 1:
-        raise WorkflowContractError("ambiguous_structured_output", "Workflow exposes ambiguous structured output contracts")
+    if len(unique_output_contracts) > 1:
+        raise WorkflowContractError("ambiguous_output_contract", "Workflow exposes ambiguous output contracts")
 
-    output_fields, output_schema = next(iter(unique_output_schemas.values()))
+    output_mode, output_fields, output_schema = next(iter(unique_output_contracts.values()))
     return WorkflowContractSnapshot(
+        input_mode=input_mode,
+        output_mode=output_mode,
         input_fields=input_fields,
         output_fields=output_fields,
         input_schema=input_schema,

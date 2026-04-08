@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type {
   WorkflowHumanApproval,
+  WorkflowTestMemoryScope,
   WorkflowRunEvent,
   WorkflowTestSessionMemory,
 } from '../api/workflow'
@@ -157,6 +158,7 @@ const EMPTY_DELTA_SUMMARY: WorkflowDeltaSummary = {
 const EMPTY_SESSION_MEMORY: Required<WorkflowTestSessionMemory> = {
   conversationSummary: '',
   skillFacts: [],
+  workflowCallScopes: {},
 }
 
 function generateSessionId(): string {
@@ -185,9 +187,9 @@ function parseEventTs(value?: string | null): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined
 }
 
-function normalizeSessionMemory(
-  value?: WorkflowTestSessionMemory | null,
-): Required<WorkflowTestSessionMemory> {
+function normalizeMemoryScope(
+  value?: WorkflowTestMemoryScope | null,
+): Required<WorkflowTestMemoryScope> {
   const conversationSummary = `${value?.conversationSummary ?? ''}`.trim()
   const rawSkillFacts = Array.isArray(value?.skillFacts) ? value.skillFacts : []
   const skillFacts = rawSkillFacts
@@ -196,6 +198,27 @@ function normalizeSessionMemory(
   return {
     conversationSummary,
     skillFacts,
+  }
+}
+
+function normalizeSessionMemory(
+  value?: WorkflowTestSessionMemory | null,
+): Required<WorkflowTestSessionMemory> {
+  const normalizedScope = normalizeMemoryScope(value)
+  const rawScopes = value?.workflowCallScopes
+  const workflowCallScopes: Record<string, Required<WorkflowTestMemoryScope>> = {}
+
+  Object.entries(rawScopes ?? {}).forEach(([rawKey, rawValue]) => {
+    const scopeKey = `${rawKey ?? ''}`.trim()
+    if (!scopeKey) return
+    const normalized = normalizeMemoryScope(rawValue)
+    if (!normalized.conversationSummary && normalized.skillFacts.length === 0) return
+    workflowCallScopes[scopeKey] = normalized
+  })
+
+  return {
+    ...normalizedScope,
+    workflowCallScopes,
   }
 }
 

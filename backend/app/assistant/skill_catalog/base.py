@@ -177,6 +177,8 @@ class SkillDefinition(BaseModel):
     model_id: Optional[str] = None
     system_prompt: Optional[str] = None
     kb: Optional[SkillKBConfig] = None  # 知识库配置
+    workflow_id: Optional[str] = None
+    workflow_version_id: Optional[str] = None
     # workflow_dag 模式
     workflow_nodes: list[WorkflowNodeDefinition] = Field(default_factory=list)
     workflow_edges: list[WorkflowEdgeDefinition] = Field(default_factory=list)

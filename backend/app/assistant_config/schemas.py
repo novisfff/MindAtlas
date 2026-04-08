@@ -22,6 +22,8 @@ OutputFieldType = Literal["string", "number", "integer", "boolean", "object", "a
 VersionSource = Literal["save", "publish"]
 SystemBehaviorKey = Literal["weekly_report_generation", "monthly_report_generation"]
 WorkflowCallBindingMode = Literal["pinned", "latest"]
+WorkflowContractInputMode = Literal["text", "structured"]
+WorkflowContractOutputMode = Literal["text", "structured"]
 
 # 允许的 URL scheme
 ALLOWED_URL_SCHEMES = {"http", "https"}
@@ -299,6 +301,8 @@ class CallableWorkflowVersionResponse(CamelModel):
     sequence_no: int
     version_name: str
     version_source: VersionSource
+    input_mode: WorkflowContractInputMode = "structured"
+    output_mode: WorkflowContractOutputMode = "structured"
     input_params: list[WorkflowContractParamSchema] = Field(default_factory=list)
     output_params: list[WorkflowContractParamSchema] = Field(default_factory=list)
     created_at: datetime
@@ -310,6 +314,8 @@ class CallableWorkflowResponse(CamelModel):
     name: str
     description: str | None = None
     published_version_id: UUID
+    input_mode: WorkflowContractInputMode = "structured"
+    output_mode: WorkflowContractOutputMode = "structured"
     input_params: list[WorkflowContractParamSchema] = Field(default_factory=list)
     output_params: list[WorkflowContractParamSchema] = Field(default_factory=list)
     available_versions: list[CallableWorkflowVersionResponse] = Field(default_factory=list)
@@ -341,12 +347,12 @@ class WorkflowConversationHistoryItem(CamelModel):
         return self
 
 
-class WorkflowTestSessionMemoryInput(CamelModel):
+class WorkflowTestMemoryScopeInput(CamelModel):
     conversation_summary: str | None = Field(default=None, max_length=8000)
     skill_facts: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _validate(self) -> "WorkflowTestSessionMemoryInput":
+    def _validate(self) -> "WorkflowTestMemoryScopeInput":
         if self.conversation_summary is not None:
             self.conversation_summary = str(self.conversation_summary or "").strip()
         normalized_facts: list[str] = []
@@ -356,6 +362,21 @@ class WorkflowTestSessionMemoryInput(CamelModel):
                 continue
             normalized_facts.append(value)
         self.skill_facts = normalized_facts
+        return self
+
+
+class WorkflowTestSessionMemoryInput(WorkflowTestMemoryScopeInput):
+    workflow_call_scopes: dict[str, WorkflowTestMemoryScopeInput] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_scopes(self) -> "WorkflowTestSessionMemoryInput":
+        normalized_scopes: dict[str, WorkflowTestMemoryScopeInput] = {}
+        for raw_key, raw_value in (self.workflow_call_scopes or {}).items():
+            scope_key = str(raw_key or "").strip()
+            if not scope_key:
+                continue
+            normalized_scopes[scope_key] = raw_value
+        self.workflow_call_scopes = normalized_scopes
         return self
 
 
@@ -379,8 +400,6 @@ class WorkflowTestRunRequest(CamelModel):
                 raise ValueError("user_input is not allowed when start inputMode=structured")
             if self.history:
                 raise ValueError("history is not allowed when start inputMode=structured")
-            if self.session_memory is not None:
-                raise ValueError("session_memory is not allowed when start inputMode=structured")
             return self
 
         if self.structured_input is not None:

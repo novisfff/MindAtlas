@@ -4,7 +4,7 @@ import json
 import logging
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterator
 from uuid import UUID, uuid4
@@ -56,15 +56,31 @@ class PreparedWorkflowTestRun:
 
 
 @dataclass(frozen=True)
-class PreparedWorkflowSessionMemory:
+class PreparedWorkflowMemoryScope:
     conversation_summary: str
     skill_facts: list[str]
 
     def to_payload(self) -> dict[str, Any]:
-        return {
-            "conversationSummary": self.conversation_summary,
-            "skillFacts": list(self.skill_facts),
-        }
+        payload: dict[str, Any] = {}
+        if self.conversation_summary:
+            payload["conversationSummary"] = self.conversation_summary
+        if self.skill_facts:
+            payload["skillFacts"] = list(self.skill_facts)
+        return payload
+
+
+@dataclass(frozen=True)
+class PreparedWorkflowSessionMemory(PreparedWorkflowMemoryScope):
+    workflow_call_scopes: dict[str, PreparedWorkflowMemoryScope] = field(default_factory=dict)
+
+    def to_payload(self) -> dict[str, Any]:
+        payload = super().to_payload()
+        if self.workflow_call_scopes:
+            payload["workflowCallScopes"] = {
+                scope_key: scope_memory.to_payload()
+                for scope_key, scope_memory in self.workflow_call_scopes.items()
+            }
+        return payload
 
 
 def _utc_iso_now() -> str:
@@ -82,6 +98,17 @@ def _safe_json_parse(text: str) -> dict[str, Any] | list[Any] | None:
     if isinstance(parsed, (dict, list)):
         return parsed
     return None
+
+
+def _has_session_memory_payload(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if str(payload.get("conversationSummary", "") or "").strip():
+        return True
+    if payload.get("skillFacts"):
+        return True
+    workflow_call_scopes = payload.get("workflowCallScopes")
+    return isinstance(workflow_call_scopes, dict) and bool(workflow_call_scopes)
 
 
 def _build_trace_context_payload(extra: dict[str, Any]) -> dict[str, Any]:
@@ -291,6 +318,7 @@ class WorkflowTestRunService:
             langgraph_pattern="workflow_dag",
             system_prompt=None,
             kb=SkillKBConfig(enabled=kb_enabled),
+            workflow_id=str(scope_workflow_id),
             workflow_nodes=workflow_nodes,
             workflow_edges=workflow_edges,
         )
@@ -316,7 +344,11 @@ class WorkflowTestRunService:
     ) -> PreparedWorkflowSessionMemory:
         raw = session_memory
         if raw is None:
-            return PreparedWorkflowSessionMemory(conversation_summary="", skill_facts=[])
+            return PreparedWorkflowSessionMemory(
+                conversation_summary="",
+                skill_facts=[],
+                workflow_call_scopes={},
+            )
 
         settings = get_settings()
         max_chars = max(1, int(getattr(settings, "assistant_memory_l1_max_chars", 2000) or 2000))
@@ -335,9 +367,24 @@ class WorkflowTestRunService:
             list(raw_facts or []),
             max_items=max_items,
         )
+        raw_scopes = raw.get("workflow_call_scopes", raw.get("workflowCallScopes", {})) if isinstance(raw, dict) else (
+            getattr(raw, "workflow_call_scopes", {})
+        )
+        workflow_call_scopes: dict[str, PreparedWorkflowMemoryScope] = {}
+        normalized_scopes = AssistantMemoryService.normalize_workflow_call_scopes(
+            raw_scopes,
+            max_chars=max_chars,
+            max_items=max_items,
+        )
+        for scope_key, scope_value in normalized_scopes.items():
+            workflow_call_scopes[scope_key] = PreparedWorkflowMemoryScope(
+                conversation_summary=str(scope_value.get("conversationSummary", "") or "").strip(),
+                skill_facts=list(scope_value.get("skillFacts", []) or []),
+            )
         return PreparedWorkflowSessionMemory(
             conversation_summary=conversation_summary,
             skill_facts=skill_facts,
+            workflow_call_scopes=workflow_call_scopes,
         )
 
     def prepare(self, skill_id: UUID, request: WorkflowTestRunRequest) -> PreparedWorkflowTestRun:
@@ -394,10 +441,20 @@ class WorkflowTestRunService:
         prepared: PreparedWorkflowTestRun,
         assistant_text: str,
         run_id: str,
+        workflow_call_scopes: dict[str, Any] | None = None,
     ) -> PreparedWorkflowSessionMemory:
         previous = prepared.session_memory
+        next_workflow_call_scopes = self._normalize_session_memory(
+            {
+                "workflowCallScopes": workflow_call_scopes or previous.to_payload().get("workflowCallScopes", {}),
+            }
+        ).workflow_call_scopes
         if prepared.start_input_mode != "text":
-            return previous
+            return PreparedWorkflowSessionMemory(
+                conversation_summary=previous.conversation_summary,
+                skill_facts=list(previous.skill_facts),
+                workflow_call_scopes=next_workflow_call_scopes,
+            )
 
         settings = get_settings()
         max_chars = max(1, int(getattr(settings, "assistant_memory_l1_max_chars", 2000) or 2000))
@@ -440,6 +497,7 @@ class WorkflowTestRunService:
         return PreparedWorkflowSessionMemory(
             conversation_summary=next_summary,
             skill_facts=next_facts,
+            workflow_call_scopes=next_workflow_call_scopes,
         )
 
     def stream(self, prepared: PreparedWorkflowTestRun) -> Iterator[bytes]:
@@ -704,6 +762,9 @@ class WorkflowTestRunService:
                     ts=_utc_iso_now(),
                 )
 
+            session_memory_payload = prepared.session_memory.to_payload()
+            session_memory_payload.setdefault("workflowCallScopes", {})
+
             for delta in engine.execute(
                 skill=prepared.skill_definition,
                 user_input=prepared.user_input or "",
@@ -717,11 +778,7 @@ class WorkflowTestRunService:
                     "workflow_id": str(prepared.workflow_id),
                     "skill_id": str(prepared.skill_id) if prepared.skill_id else None,
                     "locale": resolve_system_locale(self.db),
-                    **(
-                        {"session_memory": prepared.session_memory.to_payload()}
-                        if prepared.start_input_mode == "text"
-                        else {}
-                    ),
+                    "session_memory": session_memory_payload,
                 },
                 on_tool_call_start=on_tool_call_start,
                 on_tool_call_end=on_tool_call_end,
@@ -750,19 +807,18 @@ class WorkflowTestRunService:
             yield from flush()
             final_text = "".join(final_parts)
             final_json = _safe_json_parse(final_text)
-            next_session_memory_payload: dict[str, Any] | None = None
-            if prepared.start_input_mode == "text":
-                next_session_memory = self._compute_next_session_memory(
-                    cfg=OpenAiFallbackConfig(
-                        api_key=cfg.api_key,
-                        base_url=cfg.base_url,
-                        model=cfg.model,
-                    ),
-                    prepared=prepared,
-                    assistant_text=final_text,
-                    run_id=run_id,
-                )
-                next_session_memory_payload = next_session_memory.to_payload()
+            next_session_memory = self._compute_next_session_memory(
+                cfg=OpenAiFallbackConfig(
+                    api_key=cfg.api_key,
+                    base_url=cfg.base_url,
+                    model=cfg.model,
+                ),
+                prepared=prepared,
+                assistant_text=final_text,
+                run_id=run_id,
+                workflow_call_scopes=session_memory_payload.get("workflowCallScopes", {}),
+            )
+            next_session_memory_payload = next_session_memory.to_payload() if _has_session_memory_payload(next_session_memory.to_payload()) else None
             duration_ms = int((time.perf_counter() - started_perf) * 1000)
             enqueue(
                 "run_end",

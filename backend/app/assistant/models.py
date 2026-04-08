@@ -57,6 +57,12 @@ class Conversation(UuidPrimaryKeyMixin, TimestampMixin, Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    workflow_call_memories = relationship(
+        "AssistantConversationWorkflowCallMemory",
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 class Message(UuidPrimaryKeyMixin, TimestampMixin, Base):
@@ -193,6 +199,45 @@ class AssistantConversationSkillL2Memory(UuidPrimaryKeyMixin, TimestampMixin, Ba
             "ix_assistant_l2_memory_conversation_skill",
             "conversation_id",
             "skill_name",
+            unique=True,
+        ),
+    )
+
+
+class AssistantConversationWorkflowCallMemory(UuidPrimaryKeyMixin, TimestampMixin, Base):
+    """Conversation+workflow_call scope memory for nested workflow reuse."""
+
+    __tablename__ = "assistant_conversation_workflow_call_memory"
+
+    conversation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_conversation.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_workflow_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_workflow.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_node_scope = Column(String(512), nullable=False)
+    target_workflow_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_workflow.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    summary_text = Column(Text, nullable=False, default="")
+    facts = Column(JSON, nullable=False, default=list)
+    version = Column(Integer, nullable=False, default=1)
+
+    conversation = relationship("Conversation", back_populates="workflow_call_memories")
+
+    __table_args__ = (
+        Index(
+            "ix_assistant_workflow_call_memory_scope",
+            "conversation_id",
+            "source_workflow_id",
+            "source_node_scope",
+            "target_workflow_id",
             unique=True,
         ),
     )

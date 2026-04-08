@@ -163,6 +163,9 @@ def build_scoped_metadata(
 ) -> dict[str, Any]:
     raw_metadata = metadata if isinstance(metadata, dict) else {}
     scoped = dict(raw_metadata)
+    inherited_scope_prefix = str(raw_metadata.get("__scope_prefix__", "") or "").strip()
+    effective_scope_prefix = scope_prefix if not inherited_scope_prefix else f"{inherited_scope_prefix}::{scope_prefix}"
+    scoped["__scope_prefix__"] = effective_scope_prefix
 
     def _scoped_node_id(node_id: str) -> str:
         raw = str(node_id or "").strip()
@@ -384,6 +387,8 @@ def execute_container_body(
         state_for_node: WorkflowState = {
             "metadata": metadata,
             "node_outputs": node_outputs_local,
+            "workflow_id": str(parent_state.get("workflow_id", "") or ""),
+            "workflow_version_id": str(parent_state.get("workflow_version_id", "") or ""),
             "user_input": stringify(container_input),
             "memory_mode": str(parent_state.get("memory_mode", "auto") or "auto"),
             "memory_context": parent_state.get("memory_context", {}),
@@ -447,6 +452,8 @@ def execute_container_body(
             execution_trace.extend([str(item) for item in result["execution_trace"]])
         if isinstance(result.get("branch_decisions"), dict):
             branch_decisions.update({str(k): str(v) for k, v in result["branch_decisions"].items()})
+        if isinstance(result.get("memory_context"), dict):
+            parent_state["memory_context"] = result["memory_context"]
         if isinstance(result.get("env_vars"), dict):
             env_vars_local = dict(result["env_vars"])
         if isinstance(result.get("env_specs"), dict):

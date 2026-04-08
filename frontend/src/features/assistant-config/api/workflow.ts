@@ -550,9 +550,13 @@ export interface WorkflowConversationHistoryItem {
   content: string
 }
 
-export interface WorkflowTestSessionMemory {
+export interface WorkflowTestMemoryScope {
   conversationSummary?: string
   skillFacts?: string[]
+}
+
+export interface WorkflowTestSessionMemory extends WorkflowTestMemoryScope {
+  workflowCallScopes?: Record<string, WorkflowTestMemoryScope>
 }
 
 export interface WorkflowTestRunRequest {

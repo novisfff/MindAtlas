@@ -5,7 +5,31 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
-from langchain_core.tools import StructuredTool
+try:
+    from langchain_core.tools import StructuredTool
+except (ImportError, AttributeError):
+    class StructuredTool:  # type: ignore[override]
+        def __init__(self, *, func: Callable[..., Any], name: str, description: str, args_schema: type[BaseModel]):
+            self.func = func
+            self.name = name
+            self.description = description
+            self.args_schema = args_schema
+
+        @classmethod
+        def from_function(
+            cls,
+            *,
+            func: Callable[..., Any],
+            name: str,
+            description: str,
+            args_schema: type[BaseModel],
+        ) -> "StructuredTool":
+            return cls(
+                func=func,
+                name=name,
+                description=description,
+                args_schema=args_schema,
+            )
 from pydantic import BaseModel, Field
 
 from app.assistant.workflow import execution_copy as _copy

@@ -481,7 +481,7 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         self.assertEqual(run_error_payload["stage"], "bootstrap")
         self.assertEqual(run_end_payload["status"], "error")
 
-    def test_prepare_rejects_structured_history_and_session_memory(self) -> None:
+    def test_prepare_rejects_structured_history_but_allows_session_memory(self) -> None:
         from app.assistant_config.schemas import (
             WorkflowEdgeInput,
             WorkflowInput,
@@ -520,8 +520,15 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
                 workflow=workflow,
                 structured_input={"title": "hello"},
                 history=[{"role": "user", "content": "old turn"}],
-                session_memory={"conversationSummary": "summary", "skillFacts": ["fact"]},
             )
+
+        request = WorkflowTestRunRequest(
+            workflow=workflow,
+            structured_input={"title": "hello"},
+            session_memory={"conversationSummary": "summary", "skillFacts": ["fact"]},
+        )
+        self.assertEqual(request.session_memory.conversation_summary, "summary")
+        self.assertEqual(request.session_memory.skill_facts, ["fact"])
 
     def test_stream_passes_history_and_session_memory_to_engine(self) -> None:
         from app.assistant_config.schemas import WorkflowTestRunRequest
@@ -580,7 +587,14 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         )
         runtime_context = captured_kwargs["runtime_context"]
         assert isinstance(runtime_context, dict)
-        self.assertEqual(runtime_context["session_memory"], {"conversationSummary": "旧摘要", "skillFacts": ["事实A"]})
+        self.assertEqual(
+            runtime_context["session_memory"],
+            {
+                "conversationSummary": "旧摘要",
+                "skillFacts": ["事实A"],
+                "workflowCallScopes": {},
+            },
+        )
         self.assertTrue(str(runtime_context["conversation_id"]).startswith("workflow_test_session:"))
 
         events = _parse_sse_events(chunks)
@@ -635,6 +649,101 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         self.assertEqual(
             run_end_payload["sessionMemory"],
             {"conversationSummary": "旧摘要", "skillFacts": ["事实A"]},
+        )
+
+    def test_structured_stream_round_trips_workflow_call_scopes(self) -> None:
+        from app.assistant_config.schemas import (
+            WorkflowEdgeInput,
+            WorkflowInput,
+            WorkflowNodeInput,
+            WorkflowTestRunRequest,
+        )
+        from app.assistant_config.workflow_test_service import WorkflowTestRunService
+
+        workflow = WorkflowInput(
+            nodes=[
+                WorkflowNodeInput(
+                    node_id="start",
+                    node_type="start",
+                    label="Start",
+                    config={
+                        "inputMode": "structured",
+                        "structuredFields": [
+                            {"name": "title", "type": "string", "required": True},
+                        ],
+                    },
+                ),
+                WorkflowNodeInput(
+                    node_id="output_1",
+                    node_type="output",
+                    label="Output",
+                    config={"outputMode": "text", "textTemplate": "ok"},
+                ),
+            ],
+            edges=[
+                WorkflowEdgeInput(
+                    edge_id="e1",
+                    source_node_id="start",
+                    target_node_id="output_1",
+                    source_handle="output",
+                    target_handle="input",
+                ),
+            ],
+        )
+
+        skill = self._create_workflow_skill()
+        service = WorkflowTestRunService(self.db)
+        request = WorkflowTestRunRequest(
+            workflow=workflow,
+            structured_input={"title": "hello"},
+            session_id=uuid4(),
+        )
+        prepared = service.prepare(skill.id, request)
+        captured_runtime_context: dict[str, object] = {}
+        captured_session_memory_before: dict[str, object] = {}
+
+        class _FakeEngine:
+            def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                runtime_context = kwargs["runtime_context"]
+                captured_runtime_context.update(runtime_context)
+                session_memory = runtime_context["session_memory"]
+                captured_session_memory_before.update(session_memory)
+                session_memory["workflowCallScopes"] = {
+                    "wf-1|call_child|wf-2": {
+                        "conversationSummary": "子摘要",
+                        "skillFacts": ["事实A"],
+                    }
+                }
+                yield "ok"
+
+        with patch(
+            "app.assistant_config.workflow_test_service.resolve_openai_compat_config",
+            return_value=SimpleNamespace(api_key="k", base_url="https://api.example.com", model="gpt-test"),
+        ), patch(
+            "app.assistant_config.workflow_test_service.WorkflowTestRunService._build_engine",
+            return_value=_FakeEngine(),
+        ):
+            chunks = list(service.stream(prepared))
+
+        runtime_context = captured_runtime_context
+        assert isinstance(runtime_context, dict)
+        self.assertEqual(
+            captured_session_memory_before,
+            {"workflowCallScopes": {}},
+        )
+
+        events = _parse_sse_events(chunks)
+        run_end_payload = next(payload for name, payload in events if name == "run_end")
+        self.assertEqual(
+            run_end_payload["sessionMemory"],
+            {
+                "workflowCallScopes": {
+                    "wf-1|call_child|wf-2": {
+                        "conversationSummary": "子摘要",
+                        "skillFacts": ["事实A"],
+                    }
+                }
+            },
         )
 
 
