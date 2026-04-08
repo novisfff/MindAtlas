@@ -1,7 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { format, parse, isValid, startOfMonth, startOfWeek, endOfWeek, addDays } from 'date-fns'
-import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
+import {
+  format,
+  parse,
+  isValid,
+  startOfMonth,
+  startOfWeek,
+  endOfWeek,
+  addDays,
+} from 'date-fns'
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core'
 import { toast } from 'sonner'
 import { CalendarHeader } from './components/CalendarHeader'
 import { MonthView } from './components/MonthView'
@@ -12,12 +26,18 @@ import { QuickCreateDialog } from './components/QuickCreateDialog'
 import { EntryDetailDialog } from './components/EntryDetailDialog'
 import { useCalendarEntriesQuery, usePatchEntryTimeMutation } from './queries'
 import type { Entry } from '@/types'
+import { cn } from '@/lib/utils'
 import { useCalendarDnd } from './hooks/useCalendarDnd'
 import { useCalendarKeyboard } from './hooks/useCalendarKeyboard'
-
-export type CalendarViewMode = 'month' | 'week' | 'day'
+import type { CalendarDensity, CalendarViewMode } from './types'
+import { calendarSurface } from './styles'
 
 const VALID_VIEWS: CalendarViewMode[] = ['month', 'week', 'day']
+const COMPACT_HEIGHT_THRESHOLDS: Record<CalendarViewMode, number> = {
+  month: 800,
+  week: 620,
+  day: 620,
+}
 
 function parseUrlDate(dateStr: string | null): Date {
   if (!dateStr) return new Date()
@@ -29,7 +49,10 @@ function formatUrlDate(date: Date): string {
   return format(date, 'yyyy-MM-dd')
 }
 
-type EntryTimeSnapshot = Pick<Entry, 'timeMode' | 'timeAt' | 'timeFrom' | 'timeTo'>
+type EntryTimeSnapshot = Pick<
+  Entry,
+  'timeMode' | 'timeAt' | 'timeFrom' | 'timeTo'
+>
 
 interface UndoAction {
   id: string
@@ -55,9 +78,14 @@ export function CalendarPage() {
   const [quickCreateDate, setQuickCreateDate] = useState<Date | null>(null)
   const [selectedEntry, setSelectedEntry] = useState<Entry | null>(null)
 
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }))
-  const { activeId, handleDragStart, handleDragEnd, handleDragCancel } = useCalendarDnd()
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+  )
+  const { activeId, handleDragStart, handleDragEnd, handleDragCancel } =
+    useCalendarDnd()
   const patchMutation = usePatchEntryTimeMutation()
+  const viewportRef = useRef<HTMLDivElement>(null)
+  const [viewportHeight, setViewportHeight] = useState(0)
 
   const undoStackRef = useRef<UndoAction[]>([])
   const [canUndo, setCanUndo] = useState(false)
@@ -71,12 +99,17 @@ export function CalendarPage() {
     }
   }, [])
 
-  const isSameSnapshot = useCallback((a: EntryTimeSnapshot, b: EntryTimeSnapshot) => {
-    return a.timeMode === b.timeMode &&
-      a.timeAt === b.timeAt &&
-      a.timeFrom === b.timeFrom &&
-      a.timeTo === b.timeTo
-  }, [])
+  const isSameSnapshot = useCallback(
+    (a: EntryTimeSnapshot, b: EntryTimeSnapshot) => {
+      return (
+        a.timeMode === b.timeMode &&
+        a.timeAt === b.timeAt &&
+        a.timeFrom === b.timeFrom &&
+        a.timeTo === b.timeTo
+      )
+    },
+    [],
+  )
 
   const removeUndoAction = useCallback((id: string) => {
     const next = undoStackRef.current.filter((a) => a.id !== id)
@@ -105,90 +138,142 @@ export function CalendarPage() {
           undoStackRef.current.push(action)
           setCanUndo(true)
           toast.error('撤回失败', {
-            description: error instanceof Error ? error.message : 'Failed to undo',
+            description:
+              error instanceof Error ? error.message : 'Failed to undo',
           })
         },
-      }
+      },
     )
   }, [patchMutation])
 
-  const undoSpecific = useCallback((id: string) => {
-    const latest = undoStackRef.current.at(-1)
-    if (!latest || latest.id !== id) {
-      toast('只能撤回最新操作')
-      return
-    }
-    undoLatest()
-  }, [undoLatest])
-
-  const recordUndoAndPatch = useCallback((args: {
-    entry: Entry
-    after: EntryTimeSnapshot
-    label: string
-  }) => {
-    const before = snapshotEntryTime(args.entry)
-    const id = typeof crypto !== 'undefined' && 'randomUUID' in crypto
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random()}`
-
-    const action: UndoAction = {
-      id,
-      entryId: args.entry.id,
-      label: args.label,
-      before,
-      after: args.after,
-      timestamp: Date.now(),
-    }
-
-    if (isSameSnapshot(before, args.after)) return
-
-    undoStackRef.current.push(action)
-    setCanUndo(true)
-
-    patchMutation.mutate(
-      {
-        id: args.entry.id,
-        timeMode: args.after.timeMode,
-        timeAt: args.after.timeAt,
-        timeFrom: args.after.timeFrom,
-        timeTo: args.after.timeTo,
-      },
-      {
-        onSuccess: () => {
-          toast('已更新时间', {
-            description: args.label,
-            action: {
-              label: '撤回',
-              onClick: () => undoSpecific(action.id),
-            },
-          })
-        },
-        onError: (error) => {
-          removeUndoAction(action.id)
-          toast.error('更新时间失败', {
-            description: error instanceof Error ? error.message : 'Failed to update',
-          })
-        },
+  const undoSpecific = useCallback(
+    (id: string) => {
+      const latest = undoStackRef.current.at(-1)
+      if (!latest || latest.id !== id) {
+        toast('只能撤回最新操作')
+        return
       }
-    )
-  }, [isSameSnapshot, patchMutation, removeUndoAction, snapshotEntryTime, undoSpecific])
+      undoLatest()
+    },
+    [undoLatest],
+  )
+
+  const recordUndoAndPatch = useCallback(
+    (args: { entry: Entry; after: EntryTimeSnapshot; label: string }) => {
+      const before = snapshotEntryTime(args.entry)
+      const id =
+        typeof crypto !== 'undefined' && 'randomUUID' in crypto
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random()}`
+
+      const action: UndoAction = {
+        id,
+        entryId: args.entry.id,
+        label: args.label,
+        before,
+        after: args.after,
+        timestamp: Date.now(),
+      }
+
+      if (isSameSnapshot(before, args.after)) return
+
+      undoStackRef.current.push(action)
+      setCanUndo(true)
+
+      patchMutation.mutate(
+        {
+          id: args.entry.id,
+          timeMode: args.after.timeMode,
+          timeAt: args.after.timeAt,
+          timeFrom: args.after.timeFrom,
+          timeTo: args.after.timeTo,
+        },
+        {
+          onSuccess: () => {
+            toast('已更新时间', {
+              description: args.label,
+              action: {
+                label: '撤回',
+                onClick: () => undoSpecific(action.id),
+              },
+            })
+          },
+          onError: (error) => {
+            removeUndoAction(action.id)
+            toast.error('更新时间失败', {
+              description:
+                error instanceof Error ? error.message : 'Failed to update',
+            })
+          },
+        },
+      )
+    },
+    [
+      isSameSnapshot,
+      patchMutation,
+      removeUndoAction,
+      snapshotEntryTime,
+      undoSpecific,
+    ],
+  )
 
   const dateRange = useMemo(() => {
     if (viewMode === 'month') {
       const monthStart = startOfMonth(currentDate)
       const gridStart = startOfWeek(monthStart, { weekStartsOn: 1 })
       const gridEnd = addDays(gridStart, 41)
-      return { timeFrom: formatUrlDate(gridStart), timeTo: formatUrlDate(gridEnd) }
+      return {
+        timeFrom: formatUrlDate(gridStart),
+        timeTo: formatUrlDate(gridEnd),
+      }
     }
     if (viewMode === 'week') {
       const weekStart = startOfWeek(currentDate, { weekStartsOn: 1 })
       const weekEnd = endOfWeek(currentDate, { weekStartsOn: 1 })
-      return { timeFrom: formatUrlDate(weekStart), timeTo: formatUrlDate(weekEnd) }
+      return {
+        timeFrom: formatUrlDate(weekStart),
+        timeTo: formatUrlDate(weekEnd),
+      }
     }
-    return { timeFrom: formatUrlDate(currentDate), timeTo: formatUrlDate(currentDate) }
+    return {
+      timeFrom: formatUrlDate(currentDate),
+      timeTo: formatUrlDate(currentDate),
+    }
   }, [viewMode, currentDate])
 
   const { data: entries = [], isLoading } = useCalendarEntriesQuery(dateRange)
+
+  useEffect(() => {
+    const node = viewportRef.current
+    if (!node) return
+
+    let frame = 0
+    const measure = () => {
+      frame = 0
+      setViewportHeight(node.clientHeight)
+    }
+    const requestMeasure = () => {
+      if (frame) window.cancelAnimationFrame(frame)
+      frame = window.requestAnimationFrame(measure)
+    }
+
+    requestMeasure()
+
+    const observer = new ResizeObserver(requestMeasure)
+    observer.observe(node)
+
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame)
+      observer.disconnect()
+    }
+  }, [])
+
+  const density = useMemo<CalendarDensity>(() => {
+    if (viewportHeight <= 0) return 'comfortable'
+    return viewportHeight < COMPACT_HEIGHT_THRESHOLDS[viewMode]
+      ? 'compact'
+      : 'comfortable'
+  }, [viewportHeight, viewMode])
 
   const handleViewChange = (mode: CalendarViewMode) => {
     setViewMode(mode)
@@ -208,17 +293,25 @@ export function CalendarPage() {
     setSelectedEntry(entry)
   }
 
-  const handleEntryUpdate = useCallback((entry: Entry, start: Date, end: Date) => {
-    const actuallySingleDay = start.getDate() === end.getDate() &&
-      start.getMonth() === end.getMonth() &&
-      start.getFullYear() === end.getFullYear()
+  const handleEntryUpdate = useCallback(
+    (entry: Entry, start: Date, end: Date) => {
+      const actuallySingleDay =
+        start.getDate() === end.getDate() &&
+        start.getMonth() === end.getMonth() &&
+        start.getFullYear() === end.getFullYear()
 
-    const after: EntryTimeSnapshot = actuallySingleDay
-      ? { timeMode: 'POINT', timeAt: start.toISOString() }
-      : { timeMode: 'RANGE', timeFrom: start.toISOString(), timeTo: end.toISOString() }
+      const after: EntryTimeSnapshot = actuallySingleDay
+        ? { timeMode: 'POINT', timeAt: start.toISOString() }
+        : {
+            timeMode: 'RANGE',
+            timeFrom: start.toISOString(),
+            timeTo: end.toISOString(),
+          }
 
-    recordUndoAndPatch({ entry, after, label: '伸缩调整时间' })
-  }, [recordUndoAndPatch])
+      recordUndoAndPatch({ entry, after, label: '伸缩调整时间' })
+    },
+    [recordUndoAndPatch],
+  )
 
   useCalendarKeyboard({
     currentDate,
@@ -229,15 +322,16 @@ export function CalendarPage() {
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      const isUndo = (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z'
+      const isUndo =
+        (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z'
       if (!isUndo) return
 
       const target = e.target as HTMLElement | null
-      const isEditable = !!target && (
-        target.tagName === 'INPUT' ||
-        target.tagName === 'TEXTAREA' ||
-        (target as HTMLElement).isContentEditable
-      )
+      const isEditable =
+        !!target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          (target as HTMLElement).isContentEditable)
       if (isEditable) return
 
       if (undoStackRef.current.length === 0) return
@@ -273,7 +367,11 @@ export function CalendarPage() {
       const newEnd = new Date(newStart.getTime() + duration)
       recordUndoAndPatch({
         entry,
-        after: { timeMode: 'RANGE', timeFrom: newStart.toISOString(), timeTo: newEnd.toISOString() },
+        after: {
+          timeMode: 'RANGE',
+          timeFrom: newStart.toISOString(),
+          timeTo: newEnd.toISOString(),
+        },
         label: '拖拽移动时间',
       })
     }
@@ -286,48 +384,65 @@ export function CalendarPage() {
       onDragEnd={onDragEnd}
       onDragCancel={handleDragCancel}
     >
-      <div className="flex flex-col h-full">
-        <CalendarHeader
-          viewMode={viewMode}
-          currentDate={currentDate}
-          onViewChange={handleViewChange}
-          onDateChange={handleDateChange}
-        />
-        <div className="flex-1 overflow-auto">
-          {viewMode === 'month' && (
-            <MonthView
-              currentDate={currentDate}
-              entries={entries}
-              onDateSelect={handleDateChange}
-              onDateDoubleClick={handleDateDoubleClick}
-              onEntryClick={handleEntryClick}
-              onEntryUpdate={handleEntryUpdate}
-            />
-          )}
-          {viewMode === 'week' && (
-            <WeekView
-              currentDate={currentDate}
-              entries={entries}
-              onDateSelect={handleDateChange}
-              onDateDoubleClick={handleDateDoubleClick}
-              onEntryClick={handleEntryClick}
-              onEntryUpdate={handleEntryUpdate}
-            />
-          )}
-          {viewMode === 'day' && (
-            <DayView
-              currentDate={currentDate}
-              entries={entries}
-              onDateDoubleClick={handleDateDoubleClick}
-              onEntryClick={handleEntryClick}
-            />
-          )}
+      <div
+        className={cn(
+          'flex h-full min-h-0 flex-col overflow-hidden px-3 pb-4 pt-4 sm:px-4 md:px-5 md:pb-5 md:pt-5 lg:pr-24',
+          calendarSurface.routeBackdrop,
+        )}
+      >
+        <div className="flex min-h-0 flex-1 flex-col gap-4">
+          <CalendarHeader
+            density={density}
+            viewMode={viewMode}
+            currentDate={currentDate}
+            onViewChange={handleViewChange}
+            onDateChange={handleDateChange}
+          />
+          <div
+            ref={viewportRef}
+            className="custom-scrollbar min-h-0 flex-1 overflow-auto pr-1"
+            aria-busy={isLoading}
+          >
+            <div className="min-h-full">
+              {viewMode === 'month' && (
+                <MonthView
+                  density={density}
+                  currentDate={currentDate}
+                  entries={entries}
+                  onDateSelect={handleDateChange}
+                  onDateDoubleClick={handleDateDoubleClick}
+                  onEntryClick={handleEntryClick}
+                  onEntryUpdate={handleEntryUpdate}
+                />
+              )}
+              {viewMode === 'week' && (
+                <WeekView
+                  density={density}
+                  currentDate={currentDate}
+                  entries={entries}
+                  onDateSelect={handleDateChange}
+                  onDateDoubleClick={handleDateDoubleClick}
+                  onEntryClick={handleEntryClick}
+                  onEntryUpdate={handleEntryUpdate}
+                />
+              )}
+              {viewMode === 'day' && (
+                <DayView
+                  density={density}
+                  currentDate={currentDate}
+                  entries={entries}
+                  onDateDoubleClick={handleDateDoubleClick}
+                  onEntryClick={handleEntryClick}
+                />
+              )}
+            </div>
+          </div>
         </div>
       </div>
       <DragOverlay>
         {activeEntry && (
           <div className="pointer-events-none">
-            <CalendarEvent entry={activeEntry} isDragging />
+            <CalendarEvent entry={activeEntry} density={density} isDragging />
           </div>
         )}
       </DragOverlay>

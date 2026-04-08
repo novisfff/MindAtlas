@@ -546,7 +546,7 @@ export function WorkflowTestRunPanel({ open, workflowId, startInputMode, onAnaly
         subtitle="草稿直跑，不计入正式会话"
         onClose={onClose}
         headerActions={headerActions}
-        bodyClassName="min-h-0 flex-1 overflow-hidden bg-slate-50/70"
+        bodyClassName="min-h-0 flex flex-1 flex-col overflow-hidden bg-slate-50/70"
         footer={panelFooter}
       >
 
@@ -582,7 +582,7 @@ export function WorkflowTestRunPanel({ open, workflowId, startInputMode, onAnaly
           })}
         </div>
 
-        <div className="flex-1 overflow-auto p-4 custom-scrollbar bg-slate-50/50">
+        <div className="min-h-0 flex-1 overflow-auto p-4 custom-scrollbar bg-slate-50/50">
           {activeTab === 'conversation' && isConversationMode && (
             <div className="h-full flex flex-col gap-4">
               <div className="flex-1 overflow-auto min-h-0 space-y-4 pr-1">

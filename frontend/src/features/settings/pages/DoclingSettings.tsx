@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowLeft, Loader2, Save } from 'lucide-react'
+import { Loader2, Save } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { uiChrome } from '@/components/ui/styles'
 import {
   InputField,
   RuntimeCapabilityMeta,
@@ -16,7 +17,14 @@ import {
   type RuntimeDocumentParsingConfigRequest,
   type RuntimeDocumentParsingConfigResponse,
 } from '@/features/system-setup'
+import {
+  SettingsInset,
+  SettingsPageHeader,
+  SettingsPageShell,
+  SettingsSection,
+} from '@/features/settings/components/SettingsShell'
 import { validateDocumentParsingCapability } from '@/features/system-setup/runtimeRules'
+import { cn } from '@/lib/utils'
 
 interface DoclingDraft extends RuntimeDocumentParsingConfigResponse {
   pictureDescriptionApiKey: string
@@ -43,8 +51,8 @@ function CapabilityRunBadge({
       variant="outline"
       className={
         active
-          ? 'rounded-full border-emerald-200 bg-emerald-50 text-emerald-700'
-          : 'rounded-full border-amber-200 bg-amber-50 text-amber-700'
+          ? 'border-emerald-200/80 bg-emerald-50/80 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200'
+          : 'border-amber-200/80 bg-amber-50/80 text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200'
       }
     >
       {active ? activeLabel : inactiveLabel}
@@ -141,41 +149,26 @@ export function DoclingSettingsPage() {
     : t('systemSetup.detailPages.docling.notStartedSummary')
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="space-y-3">
-          <button
+    <SettingsPageShell>
+      <SettingsPageHeader
+        title={t('pages.settings.docling')}
+        description={t('pages.settings.doclingDesc')}
+        backAction={{ label: t('common.back'), onClick: () => navigate('/settings') }}
+        actions={
+          <Button
             type="button"
-            onClick={() => navigate('/settings')}
-            className="inline-flex items-center gap-2 text-sm text-slate-500 transition hover:text-slate-900"
+            onClick={() => {
+              void handleSave()
+            }}
+            disabled={updateMutation.isPending || !isStarted}
           >
-            <ArrowLeft className="h-4 w-4" />
-            {t('common.back')}
-          </button>
-          <div className="space-y-2">
-            <h1 className="text-3xl font-semibold tracking-tight text-slate-900">
-              {t('pages.settings.docling')}
-            </h1>
-            <p className="max-w-3xl text-sm leading-7 text-slate-600">
-              {t('pages.settings.doclingDesc')}
-            </p>
-          </div>
-        </div>
+            {updateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+            {t('common.save')}
+          </Button>
+        }
+      />
 
-        <Button
-          type="button"
-          onClick={() => {
-            void handleSave()
-          }}
-          disabled={updateMutation.isPending || !isStarted}
-          className="rounded-2xl"
-        >
-          {updateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-          {t('common.save')}
-        </Button>
-      </div>
-
-      <section className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+      <SettingsSection>
         <div className="space-y-4">
           <div className="flex flex-wrap items-center gap-2">
             <CapabilityRunBadge
@@ -186,37 +179,37 @@ export function DoclingSettingsPage() {
             <RuntimeCapabilityMeta module={current} skipped={false} t={t} />
           </div>
           <div className="space-y-2">
-            <p className="text-sm font-semibold text-slate-900">
+            <p className="text-sm font-semibold text-foreground">
               {t('systemSetup.detailPages.effectiveSummary')}
             </p>
-            <p className="text-sm leading-6 text-slate-600">{displaySummary}</p>
+            <p className="text-sm leading-6 text-muted-foreground">{displaySummary}</p>
           </div>
-          <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 px-4 py-4 text-sm leading-6 text-slate-600">
+          <SettingsInset className="text-sm leading-6 text-muted-foreground">
             {t('systemSetup.detailPages.docling.deploymentManaged')}
-          </div>
+          </SettingsInset>
         </div>
-      </section>
+      </SettingsSection>
 
       {!isStarted ? (
-        <section className="rounded-[28px] border border-amber-200 bg-amber-50/70 p-6 shadow-sm">
+        <SettingsSection className="border border-amber-200/80 bg-amber-50/72 dark:border-amber-500/20 dark:bg-amber-500/10">
           <div className="space-y-2">
-            <h2 className="text-lg font-semibold text-amber-950">
+            <h2 className="text-lg font-semibold text-amber-950 dark:text-amber-100">
               {t('systemSetup.detailPages.docling.unavailableTitle')}
             </h2>
-            <p className="text-sm leading-6 text-amber-900">
+            <p className="text-sm leading-6 text-amber-900 dark:text-amber-200">
               {t('systemSetup.detailPages.docling.unavailableDescription')}
             </p>
           </div>
-        </section>
+        </SettingsSection>
       ) : (
         <>
-          <section className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+          <SettingsSection>
             <div className="space-y-5">
               <div className="space-y-2">
-                <h2 className="text-lg font-semibold text-slate-900">
+                <h2 className="text-lg font-semibold text-foreground">
                   {t('systemSetup.detailPages.docling.sections.ocr')}
                 </h2>
-                <p className="text-sm leading-6 text-slate-600">
+                <p className="text-sm leading-6 text-muted-foreground">
                   {t('systemSetup.detailPages.docling.ocrHint')}
                 </p>
               </div>
@@ -236,15 +229,15 @@ export function DoclingSettingsPage() {
                 disabled={!draft.ocrEnabled}
               />
             </div>
-          </section>
+          </SettingsSection>
 
-          <section className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+          <SettingsSection>
             <div className="space-y-5">
               <div className="space-y-2">
-                <h2 className="text-lg font-semibold text-slate-900">
+                <h2 className="text-lg font-semibold text-foreground">
                   {t('systemSetup.detailPages.docling.sections.pictureDescription')}
                 </h2>
-                <p className="text-sm leading-6 text-slate-600">
+                <p className="text-sm leading-6 text-muted-foreground">
                   {t('systemSetup.detailPages.docling.pictureDescriptionHint')}
                 </p>
               </div>
@@ -256,7 +249,7 @@ export function DoclingSettingsPage() {
                 onCheckedChange={(pictureDescriptionEnabled) => patchDraft({ pictureDescriptionEnabled })}
               />
 
-              <div className="grid gap-4 rounded-[24px] border border-slate-200 bg-slate-50/70 p-4 md:grid-cols-2">
+              <SettingsInset className="grid gap-4 md:grid-cols-2">
                 <InputField
                   label={t('systemSetup.forms.documentParsing.pictureDescriptionUrl.label')}
                   value={draft.pictureDescriptionUrl}
@@ -313,11 +306,11 @@ export function DoclingSettingsPage() {
                     rows={3}
                   />
                 </div>
-              </div>
+              </SettingsInset>
             </div>
-          </section>
+          </SettingsSection>
         </>
       )}
-    </div>
+    </SettingsPageShell>
   )
 }

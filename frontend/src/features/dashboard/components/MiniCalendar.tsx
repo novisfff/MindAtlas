@@ -13,6 +13,7 @@ import { Button } from '@/components/ui/button'
 import { Calendar, CalendarDayButton } from '@/components/ui/calendar'
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { uiChrome, uiRadius } from '@/components/ui/styles'
 
 export function MiniCalendar() {
   const { t, i18n } = useTranslation()
@@ -60,7 +61,7 @@ export function MiniCalendar() {
 
   if (isLoading) {
     return (
-      <div className="rounded-xl border bg-card/60 p-4 shadow-sm backdrop-blur-sm">
+      <div className={cn(uiChrome.card, 'p-4')}>
         <div className="flex items-center justify-center h-52">
           <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
         </div>
@@ -69,8 +70,8 @@ export function MiniCalendar() {
   }
 
   return (
-    <div className="rounded-xl border bg-card shadow-sm h-full flex flex-col overflow-hidden transition-all duration-300 hover:shadow-md">
-      <div className="flex items-center justify-between p-3.5 pb-2 border-b border-border/40 bg-muted/5">
+    <div className={cn(uiChrome.card, 'h-full flex flex-col overflow-hidden')}>
+      <div className="flex items-center justify-between border-b border-border/50 px-4 py-3">
         <h3 className="text-[0.925rem] font-semibold pl-1 tracking-tight text-foreground/90">
           {format(currentMonth, 'MMMM yyyy', { locale })}
         </h3>
@@ -95,7 +96,7 @@ export function MiniCalendar() {
           </Button>
         </div>
       </div>
-      <div className="p-3 flex-1 min-h-0 bg-card/30">
+      <div className="flex-1 min-h-0 bg-background/40 p-3">
         <Calendar
           mode="single"
           month={currentMonth}
@@ -139,7 +140,8 @@ export function MiniCalendar() {
                   day={day}
                   modifiers={modifiers}
                   className={cn(
-                    'rounded-lg text-xs font-medium relative w-full h-full aspect-square flex items-center justify-center',
+                    'relative flex h-full w-full aspect-square items-center justify-center text-xs font-medium',
+                    uiRadius.inset,
                     'transition-all duration-200 ease-in-out',
                     startCount > 0
                       ? getColorClass(startCount)
@@ -207,9 +209,9 @@ function DayHoverCard({ date, totalCount, locale, onNavigate, onEntryOpen, child
       <HoverCardTrigger asChild>
         <span className="block w-full h-full">{children}</span>
       </HoverCardTrigger>
-      <HoverCardContent className="w-72 p-0 overflow-hidden border-border/60 shadow-xl bg-card/95 backdrop-blur-sm" align="center" side="top">
+      <HoverCardContent className="w-72 overflow-hidden p-0" align="center" side="top">
         {/* Header */}
-        <div className="px-3.5 py-2.5 flex items-center justify-between bg-muted/30 border-b border-border/40">
+        <div className="flex items-center justify-between border-b border-border/40 bg-background/65 px-3.5 py-2.5">
           <div className="flex flex-col gap-0.5">
             <h4 className="text-sm font-semibold tracking-tight text-foreground">
               {format(date, 'MMM d, yyyy', { locale })}
@@ -218,7 +220,12 @@ function DayHoverCard({ date, totalCount, locale, onNavigate, onEntryOpen, child
               {format(date, 'EEEE', { locale })}
             </span>
           </div>
-          <div className="bg-emerald-500/10 text-emerald-600 text-[10px] font-bold px-2 py-0.5 rounded-full border border-emerald-500/20 shadow-sm">
+          <div
+            className={cn(
+              uiRadius.pill,
+              'border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-600 shadow-sm',
+            )}
+          >
             {t('dashboard.miniCalendar.entriesOnDate', { count: totalCount, date: '' }).replace(': ', '').trim()}
           </div>
         </div>
@@ -236,7 +243,10 @@ function DayHoverCard({ date, totalCount, locale, onNavigate, onEntryOpen, child
                   {dayEntriesData?.entries.map((entry) => (
                     <div
                       key={entry.id}
-                      className="group flex items-center gap-2.5 text-xs p-2 rounded-md hover:bg-muted/50 transition-all cursor-pointer border border-transparent hover:border-border/40"
+                      className={cn(
+                        uiRadius.inset,
+                        'group flex cursor-pointer items-center gap-2.5 border border-transparent p-2 text-xs transition-all hover:border-border/40 hover:bg-muted/50',
+                      )}
                       onClick={(e) => {
                         e.preventDefault()
                         e.stopPropagation()
@@ -255,7 +265,12 @@ function DayHoverCard({ date, totalCount, locale, onNavigate, onEntryOpen, child
                         {entry.title}
                       </span>
                       {entry.timeMode === 'RANGE' && (
-                        <span className="text-[10px] text-muted-foreground/70 px-1.5 py-0.5 bg-muted rounded-sm shrink-0 border border-border/30">
+                        <span
+                          className={cn(
+                            uiRadius.inset,
+                            'shrink-0 border border-border/30 bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground/70',
+                          )}
+                        >
                           {entry.coverKind === 'RANGE_START' ? '▶' : '↔'}
                         </span>
                       )}
@@ -268,10 +283,13 @@ function DayHoverCard({ date, totalCount, locale, onNavigate, onEntryOpen, child
         </div>
 
         {/* Footer */}
-        <div className="p-1 border-t border-border/40 bg-muted/20">
+        <div className="border-t border-border/40 bg-muted/20 p-1">
           <button
             type="button"
-            className="w-full flex items-center justify-center gap-1 text-[10px] font-medium text-muted-foreground hover:text-emerald-600 py-1 hover:bg-background/80 rounded transition-all group border border-transparent hover:border-border/30 hover:shadow-sm"
+            className={cn(
+              uiRadius.inset,
+              'group flex w-full items-center justify-center gap-1 border border-transparent py-1 text-[10px] font-medium text-muted-foreground transition-all hover:border-border/30 hover:bg-background/80 hover:text-emerald-600 hover:shadow-sm',
+            )}
             onClick={(e) => {
               e.preventDefault()
               e.stopPropagation()

@@ -83,7 +83,8 @@ python -m app.lightrag.worker
 附件解析 Worker 使用 Docling 库解析上传的文档（PDF、Office、图片），提取文本后索引到知识图谱。
 
 ```bash
-# 安装 Docling 依赖（独立于主依赖，因为体积较大）
+# Linux CPU-only 环境建议先安装 CPU 版 PyTorch，再安装 Docling 依赖
+pip install "torch==2.7.0" --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements-docling.txt
 
 # 在 .env 中配置（参考 .env.example）

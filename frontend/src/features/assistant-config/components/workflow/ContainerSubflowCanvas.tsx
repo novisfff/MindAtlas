@@ -591,9 +591,10 @@ function toReactFlowNodes(
   nodes: ContainerBodyNode[],
   quickAddHandleMap: Map<string, string[]>,
   onRemoveNode: (nodeId: string) => void,
-  onQuickAddNode: (nodeId: string, handleId: string, payload: QuickAddPayload) => void,
+  onQuickAddNode: ((nodeId: string, handleId: string, payload: QuickAddPayload) => void) | undefined,
   tools: WorkflowToolDefinition[],
   floatingUiEpoch: number,
+  readOnly: boolean,
 ): Node<SubflowNodeData>[] {
   return nodes.map((item, index) => ({
     id: item.nodeId,
@@ -608,12 +609,12 @@ function toReactFlowNodes(
       config: item.config ?? null,
       removable: item.nodeType !== 'start',
       onRemove: onRemoveNode,
-      quickAddHandles: quickAddHandleMap.get(item.nodeId) ?? [],
+      quickAddHandles: readOnly ? [] : (quickAddHandleMap.get(item.nodeId) ?? []),
       onQuickAdd: onQuickAddNode,
       tools,
       floatingUiEpoch,
     },
-    draggable: item.nodeType !== 'start',
+    draggable: !readOnly && item.nodeType !== 'start',
   }))
 }
 
@@ -817,6 +818,7 @@ export function ContainerSubflowCanvas({
   floatingUiEpoch = 0,
   canvasHeight = 168,
   canvasWidth,
+  readOnly = false,
   onSelectionChange,
   onChange,
 }: {
@@ -826,6 +828,7 @@ export function ContainerSubflowCanvas({
   floatingUiEpoch?: number
   canvasHeight?: number
   canvasWidth?: number
+  readOnly?: boolean
   onSelectionChange?: (selection: { nodeId: string | null; edgeId: string | null }) => void
   onChange: (nodes: ContainerBodyNode[], edges: ContainerBodyEdge[]) => void
 }) {
@@ -841,10 +844,11 @@ export function ContainerSubflowCanvas({
 
   const persist = useCallback(
     (nodes: Node<SubflowNodeData>[], edges: Edge[]) => {
+      if (readOnly) return
       const nextBodyNodes = toBodyNodes(nodes)
       onChange(nextBodyNodes, toBodyEdges(edges, nextBodyNodes))
     },
-    [onChange],
+    [onChange, readOnly],
   )
 
   const quickAddHandleMap = useMemo(() => {
@@ -857,6 +861,7 @@ export function ContainerSubflowCanvas({
 
   const handleQuickAdd = useCallback(
     (anchorNodeId: string, anchorHandle: string, payload: QuickAddPayload) => {
+      if (readOnly) return
       const currentBodyNodes = toBodyNodes(draftNodesRef.current)
       const currentBodyEdges = toBodyEdges(draftEdgesRef.current, currentBodyNodes)
       const anchorNode = currentBodyNodes.find((node) => node.nodeId === anchorNodeId)
@@ -890,7 +895,7 @@ export function ContainerSubflowCanvas({
             nodeType: 'tool',
             positionX: position.x,
             positionY: position.y,
-            label: payload.toolName,
+            label: toolDef?.displayName ?? payload.toolName,
             toolName: payload.toolName,
             toolDef,
           })
@@ -923,11 +928,12 @@ export function ContainerSubflowCanvas({
         ],
       )
     },
-    [onChange, tools],
+    [onChange, readOnly, tools],
   )
 
   const handleRemoveNode = useCallback(
     (nodeId: string) => {
+      if (readOnly) return
       if (nodeId === 'start') return
       const nextNodes = draftNodesRef.current.filter((item) => item.id !== nodeId)
       const nextEdges = refreshDraftEdgeAnchors(
@@ -943,16 +949,25 @@ export function ContainerSubflowCanvas({
       requestFit('delete-node')
       persist(nextNodes, nextEdges)
     },
-    [persist, requestFit],
+    [persist, readOnly, requestFit],
   )
 
   const flowNodes = useMemo(
-    () => toReactFlowNodes(bodyNodes, quickAddHandleMap, handleRemoveNode, handleQuickAdd, tools, floatingUiEpoch),
-    [quickAddHandleMap, bodyNodes, floatingUiEpoch, handleQuickAdd, handleRemoveNode, tools],
+    () => toReactFlowNodes(
+      bodyNodes,
+      quickAddHandleMap,
+      handleRemoveNode,
+      readOnly ? undefined : handleQuickAdd,
+      tools,
+      floatingUiEpoch,
+      readOnly,
+    ),
+    [quickAddHandleMap, bodyNodes, floatingUiEpoch, handleQuickAdd, handleRemoveNode, readOnly, tools],
   )
 
   const handleDeleteEdge = useCallback(
     (edgeId: string) => {
+      if (readOnly) return
       const nextEdges = refreshDraftEdgeAnchors(
         draftEdgesRef.current.filter((item) => item.id !== edgeId),
         draftNodesRef.current,
@@ -963,12 +978,24 @@ export function ContainerSubflowCanvas({
       persist(draftNodesRef.current, nextEdges)
       setSelectedEdgeId((prev) => (prev === edgeId ? null : prev))
     },
-    [persist, requestFit],
+    [persist, readOnly, requestFit],
   )
 
   const flowEdges = useMemo(
-    () => toReactFlowEdges(bodyEdges, bodyNodes, handleDeleteEdge, setSelectedEdgeId, selectedEdgeId),
-    [bodyEdges, bodyNodes, handleDeleteEdge, selectedEdgeId],
+    () => toReactFlowEdges(
+      bodyEdges,
+      bodyNodes,
+      readOnly ? () => {} : handleDeleteEdge,
+      setSelectedEdgeId,
+      selectedEdgeId,
+    ).map((edge) => ({
+      ...edge,
+      data: {
+        ...(edge.data && typeof edge.data === 'object' ? edge.data : {}),
+        onDelete: readOnly ? undefined : (edge.data as { onDelete?: (edgeId: string) => void } | undefined)?.onDelete,
+      },
+    })),
+    [bodyEdges, bodyNodes, handleDeleteEdge, readOnly, selectedEdgeId],
   )
 
   const syncSignature = useMemo(
@@ -1034,6 +1061,7 @@ export function ContainerSubflowCanvas({
 
   const onNodesChange: OnNodesChange = useCallback(
     (changes) => {
+      if (readOnly) return
       const normalizedChanges = changes.map((change) => {
         if (change.type !== 'position' || !change.position) return change
         const position = clampPositionToExtent(change.position, nodeExtent)
@@ -1060,11 +1088,12 @@ export function ContainerSubflowCanvas({
       }
       persist(nextNodes, nextEdges)
     },
-    [nodeExtent, persist, requestFit],
+    [nodeExtent, persist, readOnly, requestFit],
   )
 
   const onEdgesChange: OnEdgesChange = useCallback(
     (changes) => {
+      if (readOnly) return
       const next = applyEdgeChanges(changes, draftEdgesRef.current)
       const nextEdges = refreshDraftEdgeAnchors(next, draftNodesRef.current)
       setDraftEdges(nextEdges)
@@ -1073,11 +1102,12 @@ export function ContainerSubflowCanvas({
       requestFit('structure')
       persist(draftNodesRef.current, nextEdges)
     },
-    [persist, requestFit],
+    [persist, readOnly, requestFit],
   )
 
   const onConnect: OnConnect = useCallback(
     (params) => {
+      if (readOnly) return
       if (!params.source || !params.target) return
       const currentBodyNodes = toBodyNodes(draftNodesRef.current)
       const sourceNode = currentBodyNodes.find((node) => node.nodeId === params.source)
@@ -1099,7 +1129,7 @@ export function ContainerSubflowCanvas({
       draftEdgesRef.current = nextEdges
       persist(draftNodesRef.current, nextEdges)
     },
-    [handleDeleteEdge, persist],
+    [handleDeleteEdge, persist, readOnly],
   )
 
   const isEditableElement = useCallback((target: EventTarget | Element | null): boolean => {
@@ -1110,6 +1140,7 @@ export function ContainerSubflowCanvas({
 
   const handleSubflowDeleteKey = useCallback(
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (readOnly) return
       const isDeleteKey = event.key === 'Delete' || event.key === 'Backspace'
       if (!isDeleteKey) return
       if (isEditableElement(event.target) || isEditableElement(document.activeElement)) return
@@ -1131,7 +1162,7 @@ export function ContainerSubflowCanvas({
         handleDeleteEdge(selectedEdgeId)
       }
     },
-    [handleDeleteEdge, handleRemoveNode, isEditableElement, selectedEdgeId, selectedNodeId],
+    [handleDeleteEdge, handleRemoveNode, isEditableElement, readOnly, selectedEdgeId, selectedNodeId],
   )
 
   const handleContainerPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1178,8 +1209,8 @@ export function ContainerSubflowCanvas({
               animated: false,
               style: { strokeWidth: 2.5, strokeLinecap: 'round' },
             }}
-            nodesConnectable
-            nodesDraggable
+            nodesConnectable={!readOnly}
+            nodesDraggable={!readOnly}
             elementsSelectable
             nodeExtent={nodeExtent}
             panOnDrag={false}

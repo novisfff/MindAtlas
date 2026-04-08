@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom'
 import { Plus, Network, Search } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useTranslation } from 'react-i18next'
+import { uiChrome } from '@/components/ui/styles'
 
 export function QuickActions() {
   const { t } = useTranslation()
@@ -34,8 +35,8 @@ export function QuickActions() {
           key={action.href}
           to={action.href}
           className={cn(
-            'group flex items-center gap-2 px-3 py-2 rounded-lg border',
-            'bg-card hover:bg-muted/50 transition-colors'
+            uiChrome.control,
+            'group flex items-center gap-2 px-3 py-2 transition-colors hover:bg-muted/55'
           )}
         >
           <action.icon className="w-4 h-4" style={{ color: action.color }} />

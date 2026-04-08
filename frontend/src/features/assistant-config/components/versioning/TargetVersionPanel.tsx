@@ -73,6 +73,7 @@ export function TargetVersionPanel({
     setClearConfirmOpen(false)
     onClear()
   }
+  const clearDisabled = isSystemTarget || loading || clearing || versions.length === 0
 
   if (!open) return null
 
@@ -83,9 +84,11 @@ export function TargetVersionPanel({
         fluid
         icon={<History className="h-4 w-4" />}
         title={t('settings.skills.workflowActions.versionHistory')}
-        subtitle={t('settings.skills.versioning.panelSubtitle', {
-          defaultValue: '查看草稿与发布历史，并可恢复到当前草稿。',
-        })}
+        subtitle={isSystemTarget
+          ? t('settings.skills.systemVersionReadonlyHint')
+          : t('settings.skills.versioning.panelSubtitle', {
+              defaultValue: '查看草稿与发布历史，并可恢复到当前草稿。',
+            })}
         onClose={onClose}
         headerActions={(
           <>
@@ -94,7 +97,7 @@ export function TargetVersionPanel({
               onClick={() => setClearConfirmOpen(true)}
               className="inline-flex items-center gap-1.5 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50"
               title={t('settings.skills.versioning.clearNonPublished')}
-              disabled={loading || clearing || versions.length === 0}
+              disabled={clearDisabled}
             >
               <Eraser className={`h-3.5 w-3.5 ${clearing ? 'animate-spin' : ''}`} />
               {t('settings.skills.versioning.clearNonPublished')}
@@ -124,6 +127,12 @@ export function TargetVersionPanel({
             </div>
           )}
 
+          {isSystemTarget && (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-xs leading-6 text-amber-800">
+              {t('settings.skills.systemVersionReadonlyHint')}
+            </div>
+          )}
+
           {!loading && versions.length === 0 && (
             <div className="rounded-2xl border border-dashed p-6 text-center text-sm text-muted-foreground">
               {t('settings.skills.versioning.empty')}
@@ -136,7 +145,8 @@ export function TargetVersionPanel({
             const isSystemDefault = systemDefaultVersionId === item.id
             const restoring = restoringVersionId === item.id
             const deleting = deletingVersionId === item.id
-            const deleteDisabled = isDraft || isPublished || isSystemDefault || deleting || restoring
+            const deleteDisabled = isSystemTarget || isDraft || isPublished || isSystemDefault || deleting || restoring
+            const restoreDisabled = isSystemTarget || isDraft || restoring || deleting
             return (
               <div
                 key={item.id}
@@ -202,7 +212,7 @@ export function TargetVersionPanel({
                     <button
                       type="button"
                       onClick={() => onRestore(item.id)}
-                      disabled={isDraft || restoring || deleting}
+                      disabled={restoreDisabled}
                       className="inline-flex items-center gap-1 rounded-xl border border-slate-200 px-2.5 py-1.5 text-xs text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50"
                     >
                       <RotateCcw className={`w-3 h-3 ${restoring ? 'animate-spin' : ''}`} />

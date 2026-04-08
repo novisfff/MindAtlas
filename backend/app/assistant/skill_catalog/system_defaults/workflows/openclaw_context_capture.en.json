@@ -1,0 +1,552 @@
+{
+  "nodes": [
+    {
+      "nodeId": "start",
+      "nodeType": "start",
+      "label": "Start",
+      "positionX": 80.0,
+      "positionY": 320.0,
+      "config": {
+        "inputMode": "structured",
+        "structuredFields": [
+          {
+            "name": "context",
+            "type": "string",
+            "required": true,
+            "description": "High-value context to submit to MindAtlas. It should ideally include what happened, the result, why it matters, and any clear time clues."
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_types",
+      "nodeType": "tool",
+      "label": "List Entry Types",
+      "positionX": 430.0,
+      "positionY": 220.0,
+      "config": {
+        "toolName": "list_entry_types",
+        "inputBindings": {}
+      }
+    },
+    {
+      "nodeId": "tool_tags",
+      "nodeType": "tool",
+      "label": "List Tags",
+      "positionX": 430.0,
+      "positionY": 420.0,
+      "config": {
+        "toolName": "list_tags",
+        "inputBindings": {}
+      }
+    },
+    {
+      "nodeId": "llm_materialize",
+      "nodeType": "llm",
+      "label": "Materialize Fields",
+      "positionX": 860.0,
+      "positionY": 320.0,
+      "config": {
+        "systemPrompt": "You are MindAtlas's OpenClaw thin-context capture workflow. Convert one high-value context block into final persistence fields.\n\nGoals:\n- Use only the submitted context and OpenClaw request metadata to produce the final title, summary, content, type_code, tags, time_mode, and time fields.\n- Do not require the caller to hand-assemble title, summary, type, tags, or time fields.\n- Do not invent facts the user did not imply. You may only organize, normalize, and lightly synthesize what was actually provided.\n\nConstraints:\n- type_code must be selected from the codes in {{tool_types.items}} only. If unsure, pick the first available code.\n- tags should prefer existing names from {{tool_tags.items}}. Return at most 5 tags and do not add # prefixes.\n- content should preserve the important facts from the submitted context and may be organized as Markdown, but it must not fabricate new facts.\n- summary should be one concise paragraph of roughly 50-150 characters.\n- title should be accurate and stay within 30 characters when possible.\n- If the context does not provide clear time information, default to time_mode=POINT and time_at=today in YYYY-MM-DD.\n- Use RANGE only when there is a real time span. When time_mode=POINT, time_from/time_to must be null. When time_mode=RANGE, time_at must be null.",
+        "userInput": "date: {{sys.date}}\nsource: {{sys.openclaw_source}}\nchannel: {{sys.openclaw_channel}}\nsession: {{sys.openclaw_session}}\ntool: {{sys.openclaw_tool}}\n\ncontext:\n{{start.context}}",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "title"
+          },
+          {
+            "name": "summary"
+          },
+          {
+            "name": "content"
+          },
+          {
+            "name": "type_code"
+          },
+          {
+            "name": "tags",
+            "type": "array",
+            "items_type": "string"
+          },
+          {
+            "name": "time_mode",
+            "enum": [
+              "POINT",
+              "RANGE"
+            ]
+          },
+          {
+            "name": "time_at",
+            "nullable": true
+          },
+          {
+            "name": "time_from",
+            "nullable": true
+          },
+          {
+            "name": "time_to",
+            "nullable": true
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_search_candidates",
+      "nodeType": "tool",
+      "label": "Search Candidates",
+      "positionX": 1290.0,
+      "positionY": 320.0,
+      "config": {
+        "toolName": "search_entries",
+        "inputBindings": {
+          "keyword": "{{llm_materialize.title}}",
+          "tag_names": "{{llm_materialize.tags}}",
+          "limit": "5"
+        }
+      }
+    },
+    {
+      "nodeId": "llm_decide",
+      "nodeType": "llm",
+      "label": "Decide Create Or Merge",
+      "positionX": 1720.0,
+      "positionY": 320.0,
+      "config": {
+        "systemPrompt": "You are MindAtlas's conservative deduplication decision node. Choose between create and merge with at most one target entry.\n\nRules:\n- You may choose action=merge only when the candidate list contains one clearly matching long-lived entry that should absorb the new context.\n- If the candidate list is empty, ambiguous, only loosely related, or you are not confident that the new context belongs to the same durable record, you must output action=create.\n- entry_id must come from the candidate list ids only. When action=create, entry_id must be null.\n- reason should briefly explain why you chose create or merge.",
+        "userInput": "date: {{sys.date}}\nsource: {{sys.openclaw_source}}\nchannel: {{sys.openclaw_channel}}\nsession: {{sys.openclaw_session}}\n\nnew_entry:\n{{llm_materialize.result}}\n\ncandidate_entries:\n{{tool_search_candidates.items}}\n\noriginal_context:\n{{start.context}}",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "action",
+            "enum": [
+              "create",
+              "merge"
+            ]
+          },
+          {
+            "name": "entry_id",
+            "nullable": true
+          },
+          {
+            "name": "reason"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "if_route",
+      "nodeType": "if_else",
+      "label": "Route",
+      "positionX": 2140.0,
+      "positionY": 320.0,
+      "config": {
+        "elseHandle": "create",
+        "branches": [
+          {
+            "id": "merge",
+            "label": "MERGE",
+            "logic": "and",
+            "conditions": [
+              {
+                "id": "merge_action",
+                "variable": "llm_decide.action",
+                "operator": "is",
+                "value": "merge"
+              },
+              {
+                "id": "merge_entry_id",
+                "variable": "llm_decide.entry_id",
+                "operator": "is_not_empty",
+                "value": ""
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_get_existing",
+      "nodeType": "tool",
+      "label": "Get Existing Entry",
+      "positionX": 2560.0,
+      "positionY": 220.0,
+      "config": {
+        "toolName": "get_entry_detail",
+        "inputBindings": {
+          "entry_id": "{{llm_decide.entry_id}}"
+        }
+      }
+    },
+    {
+      "nodeId": "llm_merge_rewrite",
+      "nodeType": "llm",
+      "label": "Rewrite Merged Entry",
+      "positionX": 2980.0,
+      "positionY": 220.0,
+      "config": {
+        "systemPrompt": "You are MindAtlas's entry merger. Rewrite one final canonical record by combining the existing entry with the new OpenClaw context.\n\nGoals:\n- Start from the existing record and absorb the new facts, progress, conclusions, and time clues from the new context.\n- Output the new final title, summary, content, type_code, tags, time_mode, and time fields that should replace the current entry.\n- Use a full rewrite strategy: the content should become one coherent updated record, not a simple append.\n\nConstraints:\n- Use only facts that appear in existing_entry and original_context. Do not invent details.\n- type_code must be selected from the codes in {{tool_types.items}} only.\n- tags should prefer existing names from {{tool_tags.items}}. Return at most 5 tags and do not add # prefixes.\n- content should preserve the important facts from both the old record and the new context and may be organized as Markdown, but it must not fabricate new facts.\n- summary should be one concise paragraph of roughly 50-150 characters.\n- title should be accurate and stay within 30 characters when possible.\n- If the new context provides better time information, you may update the time fields; otherwise preserve or reasonably continue the existing time framing.",
+        "userInput": "date: {{sys.date}}\nsource: {{sys.openclaw_source}}\nchannel: {{sys.openclaw_channel}}\nsession: {{sys.openclaw_session}}\n\nexisting_entry:\n{{tool_get_existing.result}}\n\nnew_materialized_entry:\n{{llm_materialize.result}}\n\noriginal_context:\n{{start.context}}",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "title"
+          },
+          {
+            "name": "summary"
+          },
+          {
+            "name": "content"
+          },
+          {
+            "name": "type_code"
+          },
+          {
+            "name": "tags",
+            "type": "array",
+            "items_type": "string"
+          },
+          {
+            "name": "time_mode",
+            "enum": [
+              "POINT",
+              "RANGE"
+            ]
+          },
+          {
+            "name": "time_at",
+            "nullable": true
+          },
+          {
+            "name": "time_from",
+            "nullable": true
+          },
+          {
+            "name": "time_to",
+            "nullable": true
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_update",
+      "nodeType": "tool",
+      "label": "Update Entry",
+      "positionX": 3400.0,
+      "positionY": 220.0,
+      "config": {
+        "toolName": "update_entry",
+        "inputBindings": {
+          "entry_id": "{{llm_decide.entry_id}}",
+          "title": "{{llm_merge_rewrite.title}}",
+          "summary": "{{llm_merge_rewrite.summary}}",
+          "content": "{{llm_merge_rewrite.content}}",
+          "type_code": "{{llm_merge_rewrite.type_code}}",
+          "tags": "{{llm_merge_rewrite.tags}}",
+          "time_mode": "{{llm_merge_rewrite.time_mode}}",
+          "time_at": "{{llm_merge_rewrite.time_at}}",
+          "time_from": "{{llm_merge_rewrite.time_from}}",
+          "time_to": "{{llm_merge_rewrite.time_to}}"
+        }
+      }
+    },
+    {
+      "nodeId": "tool_create",
+      "nodeType": "tool",
+      "label": "Create Entry",
+      "positionX": 2560.0,
+      "positionY": 480.0,
+      "config": {
+        "toolName": "create_entry",
+        "inputBindings": {
+          "title": "{{llm_materialize.title}}",
+          "summary": "{{llm_materialize.summary}}",
+          "content": "{{llm_materialize.content}}",
+          "type_code": "{{llm_materialize.type_code}}",
+          "tags": "{{llm_materialize.tags}}",
+          "time_mode": "{{llm_materialize.time_mode}}",
+          "time_at": "{{llm_materialize.time_at}}",
+          "time_from": "{{llm_materialize.time_from}}",
+          "time_to": "{{llm_materialize.time_to}}"
+        }
+      }
+    },
+    {
+      "nodeId": "output_merged",
+      "nodeType": "output",
+      "label": "Merged Output",
+      "positionX": 3820.0,
+      "positionY": 220.0,
+      "config": {
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "status",
+            "type": "string",
+            "value": "merged"
+          },
+          {
+            "name": "entryId",
+            "type": "string",
+            "value": "{{tool_update.id}}"
+          },
+          {
+            "name": "entryTitle",
+            "type": "string",
+            "value": "{{tool_update.title}}"
+          },
+          {
+            "name": "entryTypeCode",
+            "type": "string",
+            "value": "{{tool_update.type_code}}"
+          },
+          {
+            "name": "entryTypeName",
+            "type": "string",
+            "value": "{{tool_update.type}}"
+          },
+          {
+            "name": "summary",
+            "type": "string",
+            "value": "{{tool_update.summary}}"
+          },
+          {
+            "name": "tagNames",
+            "type": "array",
+            "itemsType": "string",
+            "value": "{{tool_update.tags}}"
+          },
+          {
+            "name": "timeMode",
+            "type": "string",
+            "value": "{{tool_update.time_mode}}"
+          },
+          {
+            "name": "timeAt",
+            "nullable": true,
+            "value": "{{tool_update.time_at}}"
+          },
+          {
+            "name": "timeFrom",
+            "nullable": true,
+            "value": "{{tool_update.time_from}}"
+          },
+          {
+            "name": "timeTo",
+            "nullable": true,
+            "value": "{{tool_update.time_to}}"
+          },
+          {
+            "name": "createdAt",
+            "type": "string",
+            "value": "{{tool_update.created_at}}"
+          },
+          {
+            "name": "updatedAt",
+            "type": "string",
+            "value": "{{tool_update.updated_at}}"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "output_created",
+      "nodeType": "output",
+      "label": "Created Output",
+      "positionX": 2980.0,
+      "positionY": 480.0,
+      "config": {
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "status",
+            "type": "string",
+            "value": "created"
+          },
+          {
+            "name": "entryId",
+            "type": "string",
+            "value": "{{tool_create.id}}"
+          },
+          {
+            "name": "entryTitle",
+            "type": "string",
+            "value": "{{tool_create.title}}"
+          },
+          {
+            "name": "entryTypeCode",
+            "type": "string",
+            "value": "{{tool_create.type_code}}"
+          },
+          {
+            "name": "entryTypeName",
+            "type": "string",
+            "value": "{{tool_create.type}}"
+          },
+          {
+            "name": "summary",
+            "type": "string",
+            "value": "{{tool_create.summary}}"
+          },
+          {
+            "name": "tagNames",
+            "type": "array",
+            "itemsType": "string",
+            "value": "{{tool_create.tags}}"
+          },
+          {
+            "name": "timeMode",
+            "type": "string",
+            "value": "{{tool_create.time_mode}}"
+          },
+          {
+            "name": "timeAt",
+            "nullable": true,
+            "value": "{{tool_create.time_at}}"
+          },
+          {
+            "name": "timeFrom",
+            "nullable": true,
+            "value": "{{tool_create.time_from}}"
+          },
+          {
+            "name": "timeTo",
+            "nullable": true,
+            "value": "{{tool_create.time_to}}"
+          },
+          {
+            "name": "createdAt",
+            "type": "string",
+            "value": "{{tool_create.created_at}}"
+          },
+          {
+            "name": "updatedAt",
+            "type": "string",
+            "value": "{{tool_create.updated_at}}"
+          }
+        ]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edgeId": "e_start_types",
+      "sourceNodeId": "start",
+      "targetNodeId": "tool_types",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_types_tags",
+      "sourceNodeId": "tool_types",
+      "targetNodeId": "tool_tags",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_tags_materialize",
+      "sourceNodeId": "tool_tags",
+      "targetNodeId": "llm_materialize",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_materialize_search",
+      "sourceNodeId": "llm_materialize",
+      "targetNodeId": "tool_search_candidates",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_search_decide",
+      "sourceNodeId": "tool_search_candidates",
+      "targetNodeId": "llm_decide",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_decide_route",
+      "sourceNodeId": "llm_decide",
+      "targetNodeId": "if_route",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_route_merge",
+      "sourceNodeId": "if_route",
+      "targetNodeId": "tool_get_existing",
+      "sourceHandle": "merge",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_route_create",
+      "sourceNodeId": "if_route",
+      "targetNodeId": "tool_create",
+      "sourceHandle": "create",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_get_existing_merge_rewrite",
+      "sourceNodeId": "tool_get_existing",
+      "targetNodeId": "llm_merge_rewrite",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_merge_rewrite_update",
+      "sourceNodeId": "llm_merge_rewrite",
+      "targetNodeId": "tool_update",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_update_output",
+      "sourceNodeId": "tool_update",
+      "targetNodeId": "output_merged",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_create_output",
+      "sourceNodeId": "tool_create",
+      "targetNodeId": "output_created",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    }
+  ]
+}

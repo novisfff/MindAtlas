@@ -1,5 +1,8 @@
 import { Plus, Trash2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { Button } from '@/components/ui/button'
+import { uiChrome, uiField } from '@/components/ui/styles'
+import { cn } from '@/lib/utils'
 import { RichMentionInput } from './RichMentionInput'
 import type { InputParam } from '../api/tools'
 
@@ -40,15 +43,16 @@ export function KeyValueEditor({
   }
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
       {pairs.map((pair, index) => (
-        <div key={index} className="flex items-start gap-2">
+        <div key={index} className={cn(uiChrome.control, 'flex items-start gap-2 p-2 shadow-none')}>
           <RichMentionInput
             value={pair.key}
             onChange={(val: string) => updatePair(index, 'key', val)}
             inputParams={inputParams}
             placeholder={keyPlaceholder}
             className="flex-1"
+            inputClassName={uiField.input}
           />
           <RichMentionInput
             value={pair.value}
@@ -56,24 +60,23 @@ export function KeyValueEditor({
             inputParams={inputParams}
             placeholder={valuePlaceholder}
             className="flex-1"
+            inputClassName={uiField.input}
           />
-          <button
+          <Button
             type="button"
             onClick={() => removePair(index)}
-            className="p-1.5 text-muted-foreground hover:text-destructive rounded mt-0.5"
+            variant="ghost"
+            size="icon"
+            className="mt-0.5 h-10 w-10 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
           >
-            <Trash2 className="w-4 h-4" />
-          </button>
+            <Trash2 className="h-4 w-4" />
+          </Button>
         </div>
       ))}
-      <button
-        type="button"
-        onClick={addPair}
-        className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-      >
-        <Plus className="w-3 h-3" />
+      <Button type="button" onClick={addPair} variant="outline" size="sm">
+        <Plus className="h-3 w-3" />
         {t('common.add')}
-      </button>
+      </Button>
     </div>
   )
 }

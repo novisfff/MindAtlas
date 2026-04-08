@@ -1,7 +1,7 @@
 import * as React from "react"
 import { createPortal } from "react-dom"
-import { X } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { uiChrome, uiSurface } from "@/components/ui/styles"
 
 const Dialog = ({
     open,
@@ -62,7 +62,10 @@ const Dialog = ({
         <div className="fixed inset-0 z-50 flex items-center justify-center">
             {/* Backdrop */}
             <div
-                className="fixed inset-0 bg-slate-950/38 backdrop-blur-[2px] animate-in fade-in duration-200"
+                className={cn(
+                    "fixed inset-0 animate-in fade-in duration-200",
+                    uiSurface.overlay
+                )}
                 onClick={() => {
                     if (open !== undefined && onOpenChange) {
                         onOpenChange(false)
@@ -85,7 +88,8 @@ const DialogContent = React.forwardRef<
         ref={ref}
         data-ui-modal="true"
         className={cn(
-            "relative z-[1] mx-4 grid w-[min(100%,40rem)] max-h-[calc(100vh-2rem)] gap-4 overflow-y-auto rounded-[24px] border border-slate-200 bg-white p-6 text-slate-900 shadow-[0_24px_80px_rgba(15,23,42,0.22)] duration-200 animate-in fade-in-90 zoom-in-95",
+            "relative z-[1] mx-4 grid w-[min(100%,40rem)] max-h-[calc(100vh-2rem)] gap-4 overflow-y-auto p-6 text-foreground duration-200 animate-in fade-in-90 zoom-in-95",
+            uiChrome.modal,
             className
         )}
         {...props}

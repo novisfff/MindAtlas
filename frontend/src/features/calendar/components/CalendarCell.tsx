@@ -2,11 +2,12 @@ import { format } from 'date-fns'
 import { useDroppable } from '@dnd-kit/core'
 import { Plus } from 'lucide-react'
 import { cn } from '@/lib/utils'
-
-const MAX_VISIBLE_ENTRIES = 3
+import type { CalendarDensity } from '../types'
+import { calendarRadius, calendarTone } from '../styles'
 
 interface CalendarCellProps {
   date: Date
+  density: CalendarDensity
   isToday: boolean
   isCurrentMonth: boolean
   onClick: () => void
@@ -18,6 +19,7 @@ interface CalendarCellProps {
 
 export function CalendarCell({
   date,
+  density,
   isToday,
   isCurrentMonth,
   onClick,
@@ -28,8 +30,7 @@ export function CalendarCell({
 }: CalendarCellProps) {
   const dateId = format(date, 'yyyy-MM-dd')
   const { setNodeRef, isOver } = useDroppable({ id: dateId })
-
-
+  const isCompact = density === 'compact'
 
   return (
     <div
@@ -37,22 +38,26 @@ export function CalendarCell({
       onClick={onClick}
       onDoubleClick={onDoubleClick}
       className={cn(
-        'group relative min-h-[104px] p-1.5 border-b border-r border-border/60 cursor-pointer',
-        'bg-background/60 hover:bg-muted/40 transition-colors',
-        !isCurrentMonth && 'bg-muted/20',
-        isOver && 'bg-primary/10',
-        className
+        'group relative h-full min-h-0 cursor-pointer border-b border-r border-border/60 transition-colors',
+        isCompact ? 'p-1.5' : 'p-2',
+        calendarTone.cell,
+        !isCurrentMonth && calendarTone.cellMuted,
+        isToday && calendarTone.cellToday,
+        isOver &&
+          'bg-primary/10 shadow-[inset_0_0_0_1px_hsl(var(--primary)/0.18)]',
+        className,
       )}
     >
       <button
         type="button"
         aria-label="Create entry"
         className={cn(
-          'absolute right-1 top-1 z-10',
-          'inline-flex h-6 w-6 items-center justify-center rounded-md',
+          'absolute right-1.5 top-1.5 z-10',
+          'inline-flex items-center justify-center border border-transparent',
+          calendarRadius.micro,
+          isCompact ? 'h-[22px] w-[22px]' : 'h-6 w-6',
           'opacity-0 group-hover:opacity-100 transition-opacity',
-          'text-muted-foreground hover:text-foreground',
-          'hover:bg-muted'
+          'text-muted-foreground hover:border-border/60 hover:bg-background hover:text-foreground',
         )}
         onClick={(e) => {
           e.preventDefault()
@@ -64,14 +69,18 @@ export function CalendarCell({
       </button>
       <div
         className={cn(
-          'w-7 h-7 flex items-center justify-center rounded-full text-xs font-medium',
-          isToday && 'bg-primary text-primary-foreground',
-          !isCurrentMonth && 'text-muted-foreground'
+          'flex items-center justify-center font-semibold transition-colors',
+          isCompact ? 'h-6 w-6 text-[11px]' : 'h-7 w-7 text-sm',
+          calendarRadius.pill,
+          isToday
+            ? 'bg-primary text-primary-foreground'
+            : 'bg-background/92 text-foreground/90 ring-1 ring-border/50 dark:bg-background/72',
+          !isCurrentMonth && 'text-muted-foreground',
         )}
       >
         {format(date, 'd')}
       </div>
-      <div className="mt-1 space-y-0.5">
+      <div className={cn(isCompact ? 'mt-1' : 'mt-1.5')}>
         {/* Events are now rendered by the parent MonthView */}
         {children}
       </div>

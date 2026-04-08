@@ -73,6 +73,23 @@ class AssistantConfigServiceTests(unittest.TestCase):
                 kwargs["agent_profile_id"] = profile.id
         return AssistantSkill(**kwargs)
 
+    def _get_seeded_system_skill(self, name: str):
+        from app.assistant_config.models import AssistantSkill  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        skill = (
+            self.db.query(AssistantSkill)
+            .filter(
+                AssistantSkill.name == name,
+                AssistantSkill.is_system.is_(True),
+            )
+            .first()
+        )
+        self.assertIsNotNone(skill)
+        return svc, skill
+
     def test_sync_system_tools_does_not_seed_records(self) -> None:
         from app.assistant_config.models import AssistantTool  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -270,214 +287,58 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertEqual(skill.langgraph_pattern, "workflow_dag")
 
     def test_sync_system_skills_migrates_tool_text_refs_to_result(self) -> None:
-        from app.assistant_config.models import AssistantSkill, AssistantSkillEdge, AssistantSkillNode  # noqa: E402
-        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+        svc, skill = self._get_seeded_system_skill("smart_capture")
+        self.assertIsNotNone(skill)
+        self.assertIsNotNone(skill.workflow)
 
-        class FakeSkill:
-            name = "smart_capture"
-            description = "d"
-            intent_examples = []
-            tools = []
-            mode = "langgraph"
-            langgraph_pattern = "workflow_dag"
-            system_prompt = None
-            kb = None
-            workflow_nodes = []
-            workflow_edges = []
-
-        existing = self._new_skill_with_binding(
-            name="smart_capture",
-            description="old",
-            intent_examples=[],
-            tools=[],
-            mode="langgraph",
-            langgraph_pattern="workflow_dag",
-            system_prompt=None,
-            is_system=True,
-            enabled=True,
-            workflow_id=None,
-            agent_profile_id=self._create_agent_target().id,
-        )
-        existing.nodes = [
-            AssistantSkillNode(
-                node_id="start",
-                node_type="start",
-                label="start",
-                position_x=0,
-                position_y=0,
-                config={},
-            ),
-            AssistantSkillNode(
-                node_id="tool_create",
-                node_type="tool",
-                label="tool",
-                position_x=0,
-                position_y=0,
-                config={"toolName": "create_entry", "inputBindings": {}},
-            ),
-            AssistantSkillNode(
-                node_id="llm_output",
-                node_type="llm",
-                label="out",
-                position_x=0,
-                position_y=0,
-                config={
-                    "userInput": "{{tool_create.text}}",
-                    "systemPrompt": "summary {{tool_create.text}}",
-                },
-            ),
-            AssistantSkillNode(
-                node_id="output_final",
-                node_type="output",
-                label="output",
-                position_x=0,
-                position_y=0,
-                config={
-                    "outputMode": "text",
-                    "textTemplate": "{{llm_output.response}}",
-                },
-            ),
-        ]
-        existing.edges = [
-            AssistantSkillEdge(
-                edge_id="e0",
-                source_node_id="start",
-                target_node_id="tool_create",
-                source_handle="output",
-                target_handle="input",
-            ),
-            AssistantSkillEdge(
-                edge_id="e1",
-                source_node_id="tool_create",
-                target_node_id="llm_output",
-                source_handle="output",
-                target_handle="input",
-            ),
-            AssistantSkillEdge(
-                edge_id="e2",
-                source_node_id="llm_output",
-                target_node_id="output_final",
-                source_handle="output",
-                target_handle="input",
-            ),
-        ]
-        self.db.add(existing)
+        llm_node = next((node for node in (skill.workflow.nodes or []) if node.node_id == "llm_output"), None)
+        self.assertIsNotNone(llm_node)
+        llm_node.config = {
+            **dict(llm_node.config or {}),
+            "userInput": "{{tool_create.text}}",
+        }
         self.db.commit()
 
-        svc = AssistantConfigService(self.db)
-        with patch("app.assistant_config.service.SkillRegistry.list_system_skills", return_value=[FakeSkill()]):
-            svc.sync_system_skills()
+        svc.sync_system_skills()
 
-        skill = self.db.query(AssistantSkill).filter(AssistantSkill.name == "smart_capture").first()
-        self.assertIsNotNone(skill)
-        llm_node = next((node for node in (skill.nodes or []) if node.node_id == "llm_output"), None)
+        refreshed = svc.get_skill(skill.id)
+        self.assertIsNotNone(refreshed.workflow)
+        llm_node = next((node for node in (refreshed.workflow.nodes or []) if node.node_id == "llm_output"), None)
         self.assertIsNotNone(llm_node)
         self.assertEqual(llm_node.config.get("userInput"), "{{tool_create.result}}")
-        self.assertIn("{{tool_create.result}}", llm_node.config.get("systemPrompt", ""))
 
     def test_sync_system_skills_migrates_legacy_workflow_output_to_output_node(self) -> None:
-        from app.assistant.skill_catalog.base import WorkflowEdgeDefinition, WorkflowNodeDefinition  # noqa: E402
-        from app.assistant_config.models import AssistantSkill, AssistantSkillEdge, AssistantSkillNode  # noqa: E402
-        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+        svc, skill = self._get_seeded_system_skill("smart_capture")
+        self.assertIsNotNone(skill)
+        self.assertIsNotNone(skill.workflow)
 
-        class FakeSkill:
-            name = "smart_capture"
-            description = "d"
-            intent_examples = []
-            tools = []
-            mode = "langgraph"
-            langgraph_pattern = "workflow_dag"
-            system_prompt = None
-            kb = None
-            workflow_nodes = [
-                WorkflowNodeDefinition(
-                    node_id="start",
-                    node_type="start",
-                    label="Start",
-                    position_x=120,
-                    position_y=220,
-                    config={},
-                ),
-                WorkflowNodeDefinition(
-                    node_id="llm_output",
-                    node_type="llm",
-                    label="生成回复",
-                    position_x=460,
-                    position_y=220,
-                    config={"outputMode": "text"},
-                ),
-                WorkflowNodeDefinition(
-                    node_id="output_final",
-                    node_type="output",
-                    label="输出",
-                    position_x=780,
-                    position_y=220,
-                    config={"outputMode": "text", "textTemplate": "{{llm_output.response}}"},
-                ),
-            ]
-            workflow_edges = [
-                WorkflowEdgeDefinition(edge_id="e1", source_node_id="start", target_node_id="llm_output"),
-                WorkflowEdgeDefinition(edge_id="e2", source_node_id="llm_output", target_node_id="output_final"),
-            ]
-
-        existing = self._new_skill_with_binding(
-            name="smart_capture",
-            description="old",
-            intent_examples=[],
-            tools=[],
-            mode="langgraph",
-            langgraph_pattern="workflow_dag",
-            system_prompt=None,
-            is_system=True,
-            enabled=True,
-            workflow_id=None,
-            agent_profile_id=self._create_agent_target().id,
-        )
-        existing.nodes = [
-            AssistantSkillNode(
-                node_id="start",
-                node_type="start",
-                label="Start",
-                position_x=120,
-                position_y=220,
-                config={},
-            ),
-            AssistantSkillNode(
-                node_id="llm_output",
-                node_type="llm",
-                label="生成回复",
-                position_x=460,
-                position_y=220,
-                config={"outputMode": "text", "isOutput": True},
-            ),
-        ]
-        existing.edges = [
-            AssistantSkillEdge(
-                edge_id="legacy_e1",
-                source_node_id="start",
-                target_node_id="llm_output",
-                source_handle="output",
-                target_handle="input",
-            ),
-        ]
-        self.db.add(existing)
+        workflow = skill.workflow
+        for node in list(workflow.nodes or []):
+            if node.node_id in {"output_created", "output_cancelled"}:
+                self.db.delete(node)
+        for edge in list(workflow.edges or []):
+            if edge.target_node_id in {"output_created", "output_cancelled"} or edge.source_node_id in {
+                "output_created",
+                "output_cancelled",
+            }:
+                self.db.delete(edge)
+        llm_node = next((node for node in (workflow.nodes or []) if node.node_id == "llm_output"), None)
+        self.assertIsNotNone(llm_node)
+        llm_node.config = {**dict(llm_node.config or {}), "isOutput": True}
         self.db.commit()
 
-        svc = AssistantConfigService(self.db)
-        with patch("app.assistant_config.service.SkillRegistry.list_system_skills", return_value=[FakeSkill()]):
-            svc.sync_system_skills()
+        svc.sync_system_skills()
 
-        skill = self.db.query(AssistantSkill).filter(AssistantSkill.name == "smart_capture").first()
-        self.assertIsNotNone(skill)
-
-        nodes = list(skill.nodes or [])
-        edges = list(skill.edges or [])
-        output_nodes = [node for node in nodes if node.node_type == "output"]
-        self.assertEqual(len(output_nodes), 1)
-        self.assertEqual(output_nodes[0].node_id, "output_final")
+        refreshed = svc.get_skill(skill.id)
+        self.assertIsNotNone(refreshed.workflow)
+        nodes = list(refreshed.workflow.nodes or [])
+        edges = list(refreshed.workflow.edges or [])
+        output_nodes = sorted(node.node_id for node in nodes if node.node_type == "output")
+        self.assertEqual(output_nodes, ["output_cancelled", "output_created"])
         self.assertFalse(any(isinstance(node.config, dict) and "isOutput" in node.config for node in nodes))
-        self.assertTrue(any(edge.target_node_id == "output_final" for edge in edges))
-        self.assertFalse(any(edge.source_node_id == "output_final" for edge in edges))
+        self.assertTrue(any(edge.target_node_id == "output_created" for edge in edges))
+        self.assertTrue(any(edge.target_node_id == "output_cancelled" for edge in edges))
+        self.assertFalse(any(edge.source_node_id in {"output_created", "output_cancelled"} for edge in edges))
 
     def test_reset_skill_restores_langgraph_pattern(self) -> None:
         from app.assistant_config.models import AssistantSkill  # noqa: E402
@@ -515,7 +376,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertEqual(out.mode, "langgraph")
         self.assertEqual(out.langgraph_pattern, "workflow_dag")
 
-    def test_sync_system_skills_integrity_error_40911(self) -> None:
+    def test_sync_system_skills_integrity_error_40920(self) -> None:
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
         svc = AssistantConfigService(self.db)
@@ -539,7 +400,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
             with self.assertRaises(ApiException) as ctx:
                 svc.sync_system_skills()
         self.assertEqual(ctx.exception.status_code, 409)
-        self.assertEqual(ctx.exception.code, 40911)
+        self.assertEqual(ctx.exception.code, 40920)
 
     def test_update_system_tool_only_allows_enabled(self) -> None:
         from app.assistant_config.models import AssistantTool  # noqa: E402
@@ -636,24 +497,16 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 40412)
 
     def test_reset_skill_rebinds_to_system_workflow_and_keeps_custom_workflow_unchanged(self) -> None:
-        from app.assistant_config.models import AssistantSkill, AssistantWorkflowVersion  # noqa: E402
+        from app.assistant_config.models import AssistantWorkflowVersion  # noqa: E402
         from app.assistant_config.schemas import AssistantWorkflowCreateRequest  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
-        class WorkflowDefaultSkill:
-            description = "default quick stats"
-            intent_examples = ["统计我的记录"]
-            tools = []
-            mode = "langgraph"
-            langgraph_pattern = "workflow_dag"
-            system_prompt = None
-            kb = None
-            workflow_nodes = []
-            workflow_edges = []
-            model_source = "default"
-            model_id = None
-
         svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        skill = self._get_seeded_system_skill("quick_stats")[1]
+        canonical_workflow_id = skill.workflow_id
+        self.assertIsNotNone(canonical_workflow_id)
+
         custom_workflow = svc.create_workflow(
             AssistantWorkflowCreateRequest(
                 name="user_wf_for_reset",
@@ -665,28 +518,16 @@ class AssistantConfigServiceTests(unittest.TestCase):
         custom_workflow_version = custom_workflow.workflow_version
         custom_positions = sorted((node.node_id, node.position_x, node.position_y) for node in custom_workflow.nodes)
 
-        skill = AssistantSkill(
-            name="quick_stats",
-            description="mutated",
-            intent_examples=["x"],
-            tools=[],
-            mode="langgraph",
-            langgraph_pattern="workflow_dag",
-            system_prompt=None,
-            kb_config={"enabled": False},
-            is_system=True,
-            enabled=True,
-            workflow_id=custom_workflow_id,
-            agent_profile_id=None,
-        )
-        self.db.add(skill)
+        skill.description = "mutated"
+        skill.intent_examples = ["x"]
+        skill.workflow_id = custom_workflow_id
+        skill.agent_profile_id = None
         self.db.commit()
 
-        with patch("app.assistant.skill_catalog.definitions.get_skill_by_name", return_value=WorkflowDefaultSkill()):
-            svc.reset_skill(skill.id, confirm=True)
+        svc.reset_skill(skill.id, confirm=True)
 
         out_skill = svc.get_skill(skill.id)
-        self.assertNotEqual(out_skill.workflow_id, custom_workflow_id)
+        self.assertEqual(out_skill.workflow_id, canonical_workflow_id)
         self.assertEqual(out_skill.agent_profile_id, None)
         self.assertEqual(out_skill.langgraph_pattern, "workflow_dag")
 
@@ -712,27 +553,17 @@ class AssistantConfigServiceTests(unittest.TestCase):
         )
 
     def test_reset_skill_rebinds_to_system_agent_and_keeps_custom_agent_unchanged(self) -> None:
-        from app.assistant_config.models import AssistantAgentProfileVersion, AssistantSkill  # noqa: E402
+        from app.assistant.skill_catalog.defaults_loader import get_system_agent_baseline  # noqa: E402
+        from app.assistant_config.models import AssistantAgentProfileVersion  # noqa: E402
         from app.assistant_config.schemas import AssistantAgentProfileCreateRequest  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
-        class _KB:
-            enabled = True
-
-        class AgentDefaultSkill:
-            description = "default fallback agent"
-            intent_examples = []
-            tools = ["list_tags"]
-            mode = "langgraph"
-            langgraph_pattern = "agent_loop"
-            system_prompt = "system baseline prompt"
-            kb = _KB()
-            workflow_nodes = []
-            workflow_edges = []
-            model_source = "default"
-            model_id = None
-
         svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        skill = self._get_seeded_system_skill("general_chat")[1]
+        canonical_agent_id = skill.agent_profile_id
+        self.assertIsNotNone(canonical_agent_id)
+
         custom_agent = svc.create_agent_profile(
             AssistantAgentProfileCreateRequest(
                 name="user_agent_for_reset",
@@ -749,37 +580,32 @@ class AssistantConfigServiceTests(unittest.TestCase):
         custom_tools = list(custom_agent.tools or [])
         custom_kb_enabled = bool((custom_agent.kb_config or {}).get("enabled", False))
 
-        skill = AssistantSkill(
-            name="general_chat",
-            description="mutated",
-            intent_examples=[],
-            tools=list(custom_tools),
-            mode="langgraph",
-            langgraph_pattern="agent_loop",
-            system_prompt=custom_prompt,
-            kb_config={"enabled": custom_kb_enabled},
-            is_system=True,
-            enabled=True,
-            workflow_id=None,
-            agent_profile_id=custom_agent_id,
-        )
-        self.db.add(skill)
+        skill.description = "mutated"
+        skill.tools = list(custom_tools)
+        skill.system_prompt = custom_prompt
+        skill.kb_config = {"enabled": custom_kb_enabled}
+        skill.workflow_id = None
+        skill.agent_profile_id = custom_agent_id
         self.db.commit()
 
-        with patch("app.assistant.skill_catalog.definitions.get_skill_by_name", return_value=AgentDefaultSkill()):
-            svc.reset_skill(skill.id, confirm=True)
+        svc.reset_skill(skill.id, confirm=True)
 
         out_skill = svc.get_skill(skill.id)
-        self.assertNotEqual(out_skill.agent_profile_id, custom_agent_id)
+        self.assertEqual(out_skill.agent_profile_id, canonical_agent_id)
         self.assertEqual(out_skill.workflow_id, None)
         self.assertEqual(out_skill.langgraph_pattern, "agent_loop")
 
         reset_profile = svc.get_agent_profile(out_skill.agent_profile_id)
+        canonical = get_system_agent_baseline("general_chat")
+        self.assertIsNotNone(canonical)
         self.assertTrue(reset_profile.is_system)
         self.assertEqual(reset_profile.name, "general_chat__agent")
-        self.assertEqual(reset_profile.system_prompt, "system baseline prompt")
-        self.assertEqual(list(reset_profile.tools or []), ["list_tags"])
-        self.assertTrue(bool((reset_profile.kb_config or {}).get("enabled", False)))
+        self.assertEqual(reset_profile.system_prompt, canonical.system_prompt)
+        self.assertEqual(list(reset_profile.tools or []), list(canonical.tools or []))
+        self.assertEqual(
+            bool((reset_profile.kb_config or {}).get("enabled", False)),
+            bool((canonical.kb_config or {}).get("enabled", False)),
+        )
         self.assertEqual(reset_profile.draft_version_id, reset_profile.published_version_id)
 
         reset_versions = (
@@ -801,21 +627,12 @@ class AssistantConfigServiceTests(unittest.TestCase):
         from app.assistant_config.schemas import AssistantWorkflowCreateRequest  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
-        class WorkflowDefaultSkill:
-            name = "quick_stats"
-            description = "default quick stats"
-            intent_examples = ["统计我的记录"]
-            tools = []
-            mode = "langgraph"
-            langgraph_pattern = "workflow_dag"
-            system_prompt = None
-            kb = None
-            workflow_nodes = []
-            workflow_edges = []
-            model_source = "default"
-            model_id = None
-
         svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        system_skill = self._get_seeded_system_skill("quick_stats")[1]
+        canonical_workflow_id = system_skill.workflow_id
+        self.assertIsNotNone(canonical_workflow_id)
+
         custom_workflow = svc.create_workflow(
             AssistantWorkflowCreateRequest(
                 name="user_wf_for_reset_all",
@@ -826,20 +643,9 @@ class AssistantConfigServiceTests(unittest.TestCase):
         custom_workflow_id = custom_workflow.id
         custom_workflow_version = custom_workflow.workflow_version
 
-        system_skill = AssistantSkill(
-            name="quick_stats",
-            description="mutated system skill",
-            intent_examples=[],
-            tools=[],
-            mode="langgraph",
-            langgraph_pattern="workflow_dag",
-            system_prompt=None,
-            kb_config={"enabled": False},
-            is_system=True,
-            enabled=True,
-            workflow_id=custom_workflow_id,
-            agent_profile_id=None,
-        )
+        system_skill.description = "mutated system skill"
+        system_skill.workflow_id = custom_workflow_id
+        system_skill.agent_profile_id = None
         custom_skill = AssistantSkill(
             name="my_custom_skill",
             description="custom skill",
@@ -854,25 +660,18 @@ class AssistantConfigServiceTests(unittest.TestCase):
             workflow_id=custom_workflow_id,
             agent_profile_id=None,
         )
-        self.db.add(system_skill)
         self.db.add(custom_skill)
         self.db.commit()
 
-        with (
-            patch(
-                "app.assistant.skill_catalog.defaults_loader.load_system_skill_defaults",
-                return_value=[WorkflowDefaultSkill()],
-            ),
-            patch("app.assistant.skill_catalog.definitions.SKILLS", [WorkflowDefaultSkill()]),
-            patch("app.assistant.skill_catalog.definitions.get_skill_by_name", return_value=WorkflowDefaultSkill()),
-        ):
-            result = svc.reset_all_system_skills(confirm=True)
+        result = svc.reset_all_system_skills(confirm=True)
 
-        self.assertEqual(result["resetCount"], 1)
+        self.assertGreaterEqual(result["resetCount"], 1)
         self.assertEqual(result["createdCount"], 0)
+        self.assertIn("quick_stats", {item["name"] for item in result["affected"]})
+        self.assertNotIn("my_custom_skill", {item["name"] for item in result["affected"]})
 
         refreshed_system_skill = svc.get_skill(system_skill.id)
-        self.assertNotEqual(refreshed_system_skill.workflow_id, custom_workflow_id)
+        self.assertEqual(refreshed_system_skill.workflow_id, canonical_workflow_id)
         self.assertEqual(refreshed_system_skill.agent_profile_id, None)
 
         refreshed_custom_skill = svc.get_skill(custom_skill.id)
@@ -883,7 +682,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
 
         reset_versions = (
             self.db.query(AssistantWorkflowVersion)
-            .filter(AssistantWorkflowVersion.workflow_id == refreshed_system_skill.workflow_id)
+            .filter(AssistantWorkflowVersion.workflow_id == canonical_workflow_id)
             .all()
         )
         self.assertEqual(len(reset_versions), 1)

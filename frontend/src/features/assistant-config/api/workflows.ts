@@ -105,6 +105,9 @@ export const createWorkflow = (data: CreateWorkflowRequest) =>
 export const updateWorkflowEntity = (id: string, data: UpdateWorkflowRequest) =>
   apiClient.put<AssistantWorkflow>(`/api/assistant-config/workflows/${id}`, { body: data })
 
+export const copyWorkflow = (id: string) =>
+  apiClient.post<AssistantWorkflow>(`/api/assistant-config/workflows/${id}/copy`)
+
 export const listWorkflowVersions = (id: string) =>
   apiClient.get<WorkflowVersionListPayload>(`/api/assistant-config/workflows/${id}/versions`)
 

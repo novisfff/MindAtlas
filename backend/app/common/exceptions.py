@@ -2,17 +2,16 @@ from __future__ import annotations
 
 import logging
 import traceback
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
-from fastapi import FastAPI
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
-from starlette.requests import Request
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.status import HTTP_500_INTERNAL_SERVER_ERROR
 
 from app.common.responses import ApiResponse
 from app.common.request_context import get_request_id
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
 
 class ApiException(StarletteHTTPException):
@@ -42,7 +41,11 @@ def _make_json_safe(value: Any) -> Any:
     return str(value)
 
 
-def register_exception_handlers(app: FastAPI, *, debug: bool = False) -> None:
+def register_exception_handlers(app: "FastAPI", *, debug: bool = False) -> None:
+    from fastapi.exceptions import RequestValidationError
+    from fastapi.responses import JSONResponse
+    from starlette.requests import Request
+
     logger = logging.getLogger(__name__)
 
     @app.exception_handler(ApiException)

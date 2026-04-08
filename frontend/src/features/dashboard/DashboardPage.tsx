@@ -7,6 +7,7 @@ import { AIReportsContainer } from './components/AIReportsContainer'
 import { KeyMetricsCard } from './components/KeyMetricsCard'
 import { MiniCalendar } from './components/MiniCalendar'
 import { TypeTagHotness } from './components/TypeTagHotness'
+import { uiLayout } from '@/components/ui/styles'
 
 export function DashboardPage() {
   const { t } = useTranslation()
@@ -30,14 +31,14 @@ export function DashboardPage() {
   const recentEntries = entriesPage?.content ?? []
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6 p-1">
+    <div className={uiLayout.page7}>
       {/* Header with Greeting and Quick Actions */}
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">
+      <div className={uiLayout.headerRow}>
+        <div className={uiLayout.headerBlock}>
+          <h1 className="text-3xl font-semibold tracking-tight text-foreground">
             {t('greetings.welcome', { greeting: getGreeting() })}
           </h1>
-          <p className="text-sm text-muted-foreground">
+          <p className="max-w-2xl text-sm leading-7 text-muted-foreground md:text-base">
             {t('pages.dashboard.subtitle')}
           </p>
         </div>

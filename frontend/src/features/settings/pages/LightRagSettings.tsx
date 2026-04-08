@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowLeft, Loader2, Lock, Save, TestTube2 } from 'lucide-react'
+import { Loader2, Lock, Save, TestTube2 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { uiChrome } from '@/components/ui/styles'
 import { useInitializationStatusQuery } from '@/features/initialization/queries'
 import {
   InputField,
@@ -19,6 +20,12 @@ import {
   type RuntimeKnowledgeGraphConfigResponse,
 } from '@/features/system-setup'
 import {
+  SettingsInset,
+  SettingsPageHeader,
+  SettingsPageShell,
+  SettingsSection,
+} from '@/features/settings/components/SettingsShell'
+import {
   getDefaultLightRagSummaryLanguage,
   isLightRagEmbeddingDimLocked,
   isKnowledgeGraphRerankEnabled,
@@ -28,6 +35,7 @@ import {
   validateKnowledgeGraphCapability,
 } from '@/features/system-setup/runtimeRules'
 import { useAppStore } from '@/stores/app-store'
+import { cn } from '@/lib/utils'
 
 interface LightRagDraft extends RuntimeKnowledgeGraphConfigResponse {
   neo4jPassword: string
@@ -65,15 +73,15 @@ function LockedField({
   return (
     <div className="space-y-2">
       <Label>{label}</Label>
-      <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 px-4 py-3">
+      <div className={cn(uiChrome.inset, 'border border-amber-200/80 bg-amber-50/80 px-4 py-3 dark:border-amber-500/20 dark:bg-amber-500/10')}>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <span className="text-sm font-medium text-slate-900">{value || '-'}</span>
-          <Badge variant="outline" className="rounded-full border-amber-200 bg-white/80 text-amber-700">
+          <span className="text-sm font-medium text-foreground">{value || '-'}</span>
+          <Badge variant="outline" className="border-amber-200/80 bg-white/80 text-amber-700 dark:border-amber-500/20 dark:bg-background/70 dark:text-amber-200">
             <Lock className="mr-1 h-3.5 w-3.5" />
             {lockLabel}
           </Badge>
         </div>
-        <p className="mt-2 text-xs leading-5 text-amber-800">{hint}</p>
+        <p className="mt-2 text-xs leading-5 text-amber-800 dark:text-amber-200">{hint}</p>
       </div>
     </div>
   )
@@ -93,8 +101,8 @@ function CapabilityRunBadge({
       variant="outline"
       className={
         active
-          ? 'rounded-full border-emerald-200 bg-emerald-50 text-emerald-700'
-          : 'rounded-full border-amber-200 bg-amber-50 text-amber-700'
+          ? 'border-emerald-200/80 bg-emerald-50/80 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200'
+          : 'border-amber-200/80 bg-amber-50/80 text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200'
       }
     >
       {active ? activeLabel : inactiveLabel}
@@ -251,55 +259,39 @@ export function LightRagSettingsPage() {
     : t('systemSetup.detailPages.lightrag.notStartedSummary')
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="space-y-3">
-          <button
-            type="button"
-            onClick={() => navigate('/settings')}
-            className="inline-flex items-center gap-2 text-sm text-slate-500 transition hover:text-slate-900"
-          >
-            <ArrowLeft className="h-4 w-4" />
-            {t('common.back')}
-          </button>
-          <div className="space-y-2">
-            <h1 className="text-3xl font-semibold tracking-tight text-slate-900">
-              {t('pages.settings.lightRag')}
-            </h1>
-            <p className="max-w-3xl text-sm leading-7 text-slate-600">
-              {t('pages.settings.lightRagDesc')}
-            </p>
-          </div>
-        </div>
+    <SettingsPageShell>
+      <SettingsPageHeader
+        title={t('pages.settings.lightRag')}
+        description={t('pages.settings.lightRagDesc')}
+        backAction={{ label: t('common.back'), onClick: () => navigate('/settings') }}
+        actions={
+          <>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                void handleValidate()
+              }}
+              disabled={isBusy || !isStarted}
+            >
+              {validateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <TestTube2 className="h-4 w-4" />}
+              {t('systemSetup.actions.validate')}
+            </Button>
+            <Button
+              type="button"
+              onClick={() => {
+                void handleSave()
+              }}
+              disabled={isBusy || !isStarted}
+            >
+              {updateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              {t('common.save')}
+            </Button>
+          </>
+        }
+      />
 
-        <div className="flex flex-wrap items-center gap-3">
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => {
-              void handleValidate()
-            }}
-            disabled={isBusy || !isStarted}
-            className="rounded-2xl"
-          >
-            {validateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <TestTube2 className="h-4 w-4" />}
-            {t('systemSetup.actions.validate')}
-          </Button>
-          <Button
-            type="button"
-            onClick={() => {
-              void handleSave()
-            }}
-            disabled={isBusy || !isStarted}
-            className="rounded-2xl"
-          >
-            {updateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-            {t('common.save')}
-          </Button>
-        </div>
-      </div>
-
-      <section className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+      <SettingsSection>
         <div className="space-y-4">
           <div className="flex flex-wrap items-center gap-2">
             <CapabilityRunBadge
@@ -310,37 +302,37 @@ export function LightRagSettingsPage() {
             <RuntimeCapabilityMeta module={current} skipped={false} t={t} />
           </div>
           <div className="space-y-2">
-            <p className="text-sm font-semibold text-slate-900">
+            <p className="text-sm font-semibold text-foreground">
               {t('systemSetup.detailPages.effectiveSummary')}
             </p>
-            <p className="text-sm leading-6 text-slate-600">{displaySummary}</p>
+            <p className="text-sm leading-6 text-muted-foreground">{displaySummary}</p>
           </div>
-          <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 px-4 py-4 text-sm leading-6 text-slate-600">
+          <SettingsInset className="text-sm leading-6 text-muted-foreground">
             {t('systemSetup.detailPages.lightrag.deploymentManaged')}
-          </div>
+          </SettingsInset>
         </div>
-      </section>
+      </SettingsSection>
 
       {!isStarted ? (
-        <section className="rounded-[28px] border border-amber-200 bg-amber-50/70 p-6 shadow-sm">
+        <SettingsSection className="border border-amber-200/80 bg-amber-50/72 dark:border-amber-500/20 dark:bg-amber-500/10">
           <div className="space-y-2">
-            <h2 className="text-lg font-semibold text-amber-950">
+            <h2 className="text-lg font-semibold text-amber-950 dark:text-amber-100">
               {t('systemSetup.detailPages.lightrag.unavailableTitle')}
             </h2>
-            <p className="text-sm leading-6 text-amber-900">
+            <p className="text-sm leading-6 text-amber-900 dark:text-amber-200">
               {t('systemSetup.detailPages.lightrag.unavailableDescription')}
             </p>
           </div>
-        </section>
+        </SettingsSection>
       ) : (
         <>
-          <section className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+          <SettingsSection>
             <div className="space-y-5">
               <div className="space-y-2">
-                <h2 className="text-lg font-semibold text-slate-900">
+                <h2 className="text-lg font-semibold text-foreground">
                   {t('systemSetup.detailPages.lightrag.sections.embedding')}
                 </h2>
-                <p className="text-sm leading-6 text-slate-600">
+                <p className="text-sm leading-6 text-muted-foreground">
                   {t('systemSetup.detailPages.lightrag.embeddingHint')}
                 </p>
               </div>
@@ -414,15 +406,15 @@ export function LightRagSettingsPage() {
                 </div>
               </div>
             </div>
-          </section>
+          </SettingsSection>
 
-          <section className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+          <SettingsSection>
             <div className="space-y-5">
               <div className="space-y-2">
-                <h2 className="text-lg font-semibold text-slate-900">
+                <h2 className="text-lg font-semibold text-foreground">
                   {t('systemSetup.detailPages.lightrag.sections.rerank')}
                 </h2>
-                <p className="text-sm leading-6 text-slate-600">
+                <p className="text-sm leading-6 text-muted-foreground">
                   {t('systemSetup.detailPages.lightrag.rerankHint')}
                 </p>
               </div>
@@ -446,7 +438,7 @@ export function LightRagSettingsPage() {
                 }
               />
 
-              <div className="grid gap-4 rounded-[24px] border border-slate-200 bg-slate-50/70 p-4 md:grid-cols-2">
+              <SettingsInset className="grid gap-4 md:grid-cols-2">
                 <InputField
                   label={t('systemSetup.forms.knowledgeGraph.rerankModel.label')}
                   value={draft.rerankModel}
@@ -482,11 +474,11 @@ export function LightRagSettingsPage() {
                   onChange={(rerankRequestFormat) => patchDraft({ rerankRequestFormat })}
                   disabled={!draft.rerankEnabled}
                 />
-              </div>
+              </SettingsInset>
             </div>
-          </section>
+          </SettingsSection>
         </>
       )}
-    </div>
+    </SettingsPageShell>
   )
 }

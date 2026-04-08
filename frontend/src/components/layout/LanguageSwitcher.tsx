@@ -6,6 +6,7 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { updateSystemLocale } from '@/features/settings/api/system-settings'
 import { useAppStore } from '@/stores/app-store'
 import { cn } from '@/lib/utils'
+import { uiRadius } from '@/components/ui/styles'
 
 export function LanguageSwitcher() {
   const { t, i18n } = useTranslation()
@@ -58,8 +59,9 @@ export function LanguageSwitcher() {
         onClick={openConfirmDialog}
         disabled={isSubmitting}
         className={cn(
-          'flex items-center gap-1.5 rounded-md px-2 py-1.5',
-          'text-muted-foreground hover:bg-muted hover:text-foreground',
+          'flex items-center gap-1.5 px-2.5 py-2',
+          uiRadius.control,
+          'text-muted-foreground hover:bg-muted/55 hover:text-foreground',
           'transition-colors disabled:cursor-not-allowed disabled:opacity-60'
         )}
         aria-label={t('layout.languageSwitcher.ariaLabel')}

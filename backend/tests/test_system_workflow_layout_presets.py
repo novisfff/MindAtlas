@@ -60,71 +60,21 @@ class SystemWorkflowLayoutPresetTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.db.close()
 
-    @staticmethod
-    def _workflow_input_from_definition(definition):
-        from app.assistant_config.schemas import WorkflowInput  # noqa: E402
-
-        return WorkflowInput.model_validate(
-            {
-                "nodes": [
-                    {
-                        "node_id": node.node_id,
-                        "node_type": node.node_type,
-                        "label": node.label,
-                        "position_x": node.position_x,
-                        "position_y": node.position_y,
-                        "config": node.config,
-                    }
-                    for node in (definition.workflow_nodes or [])
-                ],
-                "edges": [
-                    {
-                        "edge_id": edge.edge_id,
-                        "source_node_id": edge.source_node_id,
-                        "target_node_id": edge.target_node_id,
-                        "source_handle": edge.source_handle,
-                        "target_handle": edge.target_handle,
-                        "condition_type": edge.condition_type,
-                        "condition_expr": edge.condition_expr.model_dump() if edge.condition_expr else None,
-                        "label": edge.label,
-                    }
-                    for edge in (definition.workflow_edges or [])
-                ],
-                "viewport": getattr(definition, "workflow_viewport", None),
-            }
-        )
-
-    def _create_system_skill_with_workflow(self, definition):
+    def _get_system_skill_with_workflow(self, definition):
         from app.assistant_config.models import AssistantSkill  # noqa: E402
-        from app.assistant_config.schemas import AssistantWorkflowCreateRequest  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
         svc = AssistantConfigService(self.db)
-        workflow = svc.create_workflow(
-            AssistantWorkflowCreateRequest(
-                name=f"{definition.name}__workflow",
-                description=definition.description,
-                enabled=True,
-                workflow=self._workflow_input_from_definition(definition),
+        svc.sync_system_skills()
+        skill = (
+            self.db.query(AssistantSkill)
+            .filter(
+                AssistantSkill.name == definition.name,
+                AssistantSkill.is_system.is_(True),
             )
+            .first()
         )
-        workflow.is_system = True
-        skill = AssistantSkill(
-            name=definition.name,
-            description=definition.description,
-            intent_examples=list(definition.intent_examples or []),
-            tools=list(definition.tools or []),
-            mode="langgraph",
-            langgraph_pattern="workflow_dag",
-            system_prompt=None,
-            kb_config={"enabled": False},
-            is_system=True,
-            enabled=True,
-            workflow_id=workflow.id,
-            agent_profile_id=None,
-        )
-        self.db.add(skill)
-        self.db.commit()
+        self.assertIsNotNone(skill)
         return svc, skill.id
 
     def test_system_workflow_definitions_use_optimized_layout_presets(self) -> None:
@@ -148,7 +98,7 @@ class SystemWorkflowLayoutPresetTests(unittest.TestCase):
         from app.assistant.skill_catalog.definitions import QUICK_STATS  # noqa: E402
         from app.assistant_config.models import AssistantSkill  # noqa: E402
 
-        svc, skill_id = self._create_system_skill_with_workflow(QUICK_STATS)
+        svc, skill_id = self._get_system_skill_with_workflow(QUICK_STATS)
         skill = self.db.query(AssistantSkill).filter(AssistantSkill.id == skill_id).first()
         self.assertIsNotNone(skill)
         self.assertIsNotNone(skill.workflow)
@@ -168,11 +118,11 @@ class SystemWorkflowLayoutPresetTests(unittest.TestCase):
             EXPECTED_WORKFLOW_POSITIONS["quick_stats"],
         )
 
-    def test_sync_does_not_override_existing_system_workflow_positions(self) -> None:
+    def test_sync_restores_existing_system_workflow_positions(self) -> None:
         from app.assistant.skill_catalog.definitions import QUICK_STATS  # noqa: E402
         from app.assistant_config.models import AssistantSkill  # noqa: E402
 
-        svc, skill_id = self._create_system_skill_with_workflow(QUICK_STATS)
+        svc, skill_id = self._get_system_skill_with_workflow(QUICK_STATS)
         skill = self.db.query(AssistantSkill).filter(AssistantSkill.id == skill_id).first()
         self.assertIsNotNone(skill)
         self.assertIsNotNone(skill.workflow)
@@ -192,6 +142,30 @@ class SystemWorkflowLayoutPresetTests(unittest.TestCase):
         refreshed = self.db.query(AssistantSkill).filter(AssistantSkill.id == skill_id).first()
         self.assertIsNotNone(refreshed)
         self.assertIsNotNone(refreshed.workflow)
-        refreshed_start = next((node for node in (refreshed.workflow.nodes or []) if node.node_id == "start"), None)
-        self.assertIsNotNone(refreshed_start)
-        self.assertEqual((int(round(refreshed_start.position_x)), int(round(refreshed_start.position_y))), (999, 777))
+        self.assertEqual(
+            _node_position_map(refreshed.workflow),
+            EXPECTED_WORKFLOW_POSITIONS["quick_stats"],
+        )
+
+    def test_sync_clears_system_workflow_viewport_when_baseline_has_none(self) -> None:
+        from app.assistant.skill_catalog.definitions import QUICK_STATS  # noqa: E402
+        from app.assistant_config.models import AssistantSkill  # noqa: E402
+
+        svc, skill_id = self._get_system_skill_with_workflow(QUICK_STATS)
+        skill = self.db.query(AssistantSkill).filter(AssistantSkill.id == skill_id).first()
+        self.assertIsNotNone(skill)
+        self.assertIsNotNone(skill.workflow)
+
+        skill.workflow.workflow_viewport = {"x": 0, "y": 0, "zoom": 1}
+        self.db.commit()
+
+        with patch(
+            "app.assistant_config.service.SkillRegistry.list_system_skills",
+            return_value=[QUICK_STATS],
+        ):
+            svc.sync_system_skills()
+
+        refreshed = self.db.query(AssistantSkill).filter(AssistantSkill.id == skill_id).first()
+        self.assertIsNotNone(refreshed)
+        self.assertIsNotNone(refreshed.workflow)
+        self.assertIsNone(refreshed.workflow.workflow_viewport)

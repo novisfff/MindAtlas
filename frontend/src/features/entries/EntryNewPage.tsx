@@ -3,6 +3,8 @@ import { useCreateEntryMutation } from './queries'
 import { EntryForm } from './components/EntryForm'
 import type { EntryUpsertRequest } from './api/entries'
 import { useTranslation } from 'react-i18next'
+import { uiChrome, uiLayout } from '@/components/ui/styles'
+import { cn } from '@/lib/utils'
 
 export function EntryNewPage() {
   const navigate = useNavigate()
@@ -18,13 +20,17 @@ export function EntryNewPage() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto">
-      <h1 className="text-2xl font-bold mb-6">{t('pages.entryNew.title')}</h1>
-      <EntryForm
-        defaultDate={defaultDate}
-        onSubmit={handleSubmit}
-        isSubmitting={createMutation.isPending}
-      />
+    <div className={uiLayout.page6}>
+      <div className={uiLayout.headerBlock}>
+        <h1 className={uiLayout.headerTitle}>{t('pages.entryNew.title')}</h1>
+      </div>
+      <div className={cn(uiChrome.shell, 'p-5 md:p-6')}>
+        <EntryForm
+          defaultDate={defaultDate}
+          onSubmit={handleSubmit}
+          isSubmitting={createMutation.isPending}
+        />
+      </div>
     </div>
   )
 }

@@ -4,6 +4,8 @@ import { useTranslation } from 'react-i18next'
 import { ModelSelector } from './ModelSelector'
 import { useModelBindingsQuery, useUpdateBindingsMutation, useModelsQuery } from '../queries'
 import { toast } from 'sonner'
+import { uiChrome } from '@/components/ui/styles'
+import { SettingsBadge, SettingsInset } from '@/features/settings/components/SettingsShell'
 import { cn } from '@/lib/utils'
 
 interface ModelBindingSectionProps {
@@ -54,33 +56,33 @@ export function ModelBindingSection({ className }: ModelBindingSectionProps) {
 
   if (isLoading) {
     return (
-      <div className={cn("rounded-xl border bg-card p-4", className)}>
+      <div className={cn(uiChrome.card, "p-4", className)}>
         <div className="h-6 w-48 bg-muted animate-pulse rounded" />
       </div>
     )
   }
 
   return (
-    <div className={cn("rounded-xl border bg-card overflow-hidden transition-all", className)}>
+    <div className={cn(uiChrome.card, "overflow-hidden transition-all", className)}>
       <div
-        className="p-4 flex items-center justify-between cursor-pointer hover:bg-muted/50 transition-colors"
+        className="flex cursor-pointer items-center justify-between gap-4 px-5 py-4 transition-colors hover:bg-muted/25"
         onClick={() => setIsExpanded(!isExpanded)}
       >
         <div className="flex items-center gap-4 min-w-0 flex-1">
-          <h3 className="font-medium text-sm shrink-0">{t('settings.ai.sections.defaultBindings')}</h3>
+          <h3 className="shrink-0 text-sm font-semibold text-foreground">{t('settings.ai.sections.defaultBindings')}</h3>
 
           {!isExpanded && bindings && (
-            <div className="flex items-center gap-4 text-xs text-muted-foreground truncate opacity-80">
+            <div className="flex items-center gap-2 truncate text-xs text-muted-foreground opacity-90">
               <div className="flex items-center gap-1">
                 <Bot className="w-3 h-3" />
                 <span>{getModelName(bindings.assistant?.llmModelId)}</span>
               </div>
-              <div className="w-px h-3 bg-border" />
+              <span className="text-border">/</span>
               <div className="flex items-center gap-1">
                 <BrainCircuit className="w-3 h-3" />
                 <span>{getModelName(bindings.lightrag?.llmModelId)}</span>
               </div>
-              <div className="w-px h-3 bg-border" />
+              <span className="text-border">/</span>
               <div className="flex items-center gap-1">
                 <Sparkles className="w-3 h-3" />
                 <span>{getModelName(bindings.workflowCopilot?.llmModelId)}</span>
@@ -94,16 +96,15 @@ export function ModelBindingSection({ className }: ModelBindingSectionProps) {
       </div>
 
       {isExpanded && (
-        <div className="p-4 pt-0 space-y-4 animate-in slide-in-from-top-2">
+        <div className="space-y-4 border-t border-border/70 px-5 py-5 animate-in slide-in-from-top-2">
           <p className="text-sm text-muted-foreground">
             {t('settings.ai.sections.assignmentsDesc')}
           </p>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {/* System Assistant Card */}
-            <div className="rounded-xl border bg-background/50 p-4 h-full flex flex-col gap-4">
-              <div className="flex items-start gap-2 min-h-[88px]">
-                <div className="p-2 rounded-lg bg-violet-500/10 text-violet-600">
+            <SettingsInset className="flex h-full flex-col gap-4">
+              <div className="flex min-h-[88px] items-start gap-3">
+                <div className="rounded-full bg-primary/10 p-2 text-primary">
                   <Bot className="w-5 h-5" />
                 </div>
                 <div>
@@ -125,12 +126,11 @@ export function ModelBindingSection({ className }: ModelBindingSectionProps) {
                   disabled={updateBindingsMutation.isPending}
                 />
               </div>
-            </div>
+            </SettingsInset>
 
-            {/* LightRAG Card */}
-            <div className="rounded-xl border bg-background/50 p-4 h-full flex flex-col gap-4">
-              <div className="flex items-start gap-2 min-h-[88px]">
-                <div className="p-2 rounded-lg bg-purple-500/10 text-purple-600">
+            <SettingsInset className="flex h-full flex-col gap-4">
+              <div className="flex min-h-[88px] items-start gap-3">
+                <div className="rounded-full bg-primary/10 p-2 text-primary">
                   <BrainCircuit className="w-5 h-5" />
                 </div>
                 <div>
@@ -152,12 +152,11 @@ export function ModelBindingSection({ className }: ModelBindingSectionProps) {
                   disabled={updateBindingsMutation.isPending}
                 />
               </div>
-            </div>
+            </SettingsInset>
 
-            {/* Workflow Copilot Card */}
-            <div className="rounded-xl border bg-background/50 p-4 h-full flex flex-col gap-4">
-              <div className="flex items-start gap-2 min-h-[88px]">
-                <div className="p-2 rounded-lg bg-amber-500/10 text-amber-600">
+            <SettingsInset className="flex h-full flex-col gap-4">
+              <div className="flex min-h-[88px] items-start gap-3">
+                <div className="rounded-full bg-primary/10 p-2 text-primary">
                   <Sparkles className="w-5 h-5" />
                 </div>
                 <div>
@@ -179,7 +178,7 @@ export function ModelBindingSection({ className }: ModelBindingSectionProps) {
                   disabled={updateBindingsMutation.isPending}
                 />
               </div>
-            </div>
+            </SettingsInset>
           </div>
         </div>
       )}

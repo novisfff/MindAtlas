@@ -625,6 +625,279 @@
       "knowledgeGraphIncomplete": "The knowledge graph service is not fully ready yet. Please check Neo4j, the LightRAG worker, and the default AI model bindings."
     }
   },
+  "openclawIntegration": {
+    "overview": {
+      "title": "Connect MindAtlas to OpenClaw",
+      "description": "Turn on the integration here, finish the setup steps once, then verify everything from a fresh OpenClaw session.",
+      "switchLabel": "Enable OpenClaw integration",
+      "switchHint": "Turn this on before OpenClaw reads the exported catalog and calls the `mindatlas_*` tools."
+    },
+    "summary": {
+      "integration": "Integration",
+      "secret": "Integration secret",
+      "exposedAvailable": "Exposed and available items",
+      "integrationHintEnabled": "OpenClaw can now read the MindAtlas catalog from this server.",
+      "integrationHintDisabled": "Turn this on before you configure the OpenClaw host.",
+      "secretHintConfigured": "You can now paste the secret into the OpenClaw plugin config.",
+      "secretHintMissing": "Generate the secret on this page before editing the OpenClaw config.",
+      "catalogHintReady": "OpenClaw can already discover {{count}} exposed item(s).",
+      "catalogHintMissing": "Expose at least one available item below or new OpenClaw sessions will not get any `mindatlas_*` tools.",
+      "integrationDisabledNotice": "The integration is still off. Turn it on before you expect OpenClaw to read or call anything from this page."
+    },
+    "guide": {
+      "title": "Quick start",
+      "description": "Follow these 4 steps in order. This page guides the setup, but it cannot automatically confirm plugin installation, Gateway restarts, or tool visibility inside a remote OpenClaw session.",
+      "intro": "MindAtlas owns the capability catalog, knowledge data, and execution runtime. OpenClaw owns the chat entry, tool registration, and conversation orchestration. After installation, the plugin also ships the overview, auto-capture, retrieval, and summary MindAtlas skills. `mindatlas-overview` is the main router, and the actual callable tools still come from the live MindAtlas capability catalog. In practice, the agent should route from the session-visible `mindatlas_*` tool surface first, not from an imaginary in-session catalog tool. Follow the sequence on this page from top to bottom: generate the secret, expose catalog items, install the plugin, paste the config, restart the Gateway, then verify one live call from a fresh session.",
+      "actions": {
+        "expand": "Show troubleshooting",
+        "collapse": "Hide troubleshooting",
+        "copy": "Copy",
+        "jumpToCatalog": "Go to catalog"
+      },
+      "stepStatus": {
+        "done": "Done",
+        "actionNeeded": "Action needed",
+        "manual": "Manual step"
+      },
+      "steps": {
+        "secret": {
+          "title": "Generate the integration secret",
+          "description": "Generate the bearer secret on this page, then paste it into the OpenClaw plugin config.",
+          "ready": "The secret is ready. If you rotate it later, update the OpenClaw plugin config immediately.",
+          "missing": "Use the secret panel above to generate the secret before you continue."
+        },
+        "catalog": {
+          "title": "Expose MindAtlas capabilities",
+          "description": "Turn on the tools, workflows, or agents that you want OpenClaw to discover. New sessions only receive items that are both exposed and currently available.",
+          "ready": "OpenClaw can already discover {{count}} exposed item(s).",
+          "missing": "No exposed available item exists yet. Until you fix that below, fresh OpenClaw sessions will not receive any `mindatlas_*` tools."
+        },
+        "plugin": {
+          "title": "Install and configure the plugin on the OpenClaw host",
+          "description": "Run the commands below on the machine that runs the OpenClaw Gateway, paste the config, and validate it before you restart anything.",
+          "hostHint": "Run every command in this step on the OpenClaw Gateway host. This page cannot execute those commands for you.",
+          "details": {
+            "install": "Install the plugin from the MindAtlas repository on the same machine that runs OpenClaw. If OpenClaw runs on another server, copy the `integrations/openclaw-mindatlas` folder there first. The install command itself does not require `baseUrl` or `integrationSecret` yet, and you do not need to install the 4 shipped skills separately because they are bundled with the plugin and synced into OpenClaw on Gateway start. Running `configure:skills` writes `skills.load.extraDirs` for the shipped skills and warns if it finds legacy MindAtlas `tools.allow` or `tools.profile` remnants.",
+            "baseUrl": "Set `plugins.entries.openclaw-mindatlas.config.baseUrl` to the MindAtlas backend or reverse-proxy origin that the OpenClaw host can really reach, then paste the bearer secret generated on this page into `integrationSecret`. The shipped skills guide routing, but the actual exposed tools still depend on the session-visible MindAtlas capability surface.",
+            "refresh": "Catalog availability changes can be picked up by the plugin refresh cycle. If a tool name, exported title, exported description, or input schema changes, active sessions will not hot-refresh. Start a new session or reload the OpenClaw Gateway or plugin. If a session shows no `mindatlas_*` tools, the agent should say MindAtlas is not exposed in that session instead of silently falling back to generic memory."
+          }
+        },
+        "verify": {
+          "title": "Verify from a fresh OpenClaw session",
+          "description": "Restart the Gateway with your own deployment method, open a brand-new OpenClaw session, and check that the session no longer says MindAtlas tools are missing."
+        }
+      },
+      "installTitle": "Install the plugin on the OpenClaw host",
+      "installDescription": "These commands are meant to be run where your OpenClaw Gateway is installed. The plugin package lives in this MindAtlas repository, and installation also brings in the 4 shipped MindAtlas skills that the plugin syncs into OpenClaw on startup. A new session is still required before the refreshed skill and tool surface appears in prompts.",
+      "installBlocks": {
+        "locate": {
+          "title": "Locate the MindAtlas repository or plugin folder",
+          "description": "Open a shell on the OpenClaw machine and enter the MindAtlas repository root. If OpenClaw is deployed on another machine, copy the `integrations/openclaw-mindatlas` folder there first."
+        },
+        "install": {
+          "title": "Install the shipped plugin and sync the bundled skills",
+          "description": "Install the native `openclaw-mindatlas` plugin from the local filesystem, then run `configure:skills` on the same host. This step does not require the final plugin config yet."
+        },
+        "verify": {
+          "title": "Confirm the plugin is visible to OpenClaw",
+          "description": "Check that OpenClaw can see the newly installed plugin before you continue with configuration. After the later Gateway restart, the plugin will sync the shipped skills and register tools from the current MindAtlas catalog."
+        }
+      },
+      "configTitle": "Fill in the OpenClaw plugin configuration",
+      "configDescription": "Find the active OpenClaw config file, paste the plugin block below, replace the placeholders, and validate it before you restart the Gateway.",
+      "configBlocks": {
+        "findConfig": {
+          "title": "Find the active OpenClaw config file",
+          "description": "Run this first if you are not sure which config file your OpenClaw installation is using."
+        },
+        "validate": {
+          "title": "Validate the config after editing",
+          "description": "After you paste the plugin block below into the config file and replace the placeholders, validate the file before restarting."
+        }
+      },
+      "configExampleTitle": "Config example to paste into OpenClaw",
+      "configExampleDescription": "Replace `baseUrl` with the MindAtlas backend address that OpenClaw can access, and replace `integrationSecret` with the secret generated on this page.",
+      "restartTitle": "Restart the OpenClaw Gateway",
+      "restartDescription": "After the config validates, restart the OpenClaw Gateway with your own deployment method. Then open a fresh session because active sessions do not hot-refresh `mindatlas_*` tools or bundled skills.",
+      "verifyChecksTitle": "What to do next",
+      "verifyChecks": {
+        "restart": "Restart the OpenClaw Gateway after installation and config changes.",
+        "session": "Open a brand-new OpenClaw session after the restart.",
+        "failure": "If the new session still says MindAtlas is not exposed, return to Step 2 and Step 3."
+      },
+      "verifyPromptsTitle": "Short prompts to test in a fresh session",
+      "verifyPromptsDescription": "Ask one of these after the restart. The session should stop claiming that MindAtlas tools are missing.",
+      "verifyPrompts": {
+        "first": "What did I record before?",
+        "second": "What did I do in the last week?"
+      },
+      "advancedTitle": "Troubleshooting and advanced notes",
+      "advancedDescription": "Open this only if the main 4-step flow still does not work.",
+      "endpointsTitle": "Key endpoints",
+      "endpoints": {
+        "auth": "Auth header",
+        "catalog": "Catalog discovery",
+        "execute": "Capability execution"
+      },
+      "notesTitle": "Important notes",
+      "notes": {
+        "catalogOnly": "OpenClaw only sees catalog items that are currently exposed. Hidden or currently unavailable items should not appear as callable tools, and a session with no visible `mindatlas_*` tools cannot route MindAtlas work automatically.",
+        "skillBoundary": "The 4 shipped skills tell OpenClaw when it should call MindAtlas and which class of capability to prefer. `mindatlas-overview` is the broad router, while summary, retrieval, and auto-capture are narrower sub-strategies. The actual callable tools still come only from the currently exposed MindAtlas capability catalog.",
+        "refresh": "After creating, deleting, or editing catalog items, refresh the catalog on the OpenClaw side. If a tool name, exported title, exported description, or input schema changes structurally, active sessions still will not hot-refresh, so start a new session or reload the Gateway or plugin as well. If startup registration fails or a previously unavailable tool becomes available later, fix the issue and reload the Gateway because the plugin no longer late-registers tools after startup. If the current session still shows no MindAtlas tools, the agent should say MindAtlas is not exposed in that session instead of silently substituting generic memory."
+      }
+    },
+    "secret": {
+      "title": "Integration secret",
+      "description": "Generate the bearer secret here and copy it into the OpenClaw plugin config. The raw value is shown only once after generation or rotation.",
+      "configured": "Secret configured",
+      "configuredHint": "A secret is already stored for runtime authentication.",
+      "notConfigured": "Secret not configured",
+      "missingHint": "Generate a secret before you enable the integration or wire the OpenClaw plugin.",
+      "revealedTitle": "Copy this secret into the OpenClaw plugin now"
+    },
+    "types": {
+      "systemAdapter": "System item",
+      "tool": "Tool",
+      "workflow": "Workflow",
+      "agent": "Agent"
+    },
+    "labels": {
+      "system": "System",
+      "user": "User",
+      "input": "Input",
+      "output": "Output"
+    },
+    "status": {
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "available": "Available",
+      "unavailable": "Unavailable",
+      "retired": "Retired",
+      "exposed": "Exposed",
+      "hidden": "Hidden"
+    },
+    "actions": {
+      "generateSecret": "Generate secret",
+      "rotateSecret": "Rotate secret",
+      "copySecret": "Copy secret",
+      "addCapability": "Add capability",
+      "resetSystemItems": "Reset system items",
+      "resetSystemPresets": "Reset system items"
+    },
+    "catalog": {
+      "title": "Expose MindAtlas capabilities",
+      "description": "Turn on at least one currently available item below. Fresh OpenClaw sessions only discover items that are both exposed and available.",
+      "blockedTitle": "No exposed available item yet",
+      "blockedDescription": "Until at least one item below is both exposed and available, new OpenClaw sessions will not receive any `mindatlas_*` tools.",
+      "emptyTitle": "No capability items yet",
+      "emptyDescription": "Add a tool, workflow, or agent binding first, then define the exported copy and structured contracts."
+    },
+    "systemPresets": {
+      "title": "System capability items",
+      "description": "These shipped system items are auto-seeded by MindAtlas and are a good fit for exposing core entry, graph, and report capabilities. You can disable them or adjust their exported title and tool name."
+    },
+    "customItems": {
+      "title": "Custom capability catalog",
+      "description": "Wrap existing tools, workflows, or agents as OpenClaw-facing catalog items and maintain their exported copy and contracts independently.",
+      "emptyTitle": "No custom capability items yet",
+      "emptyDescription": "Pick an existing tool, workflow, or agent first, then define the exported copy and structured contracts."
+    },
+    "dialog": {
+      "createTitle": "Add capability catalog item",
+      "createDescription": "Choose a source object first, then define the exported tool name, title, description, and contract.",
+      "editTitle": "Edit capability catalog item",
+      "editDescription": "Update the exported copy and contract configuration.",
+      "editSystemItem": "Edit system capability item",
+      "editSystemItemDescription": "System items follow the same editing flow as custom items. Reset restores the shipped source binding, copy, schema, and enabled state later if needed.",
+      "editSystemPreset": "Edit system capability item",
+      "editSystemPresetDescription": "System items follow the same editing flow as custom items. Reset restores the shipped source binding, copy, schema, and enabled state later if needed."
+    },
+    "form": {
+      "sourceType": "Source type",
+      "source": "Source object",
+      "chooseSource": "Choose source",
+      "sourcePickerTitle": "Choose a source object",
+      "sourcePickerDescription": "Only candidates for the current source type are shown here. Picking one will prefill the title, description, and default contract.",
+      "sourcePickerEmpty": "No source object selected yet",
+      "sourcePickerHint": "Use the picker on the right to choose a tool, workflow, or agent source.",
+      "sourceSearchPlaceholder": "Search by name, description, or source key",
+      "sourceSearchEmpty": "No source objects match your search",
+      "toolName": "OpenClaw tool name",
+      "title": "Display title",
+      "description": "Description",
+      "exposed": "Expose to OpenClaw",
+      "exposedHint": "When turned off, this catalog item disappears from OpenClaw runtime metadata.",
+      "retiredHint": "This catalog item is bound to a retired source. It stays visible in settings for inspection or rebinding only, and it no longer appears in OpenClaw runtime metadata.",
+      "inputSummary": "Input summary",
+      "outputSummary": "Output summary",
+      "toolResponseMode": "Tool response mode",
+      "contractPreviewTitle": "Current contract",
+      "contractStatus": "Contract status",
+      "contractStatusDerived": "Source-derived",
+      "contractStatusOverride": "Manual override",
+      "contractStatusDerivedHint": "Synced from the selected source.",
+      "contractStatusOverrideHint": "Using a manual version.",
+      "contractSourceMode": "Source mode",
+      "contractSourceModeEditable": "Override allowed",
+      "contractSourceModeReadonly": "Read-only sync",
+      "contractSourceModeEditableHint": "Auto-generated by default, editable when needed.",
+      "contractSourceModeReadonlyHint": "Synced directly from the source.",
+      "contractAutoNote": "The contract is generated from the current source, so manual schema editing is usually unnecessary.",
+      "contractWorkflowNote": "Workflow contracts sync automatically.",
+      "contractManualNote": "This contract is using a manual override.",
+      "agentAutoContractHint": "Agents get an auto-generated contract by default.",
+      "restoreSourceContract": "Restore source defaults",
+      "advancedContractTitle": "Advanced contract editing",
+      "advancedContractDescription": "Open this only when you need to edit the summaries, response mode, or schema.",
+      "advancedContractShow": "Show editor",
+      "advancedContractHide": "Hide editor",
+      "inputSchema": "Input schema",
+      "outputSchema": "Output schema",
+      "readonlySchemaHint": "This source schema is system-managed and shown as read-only here. If the underlying published contract changes, resave the catalog item to sync it again."
+    },
+    "sourceTypeDescriptions": {
+      "tool": "Best for exposing existing tools while maintaining the OpenClaw-facing schema on the catalog item.",
+      "workflow": "Only published workflows with structured input and output contracts are allowed. Schemas are synced automatically.",
+      "agent": "Bind a published agent and declare the OpenClaw-facing structured input and output on the catalog item."
+    },
+    "responseModes": {
+      "json_schema": "JSON schema",
+      "text_field": "Single text field",
+      "jsonSchema": "JSON schema",
+      "textField": "Single text field"
+    },
+    "responseModeDescriptions": {
+      "json_schema": "Use this when the tool returns a JSON object and the result should be validated against the catalog schema.",
+      "text_field": "Use this when the tool returns plain text and MindAtlas should wrap it into a single string field.",
+      "jsonSchema": "Use this when the tool returns a JSON object and the result should be validated against the catalog schema.",
+      "textField": "Use this when the tool returns plain text and MindAtlas should wrap it into a single string field."
+    },
+    "confirmRotate": {
+      "title": "Rotate OpenClaw integration secret?",
+      "description": "The existing OpenClaw plugin will stop working until you update it with the new secret."
+    },
+    "confirmReset": {
+      "title": "Reset system items?",
+      "description": "This will restore every shipped system item back to its default source binding, title, description, tool name, schema, and enabled state. Custom items will stay untouched."
+    },
+    "confirmDelete": {
+      "title": "Delete this catalog item?",
+      "description": "After deletion, OpenClaw will no longer be able to call \"{{title}}\"."
+    },
+    "messages": {
+      "saved": "OpenClaw integration settings saved",
+      "secretGenerated": "A new integration secret has been generated",
+      "secretCopied": "Integration secret copied",
+      "copied": "Copied to clipboard",
+      "systemItemsReset": "System items reset",
+      "systemPresetsReset": "System items reset",
+      "deleted": "Catalog item deleted",
+      "syncWarningTitle": "System item sync incomplete",
+      "loadFailedDescription": "OpenClaw integration settings could not be loaded right now. Try refreshing the page or inspect the backend logs.",
+      "invalidSchemaJson": "Schema must be valid JSON.",
+      "invalidSchemaObject": "Schema root must be a JSON object."
+    }
+  },
   "tags": {
     "searchPlaceholder": "Search or create tags...",
     "create": "Create tag \"{{name}}\""
@@ -679,6 +952,8 @@
       "assistantSkillsDesc": "Manage AI assistant skill configurations",
       "assistantTargets": "Assistant Targets",
       "assistantTargetsDesc": "Manage reusable workflow and agent executables in one place",
+      "openClawIntegration": "OpenClaw Integration",
+      "openClawIntegrationDesc": "Configure the dedicated MindAtlas capability gateway that OpenClaw can discover and call",
       "systemAiBehaviors": "System AI Behaviors",
       "systemAiBehaviorsDesc": "Configure which workflow or agent powers built-in system AI behaviors like weekly and monthly reports",
       "lightRag": "LightRAG",
@@ -736,11 +1011,18 @@
         "searchEntries": "Search Entries",
         "getEntryDetail": "Get Entry Detail",
         "createEntry": "Create Entry",
+        "updateEntry": "Update Entry",
+        "createRelation": "Create Relation",
+        "queryKnowledgeGraph": "Query Knowledge Graph",
+        "generateWeeklyReport": "Generate Weekly Report",
+        "generateMonthlyReport": "Generate Monthly Report",
         "getStatistics": "Get Statistics",
         "getEntriesByTimeRange": "Query by Time Range",
         "analyzeActivity": "Analyze Activity",
+        "getTagStatistics": "Get Tag Statistics",
         "listEntryTypes": "List Entry Types",
-        "listTags": "List Tags"
+        "listTags": "List Tags",
+        "kbRelationRecommendations": "Relation Recommendations"
       },
       "skills": {
         "searchEntries": "Search Entries",
@@ -850,6 +1132,8 @@
       "noDescription": "No description",
       "enable": "Enable",
       "disable": "Disable",
+      "enabledStateOn": "Enabled",
+      "enabledStateOff": "Disabled",
       "deleteTitle": "Delete Tool",
       "deleteDescription": "Are you sure you want to delete this tool? This action cannot be undone.",
       "name": "Name",
@@ -979,14 +1263,19 @@
       "noAgentOptions": "No agents available",
       "targetInUse": "Referenced by skills",
       "referenceCount": "{{count}} skills bound",
+      "copyAsDuplicate": "Copy As Duplicate",
       "noTargetsFound": "No assistant targets found",
       "deleteTargetTitle": "Delete Target",
       "deleteTargetDescription": "Are you sure you want to delete this target? This action cannot be undone.",
       "workflowList": "Workflow List",
       "agentList": "Agent List",
       "workflowCreated": "Workflow created",
+      "workflowCopying": "Creating workflow duplicate...",
+      "workflowCopied": "Workflow duplicate created",
       "workflowUpdated": "Workflow updated",
       "agentCreated": "Agent created",
+      "agentCopying": "Creating agent duplicate...",
+      "agentCopied": "Agent duplicate created",
       "agentUpdated": "Agent updated",
       "createWorkflow": "Create Workflow",
       "createAgent": "Create Agent",
@@ -1015,6 +1304,11 @@
       "enabledStateOn": "On",
       "enabledStateOff": "Off",
       "targetNormalizationError": "Failed to auto-enable some legacy targets. Please retry later.",
+      "systemTargetReadonlyBannerTitle": "System workflows and agents are now read-only baselines",
+      "systemWorkflowReadonlyDescription": "System workflows support viewing, validation, test runs, and copying only. To customize one, copy a duplicate first, then edit that duplicate and rebind the higher-level feature.",
+      "systemAgentReadonlyDescription": "System agents support viewing, test runs, and copying only. To customize one, copy a duplicate first, then edit that duplicate and rebind the higher-level feature.",
+      "systemTargetBindingHint": "This binding currently points to a system target. System workflows and agents are read-only baselines. If you need custom behavior, open the target page, copy a duplicate, then come back and rebind to that duplicate.",
+      "systemVersionReadonlyHint": "Version history for system targets is now read-only and kept only for inspecting the official baseline.",
       "systemPrompt": "System Prompt",
       "systemPromptPlaceholder": "Define the AI assistant's behavior and capabilities...",
       "systemPromptHelpText": "System prompt guides how AI uses tools to complete tasks",
@@ -1758,6 +2052,7 @@
       "sun": "Sun"
     },
     "noEntries": "No entries for this date",
+    "viewMore": "View more",
     "moreEvents": "+{{count}} more"
   },
   "relations": {

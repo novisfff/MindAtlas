@@ -8,6 +8,7 @@ import { useEntriesQuery } from './queries'
 import { useEntryTypesQuery } from '@/features/entry-types/queries'
 import { useDebounce } from '@/hooks/useDebounce'
 import { Entry } from '@/types'
+import { uiLayout } from '@/components/ui/styles'
 
 const PAGE_SIZE = 10
 
@@ -98,7 +99,7 @@ export default function EntriesPage() {
 
   if (isError) {
     return (
-      <div className="container mx-auto py-8 px-4 max-w-7xl">
+      <div className={uiLayout.page7}>
         <div className="text-center py-16">
           <h2 className="text-xl font-semibold text-destructive mb-2">{t('messages.failedToLoad')}</h2>
           <p className="text-muted-foreground">
@@ -110,10 +111,10 @@ export default function EntriesPage() {
   }
 
   return (
-    <div className="container mx-auto py-8 px-4 max-w-7xl">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold tracking-tight mb-2">{t('pages.entries.title')}</h1>
-        <p className="text-muted-foreground">{t('pages.entries.subtitle')}</p>
+    <div className={uiLayout.page7}>
+      <div className={uiLayout.headerBlock}>
+        <h1 className={uiLayout.headerTitle}>{t('pages.entries.title')}</h1>
+        <p className={uiLayout.headerSubtitle}>{t('pages.entries.subtitle')}</p>
       </div>
 
       <EntriesToolbar

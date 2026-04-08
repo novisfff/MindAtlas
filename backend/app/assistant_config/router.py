@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -54,10 +54,15 @@ from app.database import get_db
 router = APIRouter(prefix="/api/assistant-config", tags=["assistant-config"])
 
 
+def _preferred_locale_from_request(request: Request) -> str | None:
+    return request.headers.get("x-mindatlas-locale")
+
+
 # ==================== Tools ====================
 
 @router.get("/system-tools/definitions", response_model=ApiResponse)
 def list_system_tool_definitions(
+    request: Request,
     include_disabled: bool = Query(True, description="是否包含已禁用的系统工具"),
     include_schema: bool = Query(True, description="是否包含 JSON Schema"),
     db: Session = Depends(get_db),
@@ -67,6 +72,7 @@ def list_system_tool_definitions(
     items = service.list_system_tool_definitions(
         include_disabled=include_disabled,
         include_schema=include_schema,
+        preferred_locale=_preferred_locale_from_request(request),
     )
     return ApiResponse.ok([
         SystemToolDefinitionResponse.model_validate(i).model_dump(by_alias=True)
@@ -310,6 +316,15 @@ def update_agent_profile(
     )
 
 
+@router.post("/agents/{id}/copy", response_model=ApiResponse)
+def copy_agent_profile(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
+    service = AssistantConfigService(db)
+    item = service.copy_agent_profile(id)
+    return ApiResponse.ok(
+        AssistantAgentProfileResponse.model_validate(service.serialize_agent_profile(item)).model_dump(by_alias=True)
+    )
+
+
 @router.get("/agents/{id}/versions", response_model=ApiResponse)
 def list_agent_profile_versions(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
     service = AssistantConfigService(db)
@@ -453,6 +468,15 @@ def update_workflow_entity(
 ) -> ApiResponse:
     service = AssistantConfigService(db)
     item = service.update_workflow_entity(id, request)
+    return ApiResponse.ok(
+        AssistantWorkflowResponse.model_validate(service.serialize_workflow(item)).model_dump(by_alias=True)
+    )
+
+
+@router.post("/workflows/{id}/copy", response_model=ApiResponse)
+def copy_workflow(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
+    service = AssistantConfigService(db)
+    item = service.copy_workflow(id)
     return ApiResponse.ok(
         AssistantWorkflowResponse.model_validate(service.serialize_workflow(item)).model_dump(by_alias=True)
     )

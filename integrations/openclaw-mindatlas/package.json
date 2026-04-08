@@ -1,0 +1,45 @@
+{
+  "name": "openclaw-mindatlas",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenClaw native plugin that exposes MindAtlas capability catalog items as OpenClaw tools.",
+  "license": "MIT",
+  "files": [
+    "README.md",
+    "openclaw.plugin.json",
+    "package.json",
+    "scripts",
+    "skills",
+    "src",
+    "tsconfig.json"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "configure:skills": "node ./scripts/configure-openclaw-skills.mjs",
+    "install:openclaw": "openclaw plugins install . && node ./scripts/configure-openclaw-skills.mjs",
+    "build": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.4.1",
+      "minGatewayVersion": "2026.4.1"
+    },
+    "build": {
+      "openclawVersion": "2026.4.1",
+      "pluginSdkVersion": "2026.4.1"
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "openclaw": "2026.4.1",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}

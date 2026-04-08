@@ -19,41 +19,48 @@ class SystemAgentBaselineRestoreTests(unittest.TestCase):
 
     def _create_system_agent_with_legacy_baseline(self):
         from app.assistant_config.models import AssistantSkill  # noqa: E402
-        from app.assistant_config.schemas import AssistantAgentProfileCreateRequest  # noqa: E402
+        from app.assistant_config.schemas import AgentPublishDraftInput  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
         svc = AssistantConfigService(self.db)
-        profile = svc.create_agent_profile(
-            AssistantAgentProfileCreateRequest(
-                name="general_chat__agent",
-                description="legacy baseline",
-                system_prompt="legacy prompt",
-                tools=["list_tags"],
-                kb_config={"enabled": False},
-                model_source="default",
-                enabled=True,
+        svc.sync_system_skills()
+        skill = (
+            self.db.query(AssistantSkill)
+            .filter(
+                AssistantSkill.name == "general_chat",
+                AssistantSkill.is_system.is_(True),
             )
+            .first()
         )
-        profile.is_system = True
-        skill = AssistantSkill(
-            name="general_chat",
-            description="默认兜底对话",
-            intent_examples=[],
-            tools=list(profile.tools or []),
-            mode="langgraph",
-            langgraph_pattern="agent_loop",
-            system_prompt=profile.system_prompt,
-            kb_config=profile.kb_config,
-            is_system=True,
-            enabled=True,
-            workflow_id=None,
-            agent_profile_id=profile.id,
+        self.assertIsNotNone(skill)
+        self.assertIsNotNone(skill.agent_profile)
+        profile = skill.agent_profile
+
+        legacy_draft = AgentPublishDraftInput.model_validate(
+            {
+                "system_prompt": "legacy prompt",
+                "tools": ["list_tags"],
+                "kb_config": {"enabled": False},
+                "model_source": "default",
+                "model_id": None,
+            }
         )
-        self.db.add(skill)
+        profile.description = "legacy baseline"
+        profile.system_prompt = legacy_draft.system_prompt
+        profile.tools = list(legacy_draft.tools or [])
+        profile.kb_config = legacy_draft.kb_config
+        mutated_version = svc._create_agent_profile_version(  # noqa: SLF001
+            agent_profile=profile,
+            draft=legacy_draft,
+            version_source="publish",
+            version_name="Legacy baseline",
+        )
+        profile.draft_version_id = mutated_version.id
+        profile.published_version_id = mutated_version.id
         self.db.commit()
         return svc, profile.id
 
-    def test_rollback_system_agent_baseline_uses_json_default(self) -> None:
+    def test_sync_system_agent_baseline_uses_json_default(self) -> None:
         from app.assistant.skill_catalog.defaults_loader import get_system_agent_baseline  # noqa: E402
         from app.assistant_config.models import AssistantAgentProfileVersion  # noqa: E402
 
@@ -61,35 +68,39 @@ class SystemAgentBaselineRestoreTests(unittest.TestCase):
         canonical = get_system_agent_baseline("general_chat")
         self.assertIsNotNone(canonical)
 
-        baseline_version = (
+        current_published = (
             self.db.query(AssistantAgentProfileVersion)
             .filter(
                 AssistantAgentProfileVersion.agent_profile_id == profile_id,
-                AssistantAgentProfileVersion.version_source == "publish",
             )
-            .order_by(AssistantAgentProfileVersion.sequence_no.asc())
+            .order_by(AssistantAgentProfileVersion.sequence_no.desc())
             .first()
         )
-        self.assertIsNotNone(baseline_version)
-        self.assertNotEqual((baseline_version.snapshot or {}).get("system_prompt"), canonical.system_prompt)
+        self.assertIsNotNone(current_published)
+        self.assertNotEqual((current_published.snapshot or {}).get("system_prompt"), canonical.system_prompt)
 
-        response = svc.rollback_agent_profile_version(profile_id, baseline_version.id)
-        self.assertIsNotNone(response.agent_draft)
-        self.assertEqual(response.draft_version_id, baseline_version.id)
-        self.assertEqual(response.agent_draft.system_prompt, canonical.system_prompt)
-        self.assertEqual(list(response.agent_draft.tools or []), list(canonical.tools or []))
-        self.assertEqual(response.agent_draft.model_source, canonical.model_source)
-        self.assertEqual(response.agent_draft.model_id, canonical.model_id)
+        svc.sync_system_skills()
+
+        restored = svc.get_agent_profile(profile_id)
+        restored_draft = svc._get_agent_profile_draft(restored)  # noqa: SLF001
+        self.assertEqual(restored_draft.system_prompt, canonical.system_prompt)
+        self.assertEqual(list(restored_draft.tools or []), list(canonical.tools or []))
+        self.assertEqual(restored_draft.model_source, canonical.model_source)
+        self.assertEqual(restored_draft.model_id, canonical.model_id)
         self.assertEqual(
-            bool((response.agent_draft.kb_config or {}).get("enabled", False)),
+            bool((restored_draft.kb_config or {}).get("enabled", False)),
             bool((canonical.kb_config or {}).get("enabled", False)),
         )
 
-        self.db.refresh(baseline_version)
-        self.assertEqual((baseline_version.snapshot or {}).get("system_prompt"), canonical.system_prompt)
-        self.assertEqual(list((baseline_version.snapshot or {}).get("tools") or []), list(canonical.tools or []))
+        remaining_versions = (
+            self.db.query(AssistantAgentProfileVersion)
+            .filter(AssistantAgentProfileVersion.agent_profile_id == profile_id)
+            .all()
+        )
+        self.assertEqual(len(remaining_versions), 1)
+        self.assertEqual((remaining_versions[0].snapshot or {}).get("system_prompt"), canonical.system_prompt)
+        self.assertEqual(list((remaining_versions[0].snapshot or {}).get("tools") or []), list(canonical.tools or []))
 
 
 if __name__ == "__main__":
     unittest.main()
-

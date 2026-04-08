@@ -1,8 +1,9 @@
 import { useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowLeft, Bot, BrainCircuit, FileType2, Languages, Loader2, Network, Settings2, Sparkles } from 'lucide-react'
+import { Bot, BrainCircuit, FileType2, Languages, Loader2, Network, Settings2, Sparkles } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
+import { uiChrome } from '@/components/ui/styles'
 import { useAppStore } from '@/stores/app-store'
 import { useModelBindingsQuery } from '@/features/ai-providers/queries'
 import {
@@ -14,6 +15,8 @@ import {
   type RuntimeKnowledgeGraphConfigResponse,
   type RuntimeStorageConfigResponse,
 } from '@/features/system-setup'
+import { SettingsPageHeader, SettingsPageShell } from '@/features/settings/components/SettingsShell'
+import { cn } from '@/lib/utils'
 
 type RuntimeStatusCard =
   | RuntimeStorageConfigResponse
@@ -141,37 +144,24 @@ export function SystemSetupSettingsPage() {
       : null
 
   return (
-    <div className="mx-auto max-w-5xl space-y-8">
-      <div className="space-y-3">
-        <button
-          type="button"
-          onClick={() => navigate('/settings')}
-          className="inline-flex items-center gap-2 text-sm text-slate-500 transition hover:text-slate-900"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          {t('common.back')}
-        </button>
-        <div className="space-y-2">
-          <h1 className="text-3xl font-semibold tracking-tight text-slate-900">
-            {t('systemSetup.title')}
-          </h1>
-          <p className="max-w-3xl text-sm leading-7 text-slate-600">
-            {t('systemSetup.description')}
-          </p>
-        </div>
-      </div>
+    <SettingsPageShell>
+      <SettingsPageHeader
+        title={t('systemSetup.title')}
+        description={t('systemSetup.description')}
+        backAction={{ label: t('common.back'), onClick: () => navigate('/settings') }}
+      />
 
       <div className="grid gap-4 md:grid-cols-3">
         {coreCards.map((card) => {
           const content = (
             <div className="flex items-start gap-4">
-              <div className="rounded-2xl bg-slate-100 p-3 text-slate-700">
+              <div className={cn(uiChrome.inset, 'p-3 text-foreground')}>
                 <card.icon className="h-5 w-5" />
               </div>
               <div className="space-y-2">
-                <p className="text-sm text-slate-500">{card.title}</p>
-                <p className="text-base font-semibold text-slate-900">{card.value}</p>
-                <p className="text-sm leading-6 text-slate-600">{card.description}</p>
+                <p className="text-sm text-muted-foreground">{card.title}</p>
+                <p className="text-base font-semibold text-foreground">{card.value}</p>
+                <p className="text-sm leading-6 text-muted-foreground">{card.description}</p>
               </div>
             </div>
           )
@@ -182,7 +172,10 @@ export function SystemSetupSettingsPage() {
                 key={card.key}
                 type="button"
                 onClick={() => navigate(card.path!)}
-                className="rounded-[24px] border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
+                className={cn(
+                  uiChrome.card,
+                  'p-5 text-left transition duration-200 hover:border-primary/20',
+                )}
               >
                 {content}
               </button>
@@ -192,7 +185,7 @@ export function SystemSetupSettingsPage() {
           return (
             <div
               key={card.key}
-              className="rounded-[24px] border border-slate-200 bg-white p-5 text-left shadow-sm"
+              className={cn(uiChrome.card, 'p-5 text-left')}
             >
               {content}
             </div>
@@ -200,14 +193,14 @@ export function SystemSetupSettingsPage() {
         })}
       </div>
 
-      <div className="rounded-[28px] border border-slate-200 bg-slate-50/70 p-5">
+      <div className={cn(uiChrome.inset, 'p-5')}>
         <div className="flex items-start gap-3">
-          <div className="rounded-2xl bg-white p-2 text-slate-700 shadow-sm">
+          <div className={cn(uiChrome.control, 'p-2 text-foreground shadow-none')}>
             <Settings2 className="h-5 w-5" />
           </div>
           <div className="space-y-1">
-            <p className="text-sm font-semibold text-slate-900">{t('systemSetup.runtimeTitle')}</p>
-            <p className="text-sm leading-6 text-slate-600">{t('systemSetup.runtimeDescription')}</p>
+            <p className="text-sm font-semibold text-foreground">{t('systemSetup.runtimeTitle')}</p>
+            <p className="text-sm leading-6 text-muted-foreground">{t('systemSetup.runtimeDescription')}</p>
           </div>
         </div>
       </div>
@@ -219,15 +212,15 @@ export function SystemSetupSettingsPage() {
             const detailRoute = moduleDetailRoutes[module.groupKey]
             const summary = getModuleSummary(current, module.groupKey, t)
             return (
-              <section key={module.groupKey} className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
+              <section key={module.groupKey} className={cn(uiChrome.card, 'p-5')}>
                 <div className="space-y-4">
                   <RuntimeCapabilityMeta module={current} skipped={false} t={t} />
                   <div className="space-y-2">
-                    <h2 className="text-lg font-semibold text-slate-900">{module.title}</h2>
-                    <p className="text-sm leading-6 text-slate-600">{module.description}</p>
-                    <p className="text-sm leading-6 text-slate-500">{summary}</p>
+                    <h2 className="text-lg font-semibold text-foreground">{module.title}</h2>
+                    <p className="text-sm leading-6 text-muted-foreground">{module.description}</p>
+                    <p className="text-sm leading-6 text-muted-foreground">{summary}</p>
                   </div>
-                  <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 px-4 py-4 text-sm leading-6 text-slate-600">
+                  <div className={cn(uiChrome.inset, 'px-4 py-4 text-sm leading-6 text-muted-foreground')}>
                     {t('systemSetup.managedHint')}
                   </div>
                   {detailRoute ? (
@@ -235,7 +228,6 @@ export function SystemSetupSettingsPage() {
                       type="button"
                       variant="outline"
                       onClick={() => navigate(detailRoute)}
-                      className="rounded-2xl"
                     >
                       {t('systemSetup.actions.openDetails')}
                     </Button>
@@ -246,28 +238,28 @@ export function SystemSetupSettingsPage() {
           })}
         </div>
       ) : (
-        <div className="rounded-[28px] border border-red-100 bg-white p-6 shadow-sm">
-          <p className="text-sm text-red-600">{t('pages.graph.failedToLoad')}</p>
+        <div className="rounded-[20px] border border-destructive/20 bg-destructive/5 p-6">
+          <p className="text-sm text-destructive">{t('pages.graph.failedToLoad')}</p>
         </div>
       )}
 
-      <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
+      <div className={cn(uiChrome.card, 'p-5')}>
         <div className="flex items-start gap-4">
-          <div className="rounded-2xl bg-slate-100 p-3 text-slate-700">
+          <div className={cn(uiChrome.inset, 'p-3 text-foreground')}>
             <Network className="h-5 w-5" />
           </div>
           <div className="space-y-3">
             <div className="space-y-2">
-              <p className="text-sm font-semibold text-slate-900">{t('systemSetup.footerTitle')}</p>
-              <p className="text-sm leading-6 text-slate-600">{t('systemSetup.footerDescription')}</p>
+              <p className="text-sm font-semibold text-foreground">{t('systemSetup.footerTitle')}</p>
+              <p className="text-sm leading-6 text-muted-foreground">{t('systemSetup.footerDescription')}</p>
             </div>
 
             <div className="flex flex-wrap items-center gap-3">
-              <Button type="button" variant="outline" onClick={() => navigate('/settings/assistant-skills')} className="rounded-2xl">
+              <Button type="button" variant="outline" onClick={() => navigate('/settings/assistant-skills')}>
                 <BrainCircuit className="h-4 w-4" />
                 {t('systemSetup.actions.openAiSkills')}
               </Button>
-              <Button type="button" variant="outline" onClick={() => navigate('/settings/system-ai-behaviors')} className="rounded-2xl">
+              <Button type="button" variant="outline" onClick={() => navigate('/settings/system-ai-behaviors')}>
                 <Sparkles className="h-4 w-4" />
                 {t('systemSetup.footerAction')}
               </Button>
@@ -275,6 +267,6 @@ export function SystemSetupSettingsPage() {
           </div>
         </div>
       </div>
-    </div>
+    </SettingsPageShell>
   )
 }

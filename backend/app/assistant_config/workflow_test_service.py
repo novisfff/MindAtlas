@@ -210,6 +210,8 @@ class WorkflowTestRunService:
                     raise ApiException(status_code=422, code=42213, message=f"field '{field_name}' must be integer")
                 if field_type == "boolean" and not isinstance(value, bool):
                     raise ApiException(status_code=422, code=42213, message=f"field '{field_name}' must be boolean")
+                if field_type == "array" and not isinstance(value, list):
+                    raise ApiException(status_code=422, code=42213, message=f"field '{field_name}' must be array")
 
         nodes_raw = [
             {

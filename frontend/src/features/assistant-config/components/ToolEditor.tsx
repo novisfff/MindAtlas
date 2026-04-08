@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Loader2, X } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { uiChrome, uiField } from '@/components/ui/styles'
 import { type KeyValuePair } from './KeyValueEditor'
 import { ToolInputParamsEditor } from './ToolInputParamsEditor'
 import { ToolRequestConfig } from './ToolRequestConfig'
@@ -103,27 +105,33 @@ export function ToolEditor({ tool, isNew, onCancel, onSave, isSaving, errorMessa
   }
 
   return (
-    <form onSubmit={handleSubmit} className="flex flex-col h-[700px] w-full max-w-full bg-background rounded-lg border shadow-sm overflow-hidden">
-      {/* Header */}
-      <div className="flex items-center justify-between px-6 py-3 border-b shrink-0 bg-muted/20">
-        <h3 className="font-semibold text-lg">{isNew ? t('common.create') : t('common.edit')}</h3>
-        <button type="button" onClick={onCancel} className="text-muted-foreground hover:text-foreground p-1">
-          <X className="w-5 h-5" />
-        </button>
+    <form onSubmit={handleSubmit} className={uiChrome.card}>
+      <div className="flex items-start justify-between gap-4 border-b border-border/70 px-6 py-5">
+        <div className="space-y-1">
+          <h3 className="text-lg font-semibold text-foreground">
+            {isNew ? t('common.create') : t('common.edit')}
+          </h3>
+          <p className="text-sm leading-6 text-muted-foreground">
+            {t('pages.settings.assistantToolsDesc')}
+          </p>
+        </div>
+        <Button type="button" onClick={onCancel} variant="ghost" size="icon">
+          <X className="h-5 w-5" />
+        </Button>
       </div>
 
       {errorMessage && (
-        <div className="px-6 py-3 bg-red-50 text-red-600 text-sm font-medium border-b border-red-100 flex items-center gap-2 animate-in slide-in-from-top-2">
-          <div className="w-1 h-4 bg-red-500 rounded-full"></div>
+        <div className="flex items-center gap-2 border-b border-destructive/20 bg-destructive/5 px-6 py-3 text-sm font-medium text-destructive">
+          <div className="h-4 w-1 rounded-full bg-destructive"></div>
           {errorMessage}
         </div>
       )}
 
-      <div className="flex-1 grid grid-cols-12 divide-x h-full overflow-hidden">
-        {/* LEFT COLUMN: Tool Info & Inputs (5/12) */}
-        <div className="col-span-5 flex flex-col h-full overflow-y-auto custom-scrollbar bg-card/50 p-6 space-y-8">
+      <div className="grid min-w-0 gap-0 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+        <div className="min-w-0 border-b border-border/70 px-6 py-6 xl:border-b-0 xl:border-r">
+          <div className="space-y-6">
           <div className="space-y-4">
-            <h4 className="font-medium text-sm text-foreground/80">{t('settings.tools.basicInfo')}</h4>
+            <h4 className="text-sm font-semibold text-foreground">{t('settings.tools.basicInfo')}</h4>
             <div className="space-y-4">
               <div className="space-y-1.5">
                 <input
@@ -131,7 +139,7 @@ export function ToolEditor({ tool, isNew, onCancel, onSave, isSaving, errorMessa
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   required
-                  className="w-full px-3 py-2 text-sm rounded-md border bg-background focus:ring-1 focus:ring-primary/20"
+                  className={uiField.input}
                   placeholder={t('settings.tools.namePlaceholder', 'Tool Name')}
                 />
               </div>
@@ -140,7 +148,7 @@ export function ToolEditor({ tool, isNew, onCancel, onSave, isSaving, errorMessa
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   rows={4}
-                  className="w-full px-3 py-2 text-sm rounded-md border bg-background resize-none focus:ring-1 focus:ring-primary/20"
+                  className={uiField.textarea}
                   placeholder={t('settings.tools.descriptionPlaceholder', 'Tool Description used by AI to understand when to use this tool...')}
                 />
               </div>
@@ -154,9 +162,9 @@ export function ToolEditor({ tool, isNew, onCancel, onSave, isSaving, errorMessa
             onUpdate={updateInputParam}
           />
         </div>
+        </div>
 
-        {/* RIGHT COLUMN: Request Config (7/12) */}
-        <div className="col-span-7 flex flex-col h-full bg-background">
+        <div className="min-w-0 px-6 py-6">
           <ToolRequestConfig
             httpMethod={httpMethod}
             endpointUrl={endpointUrl}
@@ -178,27 +186,25 @@ export function ToolEditor({ tool, isNew, onCancel, onSave, isSaving, errorMessa
             onQueryParamsChange={setQueryParams}
             onHeadersChange={setHeaders}
           />
-
-          {/* Footer Action Bar */}
-          <div className="px-6 py-4 border-t bg-muted/10 flex justify-end gap-3 shrink-0">
-            <button
-              type="button"
-              onClick={onCancel}
-              disabled={isSaving}
-              className="px-4 py-2 text-sm font-medium rounded-md border bg-background hover:bg-muted transition-colors disabled:opacity-50"
-            >
-              {t('common.cancel')}
-            </button>
-            <button
-              type="submit"
-              disabled={isSaving || !name || !endpointUrl}
-              className="px-6 py-2 text-sm font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-            >
-              {isSaving && <Loader2 className="w-4 h-4 animate-spin" />}
-              {isNew ? t('common.create') : t('common.confirm')}
-            </button>
-          </div>
         </div>
+      </div>
+
+      <div className="flex flex-col gap-3 border-t border-border/70 px-6 py-4 sm:flex-row sm:justify-end">
+        <Button
+          type="button"
+          onClick={onCancel}
+          disabled={isSaving}
+          variant="outline"
+        >
+          {t('common.cancel')}
+        </Button>
+        <Button
+          type="submit"
+          disabled={isSaving || !name || !endpointUrl}
+        >
+          {isSaving && <Loader2 className="h-4 w-4 animate-spin" />}
+          {isNew ? t('common.create') : t('common.confirm')}
+        </Button>
       </div>
     </form>
   )

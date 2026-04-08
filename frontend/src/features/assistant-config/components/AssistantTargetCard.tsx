@@ -4,13 +4,17 @@ import {
     Bot,
     ChevronDown,
     ChevronRight,
+    Copy,
     ExternalLink,
+    Loader2,
     Trash2,
     Workflow,
     Clock,
-    Hash,
-    MoreHorizontal
+    Hash
 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { uiChrome } from '@/components/ui/styles'
+import { SettingsBadge, SettingsInset } from '@/features/settings/components/SettingsShell'
 import { WorkflowReadonlyPreview } from './workflow/WorkflowReadonlyPreview'
 import type { AssistantExecutableTarget } from './skillTargetOptions'
 import type { AssistantAgentProfile } from '../api/agents'
@@ -24,7 +28,10 @@ interface AssistantTargetCardProps {
     isExpanded: boolean
     onToggleExpand: () => void
     onEdit: () => void
+    onCopy: () => void
     onDelete: () => void
+    isCopying: boolean
+    disableCopy: boolean
     isDeleting: boolean
     disableDelete: boolean
 }
@@ -36,7 +43,10 @@ export const AssistantTargetCard = memo(function AssistantTargetCard({
     isExpanded,
     onToggleExpand,
     onEdit,
+    onCopy,
     onDelete,
+    isCopying,
+    disableCopy,
     isDeleting,
     disableDelete,
 }: AssistantTargetCardProps) {
@@ -49,107 +59,134 @@ export const AssistantTargetCard = memo(function AssistantTargetCard({
     return (
         <div
             className={cn(
-                "group rounded-xl border bg-card transition-all duration-200 ease-in-out",
+                uiChrome.card,
+                "group overflow-hidden p-4 transition-all duration-200 ease-in-out",
                 isExpanded
-                    ? "border-primary/50 shadow-md ring-1 ring-primary/10"
-                    : "hover:border-primary/30 hover:shadow-sm"
+                    ? "border-primary/25 ring-1 ring-primary/10"
+                    : "hover:border-primary/20"
             )}
         >
             <div
                 role="button"
                 tabIndex={0}
                 onClick={onToggleExpand}
-                className="flex items-center gap-4 p-4 cursor-pointer"
+                className="flex cursor-pointer items-start gap-4"
             >
-                {/* Icon & Type Indicator */}
                 <div className={cn(
-                    "flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border transition-colors",
+                    uiChrome.control,
+                    "flex h-11 w-11 shrink-0 items-center justify-center transition-colors shadow-none",
                     isWorkflow
-                        ? "bg-blue-50 text-blue-600 border-blue-100 dark:bg-blue-900/20 dark:text-blue-400 dark:border-blue-900/30"
-                        : "bg-purple-50 text-purple-600 border-purple-100 dark:bg-purple-900/20 dark:text-purple-400 dark:border-purple-900/30"
+                        ? "border-primary/15 bg-primary/10 text-primary"
+                        : "border-primary/15 bg-primary/10 text-primary"
                 )}>
                     {isWorkflow ? <Workflow className="h-6 w-6" /> : <Bot className="h-6 w-6" />}
                 </div>
 
-                {/* Content */}
-                <div className="flex-1 min-w-0 grid gap-1">
-                    <div className="flex items-center gap-2">
-                        <h3 className="font-semibold text-base truncate text-foreground">
+                <div className="min-w-0 flex-1 space-y-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0 space-y-2">
+                            <div className="flex flex-wrap items-center gap-2">
+                                <h3 className="truncate text-base font-semibold text-foreground">
                             {target.name}
                         </h3>
-                        <div className="flex items-center gap-1.5">
-                            {target.isSystemDefault && (
-                                <span className="inline-flex items-center rounded-md bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-500/20">
+                                {target.isSystemDefault && (
+                                    <SettingsBadge className="border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">
                                     {t('settings.skills.systemDefaultTarget')}
-                                </span>
-                            )}
-                            {target.isSystem && (
-                                <span className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground ring-1 ring-inset ring-gray-500/10">
+                                    </SettingsBadge>
+                                )}
+                                {target.isSystem && (
+                                    <SettingsBadge>
                                     {t('settings.skills.system')}
-                                </span>
-                            )}
-                        </div>
-                    </div>
-
-                    <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                        <div className="flex items-center gap-1">
-                            <Hash className="w-3.5 h-3.5" />
-                            <span>{t('settings.skills.referenceCount', { count: target.referenceCount })}</span>
-                        </div>
-                        {(target.systemBehaviorReferenceCount ?? 0) > 0 && (
-                          <div className="flex items-center gap-1">
-                            <Hash className="w-3.5 h-3.5" />
-                            <span>{t('settings.systemBehaviors.referenceCount', { count: target.systemBehaviorReferenceCount })}</span>
-                          </div>
-                        )}
-                        {workflow?.updatedAt && (
-                            <div className="flex items-center gap-1">
-                                <Clock className="w-3.5 h-3.5" />
-                                <span>{new Date(workflow.updatedAt).toLocaleDateString()}</span>
+                                    </SettingsBadge>
+                                )}
                             </div>
-                        )}
+
+                            <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                                <div className="flex items-center gap-1">
+                                    <Hash className="h-3.5 w-3.5" />
+                                    <span>{t('settings.skills.referenceCount', { count: target.referenceCount })}</span>
+                                </div>
+                                {(target.systemBehaviorReferenceCount ?? 0) > 0 && (
+                                  <div className="flex items-center gap-1">
+                                    <Hash className="h-3.5 w-3.5" />
+                                    <span>{t('settings.systemBehaviors.referenceCount', { count: target.systemBehaviorReferenceCount })}</span>
+                                  </div>
+                                )}
+                                {workflow?.updatedAt && (
+                                    <div className="flex items-center gap-1">
+                                        <Clock className="h-3.5 w-3.5" />
+                                        <span>{new Date(workflow.updatedAt).toLocaleDateString()}</span>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className={cn(
+                            "flex items-center gap-1 transition-opacity focus-within:opacity-100",
+                            isCopying ? "opacity-100" : "opacity-0 group-hover:opacity-100",
+                        )}>
+                            <Button
+                                type="button"
+                                onClick={(e) => {
+                                    e.stopPropagation()
+                                    onEdit()
+                                }}
+                                variant="ghost"
+                                size="icon"
+                                title={t('settings.skills.editTarget')}
+                            >
+                                <ExternalLink className="h-4 w-4" />
+                            </Button>
+                            <Button
+                                type="button"
+                                onClick={(e) => {
+                                    e.stopPropagation()
+                                    onCopy()
+                                }}
+                                disabled={disableCopy}
+                                variant="ghost"
+                                size="icon"
+                                className={disableCopy ? 'cursor-not-allowed opacity-50 text-muted-foreground' : ''}
+                                title={isCopying ? t('messages.loading') : t('settings.skills.copyAsDuplicate')}
+                            >
+                                {isCopying ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                ) : (
+                                    <Copy className="h-4 w-4" />
+                                )}
+                            </Button>
+
+                            <Button
+                                type="button"
+                                onClick={(e) => {
+                                    e.stopPropagation()
+                                    onDelete()
+                                }}
+                                disabled={disableDelete || isDeleting}
+                                title={disableDelete ? t('settings.skills.targetInUse') : t('common.delete')}
+                                variant="ghost"
+                                size="icon"
+                                className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                            >
+                                <Trash2 className="h-4 w-4" />
+                            </Button>
+
+                            <Button
+                                type="button"
+                                onClick={(e) => {
+                                    e.stopPropagation()
+                                    onToggleExpand()
+                                }}
+                                variant="ghost"
+                                size="icon"
+                            >
+                                {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                            </Button>
+                        </div>
                     </div>
-                </div>
-
-                {/* Actions */}
-                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity focus-within:opacity-100">
-                    <button
-                        onClick={(e) => {
-                            e.stopPropagation()
-                            onEdit()
-                        }}
-                        className="p-2 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-                        title={t('settings.skills.editTarget')}
-                    >
-                        <ExternalLink className="w-4 h-4" />
-                    </button>
-
-                    <div className="w-px h-4 bg-border mx-1" />
-
-                    <button
-                        onClick={(e) => {
-                            e.stopPropagation()
-                            onDelete()
-                        }}
-                        disabled={disableDelete || isDeleting}
-                        title={disableDelete ? t('settings.skills.targetInUse') : t('common.delete')}
-                        className={cn(
-                            "p-2 rounded-lg transition-colors",
-                            disableDelete
-                                ? "opacity-50 cursor-not-allowed text-muted-foreground"
-                                : "text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                        )}
-                    >
-                        <Trash2 className="w-4 h-4" />
-                    </button>
-                </div>
-
-                <div className="pl-2 text-muted-foreground">
-                    {isExpanded ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
                 </div>
             </div>
 
-            {/* Expanded Content */}
             <div
                 className={cn(
                     "grid transition-all duration-300 ease-in-out",
@@ -157,17 +194,17 @@ export const AssistantTargetCard = memo(function AssistantTargetCard({
                 )}
             >
                 <div className="overflow-hidden">
-                    <div className="p-4 pt-0 border-t border-border/50">
-                        <div className="pt-4 space-y-4">
+                    <div className="mt-4 border-t border-border/70 pt-4">
+                        <div className="space-y-4">
                             {isWorkflow ? (
                                 workflow ? (
                                     <div className="space-y-4">
                                         {workflow.description && (
-                                            <div className="text-sm text-muted-foreground leading-relaxed">
+                                            <SettingsInset className="text-sm leading-6 text-muted-foreground">
                                                 {workflow.description}
-                                            </div>
+                                            </SettingsInset>
                                         )}
-                                        <div className="rounded-lg border bg-muted/30 overflow-hidden">
+                                        <div className="overflow-hidden rounded-[20px] border border-border/70 bg-muted/20">
                                             <WorkflowReadonlyPreview
                                                 workflow={workflow}
                                                 onOpenEditor={onEdit}
@@ -179,22 +216,21 @@ export const AssistantTargetCard = memo(function AssistantTargetCard({
                                 )
                             ) : (
                                 <div className="grid gap-6">
-                                    {/* Agent Info Grid */}
                                     <div className="grid gap-4 md:grid-cols-2">
-                                        <div className="space-y-1.5">
-                                            <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                                        <SettingsInset className="space-y-1.5">
+                                            <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                                                 {t('settings.skills.description')}
                                             </label>
-                                            <div className="text-sm p-3 rounded-lg bg-muted/40 border border-border/50">
+                                            <div className={cn(uiChrome.control, 'px-3 py-3 text-sm shadow-none')}>
                                                 {agent?.description || '-'}
                                             </div>
-                                        </div>
+                                        </SettingsInset>
 
-                                        <div className="space-y-1.5">
-                                            <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                                        <SettingsInset className="space-y-1.5">
+                                            <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                                                 {t('settings.skills.targetRuntimeConfig')}
                                             </label>
-                                            <div className="text-sm p-3 rounded-lg bg-muted/40 border border-border/50 flex items-center gap-2">
+                                            <div className={cn(uiChrome.control, 'flex items-center gap-2 px-3 py-3 text-sm shadow-none')}>
                                                 <div className={cn(
                                                     "w-2 h-2 rounded-full",
                                                     agent?.kbConfig?.enabled ? "bg-green-500" : "bg-gray-300"
@@ -208,12 +244,11 @@ export const AssistantTargetCard = memo(function AssistantTargetCard({
                                                     </span>
                                                 </span>
                                             </div>
-                                        </div>
+                                        </SettingsInset>
                                     </div>
 
-                                    {/* Tools */}
-                                    <div className="space-y-2">
-                                        <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                                    <SettingsInset className="space-y-2">
+                                        <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                                             {t('settings.skills.agentTools')}
                                         </label>
                                         {agentTools.length === 0 ? (
@@ -221,26 +256,25 @@ export const AssistantTargetCard = memo(function AssistantTargetCard({
                                         ) : (
                                             <div className="flex flex-wrap gap-2">
                                                 {agentTools.map((tool: string) => (
-                                                    <span
+                                                    <SettingsBadge
                                                         key={tool}
-                                                        className="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium bg-primary/10 text-primary border border-primary/20"
+                                                        className="border-primary/15 bg-primary/10 text-primary"
                                                     >
                                                         {tool}
-                                                    </span>
+                                                    </SettingsBadge>
                                                 ))}
                                             </div>
                                         )}
-                                    </div>
+                                    </SettingsInset>
 
-                                    {/* System Prompt */}
-                                    <div className="space-y-2">
-                                        <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                                    <SettingsInset className="space-y-2">
+                                        <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                                             {t('settings.skills.systemPrompt')}
                                         </label>
-                                        <div className="rounded-lg border bg-muted/30 p-4 text-sm font-mono text-muted-foreground whitespace-pre-wrap max-h-64 overflow-y-auto">
+                                        <div className="max-h-64 overflow-y-auto rounded-[12px] border border-border/70 bg-background/92 p-4 font-mono text-sm text-muted-foreground whitespace-pre-wrap">
                                             {agent?.systemPrompt || '-'}
                                         </div>
-                                    </div>
+                                    </SettingsInset>
                                 </div>
                             )}
                         </div>

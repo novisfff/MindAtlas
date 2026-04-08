@@ -316,11 +316,11 @@ export function FlowCanvas({ tools, workflowDescription, readOnly = false, float
         selected: edge.id === store.selectedEdgeId,
         data: {
           ...(edge.data && typeof edge.data === 'object' ? edge.data : {}),
-          onDelete: handleDeleteEdge,
+          onDelete: readOnly ? undefined : handleDeleteEdge,
           onSelect: handleSelectEdge,
         },
       })),
-    [handleDeleteEdge, handleSelectEdge, nodeMap, store.edges, store.selectedEdgeId],
+    [handleDeleteEdge, handleSelectEdge, nodeMap, readOnly, store.edges, store.selectedEdgeId],
   )
 
   const quickAddHandleMap = useMemo(() => {
@@ -353,7 +353,7 @@ export function FlowCanvas({ tools, workflowDescription, readOnly = false, float
             id: nextNodeId,
             nodeType: 'tool',
             position: { x: 0, y: 0 },
-            label: payload.toolName,
+            label: toolDef?.displayName ?? payload.toolName,
             toolName: payload.toolName,
             toolDef,
           })
@@ -418,13 +418,14 @@ export function FlowCanvas({ tools, workflowDescription, readOnly = false, float
           ...node.data,
           workflowDescription,
           runtimeStatus: runtimeStatusByNodeId[node.id],
-          quickAddHandles: quickAddHandleMap.get(node.id) ?? [],
-          onQuickAdd: handleQuickAdd,
+          quickAddHandles: readOnly ? [] : (quickAddHandleMap.get(node.id) ?? []),
+          onQuickAdd: readOnly ? undefined : handleQuickAdd,
           quickAddTools: tools,
           floatingUiEpoch,
+          readOnly,
         },
       })),
-    [floatingUiEpoch, handleQuickAdd, quickAddHandleMap, runtimeStatusByNodeId, store.nodes, tools, workflowDescription],
+    [floatingUiEpoch, handleQuickAdd, quickAddHandleMap, readOnly, runtimeStatusByNodeId, store.nodes, tools, workflowDescription],
   )
 
   const onEdgeClick = useCallback(
@@ -488,17 +489,15 @@ export function FlowCanvas({ tools, workflowDescription, readOnly = false, float
 
   const onNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
-      if (readOnly) return
       store.setSelectedNodeId(node.id)
     },
-    [readOnly, store],
+    [store],
   )
 
   const onPaneClick = useCallback(() => {
-    if (readOnly) return
     store.setSelectedNodeId(null)
     store.setSelectedEdgeId(null)
-  }, [readOnly, store])
+  }, [store])
 
   const onDragOver = useCallback((e: React.DragEvent) => {
     if (readOnly) return
@@ -626,7 +625,7 @@ export function FlowCanvas({ tools, workflowDescription, readOnly = false, float
         deleteKeyCode={null}
         nodesDraggable={isEditable}
         nodesConnectable={isEditable}
-        elementsSelectable={isEditable}
+        elementsSelectable
       >
         <Background gap={16} size={1} color="#94a3b8" className="opacity-40" />
         <FlowControls isInteractive={isEditable} onLockChange={setIsInteractive} />

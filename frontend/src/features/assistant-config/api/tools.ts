@@ -25,6 +25,8 @@ export interface OutputParam {
 export interface SystemToolDefinition {
   name: string
   description: string | null
+  displayName: string
+  displayDescription: string | null
   kind: 'local'
   isSystem: true
   enabled: boolean

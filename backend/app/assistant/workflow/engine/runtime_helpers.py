@@ -273,6 +273,8 @@ def wrap_tool_with_db(tool: Any, db_bind: Any) -> Callable:
             tool_func = getattr(tool, "func", None)
             if callable(tool_func):
                 return tool_func(**args)
+            if callable(tool):
+                return tool(**args)
             return tool.invoke(args)
         finally:
             session.close()
@@ -517,6 +519,10 @@ def coerce_start_structured_field_value(field_name: str, field_type_raw: Any, va
         if isinstance(value, bool):
             return value
         raise ValueError(f"start structured field '{field_name}' must be boolean")
+    if field_type == "array":
+        if not isinstance(value, list):
+            raise ValueError(f"start structured field '{field_name}' must be array")
+        return list(value)
     raise ValueError(f"start structured field '{field_name}' has unsupported type: {field_type_raw}")
 
 

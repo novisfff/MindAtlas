@@ -10,7 +10,6 @@ from urllib.request import Request, urlopen
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.assistant_config.system_behavior_runner import SystemAiBehaviorRunInput, SystemAiBehaviorRunner
 from app.common.time import utcnow
 from app.entry.models import Entry, TimeMode
 from app.report.models import MonthlyReport, WeeklyReport
@@ -127,6 +126,11 @@ class WeeklyReportService:
         period_end: date,
         entry_count: int,
     ) -> dict:
+        from app.assistant_config.system_behavior_runner import (
+            SystemAiBehaviorRunInput,
+            SystemAiBehaviorRunner,
+        )
+
         runner = SystemAiBehaviorRunner(self.db)
         return runner.run_report_behavior(
             behavior_key=behavior_key,

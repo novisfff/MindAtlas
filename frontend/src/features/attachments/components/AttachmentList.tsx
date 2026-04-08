@@ -1,5 +1,16 @@
 import { useState } from 'react'
-import { File, Download, Trash2, Image, FileText, Loader2, CheckCircle, AlertCircle, RefreshCw, Eye } from 'lucide-react'
+import {
+  File,
+  Download,
+  Trash2,
+  Image,
+  FileText,
+  Loader2,
+  CheckCircle,
+  AlertCircle,
+  RefreshCw,
+  Eye,
+} from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { Attachment } from '@/types'
 import { getDownloadUrl } from '../api/attachments'
@@ -8,6 +19,7 @@ import { AttachmentPreview } from './AttachmentPreview'
 
 interface AttachmentListProps {
   attachments: Attachment[]
+  compact?: boolean
   onDelete?: (id: string) => void
   onRetry?: (id: string) => void
   onRetryIndex?: (id: string) => void
@@ -24,13 +36,20 @@ function formatFileSize(bytes: number): string {
 
 function getFileIcon(contentType: string) {
   if (contentType.startsWith('image/')) return Image
-  if (contentType.includes('pdf') || contentType.includes('document')) return FileText
+  if (contentType.includes('pdf') || contentType.includes('document'))
+    return FileText
   return File
 }
 
 type KgUiStatusTone = 'muted' | 'info' | 'success' | 'danger'
 
-function KnowledgeStatusBadge({ attachment }: { attachment: Attachment }) {
+function KnowledgeStatusBadge({
+  attachment,
+  compact = false,
+}: {
+  attachment: Attachment
+  compact?: boolean
+}) {
   const { t } = useTranslation()
 
   if (!attachment.indexToKnowledgeGraph) return null
@@ -92,8 +111,11 @@ function KnowledgeStatusBadge({ attachment }: { attachment: Attachment }) {
     <span
       title={title}
       className={cn(
-        'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[11px] leading-none',
-        toneClass
+        'inline-flex items-center rounded-full border leading-none',
+        compact
+          ? 'gap-1 px-1.5 py-0.5 text-[10px]'
+          : 'gap-1.5 px-2 py-0.5 text-[11px]',
+        toneClass,
       )}
     >
       <span className={cn(spin && 'animate-spin')}>{icon}</span>
@@ -102,9 +124,20 @@ function KnowledgeStatusBadge({ attachment }: { attachment: Attachment }) {
   )
 }
 
-export function AttachmentList({ attachments, onDelete, onRetry, onRetryIndex, isDeleting, isRetrying, isRetryingIndex }: AttachmentListProps) {
+export function AttachmentList({
+  attachments,
+  compact = false,
+  onDelete,
+  onRetry,
+  onRetryIndex,
+  isDeleting,
+  isRetrying,
+  isRetryingIndex,
+}: AttachmentListProps) {
   const { t } = useTranslation()
-  const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null)
+  const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(
+    null,
+  )
 
   if (attachments.length === 0) {
     return (
@@ -123,30 +156,52 @@ export function AttachmentList({ attachments, onDelete, onRetry, onRetryIndex, i
             <div
               key={attachment.id}
               className={cn(
-                'flex items-center justify-between p-3 rounded-lg border bg-card',
-                'hover:bg-accent/50 transition-colors'
+                'flex items-center justify-between overflow-hidden rounded-lg border bg-card',
+                compact ? 'p-2.5' : 'p-3',
+                'hover:bg-accent/50 transition-colors',
               )}
             >
-              <div className="flex items-center gap-3 min-w-0">
-                <Icon className="w-5 h-5 text-muted-foreground flex-shrink-0" />
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <p className="text-sm font-medium truncate">
+              <div className="flex min-w-0 flex-1 items-center gap-3">
+                <Icon
+                  className={cn(
+                    'text-muted-foreground flex-shrink-0',
+                    compact ? 'h-[18px] w-[18px]' : 'h-5 w-5',
+                  )}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <p
+                      className={cn(
+                        'min-w-0 flex-1 truncate font-medium',
+                        compact ? 'text-[13px]' : 'text-sm',
+                      )}
+                    >
                       {attachment.originalFilename}
                     </p>
-                    <KnowledgeStatusBadge attachment={attachment} />
+                    <KnowledgeStatusBadge
+                      attachment={attachment}
+                      compact={compact}
+                    />
                   </div>
-                  <p className="text-xs text-muted-foreground">
+                  <p
+                    className={cn(
+                      'text-muted-foreground',
+                      compact ? 'text-[11px]' : 'text-xs',
+                    )}
+                  >
                     {formatFileSize(attachment.size)}
                   </p>
                 </div>
               </div>
-              <div className="flex items-center gap-1">
+              <div className="ml-2 flex shrink-0 items-center gap-1">
                 <button
                   type="button"
                   onClick={() => setPreviewAttachment(attachment)}
                   aria-label="Preview attachment"
-                  className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                  className={cn(
+                    'rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors',
+                    compact ? 'p-1' : 'p-1.5',
+                  )}
                 >
                   <Eye className="w-4 h-4" />
                 </button>
@@ -156,26 +211,44 @@ export function AttachmentList({ attachments, onDelete, onRetry, onRetryIndex, i
                     onClick={() => onRetry(attachment.id)}
                     disabled={isRetrying}
                     aria-label="Retry parse"
-                    className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                    className={cn(
+                      'rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50',
+                      compact ? 'p-1' : 'p-1.5',
+                    )}
                   >
-                    <RefreshCw className={cn("w-4 h-4", isRetrying && "animate-spin")} />
+                    <RefreshCw
+                      className={cn('w-4 h-4', isRetrying && 'animate-spin')}
+                    />
                   </button>
                 )}
-                {attachment.parseStatus === 'completed' && attachment.kgIndexStatus === 'dead' && onRetryIndex && (
-                  <button
-                    type="button"
-                    onClick={() => onRetryIndex(attachment.id)}
-                    disabled={isRetryingIndex}
-                    aria-label="Retry index"
-                    className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
-                  >
-                    <RefreshCw className={cn("w-4 h-4", isRetryingIndex && "animate-spin")} />
-                  </button>
-                )}
+                {attachment.parseStatus === 'completed' &&
+                  attachment.kgIndexStatus === 'dead' &&
+                  onRetryIndex && (
+                    <button
+                      type="button"
+                      onClick={() => onRetryIndex(attachment.id)}
+                      disabled={isRetryingIndex}
+                      aria-label="Retry index"
+                      className={cn(
+                        'rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50',
+                        compact ? 'p-1' : 'p-1.5',
+                      )}
+                    >
+                      <RefreshCw
+                        className={cn(
+                          'w-4 h-4',
+                          isRetryingIndex && 'animate-spin',
+                        )}
+                      />
+                    </button>
+                  )}
                 <a
                   href={getDownloadUrl(attachment.id)}
                   download
-                  className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                  className={cn(
+                    'rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors',
+                    compact ? 'p-1' : 'p-1.5',
+                  )}
                   aria-label="Download attachment"
                 >
                   <Download className="w-4 h-4" />
@@ -187,9 +260,11 @@ export function AttachmentList({ attachments, onDelete, onRetry, onRetryIndex, i
                     disabled={isDeleting}
                     aria-label="Delete attachment"
                     className={cn(
-                      'p-1.5 rounded hover:bg-destructive/10',
+                      compact
+                        ? 'p-1 rounded hover:bg-destructive/10'
+                        : 'p-1.5 rounded hover:bg-destructive/10',
                       'text-muted-foreground hover:text-destructive',
-                      'transition-colors disabled:opacity-50'
+                      'transition-colors disabled:opacity-50',
                     )}
                   >
                     <Trash2 className="w-4 h-4" />

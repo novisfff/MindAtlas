@@ -64,6 +64,8 @@ class SystemToolDefinitionResponse(CamelModel):
     """系统工具完整定义（代码即真相）。"""
     name: str
     description: str | None = None
+    display_name: str = Field(alias="displayName")
+    display_description: str | None = Field(default=None, alias="displayDescription")
     kind: ToolKind = "local"
     is_system: bool = True
     enabled: bool = True

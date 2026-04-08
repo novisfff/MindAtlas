@@ -48,7 +48,7 @@ export function WorkflowDeletableEdge({
 }: EdgeProps) {
   const [hovered, setHovered] = useState(false)
   const edgeData = (data ?? null) as WorkflowDeletableEdgeData | null
-  const showDelete = hovered || selected
+  const showDelete = Boolean(edgeData?.onDelete) && (hovered || selected)
 
   const anchorOverride = edgeData?.anchorOverride
   const resolvedAnchorOverride = isValidAnchorOverride(anchorOverride) ? anchorOverride : null

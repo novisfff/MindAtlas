@@ -3,6 +3,7 @@ import { KeyboardEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Entry } from '@/types'
 import { cn } from '@/lib/utils'
+import { uiChrome, uiRadius } from '@/components/ui/styles'
 
 interface EntryCardProps {
   entry: Entry
@@ -60,7 +61,8 @@ export function EntryCard({ entry, onClick }: EntryCardProps) {
       tabIndex={0}
       aria-label={t('entry.card.viewEntryAria', { title: ariaTitle })}
       className={cn(
-        'group relative flex flex-col justify-between rounded-lg border bg-card text-card-foreground shadow-sm hover:shadow-md transition-shadow cursor-pointer overflow-hidden h-[200px] focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2'
+        uiChrome.card,
+        'group relative flex h-[200px] cursor-pointer flex-col justify-between overflow-hidden transition-shadow hover:shadow-[0_14px_32px_rgba(15,23,42,0.08)] focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2'
       )}
       onClick={() => onClick?.(entry)}
       onKeyDown={handleKeyDown}
@@ -76,7 +78,10 @@ export function EntryCard({ entry, onClick }: EntryCardProps) {
             {entry.title}
           </h3>
           <span
-            className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold transition-colors shrink-0"
+            className={cn(
+              uiRadius.pill,
+              'inline-flex shrink-0 items-center border px-2 py-0.5 text-xs font-semibold transition-colors',
+            )}
             style={{
               backgroundColor: entry.type?.color ? `${entry.type.color}20` : undefined,
               borderColor: entry.type?.color || undefined,

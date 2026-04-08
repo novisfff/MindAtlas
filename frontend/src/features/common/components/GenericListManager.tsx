@@ -1,6 +1,9 @@
 import { useState, ReactNode } from 'react'
 import { Loader2, Plus } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { uiRadius } from '@/components/ui/styles'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { cn } from '@/lib/utils'
 
 interface RowProps {
   isEditing: boolean
@@ -48,26 +51,28 @@ export function GenericListManager<T extends { id: string }>({
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center py-8">
+      <div className="flex items-center justify-center py-12">
         <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
       </div>
     )
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h3 className="font-semibold">{title}</h3>
-        <button
+    <div className="space-y-5">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="space-y-1">
+          <h3 className="text-lg font-semibold text-foreground">{title}</h3>
+          <p className="text-sm text-muted-foreground">{items.length} items</p>
+        </div>
+        <Button
           onClick={() => setIsAdding(true)}
           disabled={isAdding}
-          className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
         >
           <Plus className="w-4 h-4" /> {addButtonText}
-        </button>
+        </Button>
       </div>
 
-      <div className="space-y-2">
+      <div className="space-y-3">
         {isAdding && renderNewRow({
           onCancel: () => setIsAdding(false),
           isSaving
@@ -79,6 +84,11 @@ export function GenericListManager<T extends { id: string }>({
           onDelete: () => setDeleteId(item.id),
           isSaving
         }))}
+        {items.length === 0 && !isAdding ? (
+          <div className={cn(uiRadius.panel, 'border border-dashed border-border/80 bg-muted/20 px-6 py-10 text-center text-sm text-muted-foreground')}>
+            No items yet.
+          </div>
+        ) : null}
       </div>
 
       <ConfirmDialog

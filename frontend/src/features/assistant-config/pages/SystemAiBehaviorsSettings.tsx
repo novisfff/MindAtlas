@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react'
 import {
-  ArrowLeft,
   Bot,
   Check,
   ChevronDown,
@@ -14,8 +13,10 @@ import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { uiChrome } from '@/components/ui/styles'
 import { cn } from '@/lib/utils'
 import type { SystemBehavior } from '../api/system-behaviors'
 import {
@@ -34,6 +35,13 @@ import {
   type AssistantExecutableTarget,
 } from '../components/skillTargetOptions'
 import { ResetDangerConfirmDialog } from '../components/ResetDangerConfirmDialog'
+import {
+  SettingsBadge,
+  SettingsPageHeader,
+  SettingsPageShell,
+  SettingsSection,
+  SettingsInset,
+} from '@/features/settings/components/SettingsShell'
 
 const BEHAVIOR_LOCALE_KEY: Record<SystemBehavior['behaviorKey'], string> = {
   weekly_report_generation: 'weeklyReportGeneration',
@@ -245,49 +253,37 @@ export function SystemAiBehaviorsSettings() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 px-6 py-8">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="space-y-1.5">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => navigate('/settings')}
-              className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
-            >
-              <ArrowLeft className="h-5 w-5" />
-            </button>
-            <h1 className="text-3xl font-bold tracking-tight">
-              {t('pages.settings.systemAiBehaviors')}
-            </h1>
-          </div>
-          <p className="max-w-3xl text-base text-muted-foreground">
-            {t('pages.settings.systemAiBehaviorsDesc')}
-          </p>
-        </div>
-        {behaviors.length > 0 && (
-          <button
+    <SettingsPageShell>
+      <SettingsPageHeader
+        title={t('pages.settings.systemAiBehaviors')}
+        description={t('pages.settings.systemAiBehaviorsDesc')}
+        backAction={{ label: t('common.back'), onClick: () => navigate('/settings') }}
+        actions={behaviors.length > 0 ? (
+          <Button
             type="button"
             onClick={() => setShowResetAllConfirm(true)}
             disabled={loading || resetAllMutation.isPending}
-            className="group flex items-center gap-1.5 self-start px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:text-orange-600 disabled:opacity-50"
-            title={t('settings.systemBehaviors.resetAll')}
+            variant="outline"
+            size="sm"
           >
             {resetAllMutation.isPending ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
-              <RotateCcw className="h-3.5 w-3.5 transition-transform duration-500 group-hover:rotate-180" />
+              <RotateCcw className="h-3.5 w-3.5" />
             )}
             {t('settings.systemBehaviors.resetAll')}
-          </button>
-        )}
-      </div>
+          </Button>
+        ) : null}
+      />
 
-      {loading ? (
-        <div className="flex min-h-[220px] flex-col items-center justify-center gap-4 text-muted-foreground">
-          <Loader2 className="h-8 w-8 animate-spin text-primary" />
-          <p className="text-sm">{t('messages.loading')}</p>
-        </div>
-      ) : (
-        <div className="grid gap-4">
+      <SettingsSection className="space-y-4">
+        {loading ? (
+          <div className="flex min-h-[220px] flex-col items-center justify-center gap-4 text-muted-foreground">
+            <Loader2 className="h-8 w-8 animate-spin text-primary" />
+            <p className="text-sm">{t('messages.loading')}</p>
+          </div>
+        ) : (
+          <div className="grid gap-4">
           {behaviors.map((behavior) => {
             const localeKey = BEHAVIOR_LOCALE_KEY[behavior.behaviorKey]
             const availableTargets = targetsByBehavior.get(behavior.behaviorKey) ?? []
@@ -314,16 +310,17 @@ export function SystemAiBehaviorsSettings() {
               <section
                 key={behavior.behaviorKey}
                 className={cn(
-                  "overflow-hidden rounded-[24px] border bg-card transition-all duration-300",
-                  isExpanded ? "shadow-md ring-1 ring-border/50" : "shadow-sm hover:shadow-md hover:border-primary/20",
+                  uiChrome.card,
+                  "overflow-hidden transition-all duration-300",
+                  isExpanded ? "border-primary/20 ring-1 ring-primary/10" : "hover:border-primary/20",
                 )}
               >
                 <button
                   type="button"
                   onClick={() => toggleBehavior(behavior.behaviorKey)}
-                  className="w-full text-left transition-colors hover:bg-muted/30"
+                  className="w-full text-left transition-colors hover:bg-muted/25"
                 >
-                  <div className="flex items-start justify-between gap-4 p-5 sm:p-6 sm:pb-5">
+                  <div className="flex items-start justify-between gap-4 px-5 py-5 sm:px-6">
                     <div className="min-w-0 flex-1 space-y-2">
                       <div className="flex flex-wrap items-center gap-2.5">
                         <h2 className="text-[1.1rem] font-semibold tracking-tight text-foreground">
@@ -332,13 +329,13 @@ export function SystemAiBehaviorsSettings() {
                           })}
                         </h2>
                         {behavior.currentBinding.isCanonicalDefault && (
-                          <span className="inline-flex items-center rounded-full bg-amber-500/15 px-2.5 py-0.5 text-[11px] font-medium text-amber-600 dark:bg-amber-500/20 dark:text-amber-400">
+                          <SettingsBadge className="border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">
                             {t('settings.skills.systemDefaultTarget')}
-                          </span>
+                          </SettingsBadge>
                         )}
-                        <span className="inline-flex items-center rounded-full bg-muted/60 px-2.5 py-0.5 text-[11px] font-medium text-muted-foreground border">
+                        <SettingsBadge>
                           {targetTypeLabel(behavior.currentBinding.targetType)}
-                        </span>
+                        </SettingsBadge>
                       </div>
 
                       <p className="max-w-3xl line-clamp-2 text-[13px] leading-relaxed text-muted-foreground">
@@ -348,8 +345,8 @@ export function SystemAiBehaviorsSettings() {
                       </p>
 
                       {!isExpanded && (
-                        <div className="flex flex-wrap gap-2 pt-1.5 animate-in fade-in slide-in-from-top-1 duration-200">
-                          <div className="inline-flex max-w-full items-center gap-2 rounded-full border bg-muted/10 px-3 py-1 text-xs shadow-sm">
+                        <div className="animate-in fade-in slide-in-from-top-1 flex flex-wrap gap-2 pt-1.5 duration-200">
+                          <SettingsBadge className="max-w-full gap-2">
                             <span className="text-muted-foreground/80">
                               {t('settings.systemBehaviors.currentBinding')}
                             </span>
@@ -359,14 +356,15 @@ export function SystemAiBehaviorsSettings() {
                             >
                               {behavior.currentBinding.name}
                             </span>
-                          </div>
+                          </SettingsBadge>
                         </div>
                       )}
                     </div>
 
                     <div className={cn(
-                      "flex shrink-0 items-center justify-center gap-1.5 rounded-full border px-3 py-1.5 text-[12px] font-medium transition-colors md:px-3.5",
-                      isExpanded ? "bg-muted/40 text-foreground border-border/80" : "bg-background text-muted-foreground hover:bg-muted/60"
+                      uiChrome.control,
+                      "flex shrink-0 items-center justify-center gap-1.5 px-3 py-1.5 text-[12px] font-medium shadow-none md:px-3.5",
+                      isExpanded ? "bg-muted/50 text-foreground" : "text-muted-foreground hover:bg-muted/60"
                     )}>
                       <span className="hidden md:inline">{t(isExpanded ? 'actions.collapse' : 'actions.expand')}</span>
                       <ChevronDown
@@ -380,30 +378,28 @@ export function SystemAiBehaviorsSettings() {
                 </button>
 
                 {isExpanded && (
-                  <div className="border-t bg-slate-50/40 p-5 sm:p-6 animate-in slide-in-from-top-2 duration-300 dark:bg-muted/5">
+                  <div className="animate-in border-t border-border/70 px-5 py-5 slide-in-from-top-2 duration-300 sm:px-6">
                     <div className="space-y-5">
-                      {/* Box 1: Current Binding */}
-                      <div className="rounded-[20px] border border-border/60 bg-background p-5 shadow-sm transition-all hover:shadow-md">
+                      <SettingsInset className="space-y-4 p-5">
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                           <div className="flex items-center gap-2 text-[13px] font-medium text-muted-foreground">
                             <span className="h-4 w-1 rounded-full bg-primary/40"></span>
                             {t('settings.systemBehaviors.currentBinding')}
                           </div>
                           <div className="flex items-center gap-2">
-                            <Badge variant="secondary" className="rounded-md font-medium px-2 py-0 border shadow-sm bg-muted/40 text-muted-foreground">
+                            <SettingsBadge>
                               {targetTypeLabel(behavior.currentBinding.targetType)}
-                            </Badge>
+                            </SettingsBadge>
                           </div>
                         </div>
-                        <div className="mt-4 flex min-h-[56px] items-center rounded-2xl border border-muted-foreground/15 bg-muted/10 px-4 py-3 shadow-inner">
+                        <div className={cn(uiChrome.control, "flex min-h-[56px] items-center px-4 py-3 shadow-none")}>
                           <div className="truncate text-base font-semibold tracking-tight text-foreground" title={behavior.currentBinding.name}>
                             {behavior.currentBinding.name}
                           </div>
                         </div>
-                      </div>
+                      </SettingsInset>
 
-                      {/* Box 2: Settings */}
-                      <aside className="rounded-[20px] border border-border/60 bg-background p-5 shadow-sm transition-all hover:shadow-md">
+                      <SettingsInset className="space-y-6 p-5">
                         <div className="flex flex-col gap-6">
                           <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                             <div className="space-y-1.5">
@@ -412,15 +408,22 @@ export function SystemAiBehaviorsSettings() {
                               </div>
                               <p className="text-[13px] text-muted-foreground max-w-xl leading-relaxed">
                                 {t('settings.systemBehaviors.bindingSettingsDesc')}
-                                <br/>
+                                <br />
                                 {t('settings.systemBehaviors.createExampleWorkflowHint')}
                               </p>
+                              {(behavior.currentBinding.isCanonicalDefault || currentTarget?.isSystem) && (
+                                <div className="rounded-[12px] border border-amber-200 bg-amber-50/90 px-4 py-3 text-[13px] leading-6 text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">
+                                  {t('settings.skills.systemTargetBindingHint')}
+                                </div>
+                              )}
                             </div>
-                            <button
+                            <Button
                               type="button"
                               onClick={() => handleCreateExampleWorkflow(behavior)}
                               disabled={isMutating}
-                              className="inline-flex h-[36px] shrink-0 items-center justify-center gap-1.5 rounded-lg border border-border bg-background px-3 text-[13px] font-medium shadow-sm transition-all hover:bg-muted hover:text-foreground disabled:opacity-50"
+                              variant="outline"
+                              size="sm"
+                              className="shrink-0"
                             >
                               {createExampleWorkflowMutation.isPending ? (
                                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -428,7 +431,7 @@ export function SystemAiBehaviorsSettings() {
                                 <Plus className="h-3.5 w-3.5" />
                               )}
                               {t('settings.systemBehaviors.createExampleWorkflow')}
-                            </button>
+                            </Button>
                           </div>
 
                           <div className="space-y-3">
@@ -444,10 +447,13 @@ export function SystemAiBehaviorsSettings() {
                                 <button
                                   type="button"
                                   disabled={isMutating}
-                                  className="group flex min-h-[72px] w-full items-center justify-between gap-4 rounded-2xl border border-border/80 bg-background px-4 py-2.5 text-left shadow-sm transition-all hover:border-primary/40 hover:bg-muted/20 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50"
+                                  className={cn(
+                                    uiChrome.control,
+                                    "group flex min-h-[72px] w-full items-center justify-between gap-4 px-4 py-2.5 text-left shadow-none transition-all hover:border-primary/25 hover:bg-muted/20 focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50"
+                                  )}
                                 >
                                   <div className="flex items-center gap-4 min-w-0">
-                                    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[14px] bg-muted/50 border border-border/50 text-muted-foreground group-hover:bg-primary/5 group-hover:text-primary transition-colors">
+                                    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-muted/50 text-muted-foreground transition-colors group-hover:bg-primary/5 group-hover:text-primary">
                                       {(currentTarget?.type ?? behavior.currentBinding.targetType) === 'workflow' ? (
                                         <Workflow className="h-5 w-5" />
                                       ) : (
@@ -470,7 +476,7 @@ export function SystemAiBehaviorsSettings() {
                                     </div>
                                   </div>
 
-                                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border bg-background text-muted-foreground shadow-sm transition-all group-hover:bg-muted/50 group-hover:border-border">
+                                  <div className={cn(uiChrome.control, "flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted-foreground shadow-none transition-all group-hover:bg-muted/50")}>
                                     <ChevronDown className="h-4 w-4 transition-transform group-data-[state=open]:rotate-180" />
                                   </div>
                                 </button>
@@ -478,7 +484,7 @@ export function SystemAiBehaviorsSettings() {
                               <PopoverContent
                                 align="start"
                                 sideOffset={8}
-                                className="w-[min(560px,calc(100vw-3rem))] rounded-2xl p-2 shadow-xl"
+                                className="w-[min(560px,calc(100vw-3rem))] p-2"
                               >
                                 <div className="border-b px-3 pb-3 pt-2">
                                   <div className="text-[14px] font-semibold text-foreground">
@@ -497,19 +503,20 @@ export function SystemAiBehaviorsSettings() {
                                         key={target.key}
                                         type="button"
                                         disabled={!target.bindable && target.key !== SYSTEM_DEFAULT_TARGET_KEY}
-                                        onClick={() => handleSelectTarget(behavior, target)}
-                                        className={cn(
-                                          'flex w-full items-start gap-4 rounded-xl border px-3 py-3 text-left transition-all',
+                                      onClick={() => handleSelectTarget(behavior, target)}
+                                      className={cn(
+                                          uiChrome.control,
+                                          'flex w-full items-start gap-4 px-3 py-3 text-left shadow-none transition-all',
                                           isSelected
-                                            ? 'border-primary/25 bg-primary/5 shadow-sm'
-                                            : 'border-transparent bg-background hover:bg-muted/40',
+                                            ? 'border-primary/25 bg-primary/5'
+                                            : 'border-transparent bg-transparent hover:bg-muted/40',
                                           !target.bindable && target.key !== SYSTEM_DEFAULT_TARGET_KEY
                                             ? 'cursor-not-allowed opacity-50 grayscale'
                                             : 'cursor-pointer',
                                         )}
                                       >
                                         <div className={cn(
-                                          'mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] border',
+                                          'mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full',
                                           isSelected ? 'border-primary/20 bg-primary/10 text-primary' : 'border-transparent bg-muted/60 text-muted-foreground',
                                         )}>
                                           <Icon className="h-4 w-4" />
@@ -523,13 +530,13 @@ export function SystemAiBehaviorsSettings() {
                                             >
                                               {target.name}
                                             </span>
-                                            <Badge variant="outline" className="font-normal text-[10px] uppercase tracking-wide leading-none px-1.5 py-0.5 opacity-80">
+                                            <SettingsBadge className="text-[10px] uppercase tracking-wide opacity-80">
                                               {targetTypeLabel(target.type)}
-                                            </Badge>
+                                            </SettingsBadge>
                                             {target.key === SYSTEM_DEFAULT_TARGET_KEY && (
-                                              <Badge variant="secondary" className="font-normal text-[10px] uppercase tracking-wide leading-none px-1.5 py-0.5 bg-amber-500/10 text-amber-600 border border-amber-500/20">
+                                              <SettingsBadge className="border-amber-200 bg-amber-50 text-[10px] uppercase tracking-wide text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">
                                                 {t('settings.skills.systemDefaultTarget')}
-                                              </Badge>
+                                              </SettingsBadge>
                                             )}
                                           </div>
 
@@ -552,16 +559,18 @@ export function SystemAiBehaviorsSettings() {
                           </div>
 
                           <div className="grid gap-3 sm:grid-cols-2">
-                            <button
+                            <Button
                               type="button"
                               onClick={() => openTarget(behavior.currentBinding.targetType, behavior.currentBinding.id)}
-                              className="group inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-border/80 bg-background px-4 text-[13px] font-medium text-muted-foreground shadow-sm transition-all hover:bg-muted/40 hover:text-foreground hover:shadow-md"
+                              variant="outline"
+                              className="group h-11 justify-center text-[13px] text-muted-foreground hover:text-foreground"
                             >
                               <ExternalLink className="h-4 w-4 transition-transform group-hover:scale-110" />
                               {t('settings.systemBehaviors.editTarget')}
-                            </button>
+                            </Button>
 
-                            <button
+                            <Button
+                              type="button"
                               onClick={() => setResetBehaviorPrompt({
                                 behaviorKey: behavior.behaviorKey,
                                 behaviorName: t(`settings.systemBehaviors.behaviors.${localeKey}.title`, {
@@ -569,20 +578,20 @@ export function SystemAiBehaviorsSettings() {
                                 }),
                               })}
                               disabled={resetDisabled}
-                              className="group inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-border/80 bg-background px-4 text-[13px] font-medium text-foreground shadow-sm transition-all hover:bg-muted/40 hover:shadow-md disabled:opacity-50"
+                              variant="outline"
+                              className="group h-11 justify-center text-[13px]"
                             >
                               <RotateCcw className={cn(
                                 "h-4 w-4 transition-all duration-300",
                                 !resetDisabled && "group-hover:-rotate-180"
                               )} />
                               {t('settings.systemBehaviors.resetToDefault')}
-                            </button>
+                            </Button>
                           </div>
                         </div>
-                      </aside>
+                      </SettingsInset>
 
-                      {/* Box 3: Contract Summary */}
-                      <div className="rounded-[20px] border border-border/60 bg-background p-5 shadow-sm transition-all hover:shadow-md">
+                      <SettingsInset className="space-y-4 p-5">
                         <div className="flex flex-col gap-1.5">
                           <div className="flex items-center gap-2 text-[15px] font-bold text-foreground">
                             {t('settings.systemBehaviors.contractSummary')}
@@ -593,47 +602,47 @@ export function SystemAiBehaviorsSettings() {
                         </div>
 
                         <div className="mt-5 grid gap-4 md:grid-cols-2">
-                          <div className="rounded-xl border border-muted/50 bg-slate-50/50 p-4 dark:bg-muted/10">
+                          <div className={cn(uiChrome.control, 'p-4 shadow-none')}>
                             <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.2em] text-muted-foreground mb-3">
                               <span className="w-1.5 h-1.5 rounded-full bg-blue-500/60"></span>
                               {t('settings.systemBehaviors.contractInput')}
                             </div>
                             <div className="flex flex-wrap gap-2">
                               {behavior.contract.inputFields.map((field) => (
-                                <span
+                                <SettingsBadge
                                   key={field.name}
-                                  className="inline-flex items-center rounded-md border border-border/50 bg-background px-2.5 py-1 text-[12px] font-medium text-foreground shadow-sm"
+                                  className="rounded-[12px] border-border/70 bg-background/92 px-2.5 py-1 text-[12px] font-medium text-foreground"
                                 >
                                   {field.name}
                                   <span className="ml-1.5 text-[11px] text-muted-foreground/70 font-mono scale-90">
                                     {formatFieldType(field)}
                                   </span>
-                                </span>
+                                </SettingsBadge>
                               ))}
                             </div>
                           </div>
 
-                          <div className="rounded-xl border border-muted/50 bg-slate-50/50 p-4 dark:bg-muted/10">
+                          <div className={cn(uiChrome.control, 'p-4 shadow-none')}>
                             <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.2em] text-muted-foreground mb-3">
                               <span className="w-1.5 h-1.5 rounded-full bg-green-500/60"></span>
                               {t('settings.systemBehaviors.contractOutput')}
                             </div>
                             <div className="flex flex-wrap gap-2">
                               {behavior.contract.outputFields.map((field) => (
-                                <span
+                                <SettingsBadge
                                   key={field.name}
-                                  className="inline-flex items-center rounded-md border border-border/50 bg-background px-2.5 py-1 text-[12px] font-medium text-foreground shadow-sm"
+                                  className="rounded-[12px] border-border/70 bg-background/92 px-2.5 py-1 text-[12px] font-medium text-foreground"
                                 >
                                   {field.name}
                                   <span className="ml-1.5 text-[11px] text-muted-foreground/70 font-mono scale-90">
                                     {formatFieldType(field)}
                                   </span>
-                                </span>
+                                </SettingsBadge>
                               ))}
                             </div>
                           </div>
                         </div>
-                      </div>
+                      </SettingsInset>
                     </div>
                   </div>
                 )}
@@ -641,7 +650,8 @@ export function SystemAiBehaviorsSettings() {
             )
           })}
         </div>
-      )}
+        )}
+      </SettingsSection>
 
       <ConfirmDialog
         isOpen={!!createdExamplePrompt}
@@ -685,6 +695,6 @@ export function SystemAiBehaviorsSettings() {
           void handleResetAll()
         }}
       />
-    </div>
+    </SettingsPageShell>
   )
 }

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timezone
 import time
-from typing import Callable
+from typing import Any, Callable
 
 
 def _utc_iso_now() -> str:
@@ -62,7 +62,7 @@ class ChatEventAdapter:
     def on_tool_call_start(
         self,
         tool_call_id: str,
-        name: str,
+        tool_name: str,
         args: dict,
         hidden: bool = False,
         node_id: str = "",
@@ -72,7 +72,10 @@ class ChatEventAdapter:
         tool_call_index: int | None = None,
         tool_kind: str = "",
         started_at: str | None = None,
+        name: str = "",
+        **_extra: Any,
     ) -> None:
+        effective_name = str(tool_name or name or "").strip()
         hidden = bool(hidden)
         effective_started_at = started_at or _utc_iso_now()
         self._tool_started_at[tool_call_id] = effective_started_at
@@ -80,7 +83,7 @@ class ChatEventAdapter:
 
         payload = {
             "id": tool_call_id,
-            "name": name,
+            "name": effective_name,
             "args": args,
             "hidden": hidden,
             "startedAt": effective_started_at,
@@ -106,7 +109,7 @@ class ChatEventAdapter:
             "tool_call_start",
             {
                 "toolCallId": tool_call_id,
-                "name": name,
+                "name": effective_name,
                 "args": args,
                 "hidden": hidden,
                 "startedAt": effective_started_at,
@@ -133,6 +136,7 @@ class ChatEventAdapter:
         started_at: str | None = None,
         ended_at: str | None = None,
         duration_ms: int | None = None,
+        **_extra: Any,
     ) -> None:
         effective_started_at = started_at or self._tool_started_at.pop(tool_call_id, None)
         started_perf = self._tool_started_perf.pop(tool_call_id, None)

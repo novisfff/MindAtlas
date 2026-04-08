@@ -7,8 +7,16 @@ import {
     useDeleteModelMutation,
     useDiscoverModelsByCredentialMutation,
 } from '../queries'
+import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
+import { uiChrome, uiField } from '@/components/ui/styles'
+import {
+    SettingsBadge,
+    SettingsEmptyState,
+    SettingsSectionHeader,
+} from '@/features/settings/components/SettingsShell'
+import { cn } from '@/lib/utils'
 import type { AiCredential } from '../api/credentials'
 import type { AiModelType } from '../api/models'
 
@@ -82,49 +90,54 @@ export function ProviderModels({ credential }: ProviderModelsProps) {
     }
 
     return (
-        <div className="space-y-4 max-w-2xl">
-            <div className="flex items-center justify-between">
-                <div>
-                    <h3 className="text-lg font-medium">{t('settings.ai.sections.models')}</h3>
-                    <p className="text-sm text-muted-foreground">{t('aiProvider.availableModels')}</p>
-                </div>
-                <button
-                    onClick={() => setIsAdding(true)}
-                    className="inline-flex items-center gap-2 px-3 py-1.5 bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/80 text-sm font-medium transition-colors"
-                >
-                    <Plus className="w-4 h-4" />
-                    {t('settings.ai.addModel')}
-                </button>
-            </div>
+        <div className="space-y-4">
+            <SettingsSectionHeader
+                title={t('settings.ai.sections.models')}
+                description={t('aiProvider.availableModels')}
+                actions={
+                    <Button onClick={() => setIsAdding(true)}>
+                        <Plus className="h-4 w-4" />
+                        {t('settings.ai.addModel')}
+                    </Button>
+                }
+            />
 
-            <div className="border rounded-xl bg-card">
+            <div className={cn(uiChrome.card, 'overflow-hidden')}>
                 {models.length === 0 ? (
-                    <div className="p-8 text-center text-muted-foreground text-sm">
-                        {t('aiProvider.noModels')}
+                    <div className="p-6">
+                        <SettingsEmptyState
+                            title={t('aiProvider.noModels')}
+                            description={t('settings.ai.addModel')}
+                        />
                     </div>
                 ) : (
                     <div className="divide-y">
                         {models.map((model) => (
-                            <div key={model.id} className="flex items-center justify-between p-3 hover:bg-muted/50 transition-colors">
-                                <div className="flex items-center gap-3">
-                                    <div className="p-2 bg-primary/10 rounded-md text-primary">
+                            <div key={model.id} className="flex items-center justify-between gap-4 px-4 py-3 transition-colors hover:bg-muted/25">
+                                <div className="min-w-0 flex items-center gap-3">
+                                    <div className="rounded-full bg-primary/10 p-2 text-primary">
                                         {model.modelType === 'embedding' ? (
                                             <BrainCircuit className="w-4 h-4" />
                                         ) : (
                                             <Bot className="w-4 h-4" />
                                         )}
                                     </div>
-                                    <div>
-                                        <div className="font-medium">{model.name}</div>
-                                        <div className="text-xs text-muted-foreground capitalize">{model.modelType}</div>
+                                    <div className="min-w-0">
+                                        <div className="truncate font-medium text-foreground">{model.name}</div>
+                                        <div className="mt-1 flex flex-wrap items-center gap-2">
+                                            <SettingsBadge className="capitalize">{model.modelType}</SettingsBadge>
+                                        </div>
                                     </div>
                                 </div>
-                                <button
+                                <Button
+                                    type="button"
                                     onClick={() => setDeleteId(model.id)}
-                                    className="p-2 text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-md transition-colors"
+                                    variant="ghost"
+                                    size="icon"
+                                    className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                                 >
-                                    <Trash2 className="w-4 h-4" />
-                                </button>
+                                    <Trash2 className="h-4 w-4" />
+                                </Button>
                             </div>
                         ))}
                     </div>
@@ -147,24 +160,39 @@ export function ProviderModels({ credential }: ProviderModelsProps) {
                                     value={newModelName}
                                     onChange={(e) => setNewModelName(e.target.value)}
                                     placeholder={t('settings.ai.modelName') + "..."}
-                                    className="w-full px-3 py-2 border rounded-md pr-24"
+                                    className={cn(uiField.input, 'pr-28')}
                                 />
-                                <button
+                                <Button
+                                    type="button"
                                     onClick={handleFetchModels}
                                     disabled={isFetching}
-                                    className="absolute right-1 top-1 bottom-1 px-3 text-xs bg-muted hover:bg-muted/80 rounded flex items-center gap-1 transition-colors"
+                                    variant="outline"
+                                    size="sm"
+                                    className="absolute bottom-1 right-1 top-1 h-auto"
                                 >
-                                    {isFetching ? <Search className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+                                    {isFetching ? <Search className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
                                     {isFetching ? t('aiProvider.fetching') : t('aiProvider.fetchList')}
-                                </button>
+                                </Button>
                             </div>
                             {fetchError && (
                                 <p className="text-xs text-destructive">{fetchError}</p>
                             )}
                         </div>
 
+                        <div className="space-y-2">
+                            <label className="text-sm font-medium">{t('settings.ai.modelType', { defaultValue: 'Model Type' })}</label>
+                            <select
+                                value={newModelType}
+                                onChange={(event) => setNewModelType(event.target.value as AiModelType)}
+                                className={uiField.select}
+                            >
+                                <option value="llm">LLM</option>
+                                <option value="embedding">Embedding</option>
+                            </select>
+                        </div>
+
                         {fetchedModels.length > 0 && (
-                            <div className="space-y-2 border rounded-md p-2 max-h-40 overflow-y-auto bg-muted/30">
+                            <div className="max-h-40 space-y-2 overflow-y-auto rounded-[12px] border border-border/75 bg-muted/30 p-2">
                                 <div className="text-xs text-muted-foreground px-1 pb-1">{t('aiProvider.selectFromFetched')}</div>
                                 <div className="grid gap-1">
                                     {fetchedModels.map((m) => (
@@ -175,9 +203,11 @@ export function ProviderModels({ credential }: ProviderModelsProps) {
                                                 // Defaulting to LLM as per requirement, ignoring suggested type for now
                                                 // setNewModelType(m.suggestedType) 
                                             }}
-                                            className={`text-left text-sm px-2 py-1.5 rounded flex items-center justify-between hover:bg-primary/10 transition-colors
-                                        ${newModelName === m.name ? 'bg-primary/10 text-primary font-medium' : ''}
-                                    `}
+                                            className={cn(
+                                                uiChrome.control,
+                                                'flex items-center justify-between px-2 py-2 text-left text-sm shadow-none transition-colors',
+                                                newModelName === m.name ? 'border-primary/20 bg-primary/8 text-primary' : 'hover:bg-muted/60'
+                                            )}
                                         >
                                             <span>{m.name}</span>
                                             {newModelName === m.name && <Check className="w-3 h-3" />}
@@ -189,19 +219,20 @@ export function ProviderModels({ credential }: ProviderModelsProps) {
                     </div>
 
                     <DialogFooter>
-                        <button
+                        <Button
+                            type="button"
                             onClick={handleCloseAdd}
-                            className="px-4 py-2 text-sm font-medium hover:bg-muted rounded-md transition-colors"
+                            variant="outline"
                         >
                             {t('actions.cancel')}
-                        </button>
-                        <button
+                        </Button>
+                        <Button
+                            type="button"
                             onClick={handleAddModel}
                             disabled={!newModelName || createMutation.isPending}
-                            className="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
                         >
                             {createMutation.isPending ? t('messages.loading') : t('actions.add')}
-                        </button>
+                        </Button>
                     </DialogFooter>
                 </DialogContent>
             </Dialog>

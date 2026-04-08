@@ -13,11 +13,18 @@ const TOOL_KEYS: Record<string, string> = {
   search_entries: 'searchEntries',
   get_entry_detail: 'getEntryDetail',
   create_entry: 'createEntry',
+  update_entry: 'updateEntry',
+  create_relation: 'createRelation',
+  query_knowledge_graph: 'queryKnowledgeGraph',
+  generate_weekly_report: 'generateWeeklyReport',
+  generate_monthly_report: 'generateMonthlyReport',
   get_statistics: 'getStatistics',
   get_entries_by_time_range: 'getEntriesByTimeRange',
   analyze_activity: 'analyzeActivity',
+  get_tag_statistics: 'getTagStatistics',
   list_entry_types: 'listEntryTypes',
   list_tags: 'listTags',
+  kb_relation_recommendations: 'kbRelationRecommendations',
 }
 
 export function ToolCallDisplay({ toolCalls, variant = 'default' }: ToolCallDisplayProps) {

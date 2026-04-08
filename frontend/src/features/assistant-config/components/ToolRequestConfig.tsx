@@ -1,5 +1,8 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { Button } from '@/components/ui/button'
+import { uiChrome, uiField } from '@/components/ui/styles'
+import { cn } from '@/lib/utils'
 import { KeyValueEditor, type KeyValuePair } from './KeyValueEditor'
 import { RichMentionInput } from './RichMentionInput'
 import type { AuthType, BodyType, InputParam } from '../api/tools'
@@ -57,15 +60,15 @@ export function ToolRequestConfig({
   const [activeTab, setActiveTab] = useState<TabType>('params')
 
   return (
-    <div className="p-6 space-y-8 flex-1 overflow-y-auto custom-scrollbar">
-      {/* Request URL Block */}
+    <div className="space-y-6">
       <div className="space-y-4">
-        <h4 className="font-medium text-sm text-foreground/80">{t('settings.tools.requestConfig')}</h4>
-        <div className="flex rounded-md shadow-sm">
+        <h4 className="text-sm font-semibold text-foreground">{t('settings.tools.requestConfig')}</h4>
+        <div className={cn(uiChrome.inset, 'space-y-4 p-4')}>
+          <div className="grid gap-3 sm:grid-cols-[120px_minmax(0,1fr)]">
           <select
             value={httpMethod}
             onChange={(e) => onHttpMethodChange(e.target.value)}
-            className="rounded-l-md border-r-0 border-input bg-muted/40 px-3 py-2 text-sm font-medium focus:ring-1 focus:ring-primary/20 w-24"
+              className={uiField.select}
           >
             {HTTP_METHODS.map((m) => (
               <option key={m} value={m}>{m}</option>
@@ -76,22 +79,22 @@ export function ToolRequestConfig({
             value={endpointUrl}
             onChange={(e) => onEndpointUrlChange(e.target.value)}
             required
-            className="flex-1 rounded-r-md border-input bg-background px-4 py-2 text-sm font-mono focus:ring-1 focus:ring-primary/20"
+              className={cn(uiField.input, 'font-mono')}
             placeholder="https://api.example.com/v1/resource"
           />
+          </div>
         </div>
       </div>
 
-      {/* Auth Config */}
       <div className="space-y-4">
-        <h4 className="font-medium text-sm text-foreground/80">{t('settings.tools.authConfig')}</h4>
-        <div className="p-4 rounded-lg border bg-muted/10 space-y-4">
+        <h4 className="text-sm font-semibold text-foreground">{t('settings.tools.authConfig')}</h4>
+        <div className={cn(uiChrome.inset, 'space-y-4 p-4')}>
           <div className="grid grid-cols-1 gap-1.5">
             <label className="text-xs font-medium text-muted-foreground">{t('settings.tools.authType')}</label>
             <select
               value={authType}
               onChange={(e) => onAuthTypeChange(e.target.value as AuthType)}
-              className="w-full px-3 py-2 rounded-md border bg-background text-sm"
+              className={uiField.select}
             >
               {AUTH_TYPES.map((at) => (
                 <option key={at} value={at}>{at}</option>
@@ -108,7 +111,7 @@ export function ToolRequestConfig({
                     value={apiKey}
                     onChange={(e) => onApiKeyChange(e.target.value)}
                     placeholder="Bearer Token"
-                    className="w-full px-3 py-2 rounded-md border bg-background text-sm font-mono"
+                    className={cn(uiField.input, 'font-mono')}
                   />
                 </div>
               )}
@@ -121,7 +124,7 @@ export function ToolRequestConfig({
                       value={authHeaderName}
                       onChange={(e) => onAuthHeaderNameChange(e.target.value)}
                       placeholder="X-API-Key"
-                      className="w-full px-3 py-2 rounded-md border bg-background text-sm"
+                      className={uiField.input}
                     />
                   </div>
                   <div className="space-y-1.5">
@@ -131,7 +134,7 @@ export function ToolRequestConfig({
                       value={apiKey}
                       onChange={(e) => onApiKeyChange(e.target.value)}
                       placeholder="Key Value"
-                      className="w-full px-3 py-2 rounded-md border bg-background text-sm"
+                      className={cn(uiField.input, 'font-mono')}
                     />
                   </div>
                 </div>
@@ -141,22 +144,22 @@ export function ToolRequestConfig({
         </div>
       </div>
 
-      {/* Request Details (Tabs) */}
       <div className="space-y-4">
-        <div className="flex border-b gap-6">
+        <div className="flex flex-wrap gap-2">
           {(['params', 'body', 'headers'] as const).map((tab) => (
-            <button
+            <Button
               key={tab}
               type="button"
               onClick={() => setActiveTab(tab)}
-              className={`text-sm font-medium pb-2 border-b-2 transition-colors ${activeTab === tab ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'}`}
+              variant={activeTab === tab ? 'secondary' : 'ghost'}
+              size="sm"
             >
               {tab === 'params' ? 'Params' : tab === 'body' ? 'Body' : 'Headers'}
-            </button>
+            </Button>
           ))}
         </div>
 
-        <div className="min-h-[200px]">
+        <div className={cn(uiChrome.inset, 'min-h-[220px] p-4')}>
           {activeTab === 'params' && (
             <KeyValueEditor
               pairs={queryParams}
@@ -179,16 +182,18 @@ export function ToolRequestConfig({
 
           {activeTab === 'body' && (
             <div className="space-y-3">
-              <div className="flex items-center gap-1 bg-muted/40 p-1 rounded-md inline-flex">
+              <div className={cn(uiChrome.control, 'inline-flex items-center gap-1 p-1 shadow-none')}>
                 {BODY_TYPES.map((bt) => (
-                  <button
+                  <Button
                     key={bt}
                     type="button"
                     onClick={() => onBodyTypeChange(bt)}
-                    className={`px-3 py-1 text-xs rounded font-medium transition-all ${bodyType === bt ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+                    variant={bodyType === bt ? 'secondary' : 'ghost'}
+                    size="sm"
+                    className="capitalize"
                   >
                     {bt}
-                  </button>
+                  </Button>
                 ))}
               </div>
               {bodyType !== 'none' && (
@@ -200,6 +205,7 @@ export function ToolRequestConfig({
                     multiline
                     rows={8}
                     className="w-full font-mono text-sm"
+                    inputClassName={cn(uiField.textarea, 'min-h-[220px] font-mono')}
                     placeholder={bodyType === 'json' ? '{\n  "key": "value"\n}' : ''}
                   />
                   <div className="absolute right-2 bottom-2 text-xs text-muted-foreground pointer-events-none">
@@ -208,7 +214,7 @@ export function ToolRequestConfig({
                 </div>
               )}
               {bodyType === 'none' && (
-                <div className="flex items-center justify-center h-32 border-2 border-dashed rounded-lg bg-muted/10 text-muted-foreground text-sm">
+                <div className="flex h-32 items-center justify-center rounded-[12px] border border-dashed border-border/75 bg-background/72 text-sm text-muted-foreground">
                   No Body Content
                 </div>
               )}

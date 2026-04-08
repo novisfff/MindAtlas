@@ -34,6 +34,7 @@ from app.assistant.workflow.human_approval_runtime import (
     list_pending_approvals_for_conversation,
     submit_human_approval_decision,
 )
+from app.assistant.workflow.engine.runtime_helpers import invoke_callback
 from app.common.request_context import reset_request_locale, set_request_locale
 from app.common.exceptions import ApiException
 from app.common.time import utcnow
@@ -532,7 +533,10 @@ class AssistantService:
         def _wrap_event_callback(fn: Callable[..., None]) -> Callable[..., None]:
             def _wrapped(*args: Any, **kwargs: Any) -> None:
                 with state_lock:
-                    fn(*args, **kwargs)
+                    if args:
+                        fn(*args, **kwargs)
+                        return
+                    invoke_callback(fn, **kwargs)
 
             return _wrapped
 

@@ -6,6 +6,7 @@ import {
   ArrowLeft,
   Bot,
   BrainCircuit,
+  Copy,
   Eraser,
   History,
   Play,
@@ -20,6 +21,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { isApiError } from '@/lib/api/client'
+import { cn } from '@/lib/utils'
 import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -36,7 +38,12 @@ import {
   runAgentTestStream,
   type AgentTestRunEvent,
 } from '../api/agents'
-import { useSystemToolDefinitionsQuery, useToolsQuery, useUpdateAgentProfileMutation } from '../queries'
+import {
+  useCopyAgentProfileMutation,
+  useSystemToolDefinitionsQuery,
+  useToolsQuery,
+  useUpdateAgentProfileMutation,
+} from '../queries'
 import { useAgentTestRunStore } from '../stores/agent-test-run-store'
 import { useModelsQuery } from '../../ai-providers/queries'
 import ReactMarkdown from 'react-markdown'
@@ -46,6 +53,7 @@ import { TargetVersionPanel } from '../components/versioning/TargetVersionPanel'
 
 interface ToolOption {
   name: string
+  displayName: string
   description?: string
   enabled: boolean
 }
@@ -93,6 +101,7 @@ export default function AgentEditorPage() {
   const { t } = useTranslation()
   const qc = useQueryClient()
   const updateMutation = useUpdateAgentProfileMutation()
+  const copyAgentMutation = useCopyAgentProfileMutation()
 
   const [initializedForId, setInitializedForId] = useState<string | null>(null)
   const [name, setName] = useState('')
@@ -157,10 +166,20 @@ export default function AgentEditorPage() {
   const validTools = useMemo(() => {
     const all: ToolOption[] = []
     systemToolDefs.forEach((def) => {
-      all.push({ name: def.name, description: def.description || undefined, enabled: selectedTools.includes(def.name) })
+      all.push({
+        name: def.name,
+        displayName: def.displayName || def.name,
+        description: def.displayDescription || def.description || undefined,
+        enabled: selectedTools.includes(def.name),
+      })
     })
     customTools.forEach((ct) => {
-      all.push({ name: ct.name, description: ct.description || undefined, enabled: selectedTools.includes(ct.name) })
+      all.push({
+        name: ct.name,
+        displayName: ct.name,
+        description: ct.description || undefined,
+        enabled: selectedTools.includes(ct.name),
+      })
     })
     return all
   }, [systemToolDefs, customTools, selectedTools])
@@ -177,6 +196,7 @@ export default function AgentEditorPage() {
     [publishDialogOpen],
   )
   const modelInList = llmModels.some((item) => item.id === modelId)
+  const isSystemAgent = Boolean(agent?.isSystem)
   const modelOptions = [
     { label: t('settings.skills.agentModelDefault'), value: DEFAULT_MODEL_VALUE },
     ...llmModels.map((item) => ({ label: item.name, value: item.id })),
@@ -184,6 +204,7 @@ export default function AgentEditorPage() {
   ]
 
   const toggleTool = (toolName: string) => {
+    if (isSystemAgent) return
     if (selectedTools.includes(toolName)) {
       setSelectedTools(selectedTools.filter((t) => t !== toolName))
     } else {
@@ -192,6 +213,7 @@ export default function AgentEditorPage() {
   }
 
   const handleSave = () => {
+    if (isSystemAgent) return
     if (!agentProfileId) return
     if (!name.trim()) {
       toast.error(t('settings.skills.nameRequired'))
@@ -229,6 +251,19 @@ export default function AgentEditorPage() {
         },
       }
     )
+  }
+
+  const handleCopyAgent = async () => {
+    if (!agentProfileId) return
+    const loadingToastId = toast.loading(t('settings.skills.agentCopying'))
+    try {
+      const copied = await copyAgentMutation.mutateAsync(agentProfileId)
+      toast.success(t('settings.skills.agentCopied'), { id: loadingToastId })
+      navigate(`/settings/agent-editor/${copied.id}`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t('messages.error')
+      toast.error(message, { id: loadingToastId })
+    }
   }
 
   const publishMutation = useMutation({
@@ -410,7 +445,20 @@ export default function AgentEditorPage() {
                 {t('settings.skills.workflowActions.versionHistory')}
               </button>
               <button
+                onClick={() => void handleCopyAgent()}
+                disabled={copyAgentMutation.isPending}
+                className="px-4 py-2 text-sm rounded-lg border hover:bg-muted transition-colors inline-flex items-center gap-2 disabled:opacity-50"
+              >
+                {copyAgentMutation.isPending ? (
+                  <Sparkles className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Copy className="w-4 h-4" />
+                )}
+                {t('settings.skills.copyAsDuplicate')}
+              </button>
+              <button
                 onClick={() => {
+                  if (isSystemAgent) return
                   if (!systemPrompt.trim()) {
                     toast.error(t('settings.skills.systemPromptRequired'))
                     return
@@ -421,7 +469,7 @@ export default function AgentEditorPage() {
                   }
                   setPublishDialogOpen(true)
                 }}
-                disabled={publishMutation.isPending}
+                disabled={publishMutation.isPending || isSystemAgent}
                 className="px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 inline-flex items-center gap-2 transition-all shadow-sm"
               >
                 {publishMutation.isPending ? (
@@ -433,7 +481,7 @@ export default function AgentEditorPage() {
               </button>
               <button
                 onClick={handleSave}
-                disabled={updateMutation.isPending || !name.trim() || !systemPrompt.trim()}
+                disabled={updateMutation.isPending || !name.trim() || !systemPrompt.trim() || isSystemAgent}
                 className="px-4 py-2 text-sm rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 inline-flex items-center gap-2 transition-all shadow-sm"
               >
                 {updateMutation.isPending ? (
@@ -445,6 +493,34 @@ export default function AgentEditorPage() {
               </button>
             </div>
           </div>
+
+          {isSystemAgent && (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div className="space-y-1">
+                  <p className="text-sm font-semibold text-amber-900">
+                    {t('settings.skills.systemTargetReadonlyBannerTitle')}
+                  </p>
+                  <p className="text-sm leading-6 text-amber-800">
+                    {t('settings.skills.systemAgentReadonlyDescription')}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleCopyAgent()}
+                  disabled={copyAgentMutation.isPending}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-amber-300 bg-white px-4 py-2 text-sm font-medium text-amber-900 transition-colors hover:bg-amber-100 disabled:opacity-50"
+                >
+                  {copyAgentMutation.isPending ? (
+                    <Sparkles className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Copy className="w-4 h-4" />
+                  )}
+                  {t('settings.skills.copyAsDuplicate')}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Scrollable Content */}
@@ -467,6 +543,7 @@ export default function AgentEditorPage() {
                   <input
                     value={name}
                     onChange={(e) => setName(e.target.value)}
+                    disabled={isSystemAgent}
                     className="flex h-11 w-full rounded-xl border border-input/60 bg-background hover:bg-muted/10 px-4 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/20 focus-visible:border-blue-500/50 disabled:cursor-not-allowed disabled:opacity-50 transition-all"
                     placeholder={t('settings.skills.name')}
                   />
@@ -478,6 +555,7 @@ export default function AgentEditorPage() {
                   <input
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
+                    disabled={isSystemAgent}
                     className="flex h-11 w-full rounded-xl border border-input/60 bg-background hover:bg-muted/10 px-4 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/20 focus-visible:border-blue-500/50 disabled:cursor-not-allowed disabled:opacity-50 transition-all"
                     placeholder={t('settings.skills.description')}
                   />
@@ -504,6 +582,7 @@ export default function AgentEditorPage() {
                 <textarea
                   value={systemPrompt}
                   onChange={(e) => setSystemPrompt(e.target.value)}
+                  disabled={isSystemAgent}
                   className="flex min-h-[320px] w-full rounded-xl border border-input/60 bg-muted/10 hover:bg-muted/20 focus:bg-background px-4 py-3 text-sm font-mono leading-relaxed ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-500/20 focus-visible:border-purple-500/50 disabled:cursor-not-allowed disabled:opacity-50 resize-y transition-all duration-200"
                   placeholder={t('settings.skills.systemPromptPlaceholder')}
                 />
@@ -525,6 +604,7 @@ export default function AgentEditorPage() {
                   <label className="text-sm font-medium leading-none">{t('settings.skills.agentModel')}</label>
                   <select
                     value={modelSelectValue}
+                    disabled={isSystemAgent}
                     onChange={(e) => {
                       const val = e.target.value
                       if (val === DEFAULT_MODEL_VALUE) {
@@ -554,7 +634,7 @@ export default function AgentEditorPage() {
                     <label className="text-sm font-semibold leading-none">{t('settings.skills.kbEnabled')}</label>
                     <p className="text-xs text-muted-foreground">{t('settings.skills.kbEnabledDesc')}</p>
                   </div>
-                  <Switch checked={kbEnabled} onCheckedChange={setKbEnabled} className="data-[state=checked]:bg-emerald-500" />
+                  <Switch checked={kbEnabled} onCheckedChange={setKbEnabled} disabled={isSystemAgent} className="data-[state=checked]:bg-emerald-500" />
                 </div>
 
                 {/* Tools */}
@@ -566,7 +646,10 @@ export default function AgentEditorPage() {
                         <HoverCardTrigger asChild>
                           <div
                             onClick={() => toggleTool(tool.name)}
-                            className="group flex items-center justify-between p-3 rounded-xl border bg-emerald-500/5 border-emerald-500/40 ring-1 ring-emerald-500/10 hover:bg-emerald-500/10 cursor-pointer shadow-sm transition-all duration-200"
+                            className={cn(
+                              "group flex items-center justify-between p-3 rounded-xl border bg-emerald-500/5 border-emerald-500/40 ring-1 ring-emerald-500/10 shadow-sm transition-all duration-200",
+                              isSystemAgent ? "cursor-not-allowed opacity-80" : "cursor-pointer hover:bg-emerald-500/10",
+                            )}
                             title={t('common.remove', { defaultValue: 'Remove' })}
                           >
                             <div className="flex items-center gap-3 w-full">
@@ -574,12 +657,14 @@ export default function AgentEditorPage() {
                                 <Zap className="w-4 h-4" />
                               </div>
                               <span className="text-sm font-medium text-emerald-700 dark:text-emerald-400 truncate">
-                                {tool.name}
+                                {tool.displayName}
                               </span>
                             </div>
-                            <div className="opacity-0 group-hover:opacity-100 p-1 text-emerald-600/60 hover:text-emerald-700 transition-all">
-                              <X className="w-3.5 h-3.5" />
-                            </div>
+                            {!isSystemAgent ? (
+                              <div className="opacity-0 group-hover:opacity-100 p-1 text-emerald-600/60 hover:text-emerald-700 transition-all">
+                                <X className="w-3.5 h-3.5" />
+                              </div>
+                            ) : null}
                           </div>
                         </HoverCardTrigger>
                         <HoverCardContent side="top" align="start" className="w-80 p-4 space-y-2 shadow-lg z-50">
@@ -587,7 +672,12 @@ export default function AgentEditorPage() {
                             <div className="p-1.5 rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
                               <Zap className="w-4 h-4" />
                             </div>
-                            <h4 className="font-semibold text-sm truncate">{tool.name}</h4>
+                            <div className="min-w-0">
+                              <h4 className="truncate text-sm font-semibold">{tool.displayName}</h4>
+                              {tool.displayName !== tool.name ? (
+                                <code className="block truncate text-[11px] text-muted-foreground">{tool.name}</code>
+                              ) : null}
+                            </div>
                           </div>
                           <p className="text-sm text-muted-foreground leading-relaxed">
                             {tool.description || t('settings.skills.noToolDescription', { defaultValue: 'No description available for this tool.' })}
@@ -598,7 +688,7 @@ export default function AgentEditorPage() {
 
                     <Popover>
                       <PopoverTrigger asChild>
-                        <button className="group flex items-center justify-center gap-2 p-3 h-full min-h-[58px] rounded-xl border border-dashed border-border/60 bg-muted/10 hover:bg-muted/30 hover:border-primary/50 transition-all text-muted-foreground hover:text-foreground shadow-sm">
+                        <button disabled={isSystemAgent} className="group flex items-center justify-center gap-2 p-3 h-full min-h-[58px] rounded-xl border border-dashed border-border/60 bg-muted/10 hover:bg-muted/30 hover:border-primary/50 transition-all text-muted-foreground hover:text-foreground shadow-sm disabled:cursor-not-allowed disabled:opacity-50">
                           <Plus className="w-4 h-4" />
                           <span className="text-sm font-medium">{t('settings.skills.addTool', { defaultValue: 'Add Tool' })}</span>
                         </button>
@@ -619,16 +709,22 @@ export default function AgentEditorPage() {
                                     <HoverCardTrigger asChild>
                                       <button
                                         onClick={() => toggleTool(tool.name)}
+                                        disabled={isSystemAgent}
                                         className="w-full flex items-center gap-3 px-3 py-2 text-sm rounded-lg hover:bg-muted transition-colors text-left group"
                                       >
                                         <div className="p-1.5 rounded-md bg-muted group-hover:bg-primary/10 transition-colors">
                                           <Zap className="w-3.5 h-3.5 text-muted-foreground group-hover:text-primary transition-colors" />
                                         </div>
-                                        <span className="font-medium truncate">{tool.name}</span>
+                                        <span className="font-medium truncate">{tool.displayName}</span>
                                       </button>
                                     </HoverCardTrigger>
                                     <HoverCardContent side="right" align="start" className="w-72 p-3 space-y-1.5 shadow-lg z-50">
-                                      <h4 className="font-semibold text-sm truncate">{tool.name}</h4>
+                                      <div className="min-w-0">
+                                        <h4 className="truncate text-sm font-semibold">{tool.displayName}</h4>
+                                        {tool.displayName !== tool.name ? (
+                                          <code className="block truncate text-[11px] text-muted-foreground">{tool.name}</code>
+                                        ) : null}
+                                      </div>
                                       <p className="text-xs text-muted-foreground leading-relaxed line-clamp-3">
                                         {tool.description || t('settings.skills.noToolDescription', { defaultValue: 'No description available for this tool.' })}
                                       </p>

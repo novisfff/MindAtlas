@@ -41,6 +41,10 @@ from app.assistant_config.router import router as assistant_config_router
 from app.stats.router import router as stats_router
 from app.graph.router import router as graph_router
 from app.lightrag.router import router as lightrag_router
+from app.openclaw_integration.router import (
+    runtime_router as openclaw_integration_runtime_router,
+    settings_router as openclaw_integration_settings_router,
+)
 from app.report.router import router as report_router
 from app.scheduler import setup_scheduler, shutdown_scheduler
 from app.system_settings.router import router as system_settings_router
@@ -143,6 +147,8 @@ app.include_router(graph_router)
 app.include_router(lightrag_router)
 app.include_router(report_router)
 app.include_router(system_settings_router)
+app.include_router(openclaw_integration_settings_router)
+app.include_router(openclaw_integration_runtime_router)
 
 
 @app.get("/health", response_model=ApiResponse)

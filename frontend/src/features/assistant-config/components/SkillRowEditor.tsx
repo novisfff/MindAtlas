@@ -5,6 +5,10 @@ import type { AssistantSkill, CreateSkillRequest, UpdateSkillRequest } from '../
 import type { AssistantExecutableTarget } from './skillTargetOptions'
 import { Popover, PopoverContent, PopoverTrigger } from '../../../components/ui/popover'
 import { Badge } from '../../../components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { uiChrome, uiField } from '@/components/ui/styles'
+import { SettingsInset } from '@/features/settings/components/SettingsShell'
+import { cn } from '@/lib/utils'
 import { useSkillForm } from './useSkillForm'
 
 export interface SkillRowProps {
@@ -59,13 +63,13 @@ export function SkillRowEditor({
   return (
     <form
       onSubmit={handleSubmit}
-      className="p-6 rounded-2xl border bg-card shadow-[0_4px_16px_rgba(0,0,0,0.03)] space-y-6"
+      className={cn(uiChrome.card, 'space-y-6 p-6')}
     >
       <div className="space-y-4">
         <h3 className="text-lg font-semibold">
           {isNew ? t('settings.skills.addSkill') : t('settings.skills.editSkill')}
         </h3>
-        <div className="grid grid-cols-2 gap-6">
+        <div className="grid gap-5 md:grid-cols-2">
           <div className="space-y-2">
             <label className="text-sm font-medium">
               {t('settings.skills.name')} <span className="text-red-500/80">*</span>
@@ -75,7 +79,7 @@ export function SkillRowEditor({
               value={state.name}
               onChange={(e) => actions.setName(e.target.value)}
               required
-              className="w-full px-3 py-2 rounded-xl border bg-background focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all shadow-sm"
+              className={uiField.input}
               placeholder="my_custom_skill"
             />
           </div>
@@ -88,28 +92,31 @@ export function SkillRowEditor({
               value={state.description}
               onChange={(e) => actions.setDescription(e.target.value)}
               required
-              className="w-full px-3 py-2 rounded-xl border bg-background focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all shadow-sm"
+              className={uiField.input}
               placeholder={t('settings.skills.descriptionPlaceholder')}
             />
           </div>
         </div>
       </div>
 
-      <div className="space-y-3">
+      <SettingsInset className="space-y-4">
         <label className="text-sm font-medium">
           {t('settings.skills.bindTarget')} <span className="text-red-500/80">*</span>
         </label>
 
-        <div className="flex gap-2 items-stretch">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
           <Popover>
             <PopoverTrigger asChild>
               <button
                 type="button"
-                className="flex-1 flex items-center justify-between w-full px-3 py-2.5 rounded-xl border bg-background hover:bg-muted/30 focus:ring-2 focus:ring-blue-500/20 focus:outline-none transition-all shadow-sm group text-left"
+                className={cn(
+                  uiChrome.control,
+                  'group flex w-full flex-1 items-center justify-between gap-3 px-4 py-3 text-left shadow-none transition-colors hover:bg-muted/55',
+                )}
               >
                 {selectedTarget ? (
-                  <div className="flex items-center gap-2 truncate">
-                    <div className="p-1.5 rounded-md bg-primary/5 text-primary">
+                  <div className="flex min-w-0 items-center gap-2 truncate">
+                    <div className="rounded-full bg-primary/10 p-1.5 text-primary">
                       {targetTypeIcon}
                     </div>
                     {selectedTarget.isSystem && (
@@ -117,16 +124,16 @@ export function SkillRowEditor({
                         {t('settings.skills.system')}
                       </Badge>
                     )}
-                    <span className="text-sm font-medium truncate">{selectedTarget.name}</span>
+                    <span className="truncate text-sm font-medium">{selectedTarget.name}</span>
                   </div>
                 ) : (
                   <span className="text-sm text-muted-foreground">{t('settings.skills.noTargetOptions')}</span>
                 )}
-                <ChevronDown className="w-4 h-4 text-muted-foreground opacity-50 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+                <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground opacity-50 transition-opacity group-hover:opacity-100" />
               </button>
             </PopoverTrigger>
-            <PopoverContent align="start" className="w-[480px] p-1.5 shadow-xl rounded-xl">
-              <div className="max-h-[300px] overflow-y-auto custom-scrollbar flex flex-col gap-1 pr-1">
+            <PopoverContent align="start" className="w-[min(520px,calc(100vw-2rem))] p-2">
+              <div className="max-h-[320px] overflow-y-auto pr-1">
                 {availableTargets.map((target) => {
                   const typeLabel = target.type === 'workflow'
                     ? t('settings.skills.targetTypeWorkflow')
@@ -143,15 +150,20 @@ export function SkillRowEditor({
                       title={target.description || ''}
                       onClick={() => {
                         actions.setSelectedTargetKey(target.key)
-                        // Trigger click on body to close popover natively if needed, or controlled state
                       }}
-                      className={`
-                        w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left transition-all
-                        ${!target.bindable ? 'opacity-50 cursor-not-allowed bg-muted/30 grayscale' : 'hover:bg-accent hover:text-accent-foreground cursor-pointer'}
-                        ${isSelected ? 'bg-primary/5 border border-primary/20' : 'border border-transparent'}
-                      `}
+                      className={cn(
+                        uiChrome.control,
+                        'mb-1 flex w-full items-center gap-3 px-3 py-3 text-left shadow-none transition-colors',
+                        !target.bindable
+                          ? 'cursor-not-allowed opacity-50 grayscale'
+                          : 'cursor-pointer hover:bg-muted/60',
+                        isSelected ? 'border-primary/20 bg-primary/5' : 'border-transparent bg-transparent',
+                      )}
                     >
-                      <div className={`p-1.5 flex-shrink-0 rounded-md ${isSelected ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'}`}>
+                      <div className={cn(
+                        'rounded-full p-1.5',
+                        isSelected ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
+                      )}>
                         <IconComponent className="w-4 h-4" />
                       </div>
 
@@ -183,39 +195,47 @@ export function SkillRowEditor({
           </Popover>
 
           {selectedTarget && (
-            <button
+            <Button
               type="button"
               onClick={handleEditTarget}
               title={t('settings.skills.editTarget')}
-              className="flex items-center justify-center px-4 rounded-xl border bg-muted/20 hover:bg-muted/50 hover:border-border text-muted-foreground hover:text-foreground transition-all flex-shrink-0"
+              variant="outline"
+              size="icon"
+              className="h-12 w-12 shrink-0"
             >
-              <ArrowRight className="w-4 h-4" />
-            </button>
+              <ArrowRight className="h-4 w-4" />
+            </Button>
           )}
         </div>
-      </div>
 
-      <div className="space-y-3 p-5 rounded-2xl bg-slate-50 border shadow-inner">
-        <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
+        {selectedTarget?.isSystem && (
+          <div className="rounded-[12px] border border-amber-200 bg-amber-50/90 px-3 py-2 text-sm leading-6 text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">
+            {t('settings.skills.systemTargetBindingHint')}
+          </div>
+        )}
+      </SettingsInset>
+
+      <SettingsInset className="space-y-3">
+        <div className="flex items-center gap-2 text-sm font-medium text-foreground">
           {t('settings.skills.intentExamples')}
         </div>
 
-        <div className="space-y-2 max-h-[200px] overflow-y-auto custom-scrollbar">
+        <div className="max-h-[220px] space-y-2 overflow-y-auto">
           {state.intentExamples.length === 0 ? (
-            <div className="text-center py-6 border-2 border-dashed border-slate-200 rounded-xl bg-white/50 text-sm text-muted-foreground">
+            <div className="rounded-[12px] border border-dashed border-border/75 bg-background/72 py-6 text-center text-sm text-muted-foreground">
               {t('settings.skills.intentPlaceholder')}
             </div>
           ) : (
             state.intentExamples.map((ex, i) => (
               <div
                 key={i}
-                className="group flex items-center justify-between gap-2 p-2.5 px-3 rounded-xl bg-white border shadow-sm text-sm hover:border-slate-300 transition-colors"
+                className={cn(uiChrome.control, 'group flex items-center justify-between gap-2 px-3 py-2.5 text-sm shadow-none')}
               >
-                <span className="text-slate-700 font-medium">{ex}</span>
+                <span className="font-medium text-foreground">{ex}</span>
                 <button
                   type="button"
                   onClick={() => actions.removeIntent(i)}
-                  className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-red-50 hover:text-red-500 rounded-lg transition-all"
+                  className="rounded-md p-1.5 opacity-0 transition-all group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive"
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>
@@ -230,54 +250,47 @@ export function SkillRowEditor({
             value={state.newIntent}
             onChange={(e) => actions.setNewIntent(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), actions.addIntent())}
-            className="flex-1 px-3 py-2 text-sm rounded-xl border bg-white focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-shadow shadow-sm"
+            className={uiField.input}
             placeholder={t('settings.skills.intentExamples')}
           />
-          <button
+          <Button
             type="button"
             onClick={actions.addIntent}
             disabled={!state.newIntent.trim()}
-            className="px-3 min-w-[44px] flex items-center justify-center rounded-xl bg-blue-50 text-blue-600 border border-blue-100 hover:bg-blue-100 hover:border-blue-200 disabled:opacity-50 disabled:grayscale transition-all shadow-sm"
+            variant="outline"
+            size="icon"
           >
-            <Plus className="w-4 h-4" />
-          </button>
+            <Plus className="h-4 w-4" />
+          </Button>
         </div>
-      </div>
+      </SettingsInset>
 
-      <div className="flex items-center justify-between pt-6 border-t">
+      <div className="flex flex-col gap-3 border-t border-border/70 pt-6 sm:flex-row sm:items-center sm:justify-between">
         <div>
           {onReset && (
-            <button
+            <Button
               type="button"
               onClick={onReset}
-              className="px-4 py-2.5 text-sm rounded-xl hover:bg-orange-50 text-orange-600 dark:hover:bg-orange-950/30 flex items-center gap-2 transition-colors font-medium border border-transparent hover:border-orange-200"
+              variant="outline"
+              className="border-amber-200 text-amber-700 hover:bg-amber-50 dark:border-amber-500/20 dark:text-amber-200 dark:hover:bg-amber-500/10"
             >
-              <RotateCcw className="w-4 h-4" />
+              <RotateCcw className="h-4 w-4" />
               {t('settings.skills.reset')}
-            </button>
+            </Button>
           )}
         </div>
         <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={isSaving}
-            className="px-5 py-2.5 text-sm rounded-xl border shadow-sm hover:bg-slate-50 transition-colors font-medium"
-          >
+          <Button type="button" onClick={onCancel} disabled={isSaving} variant="outline">
             {t('common.cancel')}
-          </button>
-          <button
-            type="submit"
-            disabled={isSaving || !isValid}
-            className="px-6 py-2.5 text-sm rounded-xl bg-blue-600 text-white hover:bg-blue-700 shadow-sm disabled:opacity-50 flex items-center gap-2 transition-all min-w-[120px] justify-center font-medium border border-blue-700"
-          >
+          </Button>
+          <Button type="submit" disabled={isSaving || !isValid} className="min-w-[120px] justify-center">
             {isSaving ? (
               <Loader2 className="w-4 h-4 animate-spin" />
             ) : (
               <Check className="w-4 h-4" />
             )}
             {isNew ? t('common.create') : t('common.save')}
-          </button>
+          </Button>
         </div>
       </div>
     </form>

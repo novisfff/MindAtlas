@@ -19,6 +19,7 @@ export function ToolNodeSettings({ config, onUpdate, mentionParams, tools = [] }
 
     const selectedToolName = String(config.toolName ?? '').trim()
     const selectedTool = tools.find((tool) => tool.name === selectedToolName)
+    const selectedToolDisplayName = selectedTool?.displayName ?? selectedToolName
 
     const rawBindings = config.inputBindings
     const inputBindings =
@@ -39,8 +40,15 @@ export function ToolNodeSettings({ config, onUpdate, mentionParams, tools = [] }
         <div className="space-y-4">
             <div className="space-y-1.5">
                 <Label icon={<Wrench className="w-4 h-4" />}>{t('settings.skills.workflowToolName') || 'Tool Name'}</Label>
-                <div className="w-full px-2.5 py-2 text-sm rounded-xl border border-slate-200 bg-slate-50 text-slate-700 break-all shadow-sm">
-                    {selectedToolName || '-'}
+                <div className="w-full rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-2 text-slate-700 shadow-sm">
+                    <div className="text-sm font-medium break-all">
+                        {selectedToolDisplayName || '-'}
+                    </div>
+                    {selectedTool && selectedToolDisplayName !== selectedToolName ? (
+                        <code className="mt-1 block break-all text-xs text-slate-500">
+                            {selectedToolName}
+                        </code>
+                    ) : null}
                 </div>
             </div>
 

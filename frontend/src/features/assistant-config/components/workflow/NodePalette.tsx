@@ -30,7 +30,7 @@ export function NodePalette({ tools }: NodePaletteProps) {
       JSON.stringify({
         nodeType: 'tool',
         toolName: tool.name,
-        label: tool.name,
+        label: tool.displayName ?? tool.name,
       }),
     )
     e.dataTransfer.effectAllowed = 'move'
@@ -47,6 +47,7 @@ export function NodePalette({ tools }: NodePaletteProps) {
     return tools.filter((tool) => {
       return (
         tool.name.toLowerCase().includes(normalized) ||
+        (tool.displayName ?? '').toLowerCase().includes(normalized) ||
         (tool.description ?? '').toLowerCase().includes(normalized)
       )
     })
@@ -147,7 +148,9 @@ export function NodePalette({ tools }: NodePaletteProps) {
                       <div className="p-1 rounded-md bg-white shadow-sm ring-1 ring-black/5 group-hover:scale-105 transition-transform">
                         <Wrench className="w-3.5 h-3.5 opacity-70 group-hover:opacity-100 text-sky-500" />
                       </div>
-                      <span className="text-[11px] font-medium text-muted-foreground group-hover:text-foreground transition-colors truncate">{tool.name}</span>
+                      <span className="text-[11px] font-medium text-muted-foreground group-hover:text-foreground transition-colors truncate">
+                        {tool.displayName ?? tool.name}
+                      </span>
                     </div>
                   ))}
                 </div>

@@ -1,5 +1,8 @@
-import { Plus, Search } from 'lucide-react'
+import { Plus } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { Button } from '@/components/ui/button'
+import { uiChrome } from '@/components/ui/styles'
+import { SettingsBadge, SettingsEmptyState, SettingsInset } from '@/features/settings/components/SettingsShell'
 import { cn } from '@/lib/utils'
 import type { AiCredential } from '../api/credentials'
 
@@ -21,47 +24,55 @@ export function ProviderSidebar({
     const { t } = useTranslation()
 
     return (
-        <div className={cn('flex flex-col h-full border-r bg-muted/10', className)}>
-            <div className="p-4 space-y-4">
-                {/* Header / Search could go here if needed */}
-                <div className="flex items-center justify-between">
-                    <h3 className="font-semibold text-sm text-muted-foreground uppercase tracking-wider">
+        <div className={cn('flex h-full min-h-0 flex-col p-4', className)}>
+            <div className="space-y-4">
+                <div className="flex items-center justify-between gap-3">
+                    <h3 className="text-sm font-semibold text-foreground">
                         {t('settings.ai.sections.credentials')}
                     </h3>
+                    <SettingsBadge>{credentials.length}</SettingsBadge>
                 </div>
 
-                <button
-                    onClick={onAdd}
-                    className="w-full flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 text-sm font-medium transition-colors"
-                >
-                    <Plus className="w-4 h-4" />
+                <Button onClick={onAdd} className="w-full justify-center">
+                    <Plus className="h-4 w-4" />
                     {t('settings.ai.providers.add')}
-                </button>
+                </Button>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-1">
-                {credentials.map((cred) => (
-                    <button
-                        key={cred.id}
-                        onClick={() => onSelect(cred.id)}
-                        className={cn(
-                            'w-full flex flex-col items-start px-3 py-2 rounded-lg text-left transition-colors',
-                            selectedId === cred.id
-                                ? 'bg-primary/10 text-primary'
-                                : 'hover:bg-muted text-muted-foreground hover:text-foreground'
-                        )}
-                    >
-                        <span className="font-medium truncate w-full">{cred.name}</span>
-                        <span className="text-xs opacity-70 truncate w-full">{cred.baseUrl}</span>
-                    </button>
-                ))}
-
-                {credentials.length === 0 && (
-                    <div className="text-center py-8 text-sm text-muted-foreground">
-                        {t('aiProvider.noProviders')}
+            <div className="mt-4 flex-1 overflow-y-auto">
+                {credentials.length === 0 ? (
+                    <SettingsEmptyState
+                        title={t('aiProvider.noProviders')}
+                        description={t('pages.aiProviders.description')}
+                        className="px-4 py-10"
+                    />
+                ) : (
+                    <div className="space-y-2 pr-1">
+                        {credentials.map((cred) => (
+                            <button
+                                key={cred.id}
+                                onClick={() => onSelect(cred.id)}
+                                className={cn(
+                                    uiChrome.control,
+                                    'w-full space-y-1 px-3 py-3 text-left shadow-none transition-colors',
+                                    selectedId === cred.id
+                                        ? 'border-primary/20 bg-primary/8 text-foreground'
+                                        : 'hover:bg-muted/55 text-muted-foreground hover:text-foreground'
+                                )}
+                            >
+                                <span className="block truncate font-medium text-foreground">{cred.name}</span>
+                                <span className="block truncate text-xs text-muted-foreground">{cred.baseUrl}</span>
+                            </button>
+                        ))}
                     </div>
                 )}
             </div>
+
+            <SettingsInset className="mt-4">
+                <p className="text-xs leading-6 text-muted-foreground">
+                    {t('aiProvider.providerConfigDesc')}
+                </p>
+            </SettingsInset>
         </div>
     )
 }
