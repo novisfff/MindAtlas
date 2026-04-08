@@ -92,8 +92,8 @@ _TOOL_SYSTEM_ITEM_TEMPLATES: tuple[_ToolSystemItemTemplate, ...] = (
             en="Search previously stored MindAtlas records for requests like 'did I record this before', 'search what I saved', or recent and time-bounded lookups by keyword, tags, type, or time range.",
         ),
         input_summary=_LocalizedText(
-            zh="关键词，以及可选的类型、标签、时间范围和结果数量；适合最近一周、最近几天或指定时间段的检索。",
-            en="Keyword plus optional type, tags, time range, and result limit; useful for recent, last-week, and other time-bounded searches.",
+            zh="关键词，以及可选的类型、标签、时间范围和结果数量；entryType 必须精确匹配系统中已启用的类型编码或名称，不筛选时请省略或传 null，不要传 '.' 或空字符串；timeFrom/timeTo 使用 ISO 8601。",
+            en="Keyword plus optional type, tags, time range, and result limit. entryType must exactly match an enabled entry type code or name; omit or pass null when unused, and do not send placeholders like '.' or empty strings. timeFrom/timeTo use ISO 8601 datetimes.",
         ),
         output_summary=_LocalizedText(
             zh="返回匹配记录列表与总数，便于回答是否记过、列出最近记录，或继续查看详情。",
@@ -168,8 +168,8 @@ _TOOL_SYSTEM_ITEM_TEMPLATES: tuple[_ToolSystemItemTemplate, ...] = (
             en="Generate or return the MindAtlas weekly report for requests like what did I do this week, what did I do last week, or help me make a weekly recap.",
         ),
         input_summary=_LocalizedText(
-            zh="可选周起始日期，以及是否强制重新生成。",
-            en="Optional week start date and whether to force regeneration.",
+            zh="可选 weekStart（YYYY-MM-DD）以及是否强制重新生成；不指定时请省略或传 null，不要传空字符串。",
+            en="Optional weekStart (YYYY-MM-DD) and whether to force regeneration. Omit or pass null when you want the default week, and do not send an empty string.",
         ),
         output_summary=_LocalizedText(
             zh="返回周报状态、周期和结构化内容，便于输出 recap、digest 或工作回顾。",
@@ -187,8 +187,8 @@ _TOOL_SYSTEM_ITEM_TEMPLATES: tuple[_ToolSystemItemTemplate, ...] = (
             en="Generate or return the MindAtlas monthly report for requests like what did I do this month, help me make a monthly recap, or give me a monthly digest.",
         ),
         input_summary=_LocalizedText(
-            zh="可选月起始日期，以及是否强制重新生成。",
-            en="Optional month start date and whether to force regeneration.",
+            zh="可选 monthStart（YYYY-MM-DD）以及是否强制重新生成；不指定时请省略或传 null，不要传空字符串。",
+            en="Optional monthStart (YYYY-MM-DD) and whether to force regeneration. Omit or pass null when you want the default month, and do not send an empty string.",
         ),
         output_summary=_LocalizedText(
             zh="返回月报状态、周期和结构化内容，便于输出 recap、digest 或月度回顾。",
