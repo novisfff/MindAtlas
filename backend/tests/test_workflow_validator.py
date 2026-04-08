@@ -202,6 +202,72 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertTrue(any("requires inputBindings" in e.message for e in result.errors))
 
+    def test_workflow_call_requires_target_workflow_id(self) -> None:
+        from app.assistant.workflow.validation.validator import validate_workflow
+
+        nodes = [
+            {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
+            {
+                "node_id": "call_1",
+                "node_type": "workflow_call",
+                "label": "Call Child",
+                "config": {
+                    "bindingMode": "pinned",
+                    "targetPublishedVersionId": "00000000-0000-0000-0000-000000000001",
+                    "inputBindings": {},
+                },
+            },
+        ]
+        edges = [
+            {"source_node_id": "start", "target_node_id": "call_1", "source_handle": "output"},
+        ]
+        nodes, edges = self._append_output_node(nodes, edges, "call_1")
+
+        result = validate_workflow(nodes, edges)
+        self.assertFalse(result.valid)
+        self.assertTrue(any("targetWorkflowId is required" in e.message for e in result.errors))
+
+    def test_iteration_body_allows_workflow_call_node(self) -> None:
+        from app.assistant.workflow.validation.validator import validate_workflow
+
+        nodes = [
+            {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
+            {
+                "node_id": "iteration_1",
+                "node_type": "iteration",
+                "label": "Loop",
+                "config": {
+                    "inputSource": "{{start.user_input}}",
+                    "outputVariable": "results",
+                    "outputSelector": "{{container.item}}",
+                    "bodyNodes": [
+                        {"nodeId": "start", "nodeType": "start", "label": "Start", "config": {}},
+                        {
+                            "nodeId": "call_1",
+                            "nodeType": "workflow_call",
+                            "label": "Call Child",
+                            "config": {
+                                "targetWorkflowId": "00000000-0000-0000-0000-000000000001",
+                                "bindingMode": "pinned",
+                                "targetPublishedVersionId": "00000000-0000-0000-0000-000000000002",
+                                "inputBindings": {"name": "{{container.item}}"},
+                            },
+                        },
+                    ],
+                    "bodyEdges": [
+                        {"edgeId": "be1", "sourceNodeId": "start", "targetNodeId": "call_1"},
+                    ],
+                },
+            },
+        ]
+        edges = [
+            {"source_node_id": "start", "target_node_id": "iteration_1", "source_handle": "output"},
+        ]
+        nodes, edges = self._append_output_node(nodes, edges, "iteration_1")
+
+        result = validate_workflow(nodes, edges)
+        self.assertTrue(result.valid, [e.message for e in result.errors])
+
     def test_if_else_with_branches_and_else_edge_is_valid(self) -> None:
         from app.assistant.workflow.validation.validator import validate_workflow
 

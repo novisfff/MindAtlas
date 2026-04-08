@@ -241,7 +241,10 @@ class WorkflowTestRunService:
             msg = "; ".join(error.message for error in parallel.errors[:5])
             raise ApiException(status_code=422, code=42202, message=f"Invalid parallel branches: {msg}")
 
-        workflow_tool_names = self.config_service.validate_workflow_dependencies(workflow)
+        workflow_tool_names = self.config_service.validate_workflow_dependencies(
+            workflow,
+            current_workflow_id=scope_workflow_id,
+        )
 
         workflow_nodes = [
             WorkflowNodeDefinition(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 from uuid import UUID
@@ -40,6 +41,8 @@ from app.assistant_config.schemas import (
     AssistantToolCreateRequest,
     AssistantToolUpdateRequest,
     AssistantWorkflowCreateRequest,
+    CallableWorkflowResponse,
+    CallableWorkflowVersionResponse,
     AssistantWorkflowUpdateRequest,
     ClearVersionsResponse,
     DeleteVersionResponse,
@@ -47,9 +50,17 @@ from app.assistant_config.schemas import (
     SystemBehaviorResponse,
     TargetType,
     TargetVersionResponse,
+    WorkflowContractParamSchema,
     WorkflowPublishRequest,
     WorkflowVersionListResponse,
     WorkflowInput,
+)
+from app.assistant_config.workflow_contracts import (
+    WorkflowContractError,
+    WorkflowContractSnapshot,
+    field_specs_to_params,
+    schema_summary,
+    workflow_contract_from_input,
 )
 from app.assistant_config.system_behavior_defaults_loader import get_system_behavior_default_workflow
 from app.assistant_config.system_behavior_registry import (
@@ -92,6 +103,29 @@ _SYSTEM_SKILL_DISPLAY_NAMES: dict[str, dict[str, str]] = {
     "periodic_review": {"zh": "周期性回顾工作流", "en": "Periodic Review Workflow"},
     DEFAULT_SKILL_NAME: {"zh": "默认对话智能体", "en": "General Chat Agent"},
 }
+
+
+@dataclass(frozen=True)
+class WorkflowCallReference:
+    source_workflow_id: UUID
+    source_workflow_name: str
+    source_kind: str
+    source_node_id: str
+    source_container_node_id: str | None
+    source_version_id: UUID | None
+    source_version_name: str | None
+    source_version_source: str | None
+    target_workflow_id: UUID
+    binding_mode: str
+    target_published_version_id: UUID | None
+
+
+@dataclass(frozen=True)
+class ResolvedWorkflowCallTarget:
+    workflow: AssistantWorkflow
+    version: AssistantWorkflowVersion
+    workflow_input: WorkflowInput
+    contract: WorkflowContractSnapshot
 
 
 class AssistantConfigService:
@@ -900,6 +934,10 @@ class AssistantConfigService:
             protected_ids.add(workflow.draft_version_id)
         if workflow.published_version_id is not None:
             protected_ids.add(workflow.published_version_id)
+        for ref in self._workflow_call_referrers_for_workflow(workflow.id):
+            if ref.binding_mode != "pinned" or ref.target_published_version_id is None:
+                continue
+            protected_ids.add(ref.target_published_version_id)
         if workflow.is_system:
             baseline_id = self._get_workflow_system_baseline_version_id(workflow.id)
             if baseline_id is not None:
@@ -1209,6 +1247,522 @@ class AssistantConfigService:
             return self._agent_draft_from_snapshot(version.snapshot)
         except Exception:
             return None
+
+    @staticmethod
+    def _cfg_get(cfg: dict[str, Any], *keys: str, default: Any = None) -> Any:
+        for key in keys:
+            if key in cfg:
+                return cfg.get(key)
+        return default
+
+    @staticmethod
+    def _parse_uuid_value(value: Any) -> UUID | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return UUID(text)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _iter_workflow_call_node_configs(
+        nodes: list[Any],
+        *,
+        container_node_id: str | None = None,
+    ) -> list[tuple[str, str | None, dict[str, Any]]]:
+        refs: list[tuple[str, str | None, dict[str, Any]]] = []
+        for raw_node in nodes:
+            if isinstance(raw_node, dict):
+                node_id = str(raw_node.get("node_id", raw_node.get("nodeId", "")) or "").strip()
+                node_type = str(raw_node.get("node_type", raw_node.get("nodeType", "")) or "").strip()
+                cfg = raw_node.get("config") if isinstance(raw_node.get("config"), dict) else {}
+            else:
+                node_id = str(getattr(raw_node, "node_id", "") or "").strip()
+                node_type = str(getattr(raw_node, "node_type", "") or "").strip()
+                cfg = getattr(raw_node, "config", None) if isinstance(getattr(raw_node, "config", None), dict) else {}
+
+            if not node_id:
+                continue
+
+            if node_type == "workflow_call":
+                refs.append((node_id, container_node_id, dict(cfg)))
+
+            if node_type not in {"iteration", "loop"}:
+                continue
+            body_nodes = AssistantConfigService._cfg_get(cfg, "body_nodes", "bodyNodes", default=[])
+            if isinstance(body_nodes, list):
+                refs.extend(
+                    AssistantConfigService._iter_workflow_call_node_configs(
+                        body_nodes,
+                        container_node_id=node_id,
+                    )
+                )
+        return refs
+
+    def _collect_workflow_call_references_from_input(
+        self,
+        *,
+        workflow_input: WorkflowInput,
+        source_workflow_id: UUID,
+        source_workflow_name: str,
+        source_kind: str,
+        source_version_id: UUID | None = None,
+        source_version_name: str | None = None,
+        source_version_source: str | None = None,
+    ) -> list[WorkflowCallReference]:
+        refs: list[WorkflowCallReference] = []
+        for node_id, container_node_id, cfg in self._iter_workflow_call_node_configs(workflow_input.nodes):
+            target_workflow_id = self._parse_uuid_value(
+                self._cfg_get(cfg, "target_workflow_id", "targetWorkflowId", default=None)
+            )
+            if target_workflow_id is None:
+                continue
+            target_version_id = self._parse_uuid_value(
+                self._cfg_get(cfg, "target_published_version_id", "targetPublishedVersionId", default=None)
+            )
+            binding_mode = str(self._cfg_get(cfg, "binding_mode", "bindingMode", default="pinned") or "pinned").strip().lower()
+            refs.append(
+                WorkflowCallReference(
+                    source_workflow_id=source_workflow_id,
+                    source_workflow_name=source_workflow_name,
+                    source_kind=source_kind,
+                    source_node_id=node_id,
+                    source_container_node_id=container_node_id,
+                    source_version_id=source_version_id,
+                    source_version_name=source_version_name,
+                    source_version_source=source_version_source,
+                    target_workflow_id=target_workflow_id,
+                    binding_mode=binding_mode,
+                    target_published_version_id=target_version_id,
+                )
+            )
+        return refs
+
+    @staticmethod
+    def _workflow_input_from_version_snapshot(version: AssistantWorkflowVersion) -> WorkflowInput:
+        return AssistantConfigService._workflow_input_from_snapshot(
+            version.snapshot if isinstance(version.snapshot, dict) else {}
+        )
+
+    @staticmethod
+    def _workflow_contract_from_input_checked(
+        workflow_input: WorkflowInput,
+        *,
+        workflow_name: str,
+        version_id: UUID | None = None,
+    ) -> WorkflowContractSnapshot:
+        try:
+            return workflow_contract_from_input(workflow_input)
+        except WorkflowContractError as exc:
+            version_text = f" (version {version_id})" if version_id is not None else ""
+            raise ApiException(
+                status_code=422,
+                code=42254,
+                message=f"Workflow target is not callable: {workflow_name}{version_text}; {exc.message}",
+                details={"reason": exc.reason},
+            ) from exc
+
+    def _resolve_workflow_call_target(
+        self,
+        *,
+        target_workflow_id: UUID,
+        binding_mode: str,
+        target_published_version_id: UUID | None,
+    ) -> ResolvedWorkflowCallTarget:
+        workflow = (
+            self.db.query(AssistantWorkflow)
+            .filter(AssistantWorkflow.id == target_workflow_id)
+            .first()
+        )
+        if workflow is None:
+            raise ApiException(
+                status_code=422,
+                code=42251,
+                message=f"Workflow call target not found: {target_workflow_id}",
+            )
+        if not bool(workflow.enabled):
+            raise ApiException(
+                status_code=422,
+                code=42252,
+                message=f"Workflow call target is disabled: {workflow.name}",
+            )
+
+        resolved_version_id = target_published_version_id
+        if binding_mode == "latest":
+            resolved_version_id = workflow.published_version_id
+
+        if resolved_version_id is None:
+            raise ApiException(
+                status_code=422,
+                code=42253,
+                message=f"Workflow call target has no published version: {workflow.name}",
+            )
+
+        version = (
+            self.db.query(AssistantWorkflowVersion)
+            .filter(
+                AssistantWorkflowVersion.id == resolved_version_id,
+                AssistantWorkflowVersion.workflow_id == workflow.id,
+                AssistantWorkflowVersion.version_source == "publish",
+            )
+            .first()
+        )
+        if version is None:
+            raise ApiException(
+                status_code=422,
+                code=42255,
+                message=(
+                    f"Workflow call target published version not found: "
+                    f"{workflow.name} ({resolved_version_id})"
+                ),
+            )
+
+        try:
+            workflow_input = self._workflow_input_from_version_snapshot(version)
+        except Exception as exc:
+            raise ApiException(
+                status_code=422,
+                code=42256,
+                message=f"Workflow call target has invalid published snapshot: {workflow.name}",
+            ) from exc
+
+        contract = self._workflow_contract_from_input_checked(
+            workflow_input,
+            workflow_name=workflow.name,
+            version_id=version.id,
+        )
+        return ResolvedWorkflowCallTarget(
+            workflow=workflow,
+            version=version,
+            workflow_input=workflow_input,
+            contract=contract,
+        )
+
+    @staticmethod
+    def _validate_workflow_call_input_bindings(
+        *,
+        cfg: dict[str, Any],
+        ref: WorkflowCallReference,
+        contract: WorkflowContractSnapshot,
+    ) -> None:
+        input_bindings = AssistantConfigService._cfg_get(cfg, "input_bindings", "inputBindings", default={})
+        normalized_bindings = input_bindings if isinstance(input_bindings, dict) else {}
+        allowed_fields = {field.name for field in contract.input_fields}
+        required_fields = {field.name for field in contract.input_fields if field.required}
+        provided_fields = {str(key).strip() for key in normalized_bindings.keys() if str(key).strip()}
+
+        missing_required = sorted(required_fields - provided_fields)
+        unknown_fields = sorted(field for field in provided_fields if field not in allowed_fields)
+        if missing_required or unknown_fields:
+            detail_parts: list[str] = []
+            if missing_required:
+                detail_parts.append(f"missing required input bindings: {', '.join(missing_required)}")
+            if unknown_fields:
+                detail_parts.append(f"unknown input bindings: {', '.join(unknown_fields)}")
+            location = ref.source_node_id if ref.source_container_node_id is None else (
+                f"{ref.source_container_node_id}::{ref.source_node_id}"
+            )
+            raise ApiException(
+                status_code=422,
+                code=42257,
+                message=f"workflow_call node '{location}' has invalid input bindings: {'; '.join(detail_parts)}",
+            )
+
+    def _build_workflow_call_adjacency(
+        self,
+        *,
+        current_workflow_id: UUID,
+        current_workflow_input: WorkflowInput,
+    ) -> tuple[dict[UUID, set[UUID]], dict[UUID, str]]:
+        workflows = self._list_workflows_query(include_disabled=True)
+        adjacency: dict[UUID, set[UUID]] = {}
+        name_map: dict[UUID, str] = {}
+
+        for workflow in workflows:
+            workflow_id = workflow.id
+            name_map[workflow_id] = self._display_workflow_name(workflow)
+            if workflow_id == current_workflow_id:
+                workflow_input = current_workflow_input
+            else:
+                workflow_input = self._get_workflow_draft_input(workflow)
+            refs = self._collect_workflow_call_references_from_input(
+                workflow_input=workflow_input,
+                source_workflow_id=workflow_id,
+                source_workflow_name=name_map[workflow_id],
+                source_kind="draft",
+            )
+            adjacency[workflow_id] = {ref.target_workflow_id for ref in refs}
+
+        if current_workflow_id not in adjacency:
+            adjacency[current_workflow_id] = set()
+        return adjacency, name_map
+
+    def _detect_workflow_call_cycle(
+        self,
+        *,
+        current_workflow_id: UUID,
+        current_workflow_input: WorkflowInput,
+    ) -> str | None:
+        adjacency, name_map = self._build_workflow_call_adjacency(
+            current_workflow_id=current_workflow_id,
+            current_workflow_input=current_workflow_input,
+        )
+
+        for target_id in adjacency.get(current_workflow_id, set()):
+            if target_id == current_workflow_id:
+                workflow_name = name_map.get(current_workflow_id, str(current_workflow_id))
+                return f"workflow_call recursive dependency is not allowed: {workflow_name} -> {workflow_name}"
+
+        def _dfs(node_id: UUID, path: list[UUID], in_path: set[UUID]) -> list[UUID] | None:
+            for target_id in adjacency.get(node_id, set()):
+                if target_id == current_workflow_id:
+                    return [*path, target_id]
+                if target_id in in_path:
+                    continue
+                next_path = [*path, target_id]
+                found = _dfs(target_id, next_path, { *in_path, target_id })
+                if found is not None:
+                    return found
+            return None
+
+        cycle_path = _dfs(current_workflow_id, [current_workflow_id], {current_workflow_id})
+        if cycle_path is None:
+            return None
+
+        readable = " -> ".join(name_map.get(node_id, str(node_id)) for node_id in cycle_path)
+        return f"workflow_call recursive dependency is not allowed: {readable}"
+
+    def _scan_workflow_call_references(
+        self,
+        *,
+        include_versions: bool,
+    ) -> list[WorkflowCallReference]:
+        refs: list[WorkflowCallReference] = []
+        workflows = self._list_workflows_query(include_disabled=True)
+        for workflow in workflows:
+            workflow_name = self._display_workflow_name(workflow)
+            draft_input = self._get_workflow_draft_input(workflow)
+            refs.extend(
+                self._collect_workflow_call_references_from_input(
+                    workflow_input=draft_input,
+                    source_workflow_id=workflow.id,
+                    source_workflow_name=workflow_name,
+                    source_kind="draft",
+                )
+            )
+            if not include_versions:
+                continue
+            versions = (
+                self.db.query(AssistantWorkflowVersion)
+                .filter(AssistantWorkflowVersion.workflow_id == workflow.id)
+                .all()
+            )
+            for version in versions:
+                if not isinstance(version.snapshot, dict):
+                    continue
+                try:
+                    workflow_input = self._workflow_input_from_version_snapshot(version)
+                except Exception:
+                    continue
+                refs.extend(
+                    self._collect_workflow_call_references_from_input(
+                        workflow_input=workflow_input,
+                        source_workflow_id=workflow.id,
+                        source_workflow_name=workflow_name,
+                        source_kind="version",
+                        source_version_id=version.id,
+                        source_version_name=version.version_name,
+                        source_version_source=version.version_source,
+                    )
+                )
+        return refs
+
+    @staticmethod
+    def _serialize_workflow_call_references(refs: list[WorkflowCallReference]) -> list[dict[str, Any]]:
+        return [
+            {
+                "sourceWorkflowId": str(ref.source_workflow_id),
+                "sourceWorkflowName": ref.source_workflow_name,
+                "sourceKind": ref.source_kind,
+                "sourceNodeId": ref.source_node_id,
+                "sourceContainerNodeId": ref.source_container_node_id,
+                "sourceVersionId": str(ref.source_version_id) if ref.source_version_id is not None else None,
+                "sourceVersionName": ref.source_version_name,
+                "sourceVersionSource": ref.source_version_source,
+                "bindingMode": ref.binding_mode,
+                "targetPublishedVersionId": (
+                    str(ref.target_published_version_id) if ref.target_published_version_id is not None else None
+                ),
+            }
+            for ref in refs
+        ]
+
+    def _workflow_call_referrers_for_workflow(self, workflow_id: UUID) -> list[WorkflowCallReference]:
+        return [
+            ref
+            for ref in self._scan_workflow_call_references(include_versions=True)
+            if ref.target_workflow_id == workflow_id
+        ]
+
+    def _workflow_call_referrers_for_workflow_version(self, version_id: UUID) -> list[WorkflowCallReference]:
+        return [
+            ref
+            for ref in self._scan_workflow_call_references(include_versions=True)
+            if ref.binding_mode == "pinned" and ref.target_published_version_id == version_id
+        ]
+
+    def list_callable_workflows(self) -> list[dict[str, Any]]:
+        workflows = (
+            self.db.query(AssistantWorkflow)
+            .filter(AssistantWorkflow.enabled.is_(True))
+            .order_by(AssistantWorkflow.created_at.desc())
+            .all()
+        )
+        items: list[dict[str, Any]] = []
+        for workflow in workflows:
+            if workflow.published_version_id is None:
+                continue
+            published_version = (
+                self.db.query(AssistantWorkflowVersion)
+                .filter(
+                    AssistantWorkflowVersion.id == workflow.published_version_id,
+                    AssistantWorkflowVersion.workflow_id == workflow.id,
+                    AssistantWorkflowVersion.version_source == "publish",
+                )
+                .first()
+            )
+            if published_version is None:
+                continue
+            try:
+                published_input = self._workflow_input_from_version_snapshot(published_version)
+                published_contract = workflow_contract_from_input(published_input)
+            except Exception:
+                continue
+
+            available_versions: list[dict[str, Any]] = []
+            versions = (
+                self.db.query(AssistantWorkflowVersion)
+                .filter(
+                    AssistantWorkflowVersion.workflow_id == workflow.id,
+                    AssistantWorkflowVersion.version_source == "publish",
+                )
+                .order_by(AssistantWorkflowVersion.sequence_no.desc())
+                .all()
+            )
+            for version in versions:
+                try:
+                    version_input = self._workflow_input_from_version_snapshot(version)
+                    version_contract = workflow_contract_from_input(version_input)
+                except Exception:
+                    continue
+                available_versions.append(
+                    CallableWorkflowVersionResponse.model_validate(
+                        {
+                            "id": version.id,
+                            "sequence_no": version.sequence_no,
+                            "version_name": version.version_name,
+                            "version_source": version.version_source,
+                            "input_params": [
+                                WorkflowContractParamSchema.model_validate(item).model_dump()
+                                for item in field_specs_to_params(version_contract.input_fields)
+                            ],
+                            "output_params": [
+                                WorkflowContractParamSchema.model_validate(item).model_dump()
+                                for item in field_specs_to_params(version_contract.output_fields)
+                            ],
+                            "created_at": version.created_at,
+                            "updated_at": version.updated_at,
+                        }
+                    ).model_dump()
+                )
+
+            published_version_present = any(item["id"] == published_version.id for item in available_versions)
+            if not published_version_present:
+                continue
+
+            items.append(
+                CallableWorkflowResponse.model_validate(
+                    {
+                        "id": workflow.id,
+                        "name": self._display_workflow_name(workflow),
+                        "description": workflow.description or "",
+                        "published_version_id": published_version.id,
+                        "input_params": [
+                            WorkflowContractParamSchema.model_validate(item).model_dump()
+                            for item in field_specs_to_params(published_contract.input_fields)
+                        ],
+                        "output_params": [
+                            WorkflowContractParamSchema.model_validate(item).model_dump()
+                            for item in field_specs_to_params(published_contract.output_fields)
+                        ],
+                        "available_versions": available_versions,
+                    }
+                ).model_dump()
+            )
+        return items
+
+    def _collect_transitive_workflow_dependency_sets(
+        self,
+        *,
+        workflow_input: WorkflowInput,
+        current_workflow_id: UUID | None,
+        visited_workflow_ids: set[UUID] | None = None,
+    ) -> tuple[set[str], set[UUID]]:
+        tool_names = self._collect_workflow_tool_names(workflow_input.nodes)
+        model_ids = self._collect_workflow_custom_model_ids(workflow_input.nodes)
+        visited = set(visited_workflow_ids or set())
+        if current_workflow_id is not None:
+            visited.add(current_workflow_id)
+
+        for node_id, container_node_id, cfg in self._iter_workflow_call_node_configs(workflow_input.nodes):
+            target_workflow_id = self._parse_uuid_value(
+                self._cfg_get(cfg, "target_workflow_id", "targetWorkflowId", default=None)
+            )
+            if target_workflow_id is None:
+                continue
+
+            binding_mode = str(self._cfg_get(cfg, "binding_mode", "bindingMode", default="pinned") or "pinned").strip().lower()
+            target_version_id = self._parse_uuid_value(
+                self._cfg_get(cfg, "target_published_version_id", "targetPublishedVersionId", default=None)
+            )
+            resolved = self._resolve_workflow_call_target(
+                target_workflow_id=target_workflow_id,
+                binding_mode=binding_mode,
+                target_published_version_id=target_version_id,
+            )
+            self._validate_workflow_call_input_bindings(
+                cfg=cfg,
+                ref=WorkflowCallReference(
+                    source_workflow_id=current_workflow_id or resolved.workflow.id,
+                    source_workflow_name="",
+                    source_kind="draft",
+                    source_node_id=node_id,
+                    source_container_node_id=container_node_id,
+                    source_version_id=None,
+                    source_version_name=None,
+                    source_version_source=None,
+                    target_workflow_id=target_workflow_id,
+                    binding_mode=binding_mode,
+                    target_published_version_id=target_version_id,
+                ),
+                contract=resolved.contract,
+            )
+            tool_names.update(self._collect_workflow_tool_names(resolved.workflow_input.nodes))
+            model_ids.update(self._collect_workflow_custom_model_ids(resolved.workflow_input.nodes))
+            if resolved.workflow.id in visited:
+                continue
+            child_tools, child_models = self._collect_transitive_workflow_dependency_sets(
+                workflow_input=resolved.workflow_input,
+                current_workflow_id=resolved.workflow.id,
+                visited_workflow_ids={*visited, resolved.workflow.id},
+            )
+            tool_names.update(child_tools)
+            model_ids.update(child_models)
+
+        return tool_names, model_ids
 
     @staticmethod
     def _extract_structured_start_fields(workflow_input: WorkflowInput) -> dict[str, dict[str, Any]]:
@@ -2016,7 +2570,10 @@ class AssistantConfigService:
             msgs = "; ".join(e.message for e in par_result.errors[:5])
             raise ApiException(status_code=422, code=42202, message=f"Invalid parallel branches: {msgs}")
 
-        workflow_tool_names = self.validate_workflow_dependencies(workflow)
+        workflow_tool_names = self.validate_workflow_dependencies(
+            workflow,
+            current_workflow_id=workflow_model.id,
+        )
 
         if not persist:
             return workflow_tool_names
@@ -3381,11 +3938,30 @@ class AssistantConfigService:
         skill.workflow_viewport = workflow_model.workflow_viewport
         skill.workflow_version = workflow_model.workflow_version
 
-    def validate_workflow_dependencies(self, workflow) -> set[str]:
+    def validate_workflow_dependencies(
+        self,
+        workflow,
+        *,
+        current_workflow_id: UUID | None = None,
+    ) -> set[str]:
         """Validate workflow external dependencies (tools/models) before persistence."""
-        workflow_tool_names = self._collect_workflow_tool_names(workflow.nodes)
+        if current_workflow_id is not None:
+            cycle_error = self._detect_workflow_call_cycle(
+                current_workflow_id=current_workflow_id,
+                current_workflow_input=workflow,
+            )
+            if cycle_error:
+                raise ApiException(
+                    status_code=422,
+                    code=42258,
+                    message=cycle_error,
+                )
+
+        workflow_tool_names, custom_model_ids = self._collect_transitive_workflow_dependency_sets(
+            workflow_input=workflow,
+            current_workflow_id=current_workflow_id,
+        )
         self._validate_workflow_tool_names(workflow_tool_names)
-        custom_model_ids = self._collect_workflow_custom_model_ids(workflow.nodes)
         self._validate_workflow_model_ids(custom_model_ids)
         return workflow_tool_names
 
@@ -3569,9 +4145,7 @@ class AssistantConfigService:
     # -------------------------
     # Workflows CRUD
     # -------------------------
-    def list_workflows(self, include_disabled: bool = False) -> list[AssistantWorkflow]:
-        self.sync_system_skills()
-        self.ensure_system_behaviors()
+    def _list_workflows_query(self, *, include_disabled: bool) -> list[AssistantWorkflow]:
         q = (
             self.db.query(AssistantWorkflow)
             .options(
@@ -3585,6 +4159,11 @@ class AssistantConfigService:
         if not include_disabled:
             q = q.filter(AssistantWorkflow.enabled.is_(True))
         return q.all()
+
+    def list_workflows(self, include_disabled: bool = False) -> list[AssistantWorkflow]:
+        self.sync_system_skills()
+        self.ensure_system_behaviors()
+        return self._list_workflows_query(include_disabled=include_disabled)
 
     def get_workflow(self, workflow_id: UUID) -> AssistantWorkflow:
         self.sync_system_skills()
@@ -3830,6 +4409,21 @@ class AssistantConfigService:
         if version is None:
             raise ApiException(status_code=404, code=40434, message=f"Workflow version not found: {version_id}")
 
+        pinned_refs = self._workflow_call_referrers_for_workflow_version(version.id)
+        if pinned_refs:
+            raise ApiException(
+                status_code=409,
+                code=40963,
+                message="Workflow version is referenced by workflow_call nodes",
+                details={
+                    "targetType": "workflow_version",
+                    "targetId": str(version.id),
+                    "targetWorkflowId": str(workflow.id),
+                    "targetWorkflowName": workflow.name,
+                    "references": self._serialize_workflow_call_references(pinned_refs),
+                },
+            )
+
         protected_ids = self._get_workflow_protected_version_ids(workflow)
         if version.id in protected_ids:
             raise ApiException(
@@ -3897,6 +4491,19 @@ class AssistantConfigService:
         workflow = self.get_workflow(workflow_id)
         if workflow.is_system:
             self._raise_system_workflow_readonly()
+        workflow_call_refs = self._workflow_call_referrers_for_workflow(workflow.id)
+        if workflow_call_refs:
+            raise ApiException(
+                status_code=409,
+                code=40964,
+                message="Workflow is referenced by workflow_call nodes",
+                details={
+                    "targetType": "workflow",
+                    "targetId": str(workflow.id),
+                    "targetName": workflow.name,
+                    "references": self._serialize_workflow_call_references(workflow_call_refs),
+                },
+            )
         if workflow.skills:
             skill_names = ", ".join(sorted(s.name for s in workflow.skills))
             raise ApiException(

@@ -7,16 +7,14 @@ from langchain_openai import ChatOpenAI
 from app.assistant.skill_catalog.base import SkillDefinition
 
 
-def resolve_workflow_node_llms(
+def resolve_workflow_node_llms_from_nodes(
     *,
-    skill: SkillDefinition,
+    workflow_nodes: list[Any],
     normalize_config: Callable[[dict[str, Any] | None], dict[str, Any]],
     normalize_container_body_nodes: Callable[[dict[str, Any]], list[dict[str, Any]]],
     resolve_node_custom_llm: Callable[[str, str], ChatOpenAI],
 ) -> dict[str, ChatOpenAI]:
     node_llms: dict[str, ChatOpenAI] = {}
-    if skill.langgraph_pattern != "workflow_dag":
-        return node_llms
 
     def _bind_model_for_node(*, runtime_key: str, cfg: dict[str, Any]) -> None:
         model_source = str(cfg.get("model_source", "default") or "default").strip().lower()
@@ -34,7 +32,7 @@ def resolve_workflow_node_llms(
             )
         node_llms[runtime_key] = resolve_node_custom_llm(model_id, runtime_key)
 
-    for node in getattr(skill, "workflow_nodes", None) or []:
+    for node in workflow_nodes or []:
         node_id = str(getattr(node, "node_id", "") or "").strip()
         node_type = str(getattr(node, "node_type", "") or "").strip()
         if not node_id:
@@ -59,3 +57,21 @@ def resolve_workflow_node_llms(
             _bind_model_for_node(runtime_key=runtime_key, cfg=body_cfg)
 
     return node_llms
+
+
+def resolve_workflow_node_llms(
+    *,
+    skill: SkillDefinition,
+    normalize_config: Callable[[dict[str, Any] | None], dict[str, Any]],
+    normalize_container_body_nodes: Callable[[dict[str, Any]], list[dict[str, Any]]],
+    resolve_node_custom_llm: Callable[[str, str], ChatOpenAI],
+) -> dict[str, ChatOpenAI]:
+    if skill.langgraph_pattern != "workflow_dag":
+        return {}
+
+    return resolve_workflow_node_llms_from_nodes(
+        workflow_nodes=getattr(skill, "workflow_nodes", None) or [],
+        normalize_config=normalize_config,
+        normalize_container_body_nodes=normalize_container_body_nodes,
+        resolve_node_custom_llm=resolve_node_custom_llm,
+    )

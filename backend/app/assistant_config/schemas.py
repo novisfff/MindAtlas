@@ -21,6 +21,7 @@ AgentModelSource = Literal["default", "custom"]
 OutputFieldType = Literal["string", "number", "integer", "boolean", "object", "array"]
 VersionSource = Literal["save", "publish"]
 SystemBehaviorKey = Literal["weekly_report_generation", "monthly_report_generation"]
+WorkflowCallBindingMode = Literal["pinned", "latest"]
 
 # 允许的 URL scheme
 ALLOWED_URL_SCHEMES = {"http", "https"}
@@ -222,7 +223,7 @@ class OutputFieldSpecInput(CamelModel):
 NodeType = Literal[
     "start", "llm", "agent", "tool", "if_else",
     "parameter_extractor", "knowledge_retrieval",
-    "iteration", "loop", "code_executor", "http_request", "variable_assign", "human_in_loop", "output",
+    "iteration", "loop", "code_executor", "http_request", "variable_assign", "human_in_loop", "workflow_call", "output",
 ]
 ConditionOperator = Literal[
     "contains", "not_contains", "starts_with", "ends_with",
@@ -274,6 +275,44 @@ class WorkflowInput(CamelModel):
     nodes: list[WorkflowNodeInput] = Field(..., min_length=1)
     edges: list[WorkflowEdgeInput] = Field(default_factory=list)
     viewport: dict | None = None
+
+
+class WorkflowContractParamSchema(CamelModel):
+    name: str = Field(..., min_length=1, max_length=64)
+    description: str | None = None
+    param_type: str = Field(default="string", max_length=32)
+    required: bool = False
+    nullable: bool = False
+    items_type: str | None = Field(default=None, max_length=32)
+    enum: list[str] | None = None
+
+
+class WorkflowCallNodeConfig(CamelModel):
+    target_workflow_id: UUID | None = None
+    binding_mode: WorkflowCallBindingMode = "pinned"
+    target_published_version_id: UUID | None = None
+    input_bindings: dict[str, str] = Field(default_factory=dict)
+
+
+class CallableWorkflowVersionResponse(CamelModel):
+    id: UUID
+    sequence_no: int
+    version_name: str
+    version_source: VersionSource
+    input_params: list[WorkflowContractParamSchema] = Field(default_factory=list)
+    output_params: list[WorkflowContractParamSchema] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class CallableWorkflowResponse(CamelModel):
+    id: UUID
+    name: str
+    description: str | None = None
+    published_version_id: UUID
+    input_params: list[WorkflowContractParamSchema] = Field(default_factory=list)
+    output_params: list[WorkflowContractParamSchema] = Field(default_factory=list)
+    available_versions: list[CallableWorkflowVersionResponse] = Field(default_factory=list)
 
 
 def _resolve_workflow_start_input_mode(workflow: WorkflowInput | None) -> str:

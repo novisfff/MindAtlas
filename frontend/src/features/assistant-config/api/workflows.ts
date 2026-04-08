@@ -93,8 +93,42 @@ export interface WorkflowClearVersionsResponse {
   publishedVersionId: string | null
 }
 
+export interface WorkflowContractParam {
+  name: string
+  description?: string | null
+  paramType: string
+  required: boolean
+  nullable?: boolean
+  itemsType?: string | null
+  enum?: string[] | null
+}
+
+export interface CallableWorkflowVersion {
+  id: string
+  sequenceNo: number
+  versionName: string
+  versionSource: 'publish' | 'save'
+  inputParams: WorkflowContractParam[]
+  outputParams: WorkflowContractParam[]
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CallableWorkflow {
+  id: string
+  name: string
+  description: string | null
+  publishedVersionId: string
+  inputParams: WorkflowContractParam[]
+  outputParams: WorkflowContractParam[]
+  availableVersions: CallableWorkflowVersion[]
+}
+
 export const getWorkflows = () =>
   apiClient.get<AssistantWorkflow[]>('/api/assistant-config/workflows')
+
+export const getCallableWorkflows = () =>
+  apiClient.get<CallableWorkflow[]>('/api/assistant-config/workflows/callable')
 
 export const getWorkflow = (id: string) =>
   apiClient.get<AssistantWorkflow>(`/api/assistant-config/workflows/${id}`)

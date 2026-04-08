@@ -18,6 +18,7 @@ export type NodeType =
   | 'http_request'
   | 'variable_assign'
   | 'human_in_loop'
+  | 'workflow_call'
   | 'output'
 
 export type ConditionOperator =
@@ -128,6 +129,15 @@ export interface OutputNodeConfig {
 
 export interface ToolNodeConfig {
   toolName?: string
+  inputBindings?: Record<string, string>
+}
+
+export type WorkflowCallBindingMode = 'pinned' | 'latest'
+
+export interface WorkflowCallNodeConfig {
+  targetWorkflowId?: string
+  bindingMode?: WorkflowCallBindingMode
+  targetPublishedVersionId?: string | null
   inputBindings?: Record<string, string>
 }
 
@@ -253,6 +263,7 @@ export type ContainerBodyNodeType =
   | 'http_request'
   | 'variable_assign'
   | 'human_in_loop'
+  | 'workflow_call'
 
 export interface ContainerBodyNode {
   nodeId: string
@@ -301,6 +312,7 @@ export type NodeConfig =
   | AgentNodeConfig
   | OutputNodeConfig
   | ToolNodeConfig
+  | WorkflowCallNodeConfig
   | IfElseNodeConfig
   | ParameterExtractorNodeConfig
   | KnowledgeRetrievalNodeConfig

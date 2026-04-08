@@ -14,6 +14,7 @@ import {
   Equal,
   UserCheck,
   Globe,
+  Network,
 } from 'lucide-react'
 import {
   Background,
@@ -37,9 +38,9 @@ import type { ContainerBodyEdge, ContainerBodyNode, ContainerBodyNodeType } from
 import { defaultLabelForNodeType } from './labelUtils'
 import { normalizeIfElseConfig } from './ifElseConfig'
 import { WorkflowDeletableEdge } from './WorkflowDeletableEdge'
-import type { WorkflowToolDefinition } from './types'
+import type { CallableWorkflowDefinition, WorkflowToolDefinition } from './types'
 import { QuickAddPopover, type QuickAddPayload } from './QuickAddPopover'
-import { createSubflowNode } from './nodeFactory'
+import { createSubflowNode, resolveCallableWorkflowVersion } from './nodeFactory'
 
 const edgeTypes = {
   workflowBezier: WorkflowDeletableEdge,
@@ -57,6 +58,7 @@ const NODE_STYLES: Record<ContainerBodyNodeType, { header: string; icon: typeof 
   http_request: { header: 'bg-blue-50 border-b border-blue-100', icon: Globe, iconColor: 'text-blue-600' },
   variable_assign: { header: 'bg-lime-50 border-b border-lime-100', icon: Equal, iconColor: 'text-lime-600' },
   human_in_loop: { header: 'bg-blue-50 border-b border-blue-100', icon: UserCheck, iconColor: 'text-blue-600' },
+  workflow_call: { header: 'bg-emerald-50 border-b border-emerald-100', icon: Network, iconColor: 'text-emerald-600' },
 }
 
 const PREVIEW_MAX = 50
@@ -72,6 +74,7 @@ const NODE_ICON_MAP: Record<ContainerBodyNodeType, typeof Play> = {
   http_request: Globe,
   variable_assign: Equal,
   human_in_loop: UserCheck,
+  workflow_call: Network,
 }
 
 const SUBFLOW_NODE_HANDLE_TOP = 20
@@ -110,7 +113,11 @@ function formatKnowledgeQuery(raw: unknown): string {
   return normalized
 }
 
-function getSubflowPreview(nodeType: ContainerBodyNodeType, config: Record<string, unknown> | null | undefined): string {
+function getSubflowPreview(
+  nodeType: ContainerBodyNodeType,
+  config: Record<string, unknown> | null | undefined,
+  workflows: CallableWorkflowDefinition[] = [],
+): string {
   const cfg = (config ?? {}) as Record<string, unknown>
   switch (nodeType) {
     case 'llm':
@@ -177,6 +184,21 @@ function getSubflowPreview(nodeType: ContainerBodyNodeType, config: Record<strin
       if (!instruction) return `fields ${fields}`
       return `${truncate(instruction, 36)} · ${fields} fields`
     }
+    case 'workflow_call': {
+      const targetWorkflowId = String(cfg.targetWorkflowId ?? cfg.target_workflow_id ?? '').trim()
+      const bindingMode = String(cfg.bindingMode ?? cfg.binding_mode ?? 'pinned').trim().toLowerCase() === 'latest'
+        ? 'latest'
+        : 'pinned'
+      const versionId = String(cfg.targetPublishedVersionId ?? cfg.target_published_version_id ?? '').trim()
+      const workflow = workflows.find((item) => item.id === targetWorkflowId)
+      const resolvedVersion = workflow ? resolveCallableWorkflowVersion(workflow, versionId || null) : undefined
+      const outputCount = resolvedVersion?.outputParams?.length ?? workflow?.outputParams?.length ?? 0
+      const workflowLabel = workflow?.name ?? 'Workflow'
+      const modeLabel = bindingMode === 'latest'
+        ? 'latest'
+        : resolvedVersion?.versionName || 'pinned'
+      return `${workflowLabel} · ${modeLabel} · ${outputCount + 1} outputs`
+    }
     default:
       return ''
   }
@@ -189,6 +211,7 @@ type SubflowNodeData = {
   removable: boolean
   quickAddHandles: string[]
   tools: WorkflowToolDefinition[]
+  workflows: CallableWorkflowDefinition[]
   floatingUiEpoch?: number
   onRemove?: (nodeId: string) => void
   onQuickAdd?: (nodeId: string, handleId: string, payload: QuickAddPayload) => void
@@ -400,7 +423,7 @@ function SubflowNodeCard({ id, data, selected }: SubflowNodeComponentProps) {
   const isStart = data.nodeType === 'start'
   const isIfElse = data.nodeType === 'if_else'
   const isHumanInLoop = data.nodeType === 'human_in_loop'
-  const preview = getSubflowPreview(data.nodeType, data.config)
+  const preview = getSubflowPreview(data.nodeType, data.config, data.workflows)
   const previewText = preview || '\u00A0'
   const ifElseConfig = isIfElse ? normalizeIfElseConfig((data.config ?? {}) as Record<string, unknown>) : null
   const branchHandles = isIfElse
@@ -465,6 +488,7 @@ function SubflowNodeCard({ id, data, selected }: SubflowNodeComponentProps) {
       <QuickAddPopover
         scope="container"
         tools={data.tools}
+        workflows={data.workflows}
         open={openQuickAddHandle === handleId}
         onOpenChange={(nextOpen) => setOpenQuickAddHandle(nextOpen ? handleId : null)}
         side={side}
@@ -593,6 +617,7 @@ function toReactFlowNodes(
   onRemoveNode: (nodeId: string) => void,
   onQuickAddNode: ((nodeId: string, handleId: string, payload: QuickAddPayload) => void) | undefined,
   tools: WorkflowToolDefinition[],
+  workflows: CallableWorkflowDefinition[],
   floatingUiEpoch: number,
   readOnly: boolean,
 ): Node<SubflowNodeData>[] {
@@ -612,6 +637,7 @@ function toReactFlowNodes(
       quickAddHandles: readOnly ? [] : (quickAddHandleMap.get(item.nodeId) ?? []),
       onQuickAdd: onQuickAddNode,
       tools,
+      workflows,
       floatingUiEpoch,
     },
     draggable: !readOnly && item.nodeType !== 'start',
@@ -815,6 +841,7 @@ export function ContainerSubflowCanvas({
   bodyNodes,
   bodyEdges,
   tools,
+  workflows,
   floatingUiEpoch = 0,
   canvasHeight = 168,
   canvasWidth,
@@ -825,6 +852,7 @@ export function ContainerSubflowCanvas({
   bodyNodes: ContainerBodyNode[]
   bodyEdges: ContainerBodyEdge[]
   tools: WorkflowToolDefinition[]
+  workflows: CallableWorkflowDefinition[]
   floatingUiEpoch?: number
   canvasHeight?: number
   canvasWidth?: number
@@ -881,8 +909,12 @@ export function ContainerSubflowCanvas({
       }
       const position = resolveNonOverlappingPosition(initial, currentBodyNodes)
 
-      const nextNodeType = payload.kind === 'tool' ? 'tool' : (payload.nodeType as ContainerBodyNodeType)
-      if (!['llm', 'tool', 'if_else', 'parameter_extractor', 'knowledge_retrieval', 'code_executor', 'http_request', 'variable_assign', 'human_in_loop'].includes(nextNodeType)) {
+      const nextNodeType = payload.kind === 'tool'
+        ? 'tool'
+        : payload.kind === 'workflow'
+          ? 'workflow_call'
+          : (payload.nodeType as ContainerBodyNodeType)
+      if (!['llm', 'tool', 'if_else', 'parameter_extractor', 'knowledge_retrieval', 'code_executor', 'http_request', 'variable_assign', 'human_in_loop', 'workflow_call'].includes(nextNodeType)) {
         return
       }
       const nodeId = createBodyNodeId(nextNodeType)
@@ -900,6 +932,18 @@ export function ContainerSubflowCanvas({
             toolDef,
           })
         }
+        if (payload.kind === 'workflow') {
+          const workflowDef = workflows.find((item) => item.id === payload.workflowId)
+          if (!workflowDef) return null
+          return createSubflowNode({
+            nodeId,
+            nodeType: 'workflow_call',
+            positionX: position.x,
+            positionY: position.y,
+            label: workflowDef.name,
+            workflowDef,
+          })
+        }
         return createSubflowNode({
           nodeId,
           nodeType: nextNodeType,
@@ -907,6 +951,7 @@ export function ContainerSubflowCanvas({
           positionY: position.y,
         })
       })()
+      if (!newNode) return
 
       onChange(
         [...currentBodyNodes, newNode],
@@ -928,7 +973,7 @@ export function ContainerSubflowCanvas({
         ],
       )
     },
-    [onChange, readOnly, tools],
+    [onChange, readOnly, tools, workflows],
   )
 
   const handleRemoveNode = useCallback(
@@ -959,10 +1004,11 @@ export function ContainerSubflowCanvas({
       handleRemoveNode,
       readOnly ? undefined : handleQuickAdd,
       tools,
+      workflows,
       floatingUiEpoch,
       readOnly,
     ),
-    [quickAddHandleMap, bodyNodes, floatingUiEpoch, handleQuickAdd, handleRemoveNode, readOnly, tools],
+    [quickAddHandleMap, bodyNodes, floatingUiEpoch, handleQuickAdd, handleRemoveNode, readOnly, tools, workflows],
   )
 
   const handleDeleteEdge = useCallback(

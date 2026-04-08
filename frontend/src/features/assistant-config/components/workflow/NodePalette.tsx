@@ -2,20 +2,22 @@ import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   Wrench,
+  Network,
   PanelLeftClose,
   Plus,
 } from 'lucide-react'
 import type { NodeType } from '../../api/workflow'
-import type { WorkflowToolDefinition } from './types'
+import type { CallableWorkflowDefinition, WorkflowToolDefinition } from './types'
 import { NODE_CATALOG_CATEGORIES, NODE_CATALOG_ITEMS } from './nodeCatalog'
 
 interface NodePaletteProps {
   tools: WorkflowToolDefinition[]
+  workflows: CallableWorkflowDefinition[]
 }
 
-export function NodePalette({ tools }: NodePaletteProps) {
+export function NodePalette({ tools, workflows }: NodePaletteProps) {
   const { t } = useTranslation()
-  const [activeTab, setActiveTab] = useState<'nodes' | 'tools'>('nodes')
+  const [activeTab, setActiveTab] = useState<'nodes' | 'tools' | 'workflows'>('nodes')
   const [keyword, setKeyword] = useState('')
   const [isCollapsed, setIsCollapsed] = useState(false)
 
@@ -31,6 +33,18 @@ export function NodePalette({ tools }: NodePaletteProps) {
         nodeType: 'tool',
         toolName: tool.name,
         label: tool.displayName ?? tool.name,
+      }),
+    )
+    e.dataTransfer.effectAllowed = 'move'
+  }
+
+  const onWorkflowDragStart = (e: React.DragEvent, workflow: CallableWorkflowDefinition) => {
+    e.dataTransfer.setData(
+      'application/workflow-call-item',
+      JSON.stringify({
+        nodeType: 'workflow_call',
+        workflowId: workflow.id,
+        label: workflow.name,
       }),
     )
     e.dataTransfer.effectAllowed = 'move'
@@ -52,6 +66,17 @@ export function NodePalette({ tools }: NodePaletteProps) {
       )
     })
   }, [keyword, tools])
+
+  const visibleWorkflows = useMemo(() => {
+    const normalized = keyword.trim().toLowerCase()
+    if (!normalized) return workflows
+    return workflows.filter((workflow) => {
+      return (
+        workflow.name.toLowerCase().includes(normalized) ||
+        (workflow.description ?? '').toLowerCase().includes(normalized)
+      )
+    })
+  }, [keyword, workflows])
 
 
   return (
@@ -95,6 +120,14 @@ export function NodePalette({ tools }: NodePaletteProps) {
                   }`}
               >
                 {t('settings.skills.workflowPaletteTools')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('workflows')}
+                className={`flex-1 rounded-md px-2 py-1 text-[10px] font-medium transition-all ${activeTab === 'workflows' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground/80'
+                  }`}
+              >
+                {t('settings.skills.workflowPaletteWorkflows')}
               </button>
             </div>
 
@@ -157,6 +190,41 @@ export function NodePalette({ tools }: NodePaletteProps) {
                 {visibleTools.length === 0 && (
                   <p className="text-[10px] text-muted-foreground px-1 py-1 text-center opacity-60">
                     {t('settings.skills.workflowNoTools')}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {activeTab === 'workflows' && (
+              <div className="space-y-2">
+                <input
+                  type="text"
+                  value={keyword}
+                  onChange={(e) => setKeyword(e.target.value)}
+                  placeholder={t('settings.skills.workflowWorkflowSearchPlaceholder')}
+                  className="w-full px-2 py-1.5 text-[10px] rounded-md border bg-white/50 focus:bg-white transition-colors"
+                />
+                <div className="space-y-1">
+                  {visibleWorkflows.map((workflow) => (
+                    <div
+                      key={workflow.id}
+                      draggable
+                      onDragStart={(e) => onWorkflowDragStart(e, workflow)}
+                      className="group flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-transparent hover:border-border/50 bg-transparent hover:bg-white/50 cursor-grab active:cursor-grabbing transition-all text-sm"
+                      title={workflow.description ?? undefined}
+                    >
+                      <div className="p-1 rounded-md bg-white shadow-sm ring-1 ring-black/5 group-hover:scale-105 transition-transform">
+                        <Network className="w-3.5 h-3.5 opacity-70 group-hover:opacity-100 text-emerald-500" />
+                      </div>
+                      <span className="text-[11px] font-medium text-muted-foreground group-hover:text-foreground transition-colors truncate">
+                        {workflow.name}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                {visibleWorkflows.length === 0 && (
+                  <p className="text-[10px] text-muted-foreground px-1 py-1 text-center opacity-60">
+                    {t('settings.skills.workflowNoCallableWorkflows')}
                   </p>
                 )}
               </div>

@@ -20,6 +20,7 @@ from app.assistant_config.schemas import (
     AssistantToolResponse,
     AssistantToolUpdateRequest,
     AssistantWorkflowCreateRequest,
+    CallableWorkflowResponse,
     AssistantWorkflowResponse,
     AssistantWorkflowUpdateRequest,
     ClearVersionsResponse,
@@ -439,6 +440,16 @@ def list_workflows(
     ])
 
 
+@router.get("/workflows/callable", response_model=ApiResponse)
+def list_callable_workflows(db: Session = Depends(get_db)) -> ApiResponse:
+    service = AssistantConfigService(db)
+    items = service.list_callable_workflows()
+    return ApiResponse.ok([
+        CallableWorkflowResponse.model_validate(item).model_dump(by_alias=True)
+        for item in items
+    ])
+
+
 @router.get("/workflows/{id}", response_model=ApiResponse)
 def get_workflow(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
     service = AssistantConfigService(db)
@@ -566,7 +577,10 @@ def _validate_workflow_payload(
     service = AssistantConfigService(db)
     if len(all_errors) == 0:
         try:
-            service.validate_workflow_dependencies(request)
+            service.validate_workflow_dependencies(
+                request,
+                current_workflow_id=(workflow.id if workflow is not None else None),
+            )
         except ApiException as exc:
             all_errors.append({"node_id": None, "message": exc.message})
 
@@ -713,6 +727,7 @@ _NODE_TYPE_LABELS = {
     "http_request": "HTTP Request",
     "variable_assign": "Variable Assign",
     "human_in_loop": "Human In Loop",
+    "workflow_call": "Workflow Call",
     "output": "Output",
 }
 
@@ -730,5 +745,6 @@ _NODE_TYPE_DESCRIPTIONS = {
     "http_request": "Send HTTP requests with templated URL/headers/body and structured response fields",
     "variable_assign": "Assign or update workflow env variable values",
     "human_in_loop": "Pause workflow and wait for human approval with editable fields",
+    "workflow_call": "Invoke another published workflow and consume its structured outputs",
     "output": "Workflow terminal node that formats and emits final response",
 }

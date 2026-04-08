@@ -9,6 +9,7 @@ import { isApiError } from '@/lib/api/client'
 import {
   clearWorkflowVersions,
   deleteWorkflowVersion,
+  getCallableWorkflows,
   getWorkflow,
   listWorkflowVersions,
   publishWorkflow,
@@ -300,6 +301,10 @@ export default function WorkflowEditorPage() {
     queryKey: ['assistant-tools-workflow'],
     queryFn: () => getToolsWithParams({ includeDisabled: false }),
   })
+  const { data: callableWorkflowsRaw = [] } = useQuery({
+    queryKey: ['assistant-callable-workflows'],
+    queryFn: () => getCallableWorkflows(),
+  })
 
   const workflowTools = useMemo<WorkflowToolDefinition[]>(() => {
     const merged = new Map<string, WorkflowToolDefinition>()
@@ -329,6 +334,11 @@ export default function WorkflowEditorPage() {
       (a.displayName ?? a.name).localeCompare(b.displayName ?? b.name),
     )
   }, [customTools, systemToolDefs])
+
+  const callableWorkflows = useMemo(
+    () => callableWorkflowsRaw.filter((item) => item.id !== workflowId),
+    [callableWorkflowsRaw, workflowId],
+  )
 
   const workflowInput = useMemo(
     () => serializeToWorkflowInput(store.nodes, store.edges, store.viewport),
@@ -1148,6 +1158,7 @@ export default function WorkflowEditorPage() {
         <div className="absolute inset-0 z-0">
           <FlowCanvas
             tools={workflowTools}
+            workflows={callableWorkflows}
             workflowDescription={workflowDescriptionDraft}
             readOnly={editorMutationLocked}
             floatingUiEpoch={floatingUiEpoch}
@@ -1414,7 +1425,7 @@ export default function WorkflowEditorPage() {
 
         <div className="absolute left-4 top-[4.75rem] bottom-24 z-10 flex w-fit min-h-0 flex-col justify-start pointer-events-none">
           <div className={`min-h-0 flex flex-col ${editorMutationLocked ? 'pointer-events-none opacity-60' : 'pointer-events-auto'}`}>
-            <NodePalette tools={workflowTools} />
+            <NodePalette tools={workflowTools} workflows={callableWorkflows} />
           </div>
         </div>
 
@@ -1439,6 +1450,7 @@ export default function WorkflowEditorPage() {
                   {visibleSurface === 'property' ? (
                     <PropertyPanel
                       tools={workflowTools}
+                      workflows={callableWorkflows}
                       workflowDescription={workflowDescriptionDraft}
                       onWorkflowDescriptionChange={setWorkflowDescriptionDraft}
                       selectionTarget={activePropertyTarget}

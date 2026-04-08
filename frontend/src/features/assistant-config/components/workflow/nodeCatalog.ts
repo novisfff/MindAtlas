@@ -4,7 +4,7 @@ import type { NodeType } from '../../api/workflow'
 export type NodeCatalogCategory = 'basic' | 'logic' | 'data' | 'output'
 
 export interface NodeCatalogItem {
-  type: Exclude<NodeType, 'start' | 'tool'>
+  type: Exclude<NodeType, 'start' | 'tool' | 'workflow_call'>
   icon: LucideIcon
   category: NodeCatalogCategory
 }

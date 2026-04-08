@@ -17,6 +17,7 @@ import {
   Equal,
   UserCheck,
   Globe,
+  Network,
 } from 'lucide-react'
 import type { WfNodeData } from '../../stores/workflow-editor-store'
 import { useWorkflowEditorStore } from '../../stores/workflow-editor-store'
@@ -25,7 +26,8 @@ import { normalizeIfElseConfig } from './ifElseConfig'
 import { defaultLabelForNodeType } from './labelUtils'
 import { ContainerSubflowCanvas } from './ContainerSubflowCanvas'
 import { estimateContainerNodeSizeFromConfig } from './containerLayout'
-import type { WorkflowToolDefinition } from './types'
+import { resolveCallableWorkflowVersion } from './nodeFactory'
+import type { CallableWorkflowDefinition, WorkflowToolDefinition } from './types'
 import { QuickAddPopover, type QuickAddPayload } from './QuickAddPopover'
 
 const NODE_STYLES: Record<NodeType, { header: string; icon: typeof Play; iconColor: string }> = {
@@ -33,6 +35,7 @@ const NODE_STYLES: Record<NodeType, { header: string; icon: typeof Play; iconCol
   llm: { header: 'bg-gradient-to-r from-violet-100/90 to-purple-100/90 border-b border-violet-200', icon: Brain, iconColor: 'text-violet-700' },
   agent: { header: 'bg-gradient-to-r from-indigo-100/90 to-sky-100/90 border-b border-indigo-200', icon: Bot, iconColor: 'text-indigo-700' },
   tool: { header: 'bg-gradient-to-r from-sky-100/90 to-blue-100/90 border-b border-sky-200', icon: Wrench, iconColor: 'text-sky-700' },
+  workflow_call: { header: 'bg-gradient-to-r from-emerald-100/90 to-teal-100/90 border-b border-emerald-200', icon: Network, iconColor: 'text-emerald-700' },
   if_else: { header: 'bg-gradient-to-r from-amber-100/90 to-yellow-100/90 border-b border-amber-200', icon: GitBranch, iconColor: 'text-amber-700' },
   parameter_extractor: { header: 'bg-gradient-to-r from-fuchsia-100/90 to-pink-100/90 border-b border-fuchsia-200', icon: ScanSearch, iconColor: 'text-fuchsia-700' },
   knowledge_retrieval: { header: 'bg-gradient-to-r from-teal-100/90 to-emerald-100/90 border-b border-teal-200', icon: BookOpen, iconColor: 'text-teal-700' },
@@ -182,6 +185,9 @@ function normalizeContainerBodyEdges(config: Record<string, unknown>): Container
 
 function getPreview(data: WfNodeData): string {
   const cfg = (data.config ?? {}) as Record<string, unknown>
+  const callableWorkflows = Array.isArray((data as { callableWorkflows?: unknown }).callableWorkflows)
+    ? ((data as { callableWorkflows?: CallableWorkflowDefinition[] }).callableWorkflows ?? [])
+    : []
   switch (data.nodeType) {
     case 'start': {
       const desc = data.workflowDescription as string | undefined
@@ -200,6 +206,21 @@ function getPreview(data: WfNodeData): string {
     }
     case 'tool':
       return (cfg.toolName as string) || ''
+    case 'workflow_call': {
+      const targetWorkflowId = String(cfg.targetWorkflowId ?? cfg.target_workflow_id ?? '').trim()
+      const bindingMode = String(cfg.bindingMode ?? cfg.binding_mode ?? 'pinned').trim().toLowerCase() === 'latest'
+        ? 'latest'
+        : 'pinned'
+      const versionId = String(cfg.targetPublishedVersionId ?? cfg.target_published_version_id ?? '').trim()
+      const workflow = callableWorkflows.find((item) => item.id === targetWorkflowId)
+      const resolvedVersion = workflow ? resolveCallableWorkflowVersion(workflow, versionId || null) : undefined
+      const outputCount = resolvedVersion?.outputParams?.length ?? workflow?.outputParams?.length ?? 0
+      if (!workflow) return bindingMode === 'latest' ? 'Latest published workflow' : 'Pinned published workflow'
+      const versionSummary = bindingMode === 'latest'
+        ? 'latest published'
+        : resolvedVersion?.versionName || 'pinned version'
+      return `${workflow.name} · ${versionSummary} · ${outputCount + 1} outputs`
+    }
     case 'if_else': {
       const normalized = normalizeIfElseConfig(cfg)
       const elifCount = Math.max(0, normalized.branches.length - 1)
@@ -392,6 +413,9 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
   const quickAddTools = Array.isArray((nodeData as { quickAddTools?: unknown }).quickAddTools)
     ? ((nodeData as { quickAddTools?: WorkflowToolDefinition[] }).quickAddTools ?? [])
     : []
+  const quickAddWorkflows = Array.isArray((nodeData as { quickAddWorkflows?: unknown }).quickAddWorkflows)
+    ? ((nodeData as { quickAddWorkflows?: CallableWorkflowDefinition[] }).quickAddWorkflows ?? [])
+    : []
   const floatingUiEpoch = Number((nodeData as { floatingUiEpoch?: unknown }).floatingUiEpoch ?? 0)
   const onQuickAdd = typeof (nodeData as { onQuickAdd?: unknown }).onQuickAdd === 'function'
     ? ((nodeData as { onQuickAdd?: (nodeId: string, handleId: string, payload: QuickAddPayload) => void }).onQuickAdd ?? null)
@@ -484,6 +508,7 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
       <QuickAddPopover
         scope="main"
         tools={quickAddTools}
+        workflows={quickAddWorkflows}
         open={openQuickAddHandle === handleId}
         onOpenChange={(nextOpen) => setOpenQuickAddHandle(nextOpen ? handleId : null)}
         side={side}
@@ -557,6 +582,7 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
             bodyNodes={bodyNodes}
             bodyEdges={bodyEdges}
             tools={quickAddTools}
+            workflows={quickAddWorkflows}
             floatingUiEpoch={floatingUiEpoch}
             canvasHeight={containerSize?.canvasHeight ?? 168}
             canvasWidth={containerSize?.width}
