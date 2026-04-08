@@ -1,7 +1,8 @@
 import type { Edge, Node } from '@xyflow/react'
 import type { InputParam } from '../../api/tools'
 import type { WfNodeData } from '../../stores/workflow-editor-store'
-import type { WorkflowToolDefinition } from './types'
+import { resolveCallableWorkflowVersion } from './nodeFactory'
+import type { CallableWorkflowDefinition, WorkflowContractParamDefinition, WorkflowToolDefinition } from './types'
 import {
   START_MEMORY_STRUCTURED_FIELD_NAMES,
   isValidStartStructuredFieldName,
@@ -105,6 +106,7 @@ function collectUpstreamNodeIds(
 function buildNodeOutputFields(
   node: Node<WfNodeData>,
   toolByName: Map<string, WorkflowToolDefinition>,
+  workflowById: Map<string, CallableWorkflowDefinition>,
 ): string[] {
   const cfg = (node.data.config ?? {}) as Record<string, unknown>
   if (node.data.nodeType === 'start') {
@@ -142,6 +144,23 @@ function buildNodeOutputFields(
     const tool = toolByName.get(toolName)
     const outputNames = tool?.outputParams?.map((item) => item.name).filter(Boolean) ?? []
     return ['result', ...outputNames]
+  }
+
+  if (node.data.nodeType === 'workflow_call') {
+    const targetWorkflowId = String(cfg.targetWorkflowId ?? '').trim()
+    const bindingMode = String(cfg.bindingMode ?? 'pinned').trim().toLowerCase() === 'latest' ? 'latest' : 'pinned'
+    const versionId = String(cfg.targetPublishedVersionId ?? '').trim()
+    const workflow = workflowById.get(targetWorkflowId)
+    const resolvedVersion = workflow
+      ? resolveCallableWorkflowVersion(
+          workflow,
+          bindingMode === 'latest' ? workflow.publishedVersionId : (versionId || null),
+        )
+      : undefined
+    const outputNames = (resolvedVersion?.outputParams ?? workflow?.outputParams ?? [])
+      .map((item) => item.name.trim())
+      .filter(Boolean)
+    return ['response', ...outputNames]
   }
 
   if (node.data.nodeType === 'parameter_extractor') {
@@ -224,6 +243,32 @@ function inferFieldType(field: string): InputParam['paramType'] {
   if (field === 'count' || field === 'iterations') return 'number'
   if (field === 'errors') return 'array'
   return 'string'
+}
+
+function normalizeContractParamType(rawType: string | undefined): InputParam['paramType'] {
+  const paramType = String(rawType ?? 'string').trim().toLowerCase()
+  if (paramType === 'number' || paramType === 'integer') return 'number'
+  if (paramType === 'boolean') return 'boolean'
+  if (paramType === 'object') return 'object'
+  if (paramType === 'array') return 'array'
+  return 'string'
+}
+
+function resolveWorkflowCallOutputParams(
+  node: Node<WfNodeData>,
+  workflowById: Map<string, CallableWorkflowDefinition>,
+): WorkflowContractParamDefinition[] {
+  const cfg = (node.data.config ?? {}) as Record<string, unknown>
+  const targetWorkflowId = String(cfg.targetWorkflowId ?? '').trim()
+  const bindingMode = String(cfg.bindingMode ?? 'pinned').trim().toLowerCase() === 'latest' ? 'latest' : 'pinned'
+  const versionId = String(cfg.targetPublishedVersionId ?? '').trim()
+  const workflow = workflowById.get(targetWorkflowId)
+  if (!workflow) return []
+  const resolvedVersion = resolveCallableWorkflowVersion(
+    workflow,
+    bindingMode === 'latest' ? workflow.publishedVersionId : (versionId || null),
+  )
+  return resolvedVersion?.outputParams ?? workflow.outputParams ?? []
 }
 
 function inferCodeExecutorFieldType(
@@ -316,16 +361,18 @@ export function buildWorkflowReferenceParams(
   edges: Edge[],
   currentNodeId: string,
   tools: WorkflowToolDefinition[],
+  workflows: CallableWorkflowDefinition[] = [],
 ): InputParam[] {
   const upstreamIds = collectUpstreamNodeIds(nodes, edges, currentNodeId)
   const upstreamSet = new Set(upstreamIds)
   const toolByName = new Map(tools.map((tool) => [tool.name, tool]))
+  const workflowById = new Map(workflows.map((workflow) => [workflow.id, workflow]))
   const params: InputParam[] = []
   const seen = new Set<string>()
 
   nodes.forEach((node) => {
     if (!upstreamSet.has(node.id) && node.data.nodeType !== 'start') return
-    const fields = buildNodeOutputFields(node, toolByName)
+    const fields = buildNodeOutputFields(node, toolByName, workflowById)
     const groupLabel = nodeDisplayLabel(node)
     const groupKey = `node:${node.id}`
     fields.forEach((field) => {
@@ -344,6 +391,15 @@ export function buildWorkflowReferenceParams(
             ? inferHumanInLoopFieldType(node, field)
             : node.data.nodeType === 'http_request'
               ? inferHttpRequestFieldType(field)
+              : node.data.nodeType === 'workflow_call'
+                ? (
+                    field === 'response'
+                      ? 'string'
+                      : normalizeContractParamType(
+                          resolveWorkflowCallOutputParams(node, workflowById)
+                            .find((item) => item.name === field)?.paramType,
+                        )
+                  )
               : inferFieldType(field),
         required: false,
         description: `${groupLabel}.${field}`,

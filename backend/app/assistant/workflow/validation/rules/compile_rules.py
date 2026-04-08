@@ -177,6 +177,107 @@ def _validate_compile_output_node_config(
                     )
 
 
+def _validate_compile_workflow_call_node_config(
+    *,
+    node_id: str | None,
+    cfg: dict,
+    errors: list[ValidationError],
+    subject: str = "workflow_call",
+) -> None:
+    target_workflow_id = cfg_get(cfg, "target_workflow_id", "targetWorkflowId", default=None)
+    if target_workflow_id is None or not str(target_workflow_id).strip():
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=f"{subject} targetWorkflowId is required",
+            )
+        )
+    else:
+        try:
+            UUID(str(target_workflow_id).strip())
+        except Exception:
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} targetWorkflowId must be a UUID",
+                )
+            )
+
+    binding_mode_raw = cfg_get(cfg, "binding_mode", "bindingMode", default="pinned")
+    binding_mode = str(binding_mode_raw or "pinned").strip().lower()
+    if binding_mode not in {"pinned", "latest"}:
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=f"{subject} bindingMode is invalid: {binding_mode_raw}",
+            )
+        )
+
+    target_version_id = cfg_get(cfg, "target_published_version_id", "targetPublishedVersionId", default=None)
+    if binding_mode == "pinned":
+        if target_version_id is None or not str(target_version_id).strip():
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} targetPublishedVersionId is required when bindingMode=pinned",
+                )
+            )
+        else:
+            try:
+                UUID(str(target_version_id).strip())
+            except Exception:
+                errors.append(
+                    ValidationError(
+                        node_id=node_id,
+                        message=f"{subject} targetPublishedVersionId must be a UUID",
+                    )
+                )
+    elif target_version_id is not None and str(target_version_id).strip():
+        try:
+            UUID(str(target_version_id).strip())
+        except Exception:
+            errors.append(
+                ValidationError(
+                    node_id=node_id,
+                    message=f"{subject} targetPublishedVersionId must be a UUID",
+                )
+            )
+
+    input_bindings = cfg_get(cfg, "input_bindings", "inputBindings", default=None)
+    if input_bindings is None:
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=f"{subject} requires inputBindings",
+            )
+        )
+    elif not isinstance(input_bindings, dict):
+        errors.append(
+            ValidationError(
+                node_id=node_id,
+                message=f"{subject} inputBindings must be an object",
+            )
+        )
+    else:
+        for key, value in input_bindings.items():
+            binding_key = str(key or "").strip()
+            if not binding_key:
+                errors.append(
+                    ValidationError(
+                        node_id=node_id,
+                        message=f"{subject} inputBindings keys must be non-empty strings",
+                    )
+                )
+                continue
+            if value is not None and not isinstance(value, str):
+                errors.append(
+                    ValidationError(
+                        node_id=node_id,
+                        message=f"{subject} inputBindings['{binding_key}'] must be a string",
+                    )
+                )
+
+
 def _validate_compile_model_source_for_llm_like_nodes(
     *,
     node_id: str | None,
@@ -602,6 +703,13 @@ def _validate_compile_container_body_nodes(
                 errors=errors,
                 subject=f"{node_type} body node '{body_node_id}' human_in_loop",
             )
+        if body_type == "workflow_call":
+            _validate_compile_workflow_call_node_config(
+                node_id=node_id,
+                cfg=body_cfg,
+                errors=errors,
+                subject=f"{node_type} body node '{body_node_id}' workflow_call",
+            )
 
 
 def validate_compile_node(
@@ -710,6 +818,13 @@ def validate_compile_node(
             cfg=cfg,
             errors=errors,
             subject="human_in_loop",
+        )
+
+    if node_type == "workflow_call":
+        _validate_compile_workflow_call_node_config(
+            node_id=node_id,
+            cfg=cfg,
+            errors=errors,
         )
 
     if node_type in {"iteration", "loop"}:

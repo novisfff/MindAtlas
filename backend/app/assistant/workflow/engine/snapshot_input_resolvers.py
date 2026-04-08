@@ -170,6 +170,36 @@ def build_node_snapshot_input(
             "resolvedArgs": resolved_args,
         }
 
+    if node_type == "workflow_call":
+        input_bindings = node_cfg.get("input_bindings", node_cfg.get("inputBindings"))
+        resolved_inputs: dict[str, Any] = {}
+        if isinstance(input_bindings, dict):
+            for key, raw_tpl in input_bindings.items():
+                binding_key = str(key or "").strip()
+                if not binding_key:
+                    continue
+                if isinstance(raw_tpl, str):
+                    resolved_inputs[binding_key] = rt.resolve_node_template_vars(
+                        template=raw_tpl,
+                        node_outputs=ctx.node_outputs,
+                        start_inputs=ctx.start_inputs,
+                        sys_vars=ctx.sys_vars,
+                        env_vars=ctx.env_vars,
+                    )
+                elif raw_tpl is None:
+                    resolved_inputs[binding_key] = ""
+                else:
+                    resolved_inputs[binding_key] = raw_tpl
+        return {
+            "targetWorkflowId": node_cfg.get("target_workflow_id", node_cfg.get("targetWorkflowId")),
+            "bindingMode": node_cfg.get("binding_mode", node_cfg.get("bindingMode", "pinned")),
+            "targetPublishedVersionId": node_cfg.get(
+                "target_published_version_id",
+                node_cfg.get("targetPublishedVersionId"),
+            ),
+            "resolvedInputs": resolved_inputs,
+        }
+
     if node_type == "code_executor":
         input_bindings = node_cfg.get("input_bindings", node_cfg.get("inputBindings"))
         resolved_inputs: dict[str, Any] = {}

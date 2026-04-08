@@ -28,15 +28,17 @@ import { HttpRequestNodeSettings } from './property-panel/nodes/HttpRequestNodeS
 import { VariableAssignNodeSettings } from './property-panel/nodes/VariableAssignNodeSettings'
 import { HumanInLoopNodeSettings } from './property-panel/nodes/HumanInLoopNodeSettings'
 import { OutputNodeSettings } from './property-panel/nodes/OutputNodeSettings'
+import { WorkflowCallNodeSettings } from './property-panel/nodes/WorkflowCallNodeSettings'
 import { useModelsQuery } from '../../../ai-providers/queries'
 import { Sparkles } from 'lucide-react'
 import { defaultLabelForNodeType } from './labelUtils'
 import { normalizeIfElseConfig } from './ifElseConfig'
-import type { WorkflowToolDefinition } from './types'
+import type { CallableWorkflowDefinition, WorkflowToolDefinition } from './types'
 import { WorkflowEditorSurfaceShell } from './WorkflowEditorSurfaceShell'
 
 interface PropertyPanelProps {
   tools: WorkflowToolDefinition[]
+  workflows: CallableWorkflowDefinition[]
   workflowDescription: string
   onWorkflowDescriptionChange: (value: string) => void
   onAskAiEdit?: (payload: { title?: string; instruction?: string; selection: WorkflowCopilotSelection }) => void
@@ -363,6 +365,7 @@ export function resolveSelectionContext(
 
 export function PropertyPanel({
   tools,
+  workflows,
   workflowDescription,
   onWorkflowDescriptionChange,
   onAskAiEdit,
@@ -425,7 +428,7 @@ export function PropertyPanel({
     if (!selectionContext) return []
 
     if (selectionContext.mode === 'main') {
-      const params = buildWorkflowReferenceParams(nodes, edges, selectionContext.node.id, tools)
+      const params = buildWorkflowReferenceParams(nodes, edges, selectionContext.node.id, tools, workflows)
       if (selectionContext.node.data.nodeType === 'iteration' || selectionContext.node.data.nodeType === 'loop') {
         params.push(...CONTAINER_MENTION_PARAMS)
       }
@@ -434,10 +437,10 @@ export function PropertyPanel({
 
     const graphNodes = toSubflowGraphNodes(selectionContext.bodyNodes)
     const graphEdges = toSubflowGraphEdges(selectionContext.bodyEdges)
-    const params = buildWorkflowReferenceParams(graphNodes, graphEdges, selectionContext.node.nodeId, tools)
+    const params = buildWorkflowReferenceParams(graphNodes, graphEdges, selectionContext.node.nodeId, tools, workflows)
     params.push(...CONTAINER_MENTION_PARAMS)
     return params
-  }, [edges, nodes, selectionContext, tools])
+  }, [edges, nodes, selectionContext, tools, workflows])
 
   const knowledgeSourceOptions = useMemo(() => {
     if (!selectionContext) return []
@@ -677,6 +680,8 @@ export function PropertyPanel({
         return <AgentNodeSettings {...commonProps} tools={tools} modelOptions={nodeModelOptions} />
       case 'tool':
         return <ToolNodeSettings {...commonProps} tools={tools} />
+      case 'workflow_call':
+        return <WorkflowCallNodeSettings {...commonProps} workflows={workflows} />
       case 'if_else':
         return <IfElseNodeSettings {...commonProps} onDeleteBranchEdges={handleDeleteIfElseBranchEdges} />
       case 'parameter_extractor':

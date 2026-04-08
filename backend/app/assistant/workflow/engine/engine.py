@@ -225,6 +225,11 @@ def _build_human_in_loop_node(*args, **kwargs):
     return build_human_in_loop_node(*args, **kwargs)
 
 
+def _build_workflow_call_node(*args, **kwargs):
+    from app.assistant.workflow.engine.node_builders.workflow_call_node import build_workflow_call_node
+    return build_workflow_call_node(*args, **kwargs)
+
+
 
 def _build_if_else_node(*args, **kwargs):
     from app.assistant.workflow.engine.node_builders.if_else_node import build_if_else_node
@@ -313,6 +318,7 @@ def build_workflow_dag_subgraph(
         build_http_request_node=_build_http_request_node,
         build_variable_assign_node=_build_variable_assign_node,
         build_human_in_loop_node=_build_human_in_loop_node,
+        build_workflow_call_node=_build_workflow_call_node,
         build_if_else_node=_build_if_else_node,
         build_param_extractor_node=_build_param_extractor_node,
         build_kr_node=_build_kr_node,

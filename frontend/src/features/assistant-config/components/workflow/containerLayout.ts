@@ -6,6 +6,7 @@ const BODY_NODE_SIZE: Record<ContainerBodyNodeType, { width: number; height: num
   llm: { width: 240, height: 112 },
   agent: { width: 240, height: 112 },
   tool: { width: 240, height: 112 },
+  workflow_call: { width: 240, height: 112 },
   if_else: { width: 240, height: 160 },
   parameter_extractor: { width: 240, height: 112 },
   knowledge_retrieval: { width: 240, height: 112 },

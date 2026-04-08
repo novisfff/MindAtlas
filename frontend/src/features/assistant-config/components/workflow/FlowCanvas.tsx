@@ -17,7 +17,7 @@ import { useWorkflowEditorStore, type WfNodeData } from '../../stores/workflow-e
 import { useWorkflowTestRunStore } from '../../stores/workflow-test-run-store'
 import type { NodeType } from '../../api/workflow'
 import { WorkflowNode } from './WorkflowNode'
-import type { WorkflowToolDefinition } from './types'
+import type { CallableWorkflowDefinition, WorkflowToolDefinition } from './types'
 import { normalizeIfElseConfig } from './ifElseConfig'
 import { WorkflowDeletableEdge } from './WorkflowDeletableEdge'
 import { createMainFlowNode } from './nodeFactory'
@@ -30,6 +30,7 @@ const nodeTypes: NodeTypes = {
   llm: WorkflowNode,
   agent: WorkflowNode,
   tool: WorkflowNode,
+  workflow_call: WorkflowNode,
   if_else: WorkflowNode,
   parameter_extractor: WorkflowNode,
   knowledge_retrieval: WorkflowNode,
@@ -232,6 +233,7 @@ function createWorkflowEdge(params: {
 
 interface FlowCanvasProps {
   tools: WorkflowToolDefinition[]
+  workflows: CallableWorkflowDefinition[]
   workflowDescription?: string
   readOnly?: boolean
   floatingUiEpoch?: number
@@ -245,7 +247,13 @@ const RUNTIME_STATUS_PRIORITY: Record<RuntimeNodeStatus, number> = {
   success: 1,
 }
 
-export function FlowCanvas({ tools, workflowDescription, readOnly = false, floatingUiEpoch = 0 }: FlowCanvasProps) {
+export function FlowCanvas({
+  tools,
+  workflows,
+  workflowDescription,
+  readOnly = false,
+  floatingUiEpoch = 0,
+}: FlowCanvasProps) {
   const reactFlowWrapper = useRef<HTMLDivElement>(null)
   const { screenToFlowPosition, setCenter } = useReactFlow()
   const store = useWorkflowEditorStore()
@@ -340,6 +348,7 @@ export function FlowCanvas({ tools, workflowDescription, readOnly = false, float
 
       const nextNodeId = (() => {
         if (payload.kind === 'tool') return `tool_${Date.now()}_${++nodeCounter}`
+        if (payload.kind === 'workflow') return `workflow_call_${Date.now()}_${++nodeCounter}`
         const nodeType = payload.nodeType as NodeType
         if (!nodeType || nodeType === 'start') return null
         return `${nodeType}_${Date.now()}_${++nodeCounter}`
@@ -356,6 +365,17 @@ export function FlowCanvas({ tools, workflowDescription, readOnly = false, float
             label: toolDef?.displayName ?? payload.toolName,
             toolName: payload.toolName,
             toolDef,
+          })
+        }
+        if (payload.kind === 'workflow') {
+          const workflowDef = workflows.find((item) => item.id === payload.workflowId)
+          if (!workflowDef) return null
+          return createMainFlowNode({
+            id: nextNodeId,
+            nodeType: 'workflow_call',
+            position: { x: 0, y: 0 },
+            label: workflowDef.name,
+            workflowDef,
           })
         }
         const nodeType = payload.nodeType as NodeType
@@ -407,7 +427,7 @@ export function FlowCanvas({ tools, workflowDescription, readOnly = false, float
           }),
       )
     },
-    [readOnly, store, tools],
+    [readOnly, store, tools, workflows],
   )
 
   const nodesWithRuntimeData: Node<WfNodeData>[] = useMemo(
@@ -421,11 +441,13 @@ export function FlowCanvas({ tools, workflowDescription, readOnly = false, float
           quickAddHandles: readOnly ? [] : (quickAddHandleMap.get(node.id) ?? []),
           onQuickAdd: readOnly ? undefined : handleQuickAdd,
           quickAddTools: tools,
+          quickAddWorkflows: workflows,
+          callableWorkflows: workflows,
           floatingUiEpoch,
           readOnly,
         },
       })),
-    [floatingUiEpoch, handleQuickAdd, quickAddHandleMap, readOnly, runtimeStatusByNodeId, store.nodes, tools, workflowDescription],
+    [floatingUiEpoch, handleQuickAdd, quickAddHandleMap, readOnly, runtimeStatusByNodeId, store.nodes, tools, workflowDescription, workflows],
   )
 
   const onEdgeClick = useCallback(
@@ -512,6 +534,7 @@ export function FlowCanvas({ tools, workflowDescription, readOnly = false, float
 
       const position = screenToFlowPosition({ x: e.clientX, y: e.clientY })
       const toolPayload = e.dataTransfer.getData('application/workflow-tool-item')
+      const workflowPayload = e.dataTransfer.getData('application/workflow-call-item')
 
       if (toolPayload) {
         try {
@@ -538,13 +561,38 @@ export function FlowCanvas({ tools, workflowDescription, readOnly = false, float
         }
       }
 
+      if (workflowPayload) {
+        try {
+          const parsed = JSON.parse(workflowPayload) as {
+            nodeType?: string
+            workflowId?: string
+            label?: string
+          }
+          if (parsed.nodeType === 'workflow_call' && parsed.workflowId) {
+            const workflowDef = workflows.find((item) => item.id === parsed.workflowId)
+            if (!workflowDef) return
+            const nodeId = `workflow_call_${Date.now()}_${++nodeCounter}`
+            store.addNode(createMainFlowNode({
+              id: nodeId,
+              nodeType: 'workflow_call',
+              position,
+              label: parsed.label || workflowDef.name,
+              workflowDef,
+            }))
+            return
+          }
+        } catch {
+          // fallthrough to normal node payload parsing
+        }
+      }
+
       const nodeType = e.dataTransfer.getData('application/workflow-node-type') as NodeType
       if (!nodeType) return
       const nodeId = `${nodeType}_${Date.now()}_${++nodeCounter}`
 
       store.addNode(createMainFlowNode({ id: nodeId, nodeType, position }))
     },
-    [readOnly, screenToFlowPosition, store, tools],
+    [readOnly, screenToFlowPosition, store, tools, workflows],
   )
 
   const isEditableElement = (target: EventTarget | Element | null): boolean => {

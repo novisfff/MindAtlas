@@ -28,6 +28,7 @@ from app.assistant.tools import __all__ as assistant_tool_names
 from app.assistant_config.models import AssistantAgentProfile, AssistantTool, AssistantWorkflow
 from app.assistant_config.registry import ToolRegistry
 from app.assistant_config.schemas import AgentPublishDraftInput, WorkflowInput
+from app.assistant_config.workflow_contracts import WorkflowContractError, workflow_contract_from_input
 from app.assistant_config.service import AssistantConfigService
 from app.common.exceptions import ApiException
 from app.common.request_context import get_request_id
@@ -1054,61 +1055,19 @@ class OpenClawIntegrationService:
                 code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
                 message=f"Workflow has no published version: {workflow.name}",
             )
-        if self.config_service._resolve_start_input_mode(published_input) != "structured":  # noqa: SLF001
+        try:
+            contract = workflow_contract_from_input(published_input)
+        except WorkflowContractError as exc:
             raise ApiException(
                 status_code=422,
                 code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
-                message=f"Workflow does not use structured start input: {workflow.name}",
-            )
-
-        start_fields = []
-        for item in self.config_service._extract_structured_start_fields(published_input).values():  # noqa: SLF001
-            start_fields.append(
-                {
-                    "name": item.get("name"),
-                    "type": item.get("type", "string"),
-                    "required": bool(item.get("required", False)),
-                    "description": item.get("description"),
-                }
-            )
-        input_schema = _schema_from_field_definitions(start_fields, required_key="required")
-
-        structured_output_schemas: list[dict[str, Any]] = []
-        for node in published_input.nodes:
-            if node.node_type != "output":
-                continue
-            config = node.config if isinstance(node.config, dict) else {}
-            raw_mode = str(config.get("output_mode", config.get("outputMode", "text")) or "text").strip().lower()
-            output_mode = "structured" if raw_mode in {"structured", "json"} else "text"
-            if output_mode != "structured":
-                continue
-            raw_fields = config.get("output_fields", config.get("outputFields"))
-            if not isinstance(raw_fields, list) or not raw_fields:
-                continue
-            schema = _schema_from_field_definitions(raw_fields, allow_nullable=True)
-            structured_output_schemas.append(schema)
-
-        if not structured_output_schemas:
-            raise ApiException(
-                status_code=422,
-                code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
-                message=f"Workflow does not expose a structured output contract: {workflow.name}",
-            )
-
-        unique_output_schemas = {_schema_compact(item): item for item in structured_output_schemas}
-        if len(unique_output_schemas) > 1:
-            raise ApiException(
-                status_code=422,
-                code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
-                message=f"Workflow exposes ambiguous structured output contracts: {workflow.name}",
-            )
-
-        output_schema = next(iter(unique_output_schemas.values()))
+                message=f"{exc.message}: {workflow.name}",
+            ) from exc
         return _WorkflowContractSnapshot(
-            input_schema=input_schema,
-            output_schema=output_schema,
-            input_summary=_schema_summary(input_schema, locale=locale),
-            output_summary=_schema_summary(output_schema, locale=locale),
+            input_schema=contract.input_schema,
+            output_schema=contract.output_schema,
+            input_summary=_schema_summary(contract.input_schema, locale=locale),
+            output_summary=_schema_summary(contract.output_schema, locale=locale),
         )
 
     def _build_workflow_skill_definition(

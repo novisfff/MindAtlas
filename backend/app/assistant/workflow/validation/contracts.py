@@ -81,6 +81,7 @@ _SUPPORTED_NODE_TYPES = {
     "http_request",
     "variable_assign",
     "human_in_loop",
+    "workflow_call",
     "output",
 }
 _CONTAINER_BODY_ALLOWED_NODE_TYPES = {
@@ -95,6 +96,7 @@ _CONTAINER_BODY_ALLOWED_NODE_TYPES = {
     "http_request",
     "variable_assign",
     "human_in_loop",
+    "workflow_call",
 }
 _REMOVED_NODE_TYPE_MESSAGES = {
     "answer": "Node type 'answer' is no longer supported. Use the output node instead.",

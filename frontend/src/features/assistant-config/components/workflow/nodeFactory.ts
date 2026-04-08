@@ -1,7 +1,11 @@
 import type { Node } from '@xyflow/react'
 import type { ContainerBodyNode, ContainerBodyNodeType, NodeConfig, NodeType } from '../../api/workflow'
 import type { WfNodeData } from '../../stores/workflow-editor-store'
-import type { WorkflowToolDefinition } from './types'
+import type {
+  CallableWorkflowDefinition,
+  CallableWorkflowVersionDefinition,
+  WorkflowToolDefinition,
+} from './types'
 import { createDefaultIfElseConfig } from './ifElseConfig'
 import { defaultLabelForNodeType } from './labelUtils'
 import { getDefaultCodeTemplate } from './property-panel/nodes/codeExecutorTemplates'
@@ -11,9 +15,32 @@ function buildToolInputBindings(toolDef?: WorkflowToolDefinition): Record<string
   return Object.fromEntries((toolDef.inputParams ?? []).map((item) => [item.name, '']))
 }
 
+export function resolveCallableWorkflowVersion(
+  workflowDef?: CallableWorkflowDefinition,
+  versionId?: string | null,
+): CallableWorkflowVersionDefinition | undefined {
+  if (!workflowDef) return undefined
+  const versions = workflowDef.availableVersions ?? []
+  if (versionId) {
+    const matched = versions.find((item) => item.id === versionId)
+    if (matched) return matched
+  }
+  return versions.find((item) => item.id === workflowDef.publishedVersionId) ?? versions[0]
+}
+
+function buildWorkflowCallInputBindings(versionDef?: CallableWorkflowVersionDefinition): Record<string, string> {
+  if (!versionDef) return {}
+  return Object.fromEntries((versionDef.inputParams ?? []).map((item) => [item.name, '']))
+}
+
 export function createDefaultNodeConfig(
   nodeType: NodeType | ContainerBodyNodeType,
-  options?: { toolName?: string; toolDef?: WorkflowToolDefinition },
+  options?: {
+    toolName?: string
+    toolDef?: WorkflowToolDefinition
+    workflowDef?: CallableWorkflowDefinition
+    workflowVersionId?: string | null
+  },
 ): NodeConfig | null {
   if (nodeType === 'start') {
     return {
@@ -53,6 +80,16 @@ export function createDefaultNodeConfig(
     return {
       toolName: options?.toolName ?? '',
       inputBindings: buildToolInputBindings(options?.toolDef),
+    }
+  }
+
+  if (nodeType === 'workflow_call') {
+    const workflowVersion = resolveCallableWorkflowVersion(options?.workflowDef, options?.workflowVersionId)
+    return {
+      targetWorkflowId: options?.workflowDef?.id ?? '',
+      bindingMode: 'pinned',
+      targetPublishedVersionId: workflowVersion?.id ?? options?.workflowDef?.publishedVersionId ?? null,
+      inputBindings: buildWorkflowCallInputBindings(workflowVersion),
     }
   }
 
@@ -190,8 +227,10 @@ export function createMainFlowNode(params: {
   label?: string
   toolName?: string
   toolDef?: WorkflowToolDefinition
+  workflowDef?: CallableWorkflowDefinition
+  workflowVersionId?: string | null
 }): Node<WfNodeData> {
-  const { id, nodeType, position, label, toolName, toolDef } = params
+  const { id, nodeType, position, label, toolName, toolDef, workflowDef, workflowVersionId } = params
   return {
     id,
     type: nodeType,
@@ -199,7 +238,7 @@ export function createMainFlowNode(params: {
     data: {
       nodeType,
       label: label || defaultLabelForNodeType(nodeType),
-      config: createDefaultNodeConfig(nodeType, { toolName, toolDef }),
+      config: createDefaultNodeConfig(nodeType, { toolName, toolDef, workflowDef, workflowVersionId }),
     },
   }
 }
@@ -212,9 +251,11 @@ export function createSubflowNode(params: {
   label?: string
   toolName?: string
   toolDef?: WorkflowToolDefinition
+  workflowDef?: CallableWorkflowDefinition
+  workflowVersionId?: string | null
 }): ContainerBodyNode {
-  const { nodeId, nodeType, positionX, positionY, label, toolName, toolDef } = params
-  const config = createDefaultNodeConfig(nodeType, { toolName, toolDef })
+  const { nodeId, nodeType, positionX, positionY, label, toolName, toolDef, workflowDef, workflowVersionId } = params
+  const config = createDefaultNodeConfig(nodeType, { toolName, toolDef, workflowDef, workflowVersionId })
   return {
     nodeId,
     nodeType,

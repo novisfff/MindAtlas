@@ -7,6 +7,62 @@ from langchain_openai import ChatOpenAI
 from app.assistant.workflow.engine import runtime_helpers as rt
 from app.assistant.workflow.engine.runtime_helpers import cfg_list_value, stringify
 from app.assistant.workflow.engine.state import NodeOutput, WorkflowState
+from app.assistant.workflow.human_approval_runtime import HumanLoopRuntime
+
+
+class ScopedHumanLoopRuntimeProxy(HumanLoopRuntime):
+    def __init__(self, runtime: Any, scope_prefix: str):
+        self._runtime = runtime
+        self._scope_prefix = scope_prefix
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self._runtime, item)
+
+    def _scope_node_id(self, node_id: str) -> str:
+        raw = str(node_id or "").strip()
+        if not raw:
+            return raw
+        prefix = f"{self._scope_prefix}::"
+        if raw.startswith(prefix):
+            return raw
+        return f"{prefix}{raw}"
+
+    def _scope_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        next_payload = dict(payload) if isinstance(payload, dict) else {}
+        node_id = str(next_payload.get("nodeId", "") or "").strip()
+        if node_id:
+            next_payload["nodeId"] = self._scope_node_id(node_id)
+        return next_payload
+
+    def create_and_wait(self, *, node_id: str, node_label: str, **kwargs: Any) -> dict[str, Any]:
+        original_requested = getattr(self._runtime, "_on_requested", None)
+        original_resolved = getattr(self._runtime, "_on_resolved", None)
+
+        def _wrap_callback(cb: Any) -> Any:
+            if not callable(cb):
+                return cb
+
+            def _wrapped(payload: dict[str, Any]) -> None:
+                cb(self._scope_payload(payload))
+
+            return _wrapped
+
+        if hasattr(self._runtime, "_on_requested"):
+            self._runtime._on_requested = _wrap_callback(original_requested)
+        if hasattr(self._runtime, "_on_resolved"):
+            self._runtime._on_resolved = _wrap_callback(original_resolved)
+
+        try:
+            return self._runtime.create_and_wait(
+                node_id=self._scope_node_id(node_id),
+                node_label=node_label,
+                **kwargs,
+            )
+        finally:
+            if hasattr(self._runtime, "_on_requested"):
+                self._runtime._on_requested = original_requested
+            if hasattr(self._runtime, "_on_resolved"):
+                self._runtime._on_resolved = original_resolved
 
 
 def normalize_container_body_nodes(
@@ -101,15 +157,21 @@ def _build_container_start_node(container_input: Any, container_fields: dict[str
     return start_node
 
 
-def _build_container_scoped_metadata(
-    container_node_id: str,
+def build_scoped_metadata(
+    scope_prefix: str,
     metadata: dict[str, Any] | None,
 ) -> dict[str, Any]:
     raw_metadata = metadata if isinstance(metadata, dict) else {}
     scoped = dict(raw_metadata)
 
     def _scoped_node_id(node_id: str) -> str:
-        return f"{container_node_id}::{node_id}"
+        raw = str(node_id or "").strip()
+        prefix = f"{scope_prefix}::"
+        if not raw:
+            return raw
+        if raw.startswith(prefix):
+            return raw
+        return f"{prefix}{raw}"
 
     on_node_start = raw_metadata.get("on_node_start")
     if callable(on_node_start):
@@ -216,7 +278,18 @@ def _build_container_scoped_metadata(
             _cb(payload=next_payload)
         scoped["on_human_approval_resolved"] = _wrapped_human_approval_resolved
 
+    human_loop_runtime = raw_metadata.get("human_loop_runtime")
+    if human_loop_runtime is not None:
+        scoped["human_loop_runtime"] = ScopedHumanLoopRuntimeProxy(human_loop_runtime, scope_prefix)
+
     return scoped
+
+
+def _build_container_scoped_metadata(
+    container_node_id: str,
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return build_scoped_metadata(container_node_id, metadata)
 
 
 def execute_container_body(
@@ -350,6 +423,15 @@ def execute_container_body(
             node_fn = engine_runtime._build_variable_assign_node(current, cfg)
         elif node_type == "human_in_loop":
             node_fn = engine_runtime._build_human_in_loop_node(current, cfg)
+        elif node_type == "workflow_call":
+            node_fn = engine_runtime._build_workflow_call_node(
+                current,
+                cfg,
+                llm,
+                args_llm,
+                tool_map,
+                db_bind,
+            )
         elif node_type == "start":
             node_fn = _build_container_start_node(container_input, container_ctx)
         else:

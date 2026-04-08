@@ -1,19 +1,21 @@
 import { useMemo, useState, type ReactElement } from 'react'
-import { Search, Wrench } from 'lucide-react'
+import { Network, Search, Wrench } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import type { ContainerBodyNodeType, NodeType } from '../../api/workflow'
-import type { WorkflowToolDefinition } from './types'
+import type { CallableWorkflowDefinition, WorkflowToolDefinition } from './types'
 import { NODE_CATALOG_CATEGORIES, NODE_CATALOG_ITEMS } from './nodeCatalog'
 
 export type QuickAddPayload =
   | { kind: 'node'; nodeType: NodeType | ContainerBodyNodeType }
   | { kind: 'tool'; toolName: string }
+  | { kind: 'workflow'; workflowId: string }
 
 interface QuickAddPopoverProps {
   trigger?: ReactElement
   anchor?: ReactElement
   tools: WorkflowToolDefinition[]
+  workflows: CallableWorkflowDefinition[]
   onSelect: (payload: QuickAddPayload) => void
   scope?: 'main' | 'container'
   open?: boolean
@@ -34,12 +36,14 @@ const CONTAINER_ALLOWED_TYPES = new Set<ContainerBodyNodeType>([
   'http_request',
   'variable_assign',
   'human_in_loop',
+  'workflow_call',
 ])
 
 export function QuickAddPopover({
   trigger,
   anchor,
   tools,
+  workflows,
   onSelect,
   scope = 'main',
   open,
@@ -50,7 +54,7 @@ export function QuickAddPopover({
 }: QuickAddPopoverProps) {
   const { t } = useTranslation()
   const [internalOpen, setInternalOpen] = useState(false)
-  const [activeTab, setActiveTab] = useState<'nodes' | 'tools'>('nodes')
+  const [activeTab, setActiveTab] = useState<'nodes' | 'tools' | 'workflows'>('nodes')
   const [keyword, setKeyword] = useState('')
   const isControlled = typeof open === 'boolean'
   const currentOpen = isControlled ? Boolean(open) : internalOpen
@@ -99,6 +103,17 @@ export function QuickAddPopover({
     })
   }, [keyword, tools])
 
+  const visibleWorkflows = useMemo(() => {
+    const normalized = keyword.trim().toLowerCase()
+    if (!normalized) return workflows
+    return workflows.filter((workflow) => {
+      return (
+        workflow.name.toLowerCase().includes(normalized) ||
+        (workflow.description ?? '').toLowerCase().includes(normalized)
+      )
+    })
+  }, [keyword, workflows])
+
   const handleChooseNode = (nodeType: NodeType | ContainerBodyNodeType) => {
     onSelect({ kind: 'node', nodeType })
     handleOpenChange(false)
@@ -106,6 +121,11 @@ export function QuickAddPopover({
 
   const handleChooseTool = (toolName: string) => {
     onSelect({ kind: 'tool', toolName })
+    handleOpenChange(false)
+  }
+
+  const handleChooseWorkflow = (workflowId: string) => {
+    onSelect({ kind: 'workflow', workflowId })
     handleOpenChange(false)
   }
 
@@ -139,6 +159,13 @@ export function QuickAddPopover({
             >
               {t('settings.skills.workflowPaletteTools')}
             </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('workflows')}
+              className={`flex-1 rounded-lg px-2.5 py-1.5 text-sm font-semibold transition-colors ${activeTab === 'workflows' ? 'bg-white text-primary shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+            >
+              {t('settings.skills.workflowPaletteWorkflows')}
+            </button>
           </div>
           <div className="relative mt-2.5">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground/70" />
@@ -146,7 +173,13 @@ export function QuickAddPopover({
               type="text"
               value={keyword}
               onChange={(event) => setKeyword(event.target.value)}
-              placeholder={activeTab === 'nodes' ? t('settings.skills.nodePalette') : t('settings.skills.workflowToolSearchPlaceholder')}
+              placeholder={
+                activeTab === 'nodes'
+                  ? t('settings.skills.nodePalette')
+                  : activeTab === 'tools'
+                    ? t('settings.skills.workflowToolSearchPlaceholder')
+                    : t('settings.skills.workflowWorkflowSearchPlaceholder')
+              }
               className="w-full h-10 rounded-lg border bg-background pl-8 pr-2 text-sm outline-none focus:border-primary/50"
             />
           </div>
@@ -200,6 +233,32 @@ export function QuickAddPopover({
               {visibleTools.length === 0 && (
                 <div className="text-xs text-muted-foreground text-center py-3">
                   {t('settings.skills.workflowNoTools')}
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'workflows' && (
+            <div className="space-y-1">
+              {visibleWorkflows.map((workflow) => (
+                <button
+                  key={workflow.id}
+                  type="button"
+                  onClick={() => handleChooseWorkflow(workflow.id)}
+                  className="w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-muted/50"
+                  title={workflow.description ?? undefined}
+                >
+                  <div className="p-1.5 rounded-md bg-white ring-1 ring-black/5">
+                    <Network className="w-3.5 h-3.5 text-emerald-500" />
+                  </div>
+                  <span className="text-[18px] leading-none font-medium truncate">
+                    {workflow.name}
+                  </span>
+                </button>
+              ))}
+              {visibleWorkflows.length === 0 && (
+                <div className="text-xs text-muted-foreground text-center py-3">
+                  {t('settings.skills.workflowNoCallableWorkflows')}
                 </div>
               )}
             </div>

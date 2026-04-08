@@ -25,6 +25,7 @@ class WorkflowNodeBuilderDeps:
     build_http_request_node: Callable[..., Callable[[WorkflowState], dict]]
     build_variable_assign_node: Callable[..., Callable[[WorkflowState], dict]]
     build_human_in_loop_node: Callable[..., Callable[[WorkflowState], dict]]
+    build_workflow_call_node: Callable[..., Callable[[WorkflowState], dict]]
     build_if_else_node: Callable[..., Callable[[WorkflowState], dict]]
     build_param_extractor_node: Callable[..., Callable[[WorkflowState], dict]]
     build_kr_node: Callable[..., Callable[[WorkflowState], dict]]
@@ -64,6 +65,15 @@ def _build_workflow_node_fn(
         return deps.build_variable_assign_node(node_id, node_cfg)
     if node_type == "human_in_loop":
         return deps.build_human_in_loop_node(node_id, node_cfg)
+    if node_type == "workflow_call":
+        return deps.build_workflow_call_node(
+            node_id,
+            node_cfg,
+            deps.llm,
+            deps.args_llm,
+            deps.tool_map,
+            deps.db_bind,
+        )
     if node_type == "if_else":
         return deps.build_if_else_node(node_id, node_cfg)
     if node_type == "parameter_extractor":
