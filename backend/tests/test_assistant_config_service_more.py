@@ -53,6 +53,134 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
             }
             self.assertEqual(len(workflow.edges), len(edge_keys))
 
+    def test_sync_standalone_system_targets_creates_context_capture_workflow_without_system_skill(self) -> None:
+        from app.assistant_config.models import AssistantSkill, AssistantWorkflow  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        svc.sync_standalone_system_targets()
+
+        workflow = (
+            self.db.query(AssistantWorkflow)
+            .filter(AssistantWorkflow.name == "system_context_capture__workflow")
+            .first()
+        )
+        self.assertIsNotNone(workflow)
+        self.assertTrue(bool(workflow.is_system))
+        linked_system_skills = (
+            self.db.query(AssistantSkill)
+            .filter(
+                AssistantSkill.is_system.is_(True),
+                AssistantSkill.workflow_id == workflow.id,
+            )
+            .all()
+        )
+        self.assertEqual(linked_system_skills, [])
+
+    def test_sync_standalone_system_targets_renames_legacy_capture_workflow_in_place(self) -> None:
+        from app.assistant_config.models import AssistantWorkflow  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        legacy = AssistantWorkflow(
+            name="system_openclaw_context_capture__workflow",
+            description="legacy",
+            workflow_version=0,
+            workflow_viewport=None,
+            is_system=True,
+            enabled=True,
+        )
+        self.db.add(legacy)
+        self.db.commit()
+        legacy_id = legacy.id
+
+        svc = AssistantConfigService(self.db)
+        svc.sync_standalone_system_targets()
+
+        refreshed = (
+            self.db.query(AssistantWorkflow)
+            .filter(AssistantWorkflow.id == legacy_id)
+            .first()
+        )
+        self.assertIsNotNone(refreshed)
+        self.assertEqual(refreshed.name, "system_context_capture__workflow")
+        self.assertIsNotNone(refreshed.published_version_id)
+        self.assertIsNone(
+            self.db.query(AssistantWorkflow)
+            .filter(AssistantWorkflow.name == "system_openclaw_context_capture__workflow")
+            .first()
+        )
+
+    def test_sync_standalone_system_targets_rejects_custom_name_conflict(self) -> None:
+        from app.assistant_config.models import AssistantWorkflow  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+        from app.common.exceptions import ApiException  # noqa: E402
+
+        self.db.add(
+            AssistantWorkflow(
+                name="system_context_capture__workflow",
+                description="custom conflict",
+                workflow_version=0,
+                workflow_viewport=None,
+                is_system=False,
+                enabled=True,
+            )
+        )
+        self.db.commit()
+
+        svc = AssistantConfigService(self.db)
+        with self.assertRaises(ApiException) as ctx:
+            svc.sync_standalone_system_targets()
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.code, 40946)
+
+    def test_standalone_system_workflow_uses_localized_display_name_and_callable_listing(self) -> None:
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        svc.sync_standalone_system_targets()
+
+        workflow = next(
+            item for item in svc.list_workflows(include_disabled=True)
+            if item.name == "system_context_capture__workflow"
+        )
+        serialized = svc.serialize_workflow(workflow)
+        callable_items = svc.list_callable_workflows()
+        callable_item = next(item for item in callable_items if item["id"] == workflow.id)
+
+        self.assertEqual(serialized["name"], "智能上下文入库工作流")
+        self.assertEqual(callable_item["name"], "智能上下文入库工作流")
+
+    def test_system_target_audit_reports_only_expected_origins(self) -> None:
+        from app.assistant_config.models import AssistantWorkflow  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        svc.sync_standalone_system_targets()
+        svc.ensure_system_behaviors()
+
+        clean_report = svc._audit_system_target_origins()  # noqa: SLF001
+        self.assertEqual(clean_report["unexpectedWorkflows"], [])
+        self.assertEqual(clean_report["unexpectedAgents"], [])
+
+        self.db.add(
+            AssistantWorkflow(
+                name="system_unclassified__workflow",
+                description="orphan",
+                workflow_version=0,
+                workflow_viewport=None,
+                is_system=True,
+                enabled=True,
+            )
+        )
+        self.db.commit()
+
+        dirty_report = svc._audit_system_target_origins()  # noqa: SLF001
+        names = {item["name"] for item in dirty_report["unexpectedWorkflows"]}
+        self.assertIn("system_unclassified__workflow", names)
+
     def test_create_update_delete_remote_tool(self) -> None:
         from app.assistant_config.models import AssistantTool  # noqa: E402
         from app.assistant_config.schemas import AssistantToolCreateRequest, AssistantToolUpdateRequest  # noqa: E402

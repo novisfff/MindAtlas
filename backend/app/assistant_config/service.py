@@ -69,6 +69,12 @@ from app.assistant_config.system_behavior_registry import (
     get_system_behavior_definition,
     list_system_behavior_definitions,
 )
+from app.assistant_config.standalone_system_target_registry import (
+    StandaloneSystemWorkflowDefinition,
+    get_standalone_system_workflow_definition,
+    get_standalone_system_workflow_definition_by_canonical_name,
+    list_standalone_system_workflow_definitions,
+)
 from app.assistant.skill_catalog.defaults_loader import load_system_workflow_preset_file
 from app.common.exceptions import ApiException
 from app.system_settings.service import resolve_system_locale
@@ -666,7 +672,6 @@ class AssistantConfigService:
             return None
 
         from app.assistant.skill_catalog.defaults_loader import get_system_workflow_baseline
-        from app.openclaw_integration.registry import list_openclaw_system_item_definitions
 
         locale = self._current_locale()
         for linked_skill in (workflow.skills or []):
@@ -688,14 +693,12 @@ class AssistantConfigService:
                     continue
                 return get_system_behavior_default_workflow(definition, locale=locale)
 
-            for definition in list_openclaw_system_item_definitions(locale=locale):
-                if definition.source_type != "workflow":
-                    continue
-                if str(definition.workflow_canonical_name or "").strip() != workflow_name:
-                    continue
-                if not definition.workflow_preset_file:
-                    continue
-                return load_system_workflow_preset_file(definition.workflow_preset_file)
+            standalone_definition = get_standalone_system_workflow_definition_by_canonical_name(
+                workflow_name,
+                locale=locale,
+            )
+            if standalone_definition is not None:
+                return load_system_workflow_preset_file(standalone_definition.preset_file)
         return None
 
     def _resolve_system_agent_baseline_draft(self, agent_profile: AssistantAgentProfile) -> AgentPublishDraftInput | None:
@@ -1028,6 +1031,9 @@ class AssistantConfigService:
     def serialize_workflow(self, workflow: AssistantWorkflow) -> dict[str, Any]:
         return self._serialize_workflow(workflow)
 
+    def display_workflow_name(self, workflow: AssistantWorkflow, *, locale: str | None = None) -> str:
+        return self._display_workflow_name(workflow, locale=locale)
+
     def _serialize_agent_profile(self, agent_profile: AssistantAgentProfile) -> dict[str, Any]:
         referenced_skill_ids = [s.id for s in (agent_profile.skills or [])]
         referenced_system_behavior_keys = self._binding_keys_from_relationship(
@@ -1062,6 +1068,14 @@ class AssistantConfigService:
     def serialize_agent_profile(self, agent_profile: AssistantAgentProfile) -> dict[str, Any]:
         return self._serialize_agent_profile(agent_profile)
 
+    def display_agent_profile_name(
+        self,
+        agent_profile: AssistantAgentProfile,
+        *,
+        locale: str | None = None,
+    ) -> str:
+        return self._display_agent_profile_name(agent_profile, locale=locale)
+
     @staticmethod
     def _serialize_system_behavior_contract_field(
         field: SystemBehaviorFieldDefinition,
@@ -1084,38 +1098,112 @@ class AssistantConfigService:
             }
         )
 
-    def _display_workflow_name(self, workflow: AssistantWorkflow) -> str:
+    def _display_workflow_name(self, workflow: AssistantWorkflow, *, locale: str | None = None) -> str:
         raw_name = str(workflow.name or "").strip()
         if not raw_name or not bool(workflow.is_system):
             return raw_name
-        locale = self._current_locale()
-        for definition in list_system_behavior_definitions(locale=locale):
+        normalized_locale = self._current_locale(locale)
+        for definition in list_system_behavior_definitions(locale=normalized_locale):
             if definition.default_target.target_type != "workflow":
                 continue
             if definition.default_target.canonical_name == raw_name:
-                return f"{definition.name}工作流" if locale == "zh" else f"{definition.name} Workflow"
+                return f"{definition.name}工作流" if normalized_locale == "zh" else f"{definition.name} Workflow"
+        standalone_definition = get_standalone_system_workflow_definition_by_canonical_name(
+            raw_name,
+            locale=normalized_locale,
+        )
+        if standalone_definition is not None and standalone_definition.canonical_name == raw_name:
+            return standalone_definition.display_name
         for linked_skill in (workflow.skills or []):
             if not bool(getattr(linked_skill, "is_system", False)):
                 continue
             display = _SYSTEM_SKILL_DISPLAY_NAMES.get(str(getattr(linked_skill, "name", "") or "").strip(), {})
-            localized = str(display.get(locale) or "").strip()
+            localized = str(display.get(normalized_locale) or "").strip()
             if localized:
                 return localized
         return raw_name
 
-    def _display_agent_profile_name(self, agent_profile: AssistantAgentProfile) -> str:
+    def _display_agent_profile_name(
+        self,
+        agent_profile: AssistantAgentProfile,
+        *,
+        locale: str | None = None,
+    ) -> str:
         raw_name = str(agent_profile.name or "").strip()
         if not raw_name or not bool(agent_profile.is_system):
             return raw_name
-        locale = self._current_locale()
+        normalized_locale = self._current_locale(locale)
         for linked_skill in (agent_profile.skills or []):
             if not bool(getattr(linked_skill, "is_system", False)):
                 continue
             display = _SYSTEM_SKILL_DISPLAY_NAMES.get(str(getattr(linked_skill, "name", "") or "").strip(), {})
-            localized = str(display.get(locale) or "").strip()
+            localized = str(display.get(normalized_locale) or "").strip()
             if localized:
                 return localized
         return raw_name
+
+    def _audit_system_target_origins(self) -> dict[str, list[dict[str, Any]]]:
+        locale = self._current_locale()
+        standalone_workflow_names = {
+            definition.canonical_name
+            for definition in list_standalone_system_workflow_definitions(locale=locale)
+        }
+        system_behavior_workflow_names = {
+            definition.default_target.canonical_name
+            for definition in list_system_behavior_definitions(locale=locale)
+            if definition.default_target.target_type == "workflow"
+        }
+        unexpected_workflows: list[dict[str, Any]] = []
+        unexpected_agents: list[dict[str, Any]] = []
+
+        workflows = (
+            self.db.query(AssistantWorkflow)
+            .options(joinedload(AssistantWorkflow.skills))
+            .filter(AssistantWorkflow.is_system.is_(True))
+            .all()
+        )
+        for workflow in workflows:
+            matched_kinds: list[str] = []
+            if any(bool(getattr(skill, "is_system", False)) for skill in (workflow.skills or [])):
+                matched_kinds.append("system_skill")
+            if str(workflow.name or "").strip() in system_behavior_workflow_names:
+                matched_kinds.append("system_behavior")
+            if str(workflow.name or "").strip() in standalone_workflow_names:
+                matched_kinds.append("standalone_system_target")
+            if len(matched_kinds) != 1:
+                unexpected_workflows.append(
+                    {
+                        "id": str(workflow.id),
+                        "name": workflow.name,
+                        "displayName": self._display_workflow_name(workflow),
+                        "matchedKinds": matched_kinds,
+                    }
+                )
+
+        agents = (
+            self.db.query(AssistantAgentProfile)
+            .options(joinedload(AssistantAgentProfile.skills))
+            .filter(AssistantAgentProfile.is_system.is_(True))
+            .all()
+        )
+        for agent_profile in agents:
+            matched_kinds: list[str] = []
+            if any(bool(getattr(skill, "is_system", False)) for skill in (agent_profile.skills or [])):
+                matched_kinds.append("system_skill")
+            if len(matched_kinds) != 1:
+                unexpected_agents.append(
+                    {
+                        "id": str(agent_profile.id),
+                        "name": agent_profile.name,
+                        "displayName": self._display_agent_profile_name(agent_profile),
+                        "matchedKinds": matched_kinds,
+                    }
+                )
+
+        return {
+            "unexpectedWorkflows": unexpected_workflows,
+            "unexpectedAgents": unexpected_agents,
+        }
 
     def _serialize_system_behavior_target_summary(
         self,
@@ -1383,11 +1471,12 @@ class AssistantConfigService:
                 code=42251,
                 message=f"Workflow call target not found: {target_workflow_id}",
             )
+        workflow_display_name = self._display_workflow_name(workflow)
         if not bool(workflow.enabled):
             raise ApiException(
                 status_code=422,
                 code=42252,
-                message=f"Workflow call target is disabled: {workflow.name}",
+                message=f"Workflow call target is disabled: {workflow_display_name}",
             )
 
         resolved_version_id = target_published_version_id
@@ -1398,7 +1487,7 @@ class AssistantConfigService:
             raise ApiException(
                 status_code=422,
                 code=42253,
-                message=f"Workflow call target has no published version: {workflow.name}",
+                message=f"Workflow call target has no published version: {workflow_display_name}",
             )
 
         version = (
@@ -1416,7 +1505,7 @@ class AssistantConfigService:
                 code=42255,
                 message=(
                     f"Workflow call target published version not found: "
-                    f"{workflow.name} ({resolved_version_id})"
+                    f"{workflow_display_name} ({resolved_version_id})"
                 ),
             )
 
@@ -1426,12 +1515,12 @@ class AssistantConfigService:
             raise ApiException(
                 status_code=422,
                 code=42256,
-                message=f"Workflow call target has invalid published snapshot: {workflow.name}",
+                message=f"Workflow call target has invalid published snapshot: {workflow_display_name}",
             ) from exc
 
         contract = self._workflow_contract_from_input_checked(
             workflow_input,
-            workflow_name=workflow.name,
+            workflow_name=workflow_display_name,
             version_id=version.id,
         )
         return ResolvedWorkflowCallTarget(
@@ -1615,6 +1704,9 @@ class AssistantConfigService:
         ]
 
     def list_callable_workflows(self) -> list[dict[str, Any]]:
+        self.sync_system_skills()
+        self.sync_standalone_system_targets()
+        self.ensure_system_behaviors()
         workflows = (
             self.db.query(AssistantWorkflow)
             .filter(AssistantWorkflow.enabled.is_(True))
@@ -2012,6 +2104,143 @@ class AssistantConfigService:
     ) -> AssistantWorkflow:
         workflow, _ = self._ensure_system_behavior_default_workflow(definition)
         return workflow
+
+    def _ensure_standalone_system_workflow(
+        self,
+        definition: StandaloneSystemWorkflowDefinition,
+    ) -> tuple[AssistantWorkflow, bool]:
+        expected_name = definition.canonical_name
+        changed = False
+        workflow = (
+            self.db.query(AssistantWorkflow)
+            .options(
+                joinedload(AssistantWorkflow.skills),
+                joinedload(AssistantWorkflow.system_behavior_bindings),
+            )
+            .filter(
+                AssistantWorkflow.name == expected_name,
+                AssistantWorkflow.is_system.is_(True),
+            )
+            .first()
+        )
+        legacy_workflows = []
+        if definition.legacy_canonical_names:
+            legacy_workflows = (
+                self.db.query(AssistantWorkflow)
+                .options(
+                    joinedload(AssistantWorkflow.skills),
+                    joinedload(AssistantWorkflow.system_behavior_bindings),
+                )
+                .filter(
+                    AssistantWorkflow.name.in_(tuple(definition.legacy_canonical_names)),
+                    AssistantWorkflow.is_system.is_(True),
+                )
+                .order_by(AssistantWorkflow.created_at.asc(), AssistantWorkflow.id.asc())
+                .all()
+            )
+
+        if workflow is not None:
+            duplicate_legacy = [item for item in legacy_workflows if item.id != workflow.id]
+            if duplicate_legacy:
+                duplicate_names = ", ".join(sorted({item.name for item in duplicate_legacy}))
+                raise ApiException(
+                    status_code=409,
+                    code=40967,
+                    message=(
+                        "Duplicate standalone system workflow targets detected for "
+                        f"{expected_name}: {duplicate_names}"
+                    ),
+                )
+        elif legacy_workflows:
+            if len(legacy_workflows) > 1:
+                duplicate_names = ", ".join(sorted({item.name for item in legacy_workflows}))
+                raise ApiException(
+                    status_code=409,
+                    code=40967,
+                    message=(
+                        "Duplicate standalone system workflow targets detected for "
+                        f"{expected_name}: {duplicate_names}"
+                    ),
+                )
+            workflow = legacy_workflows[0]
+
+        conflicting = (
+            self.db.query(AssistantWorkflow)
+            .filter(AssistantWorkflow.name == expected_name)
+            .first()
+        )
+        if conflicting is not None and (workflow is None or conflicting.id != workflow.id):
+            if not bool(conflicting.is_system):
+                raise ApiException(
+                    status_code=409,
+                    code=40946,
+                    message=f"Cannot create system workflow target due to custom name conflict: {expected_name}",
+                )
+            raise ApiException(
+                status_code=409,
+                code=40967,
+                message=f"Duplicate standalone system workflow targets detected for {expected_name}",
+            )
+
+        if workflow is None:
+            workflow = AssistantWorkflow(
+                name=expected_name,
+                description=definition.description,
+                workflow_version=0,
+                workflow_viewport=None,
+                is_system=True,
+                enabled=bool(definition.enabled_by_default),
+            )
+            self.db.add(workflow)
+            self.db.flush()
+            changed = True
+        elif workflow.name != expected_name:
+            workflow.name = expected_name
+            changed = True
+
+        workflow_input = load_system_workflow_preset_file(definition.preset_file)
+        changed = self._ensure_system_workflow_baseline_state(
+            workflow=workflow,
+            workflow_input=workflow_input,
+            description=definition.description,
+            enabled=bool(definition.enabled_by_default),
+            version_name="System Default",
+        ) or changed
+        return workflow, changed
+
+    def ensure_standalone_system_workflow_asset(
+        self,
+        asset_key: str,
+        *,
+        locale: str | None = None,
+    ) -> AssistantWorkflow:
+        normalized_locale = self._current_locale(locale)
+        definition = get_standalone_system_workflow_definition(asset_key, locale=normalized_locale)
+        if definition is None:
+            raise ApiException(
+                status_code=404,
+                code=40437,
+                message=f"Standalone system workflow asset not found: {asset_key}",
+            )
+        workflow, _ = self._ensure_standalone_system_workflow(definition)
+        return workflow
+
+    def sync_standalone_system_targets(self, *, commit: bool = True) -> None:
+        changed = False
+        locale = self._current_locale()
+        for definition in list_standalone_system_workflow_definitions(locale=locale):
+            _, workflow_changed = self._ensure_standalone_system_workflow(definition)
+            if workflow_changed:
+                changed = True
+
+        if not changed or not commit:
+            return
+
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40968, message="Sync standalone system targets failed") from exc
 
     def _ensure_system_behavior_binding_entity(
         self,
@@ -4166,11 +4395,13 @@ class AssistantConfigService:
 
     def list_workflows(self, include_disabled: bool = False) -> list[AssistantWorkflow]:
         self.sync_system_skills()
+        self.sync_standalone_system_targets()
         self.ensure_system_behaviors()
         return self._list_workflows_query(include_disabled=include_disabled)
 
     def get_workflow(self, workflow_id: UUID) -> AssistantWorkflow:
         self.sync_system_skills()
+        self.sync_standalone_system_targets()
         self.ensure_system_behaviors()
         workflow = (
             self.db.query(AssistantWorkflow)
@@ -4423,7 +4654,7 @@ class AssistantConfigService:
                     "targetType": "workflow_version",
                     "targetId": str(version.id),
                     "targetWorkflowId": str(workflow.id),
-                    "targetWorkflowName": workflow.name,
+                    "targetWorkflowName": self._display_workflow_name(workflow),
                     "references": self._serialize_workflow_call_references(pinned_refs),
                 },
             )
@@ -4504,7 +4735,7 @@ class AssistantConfigService:
                 details={
                     "targetType": "workflow",
                     "targetId": str(workflow.id),
-                    "targetName": workflow.name,
+                    "targetName": self._display_workflow_name(workflow),
                     "references": self._serialize_workflow_call_references(workflow_call_refs),
                 },
             )
@@ -4524,7 +4755,7 @@ class AssistantConfigService:
                 details={
                     "targetType": "workflow",
                     "targetId": str(workflow.id),
-                    "targetName": workflow.name,
+                    "targetName": self._display_workflow_name(workflow),
                     "referencedSystemBehaviorKeys": behavior_keys,
                     "action": "confirm_rebind_then_delete",
                 },

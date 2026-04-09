@@ -79,7 +79,7 @@ logger = logging.getLogger(__name__)
 OPENCLAW_INTEGRATION_CONFIG_KEY = "openclaw_integration_config"
 OPENCLAW_CAPABILITY_KEY_RE = re.compile(r"^[a-z0-9_]+$")
 OPENCLAW_SCHEMA_FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-OPENCLAW_SYSTEM_ITEM_VERSION = 8
+OPENCLAW_SYSTEM_ITEM_VERSION = 9
 OPENCLAW_RETIRED_SOURCE_TOOL_NAMES = frozenset({"openclaw_capture_entry"})
 OPENCLAW_SOURCE_TOOL_ALIAS_MAP: dict[str, str] = {
     "openclaw_search_entries": "search_entries",
@@ -906,15 +906,24 @@ class OpenClawIntegrationService:
         *,
         locale: str,
     ) -> tuple[AssistantWorkflow, _WorkflowContractSnapshot]:
-        if not definition.workflow_canonical_name or not definition.workflow_preset_file:
+        if not definition.workflow_asset_key:
             raise ApiException(status_code=500, code=50038, message=f"System workflow item is incomplete: {definition.key}")
-        workflow = self.config_service.ensure_system_workflow_asset_from_preset(
-            canonical_name=definition.workflow_canonical_name,
-            preset_file=definition.workflow_preset_file,
-            description=definition.description,
-            enabled=True,
+        workflow = self.config_service.ensure_standalone_system_workflow_asset(
+            definition.workflow_asset_key,
+            locale=locale,
         )
         return workflow, self._workflow_contract_snapshot(workflow, locale=locale)
+
+    def _workflow_source_display_name(self, workflow: AssistantWorkflow, *, locale: str | None = None) -> str:
+        return self.config_service.display_workflow_name(workflow, locale=locale)
+
+    def _agent_source_display_name(
+        self,
+        agent_profile: AssistantAgentProfile,
+        *,
+        locale: str | None = None,
+    ) -> str:
+        return self.config_service.display_agent_profile_name(agent_profile, locale=locale)
 
     def _tool_name_exists(self, tool_name: str, *, exclude_item_id: UUID | None = None) -> bool:
         query = self.db.query(OpenClawCapabilityItem.id).filter(
@@ -1069,12 +1078,13 @@ class OpenClawIntegrationService:
         return None
 
     def _workflow_contract_snapshot(self, workflow: AssistantWorkflow, *, locale: str = "en") -> _WorkflowContractSnapshot:
+        workflow_display_name = self._workflow_source_display_name(workflow, locale=locale)
         published_input = self.config_service._get_workflow_published_input(workflow)  # noqa: SLF001
         if published_input is None:
             raise ApiException(
                 status_code=422,
                 code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
-                message=f"Workflow has no published version: {workflow.name}",
+                message=f"Workflow has no published version: {workflow_display_name}",
             )
         try:
             contract = workflow_contract_from_input(published_input)
@@ -1082,7 +1092,7 @@ class OpenClawIntegrationService:
             raise ApiException(
                 status_code=422,
                 code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
-                message=f"{exc.message}: {workflow.name}",
+                message=f"{exc.message}: {workflow_display_name}",
             ) from exc
         return _WorkflowContractSnapshot(
             input_schema=contract.input_schema,
@@ -1577,10 +1587,11 @@ class OpenClawIntegrationService:
                     implementation_type="workflow",
                 )
             if not workflow.enabled:
+                workflow_name = self._workflow_source_display_name(workflow, locale=locale)
                 return _CatalogItemAvailability(
                     available=False,
                     reason=_localized_message(locale, zh="绑定的 Workflow 已禁用。", en="The bound workflow is disabled."),
-                    source_name=workflow.name,
+                    source_name=workflow_name,
                     source_description=workflow.description,
                     source_is_system=bool(workflow.is_system),
                     source_enabled=False,
@@ -1595,8 +1606,8 @@ class OpenClawIntegrationService:
                         return _CatalogItemAvailability(
                             available=False,
                             reason=reason,
-                            source_name=system_definition.title,
-                            source_description=system_definition.description,
+                            source_name=self._workflow_source_display_name(workflow, locale=locale),
+                            source_description=workflow.description,
                             source_is_system=True,
                             source_enabled=True,
                             published_version_id=workflow.published_version_id,
@@ -1608,7 +1619,7 @@ class OpenClawIntegrationService:
                 return _CatalogItemAvailability(
                     available=False,
                     reason=exc.message,
-                    source_name=workflow.name,
+                    source_name=self._workflow_source_display_name(workflow, locale=locale),
                     source_description=workflow.description,
                     source_is_system=bool(workflow.is_system),
                     source_enabled=True,
@@ -1623,7 +1634,7 @@ class OpenClawIntegrationService:
                         zh="Workflow 的 published 输入契约已发生变化，请重新同步目录项。",
                         en="The workflow published input contract has changed. Please resync the catalog item.",
                     ),
-                    source_name=workflow.name,
+                    source_name=self._workflow_source_display_name(workflow, locale=locale),
                     source_description=workflow.description,
                     source_is_system=bool(workflow.is_system),
                     source_enabled=True,
@@ -1638,7 +1649,7 @@ class OpenClawIntegrationService:
                         zh="Workflow 的 published 输出契约已发生变化，请重新同步目录项。",
                         en="The workflow published output contract has changed. Please resync the catalog item.",
                     ),
-                    source_name=workflow.name,
+                    source_name=self._workflow_source_display_name(workflow, locale=locale),
                     source_description=workflow.description,
                     source_is_system=bool(workflow.is_system),
                     source_enabled=True,
@@ -1648,7 +1659,7 @@ class OpenClawIntegrationService:
             return _CatalogItemAvailability(
                 available=True,
                 reason=None,
-                source_name=workflow.name,
+                source_name=self._workflow_source_display_name(workflow, locale=locale),
                 source_description=workflow.description,
                 source_is_system=bool(workflow.is_system),
                 source_enabled=True,
@@ -1679,7 +1690,7 @@ class OpenClawIntegrationService:
             return _CatalogItemAvailability(
                 available=False,
                 reason=_localized_message(locale, zh="绑定的 Agent 已禁用。", en="The bound agent is disabled."),
-                source_name=agent.name,
+                source_name=self._agent_source_display_name(agent, locale=locale),
                 source_description=agent.description,
                 source_is_system=bool(agent.is_system),
                 source_enabled=False,
@@ -1694,7 +1705,7 @@ class OpenClawIntegrationService:
                     zh="绑定的 Agent 没有可用的 published 版本。",
                     en="The bound agent does not have an available published version.",
                 ),
-                source_name=agent.name,
+                source_name=self._agent_source_display_name(agent, locale=locale),
                 source_description=agent.description,
                 source_is_system=bool(agent.is_system),
                 source_enabled=True,
@@ -1704,7 +1715,7 @@ class OpenClawIntegrationService:
         return _CatalogItemAvailability(
             available=True,
             reason=None,
-            source_name=agent.name,
+            source_name=self._agent_source_display_name(agent, locale=locale),
             source_description=agent.description,
             source_is_system=bool(agent.is_system),
             source_enabled=True,
@@ -2021,7 +2032,11 @@ class OpenClawIntegrationService:
         if request.source_type == "workflow":
             workflow = self.config_service.get_workflow(request.workflow_id)  # type: ignore[arg-type]
             if not workflow.enabled:
-                raise ApiException(status_code=422, code=OPENCLAW_INVALID_SOURCE_ERROR_CODE, message=f"Workflow is disabled: {workflow.name}")
+                raise ApiException(
+                    status_code=422,
+                    code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
+                    message=f"Workflow is disabled: {self._workflow_source_display_name(workflow, locale=locale)}",
+                )
             snapshot = self._workflow_contract_snapshot(workflow)
             input_schema = snapshot.input_schema
             output_schema = snapshot.output_schema
@@ -2035,12 +2050,16 @@ class OpenClawIntegrationService:
         elif request.source_type == "agent":
             agent_profile = self.config_service.get_agent_profile(request.agent_profile_id)  # type: ignore[arg-type]
             if not agent_profile.enabled:
-                raise ApiException(status_code=422, code=OPENCLAW_INVALID_SOURCE_ERROR_CODE, message=f"Agent is disabled: {agent_profile.name}")
+                raise ApiException(
+                    status_code=422,
+                    code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
+                    message=f"Agent is disabled: {self._agent_source_display_name(agent_profile, locale=locale)}",
+                )
             if agent_profile.published_version_id is None or self.config_service._get_agent_profile_published_draft(agent_profile) is None:  # noqa: SLF001
                 raise ApiException(
                     status_code=422,
                     code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
-                    message=f"Agent has no published version: {agent_profile.name}",
+                    message=f"Agent has no published version: {self._agent_source_display_name(agent_profile, locale=locale)}",
                 )
             default_input_schema, default_output_schema, default_input_summary, default_output_summary, default_mode = (
                 self._default_source_contract_for_agent(locale=locale)
@@ -2291,6 +2310,7 @@ class OpenClawIntegrationService:
         elif source_type == "workflow":
             workflows = self.config_service.list_workflows(include_disabled=True)
             for workflow in workflows:
+                workflow_name = self._workflow_source_display_name(workflow, locale=locale)
                 bindable = True
                 reason = None
                 default_input_schema = None
@@ -2310,9 +2330,9 @@ class OpenClawIntegrationService:
                     OpenClawCatalogSourceResponse(
                         source_type="workflow",
                         source_key=f"workflow:{workflow.id}",
-                        title=workflow.name,
+                        title=workflow_name,
                         description=workflow.description or "",
-                        source_name=workflow.name,
+                        source_name=workflow_name,
                         source_description=workflow.description or "",
                         is_system=bool(workflow.is_system),
                         enabled=bool(workflow.enabled),
@@ -2343,6 +2363,7 @@ class OpenClawIntegrationService:
             ) = self._default_source_contract_for_agent(locale=locale)
             agents = self.config_service.list_agent_profiles(include_disabled=True)
             for agent in agents:
+                agent_name = self._agent_source_display_name(agent, locale=locale)
                 has_published = agent.published_version_id is not None and self.config_service._get_agent_profile_published_draft(agent) is not None  # noqa: SLF001
                 bindable = bool(agent.enabled and has_published)
                 reason = None
@@ -2358,9 +2379,9 @@ class OpenClawIntegrationService:
                     OpenClawCatalogSourceResponse(
                         source_type="agent",
                         source_key=f"agent:{agent.id}",
-                        title=agent.name,
+                        title=agent_name,
                         description=agent.description or "",
-                        source_name=agent.name,
+                        source_name=agent_name,
                         source_description=agent.description or "",
                         is_system=bool(agent.is_system),
                         enabled=bool(agent.enabled),
