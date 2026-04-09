@@ -78,6 +78,42 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         )
         self.assertEqual(linked_system_skills, [])
 
+    def test_sync_standalone_system_targets_can_republish_existing_workflow_without_duplicate_edges(self) -> None:
+        from app.assistant_config.models import AssistantWorkflow  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        svc.sync_standalone_system_targets()
+
+        workflow = (
+            self.db.query(AssistantWorkflow)
+            .filter(AssistantWorkflow.name == "system_context_capture__workflow")
+            .first()
+        )
+        self.assertIsNotNone(workflow)
+        workflow_id = workflow.id
+        workflow.published_version_id = None
+        self.db.commit()
+        self.db.expunge_all()
+
+        other_svc = AssistantConfigService(self.db)
+        other_svc.sync_standalone_system_targets()
+
+        refreshed = (
+            self.db.query(AssistantWorkflow)
+            .filter(AssistantWorkflow.id == workflow_id)
+            .first()
+        )
+        self.assertIsNotNone(refreshed)
+        self.assertIsNotNone(refreshed.published_version_id)
+
+        edge_keys = {
+            (edge.source_node_id, edge.source_handle, edge.target_node_id, edge.target_handle)
+            for edge in refreshed.edges
+        }
+        self.assertEqual(len(refreshed.edges), len(edge_keys))
+
     def test_sync_standalone_system_targets_renames_legacy_capture_workflow_in_place(self) -> None:
         from app.assistant_config.models import AssistantWorkflow  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -180,6 +216,55 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         dirty_report = svc._audit_system_target_origins()  # noqa: SLF001
         names = {item["name"] for item in dirty_report["unexpectedWorkflows"]}
         self.assertIn("system_unclassified__workflow", names)
+
+    def test_ensure_system_behaviors_reuses_resolved_default_workflow_for_binding_creation(self) -> None:
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+        from app.assistant_config.system_behavior_registry import list_system_behavior_definitions  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        expected_count = len(list_system_behavior_definitions(locale=svc._current_locale()))  # noqa: SLF001
+
+        with patch.object(
+            AssistantConfigService,
+            "_ensure_system_behavior_default_workflow",
+            wraps=svc._ensure_system_behavior_default_workflow,
+        ) as mocked:
+            svc.ensure_system_behaviors()
+
+        self.assertEqual(mocked.call_count, expected_count)
+
+    def test_ensure_system_catalog_synced_runs_component_syncs_without_nested_commits(self) -> None:
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+
+        with patch.object(svc, "_acquire_system_catalog_sync_lock") as lock_mock, patch.object(
+            svc, "sync_system_tools"
+        ) as tools_mock, patch.object(svc, "sync_system_skills") as skills_mock, patch.object(
+            svc, "sync_standalone_system_targets"
+        ) as standalone_mock, patch.object(svc, "ensure_system_behaviors") as behaviors_mock, patch.object(
+            self.db, "commit"
+        ) as commit_mock:
+            svc.ensure_system_catalog_synced()
+
+        lock_mock.assert_called_once_with()
+        tools_mock.assert_called_once_with(commit=False)
+        skills_mock.assert_called_once_with(commit=False)
+        standalone_mock.assert_called_once_with(commit=False)
+        behaviors_mock.assert_called_once_with(commit=False)
+        commit_mock.assert_called_once_with()
+
+    def test_list_endpoints_reuse_system_catalog_sync_helper(self) -> None:
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        with patch.object(svc, "ensure_system_catalog_synced") as sync_mock:
+            svc.list_workflows(include_disabled=True)
+            svc.list_agent_profiles(include_disabled=True)
+            svc.list_callable_workflows()
+            svc.list_system_behaviors()
+
+        self.assertEqual(sync_mock.call_count, 4)
 
     def test_create_update_delete_remote_tool(self) -> None:
         from app.assistant_config.models import AssistantTool  # noqa: E402

@@ -9,7 +9,7 @@ from uuid import UUID
 
 from app.assistant.skill_catalog.base import DEFAULT_SKILL_NAME
 
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
@@ -78,6 +78,9 @@ from app.assistant_config.standalone_system_target_registry import (
 from app.assistant.skill_catalog.defaults_loader import load_system_workflow_preset_file
 from app.common.exceptions import ApiException
 from app.system_settings.service import resolve_system_locale
+
+
+_SYSTEM_CATALOG_SYNC_LOCK_KEY = 2026040901
 
 _TOOL_TEXT_REF_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\.text\s*\}\}")
 _TARGET_VERSION_LIMIT = 100
@@ -1704,9 +1707,7 @@ class AssistantConfigService:
         ]
 
     def list_callable_workflows(self) -> list[dict[str, Any]]:
-        self.sync_system_skills()
-        self.sync_standalone_system_targets()
-        self.ensure_system_behaviors()
+        self.ensure_system_catalog_synced()
         workflows = (
             self.db.query(AssistantWorkflow)
             .filter(AssistantWorkflow.enabled.is_(True))
@@ -2050,7 +2051,11 @@ class AssistantConfigService:
         changed = False
         workflow = (
             self.db.query(AssistantWorkflow)
-            .options(joinedload(AssistantWorkflow.system_behavior_bindings))
+            .options(
+                joinedload(AssistantWorkflow.nodes),
+                joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantWorkflow.system_behavior_bindings),
+            )
             .filter(
                 AssistantWorkflow.name == expected_name,
                 AssistantWorkflow.is_system.is_(True),
@@ -2114,6 +2119,8 @@ class AssistantConfigService:
         workflow = (
             self.db.query(AssistantWorkflow)
             .options(
+                joinedload(AssistantWorkflow.nodes),
+                joinedload(AssistantWorkflow.edges),
                 joinedload(AssistantWorkflow.skills),
                 joinedload(AssistantWorkflow.system_behavior_bindings),
             )
@@ -2128,6 +2135,8 @@ class AssistantConfigService:
             legacy_workflows = (
                 self.db.query(AssistantWorkflow)
                 .options(
+                    joinedload(AssistantWorkflow.nodes),
+                    joinedload(AssistantWorkflow.edges),
                     joinedload(AssistantWorkflow.skills),
                     joinedload(AssistantWorkflow.system_behavior_bindings),
                 )
@@ -2245,6 +2254,8 @@ class AssistantConfigService:
     def _ensure_system_behavior_binding_entity(
         self,
         definition: SystemBehaviorDefinition,
+        *,
+        default_workflow: AssistantWorkflow | None = None,
     ) -> AssistantSystemBehaviorBinding:
         binding = self._get_system_behavior_binding(definition.key)
         if binding is not None:
@@ -2257,11 +2268,11 @@ class AssistantConfigService:
                 message=f"Unsupported system behavior default target type: {definition.default_target.target_type}",
             )
 
-        default_workflow = self._resolve_or_create_system_behavior_default_workflow(definition)
+        resolved_workflow = default_workflow or self._resolve_or_create_system_behavior_default_workflow(definition)
         binding = AssistantSystemBehaviorBinding(
             behavior_key=definition.key,
             target_type="workflow",
-            workflow=default_workflow,
+            workflow=resolved_workflow,
         )
         self.db.add(binding)
         self.db.flush()
@@ -2271,12 +2282,16 @@ class AssistantConfigService:
         changed = False
         locale = self._current_locale()
         for definition in list_system_behavior_definitions(locale=locale):
+            default_workflow: AssistantWorkflow | None = None
             if definition.default_target.target_type == "workflow":
-                workflow, workflow_changed = self._ensure_system_behavior_default_workflow(definition)
-                if workflow_changed or workflow.published_version_id is None:
+                default_workflow, workflow_changed = self._ensure_system_behavior_default_workflow(definition)
+                if workflow_changed or default_workflow.published_version_id is None:
                     changed = True
             binding_before = self._get_system_behavior_binding(definition.key)
-            binding = self._ensure_system_behavior_binding_entity(definition)
+            binding = self._ensure_system_behavior_binding_entity(
+                definition,
+                default_workflow=default_workflow,
+            )
             if binding_before is None:
                 changed = True
 
@@ -2355,7 +2370,7 @@ class AssistantConfigService:
 
     def list_system_behaviors(self) -> list[dict[str, Any]]:
         locale = self._current_locale()
-        self.ensure_system_behaviors()
+        self.ensure_system_catalog_synced()
         bindings = {
             item.behavior_key: item
             for item in (
@@ -2384,7 +2399,7 @@ class AssistantConfigService:
     ) -> dict[str, Any]:
         definition = self._get_system_behavior_definition_or_error(behavior_key)
         locale = self._current_locale()
-        self.ensure_system_behaviors()
+        self.ensure_system_catalog_synced()
         if definition.default_target.target_type != "workflow":
             raise ApiException(
                 status_code=500,
@@ -2444,7 +2459,7 @@ class AssistantConfigService:
         agent_profile_id: UUID | None = None,
     ) -> dict[str, Any]:
         definition = self._get_system_behavior_definition_or_error(behavior_key)
-        self.ensure_system_behaviors()
+        self.ensure_system_catalog_synced()
         if target_type not in definition.supported_target_types:
             raise ApiException(
                 status_code=422,
@@ -2490,7 +2505,7 @@ class AssistantConfigService:
 
     def reset_system_behavior_binding(self, behavior_key: str) -> dict[str, Any]:
         definition = self._get_system_behavior_definition_or_error(behavior_key)
-        self.ensure_system_behaviors()
+        self.ensure_system_catalog_synced()
         binding = self._ensure_system_behavior_binding_entity(definition)
         if definition.default_target.target_type != "workflow":
             raise ApiException(
@@ -2811,13 +2826,22 @@ class AssistantConfigService:
         if not persist:
             return workflow_tool_names
 
-        # Clear persisted DAG children through the ORM relationship first so the
-        # in-memory collection and delete-orphan state stay aligned before the
-        # rebuilt nodes/edges are attached. This keeps repeated system-baseline
-        # restores from re-inserting stale edge rows and tripping uq_workflow_edge.
-        workflow_model.edges.clear()
-        workflow_model.nodes.clear()
+        # Replace persisted DAG children via direct deletes, then expire the
+        # relationship collections before attaching rebuilt nodes/edges. This
+        # avoids stale in-memory edge rows being re-inserted on a later flush
+        # during repeated system-baseline restores.
+        (
+            self.db.query(AssistantWorkflowEdge)
+            .filter(AssistantWorkflowEdge.workflow_id == workflow_model.id)
+            .delete(synchronize_session=False)
+        )
+        (
+            self.db.query(AssistantWorkflowNode)
+            .filter(AssistantWorkflowNode.workflow_id == workflow_model.id)
+            .delete(synchronize_session=False)
+        )
         self.db.flush()
+        self.db.expire(workflow_model, ["edges", "nodes"])
 
         workflow_model.nodes = [
             AssistantWorkflowNode(
@@ -3224,10 +3248,32 @@ class AssistantConfigService:
         agent_profile.draft_version_id = keep_version_id
         agent_profile.published_version_id = keep_version_id
 
+    def _acquire_system_catalog_sync_lock(self) -> None:
+        bind = self.db.get_bind()
+        dialect_name = getattr(getattr(bind, "dialect", None), "name", None)
+        if dialect_name != "postgresql":
+            return
+        self.db.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"),
+            {"key": _SYSTEM_CATALOG_SYNC_LOCK_KEY},
+        )
+
+    def ensure_system_catalog_synced(self) -> None:
+        self._acquire_system_catalog_sync_lock()
+        self.sync_system_tools(commit=False)
+        self.sync_system_skills(commit=False)
+        self.sync_standalone_system_targets(commit=False)
+        self.ensure_system_behaviors(commit=False)
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40969, message="Sync system catalog failed") from exc
+
     # -------------------------
     # System seed / sync
     # -------------------------
-    def sync_system_tools(self) -> None:
+    def sync_system_tools(self, *, commit: bool = True) -> None:
         """同步系统工具（仅清理 DB overlay，不写入系统工具定义）。
 
         设计说明：
@@ -3300,6 +3346,9 @@ class AssistantConfigService:
                 cleaned = [t for t in tools if not (isinstance(t, str) and t in removed_names)]
                 if cleaned != tools:
                     skill.tools = cleaned
+
+        if not commit:
+            return
 
         try:
             self.db.commit()
@@ -4394,15 +4443,11 @@ class AssistantConfigService:
         return q.all()
 
     def list_workflows(self, include_disabled: bool = False) -> list[AssistantWorkflow]:
-        self.sync_system_skills()
-        self.sync_standalone_system_targets()
-        self.ensure_system_behaviors()
+        self.ensure_system_catalog_synced()
         return self._list_workflows_query(include_disabled=include_disabled)
 
     def get_workflow(self, workflow_id: UUID) -> AssistantWorkflow:
-        self.sync_system_skills()
-        self.sync_standalone_system_targets()
-        self.ensure_system_behaviors()
+        self.ensure_system_catalog_synced()
         workflow = (
             self.db.query(AssistantWorkflow)
             .options(
@@ -4781,8 +4826,7 @@ class AssistantConfigService:
     # Agent Profiles CRUD
     # -------------------------
     def list_agent_profiles(self, include_disabled: bool = False) -> list[AssistantAgentProfile]:
-        self.sync_system_skills()
-        self.ensure_system_behaviors()
+        self.ensure_system_catalog_synced()
         q = (
             self.db.query(AssistantAgentProfile)
             .options(
@@ -4796,8 +4840,7 @@ class AssistantConfigService:
         return q.all()
 
     def get_agent_profile(self, agent_profile_id: UUID) -> AssistantAgentProfile:
-        self.sync_system_skills()
-        self.ensure_system_behaviors()
+        self.ensure_system_catalog_synced()
         profile = (
             self.db.query(AssistantAgentProfile)
             .options(
