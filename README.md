@@ -8,6 +8,38 @@ Self-hosted knowledge and experience management for capturing, connecting, searc
 
 MindAtlas helps turn scattered notes, project records, and life events into a structured personal atlas. The core model is an **Entry** with Markdown content, optional time data, tags, typed relations, attachments, and graph connections.
 
+## Preview
+
+A quick look at the current product experience:
+
+<table>
+  <tr>
+    <td align="center" colspan="2">
+      <img src=".github/assets/readme/dashboard-overview.png" alt="MindAtlas dashboard overview" />
+      <br />
+      <strong>Dashboard</strong>
+      <br />
+      Overview, activity, calendar, and AI insights.
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src=".github/assets/readme/knowledge-graph-view.png" alt="MindAtlas knowledge graph view" />
+      <br />
+      <strong>Knowledge Graph</strong>
+      <br />
+      Explore connections, clusters, and related records.
+    </td>
+    <td align="center" width="50%">
+      <img src=".github/assets/readme/workflow-editor-canvas.png" alt="MindAtlas workflow editor canvas" />
+      <br />
+      <strong>Workflow Editor</strong>
+      <br />
+      Build workflows and agents visually on a canvas.
+    </td>
+  </tr>
+</table>
+
 The current system goes beyond basic note CRUD:
 
 - **Structured knowledge capture** with entry types, tags, relations, attachments, dashboard views, calendar views, and graph exploration
@@ -55,6 +87,8 @@ MindAtlas/
 
 ### Prerequisites
 
+- Docker 20.10+
+- Docker Compose 2.0+
 - Python 3.11+
 - Node.js 18+
 - PostgreSQL 15+
@@ -68,7 +102,24 @@ git clone https://github.com/novisfff/MindAtlas
 cd MindAtlas
 ```
 
-### 2. Start the backend
+### 2. Start with Docker Compose (recommended)
+
+```bash
+cd deploy
+docker compose up -d
+```
+
+Docker deployment is zero-config by default. If you want to override ports, passwords, or other runtime defaults, copy `deploy/.env.example` to `deploy/.env` and edit only the values you need.
+
+Then open:
+
+- App: `http://localhost:3000`
+- MinIO Console: `http://localhost:9001`
+- Neo4j Browser: `http://localhost:7474`
+
+### 3. Local development setup
+
+#### Backend
 
 ```bash
 cd backend
@@ -87,7 +138,7 @@ uvicorn app.main:app --reload --port 8000
 
 The API docs are available at `http://localhost:8000/docs`.
 
-### 3. Optional workers
+#### Optional workers
 
 If LightRAG is enabled:
 
@@ -108,7 +159,7 @@ python -m app.attachment.worker
 
 See [`backend/README.md`](backend/README.md) for Docling dependency notes and full backend setup details.
 
-### 4. Start the frontend
+#### Frontend
 
 ```bash
 cd frontend
@@ -120,26 +171,17 @@ Open `http://localhost:3000`.
 
 On first run, MindAtlas will guide you through initialization and let you configure runtime modules such as storage, knowledge graph, document parsing, and automation.
 
-### 5. Docker quick start
-
-```bash
-cd deploy
-docker compose up -d
-```
-
-Docker deployment is zero-config by default. If you want to override ports, passwords, or other runtime defaults, copy `deploy/.env.example` to `deploy/.env` and edit only the values you need.
-
 ## Configuration At A Glance
 
+- Docker deployment uses built-in defaults from [`deploy/docker-compose.yml`](deploy/docker-compose.yml) plus optional overrides from [`deploy/.env.example`](deploy/.env.example).
 - Manual development setup reads from [`backend/.env.example`](backend/.env.example).
 - Runtime capability settings are managed in `Settings -> System Setup` after initialization.
 - Automation settings currently control the background scheduler used for weekly and monthly AI reports.
-- Docker deployment uses built-in defaults from [`deploy/docker-compose.yml`](deploy/docker-compose.yml) plus optional overrides from [`deploy/.env.example`](deploy/.env.example).
 
 ## Where To Go Next
 
-- [`backend/README.md`](backend/README.md): backend setup, workers, and environment details
 - [`deploy/README.md`](deploy/README.md): Docker deployment guide
+- [`backend/README.md`](backend/README.md): backend setup, workers, and environment details
 - [`docs/user-manual.md`](docs/user-manual.md): English user manual
 - [`docs/user-manual.zh-CN.md`](docs/user-manual.zh-CN.md): Chinese user manual
 - [`integrations/openclaw-mindatlas/README.md`](integrations/openclaw-mindatlas/README.md): OpenClaw plugin package and integration guide

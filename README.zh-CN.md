@@ -8,6 +8,38 @@
 
 MindAtlas 旨在把零散的笔记、项目记录和生活经历沉淀为结构化的个人知识地图。系统以 **Entry** 为核心，支持 Markdown 内容、时间信息、标签、类型化关系、附件以及图谱连接。
 
+## 产品预览
+
+先看一下当前产品界面的整体形态：
+
+<table>
+  <tr>
+    <td align="center" colspan="2">
+      <img src=".github/assets/readme/dashboard-overview.png" alt="MindAtlas 仪表盘总览" />
+      <br />
+      <strong>仪表盘</strong>
+      <br />
+      总览、近期活动、日历与 AI 洞察。
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src=".github/assets/readme/knowledge-graph-view.png" alt="MindAtlas 知识图谱视图" />
+      <br />
+      <strong>知识图谱</strong>
+      <br />
+      探索记录之间的连接、聚类与上下文。
+    </td>
+    <td align="center" width="50%">
+      <img src=".github/assets/readme/workflow-editor-canvas.png" alt="MindAtlas 工作流编辑画布" />
+      <br />
+      <strong>工作流编辑器</strong>
+      <br />
+      用可视化画布编排工作流与智能体。
+    </td>
+  </tr>
+</table>
+
 当前系统已经不只是基础记录工具，还包含：
 
 - **结构化知识管理**：Entry 类型、标签、关系、附件、仪表盘、日历视图与图谱探索
@@ -55,6 +87,8 @@ MindAtlas/
 
 ### 环境要求
 
+- Docker 20.10+
+- Docker Compose 2.0+
 - Python 3.11+
 - Node.js 18+
 - PostgreSQL 15+
@@ -68,7 +102,24 @@ git clone https://github.com/novisfff/MindAtlas
 cd MindAtlas
 ```
 
-### 2. 启动后端
+### 2. Docker Compose 启动（推荐）
+
+```bash
+cd deploy
+docker compose up -d
+```
+
+Docker 部署默认即可零配置启动。如果你想覆盖端口、密码或其他运行时默认值，再将 `deploy/.env.example` 复制为 `deploy/.env` 并按需修改。
+
+启动后可访问：
+
+- 应用：`http://localhost:3000`
+- MinIO 控制台：`http://localhost:9001`
+- Neo4j Browser：`http://localhost:7474`
+
+### 3. 本地开发方式
+
+#### 后端
 
 ```bash
 cd backend
@@ -87,7 +138,7 @@ uvicorn app.main:app --reload --port 8000
 
 API 文档地址为 `http://localhost:8000/docs`。
 
-### 3. 可选 Worker
+#### 可选 Worker
 
 如果启用了 LightRAG：
 
@@ -108,7 +159,7 @@ python -m app.attachment.worker
 
 关于 Docling 依赖说明和更完整的后端启动信息，请参考 [`backend/README.md`](backend/README.md)。
 
-### 4. 启动前端
+#### 前端
 
 ```bash
 cd frontend
@@ -120,26 +171,17 @@ npm run dev
 
 首次进入系统时，MindAtlas 会引导你完成初始化，并配置存储、知识图谱、文档解析、自动化等运行时模块。
 
-### 5. Docker 快速启动
-
-```bash
-cd deploy
-docker compose up -d
-```
-
-Docker 部署默认即可零配置启动。如果你想覆盖端口、密码或其他运行时默认值，再将 `deploy/.env.example` 复制为 `deploy/.env` 并按需修改。
-
 ## 配置说明
 
+- Docker 部署默认读取 [`deploy/docker-compose.yml`](deploy/docker-compose.yml) 的内置值，并支持通过 [`deploy/.env.example`](deploy/.env.example) 做可选覆盖。
 - 手动开发运行时，环境变量以 [`backend/.env.example`](backend/.env.example) 为准。
 - 初始化完成后，可在 `Settings -> System Setup` 中管理运行时能力配置。
 - 自动化设置当前用于控制后台调度器，负责周报和月报等 AI 定时任务。
-- Docker 部署默认读取 [`deploy/docker-compose.yml`](deploy/docker-compose.yml) 的内置值，并支持通过 [`deploy/.env.example`](deploy/.env.example) 做可选覆盖。
 
 ## 后续阅读
 
-- [`backend/README.md`](backend/README.md)：后端启动、Worker 与环境变量说明
 - [`deploy/README.md`](deploy/README.md)：Docker 部署指南
+- [`backend/README.md`](backend/README.md)：后端启动、Worker 与环境变量说明
 - [`docs/user-manual.md`](docs/user-manual.md)：英文用户手册
 - [`docs/user-manual.zh-CN.md`](docs/user-manual.zh-CN.md)：中文用户手册
 - [`integrations/openclaw-mindatlas/README.md`](integrations/openclaw-mindatlas/README.md)：OpenClaw 插件包与集成说明

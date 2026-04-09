@@ -378,7 +378,7 @@
       "validate": "测试连接",
       "save": "保存模块",
       "openAiProviders": "前往 AI 服务",
-      "openAiSkills": "前往 AI 技能",
+      "openAiSkills": "前往技能库",
       "openDetails": "查看详情"
     },
     "messages": {
@@ -926,7 +926,7 @@
       "contentSection": "内容配置",
       "contentSectionDesc": "管理内容结构、标签和基础组织方式。",
       "aiSection": "AI 与自动化",
-      "aiSectionDesc": "集中配置模型、工具、技能、智能体以及系统内置 AI 行为。",
+      "aiSectionDesc": "集中配置模型、系统工具、技能库、工作流与智能体以及系统内置 AI 行为。",
       "runtimeSection": "运行能力",
       "runtimeSectionDesc": "集中查看 Docker Compose 接管的系统能力，并分别配置 LightRAG、Docling、自动化任务等运行时设置。",
       "entryTypes": "记录类型",
@@ -935,12 +935,12 @@
       "tagsDesc": "管理用于组织内容的标签",
       "aiProviders": "AI 服务",
       "aiProvidersDesc": "配置 AI 模型和 API 连接",
-      "assistantTools": "助手工具",
-      "assistantToolsDesc": "管理 AI 助手可用的工具",
-      "assistantSkills": "助手技能",
-      "assistantSkillsDesc": "管理 AI 助手的技能配置",
-      "assistantTargets": "助手智能体",
-      "assistantTargetsDesc": "统一管理可复用的 Workflow 与 Agent 执行体",
+      "assistantTools": "系统工具",
+      "assistantToolsDesc": "统一管理系统内置工具与自定义工具",
+      "assistantSkills": "技能库",
+      "assistantSkillsDesc": "集中管理系统内置技能与自定义技能",
+      "assistantTargets": "工作流与智能体",
+      "assistantTargetsDesc": "统一管理可复用的工作流与智能体执行体",
       "openClawIntegration": "OpenClaw 集成",
       "openClawIntegrationDesc": "配置供 OpenClaw 发现和调用的 MindAtlas 专用能力网关",
       "systemAiBehaviors": "系统 AI 行为",
@@ -953,10 +953,10 @@
       "automationDesc": "管理后台调度器开关，并查看当前会自动执行的系统任务",
       "systemSetup": "系统设置",
       "systemSetupDesc": "查看系统基础设置与 Docker Compose 接管的服务状态",
-      "assistantWorkflows": "助手工作流",
+      "assistantWorkflows": "工作流",
       "assistantWorkflowsDesc": "管理可复用的工作流执行体",
-      "assistantAgents": "助手 Agent",
-      "assistantAgentsDesc": "管理可复用的 Agent 执行体"
+      "assistantAgents": "智能体",
+      "assistantAgentsDesc": "管理可复用的智能体执行体"
     },
     "graph": {
       "title": "知识图谱",
@@ -1110,7 +1110,7 @@
       "placeholder": "标签名称"
     },
     "tools": {
-      "title": "助手工具",
+      "title": "系统工具",
       "addTool": "添加工具",
       "system": "系统",
       "custom": "自定义",
@@ -1152,7 +1152,7 @@
       "noParams": "未定义参数"
     },
     "skills": {
-      "title": "助手技能",
+      "title": "技能库",
       "addSkill": "添加技能",
       "editSkill": "编辑技能",
       "system": "系统",
