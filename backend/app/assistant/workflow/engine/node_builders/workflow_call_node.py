@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable
+from uuid import UUID
 
 from langchain_openai import ChatOpenAI
 from sqlalchemy.orm import sessionmaker
 
-from app.ai_registry.runtime import resolve_openai_compat_config_by_model_id
+from app.ai_registry.runtime import (
+    resolve_openai_compat_config,
+    resolve_openai_compat_config_by_model_id,
+)
+from app.assistant.memory_computation import AssistantMemoryComputationService
+from app.assistant.memory_service import AssistantMemoryService
 from app.assistant.openai_compat import build_openai_compat_client_headers
+from app.assistant.orchestration.openai_fallback_client import OpenAiFallbackConfig
 from app.assistant.skill_catalog.base import (
     ConditionExpression,
     SkillDefinition,
@@ -27,6 +35,10 @@ from app.assistant.workflow.engine.workflow_node_llm_resolver import (
 )
 from app.assistant_config.registry import ToolRegistry
 from app.assistant_config.service import AssistantConfigService
+from app.config import get_settings
+
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_binding_mode(value: Any) -> str:
@@ -100,8 +112,141 @@ def _resolve_workflow_call_input_payload(
     return payload
 
 
+def _workflow_call_source_node_scope(node_id: str, metadata: dict[str, Any] | None) -> str:
+    scope_prefix = str((metadata or {}).get("__scope_prefix__", "") or "").strip()
+    raw_node_id = str(node_id or "").strip()
+    if not scope_prefix:
+        return raw_node_id
+    return f"{scope_prefix}::{raw_node_id}" if raw_node_id else scope_prefix
+
+
+def _workflow_call_scope_key(
+    *,
+    source_workflow_id: UUID,
+    source_node_scope: str,
+    target_workflow_id: UUID,
+) -> str:
+    return f"{source_workflow_id}|{source_node_scope}|{target_workflow_id}"
+
+
+def _merge_summary_text(parent_summary: str, child_summary: str, *, max_chars: int) -> str:
+    left = str(parent_summary or "").strip()
+    right = str(child_summary or "").strip()
+    if not left:
+        return AssistantMemoryService.truncate_summary(right, max_chars=max_chars)
+    if not right or left == right:
+        return AssistantMemoryService.truncate_summary(left, max_chars=max_chars)
+    return AssistantMemoryService.truncate_summary(f"{left}\n\n{right}", max_chars=max_chars)
+
+
+def _merge_facts(
+    parent_facts: list[str],
+    child_facts: list[str],
+    *,
+    max_items: int,
+) -> list[str]:
+    return AssistantMemoryService.normalize_l2_facts(
+        [*list(parent_facts or []), *list(child_facts or [])],
+        max_items=max_items,
+    )
+
+
+def _normalize_scope_memory_payload(
+    raw_payload: Any,
+    *,
+    max_chars: int,
+    max_items: int,
+) -> dict[str, Any]:
+    return AssistantMemoryService.normalize_workflow_call_scope_memory(
+        raw_payload,
+        max_chars=max_chars,
+        max_items=max_items,
+    )
+
+
+def _build_child_memory_context(
+    *,
+    parent_memory_context: dict[str, Any],
+    scope_key: str | None,
+    scope_payload: dict[str, Any],
+    max_chars: int,
+    max_items: int,
+) -> dict[str, Any]:
+    next_context = dict(parent_memory_context or {})
+    next_scopes = dict(next_context.get("workflow_call_scopes", {})) if isinstance(next_context.get("workflow_call_scopes"), dict) else {}
+    if scope_key and (scope_payload.get("conversationSummary") or scope_payload.get("skillFacts")):
+        next_scopes[scope_key] = dict(scope_payload)
+    next_context["workflow_call_scopes"] = next_scopes
+
+    parent_summary = str(parent_memory_context.get("l1_text", "") or "")
+    parent_facts_raw = parent_memory_context.get("l2_facts", [])
+    parent_facts = list(parent_facts_raw) if isinstance(parent_facts_raw, list) else []
+    child_summary = str(scope_payload.get("conversationSummary", "") or "")
+    child_facts = list(scope_payload.get("skillFacts", []) or [])
+    merged_facts = _merge_facts(parent_facts, child_facts, max_items=max_items)
+
+    next_context["l1_text"] = _merge_summary_text(parent_summary, child_summary, max_chars=max_chars)
+    next_context["l2_facts"] = merged_facts
+    next_context["l2_text"] = AssistantMemoryService.render_l2_text(merged_facts)
+    return next_context
+
+
+def _compute_next_scope_memory_payload(
+    *,
+    db_session: Any,
+    workflow_name: str,
+    previous_payload: dict[str, Any],
+    user_text: str,
+    assistant_text: str,
+    max_chars: int,
+    max_items: int,
+) -> dict[str, Any]:
+    next_payload = {
+        "conversationSummary": str(previous_payload.get("conversationSummary", "") or "").strip(),
+        "skillFacts": list(previous_payload.get("skillFacts", []) or []),
+    }
+    try:
+        resolved_cfg = resolve_openai_compat_config(db_session, component="assistant", model_type="llm")
+        cfg = (
+            OpenAiFallbackConfig(
+                api_key=resolved_cfg.api_key,
+                base_url=resolved_cfg.base_url,
+                model=resolved_cfg.model,
+            )
+            if resolved_cfg is not None
+            else None
+        )
+        memory_compute = AssistantMemoryComputationService()
+        next_summary, _ = memory_compute.compute_next_l1_summary(
+            cfg=cfg,
+            prev_summary=next_payload["conversationSummary"],
+            user_text=user_text,
+            assistant_text=assistant_text,
+            max_chars=max_chars,
+        )
+        next_facts, _ = memory_compute.compute_next_l2_facts(
+            cfg=cfg,
+            prev_facts=list(next_payload["skillFacts"]),
+            skill_name=workflow_name,
+            user_text=user_text,
+            assistant_text=assistant_text,
+            max_items=max_items,
+        )
+        next_payload["conversationSummary"] = next_summary
+        next_payload["skillFacts"] = next_facts
+    except Exception:
+        logger.exception("workflow_call child memory update failed workflow=%s", workflow_name)
+    return _normalize_scope_memory_payload(
+        next_payload,
+        max_chars=max_chars,
+        max_items=max_items,
+    )
+
+
 def _build_child_skill_definition(
     *,
+    workflow_id: str,
+    workflow_version_id: str | None,
     workflow_name: str,
     workflow_description: str,
     workflow_input: Any,
@@ -151,6 +296,8 @@ def _build_child_skill_definition(
         mode="langgraph",
         langgraph_pattern="workflow_dag",
         kb=SkillKBConfig(enabled=False),
+        workflow_id=workflow_id,
+        workflow_version_id=workflow_version_id,
         workflow_nodes=workflow_nodes,
         workflow_edges=workflow_edges,
     )
@@ -211,10 +358,67 @@ def build_workflow_call_node(
                     f"DAG workflow_call node {node_id}: recursive workflow call detected for {resolved.workflow.name}"
                 )
 
-            structured_input = _resolve_workflow_call_input_payload(
+            settings = get_settings()
+            max_chars = max(1, int(getattr(settings, "assistant_memory_l1_max_chars", 2000) or 2000))
+            max_items = max(1, int(getattr(settings, "assistant_memory_l2_max_items", 20) or 20))
+            source_workflow_id = AssistantConfigService._parse_uuid_value(state.get("workflow_id"))
+            source_node_scope = _workflow_call_source_node_scope(node_id, metadata)
+            scope_key = (
+                _workflow_call_scope_key(
+                    source_workflow_id=source_workflow_id,
+                    source_node_scope=source_node_scope,
+                    target_workflow_id=resolved.workflow.id,
+                )
+                if source_workflow_id is not None
+                else None
+            )
+
+            input_payload = _resolve_workflow_call_input_payload(
                 node_cfg=node_cfg,
                 state=state,
                 contract_input_fields=resolved.contract.input_fields,
+            )
+            child_user_input = ""
+            child_structured_input: dict[str, Any] | None = None
+            if resolved.contract.input_mode == "text":
+                child_user_input = stringify(input_payload.get("user_input", ""))
+            else:
+                child_structured_input = input_payload
+
+            parent_memory_context = state.get("memory_context", {}) if isinstance(state.get("memory_context"), dict) else {}
+            cached_scopes = parent_memory_context.get("workflow_call_scopes", {})
+            cached_scope_payload = (
+                cached_scopes.get(scope_key)
+                if scope_key and isinstance(cached_scopes, dict)
+                else None
+            )
+            conversation_id = str((state.get("sys_vars", {}) or {}).get("conversation_id", "") or "").strip()
+            conversation_id_uuid = AssistantConfigService._parse_uuid_value(conversation_id)
+            if cached_scope_payload is not None:
+                scope_payload = _normalize_scope_memory_payload(
+                    cached_scope_payload,
+                    max_chars=max_chars,
+                    max_items=max_items,
+                )
+            elif conversation_id_uuid is not None and source_workflow_id is not None and scope_key is not None:
+                scope_payload = _normalize_scope_memory_payload(
+                    AssistantMemoryService(session).get_workflow_call_memory(
+                        conversation_id=conversation_id_uuid,
+                        source_workflow_id=source_workflow_id,
+                        source_node_scope=source_node_scope,
+                        target_workflow_id=resolved.workflow.id,
+                    ),
+                    max_chars=max_chars,
+                    max_items=max_items,
+                )
+            else:
+                scope_payload = {"conversationSummary": "", "skillFacts": []}
+            child_memory_context = _build_child_memory_context(
+                parent_memory_context=parent_memory_context,
+                scope_key=scope_key,
+                scope_payload=scope_payload,
+                max_chars=max_chars,
+                max_items=max_items,
             )
 
             child_tool_names = config_service._collect_workflow_tool_names(resolved.workflow_input.nodes)
@@ -252,6 +456,8 @@ def build_workflow_call_node(
                 )
 
             child_skill = _build_child_skill_definition(
+                workflow_id=str(resolved.workflow.id),
+                workflow_version_id=str(resolved.version.id),
                 workflow_name=resolved.workflow.name,
                 workflow_description=resolved.workflow.description or "",
                 workflow_input=resolved.workflow_input,
@@ -277,9 +483,11 @@ def build_workflow_call_node(
 
             initial_state = build_initial_state(
                 pattern="workflow_dag",
-                messages=build_initial_messages(history=[], user_input=""),
+                messages=build_initial_messages(history=[], user_input=child_user_input),
                 skill_name=child_skill.name,
-                user_input="",
+                workflow_id=child_skill.workflow_id,
+                workflow_version_id=child_skill.workflow_version_id,
+                user_input=child_user_input,
                 kb_enabled=False,
                 memory_mode=str(state.get("memory_mode", "auto") or "auto"),
                 metadata=scoped_metadata,
@@ -288,8 +496,8 @@ def build_workflow_call_node(
                 node_llms=child_node_llms,
                 stream_output_enabled=False,
                 output_stream_source_node_id=output_stream_source_node_id,
-                structured_input=structured_input,
-                memory_context=state.get("memory_context", {}) if isinstance(state.get("memory_context"), dict) else {},
+                structured_input=child_structured_input,
+                memory_context=child_memory_context,
             )
 
             compiled = engine_runtime.build_workflow_dag_subgraph(
@@ -336,9 +544,64 @@ def build_workflow_call_node(
 
         child_json_fields = child_output.get("json_fields") if isinstance(child_output.get("json_fields"), dict) else {}
         response_value = child_json_fields.get("response", child_output.get("text", ""))
+        response_text = stringify(response_value)
+
+        final_memory_context = final_state.get("memory_context", {})
+        child_final_scopes = (
+            dict(final_memory_context.get("workflow_call_scopes", {}))
+            if isinstance(final_memory_context, dict) and isinstance(final_memory_context.get("workflow_call_scopes"), dict)
+            else {}
+        )
+        next_parent_memory_context = dict(
+            state.get("memory_context", {}) if isinstance(state.get("memory_context"), dict) else {}
+        )
+        next_parent_scopes = (
+            dict(next_parent_memory_context.get("workflow_call_scopes", {}))
+            if isinstance(next_parent_memory_context.get("workflow_call_scopes"), dict)
+            else {}
+        )
+        next_parent_scopes.update(child_final_scopes)
+
+        if source_workflow_id is not None and scope_key is not None:
+            with session_factory() as memory_session:
+                updated_scope_payload = _compute_next_scope_memory_payload(
+                    db_session=memory_session,
+                    workflow_name=resolved.workflow.name,
+                    previous_payload=scope_payload,
+                    user_text=child_user_input if resolved.contract.input_mode == "text" else stringify(child_structured_input or {}),
+                    assistant_text=response_text,
+                    max_chars=max_chars,
+                    max_items=max_items,
+                )
+            if updated_scope_payload.get("conversationSummary") or updated_scope_payload.get("skillFacts"):
+                next_parent_scopes[scope_key] = updated_scope_payload
+                if conversation_id_uuid is not None:
+                    with session_factory() as memory_session:
+                        AssistantMemoryService(memory_session).upsert_workflow_call_memory(
+                            conversation_id=conversation_id_uuid,
+                            source_workflow_id=source_workflow_id,
+                            source_node_scope=source_node_scope,
+                            target_workflow_id=resolved.workflow.id,
+                            summary_text=str(updated_scope_payload.get("conversationSummary", "") or "").strip(),
+                            facts=list(updated_scope_payload.get("skillFacts", []) or []),
+                        )
+
+        if next_parent_scopes:
+            next_parent_memory_context["workflow_call_scopes"] = next_parent_scopes
+            session_scope_payload = metadata.get("workflow_call_session_scopes")
+            if isinstance(session_scope_payload, dict):
+                session_scope_payload.clear()
+                for scope_name, scope_value in next_parent_scopes.items():
+                    if not isinstance(scope_value, dict):
+                        continue
+                    session_scope_payload[str(scope_name)] = {
+                        "conversationSummary": str(scope_value.get("conversationSummary", "") or "").strip(),
+                        "skillFacts": list(scope_value.get("skillFacts", []) or []),
+                    }
+
         node_out = NodeOutput(
             status="ok",
-            text=stringify(response_value),
+            text=response_text,
             raw=child_output.get("raw", response_value),
             json_fields={
                 "response": response_value,
@@ -349,6 +612,7 @@ def build_workflow_call_node(
         return {
             "node_outputs": {node_id: node_out},
             "execution_trace": [node_id],
+            "memory_context": next_parent_memory_context,
         }
 
     return workflow_call_node

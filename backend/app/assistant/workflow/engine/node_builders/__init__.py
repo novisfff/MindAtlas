@@ -26,12 +26,18 @@ _EXPORTS = {
 
 def __getattr__(name: str):
     module_name = _EXPORTS.get(name)
-    if module_name is None:
-        raise AttributeError(name)
-    module = import_module(f"app.assistant.workflow.engine.node_builders.{module_name}")
-    value = getattr(module, name)
-    globals()[name] = value
-    return value
+    if module_name is not None:
+        module = import_module(f"app.assistant.workflow.engine.node_builders.{module_name}")
+        value = getattr(module, name)
+        globals()[name] = value
+        return value
+
+    if name in set(_EXPORTS.values()):
+        module = import_module(f"app.assistant.workflow.engine.node_builders.{name}")
+        globals()[name] = module
+        return module
+
+    raise AttributeError(name)
 
 
 __all__ = list(_EXPORTS)

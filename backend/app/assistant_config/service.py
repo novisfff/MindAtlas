@@ -1665,6 +1665,8 @@ class AssistantConfigService:
                             "sequence_no": version.sequence_no,
                             "version_name": version.version_name,
                             "version_source": version.version_source,
+                            "input_mode": version_contract.input_mode,
+                            "output_mode": version_contract.output_mode,
                             "input_params": [
                                 WorkflowContractParamSchema.model_validate(item).model_dump()
                                 for item in field_specs_to_params(version_contract.input_fields)
@@ -1690,6 +1692,8 @@ class AssistantConfigService:
                         "name": self._display_workflow_name(workflow),
                         "description": workflow.description or "",
                         "published_version_id": published_version.id,
+                        "input_mode": published_contract.input_mode,
+                        "output_mode": published_contract.output_mode,
                         "input_params": [
                             WorkflowContractParamSchema.model_validate(item).model_dump()
                             for item in field_specs_to_params(published_contract.input_fields)

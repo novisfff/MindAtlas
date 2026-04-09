@@ -1139,6 +1139,10 @@ class OpenClawIntegrationService:
             tools=tool_names,
             mode="langgraph",
             langgraph_pattern="workflow_dag",
+            workflow_id=str(workflow.id),
+            workflow_version_id=(
+                str(workflow.published_version_id) if workflow.published_version_id is not None else None
+            ),
             workflow_nodes=workflow_nodes,
             workflow_edges=workflow_edges,
         )

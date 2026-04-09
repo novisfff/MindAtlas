@@ -33,7 +33,13 @@ import { runWorkflowTestStreamById, submitWorkflowRunApprovalDecision, validateW
 import { defaultLabelForNodeType } from './labelUtils'
 import { serializeToWorkflowInput } from './serialization'
 import { isValidStartStructuredFieldName, normalizeStartNodeConfig } from './startNodeConfig'
-import type { ContainerBodyNodeType, NodeType, StartStructuredField, WorkflowCopilotTestRunContext } from '../../api/workflow'
+import type {
+  ContainerBodyNodeType,
+  NodeType,
+  StartStructuredField,
+  WorkflowCopilotTestRunContext,
+  WorkflowTestSessionMemory,
+} from '../../api/workflow'
 import { WorkflowEditorSurfaceShell } from './WorkflowEditorSurfaceShell'
 
 interface WorkflowTestRunPanelProps {
@@ -85,6 +91,12 @@ function splitScopedNodeId(scoped: string): { containerId: string; nodeId: strin
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   return value as Record<string, unknown>
+}
+
+function hasSessionMemoryPayload(value: WorkflowTestSessionMemory): boolean {
+  if (`${value.conversationSummary ?? ''}`.trim()) return true
+  if (Array.isArray(value.skillFacts) && value.skillFacts.length > 0) return true
+  return Object.keys(value.workflowCallScopes ?? {}).length > 0
 }
 
 function resolveDisplayLabel(rawLabel: unknown, rawNodeType: unknown, fallback: string): string {
@@ -306,10 +318,11 @@ export function WorkflowTestRunPanel({ open, workflowId, startInputMode, onAnaly
         structuredInput?: Record<string, unknown>
         sessionId?: string
         history?: Array<{ role: 'user' | 'assistant'; content: string }>
-        sessionMemory?: { conversationSummary?: string; skillFacts?: string[] }
+        sessionMemory?: WorkflowTestSessionMemory
         streamOutput: boolean
       } = {
         workflow,
+        sessionId,
         streamOutput,
       }
 
@@ -338,14 +351,11 @@ export function WorkflowTestRunPanel({ open, workflowId, startInputMode, onAnaly
           return
         }
         payload.userInput = userInput
-        payload.sessionId = sessionId
         payload.history = buildCompletedWorkflowConversationHistory(messages)
-        if (sessionMemory.conversationSummary || sessionMemory.skillFacts.length > 0) {
-          payload.sessionMemory = {
-            conversationSummary: sessionMemory.conversationSummary,
-            skillFacts: sessionMemory.skillFacts,
-          }
-        }
+      }
+
+      if (hasSessionMemoryPayload(sessionMemory)) {
+        payload.sessionMemory = sessionMemory
       }
 
       const controller = new AbortController()

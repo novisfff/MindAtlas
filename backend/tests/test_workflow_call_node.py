@@ -152,6 +152,34 @@ class WorkflowCallNodeTests(unittest.TestCase):
         )
 
     @staticmethod
+    def _text_to_text_workflow_input(*, output_template: str = "{{start.user_input}}"):
+        from app.assistant_config.schemas import WorkflowEdgeInput, WorkflowInput, WorkflowNodeInput
+
+        return WorkflowInput(
+            nodes=[
+                WorkflowNodeInput(node_id="start", node_type="start", label="Start", config={"inputMode": "text"}),
+                WorkflowNodeInput(
+                    node_id="output_1",
+                    node_type="output",
+                    label="Output",
+                    config={
+                        "outputMode": "text",
+                        "textTemplate": output_template,
+                    },
+                ),
+            ],
+            edges=[
+                WorkflowEdgeInput(
+                    edge_id="e1",
+                    source_node_id="start",
+                    target_node_id="output_1",
+                    source_handle="output",
+                    target_handle="input",
+                )
+            ],
+        )
+
+    @staticmethod
     def _ambiguous_output_workflow_input():
         from app.assistant_config.schemas import WorkflowEdgeInput, WorkflowInput, WorkflowNodeInput
 
@@ -362,6 +390,10 @@ class WorkflowCallNodeTests(unittest.TestCase):
             workflow_input=self._text_start_workflow_input(),
         )
         self._create_workflow(
+            name="workflow_call__text_output",
+            workflow_input=self._text_to_text_workflow_input(),
+        )
+        self._create_workflow(
             name="workflow_call__ambiguous_output",
             workflow_input=self._ambiguous_output_workflow_input(),
         )
@@ -371,14 +403,29 @@ class WorkflowCallNodeTests(unittest.TestCase):
 
         self.assertIn("workflow_call__valid", by_name)
         self.assertNotIn("workflow_call__disabled", by_name)
-        self.assertNotIn("workflow_call__text_start", by_name)
+        self.assertIn("workflow_call__text_start", by_name)
+        self.assertIn("workflow_call__text_output", by_name)
         self.assertNotIn("workflow_call__ambiguous_output", by_name)
 
         valid_item = by_name["workflow_call__valid"]
         self.assertEqual(str(valid.id), str(valid_item["id"]))
+        self.assertEqual(valid_item["input_mode"], "structured")
+        self.assertEqual(valid_item["output_mode"], "structured")
         self.assertEqual(valid_item["input_params"][0]["name"], "name")
         self.assertEqual(valid_item["output_params"][0]["name"], "summary")
         self.assertTrue(valid_item["available_versions"])
+
+        text_start_item = by_name["workflow_call__text_start"]
+        self.assertEqual(text_start_item["input_mode"], "text")
+        self.assertEqual(text_start_item["output_mode"], "structured")
+        self.assertEqual(text_start_item["input_params"][0]["name"], "user_input")
+        self.assertEqual(text_start_item["output_params"][0]["name"], "summary")
+
+        text_output_item = by_name["workflow_call__text_output"]
+        self.assertEqual(text_output_item["input_mode"], "text")
+        self.assertEqual(text_output_item["output_mode"], "text")
+        self.assertEqual(text_output_item["input_params"][0]["name"], "user_input")
+        self.assertEqual(text_output_item["output_params"], [])
 
     def test_validate_workflow_dependencies_rejects_invalid_bindings_and_cycles(self) -> None:
         from app.common.exceptions import ApiException
@@ -578,6 +625,78 @@ class WorkflowCallNodeTests(unittest.TestCase):
         self.assertEqual(output["raw"], {"greeting": "Hello Ada"})
         self.assertEqual(output["json_fields"]["greeting"], "Hello Ada")
         self.assertEqual(output["json_fields"]["response"], '{"greeting": "Hello Ada"}')
+
+    def test_workflow_call_runtime_maps_text_child_input_and_output(self) -> None:
+        from app.assistant.workflow.engine.node_builders.workflow_call_node import build_workflow_call_node
+
+        child = self._create_workflow(
+            name="workflow_call__runtime_text_child",
+            workflow_input=self._text_to_text_workflow_input(output_template="Echo {{start.user_input}}"),
+        )
+
+        node_fn = build_workflow_call_node(
+            "call_child",
+            {
+                "targetWorkflowId": str(child.id),
+                "bindingMode": "pinned",
+                "targetPublishedVersionId": str(child.published_version_id),
+                "inputBindings": {
+                    "user_input": "{{start.user_input}}",
+                },
+            },
+            object(),
+            object(),
+            {},
+            self.db.get_bind(),
+        )
+
+        class _CompiledGraph:
+            def invoke(self, initial_state: dict) -> dict:
+                assert initial_state["user_input"] == "Ada"
+                assert initial_state.get("structured_input") is None
+                response = "Echo Ada"
+                return {
+                    "node_outputs": {
+                        "output_1": {
+                            "status": "ok",
+                            "text": response,
+                            "raw": response,
+                            "json_fields": {
+                                "response": response,
+                            },
+                        }
+                    },
+                    "execution_trace": ["output_1"],
+                }
+
+        compiled = _CompiledGraph()
+        with patch(
+            "app.assistant.workflow.engine.engine.build_workflow_dag_subgraph",
+            return_value=compiled,
+        ):
+            result = node_fn(
+                {
+                    "metadata": {},
+                    "workflow_id": str(child.id),
+                    "workflow_version_id": str(child.published_version_id),
+                    "node_outputs": {
+                        "start": {
+                            "status": "ok",
+                            "text": "Ada",
+                            "raw": "Ada",
+                            "json_fields": {"user_input": "Ada"},
+                        }
+                    },
+                    "memory_mode": "auto",
+                    "memory_context": {},
+                    "sys_vars": {},
+                }
+            )
+
+        output = result["node_outputs"]["call_child"]
+        self.assertEqual(output["raw"], "Echo Ada")
+        self.assertEqual(output["text"], "Echo Ada")
+        self.assertEqual(output["json_fields"]["response"], "Echo Ada")
 
     def test_workflow_call_runtime_scopes_human_approval_events(self) -> None:
         from app.assistant.workflow.engine.container_runtime import ScopedHumanLoopRuntimeProxy

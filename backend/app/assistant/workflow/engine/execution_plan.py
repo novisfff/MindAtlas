@@ -81,6 +81,8 @@ def build_initial_state(
     pattern: str,
     messages: list[BaseMessage],
     skill_name: str,
+    workflow_id: str | None,
+    workflow_version_id: str | None,
     user_input: str,
     kb_enabled: bool,
     memory_mode: str,
@@ -98,6 +100,8 @@ def build_initial_state(
         return {
             "messages": messages,
             "skill_name": skill_name,
+            "workflow_id": str(workflow_id or ""),
+            "workflow_version_id": str(workflow_version_id or ""),
             "user_input": user_input,
             "kb_enabled": kb_enabled,
             "memory_mode": memory_mode,

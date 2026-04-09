@@ -16,6 +16,25 @@ class StepOutput(TypedDict, total=False):
     tool_meta: dict | None
 
 
+def _merge_memory_context(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(left or {})
+    for key, value in (right or {}).items():
+        if key == "workflow_call_scopes":
+            existing = merged.get("workflow_call_scopes", {})
+            next_scopes = dict(existing) if isinstance(existing, dict) else {}
+            if isinstance(value, dict):
+                for scope_key, scope_value in value.items():
+                    normalized_key = str(scope_key or "").strip()
+                    if not normalized_key:
+                        continue
+                    if isinstance(scope_value, dict):
+                        next_scopes[normalized_key] = dict(scope_value)
+            merged["workflow_call_scopes"] = next_scopes
+            continue
+        merged[key] = value
+    return merged
+
+
 class AssistantState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
     skill_name: str
@@ -25,7 +44,7 @@ class AssistantState(TypedDict, total=False):
     sys_vars: dict[str, str]
     iteration_count: int
     metadata: dict
-    memory_context: dict[str, Any]
+    memory_context: Annotated[dict[str, Any], _merge_memory_context]
     current_step: int
     step_outputs: dict[int, StepOutput]
     summary_trace: list[dict]
@@ -63,11 +82,13 @@ def _merge_branch_decisions(left: dict[str, str], right: dict[str, str]) -> dict
 class WorkflowState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
     skill_name: str
+    workflow_id: str
+    workflow_version_id: str
     user_input: str
     kb_enabled: bool
     memory_mode: str
     metadata: dict
-    memory_context: dict[str, Any]
+    memory_context: Annotated[dict[str, Any], _merge_memory_context]
     node_outputs: Annotated[dict[str, NodeOutput], _merge_node_outputs]
     execution_trace: Annotated[list[str], _merge_trace]
     branch_decisions: Annotated[dict[str, str], _merge_branch_decisions]

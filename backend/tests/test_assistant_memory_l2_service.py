@@ -75,3 +75,70 @@ class AssistantMemoryL2ServiceTests(unittest.TestCase):
 
         rendered = AssistantMemoryService.render_l2_text(["A", "B"])
         self.assertEqual(rendered, "- A\n- B")
+
+    def test_upsert_workflow_call_memory_creates_and_updates_single_row(self) -> None:
+        from app.assistant.memory_service import AssistantMemoryService  # noqa: E402
+        from app.assistant.models import AssistantConversationWorkflowCallMemory  # noqa: E402
+        from app.assistant_config.models import AssistantWorkflow  # noqa: E402
+
+        source_workflow = AssistantWorkflow(
+            name="source",
+            description="source",
+            enabled=True,
+            is_system=False,
+            workflow_version=1,
+        )
+        target_workflow = AssistantWorkflow(
+            name="target",
+            description="target",
+            enabled=True,
+            is_system=False,
+            workflow_version=1,
+        )
+        self.db.add_all([source_workflow, target_workflow])
+        self.db.commit()
+        self.db.refresh(source_workflow)
+        self.db.refresh(target_workflow)
+
+        service = AssistantMemoryService(self.db)
+        service.upsert_workflow_call_memory(
+            conversation_id=self.conv.id,
+            source_workflow_id=source_workflow.id,
+            source_node_scope="call_child",
+            target_workflow_id=target_workflow.id,
+            summary_text="summary 1",
+            facts=["A"],
+        )
+        service.upsert_workflow_call_memory(
+            conversation_id=self.conv.id,
+            source_workflow_id=source_workflow.id,
+            source_node_scope="call_child",
+            target_workflow_id=target_workflow.id,
+            summary_text="summary 2",
+            facts=["A", "B"],
+        )
+
+        rows = (
+            self.db.query(AssistantConversationWorkflowCallMemory)
+            .filter(
+                AssistantConversationWorkflowCallMemory.conversation_id == self.conv.id,
+                AssistantConversationWorkflowCallMemory.source_workflow_id == source_workflow.id,
+                AssistantConversationWorkflowCallMemory.source_node_scope == "call_child",
+                AssistantConversationWorkflowCallMemory.target_workflow_id == target_workflow.id,
+            )
+            .all()
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].summary_text, "summary 2")
+        self.assertEqual(rows[0].facts, ["A", "B"])
+        self.assertEqual(int(rows[0].version or 0), 2)
+
+        self.assertEqual(
+            service.get_workflow_call_memory(
+                conversation_id=self.conv.id,
+                source_workflow_id=source_workflow.id,
+                source_node_scope="call_child",
+                target_workflow_id=target_workflow.id,
+            ),
+            {"conversationSummary": "summary 2", "skillFacts": ["A", "B"]},
+        )

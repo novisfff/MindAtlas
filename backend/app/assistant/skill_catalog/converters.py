@@ -103,6 +103,12 @@ def db_skill_to_definition_light(skill: AssistantSkill) -> SkillDefinition:
         model_id=model_id,
         system_prompt=system_prompt,
         kb=_parse_skill_kb_config(kb_config_raw),
+        workflow_id=str(skill.workflow_id) if getattr(skill, "workflow_id", None) is not None else None,
+        workflow_version_id=(
+            str(getattr(skill.workflow, "published_version_id", None))
+            if getattr(skill, "workflow", None) is not None and getattr(skill.workflow, "published_version_id", None) is not None
+            else None
+        ),
         workflow_nodes=[],
         workflow_edges=[],
     )
@@ -162,6 +168,12 @@ def db_skill_to_definition(skill: AssistantSkill) -> SkillDefinition:
         model_id=model_id,
         system_prompt=system_prompt,
         kb=_parse_skill_kb_config(kb_config_raw),
+        workflow_id=str(skill.workflow_id) if getattr(skill, "workflow_id", None) is not None else None,
+        workflow_version_id=(
+            str(getattr(skill.workflow, "published_version_id", None))
+            if getattr(skill, "workflow", None) is not None and getattr(skill.workflow, "published_version_id", None) is not None
+            else None
+        ),
         workflow_nodes=db_nodes_to_definitions(workflow_nodes_src if pattern == "workflow_dag" else []),
         workflow_edges=db_edges_to_definitions(workflow_edges_src if pattern == "workflow_dag" else []),
     )

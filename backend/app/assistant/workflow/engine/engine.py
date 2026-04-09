@@ -527,12 +527,12 @@ class LangGraphEngine:
             logger.exception("assistant memory l1 load failed conversation_id=%s", conversation_id_uuid)
             return ""
 
-    def _load_l2_text(self, *, conversation_id_uuid: UUID | None, skill_name: str) -> tuple[str, int]:
+    def _load_l2_text(self, *, conversation_id_uuid: UUID | None, skill_name: str) -> tuple[str, list[str]]:
         if self.db is None or conversation_id_uuid is None:
-            return "", 0
+            return "", []
         normalized_skill_name = str(skill_name or "").strip()
         if not normalized_skill_name:
-            return "", 0
+            return "", []
         try:
             from app.assistant.memory_service import AssistantMemoryService
 
@@ -541,29 +541,30 @@ class LangGraphEngine:
             memory_service = AssistantMemoryService(self.db)
             facts = memory_service.get_l2_facts(conversation_id_uuid, normalized_skill_name)
             normalized = memory_service.normalize_l2_facts(facts, max_items=max_items)
-            return memory_service.render_l2_text(normalized), len(normalized)
+            return memory_service.render_l2_text(normalized), normalized
         except Exception:
             logger.exception(
                 "assistant memory l2 load failed conversation_id=%s skill=%s",
                 conversation_id_uuid,
                 normalized_skill_name,
             )
-            return "", 0
+            return "", []
 
     def _load_runtime_memory_overrides(
         self,
         *,
         raw_context: dict[str, Any],
-    ) -> tuple[str | None, list[str] | None]:
+    ) -> tuple[str | None, list[str] | None, dict[str, dict[str, Any]]]:
         raw_override = raw_context.get("session_memory", raw_context.get("sessionMemory"))
         if not isinstance(raw_override, dict):
-            return None, None
+            return None, None, {}
 
         from app.assistant.memory_service import AssistantMemoryService
 
         settings = get_settings()
         l1_override: str | None = None
         l2_override: list[str] | None = None
+        workflow_call_scope_overrides: dict[str, dict[str, Any]] = {}
 
         if "conversation_summary" in raw_override or "conversationSummary" in raw_override:
             max_chars = max(1, int(getattr(settings, "assistant_memory_l1_max_chars", 2000) or 2000))
@@ -579,7 +580,13 @@ class LangGraphEngine:
                 max_items=max_items,
             )
 
-        return l1_override, l2_override
+        workflow_call_scope_overrides = AssistantMemoryService.normalize_workflow_call_scopes(
+            raw_override.get("workflow_call_scopes", raw_override.get("workflowCallScopes", {})),
+            max_chars=max(1, int(getattr(settings, "assistant_memory_l1_max_chars", 2000) or 2000)),
+            max_items=max(1, int(getattr(settings, "assistant_memory_l2_max_items", 20) or 20)),
+        )
+
+        return l1_override, l2_override, workflow_call_scope_overrides
 
     def execute(
         self,
@@ -643,6 +650,11 @@ class LangGraphEngine:
             runtime_events,
             handlers=event_handlers,
         )
+        raw_session_memory = parsed_ctx.raw_context.get("session_memory", parsed_ctx.raw_context.get("sessionMemory"))
+        if isinstance(raw_session_memory, dict):
+            raw_scope_payload = raw_session_memory.get("workflow_call_scopes", raw_session_memory.get("workflowCallScopes"))
+            if isinstance(raw_scope_payload, dict):
+                metadata["workflow_call_session_scopes"] = raw_scope_payload
 
         _exec_services.attach_human_loop_runtime(
             db=self.db,
@@ -692,13 +704,15 @@ class LangGraphEngine:
                 "l0_source_count": 0,
                 "l0_trimmed_chars": 0,
             }
-        l1_override, l2_facts_override = self._load_runtime_memory_overrides(raw_context=parsed_ctx.raw_context)
+        l1_override, l2_facts_override, workflow_call_scope_overrides = self._load_runtime_memory_overrides(
+            raw_context=parsed_ctx.raw_context
+        )
         if l1_override is None:
             l1_text = self._load_l1_summary(conversation_id_uuid=conversation_id_uuid)
         else:
             l1_text = l1_override
         if l2_facts_override is None:
-            l2_text, l2_count = self._load_l2_text(
+            l2_text, l2_facts = self._load_l2_text(
                 conversation_id_uuid=conversation_id_uuid,
                 skill_name=skill.name,
             )
@@ -706,7 +720,7 @@ class LangGraphEngine:
             from app.assistant.memory_service import AssistantMemoryService
 
             l2_text = AssistantMemoryService.render_l2_text(l2_facts_override)
-            l2_count = len(l2_facts_override)
+            l2_facts = list(l2_facts_override)
         l0_messages = l0_window.get("l0_messages")
         if not isinstance(l0_messages, list):
             l0_messages = []
@@ -717,6 +731,8 @@ class LangGraphEngine:
             "l0_trimmed_chars": int(l0_window.get("l0_trimmed_chars", 0) or 0),
             "l1_text": l1_text,
             "l2_text": l2_text,
+            "l2_facts": l2_facts,
+            "workflow_call_scopes": workflow_call_scope_overrides,
         }
         logger.info(
             "assistant memory context prepared conversation_id=%s skill=%s l0_source_count=%s "
@@ -729,7 +745,7 @@ class LangGraphEngine:
             len(memory_context["l0_text"]),
             len(memory_context["l1_text"]),
             len(memory_context["l2_text"]),
-            l2_count,
+            len(l2_facts),
         )
 
         # 根据 pattern 编译/获取图
@@ -804,6 +820,8 @@ class LangGraphEngine:
             pattern=pattern,
             messages=messages,
             skill_name=skill.name,
+            workflow_id=getattr(skill, "workflow_id", None),
+            workflow_version_id=getattr(skill, "workflow_version_id", None),
             user_input=user_input,
             kb_enabled=kb_enabled,
             memory_mode=memory_mode,

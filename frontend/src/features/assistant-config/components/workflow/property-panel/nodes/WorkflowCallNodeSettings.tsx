@@ -58,6 +58,7 @@ export function WorkflowCallNodeSettings({
 
   const resolvedInputs = resolvedVersion?.inputParams ?? selectedWorkflow?.inputParams ?? []
   const resolvedOutputs = resolvedVersion?.outputParams ?? selectedWorkflow?.outputParams ?? []
+  const resolvedOutputMode = resolvedVersion?.outputMode ?? selectedWorkflow?.outputMode ?? 'structured'
   const outputNames = ['response', ...resolvedOutputs.map((item) => item.name)].filter(
     (value, index, array) => Boolean(value) && array.indexOf(value) === index,
   )
@@ -190,7 +191,11 @@ export function WorkflowCallNodeSettings({
         label={t('settings.skills.workflowCallOutputs')}
         outputs={outputNames}
         description={resolvedVersion
-          ? t('settings.skills.workflowCallOutputsHint')
+          ? (
+              resolvedOutputMode === 'text'
+                ? t('settings.skills.workflowCallTextOutputsHint')
+                : t('settings.skills.workflowCallOutputsHint')
+            )
           : t('settings.skills.workflowCallSelectWorkflowHint')}
       />
     </div>
