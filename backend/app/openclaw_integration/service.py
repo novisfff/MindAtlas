@@ -2733,16 +2733,16 @@ class OpenClawIntegrationService:
                 history=[],
                 runtime_context={
                     "stream_output": False,
-                    "conversation_id": f"openclaw_workflow:{item.capability_key}:{uuid4().hex}",
+                    "conversation_id": f"capability_workflow:{item.capability_key}:{uuid4().hex}",
                     "structured_input": raw_payload,
                     "run_id": uuid4().hex,
                     "channel_type": "openclaw_capability",
                     "workflow_id": str(workflow.id),
                     "locale": locale,
-                    "openclaw_source": audit_context.source,
-                    "openclaw_channel": audit_context.channel,
-                    "openclaw_session": audit_context.session,
-                    "openclaw_tool": audit_context.tool,
+                    "request_source": audit_context.source,
+                    "request_channel": audit_context.channel,
+                    "request_session": audit_context.session,
+                    "request_tool": audit_context.tool,
                 },
             )
         )
@@ -2756,6 +2756,7 @@ class OpenClawIntegrationService:
         raw_payload: dict[str, Any],
         *,
         locale: str,
+        audit_context: OpenClawRuntimeAuditContext,
     ) -> dict[str, Any]:
         agent_profile = self.config_service.get_agent_profile(item.agent_profile_id)  # type: ignore[arg-type]
         draft = self.config_service._get_agent_profile_published_draft(agent_profile)  # noqa: SLF001
@@ -2778,10 +2779,14 @@ class OpenClawIntegrationService:
                 history=[],
                 runtime_context={
                     "stream_output": False,
-                    "conversation_id": f"openclaw_agent:{item.capability_key}:{uuid4().hex}",
+                    "conversation_id": f"capability_agent:{item.capability_key}:{uuid4().hex}",
                     "run_id": uuid4().hex,
                     "channel_type": "openclaw_capability",
                     "locale": locale,
+                    "request_source": audit_context.source,
+                    "request_channel": audit_context.channel,
+                    "request_session": audit_context.session,
+                    "request_tool": audit_context.tool,
                 },
             )
         )
@@ -2822,7 +2827,12 @@ class OpenClawIntegrationService:
                     audit_context=audit_context,
                 )
             else:
-                result = self._execute_agent_capability(item, raw_payload or {}, locale=locale)
+                result = self._execute_agent_capability(
+                    item,
+                    raw_payload or {},
+                    locale=locale,
+                    audit_context=audit_context,
+                )
 
             return OpenClawCapabilityExecuteResponse(
                 capability_key=item.capability_key,

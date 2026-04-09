@@ -11,7 +11,7 @@ Each exposed catalog item SHALL route into existing MindAtlas services or runner
 #### Scenario: Thin capture uses OpenClaw request metadata inside workflow execution
 - **WHEN** OpenClaw executes `submit_context_capture` with request headers carrying source, channel, session, or tool metadata
 - **THEN** MindAtlas SHALL pass those values into the workflow runtime context
-- **AND** the workflow SHALL be able to reference them through `sys.openclaw_*` variables without exposing them as public capture fields
+- **AND** the workflow SHALL be able to reference them through generic `sys.request_*` variables without exposing them as public capture fields
 
 #### Scenario: Smart capture can merge into an existing entry conservatively
 - **WHEN** the shipped `submit_context_capture` workflow finds one clear matching candidate entry for the submitted context

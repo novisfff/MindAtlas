@@ -26,12 +26,12 @@ OpenClaw must place all business details in that context block. Request metadata
 
 ### Runtime Metadata Bridge
 Workflow execution context will add:
-- `openclaw_source`
-- `openclaw_channel`
-- `openclaw_session`
-- `openclaw_tool`
+- `request_source`
+- `request_channel`
+- `request_session`
+- `request_tool`
 
-`parse_execution_context()` will project those values into `sys_vars` so workflow templates can reference `{{sys.openclaw_source}}` and related fields without changing general template syntax.
+`parse_execution_context()` will project those values into `sys_vars` so workflow templates can reference `{{sys.request_source}}` and related fields without changing general template syntax. Legacy `sys.openclaw_*` aliases may remain for backward compatibility with older copied workflows, but new built-in assets should use the generic names.
 
 ### Merge Strategy
 The workflow will:
@@ -52,4 +52,4 @@ The tool will reuse `EntryService.update(...)` and return the same structured sh
 - System workflow preset sync must update the shipped workflow snapshot automatically.
 - Runtime catalog tests must verify the new one-field contract.
 - Plugin tests must verify the registered tool schema and execution path use `submit_context_capture` with `context`.
-- Workflow execution tests must cover both create and merge paths, including header-to-`sys` projection.
+- Workflow execution tests must cover both create and merge paths, including header-to-`sys.request_*` projection.

@@ -1060,10 +1060,10 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(result["createdAt"], "2026-03-31T09:00:00+00:00")
         self.assertEqual(result["updatedAt"], "2026-03-31T09:05:00+00:00")
         self.assertEqual(captured_runtime_context["structured_input"], {"context": "今天完成了 OpenClaw 接入方案梳理，并确认后续要收口成 workflow preset。"})
-        self.assertEqual(captured_runtime_context["openclaw_source"], "unit-test")
-        self.assertEqual(captured_runtime_context["openclaw_channel"], "cli")
-        self.assertEqual(captured_runtime_context["openclaw_session"], "session-1")
-        self.assertEqual(captured_runtime_context["openclaw_tool"], "tool-1")
+        self.assertEqual(captured_runtime_context["request_source"], "unit-test")
+        self.assertEqual(captured_runtime_context["request_channel"], "cli")
+        self.assertEqual(captured_runtime_context["request_session"], "session-1")
+        self.assertEqual(captured_runtime_context["request_tool"], "tool-1")
 
     def test_system_capture_workflow_accepts_merged_result_shape(self) -> None:
         self._initialize_system()
