@@ -389,7 +389,7 @@
       "validate": "Test connection",
       "save": "Save module",
       "openAiProviders": "Open AI providers",
-      "openAiSkills": "Open AI skills",
+      "openAiSkills": "Open Skill Library",
       "openDetails": "Open details"
     },
     "messages": {
@@ -937,7 +937,7 @@
       "contentSection": "Content Setup",
       "contentSectionDesc": "Manage content structure, tags, and the core organization settings.",
       "aiSection": "AI & Automation",
-      "aiSectionDesc": "Configure models, tools, skills, targets, and built-in system AI behaviors in one place.",
+      "aiSectionDesc": "Configure models, system tools, the skill library, workflows, agents, and built-in system AI behaviors in one place.",
       "runtimeSection": "Runtime Capabilities",
       "runtimeSectionDesc": "Review deployment-managed services and separately maintain runtime settings such as LightRAG, Docling, and automation.",
       "entryTypes": "Entry Types",
@@ -946,12 +946,12 @@
       "tagsDesc": "Manage tags for organizing your content",
       "aiProviders": "AI Providers",
       "aiProvidersDesc": "Configure AI models and API connections",
-      "assistantTools": "Assistant Tools",
-      "assistantToolsDesc": "Manage tools available to the AI assistant",
-      "assistantSkills": "Assistant Skills",
-      "assistantSkillsDesc": "Manage AI assistant skill configurations",
-      "assistantTargets": "Assistant Targets",
-      "assistantTargetsDesc": "Manage reusable workflow and agent executables in one place",
+      "assistantTools": "System Tools",
+      "assistantToolsDesc": "Manage built-in system tools and custom tools in one place",
+      "assistantSkills": "Skill Library",
+      "assistantSkillsDesc": "Manage built-in and custom skills in one place",
+      "assistantTargets": "Workflows & Agents",
+      "assistantTargetsDesc": "Manage reusable workflows and agents in one place",
       "openClawIntegration": "OpenClaw Integration",
       "openClawIntegrationDesc": "Configure the dedicated MindAtlas capability gateway that OpenClaw can discover and call",
       "systemAiBehaviors": "System AI Behaviors",
@@ -964,9 +964,9 @@
       "automationDesc": "Manage the background scheduler toggle and review the system jobs it drives automatically",
       "systemSetup": "System Setup",
       "systemSetupDesc": "Review core setup and the status of Docker Compose managed services",
-      "assistantWorkflows": "Assistant Workflows",
+      "assistantWorkflows": "Workflows",
       "assistantWorkflowsDesc": "Manage reusable workflow executables",
-      "assistantAgents": "Assistant Agents",
+      "assistantAgents": "Agents",
       "assistantAgentsDesc": "Manage reusable agent executables"
     },
     "graph": {
@@ -1121,7 +1121,7 @@
       "placeholder": "Tag name"
     },
     "tools": {
-      "title": "Assistant Tools",
+      "title": "System Tools",
       "addTool": "Add Tool",
       "editSkill": "Edit Skill",
       "system": "System",
@@ -1164,7 +1164,7 @@
       "noParams": "No parameters defined"
     },
     "skills": {
-      "title": "Assistant Skills",
+      "title": "Skill Library",
       "addSkill": "Add Skill",
       "editSkill": "Edit Skill",
       "system": "System",
