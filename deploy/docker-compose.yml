@@ -1,8 +1,8 @@
 services:
   # PostgreSQL Database
-  db:
+  postgres:
     image: postgres:15-alpine
-    container_name: mindatlas-db
+    container_name: mindatlas-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -82,33 +82,33 @@ services:
     restart: unless-stopped
 
   # Database Migration (one-time)
-  migrate:
+  db-migrate:
     build:
       context: ../backend
       dockerfile: Dockerfile
       target: migrate
-    container_name: mindatlas-migrate
+    container_name: mindatlas-db-migrate
     volumes:
       - ./migrate.sh:/migrate.sh:ro
     entrypoint: [ "/bin/sh", "/migrate.sh" ]
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-mindatlas}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-mindatlas}
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
     networks:
       - mindatlas-network
 
   # Backend API
-  backend:
+  api:
     build:
       context: ../backend
       dockerfile: Dockerfile
       target: runtime
-    container_name: mindatlas-backend
+    container_name: mindatlas-api
     environment:
       # Database
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-mindatlas}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-mindatlas}
       # Quick-start friendly defaults. Override these from `.env` in production if needed.
       AI_PROVIDER_FERNET_KEY: ${AI_PROVIDER_FERNET_KEY:-b98esSSrtceWc4IUOFGR-f_6I8FfnxtpjjYQZN51RCw=}
       LIGHTRAG_ENABLED: "${LIGHTRAG_ENABLED:-true}"
@@ -131,13 +131,13 @@ services:
     volumes:
       - lightrag_storage:/app/lightrag_storage
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
       minio:
         condition: service_healthy
       neo4j:
         condition: service_healthy
-      migrate:
+      db-migrate:
         condition: service_completed_successfully
     networks:
       - mindatlas-network
@@ -149,15 +149,15 @@ services:
     restart: unless-stopped
 
   # LightRAG Worker (background indexing)
-  worker:
+  lightrag-worker:
     build:
       context: ../backend
       dockerfile: Dockerfile
       target: worker
-    container_name: mindatlas-worker
+    container_name: mindatlas-lightrag-worker
     environment:
       # Database
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-mindatlas}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-mindatlas}
       # Quick-start friendly defaults. Override these from `.env` in production if needed.
       AI_PROVIDER_FERNET_KEY: ${AI_PROVIDER_FERNET_KEY:-b98esSSrtceWc4IUOFGR-f_6I8FfnxtpjjYQZN51RCw=}
       LIGHTRAG_ENABLED: "${LIGHTRAG_ENABLED:-true}"
@@ -173,25 +173,25 @@ services:
     volumes:
       - lightrag_storage:/app/lightrag_storage
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
       neo4j:
         condition: service_healthy
-      migrate:
+      db-migrate:
         condition: service_completed_successfully
     networks:
       - mindatlas-network
     restart: unless-stopped
 
   # Parse Worker (Docling document parsing)
-  parse-worker:
+  docling-worker:
     build:
       context: ../backend
       dockerfile: Dockerfile
       target: parse-worker
-    container_name: mindatlas-parse-worker
+    container_name: mindatlas-docling-worker
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-mindatlas}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-mindatlas}
       # Quick-start friendly defaults. Override these from `.env` in production if needed.
       AI_PROVIDER_FERNET_KEY: ${AI_PROVIDER_FERNET_KEY:-b98esSSrtceWc4IUOFGR-f_6I8FfnxtpjjYQZN51RCw=}
       MINIO_ENDPOINT: minio:9000
@@ -201,11 +201,11 @@ services:
       MINIO_SECURE: "false"
       DOCLING_WORKER_ENABLED: "${DOCLING_WORKER_ENABLED:-true}"
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
       minio:
         condition: service_healthy
-      migrate:
+      db-migrate:
         condition: service_completed_successfully
     networks:
       - mindatlas-network
@@ -215,16 +215,16 @@ services:
           memory: 4G
     restart: unless-stopped
 
-  # Frontend (Nginx)
-  frontend:
+  # Web Frontend (Nginx)
+  web:
     build:
       context: ../frontend
       dockerfile: Dockerfile
-    container_name: mindatlas-frontend
+    container_name: mindatlas-web
     ports:
       - "${FRONTEND_PORT:-3000}:80"
     depends_on:
-      backend:
+      api:
         condition: service_healthy
     networks:
       - mindatlas-network

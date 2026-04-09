@@ -56,7 +56,7 @@ cp .env.example .env
 - 编辑 `.env`：按你的改动覆盖默认值
 
 默认情况下：
-- `DATABASE_URL`、`MINIO_ENDPOINT`、`NEO4J_URI` 等容器内地址由 `docker-compose.yml` 使用服务名（`db` / `minio` / `neo4j`）自动注入
+- `DATABASE_URL`、`MINIO_ENDPOINT`、`NEO4J_URI` 等容器内地址由 `docker-compose.yml` 使用服务名（`postgres` / `minio` / `neo4j`）自动注入
 - 对象存储、知识图谱、文档解析和后台调度器都会在 Compose 中自动启用
 - 前端 Nginx 会反代 `/api/` 到后端（同源访问），一般不需要额外配置 CORS
 
@@ -66,8 +66,8 @@ cp .env.example .env
 ┌─────────────────────────────────────────────────────────┐
 │                    Docker Network                        │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐ │
-│  │ frontend │  │ backend  │  │    db    │  │  minio  │ │
-│  │ (nginx)  │──│ (uvicorn)│──│(postgres)│  │         │ │
+│  │   web    │  │   api    │  │ postgres │  │  minio  │ │
+│  │ (nginx)  │──│ (uvicorn)│──│          │  │         │ │
 │  │  :80     │  │  :8000   │  │  :5432   │  │ :9000/1 │ │
 │  └──────────┘  └─────┬────┘  └──────────┘  └─────────┘ │
 │                      │                                  │
@@ -76,10 +76,15 @@ cp .env.example .env
 │                 │:7474/7687│                            │
 │                 └────┬─────┘                            │
 │                      │                                  │
-│                 ┌────▼─────┐                            │
-│                 │  worker  │                            │
-│                 │ (index)  │                            │
-│                 └──────────┘                            │
+│        ┌─────────────▼─────────────┐                    │
+│        │     lightrag-worker       │                    │
+│        │        (indexing)         │                    │
+│        └─────────────┬─────────────┘                    │
+│                      │                                  │
+│                 ┌──────────────┐                        │
+│                 │docling-worker│                        │
+│                 │  (parsing)   │                        │
+│                 └──────────────┘                        │
 └─────────────────────────────────────────────────────────┘
         │                                         │
         ▼                                         ▼
@@ -127,8 +132,8 @@ docker compose ps
 docker compose logs -f
 
 # 查看特定服务日志
-docker compose logs -f backend
-docker compose logs -f frontend
+docker compose logs -f api
+docker compose logs -f web
 ```
 
 ### 重启服务
@@ -138,7 +143,7 @@ docker compose logs -f frontend
 docker compose restart
 
 # 重启特定服务
-docker compose restart backend
+docker compose restart api
 ```
 
 ### 停止服务
@@ -169,13 +174,13 @@ docker compose up -d
 **解决方案**:
 ```bash
 # 检查数据库服务状态
-docker compose ps db
+docker compose ps postgres
 
 # 查看数据库日志
-docker compose logs db
+docker compose logs postgres
 
 # 手动测试连接
-docker compose exec db psql -U postgres -d mindatlas -c "SELECT 1"
+docker compose exec postgres psql -U postgres -d mindatlas -c "SELECT 1"
 ```
 
 ### 2. MinIO 桶创建失败
@@ -199,10 +204,10 @@ docker compose exec minio mc mb --ignore-existing local/mindatlas
 **解决方案**:
 ```bash
 # 检查后端健康状态
-docker compose exec frontend curl http://backend:8000/health
+docker compose exec web curl http://api:8000/health
 
 # 查看后端日志
-docker compose logs backend
+docker compose logs api
 ```
 
 ### 4. 端口被占用
