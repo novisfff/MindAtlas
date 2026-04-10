@@ -201,12 +201,12 @@ _WORKFLOW_SYSTEM_ITEM_TEMPLATES: tuple[_WorkflowSystemItemTemplate, ...] = (
         enabled_by_default=True,
         title=_LocalizedText(zh="智能记住并入库", en="Smart Save To MindAtlas"),
         description=_LocalizedText(
-            zh="向 MindAtlas 提交一段高价值上下文，由系统工作流自动提取最终字段、判定是否应合并到已有记录，并结合 OpenClaw 请求元数据完成智能入库。",
-            en="Submit one high-value context block to MindAtlas so the system workflow can extract final fields, decide whether to merge into an existing entry, and save it intelligently with OpenClaw request metadata.",
+            zh="向 MindAtlas 提交一段用于生成新记录或修正已有记录的候选上下文，由系统工作流先提取检索线索与最终字段，再判断应新建还是合并更新已有记录，并结合 OpenClaw 请求元数据完成智能入库。",
+            en="Submit one candidate record or record-update context to MindAtlas so the system workflow can derive retrieval clues and final fields, decide whether to create a new entry or merge into an existing one, and save it intelligently with OpenClaw request metadata.",
         ),
         input_summary=_LocalizedText(
-            zh="只需提供 context（一段高价值上下文），其中尽量包含发生了什么、结果是什么、为什么值得记，以及明确的时间线索；source/channel/session/tool 等上下文由 OpenClaw 请求元数据自动提供。",
-            en="Provide only `context`: one high-value context block that ideally includes what happened, the result, why it matters later, and any clear time clues. Source/channel/session/tool context is provided automatically from OpenClaw request metadata.",
+            zh="只需提供 context：一段围绕同一事项的候选记录或记录修正上下文，尽量包含对象或事项、发生了什么、新增事实或进展、当前结果、为什么值得入库、明确时间线索，以及这是否是在补充或修正同一事项。source/channel/session/tool 等上下文由 OpenClaw 请求元数据自动提供。",
+            en="Provide only `context`: one self-contained candidate record or record-update context about the same subject. It should ideally include what this is about, what happened, the new facts or progress, the current result, why it deserves persistence, clear time clues, and whether this is an update to the same ongoing item. Source/channel/session/tool context is provided automatically from OpenClaw request metadata.",
         ),
         output_summary=_LocalizedText(
             zh="返回统一的 created/merged 结果，包含记录 ID、标题、类型、摘要、标签、时间字段，以及创建/更新时间。",

@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from uuid import uuid4
 from unittest.mock import patch
 
+from pydantic import BaseModel
+
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 
 
@@ -1376,6 +1378,55 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             )
 
         self.assertEqual(set(out["node_outputs"]["tool_1"]["json_fields"].keys()), {"result"})
+
+    def test_workflow_tool_coerces_args_using_tool_schema(self) -> None:
+        from app.assistant.workflow.engine.engine import _build_dag_tool_node
+
+        class _Args(BaseModel):
+            limit: int
+
+        captured_args: dict[str, object] = {}
+        tool_starts: list[dict[str, object]] = []
+
+        class _Tool:
+            name = "fake_tool"
+            args_schema = _Args
+
+            @staticmethod
+            def func(**kwargs):
+                captured_args.update(kwargs)
+                return {"limit": kwargs.get("limit")}
+
+        with patch(
+            "app.assistant.workflow.engine.engine._wrap_tool_with_db",
+            side_effect=lambda tool, _db_bind: (lambda **kwargs: tool.func(**kwargs)),
+        ), patch(
+            "app.assistant.workflow.engine.engine._resolve_tool_output_param_names",
+            return_value=["limit"],
+        ):
+            node = _build_dag_tool_node(
+                "tool_1",
+                {"tool_name": "fake_tool", "input_bindings": {"limit": "5"}},
+                {"fake_tool": _Tool()},
+                args_llm=object(),
+                db_bind=object(),
+            )
+            out = node(
+                {
+                    "node_outputs": {
+                        "start": {"json_fields": {"user_input": "hello"}, "text": "hello", "status": "ok"},
+                    },
+                    "metadata": {
+                        "on_tool_call_start": lambda **payload: tool_starts.append(payload),
+                    },
+                }
+            )
+
+        self.assertEqual(captured_args["limit"], 5)
+        self.assertIsInstance(captured_args["limit"], int)
+        self.assertEqual(tool_starts[0]["args"]["limit"], 5)
+        self.assertEqual(out["node_outputs"]["tool_1"]["json_fields"]["limit"], 5)
+        self.assertEqual(out["node_outputs"]["tool_1"]["json_fields"]["result"]["limit"], 5)
 
     def test_if_else_branch_logic_and_order_with_sys_vars(self) -> None:
         from app.assistant.workflow.engine.engine import _build_if_else_node

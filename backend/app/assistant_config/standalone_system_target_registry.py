@@ -50,8 +50,8 @@ _WORKFLOW_TEMPLATES: tuple[_StandaloneSystemWorkflowTemplate, ...] = (
             en="Smart Context Capture Workflow",
         ),
         description=_LocalizedText(
-            zh="将一段高价值上下文整理、判定新建或合并，并最终写入 MindAtlas 的系统工作流。",
-            en="A system workflow that materializes one high-value context block, decides create versus merge, and saves it into MindAtlas.",
+            zh="接收一段足以生成新记录或修正已有记录的候选上下文，先提取检索线索与最终字段，再判断应新建还是合并到已有记录的系统工作流。",
+            en="A system workflow that accepts a candidate record context rich enough to create a new record or correct an existing one, derives retrieval clues and final fields, and then decides whether to create a new entry or merge into an existing one.",
         ),
         preset_file_zh="workflows/system_context_capture.json",
         preset_file_en="workflows/system_context_capture.en.json",

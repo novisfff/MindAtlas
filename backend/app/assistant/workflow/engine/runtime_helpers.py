@@ -265,17 +265,122 @@ def _apply_trace_context(
     return next_kwargs
 
 
+def _tool_schema_json(args_schema: Any) -> dict[str, Any] | None:
+    if args_schema is None:
+        return None
+    if hasattr(args_schema, "model_json_schema"):
+        try:
+            schema = args_schema.model_json_schema()
+            return schema if isinstance(schema, dict) else None
+        except Exception:
+            return None
+    if hasattr(args_schema, "schema"):
+        try:
+            schema = args_schema.schema()
+            return schema if isinstance(schema, dict) else None
+        except Exception:
+            return None
+    return None
+
+
+def _json_schema_types(prop: dict[str, Any]) -> list[str]:
+    types: list[str] = []
+    raw_type = prop.get("type")
+    if isinstance(raw_type, str):
+        types.append(raw_type)
+    elif isinstance(raw_type, list):
+        types.extend(str(item).strip() for item in raw_type if str(item).strip())
+
+    for key in ("anyOf", "oneOf", "allOf"):
+        items = prop.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict):
+                types.extend(_json_schema_types(item))
+    return types
+
+
+def _json_schema_primary_type(prop: dict[str, Any]) -> str | None:
+    candidates = [item for item in _json_schema_types(prop) if item != "null"]
+    for expected in ("object", "array", "integer", "number", "boolean", "string"):
+        if expected in candidates:
+            return expected
+    return candidates[0] if candidates else None
+
+
+def _json_schema_allows_null(prop: dict[str, Any]) -> bool:
+    return "null" in _json_schema_types(prop)
+
+
+def _prepare_tool_arg_for_schema(value: Any, prop: dict[str, Any]) -> Any:
+    expected_type = _json_schema_primary_type(prop)
+    if expected_type is None:
+        return value
+
+    if isinstance(value, str):
+        trimmed = value.strip()
+        if trimmed == "" and _json_schema_allows_null(prop) and expected_type != "string":
+            return None
+        if expected_type in {"array", "object"} and trimmed:
+            try:
+                parsed = json.loads(trimmed)
+            except Exception:
+                return value
+            if expected_type == "array" and isinstance(parsed, list):
+                return parsed
+            if expected_type == "object" and isinstance(parsed, dict):
+                return parsed
+
+    return value
+
+
+def coerce_tool_args(tool: Any, args: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(args, dict):
+        return {}
+
+    args_schema = getattr(tool, "args_schema", None)
+    if args_schema is None:
+        return dict(args)
+
+    prepared_args = dict(args)
+    schema_json = _tool_schema_json(args_schema)
+    props = schema_json.get("properties") if isinstance(schema_json, dict) else None
+    if isinstance(props, dict):
+        prepared_args = {
+            key: _prepare_tool_arg_for_schema(value, props.get(key) or {})
+            for key, value in prepared_args.items()
+        }
+
+    if hasattr(args_schema, "model_validate"):
+        validated = args_schema.model_validate(prepared_args)
+        if hasattr(validated, "model_dump"):
+            return validated.model_dump(mode="python", exclude_unset=True)
+        if hasattr(validated, "dict"):
+            return validated.dict(exclude_unset=True)
+        return prepared_args
+
+    if hasattr(args_schema, "parse_obj"):
+        validated = args_schema.parse_obj(prepared_args)
+        if hasattr(validated, "dict"):
+            return validated.dict(exclude_unset=True)
+        return prepared_args
+
+    return prepared_args
+
+
 def wrap_tool_with_db(tool: Any, db_bind: Any) -> Callable:
     def wrapped(**args: Any) -> Any:
+        call_args = coerce_tool_args(tool, args)
         session = sessionmaker(bind=db_bind)()
         token = set_current_db(session)
         try:
             tool_func = getattr(tool, "func", None)
             if callable(tool_func):
-                return tool_func(**args)
+                return tool_func(**call_args)
             if callable(tool):
-                return tool(**args)
-            return tool.invoke(args)
+                return tool(**call_args)
+            return tool.invoke(call_args)
         finally:
             session.close()
             reset_current_db(token)

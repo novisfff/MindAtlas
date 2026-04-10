@@ -603,7 +603,7 @@ class OpenClawIntegrationTests(unittest.TestCase):
 
         self.assertEqual(definitions["submit_context_capture"].tool_name, "mindatlas_submit_context_capture")
         self.assertEqual(definitions["submit_context_capture"].workflow_asset_key, "context_capture")
-        self.assertIn("high-value context block", definitions["submit_context_capture"].description)
+        self.assertIn("candidate record or record-update context", definitions["submit_context_capture"].description)
         self.assertIn("Provide only `context`", definitions["submit_context_capture"].input_summary or "")
         self.assertIn("recent and time-bounded lookups", definitions["search_entries"].description)
         self.assertIn("entry ID is known", definitions["get_entry"].description)
@@ -668,7 +668,7 @@ class OpenClawIntegrationTests(unittest.TestCase):
 
         capture_item = by_key["submit_context_capture"]
         capture_properties = capture_item["inputSchema"]["properties"]
-        self.assertIn("High-value context", capture_properties["context"]["description"])
+        self.assertIn("candidate record context", capture_properties["context"]["description"])
 
         enabled_entry_type_codes = [
             row.code

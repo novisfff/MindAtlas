@@ -57,6 +57,10 @@ def _wrap_tool_with_db(tool: Any, db_bind: Any) -> Callable:
     return _rt.wrap_tool_with_db(tool, db_bind)
 
 
+def _coerce_tool_args(tool: Any, args: dict[str, Any]) -> dict[str, Any]:
+    return _rt.coerce_tool_args(tool, args)
+
+
 # Kept as compatibility wrapper for tests/patch targets.
 def _resolve_tool_output_param_names(tool_name: str, tool: Any) -> list[str]:
     return _rt.resolve_tool_output_param_names(tool_name, tool)
