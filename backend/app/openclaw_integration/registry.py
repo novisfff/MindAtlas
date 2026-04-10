@@ -16,7 +16,7 @@ OpenClawSystemItemSourceType = Literal["tool", "workflow", "agent"]
 OpenClawSystemImplementationType = Literal["entry", "relation", "knowledge_graph", "report", "workflow", "agent"]
 
 OPENCLAW_CONTEXT_CAPTURE_DEFAULT_KEY: OpenClawSystemDefaultKey = "submit_context_capture"
-OPENCLAW_CONTEXT_CAPTURE_WORKFLOW_NAME = "system_openclaw_context_capture__workflow"
+OPENCLAW_CONTEXT_CAPTURE_WORKFLOW_ASSET_KEY = "context_capture"
 OPENCLAW_SYSTEM_DEFAULT_TOOL_SOURCE_NAMES: dict[OpenClawSystemCapabilityKey, str] = {
     "search_entries": "search_entries",
     "get_entry": "get_entry_detail",
@@ -55,9 +55,7 @@ class _WorkflowSystemItemTemplate:
     enabled_by_default: bool
     title: _LocalizedText
     description: _LocalizedText
-    workflow_canonical_name: str
-    workflow_preset_file_zh: str
-    workflow_preset_file_en: str
+    workflow_asset_key: str
     input_summary: _LocalizedText | None = None
     output_summary: _LocalizedText | None = None
 
@@ -72,8 +70,7 @@ class OpenClawSystemItemDefinition:
     title: str
     description: str
     source_tool_name: str | None = None
-    workflow_canonical_name: str | None = None
-    workflow_preset_file: str | None = None
+    workflow_asset_key: str | None = None
     input_summary: str | None = None
     output_summary: str | None = None
     input_schema: dict[str, Any] | None = None
@@ -215,9 +212,7 @@ _WORKFLOW_SYSTEM_ITEM_TEMPLATES: tuple[_WorkflowSystemItemTemplate, ...] = (
             zh="返回统一的 created/merged 结果，包含记录 ID、标题、类型、摘要、标签、时间字段，以及创建/更新时间。",
             en="Returns a unified created-or-merged result with the entry id, title, type, summary, tags, time fields, and created/updated timestamps.",
         ),
-        workflow_canonical_name=OPENCLAW_CONTEXT_CAPTURE_WORKFLOW_NAME,
-        workflow_preset_file_zh="workflows/openclaw_context_capture.json",
-        workflow_preset_file_en="workflows/openclaw_context_capture.en.json",
+        workflow_asset_key=OPENCLAW_CONTEXT_CAPTURE_WORKFLOW_ASSET_KEY,
     ),
 )
 
@@ -245,12 +240,7 @@ def _system_item_registry(locale: str) -> dict[OpenClawSystemDefaultKey, OpenCla
             description=workflow_template.description.resolve(locale),
             input_summary=workflow_template.input_summary.resolve(locale) if workflow_template.input_summary else None,
             output_summary=workflow_template.output_summary.resolve(locale) if workflow_template.output_summary else None,
-            workflow_canonical_name=workflow_template.workflow_canonical_name,
-            workflow_preset_file=(
-                workflow_template.workflow_preset_file_zh
-                if locale == "zh"
-                else workflow_template.workflow_preset_file_en
-            ),
+            workflow_asset_key=workflow_template.workflow_asset_key,
         )
 
     for tool_template in _TOOL_SYSTEM_ITEM_TEMPLATES:

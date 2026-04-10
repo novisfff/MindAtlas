@@ -13,7 +13,7 @@
             "name": "context",
             "type": "string",
             "required": true,
-            "description": "High-value context to submit to MindAtlas. It should ideally include what happened, the result, why it matters, and any clear time clues."
+            "description": "需要提交给 MindAtlas 的高价值上下文，应尽量包含发生了什么、结果是什么、为什么值得记，以及明确的时间线索。"
           }
         ]
       }
@@ -21,7 +21,7 @@
     {
       "nodeId": "tool_types",
       "nodeType": "tool",
-      "label": "List Entry Types",
+      "label": "获取类型列表",
       "positionX": 430.0,
       "positionY": 220.0,
       "config": {
@@ -32,7 +32,7 @@
     {
       "nodeId": "tool_tags",
       "nodeType": "tool",
-      "label": "List Tags",
+      "label": "获取标签列表",
       "positionX": 430.0,
       "positionY": 420.0,
       "config": {
@@ -43,12 +43,12 @@
     {
       "nodeId": "llm_materialize",
       "nodeType": "llm",
-      "label": "Materialize Fields",
+      "label": "提取最终字段",
       "positionX": 860.0,
       "positionY": 320.0,
       "config": {
-        "systemPrompt": "You are MindAtlas's OpenClaw thin-context capture workflow. Convert one high-value context block into final persistence fields.\n\nGoals:\n- Use only the submitted context and OpenClaw request metadata to produce the final title, summary, content, type_code, tags, time_mode, and time fields.\n- Do not require the caller to hand-assemble title, summary, type, tags, or time fields.\n- Do not invent facts the user did not imply. You may only organize, normalize, and lightly synthesize what was actually provided.\n\nConstraints:\n- type_code must be selected from the codes in {{tool_types.items}} only. If unsure, pick the first available code.\n- tags should prefer existing names from {{tool_tags.items}}. Return at most 5 tags and do not add # prefixes.\n- content should preserve the important facts from the submitted context and may be organized as Markdown, but it must not fabricate new facts.\n- summary should be one concise paragraph of roughly 50-150 characters.\n- title should be accurate and stay within 30 characters when possible.\n- If the context does not provide clear time information, default to time_mode=POINT and time_at=today in YYYY-MM-DD.\n- Use RANGE only when there is a real time span. When time_mode=POINT, time_from/time_to must be null. When time_mode=RANGE, time_at must be null.",
-        "userInput": "date: {{sys.date}}\nsource: {{sys.openclaw_source}}\nchannel: {{sys.openclaw_channel}}\nsession: {{sys.openclaw_session}}\ntool: {{sys.openclaw_tool}}\n\ncontext:\n{{start.context}}",
+        "systemPrompt": "你是 MindAtlas 的智能上下文入库工作流，负责把一段高价值上下文整理成最终记录字段。\n\n目标：\n- 仅基于提交的 context 与调用请求元数据，生成最终可入库的 title、summary、content、type_code、tags、time_mode 与时间字段。\n- 不要要求调用方手工组装标题、摘要、类型、标签或时间字段。\n- 不要编造用户没有表达过的事实，只能做结构化整理、轻度归纳与格式清洗。\n\n约束：\n- type_code 必须且只能从 {{tool_types.items}} 的 code 中选择；无法判断时选择第一个可用 code。\n- tags 优先复用 {{tool_tags.items}} 里的 name；最多输出 5 个标签；宁缺毋滥；不要带 #。\n- content 要保留上下文中的关键信息，可整理成 Markdown，但不要扩写虚构事实。\n- summary 用 1 段 50-150 字概括核心信息。\n- title 精炼准确，控制在 30 个字以内。\n- 如果 context 中没有明确时间，默认输出 time_mode=POINT 且 time_at=今天（YYYY-MM-DD）。\n- 如果能识别出明确时间区间，再输出 time_mode=RANGE 与 time_from/time_to；否则不要滥用 RANGE。\n- 当 time_mode=POINT 时，time_from/time_to 必须为 null；当 time_mode=RANGE 时，time_at 必须为 null。",
+        "userInput": "date: {{sys.date}}\nsource: {{sys.request_source}}\nchannel: {{sys.request_channel}}\nsession: {{sys.request_session}}\ntool: {{sys.request_tool}}\n\ncontext:\n{{start.context}}",
         "outputMode": "structured",
         "outputFields": [
           {
@@ -93,7 +93,7 @@
     {
       "nodeId": "tool_search_candidates",
       "nodeType": "tool",
-      "label": "Search Candidates",
+      "label": "检索候选记录",
       "positionX": 1290.0,
       "positionY": 320.0,
       "config": {
@@ -108,12 +108,12 @@
     {
       "nodeId": "llm_decide",
       "nodeType": "llm",
-      "label": "Decide Create Or Merge",
+      "label": "判定新建或合并",
       "positionX": 1720.0,
       "positionY": 320.0,
       "config": {
-        "systemPrompt": "You are MindAtlas's conservative deduplication decision node. Choose between create and merge with at most one target entry.\n\nRules:\n- You may choose action=merge only when the candidate list contains one clearly matching long-lived entry that should absorb the new context.\n- If the candidate list is empty, ambiguous, only loosely related, or you are not confident that the new context belongs to the same durable record, you must output action=create.\n- entry_id must come from the candidate list ids only. When action=create, entry_id must be null.\n- reason should briefly explain why you chose create or merge.",
-        "userInput": "date: {{sys.date}}\nsource: {{sys.openclaw_source}}\nchannel: {{sys.openclaw_channel}}\nsession: {{sys.openclaw_session}}\n\nnew_entry:\n{{llm_materialize.result}}\n\ncandidate_entries:\n{{tool_search_candidates.items}}\n\noriginal_context:\n{{start.context}}",
+        "systemPrompt": "你是 MindAtlas 的保守去重决策器，负责在 create 与 merge 之间做单目标决策。\n\n规则：\n- 只有当候选记录里存在且仅存在 1 条明显属于同一条长期记录的目标时，才允许 action=merge。\n- 如果候选为空、存在歧义、只是主题相近但并非同一条记录、或你对是否同一条记录没有把握，必须输出 action=create。\n- entry_id 只能从候选记录列表里的 id 中选择；当 action=create 时 entry_id 必须为 null。\n- reason 简洁说明决策依据。",
+        "userInput": "date: {{sys.date}}\nsource: {{sys.request_source}}\nchannel: {{sys.request_channel}}\nsession: {{sys.request_session}}\n\nnew_entry:\n{{llm_materialize.result}}\n\ncandidate_entries:\n{{tool_search_candidates.items}}\n\noriginal_context:\n{{start.context}}",
         "outputMode": "structured",
         "outputFields": [
           {
@@ -136,7 +136,7 @@
     {
       "nodeId": "if_route",
       "nodeType": "if_else",
-      "label": "Route",
+      "label": "路由",
       "positionX": 2140.0,
       "positionY": 320.0,
       "config": {
@@ -167,7 +167,7 @@
     {
       "nodeId": "tool_get_existing",
       "nodeType": "tool",
-      "label": "Get Existing Entry",
+      "label": "读取已有记录",
       "positionX": 2560.0,
       "positionY": 220.0,
       "config": {
@@ -180,12 +180,12 @@
     {
       "nodeId": "llm_merge_rewrite",
       "nodeType": "llm",
-      "label": "Rewrite Merged Entry",
+      "label": "整合重写记录",
       "positionX": 2980.0,
       "positionY": 220.0,
       "config": {
-        "systemPrompt": "You are MindAtlas's entry merger. Rewrite one final canonical record by combining the existing entry with the new OpenClaw context.\n\nGoals:\n- Start from the existing record and absorb the new facts, progress, conclusions, and time clues from the new context.\n- Output the new final title, summary, content, type_code, tags, time_mode, and time fields that should replace the current entry.\n- Use a full rewrite strategy: the content should become one coherent updated record, not a simple append.\n\nConstraints:\n- Use only facts that appear in existing_entry and original_context. Do not invent details.\n- type_code must be selected from the codes in {{tool_types.items}} only.\n- tags should prefer existing names from {{tool_tags.items}}. Return at most 5 tags and do not add # prefixes.\n- content should preserve the important facts from both the old record and the new context and may be organized as Markdown, but it must not fabricate new facts.\n- summary should be one concise paragraph of roughly 50-150 characters.\n- title should be accurate and stay within 30 characters when possible.\n- If the new context provides better time information, you may update the time fields; otherwise preserve or reasonably continue the existing time framing.",
-        "userInput": "date: {{sys.date}}\nsource: {{sys.openclaw_source}}\nchannel: {{sys.openclaw_channel}}\nsession: {{sys.openclaw_session}}\n\nexisting_entry:\n{{tool_get_existing.result}}\n\nnew_materialized_entry:\n{{llm_materialize.result}}\n\noriginal_context:\n{{start.context}}",
+        "systemPrompt": "你是 MindAtlas 的记录整合器，负责把已有记录与新的高价值上下文整合成同一条更完整的最终记录。\n\n目标：\n- 以已有记录为基础，吸收新上下文中的新增事实、进展、结论与时间线索。\n- 输出新的 title、summary、content、type_code、tags、time_mode 与时间字段，用于覆盖原记录。\n- 这次采用“整合重写”策略：正文应是新的完整整理版，而不是简单追加。\n\n约束：\n- 只能基于 existing_entry 与 original_context 中出现的信息做整理，不要编造事实。\n- type_code 必须且只能从 {{tool_types.items}} 的 code 中选择。\n- tags 优先复用 {{tool_tags.items}} 里的 name；最多输出 5 个标签；不要带 #。\n- content 要保留已有记录与新增上下文的关键事实，可用 Markdown，但不要扩写虚构内容。\n- summary 用 1 段 50-150 字概括当前整合后的核心信息。\n- title 精炼准确，控制在 30 个字以内。\n- 如果新上下文提供了更准确的时间线索，可以更新 time 字段；否则保留或合理延续原记录时间。",
+        "userInput": "date: {{sys.date}}\nsource: {{sys.request_source}}\nchannel: {{sys.request_channel}}\nsession: {{sys.request_session}}\n\nexisting_entry:\n{{tool_get_existing.result}}\n\nnew_materialized_entry:\n{{llm_materialize.result}}\n\noriginal_context:\n{{start.context}}",
         "outputMode": "structured",
         "outputFields": [
           {
@@ -230,7 +230,7 @@
     {
       "nodeId": "tool_update",
       "nodeType": "tool",
-      "label": "Update Entry",
+      "label": "更新已有记录",
       "positionX": 3400.0,
       "positionY": 220.0,
       "config": {
@@ -252,7 +252,7 @@
     {
       "nodeId": "tool_create",
       "nodeType": "tool",
-      "label": "Create Entry",
+      "label": "创建记录",
       "positionX": 2560.0,
       "positionY": 480.0,
       "config": {
@@ -273,7 +273,7 @@
     {
       "nodeId": "output_merged",
       "nodeType": "output",
-      "label": "Merged Output",
+      "label": "合并输出",
       "positionX": 3820.0,
       "positionY": 220.0,
       "config": {
@@ -351,7 +351,7 @@
     {
       "nodeId": "output_created",
       "nodeType": "output",
-      "label": "Created Output",
+      "label": "创建输出",
       "positionX": 2980.0,
       "positionY": 480.0,
       "config": {

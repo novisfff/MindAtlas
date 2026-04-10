@@ -74,10 +74,34 @@ def parse_execution_context(
         preferred_locale=str(context.get("locale", context.get("systemLocale", "")) or "").strip() or None
     )
     language = get_system_language_name(locale)
-    openclaw_source = str(context.get("openclaw_source", context.get("openclawSource", "")) or "").strip()
-    openclaw_channel = str(context.get("openclaw_channel", context.get("openclawChannel", "")) or "").strip()
-    openclaw_session = str(context.get("openclaw_session", context.get("openclawSession", "")) or "").strip()
-    openclaw_tool = str(context.get("openclaw_tool", context.get("openclawTool", "")) or "").strip()
+    request_source = str(
+        context.get(
+            "request_source",
+            context.get("requestSource", context.get("openclaw_source", context.get("openclawSource", ""))),
+        )
+        or ""
+    ).strip()
+    request_channel = str(
+        context.get(
+            "request_channel",
+            context.get("requestChannel", context.get("openclaw_channel", context.get("openclawChannel", ""))),
+        )
+        or ""
+    ).strip()
+    request_session = str(
+        context.get(
+            "request_session",
+            context.get("requestSession", context.get("openclaw_session", context.get("openclawSession", ""))),
+        )
+        or ""
+    ).strip()
+    request_tool = str(
+        context.get(
+            "request_tool",
+            context.get("requestTool", context.get("openclaw_tool", context.get("openclawTool", ""))),
+        )
+        or ""
+    ).strip()
 
     now_utc = datetime.now(timezone.utc)
     sys_vars = {
@@ -86,10 +110,15 @@ def parse_execution_context(
         "conversation_id": conversation_id,
         "locale": locale,
         "language": language,
-        "openclaw_source": openclaw_source,
-        "openclaw_channel": openclaw_channel,
-        "openclaw_session": openclaw_session,
-        "openclaw_tool": openclaw_tool,
+        "request_source": request_source,
+        "request_channel": request_channel,
+        "request_session": request_session,
+        "request_tool": request_tool,
+        # Keep legacy aliases so older copied workflows that still reference sys.openclaw_* keep working.
+        "openclaw_source": request_source,
+        "openclaw_channel": request_channel,
+        "openclaw_session": request_session,
+        "openclaw_tool": request_tool,
     }
 
     return ParsedExecutionContext(

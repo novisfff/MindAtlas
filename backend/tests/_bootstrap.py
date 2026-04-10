@@ -178,6 +178,15 @@ def reset_caches() -> None:
         pass
 
     try:
+        from app.assistant_config.standalone_system_target_registry import (
+            clear_standalone_system_target_registry_cache,
+        )
+
+        clear_standalone_system_target_registry_cache()
+    except Exception:
+        pass
+
+    try:
         from app.system_settings.initialization_defaults_loader import clear_initialization_defaults_cache
 
         clear_initialization_defaults_cache()

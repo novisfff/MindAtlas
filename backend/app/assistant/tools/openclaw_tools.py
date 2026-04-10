@@ -1,4 +1,4 @@
-"""OpenClaw-facing system tool wrappers."""
+"""Compatibility tool wrappers for catalog-facing capability contracts."""
 from __future__ import annotations
 
 import json
@@ -53,7 +53,7 @@ def _validate_payload(model_cls: type[T], data: dict[str, Any]) -> T:
         raise ApiException(
             status_code=400,
             code=40068,
-            message="Invalid OpenClaw system tool input",
+            message="Invalid capability tool input",
             details={"errors": exc.errors()},
         ) from exc
 
@@ -184,7 +184,7 @@ def openclaw_capture_entry(
     timeFrom: str | None = None,
     timeTo: str | None = None,
 ) -> str:
-    """Create a MindAtlas entry using the OpenClaw field-level capture contract."""
+    """Create a MindAtlas entry using the compatibility field-level capture contract."""
 
     payload = _validate_payload(
         OpenClawCaptureEntryRequest,
@@ -246,7 +246,7 @@ def openclaw_search_entries(
     timeTo: str | None = None,
     limit: int = 10,
 ) -> str:
-    """Search MindAtlas entries using the OpenClaw retrieval contract."""
+    """Search MindAtlas entries using the compatibility retrieval contract."""
 
     payload = _validate_payload(
         OpenClawSearchEntriesRequest,
@@ -295,7 +295,7 @@ def openclaw_search_entries(
 
 @tool
 def openclaw_get_entry(entryId: str) -> str:
-    """Get a MindAtlas entry using the OpenClaw detail contract."""
+    """Get a MindAtlas entry using the compatibility detail contract."""
 
     payload = _validate_payload(OpenClawGetEntryRequest, {"entryId": entryId})
     return _tool_result(lambda: _serialize_entry(EntryService(_get_db()).find_by_id(payload.entry_id)))
@@ -308,7 +308,7 @@ def openclaw_create_relation(
     relationType: str,
     description: str | None = None,
 ) -> str:
-    """Create a MindAtlas relation using the OpenClaw relation contract."""
+    """Create a MindAtlas relation using the compatibility relation contract."""
 
     payload = _validate_payload(
         OpenClawCreateRelationRequest,
@@ -341,7 +341,7 @@ def openclaw_query_knowledge_graph(
     mode: str = "hybrid",
     topK: int = 5,
 ) -> str:
-    """Query the MindAtlas knowledge graph using the OpenClaw graph contract."""
+    """Query the MindAtlas knowledge graph using the compatibility graph contract."""
 
     payload = _validate_payload(
         OpenClawQueryKnowledgeGraphRequest,
@@ -366,7 +366,7 @@ def openclaw_generate_weekly_report(
     weekStart: str | None = None,
     forceRegenerate: bool = False,
 ) -> str:
-    """Generate or return a MindAtlas weekly report using the OpenClaw report contract."""
+    """Generate or return a MindAtlas weekly report using the compatibility report contract."""
 
     payload = _validate_payload(
         OpenClawGenerateWeeklyReportRequest,
@@ -392,7 +392,7 @@ def openclaw_generate_monthly_report(
     monthStart: str | None = None,
     forceRegenerate: bool = False,
 ) -> str:
-    """Generate or return a MindAtlas monthly report using the OpenClaw report contract."""
+    """Generate or return a MindAtlas monthly report using the compatibility report contract."""
 
     payload = _validate_payload(
         OpenClawGenerateMonthlyReportRequest,

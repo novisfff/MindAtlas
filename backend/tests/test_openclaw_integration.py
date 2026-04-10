@@ -112,7 +112,7 @@ class OpenClawIntegrationTests(unittest.TestCase):
 
     def _get_openclaw_capture_workflow(self) -> tuple[str, str]:
         workflows = AssistantConfigService(self.db).list_workflows(include_disabled=True)
-        workflow = next(item for item in workflows if item.name == "system_openclaw_context_capture__workflow")
+        workflow = next(item for item in workflows if item.name == "system_context_capture__workflow")
         return str(workflow.id), workflow.name
 
     def test_settings_defaults_seed_system_items(self) -> None:
@@ -151,9 +151,22 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(capture_schema["required"], ["context"])
         self.assertFalse(capture_schema["additionalProperties"])
         self.assertIn("context", by_key["submit_context_capture"]["inputSummary"])
+        self.assertEqual(by_key["submit_context_capture"]["sourceName"], "智能上下文入库工作流")
         workflow_id, workflow_name = self._get_openclaw_capture_workflow()
-        self.assertEqual(workflow_name, "system_openclaw_context_capture__workflow")
+        self.assertEqual(workflow_name, "system_context_capture__workflow")
         self.assertEqual(by_key["submit_context_capture"]["workflowId"], workflow_id)
+
+    def test_workflow_catalog_sources_use_shared_display_names(self) -> None:
+        response = self.client.get(
+            "/api/system-settings/openclaw-integration/catalog-sources",
+            params={"sourceType": "workflow"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        items = response.json()["data"]["items"]
+        capture_item = next(item for item in items if item["sourceName"] == "智能上下文入库工作流")
+        self.assertEqual(capture_item["title"], "智能上下文入库工作流")
+        self.assertNotEqual(capture_item["sourceName"], "system_context_capture__workflow")
+        self.assertTrue(capture_item["isSystem"])
 
     def test_submit_context_capture_is_marked_unavailable_without_entry_types(self) -> None:
         secret = self._rotate_secret()
@@ -589,6 +602,7 @@ class OpenClawIntegrationTests(unittest.TestCase):
         definitions = {item.key: item for item in list_openclaw_system_item_definitions(locale="en")}
 
         self.assertEqual(definitions["submit_context_capture"].tool_name, "mindatlas_submit_context_capture")
+        self.assertEqual(definitions["submit_context_capture"].workflow_asset_key, "context_capture")
         self.assertIn("high-value context block", definitions["submit_context_capture"].description)
         self.assertIn("Provide only `context`", definitions["submit_context_capture"].input_summary or "")
         self.assertIn("recent and time-bounded lookups", definitions["search_entries"].description)
@@ -1046,10 +1060,10 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(result["createdAt"], "2026-03-31T09:00:00+00:00")
         self.assertEqual(result["updatedAt"], "2026-03-31T09:05:00+00:00")
         self.assertEqual(captured_runtime_context["structured_input"], {"context": "今天完成了 OpenClaw 接入方案梳理，并确认后续要收口成 workflow preset。"})
-        self.assertEqual(captured_runtime_context["openclaw_source"], "unit-test")
-        self.assertEqual(captured_runtime_context["openclaw_channel"], "cli")
-        self.assertEqual(captured_runtime_context["openclaw_session"], "session-1")
-        self.assertEqual(captured_runtime_context["openclaw_tool"], "tool-1")
+        self.assertEqual(captured_runtime_context["request_source"], "unit-test")
+        self.assertEqual(captured_runtime_context["request_channel"], "cli")
+        self.assertEqual(captured_runtime_context["request_session"], "session-1")
+        self.assertEqual(captured_runtime_context["request_tool"], "tool-1")
 
     def test_system_capture_workflow_accepts_merged_result_shape(self) -> None:
         self._initialize_system()
