@@ -187,6 +187,66 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
 
         self.assertEqual(serialized["name"], "智能上下文入库工作流")
         self.assertEqual(callable_item["name"], "智能上下文入库工作流")
+        self.assertIn("先提取检索线索与最终字段", serialized["description"])
+
+    def test_standalone_system_workflow_start_field_description_explains_create_vs_merge_context(self) -> None:
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        svc.sync_standalone_system_targets()
+
+        workflow = next(
+            item for item in svc.list_workflows(include_disabled=True)
+            if item.name == "system_context_capture__workflow"
+        )
+        start_node = next(node for node in workflow.nodes if node.node_id == "start")
+        start_cfg = dict(start_node.config or {})
+        structured_fields = start_cfg.get("structuredFields") or start_cfg.get("structured_fields") or []
+        context_field = next(item for item in structured_fields if item.get("name") == "context")
+
+        self.assertIn("新建记录还是修正、合并到已有记录", str(context_field.get("description") or ""))
+
+    def test_standalone_system_workflow_uses_lookup_preparation_and_confidence_gate(self) -> None:
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        svc.sync_standalone_system_targets()
+
+        workflow = next(
+            item for item in svc.list_workflows(include_disabled=True)
+            if item.name == "system_context_capture__workflow"
+        )
+        node_by_id = {node.node_id: node for node in (workflow.nodes or [])}
+
+        self.assertIn("llm_prepare_lookup", node_by_id)
+        self.assertNotIn("tool_tags", node_by_id)
+
+        search_cfg = dict(node_by_id["tool_search_candidates"].config or {})
+        search_bindings = search_cfg.get("inputBindings") or search_cfg.get("input_bindings") or {}
+        self.assertEqual(search_bindings.get("keyword"), "{{llm_prepare_lookup.search_keyword}}")
+        self.assertEqual(search_bindings.get("type_code"), "{{llm_prepare_lookup.search_type_code}}")
+        self.assertNotIn("tag_names", search_bindings)
+
+        decide_cfg = dict(node_by_id["llm_decide"].config or {})
+        output_fields = decide_cfg.get("outputFields") or decide_cfg.get("output_fields") or []
+        confidence_field = next(item for item in output_fields if item.get("name") == "confidence")
+        self.assertEqual(confidence_field.get("enum"), ["high", "medium", "low"])
+
+        route_cfg = dict(node_by_id["if_route"].config or {})
+        branches = route_cfg.get("branches") or []
+        merge_branch = next(item for item in branches if item.get("id") == "merge")
+        merge_conditions = merge_branch.get("conditions") or []
+        self.assertIn(
+            {
+                "id": "merge_confidence",
+                "variable": "llm_decide.confidence",
+                "operator": "is",
+                "value": "high",
+            },
+            merge_conditions,
+        )
 
     def test_system_target_audit_reports_only_expected_origins(self) -> None:
         from app.assistant_config.models import AssistantWorkflow  # noqa: E402

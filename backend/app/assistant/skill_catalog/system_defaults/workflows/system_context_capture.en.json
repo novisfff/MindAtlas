@@ -13,7 +13,7 @@
             "name": "context",
             "type": "string",
             "required": true,
-            "description": "High-value context to submit to MindAtlas. It should ideally include what happened, the result, why it matters, and any clear time clues."
+            "description": "Provide one coherent candidate record context about the same subject, item, project, or record. It should be rich enough for the system to decide whether to create a new entry or correct or merge into an existing one. It should ideally include what this is about, what happened or what new facts were added, the current result, conclusion, decision, or progress, why it deserves persistence or affects an existing record, clear time clues, and signals that this is an update to the same ongoing item when applicable. Avoid a vague one-line reminder, multiple unrelated topics mixed together, or chatty text with no durable facts."
           }
         ]
       }
@@ -23,31 +23,57 @@
       "nodeType": "tool",
       "label": "List Entry Types",
       "positionX": 430.0,
-      "positionY": 220.0,
+      "positionY": 320.0,
       "config": {
         "toolName": "list_entry_types",
         "inputBindings": {}
       }
     },
     {
-      "nodeId": "tool_tags",
-      "nodeType": "tool",
-      "label": "List Tags",
-      "positionX": 430.0,
-      "positionY": 420.0,
+      "nodeId": "llm_prepare_lookup",
+      "nodeType": "llm",
+      "label": "Prepare Lookup Clues",
+      "positionX": 860.0,
+      "positionY": 220.0,
       "config": {
-        "toolName": "list_tags",
-        "inputBindings": {}
+        "systemPrompt": "You are MindAtlas's candidate-record lookup preparation node. Turn one candidate record or record-update context into robust retrieval clues so later steps can check whether the same durable record already exists.\n\nGoals:\n- Extract the most distinctive subject, item name, outcome, phase, or correction clues from the context so downstream search can retrieve likely existing entries.\n- Output search_keyword, optional search_type_code, optional time filters, and concise subject / same-record hints for the decision node.\n- Do not generate final persistence fields here. This node only prepares retrieval clues.\n\nConstraints:\n- search_keyword must be a short but distinctive query phrase. Prefer the stable subject or item name plus the most important outcome, phase, or correction clue. Avoid generic wording.\n- Fill search_type_code only when the context clearly belongs to one entry type. When you fill it, it must be one of the codes in {{tool_types.items}}. Otherwise return null.\n- Fill search_time_from and search_time_to only when the context provides a clear and useful time range that should narrow the search. Otherwise return null and do not guess.\n- subject_hint should be a short phrase describing the core subject or item this context is about.\n- same_record_clues should be a short phrase describing what would make an existing entry the same durable record, such as the same project, the same competition, the same client, the same correction target, or the same long-running plan with new progress.\n- Do not invent facts or produce noisy pseudo-tags that are not grounded in the context.",
+        "userInput": "date: {{sys.date}}\nsource: {{sys.request_source}}\nchannel: {{sys.request_channel}}\nsession: {{sys.request_session}}\ntool: {{sys.request_tool}}\n\ncontext:\n{{start.context}}",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "search_keyword"
+          },
+          {
+            "name": "search_type_code",
+            "nullable": true
+          },
+          {
+            "name": "search_time_from",
+            "nullable": true
+          },
+          {
+            "name": "search_time_to",
+            "nullable": true
+          },
+          {
+            "name": "subject_hint",
+            "nullable": true
+          },
+          {
+            "name": "same_record_clues",
+            "nullable": true
+          }
+        ]
       }
     },
     {
       "nodeId": "llm_materialize",
       "nodeType": "llm",
       "label": "Materialize Fields",
-      "positionX": 860.0,
-      "positionY": 320.0,
+      "positionX": 1290.0,
+      "positionY": 420.0,
       "config": {
-        "systemPrompt": "You are MindAtlas's smart context capture workflow. Convert one high-value context block into final persistence fields.\n\nGoals:\n- Use only the submitted context and invocation metadata to produce the final title, summary, content, type_code, tags, time_mode, and time fields.\n- Do not require the caller to hand-assemble title, summary, type, tags, or time fields.\n- Do not invent facts the user did not imply. You may only organize, normalize, and lightly synthesize what was actually provided.\n\nConstraints:\n- type_code must be selected from the codes in {{tool_types.items}} only. If unsure, pick the first available code.\n- tags should prefer existing names from {{tool_tags.items}}. Return at most 5 tags and do not add # prefixes.\n- content should preserve the important facts from the submitted context and may be organized as Markdown, but it must not fabricate new facts.\n- summary should be one concise paragraph of roughly 50-150 characters.\n- title should be accurate and stay within 30 characters when possible.\n- If the context does not provide clear time information, default to time_mode=POINT and time_at=today in YYYY-MM-DD.\n- Use RANGE only when there is a real time span. When time_mode=POINT, time_from/time_to must be null. When time_mode=RANGE, time_at must be null.",
+        "systemPrompt": "You are the field-materialization node inside MindAtlas's smart context capture workflow. Convert one candidate record or record-update context into the final persistence fields.\n\nGoals:\n- Use only the submitted context and invocation metadata to produce the final title, summary, content, type_code, tags, time_mode, and time fields.\n- Treat the context as a self-contained candidate record or record-update context, not as a vague reminder.\n- Do not require the caller to hand-assemble title, summary, type, tags, or time fields.\n- Do not invent facts the user did not imply. You may only organize, normalize, and lightly synthesize what was actually provided.\n\nConstraints:\n- type_code must be selected from the codes in {{tool_types.items}} only. If unsure, pick the first available code.\n- title should be concise, accurate, and preferably within 30 characters while reflecting the stable subject and current key progress.\n- summary should be one concise paragraph of roughly 50-150 characters focused on the most durable facts, conclusions, or status changes.\n- content should preserve the important facts, progress, conclusions, and time clues from the submitted context and may be organized as Markdown, but it must not fabricate new facts.\n- tags should be short, stable, reusable labels inferred from the context. Return at most 5 tags, do not prepend #, and avoid verbose phrases, chatter, or weak filler tags.\n- If the context does not provide clear time information, default to time_mode=POINT and time_at=today in YYYY-MM-DD.\n- Use RANGE only when there is a real time span. When time_mode=POINT, time_from/time_to must be null. When time_mode=RANGE, time_at must be null.",
         "userInput": "date: {{sys.date}}\nsource: {{sys.request_source}}\nchannel: {{sys.request_channel}}\nsession: {{sys.request_session}}\ntool: {{sys.request_tool}}\n\ncontext:\n{{start.context}}",
         "outputMode": "structured",
         "outputFields": [
@@ -95,12 +121,14 @@
       "nodeType": "tool",
       "label": "Search Candidates",
       "positionX": 1290.0,
-      "positionY": 320.0,
+      "positionY": 220.0,
       "config": {
         "toolName": "search_entries",
         "inputBindings": {
-          "keyword": "{{llm_materialize.title}}",
-          "tag_names": "{{llm_materialize.tags}}",
+          "keyword": "{{llm_prepare_lookup.search_keyword}}",
+          "type_code": "{{llm_prepare_lookup.search_type_code}}",
+          "time_from": "{{llm_prepare_lookup.search_time_from}}",
+          "time_to": "{{llm_prepare_lookup.search_time_to}}",
           "limit": "5"
         }
       }
@@ -112,8 +140,8 @@
       "positionX": 1720.0,
       "positionY": 320.0,
       "config": {
-        "systemPrompt": "You are MindAtlas's conservative deduplication decision node. Choose between create and merge with at most one target entry.\n\nRules:\n- You may choose action=merge only when the candidate list contains one clearly matching long-lived entry that should absorb the new context.\n- If the candidate list is empty, ambiguous, only loosely related, or you are not confident that the new context belongs to the same durable record, you must output action=create.\n- entry_id must come from the candidate list ids only. When action=create, entry_id must be null.\n- reason should briefly explain why you chose create or merge.",
-        "userInput": "date: {{sys.date}}\nsource: {{sys.request_source}}\nchannel: {{sys.request_channel}}\nsession: {{sys.request_session}}\n\nnew_entry:\n{{llm_materialize.result}}\n\ncandidate_entries:\n{{tool_search_candidates.items}}\n\noriginal_context:\n{{start.context}}",
+        "systemPrompt": "You are MindAtlas's conservative same-record decision node. Choose between create and merge with at most one target entry.\n\nInput semantics:\n- original_context: the submitted candidate record or record-update context.\n- lookup_hints: retrieval clues and same-record hints derived from the context.\n- draft_entry: the materialized entry draft that would be persisted.\n- candidate_entries: the existing entries returned by retrieval.\n\nRules:\n- You may choose action=merge only when the candidate list contains exactly one clearly matching durable entry that should absorb this new update.\n- If the candidate list is empty, ambiguous, only loosely related, or you are not confident that the new context belongs to the same durable record, you must output action=create.\n- confidence must be one of high, medium, or low. Use high only when the same-record evidence is explicit and unambiguous. If there is any ambiguity, missing context, or only broad topical overlap, you must output medium or low.\n- entry_id must come from the candidate list ids only. When action=create, entry_id must be null.\n- reason should briefly explain the create-or-merge decision and cite the strongest matching or disqualifying evidence.\n- Do not merge aggressively just to reduce duplicates. A false merge is worse than creating a new entry.",
+        "userInput": "date: {{sys.date}}\nsource: {{sys.request_source}}\nchannel: {{sys.request_channel}}\nsession: {{sys.request_session}}\n\nlookup_hints:\n{{llm_prepare_lookup.result}}\n\ndraft_entry:\n{{llm_materialize.result}}\n\ncandidate_entries:\n{{tool_search_candidates.items}}\n\noriginal_context:\n{{start.context}}",
         "outputMode": "structured",
         "outputFields": [
           {
@@ -126,6 +154,14 @@
           {
             "name": "entry_id",
             "nullable": true
+          },
+          {
+            "name": "confidence",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
           },
           {
             "name": "reason"
@@ -158,6 +194,12 @@
                 "variable": "llm_decide.entry_id",
                 "operator": "is_not_empty",
                 "value": ""
+              },
+              {
+                "id": "merge_confidence",
+                "variable": "llm_decide.confidence",
+                "operator": "is",
+                "value": "high"
               }
             ]
           }
@@ -184,8 +226,8 @@
       "positionX": 2980.0,
       "positionY": 220.0,
       "config": {
-        "systemPrompt": "You are MindAtlas's entry merger. Rewrite one final canonical record by combining the existing entry with the new high-value context.\n\nGoals:\n- Start from the existing record and absorb the new facts, progress, conclusions, and time clues from the new context.\n- Output the new final title, summary, content, type_code, tags, time_mode, and time fields that should replace the current entry.\n- Use a full rewrite strategy: the content should become one coherent updated record, not a simple append.\n\nConstraints:\n- Use only facts that appear in existing_entry and original_context. Do not invent details.\n- type_code must be selected from the codes in {{tool_types.items}} only.\n- tags should prefer existing names from {{tool_tags.items}}. Return at most 5 tags and do not add # prefixes.\n- content should preserve the important facts from both the old record and the new context and may be organized as Markdown, but it must not fabricate new facts.\n- summary should be one concise paragraph of roughly 50-150 characters.\n- title should be accurate and stay within 30 characters when possible.\n- If the new context provides better time information, you may update the time fields; otherwise preserve or reasonably continue the existing time framing.",
-        "userInput": "date: {{sys.date}}\nsource: {{sys.request_source}}\nchannel: {{sys.request_channel}}\nsession: {{sys.request_session}}\n\nexisting_entry:\n{{tool_get_existing.result}}\n\nnew_materialized_entry:\n{{llm_materialize.result}}\n\noriginal_context:\n{{start.context}}",
+        "systemPrompt": "You are MindAtlas's entry merger. Rewrite one final canonical record by combining an existing entry with a new candidate record-update context.\n\nGoals:\n- Start from the existing record and absorb the new facts, progress, conclusions, corrections, and more accurate time clues from the new context.\n- Output the new final title, summary, content, type_code, tags, time_mode, and time fields that should replace the current entry.\n- Use a full rewrite strategy: the content should become one coherent updated record, not a simple append.\n\nConstraints:\n- Preserve the stable subject information, background facts, and still-valid conclusions from the existing entry unless the new context clearly corrects them.\n- Absorb only the new facts, progress, corrections, and better time clues from the new context. Do not delete older facts merely because the new context does not repeat them.\n- Use only facts that appear in existing_entry, new_materialized_entry, decision_reason, and original_context. Do not invent details.\n- type_code must be selected from the codes in {{tool_types.items}} only.\n- tags should be short, stable, reusable labels for the merged record. Return at most 5 tags, do not prepend #, and avoid verbose phrases or noisy filler tags.\n- content should preserve the important facts from both the old record and the new context and may be organized as Markdown, but it must not fabricate new facts.\n- summary should be one concise paragraph of roughly 50-150 characters.\n- title should be accurate and stay within 30 characters when possible.\n- If the new context provides better time information, you may update the time fields; otherwise preserve or reasonably continue the existing time framing.",
+        "userInput": "date: {{sys.date}}\nsource: {{sys.request_source}}\nchannel: {{sys.request_channel}}\nsession: {{sys.request_session}}\n\nmerge_confidence:\n{{llm_decide.confidence}}\n\ndecision_reason:\n{{llm_decide.reason}}\n\nexisting_entry:\n{{tool_get_existing.result}}\n\nnew_materialized_entry:\n{{llm_materialize.result}}\n\noriginal_context:\n{{start.context}}",
         "outputMode": "structured",
         "outputFields": [
           {
@@ -439,9 +481,9 @@
       "label": null
     },
     {
-      "edgeId": "e_types_tags",
+      "edgeId": "e_types_prepare_lookup",
       "sourceNodeId": "tool_types",
-      "targetNodeId": "tool_tags",
+      "targetNodeId": "llm_prepare_lookup",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
@@ -449,8 +491,8 @@
       "label": null
     },
     {
-      "edgeId": "e_tags_materialize",
-      "sourceNodeId": "tool_tags",
+      "edgeId": "e_types_materialize",
+      "sourceNodeId": "tool_search_candidates",
       "targetNodeId": "llm_materialize",
       "sourceHandle": "output",
       "targetHandle": "input",
@@ -459,8 +501,8 @@
       "label": null
     },
     {
-      "edgeId": "e_materialize_search",
-      "sourceNodeId": "llm_materialize",
+      "edgeId": "e_prepare_lookup_search",
+      "sourceNodeId": "llm_prepare_lookup",
       "targetNodeId": "tool_search_candidates",
       "sourceHandle": "output",
       "targetHandle": "input",
@@ -469,8 +511,8 @@
       "label": null
     },
     {
-      "edgeId": "e_search_decide",
-      "sourceNodeId": "tool_search_candidates",
+      "edgeId": "e_materialize_decide",
+      "sourceNodeId": "llm_materialize",
       "targetNodeId": "llm_decide",
       "sourceHandle": "output",
       "targetHandle": "input",
@@ -529,7 +571,7 @@
       "label": null
     },
     {
-      "edgeId": "e_update_output",
+      "edgeId": "e_update_output_merged",
       "sourceNodeId": "tool_update",
       "targetNodeId": "output_merged",
       "sourceHandle": "output",
@@ -539,7 +581,7 @@
       "label": null
     },
     {
-      "edgeId": "e_create_output",
+      "edgeId": "e_create_output_created",
       "sourceNodeId": "tool_create",
       "targetNodeId": "output_created",
       "sourceHandle": "output",
@@ -548,5 +590,10 @@
       "conditionExpr": null,
       "label": null
     }
-  ]
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 0.45
+  }
 }

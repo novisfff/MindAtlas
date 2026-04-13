@@ -13,7 +13,7 @@
             "name": "context",
             "type": "string",
             "required": true,
-            "description": "需要提交给 MindAtlas 的高价值上下文，应尽量包含发生了什么、结果是什么、为什么值得记，以及明确的时间线索。"
+            "description": "请提供一段围绕同一事项、对象、项目或记录的完整候选上下文，内容应尽量足以让系统判断是新建记录还是修正、合并到已有记录。最好包含：这段内容在说什么、发生了什么或新增了什么事实、当前结果、结论、决定或进展、为什么值得入库或会影响已有记录、明确时间线索，以及如果这是补充或修正已有事项时的提示。避免只给一句模糊提醒、把多个无关主题拼在一起，或只有情绪、闲聊而缺少可落库事实。"
           }
         ]
       }
@@ -23,31 +23,57 @@
       "nodeType": "tool",
       "label": "获取类型列表",
       "positionX": 430.0,
-      "positionY": 220.0,
+      "positionY": 320.0,
       "config": {
         "toolName": "list_entry_types",
         "inputBindings": {}
       }
     },
     {
-      "nodeId": "tool_tags",
-      "nodeType": "tool",
-      "label": "获取标签列表",
-      "positionX": 430.0,
-      "positionY": 420.0,
+      "nodeId": "llm_prepare_lookup",
+      "nodeType": "llm",
+      "label": "提取检索线索",
+      "positionX": 860.0,
+      "positionY": 220.0,
       "config": {
-        "toolName": "list_tags",
-        "inputBindings": {}
+        "systemPrompt": "你是 MindAtlas 的候选记录检索准备节点，负责把一段候选记录或记录修正上下文整理成稳健的检索线索，供后续查找“是否已有同一条记录”。\n\n目标：\n- 从 context 中提炼最有辨识度的主体、事项名称、关键结果、阶段或修正线索，用于搜索可能的已有记录。\n- 输出 search_keyword、可选的 search_type_code、可选的时间过滤线索，以及给后续决策节点使用的主体提示与同记录线索。\n- 不要生成最终入库 title、summary、content；这里只做检索准备。\n\n约束：\n- search_keyword 必须是一段简短但有辨识度的检索关键词，优先包含主体/事项名与最关键的结果、阶段或修正线索，避免空泛词。\n- search_type_code 只有在 context 明确表明应属于某类记录时才填写；如填写，必须且只能从 {{tool_types.items}} 的 code 中选择；不明确时返回 null。\n- search_time_from 与 search_time_to 只有在 context 给出明确且适合用于缩小检索范围的时间区间时才填写；否则返回 null，不要为了凑过滤条件而猜。\n- subject_hint 用一句短语概括这段上下文围绕的核心对象或事项。\n- same_record_clues 用一句短语概括可用于判断“是否同一条已有记录”的线索，例如同一项目、同一比赛、同一客户、同一修正事项或同一长期计划的新进展。\n- 不要编造事实，也不要输出与 context 无关的标签式噪音。",
+        "userInput": "date: {{sys.date}}\nsource: {{sys.request_source}}\nchannel: {{sys.request_channel}}\nsession: {{sys.request_session}}\ntool: {{sys.request_tool}}\n\ncontext:\n{{start.context}}",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "search_keyword"
+          },
+          {
+            "name": "search_type_code",
+            "nullable": true
+          },
+          {
+            "name": "search_time_from",
+            "nullable": true
+          },
+          {
+            "name": "search_time_to",
+            "nullable": true
+          },
+          {
+            "name": "subject_hint",
+            "nullable": true
+          },
+          {
+            "name": "same_record_clues",
+            "nullable": true
+          }
+        ]
       }
     },
     {
       "nodeId": "llm_materialize",
       "nodeType": "llm",
       "label": "提取最终字段",
-      "positionX": 860.0,
-      "positionY": 320.0,
+      "positionX": 1290.0,
+      "positionY": 420.0,
       "config": {
-        "systemPrompt": "你是 MindAtlas 的智能上下文入库工作流，负责把一段高价值上下文整理成最终记录字段。\n\n目标：\n- 仅基于提交的 context 与调用请求元数据，生成最终可入库的 title、summary、content、type_code、tags、time_mode 与时间字段。\n- 不要要求调用方手工组装标题、摘要、类型、标签或时间字段。\n- 不要编造用户没有表达过的事实，只能做结构化整理、轻度归纳与格式清洗。\n\n约束：\n- type_code 必须且只能从 {{tool_types.items}} 的 code 中选择；无法判断时选择第一个可用 code。\n- tags 优先复用 {{tool_tags.items}} 里的 name；最多输出 5 个标签；宁缺毋滥；不要带 #。\n- content 要保留上下文中的关键信息，可整理成 Markdown，但不要扩写虚构事实。\n- summary 用 1 段 50-150 字概括核心信息。\n- title 精炼准确，控制在 30 个字以内。\n- 如果 context 中没有明确时间，默认输出 time_mode=POINT 且 time_at=今天（YYYY-MM-DD）。\n- 如果能识别出明确时间区间，再输出 time_mode=RANGE 与 time_from/time_to；否则不要滥用 RANGE。\n- 当 time_mode=POINT 时，time_from/time_to 必须为 null；当 time_mode=RANGE 时，time_at 必须为 null。",
+        "systemPrompt": "你是 MindAtlas 的智能上下文入库工作流中的字段物化节点，负责把一段候选记录或记录修正上下文整理成最终可写入的记录字段。\n\n目标：\n- 仅基于提交的 context 与调用请求元数据，生成最终可入库的 title、summary、content、type_code、tags、time_mode 与时间字段。\n- 把 context 理解为“一段足以让系统生成或修正一条记录的上下文”，而不是一句零散提醒。\n- 不要要求调用方手工组装标题、摘要、类型、标签或时间字段。\n- 不要编造用户没有表达过的事实，只能做结构化整理、轻度归纳与格式清洗。\n\n约束：\n- type_code 必须且只能从 {{tool_types.items}} 的 code 中选择；无法判断时选择第一个可用 code。\n- title 精炼准确，控制在 30 个字以内，优先体现稳定主体与当前关键进展。\n- summary 用 1 段 50-150 字概括当前最值得保留的事实、结论或状态变化。\n- content 要保留上下文中的关键信息、进展、结论与时间线索，可整理成 Markdown，但不要扩写虚构事实。\n- tags 仅根据 context 生成简短、稳定、可复用的标签名，最多输出 5 个；不要带 #；避免长句、口语和为了凑数而生成弱标签。\n- 如果 context 中没有明确时间，默认输出 time_mode=POINT 且 time_at=今天（YYYY-MM-DD）。\n- 如果能识别出明确时间区间，再输出 time_mode=RANGE 与 time_from/time_to；否则不要滥用 RANGE。\n- 当 time_mode=POINT 时，time_from/time_to 必须为 null；当 time_mode=RANGE 时，time_at 必须为 null。",
         "userInput": "date: {{sys.date}}\nsource: {{sys.request_source}}\nchannel: {{sys.request_channel}}\nsession: {{sys.request_session}}\ntool: {{sys.request_tool}}\n\ncontext:\n{{start.context}}",
         "outputMode": "structured",
         "outputFields": [
@@ -95,12 +121,14 @@
       "nodeType": "tool",
       "label": "检索候选记录",
       "positionX": 1290.0,
-      "positionY": 320.0,
+      "positionY": 220.0,
       "config": {
         "toolName": "search_entries",
         "inputBindings": {
-          "keyword": "{{llm_materialize.title}}",
-          "tag_names": "{{llm_materialize.tags}}",
+          "keyword": "{{llm_prepare_lookup.search_keyword}}",
+          "type_code": "{{llm_prepare_lookup.search_type_code}}",
+          "time_from": "{{llm_prepare_lookup.search_time_from}}",
+          "time_to": "{{llm_prepare_lookup.search_time_to}}",
           "limit": "5"
         }
       }
@@ -112,8 +140,8 @@
       "positionX": 1720.0,
       "positionY": 320.0,
       "config": {
-        "systemPrompt": "你是 MindAtlas 的保守去重决策器，负责在 create 与 merge 之间做单目标决策。\n\n规则：\n- 只有当候选记录里存在且仅存在 1 条明显属于同一条长期记录的目标时，才允许 action=merge。\n- 如果候选为空、存在歧义、只是主题相近但并非同一条记录、或你对是否同一条记录没有把握，必须输出 action=create。\n- entry_id 只能从候选记录列表里的 id 中选择；当 action=create 时 entry_id 必须为 null。\n- reason 简洁说明决策依据。",
-        "userInput": "date: {{sys.date}}\nsource: {{sys.request_source}}\nchannel: {{sys.request_channel}}\nsession: {{sys.request_session}}\n\nnew_entry:\n{{llm_materialize.result}}\n\ncandidate_entries:\n{{tool_search_candidates.items}}\n\noriginal_context:\n{{start.context}}",
+        "systemPrompt": "你是 MindAtlas 的保守同记录判定器，负责在 create 与 merge 之间做单目标决策。\n\n输入含义：\n- original_context：调用方提交的候选记录或记录修正上下文。\n- lookup_hints：从上下文中提取出的检索线索与“同一条记录”提示。\n- draft_entry：准备入库的最终字段草稿。\n- candidate_entries：根据检索线索找到的候选已有记录。\n\n规则：\n- 只有当候选记录里存在且仅存在 1 条明显属于同一条长期记录的目标时，才允许 action=merge。\n- 如果候选为空、存在歧义、只是主题相近但并非同一条记录、或你对是否同一条记录没有把握，必须输出 action=create。\n- confidence 只能是 high、medium、low。只有在“同一条记录”的证据明确且无歧义时，才能输出 high；只要存在歧义、信息不足或只是大致相似，就必须输出 medium 或 low。\n- entry_id 只能从候选记录列表里的 id 中选择；当 action=create 时 entry_id 必须为 null。\n- reason 简洁说明为何判定为 create 或 merge，并点出最关键的匹配或排除依据。\n- 不要为了减少重复记录而激进合并；宁可多建一条，也不要错并。",
+        "userInput": "date: {{sys.date}}\nsource: {{sys.request_source}}\nchannel: {{sys.request_channel}}\nsession: {{sys.request_session}}\n\nlookup_hints:\n{{llm_prepare_lookup.result}}\n\ndraft_entry:\n{{llm_materialize.result}}\n\ncandidate_entries:\n{{tool_search_candidates.items}}\n\noriginal_context:\n{{start.context}}",
         "outputMode": "structured",
         "outputFields": [
           {
@@ -126,6 +154,14 @@
           {
             "name": "entry_id",
             "nullable": true
+          },
+          {
+            "name": "confidence",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
           },
           {
             "name": "reason"
@@ -158,6 +194,12 @@
                 "variable": "llm_decide.entry_id",
                 "operator": "is_not_empty",
                 "value": ""
+              },
+              {
+                "id": "merge_confidence",
+                "variable": "llm_decide.confidence",
+                "operator": "is",
+                "value": "high"
               }
             ]
           }
@@ -184,8 +226,8 @@
       "positionX": 2980.0,
       "positionY": 220.0,
       "config": {
-        "systemPrompt": "你是 MindAtlas 的记录整合器，负责把已有记录与新的高价值上下文整合成同一条更完整的最终记录。\n\n目标：\n- 以已有记录为基础，吸收新上下文中的新增事实、进展、结论与时间线索。\n- 输出新的 title、summary、content、type_code、tags、time_mode 与时间字段，用于覆盖原记录。\n- 这次采用“整合重写”策略：正文应是新的完整整理版，而不是简单追加。\n\n约束：\n- 只能基于 existing_entry 与 original_context 中出现的信息做整理，不要编造事实。\n- type_code 必须且只能从 {{tool_types.items}} 的 code 中选择。\n- tags 优先复用 {{tool_tags.items}} 里的 name；最多输出 5 个标签；不要带 #。\n- content 要保留已有记录与新增上下文的关键事实，可用 Markdown，但不要扩写虚构内容。\n- summary 用 1 段 50-150 字概括当前整合后的核心信息。\n- title 精炼准确，控制在 30 个字以内。\n- 如果新上下文提供了更准确的时间线索，可以更新 time 字段；否则保留或合理延续原记录时间。",
-        "userInput": "date: {{sys.date}}\nsource: {{sys.request_source}}\nchannel: {{sys.request_channel}}\nsession: {{sys.request_session}}\n\nexisting_entry:\n{{tool_get_existing.result}}\n\nnew_materialized_entry:\n{{llm_materialize.result}}\n\noriginal_context:\n{{start.context}}",
+        "systemPrompt": "你是 MindAtlas 的记录整合器，负责把已有记录与新的候选记录修正上下文整合成同一条更完整的最终记录。\n\n目标：\n- 以已有记录为基础，吸收新上下文中的新增事实、进展、结论、修正信息与更准确的时间线索。\n- 输出新的 title、summary、content、type_code、tags、time_mode 与时间字段，用于覆盖原记录。\n- 采用“整合重写”策略：正文应是新的完整整理版，而不是简单追加。\n\n约束：\n- 优先保留已有记录中稳定的主体信息、背景事实与仍然有效的结论，不要因为新上下文没再次提到就删掉旧信息。\n- 只吸收新上下文中的新增事实、进展、修正与更准确时间线索；只有当新上下文明显修正旧信息时，才覆盖原有表述。\n- 只能基于 existing_entry、new_materialized_entry、decision_reason 与 original_context 中出现的信息做整理，不要编造事实。\n- type_code 必须且只能从 {{tool_types.items}} 的 code 中选择。\n- tags 仅根据整合后的记录内容生成简短、稳定、可复用的标签名，最多输出 5 个；不要带 #；避免长句和噪音标签。\n- content 要保留已有记录与新增上下文的关键事实，可用 Markdown，但不要扩写虚构内容。\n- summary 用 1 段 50-150 字概括当前整合后的核心信息。\n- title 精炼准确，控制在 30 个字以内。\n- 如果新上下文提供了更准确的时间线索，可以更新 time 字段；否则保留或合理延续原记录时间。",
+        "userInput": "date: {{sys.date}}\nsource: {{sys.request_source}}\nchannel: {{sys.request_channel}}\nsession: {{sys.request_session}}\n\nmerge_confidence:\n{{llm_decide.confidence}}\n\ndecision_reason:\n{{llm_decide.reason}}\n\nexisting_entry:\n{{tool_get_existing.result}}\n\nnew_materialized_entry:\n{{llm_materialize.result}}\n\noriginal_context:\n{{start.context}}",
         "outputMode": "structured",
         "outputFields": [
           {
@@ -439,9 +481,9 @@
       "label": null
     },
     {
-      "edgeId": "e_types_tags",
+      "edgeId": "e_types_prepare_lookup",
       "sourceNodeId": "tool_types",
-      "targetNodeId": "tool_tags",
+      "targetNodeId": "llm_prepare_lookup",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
@@ -449,8 +491,8 @@
       "label": null
     },
     {
-      "edgeId": "e_tags_materialize",
-      "sourceNodeId": "tool_tags",
+      "edgeId": "e_types_materialize",
+      "sourceNodeId": "tool_search_candidates",
       "targetNodeId": "llm_materialize",
       "sourceHandle": "output",
       "targetHandle": "input",
@@ -459,8 +501,8 @@
       "label": null
     },
     {
-      "edgeId": "e_materialize_search",
-      "sourceNodeId": "llm_materialize",
+      "edgeId": "e_prepare_lookup_search",
+      "sourceNodeId": "llm_prepare_lookup",
       "targetNodeId": "tool_search_candidates",
       "sourceHandle": "output",
       "targetHandle": "input",
@@ -469,8 +511,8 @@
       "label": null
     },
     {
-      "edgeId": "e_search_decide",
-      "sourceNodeId": "tool_search_candidates",
+      "edgeId": "e_materialize_decide",
+      "sourceNodeId": "llm_materialize",
       "targetNodeId": "llm_decide",
       "sourceHandle": "output",
       "targetHandle": "input",
@@ -529,7 +571,7 @@
       "label": null
     },
     {
-      "edgeId": "e_update_output",
+      "edgeId": "e_update_output_merged",
       "sourceNodeId": "tool_update",
       "targetNodeId": "output_merged",
       "sourceHandle": "output",
@@ -539,7 +581,7 @@
       "label": null
     },
     {
-      "edgeId": "e_create_output",
+      "edgeId": "e_create_output_created",
       "sourceNodeId": "tool_create",
       "targetNodeId": "output_created",
       "sourceHandle": "output",
@@ -548,5 +590,10 @@
       "conditionExpr": null,
       "label": null
     }
-  ]
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 0.45
+  }
 }

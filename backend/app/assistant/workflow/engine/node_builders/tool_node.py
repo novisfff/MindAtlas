@@ -89,13 +89,31 @@ def build_dag_tool_node(
                 args[key] = str(raw_tpl)
 
         emit(metadata, "on_node_start", node_id=node_id, node_type="tool")
-        emit(metadata, "on_tool_call_start", tool_call_id=tool_call_id, tool_name=tool_name, args=args)
 
         wrapped = engine_runtime._wrap_tool_with_db(tool, db_bind)
         status = "ok"
+        call_args = dict(args)
+        tool_call_started = False
         try:
-            result = wrapped(**args)
+            call_args = engine_runtime._coerce_tool_args(tool, args)
+            emit(
+                metadata,
+                "on_tool_call_start",
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                args=call_args,
+            )
+            tool_call_started = True
+            result = wrapped(**call_args)
         except Exception as e:
+            if not tool_call_started:
+                emit(
+                    metadata,
+                    "on_tool_call_start",
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    args=call_args,
+                )
             logger.error("DAG tool %s failed: %s", tool_name, e)
             status = "error"
             result = _copy.build_tool_execution_failed_message(locale, e)
