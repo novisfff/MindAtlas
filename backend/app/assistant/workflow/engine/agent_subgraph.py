@@ -12,6 +12,7 @@ from app.assistant.workflow.engine.agent_execution_core import (
     build_internal_kb_tool,
     run_agent_execution,
 )
+from app.assistant.workflow.engine.graph_runner import adapt_graph_runnable, merge_graph_state
 from app.assistant.workflow.engine.runtime_helpers import AGENT_MAX_ITERATIONS
 
 
@@ -153,4 +154,16 @@ def build_agent_subgraph(
     graph.add_node("agent", agent_node)
     graph.set_entry_point("agent")
     graph.add_edge("agent", END)
-    return graph.compile()
+    compiled = graph.compile()
+
+    def _fallback_invoke(initial_state: dict[str, Any]) -> dict[str, Any]:
+        return merge_graph_state(initial_state, agent_node(initial_state))
+
+    def _fallback_stream(initial_state: dict[str, Any]):
+        yield _fallback_invoke(initial_state)
+
+    return adapt_graph_runnable(
+        compiled=compiled,
+        fallback_invoke=_fallback_invoke,
+        fallback_stream=_fallback_stream,
+    )

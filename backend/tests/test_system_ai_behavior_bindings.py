@@ -134,10 +134,13 @@ class SystemAiBehaviorBindingTests(unittest.TestCase):
 
     def _english_like_system_behavior_default_workflow_input(self, behavior_key: str):
         from app.assistant_config.schemas import WorkflowInput  # noqa: E402
-        from app.assistant_config.system_behavior_defaults_loader import get_system_behavior_default_workflow_by_key  # noqa: E402
+        from app.assistant.workflow.system_assets import load_system_workflow_asset  # noqa: E402
+        from app.assistant_config.system_behavior_registry import get_system_behavior_definition  # noqa: E402
 
-        preset = get_system_behavior_default_workflow_by_key(behavior_key)
-        assert preset is not None
+        definition = get_system_behavior_definition(behavior_key, locale="zh")
+        assert definition is not None
+        assert definition.default_target.default_target_asset_key is not None
+        preset = load_system_workflow_asset(definition.default_target.default_target_asset_key, locale="zh")
         payload = preset.model_dump(by_alias=True)
         nodes = payload.get("nodes", [])
         for node in nodes:
@@ -233,19 +236,20 @@ class SystemAiBehaviorBindingTests(unittest.TestCase):
 
         self.assertIn(ctx.exception.code, {42248, 42249, 42250})
 
-    def test_update_system_behavior_binding_accepts_agent(self) -> None:
+    def test_update_system_behavior_binding_rejects_agent_without_explicit_contract(self) -> None:
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
+        from app.common.exceptions import ApiException  # noqa: E402
 
         agent = self._create_agent_profile(f"report_agent_{uuid4().hex[:8]}")
         svc = AssistantConfigService(self.db)
-        payload = svc.update_system_behavior_binding(
-            behavior_key="monthly_report_generation",
-            target_type="agent",
-            agent_profile_id=agent.id,
-        )
+        with self.assertRaises(ApiException) as ctx:
+            svc.update_system_behavior_binding(
+                behavior_key="monthly_report_generation",
+                target_type="agent",
+                agent_profile_id=agent.id,
+            )
 
-        self.assertEqual(payload["current_binding"]["target_type"], "agent")
-        self.assertEqual(payload["current_binding"]["agent_profile_id"], agent.id)
+        self.assertEqual(ctx.exception.code, 42276)
 
     def test_create_example_workflow_creates_without_binding_by_default(self) -> None:
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -410,7 +414,7 @@ class SystemAiBehaviorBindingTests(unittest.TestCase):
         self.db.commit()
 
         custom_workflow = self._create_structured_report_workflow(f"reset_all_wf_{uuid4().hex[:8]}")
-        custom_agent = self._create_agent_profile(f"reset_all_agent_{uuid4().hex[:8]}")
+        custom_monthly_workflow = self._create_structured_report_workflow(f"reset_all_monthly_wf_{uuid4().hex[:8]}")
 
         svc.update_system_behavior_binding(
             behavior_key="weekly_report_generation",
@@ -419,8 +423,8 @@ class SystemAiBehaviorBindingTests(unittest.TestCase):
         )
         svc.update_system_behavior_binding(
             behavior_key="monthly_report_generation",
-            target_type="agent",
-            agent_profile_id=custom_agent.id,
+            target_type="workflow",
+            workflow_id=custom_monthly_workflow.id,
         )
 
         payload = svc.reset_all_system_behaviors(confirm=True)

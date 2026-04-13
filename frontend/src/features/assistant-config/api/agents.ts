@@ -19,6 +19,7 @@ export interface AssistantAgentProfile {
   referenceCount: number
   referencedSystemBehaviorKeys: string[]
   systemBehaviorReferenceCount: number
+  openclawReferenceCount: number
   createdAt: string
   updatedAt: string
 }

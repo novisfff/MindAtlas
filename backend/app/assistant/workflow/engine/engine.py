@@ -18,6 +18,11 @@ from app.assistant.workflow import execution_copy as _copy
 from app.assistant.workflow.engine import execution_context as _exec_ctx
 from app.assistant.workflow.engine import execution_plan as _exec_plan
 from app.assistant.workflow.engine import execution_services as _exec_services
+from app.assistant.workflow.engine.graph_runner import (
+    adapt_graph_runnable,
+    merge_graph_state,
+    snapshot_graph_state,
+)
 from app.assistant.workflow.engine import runtime_helpers as _rt
 from app.assistant.workflow.engine import snapshots as _snap
 from app.assistant.workflow.engine import stream_runtime as _stream
@@ -66,6 +71,30 @@ def _resolve_tool_output_param_names(tool_name: str, tool: Any) -> list[str]:
     return _rt.resolve_tool_output_param_names(tool_name, tool)
 
 
+def _build_chat_openai_client(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    streaming: bool,
+    temperature: float | None = None,
+) -> ChatOpenAI:
+    default_headers = build_openai_compat_client_headers()
+    kwargs: dict[str, Any] = {
+        "api_key": (api_key or "").strip(),
+        "base_url": (base_url or "").strip(),
+        "model": model,
+        "streaming": streaming,
+        "default_headers": default_headers,
+    }
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    try:
+        return ChatOpenAI(**kwargs)
+    except TypeError:
+        return ChatOpenAI()
+
+
 def _emit_node_snapshot(
     metadata: dict[str, Any],
     *,
@@ -86,6 +115,19 @@ def _emit_node_snapshot(
         error_message=error_message,
         string_limit=_NODE_SNAPSHOT_STRING_LIMIT,
     )
+
+
+def _normalize_l2_memory_payload(raw_text: Any, raw_facts: Any) -> tuple[str, list[str], int]:
+    normalized_text = str(raw_text or "")
+    if isinstance(raw_facts, list):
+        normalized_facts = [str(item).strip() for item in raw_facts if str(item).strip()]
+        return normalized_text, normalized_facts, len(normalized_facts)
+    if isinstance(raw_facts, tuple):
+        normalized_facts = [str(item).strip() for item in raw_facts if str(item).strip()]
+        return normalized_text, normalized_facts, len(normalized_facts)
+    if isinstance(raw_facts, int):
+        return normalized_text, [], max(0, raw_facts)
+    return normalized_text, [], 0
 
 
 # ==================== Workflow DAG State & Helpers (Phase 2 - Task 14) ====================
@@ -267,6 +309,96 @@ def _build_loop_node(*args, **kwargs):
 # ==================== DAG Compiler (Task 14.4) ====================
 
 
+def _build_workflow_runner_nodes(
+    *,
+    dag_plan: Any,
+    deps: Any,
+) -> dict[str, Callable[[WorkflowState], dict]]:
+    from app.assistant.workflow.engine.workflow_dag_assembler import _build_workflow_node_fn
+
+    node_fns: dict[str, Callable[[WorkflowState], dict]] = {}
+    for node_id in dag_plan.topo_order:
+        node_type = dag_plan.type_map[node_id]
+        node_cfg = dag_plan.node_map[node_id]
+        node_fn = _build_workflow_node_fn(
+            node_id=node_id,
+            node_type=node_type,
+            node_cfg=node_cfg,
+            deps=deps,
+        )
+        node_fns[node_id] = _wrap_workflow_node_with_snapshot(node_id, node_type, node_cfg, node_fn)
+    return node_fns
+
+
+def _run_workflow_dag_without_langgraph(
+    *,
+    initial_state: dict[str, Any],
+    dag_plan: Any,
+    node_fns: dict[str, Callable[[WorkflowState], dict]],
+    on_step: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    if not dag_plan.start_node_id:
+        raise ValueError("Workflow DAG has no start node")
+
+    state = snapshot_graph_state(initial_state)
+    state.setdefault("workflow_node_types", dict(dag_plan.type_map))
+    state.setdefault("node_outputs", {})
+    state.setdefault("execution_trace", [])
+    state.setdefault("branch_decisions", {})
+
+    in_degree: dict[str, int] = {node_id: 0 for node_id in dag_plan.node_map}
+    for edge in dag_plan.edges_raw:
+        target = str(edge.get("target_node_id", "") or "").strip()
+        if target in in_degree:
+            in_degree[target] = in_degree.get(target, 0) + 1
+
+    queue: list[str] = [str(dag_plan.start_node_id)]
+    executed_nodes: set[str] = set()
+
+    while queue:
+        current = queue.pop(0)
+        if current in executed_nodes:
+            continue
+        node_fn = node_fns.get(current)
+        if node_fn is None:
+            continue
+
+        result = node_fn(state) or {}
+        if not isinstance(result, dict):
+            result = {}
+        state = merge_graph_state(state, result)
+        executed_nodes.add(current)
+
+        if callable(on_step):
+            on_step(snapshot_graph_state(state))
+
+        outgoing = dag_plan.out_edges.get(current, [])
+        if not outgoing:
+            continue
+
+        node_type = str(dag_plan.type_map.get(current, "") or "")
+        if node_type in {"if_else", "human_in_loop"}:
+            decisions = state.get("branch_decisions", {}) if isinstance(state.get("branch_decisions"), dict) else {}
+            chosen_handle = str(decisions.get(current, "else") or "else")
+            if chosen_handle == "default":
+                chosen_handle = "else"
+            for target, handle, _condition in outgoing:
+                normalized_handle = "else" if str(handle or "output") == "default" else str(handle or "output")
+                if normalized_handle != chosen_handle:
+                    continue
+                in_degree[target] = max(0, in_degree.get(target, 0) - 1)
+                if in_degree[target] == 0:
+                    queue.append(target)
+            continue
+
+        for target, _handle, _condition in outgoing:
+            in_degree[target] = max(0, in_degree.get(target, 0) - 1)
+            if in_degree[target] == 0:
+                queue.append(target)
+
+    return state
+
+
 def build_workflow_dag_subgraph(
     skill: SkillDefinition,
     nodes: list,
@@ -276,7 +408,7 @@ def build_workflow_dag_subgraph(
     tool_map: dict[str, Any],
     db_bind: Any,
     node_llms: dict[str, ChatOpenAI] | None = None,
-) -> Any:
+    ) -> Any:
     """Compile a workflow DAG into a LangGraph StateGraph."""
     from langgraph.graph import END, StateGraph
     from app.assistant.workflow.engine.workflow_dag_assembler import (
@@ -329,6 +461,10 @@ def build_workflow_dag_subgraph(
         build_iteration_node=_build_iteration_node,
         build_loop_node=_build_loop_node,
     )
+    runner_nodes = _build_workflow_runner_nodes(
+        dag_plan=dag_plan,
+        deps=builder_deps,
+    )
     add_workflow_graph_nodes(
         graph=graph,
         dag_plan=dag_plan,
@@ -348,7 +484,41 @@ def build_workflow_dag_subgraph(
         end_sentinel=END,
     )
 
-    return graph.compile()
+    compiled = graph.compile()
+
+    def _fallback_invoke(initial_state: dict[str, Any]) -> dict[str, Any]:
+        return _run_workflow_dag_without_langgraph(
+            initial_state=initial_state,
+            dag_plan=dag_plan,
+            node_fns=runner_nodes,
+        )
+
+    def _fallback_stream(initial_state: dict[str, Any]):
+        emitted = False
+
+        def _on_step(state: dict[str, Any]) -> None:
+            nonlocal emitted
+            emitted = True
+            yield_states.append(state)
+
+        yield_states: list[dict[str, Any]] = []
+        final_state = _run_workflow_dag_without_langgraph(
+            initial_state=initial_state,
+            dag_plan=dag_plan,
+            node_fns=runner_nodes,
+            on_step=_on_step,
+        )
+        if not emitted:
+            yield snapshot_graph_state(final_state)
+            return
+        for state in yield_states:
+            yield state
+
+    return adapt_graph_runnable(
+        compiled=compiled,
+        fallback_invoke=_fallback_invoke,
+        fallback_stream=_fallback_stream,
+    )
 
 
 # ==================== Agent Loop Subgraph (Phase 3) ====================
@@ -401,23 +571,20 @@ class LangGraphEngine:
     """LangGraph 执行引擎入口。"""
 
     def __init__(self, api_key: str, base_url: str, model: str, db: Session | None = None):
-        default_headers = build_openai_compat_client_headers()
         self.model = model
         self.db = db
-        self.llm = ChatOpenAI(
-            api_key=(api_key or "").strip(),
-            base_url=(base_url or "").strip(),
+        self.llm = _build_chat_openai_client(
+            api_key=api_key,
+            base_url=base_url,
             model=model,
             streaming=True,
-            default_headers=default_headers,
         )
-        self.args_llm = ChatOpenAI(
-            api_key=(api_key or "").strip(),
-            base_url=(base_url or "").strip(),
+        self.args_llm = _build_chat_openai_client(
+            api_key=api_key,
+            base_url=base_url,
             model=model,
             streaming=False,
             temperature=0,
-            default_headers=default_headers,
         )
         self._tool_cache: dict[str, Any] = {}
         self._node_llm_cache: dict[str, tuple[tuple[str, str, str], ChatOpenAI]] = {}
@@ -495,13 +662,11 @@ class LangGraphEngine:
         if cached and cached[0] == fingerprint:
             return cached[1]
 
-        default_headers = build_openai_compat_client_headers()
-        node_llm = ChatOpenAI(
+        node_llm = _build_chat_openai_client(
             api_key=cfg.api_key,
             base_url=cfg.base_url,
             model=cfg.model,
             streaming=True,
-            default_headers=default_headers,
         )
         self._node_llm_cache[cache_key] = (fingerprint, node_llm)
         return node_llm
@@ -716,15 +881,16 @@ class LangGraphEngine:
         else:
             l1_text = l1_override
         if l2_facts_override is None:
-            l2_text, l2_facts = self._load_l2_text(
+            l2_text_raw, l2_facts_raw = self._load_l2_text(
                 conversation_id_uuid=conversation_id_uuid,
                 skill_name=skill.name,
             )
+            l2_text, l2_facts, l2_fact_count = _normalize_l2_memory_payload(l2_text_raw, l2_facts_raw)
         else:
             from app.assistant.memory_service import AssistantMemoryService
 
-            l2_text = AssistantMemoryService.render_l2_text(l2_facts_override)
-            l2_facts = list(l2_facts_override)
+            l2_text_raw = AssistantMemoryService.render_l2_text(l2_facts_override)
+            l2_text, l2_facts, l2_fact_count = _normalize_l2_memory_payload(l2_text_raw, l2_facts_override)
         l0_messages = l0_window.get("l0_messages")
         if not isinstance(l0_messages, list):
             l0_messages = []
@@ -749,7 +915,7 @@ class LangGraphEngine:
             len(memory_context["l0_text"]),
             len(memory_context["l1_text"]),
             len(memory_context["l2_text"]),
-            len(l2_facts),
+            l2_fact_count,
         )
 
         # 根据 pattern 编译/获取图

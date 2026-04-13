@@ -6,6 +6,7 @@ from threading import Thread
 from typing import Any, Callable, Iterator
 
 from app.assistant.run_control import AssistantRunCancelled, ensure_not_cancelled
+from app.assistant.workflow.engine.graph_runner import stream_graph_runnable
 from app.assistant.workflow.engine import runtime_helpers as rt
 
 _OUTPUT_SEGMENT_SEPARATOR = "\n\n"
@@ -310,7 +311,7 @@ def run_graph_stream(
 
     def _run_graph() -> None:
         try:
-            for _ in compiled.stream(initial_state):
+            for _ in stream_graph_runnable(compiled, initial_state):
                 push_runtime_event("graph_tick")
         except Exception as exc:  # pragma: no cover - raised on caller thread
             graph_errors.append(exc)

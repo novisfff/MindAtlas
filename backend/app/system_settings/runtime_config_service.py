@@ -258,6 +258,16 @@ class SystemRuntimeConfigService:
             existing.value_json = normalized_payload
         self.db.flush()
 
+    def _finalize_runtime_update(self, *, commit: bool, sync_scheduler: bool = False) -> None:
+        if not commit:
+            return
+        self.db.commit()
+        clear_runtime_config_caches()
+        if sync_scheduler:
+            from app.scheduler import sync_scheduler as _sync_scheduler
+
+            _sync_scheduler()
+
     def _apply_text_payload_updates(
         self,
         payload: dict[str, Any],
@@ -992,9 +1002,7 @@ class SystemRuntimeConfigService:
             payload["maxPdfPages"] = int(request.max_pdf_pages)
 
         self._upsert_setting_payload(RUNTIME_STORAGE_CONFIG_KEY, payload)
-        if commit:
-            self.db.commit()
-            clear_runtime_config_caches()
+        self._finalize_runtime_update(commit=commit)
         response = self.get_runtime_config_response().storage
         return response
 
@@ -1057,9 +1065,7 @@ class SystemRuntimeConfigService:
             request,
             commit=False,
         )
-        if commit:
-            self.db.commit()
-            clear_runtime_config_caches()
+        self._finalize_runtime_update(commit=commit)
         return self.get_runtime_config_response().knowledge_graph
 
     def update_document_parsing_config(self, request: RuntimeDocumentParsingConfigRequest, *, commit: bool = True) -> RuntimeDocumentParsingConfigResponse:
@@ -1102,9 +1108,7 @@ class SystemRuntimeConfigService:
         )
 
         self._upsert_setting_payload(RUNTIME_DOCUMENT_PARSING_CONFIG_KEY, payload)
-        if commit:
-            self.db.commit()
-            clear_runtime_config_caches()
+        self._finalize_runtime_update(commit=commit)
         return self.get_runtime_config_response().document_parsing
 
     def update_automation_config(self, request: RuntimeAutomationConfigRequest, *, commit: bool = True) -> RuntimeAutomationConfigResponse:
@@ -1112,12 +1116,7 @@ class SystemRuntimeConfigService:
         if request.scheduler_enabled is not None:
             payload["schedulerEnabled"] = bool(request.scheduler_enabled)
         self._upsert_setting_payload(RUNTIME_AUTOMATION_CONFIG_KEY, payload)
-        if commit:
-            self.db.commit()
-            clear_runtime_config_caches()
-            from app.scheduler import sync_scheduler
-
-            sync_scheduler()
+        self._finalize_runtime_update(commit=commit, sync_scheduler=True)
         return self.get_runtime_config_response().automation
 
     def update_group(self, group_key: str, request_data: dict[str, Any]) -> RuntimeConfigResponse:

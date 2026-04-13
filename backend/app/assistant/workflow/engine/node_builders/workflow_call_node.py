@@ -23,6 +23,7 @@ from app.assistant.skill_catalog.base import (
     WorkflowNodeDefinition,
 )
 from app.assistant.workflow.engine.container_runtime import build_scoped_metadata
+from app.assistant.workflow.engine.graph_runner import invoke_graph_runnable
 from app.assistant.workflow.engine.runtime_helpers import (
     extract_single_template_reference,
     get_start_inputs,
@@ -510,12 +511,7 @@ def build_workflow_call_node(
                 db_bind,
                 node_llms=child_node_llms,
             )
-            runnable = compiled.compile() if hasattr(compiled, "compile") and not hasattr(compiled, "invoke") else compiled
-            if not hasattr(runnable, "invoke"):
-                raise RuntimeError(
-                    f"DAG workflow_call node {node_id}: child workflow graph is not invokable"
-                )
-            final_state = runnable.invoke(initial_state)
+            final_state = invoke_graph_runnable(compiled, initial_state)
 
         if not isinstance(final_state, dict):
             raise RuntimeError(f"DAG workflow_call node {node_id}: child workflow returned invalid state")

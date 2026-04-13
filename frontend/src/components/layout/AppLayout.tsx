@@ -1,11 +1,16 @@
+import { lazy, Suspense } from 'react'
 import { Outlet, useLocation } from 'react-router-dom'
 import { Sidebar } from './Sidebar'
 import { Header } from './Header'
 import { ThemeProvider } from './ThemeProvider'
 import { useAppStore } from '@/stores/app-store'
-import { FloatingWidget } from '@/features/assistant'
 import { cn } from '@/lib/utils'
 import { uiSurface } from '@/components/ui/styles'
+
+const FloatingWidget = lazy(async () => {
+  const mod = await import('@/features/assistant/components/FloatingWidget')
+  return { default: mod.FloatingWidget }
+})
 
 export function AppLayout() {
   const location = useLocation()
@@ -43,7 +48,11 @@ export function AppLayout() {
             <Outlet />
           </main>
         </div>
-        {!isAssistantRoute && <FloatingWidget />}
+        {!isAssistantRoute && (
+          <Suspense fallback={null}>
+            <FloatingWidget />
+          </Suspense>
+        )}
       </div>
     </ThemeProvider>
   )

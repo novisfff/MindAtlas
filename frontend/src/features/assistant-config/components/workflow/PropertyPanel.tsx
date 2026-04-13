@@ -1,40 +1,81 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
-import type { Edge, Node } from '@xyflow/react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, type ComponentType } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useWorkflowEditorStore, type WfNodeData } from '../../stores/workflow-editor-store'
+import { useWorkflowEditorStore } from '../../stores/workflow-editor-store'
 import type {
-  ContainerBodyEdge,
-  ContainerBodyNode,
-  ContainerBodyNodeType,
   NodeConfig,
   NodeType,
   WorkflowCopilotSelection,
 } from '../../api/workflow'
 import { buildWorkflowReferenceParams } from './variableReferences'
 import { NodeHeader } from './property-panel/NodeHeader'
-import { StartNodeSettings } from './property-panel/nodes/StartNodeSettings'
-import { AgentNodeSettings } from './property-panel/nodes/AgentNodeSettings'
-import { LlmNodeSettings } from './property-panel/nodes/LlmNodeSettings'
-import { ToolNodeSettings } from './property-panel/nodes/ToolNodeSettings'
-import { IfElseNodeSettings } from './property-panel/nodes/IfElseNodeSettings'
-import {
-  ParameterExtractorNodeSettings,
-  KnowledgeRetrievalNodeSettings,
-  IterationNodeSettings,
-  LoopNodeSettings,
-} from './property-panel/nodes/OtherNodeSettings'
-import { CodeExecutorNodeSettings } from './property-panel/nodes/CodeExecutorNodeSettings'
-import { HttpRequestNodeSettings } from './property-panel/nodes/HttpRequestNodeSettings'
-import { VariableAssignNodeSettings } from './property-panel/nodes/VariableAssignNodeSettings'
-import { HumanInLoopNodeSettings } from './property-panel/nodes/HumanInLoopNodeSettings'
-import { OutputNodeSettings } from './property-panel/nodes/OutputNodeSettings'
-import { WorkflowCallNodeSettings } from './property-panel/nodes/WorkflowCallNodeSettings'
 import { useModelsQuery } from '../../../ai-providers/queries'
 import { Sparkles } from 'lucide-react'
 import { defaultLabelForNodeType } from './labelUtils'
-import { normalizeIfElseConfig } from './ifElseConfig'
+import {
+  normalizeContainerBodyEdges,
+  normalizeContainerBodyNodes,
+  resolveSelectionContext,
+  resolveSelectionContextFromTarget,
+  toSubflowGraphEdges,
+  toSubflowGraphNodes,
+  type PropertyPanelSelectionContext,
+  type PropertyPanelSelectionTarget,
+} from './propertyPanelSelection'
 import type { CallableWorkflowDefinition, WorkflowToolDefinition } from './types'
 import { WorkflowEditorSurfaceShell } from './WorkflowEditorSurfaceShell'
+
+function lazyNamed<TModule extends Record<string, ComponentType<any>>, TKey extends keyof TModule>(
+  loader: () => Promise<TModule>,
+  exportName: TKey,
+) {
+  return lazy(async () => {
+    const mod = await loader()
+    return { default: mod[exportName] }
+  })
+}
+
+const StartNodeSettings = lazyNamed(() => import('./property-panel/nodes/StartNodeSettings'), 'StartNodeSettings')
+const AgentNodeSettings = lazyNamed(() => import('./property-panel/nodes/AgentNodeSettings'), 'AgentNodeSettings')
+const LlmNodeSettings = lazyNamed(() => import('./property-panel/nodes/LlmNodeSettings'), 'LlmNodeSettings')
+const ToolNodeSettings = lazyNamed(() => import('./property-panel/nodes/ToolNodeSettings'), 'ToolNodeSettings')
+const IfElseNodeSettings = lazyNamed(() => import('./property-panel/nodes/IfElseNodeSettings'), 'IfElseNodeSettings')
+const ParameterExtractorNodeSettings = lazyNamed(
+  () => import('./property-panel/nodes/OtherNodeSettings'),
+  'ParameterExtractorNodeSettings',
+)
+const KnowledgeRetrievalNodeSettings = lazyNamed(
+  () => import('./property-panel/nodes/OtherNodeSettings'),
+  'KnowledgeRetrievalNodeSettings',
+)
+const IterationNodeSettings = lazyNamed(
+  () => import('./property-panel/nodes/OtherNodeSettings'),
+  'IterationNodeSettings',
+)
+const LoopNodeSettings = lazyNamed(
+  () => import('./property-panel/nodes/OtherNodeSettings'),
+  'LoopNodeSettings',
+)
+const CodeExecutorNodeSettings = lazyNamed(
+  () => import('./property-panel/nodes/CodeExecutorNodeSettings'),
+  'CodeExecutorNodeSettings',
+)
+const HttpRequestNodeSettings = lazyNamed(
+  () => import('./property-panel/nodes/HttpRequestNodeSettings'),
+  'HttpRequestNodeSettings',
+)
+const VariableAssignNodeSettings = lazyNamed(
+  () => import('./property-panel/nodes/VariableAssignNodeSettings'),
+  'VariableAssignNodeSettings',
+)
+const HumanInLoopNodeSettings = lazyNamed(
+  () => import('./property-panel/nodes/HumanInLoopNodeSettings'),
+  'HumanInLoopNodeSettings',
+)
+const OutputNodeSettings = lazyNamed(() => import('./property-panel/nodes/OutputNodeSettings'), 'OutputNodeSettings')
+const WorkflowCallNodeSettings = lazyNamed(
+  () => import('./property-panel/nodes/WorkflowCallNodeSettings'),
+  'WorkflowCallNodeSettings',
+)
 
 interface PropertyPanelProps {
   tools: WorkflowToolDefinition[]
@@ -51,33 +92,6 @@ type ConfigEditSessionRef = {
   targetKey: string | null
   active: boolean
 }
-
-type MainSelectionContext = {
-  mode: 'main'
-  node: Node<WfNodeData>
-}
-
-type SubflowSelectionContext = {
-  mode: 'subflow'
-  containerNode: Node<WfNodeData>
-  containerConfig: Record<string, unknown>
-  bodyNodes: ContainerBodyNode[]
-  bodyEdges: ContainerBodyEdge[]
-  node: ContainerBodyNode
-}
-
-type SelectionContext = MainSelectionContext | SubflowSelectionContext
-
-export type PropertyPanelSelectionTarget =
-  | {
-      kind: 'main'
-      nodeId: string
-    }
-  | {
-      kind: 'subflow'
-      containerId: string
-      nodeId: string
-    }
 
 const CONTAINER_MENTION_PARAMS = [
   {
@@ -141,228 +155,6 @@ function collectUpstreamNodeIds(
   return nodeIds.filter((id) => visited.has(id) && id !== currentNodeId)
 }
 
-function sourceHandlesForSubflowNode(
-  nodeType: ContainerBodyNodeType,
-  config?: Record<string, unknown> | null,
-): string[] {
-  if (nodeType === 'if_else') {
-    const normalized = normalizeIfElseConfig(config ?? {})
-    return [...normalized.branches.map((item) => item.id), normalized.elseHandle || 'else']
-  }
-  if (nodeType === 'human_in_loop') {
-    return ['approved', 'rejected']
-  }
-  return ['output']
-}
-
-function normalizeSubflowSourceHandle(
-  sourceNode: ContainerBodyNode | undefined,
-  rawSourceHandle: string | null | undefined,
-): string {
-  const sourceHandle = String(rawSourceHandle ?? '').trim()
-  if (!sourceNode) {
-    if (!sourceHandle) return 'output'
-    return sourceHandle
-  }
-  const handles = sourceHandlesForSubflowNode(sourceNode.nodeType, sourceNode.config ?? null)
-  if (!sourceHandle || sourceHandle === 'output') return handles[0] ?? 'output'
-  if (handles.includes(sourceHandle)) return sourceHandle
-  return handles[0] ?? 'else'
-}
-
-function normalizeSubflowTargetHandle(rawTargetHandle: string | null | undefined): string {
-  const targetHandle = String(rawTargetHandle ?? '').trim()
-  if (!targetHandle) return 'input'
-  return targetHandle
-}
-
-function normalizeContainerBodyNodes(config: Record<string, unknown>): ContainerBodyNode[] {
-  const raw = (config.bodyNodes ?? config.body_nodes) as unknown
-  if (!Array.isArray(raw)) {
-    return [
-      {
-        nodeId: 'start',
-        nodeType: 'start',
-        label: defaultLabelForNodeType('start'),
-        config: null,
-      },
-    ]
-  }
-
-  const nodes = raw
-    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item))
-    .map((item) => {
-      const nodeType = String(item.nodeType ?? item.node_type ?? '').trim() as ContainerBodyNodeType
-      const fallbackType: ContainerBodyNodeType = nodeType || 'llm'
-      return {
-        nodeId: String(item.nodeId ?? item.node_id ?? ''),
-        nodeType: fallbackType,
-        label: String(item.label ?? defaultLabelForNodeType(fallbackType as NodeType)),
-        positionX: Number.isFinite(Number(item.positionX ?? item.position_x))
-          ? Number(item.positionX ?? item.position_x)
-          : undefined,
-        positionY: Number.isFinite(Number(item.positionY ?? item.position_y))
-          ? Number(item.positionY ?? item.position_y)
-          : undefined,
-        config: item.config && typeof item.config === 'object' ? (item.config as Record<string, unknown>) : null,
-      }
-    })
-    .filter((item) => item.nodeId)
-
-  if (!nodes.some((item) => item.nodeType === 'start')) {
-    return [
-      {
-        nodeId: 'start',
-        nodeType: 'start',
-        label: defaultLabelForNodeType('start'),
-        config: null,
-      },
-      ...nodes,
-    ]
-  }
-
-  return nodes
-}
-
-function normalizeContainerBodyEdges(
-  config: Record<string, unknown>,
-  bodyNodes: ContainerBodyNode[],
-): ContainerBodyEdge[] {
-  const raw = (config.bodyEdges ?? config.body_edges) as unknown
-  if (!Array.isArray(raw)) return []
-  const nodeById = new Map(bodyNodes.map((node) => [node.nodeId, node]))
-
-  return raw
-    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item))
-    .map((item) => {
-      const sourceNodeId = String(item.sourceNodeId ?? item.source_node_id ?? '')
-      const sourceNode = nodeById.get(sourceNodeId)
-      const targetNodeId = String(item.targetNodeId ?? item.target_node_id ?? '')
-      return {
-        edgeId: String(item.edgeId ?? item.edge_id ?? ''),
-        sourceNodeId,
-        targetNodeId,
-        sourceHandle: normalizeSubflowSourceHandle(
-          sourceNode,
-          (item.sourceHandle ?? item.source_handle) as string | null | undefined,
-        ),
-        targetHandle: normalizeSubflowTargetHandle(
-          (item.targetHandle ?? item.target_handle) as string | null | undefined,
-        ),
-        conditionType: (item.conditionType ?? item.condition_type ?? null) as ContainerBodyEdge['conditionType'],
-        conditionExpr: (item.conditionExpr ?? item.condition_expr ?? null) as ContainerBodyEdge['conditionExpr'],
-        label: (item.label ?? null) as ContainerBodyEdge['label'],
-      }
-    })
-    .filter((item) => (
-      item.edgeId &&
-      item.sourceNodeId &&
-      item.targetNodeId &&
-      nodeById.has(item.sourceNodeId) &&
-      nodeById.has(item.targetNodeId)
-    ))
-}
-
-function toSubflowGraphNodes(bodyNodes: ContainerBodyNode[]): Node<WfNodeData>[] {
-  return bodyNodes.map((node) => ({
-    id: node.nodeId,
-    position: {
-      x: Number(node.positionX ?? 0),
-      y: Number(node.positionY ?? 0),
-    },
-    data: {
-      nodeType: node.nodeType as NodeType,
-      label: node.label || defaultLabelForNodeType(node.nodeType as NodeType),
-      config: (node.config ?? null) as NodeConfig | null,
-    },
-  }))
-}
-
-function toSubflowGraphEdges(bodyEdges: ContainerBodyEdge[]): Edge[] {
-  return bodyEdges.map((edge) => ({
-    id: edge.edgeId,
-    source: edge.sourceNodeId,
-    target: edge.targetNodeId,
-    sourceHandle: edge.sourceHandle,
-    targetHandle: edge.targetHandle,
-  }))
-}
-
-export function getPropertyPanelSelectionTargetKey(target: PropertyPanelSelectionTarget): string {
-  if (target.kind === 'main') {
-    return `property:main:${target.nodeId}`
-  }
-  return `property:subflow:${target.containerId}:${target.nodeId}`
-}
-
-export function resolveSelectionContextFromTarget(
-  nodes: Node<WfNodeData>[],
-  target: PropertyPanelSelectionTarget,
-): SelectionContext | null {
-  if (target.kind === 'subflow') {
-    const containerNode = nodes.find((node) => node.id === target.containerId)
-    if (containerNode && (containerNode.data.nodeType === 'iteration' || containerNode.data.nodeType === 'loop')) {
-      const containerConfig = (containerNode.data.config ?? {}) as Record<string, unknown>
-      const bodyNodes = normalizeContainerBodyNodes(containerConfig)
-      const bodyEdges = normalizeContainerBodyEdges(containerConfig, bodyNodes)
-      const selectedBodyNode = bodyNodes.find((node) => node.nodeId === target.nodeId)
-      if (selectedBodyNode) {
-        return {
-          mode: 'subflow',
-          containerNode,
-          containerConfig,
-          bodyNodes,
-          bodyEdges,
-          node: selectedBodyNode,
-        }
-      }
-    }
-    return null
-  }
-
-  const selectedNode = nodes.find((node) => node.id === target.nodeId)
-  if (!selectedNode) return null
-  return {
-    mode: 'main',
-    node: selectedNode,
-  }
-}
-
-export function resolveSelectionContext(
-  nodes: Node<WfNodeData>[],
-  selectedNodeId: string | null,
-  selectedSubflowContainerId: string | null,
-  selectedSubflowNodeId: string | null,
-): SelectionContext | null {
-  if (selectedSubflowContainerId && selectedSubflowNodeId) {
-    const containerNode = nodes.find((node) => node.id === selectedSubflowContainerId)
-    if (containerNode && (containerNode.data.nodeType === 'iteration' || containerNode.data.nodeType === 'loop')) {
-      const containerConfig = (containerNode.data.config ?? {}) as Record<string, unknown>
-      const bodyNodes = normalizeContainerBodyNodes(containerConfig)
-      const bodyEdges = normalizeContainerBodyEdges(containerConfig, bodyNodes)
-      const selectedBodyNode = bodyNodes.find((node) => node.nodeId === selectedSubflowNodeId)
-      if (selectedBodyNode) {
-        return {
-          mode: 'subflow',
-          containerNode,
-          containerConfig,
-          bodyNodes,
-          bodyEdges,
-          node: selectedBodyNode,
-        }
-      }
-    }
-  }
-
-  if (!selectedNodeId) return null
-  const selectedNode = nodes.find((node) => node.id === selectedNodeId)
-  if (!selectedNode) return null
-  return {
-    mode: 'main',
-    node: selectedNode,
-  }
-}
-
 export function PropertyPanel({
   tools,
   workflows,
@@ -387,7 +179,7 @@ export function PropertyPanel({
   const { data: llmModels = [] } = useModelsQuery({ modelType: 'llm' })
   const configEditSessionRef = useRef<ConfigEditSessionRef>({ targetKey: null, active: false })
 
-  const selectionContext = useMemo(
+  const selectionContext = useMemo<PropertyPanelSelectionContext | null>(
     () => (
       selectionTarget
         ? resolveSelectionContextFromTarget(nodes, selectionTarget)
@@ -646,6 +438,15 @@ export function PropertyPanel({
     handleConfigUpdate({ [field]: value })
   }
 
+  const nodeSettingsFallback = (
+    <div className="flex min-h-[240px] items-center justify-center rounded-2xl border border-slate-200 bg-slate-50/80 px-4 text-sm text-muted-foreground">
+      <div className="flex items-center gap-2">
+        <Sparkles className="h-4 w-4 animate-pulse" />
+        <span>{t('messages.loading')}</span>
+      </div>
+    </div>
+  )
+
   const renderContent = () => {
     const commonProps = {
       config,
@@ -656,52 +457,108 @@ export function PropertyPanel({
     switch (nodeType) {
       case 'start':
         return (
-          <StartNodeSettings
-            config={config}
-            onUpdate={handleConfigUpdate}
-            workflowDescription={workflowDescription}
-            onWorkflowDescriptionChange={(value) => {
-              if (readOnly) return
-              onWorkflowDescriptionChange(value)
-            }}
-            isSubflowNode={selectionContext.mode === 'subflow'}
-          />
+          <Suspense fallback={nodeSettingsFallback}>
+            <StartNodeSettings
+              config={config}
+              onUpdate={handleConfigUpdate}
+              workflowDescription={workflowDescription}
+              onWorkflowDescriptionChange={(value) => {
+                if (readOnly) return
+                onWorkflowDescriptionChange(value)
+              }}
+              isSubflowNode={selectionContext.mode === 'subflow'}
+            />
+          </Suspense>
         )
       case 'llm':
         return (
-          <LlmNodeSettings
-            {...commonProps}
-            onChange={handleSingleFieldUpdate}
-            knowledgeSourceOptions={knowledgeSourceOptions}
-            modelOptions={nodeModelOptions}
-          />
+          <Suspense fallback={nodeSettingsFallback}>
+            <LlmNodeSettings
+              {...commonProps}
+              onChange={handleSingleFieldUpdate}
+              knowledgeSourceOptions={knowledgeSourceOptions}
+              modelOptions={nodeModelOptions}
+            />
+          </Suspense>
         )
       case 'agent':
-        return <AgentNodeSettings {...commonProps} tools={tools} modelOptions={nodeModelOptions} />
+        return (
+          <Suspense fallback={nodeSettingsFallback}>
+            <AgentNodeSettings {...commonProps} tools={tools} modelOptions={nodeModelOptions} />
+          </Suspense>
+        )
       case 'tool':
-        return <ToolNodeSettings {...commonProps} tools={tools} />
+        return (
+          <Suspense fallback={nodeSettingsFallback}>
+            <ToolNodeSettings {...commonProps} tools={tools} />
+          </Suspense>
+        )
       case 'workflow_call':
-        return <WorkflowCallNodeSettings {...commonProps} workflows={workflows} />
+        return (
+          <Suspense fallback={nodeSettingsFallback}>
+            <WorkflowCallNodeSettings {...commonProps} workflows={workflows} />
+          </Suspense>
+        )
       case 'if_else':
-        return <IfElseNodeSettings {...commonProps} onDeleteBranchEdges={handleDeleteIfElseBranchEdges} />
+        return (
+          <Suspense fallback={nodeSettingsFallback}>
+            <IfElseNodeSettings {...commonProps} onDeleteBranchEdges={handleDeleteIfElseBranchEdges} />
+          </Suspense>
+        )
       case 'parameter_extractor':
-        return <ParameterExtractorNodeSettings {...commonProps} modelOptions={nodeModelOptions} />
+        return (
+          <Suspense fallback={nodeSettingsFallback}>
+            <ParameterExtractorNodeSettings {...commonProps} modelOptions={nodeModelOptions} />
+          </Suspense>
+        )
       case 'knowledge_retrieval':
-        return <KnowledgeRetrievalNodeSettings {...commonProps} />
+        return (
+          <Suspense fallback={nodeSettingsFallback}>
+            <KnowledgeRetrievalNodeSettings {...commonProps} />
+          </Suspense>
+        )
       case 'code_executor':
-        return <CodeExecutorNodeSettings {...commonProps} />
+        return (
+          <Suspense fallback={nodeSettingsFallback}>
+            <CodeExecutorNodeSettings {...commonProps} />
+          </Suspense>
+        )
       case 'http_request':
-        return <HttpRequestNodeSettings {...commonProps} />
+        return (
+          <Suspense fallback={nodeSettingsFallback}>
+            <HttpRequestNodeSettings {...commonProps} />
+          </Suspense>
+        )
       case 'variable_assign':
-        return <VariableAssignNodeSettings {...commonProps} />
+        return (
+          <Suspense fallback={nodeSettingsFallback}>
+            <VariableAssignNodeSettings {...commonProps} />
+          </Suspense>
+        )
       case 'human_in_loop':
-        return <HumanInLoopNodeSettings {...commonProps} />
+        return (
+          <Suspense fallback={nodeSettingsFallback}>
+            <HumanInLoopNodeSettings {...commonProps} />
+          </Suspense>
+        )
       case 'iteration':
-        return <IterationNodeSettings {...commonProps} />
+        return (
+          <Suspense fallback={nodeSettingsFallback}>
+            <IterationNodeSettings {...commonProps} />
+          </Suspense>
+        )
       case 'loop':
-        return <LoopNodeSettings {...commonProps} />
+        return (
+          <Suspense fallback={nodeSettingsFallback}>
+            <LoopNodeSettings {...commonProps} />
+          </Suspense>
+        )
       case 'output':
-        return <OutputNodeSettings {...commonProps} />
+        return (
+          <Suspense fallback={nodeSettingsFallback}>
+            <OutputNodeSettings {...commonProps} />
+          </Suspense>
+        )
       default:
         return <div className="text-sm text-muted-foreground p-4 text-center">{t('settings.skills.noSettingsAvailable')}</div>
     }
