@@ -1,11 +1,13 @@
-import * as prettier from 'prettier/standalone'
-import prettierPluginBabel from 'prettier/plugins/babel'
-import prettierPluginEstree from 'prettier/plugins/estree'
 import initRuff, { format as formatPythonWithRuff } from '@wasm-fmt/ruff_fmt/vite'
 
 type ScriptLanguage = 'python' | 'javascript'
 
 let ruffInitPromise: Promise<unknown> | null = null
+let prettierBundlePromise: Promise<{
+  prettier: typeof import('prettier/standalone')
+  babel: typeof import('prettier/plugins/babel')
+  estree: typeof import('prettier/plugins/estree')
+}> | null = null
 
 async function ensureRuffInitialized(): Promise<void> {
   if (!ruffInitPromise) {
@@ -15,6 +17,21 @@ async function ensureRuffInitialized(): Promise<void> {
     })
   }
   await ruffInitPromise
+}
+
+async function getPrettierBundle() {
+  if (!prettierBundlePromise) {
+    prettierBundlePromise = Promise.all([
+      import('prettier/standalone'),
+      import('prettier/plugins/babel'),
+      import('prettier/plugins/estree'),
+    ]).then(([prettier, babel, estree]) => ({
+      prettier,
+      babel,
+      estree,
+    }))
+  }
+  return prettierBundlePromise
 }
 
 async function formatPythonWithRuffWasm(source: string): Promise<string> {
@@ -30,9 +47,10 @@ async function formatPythonWithRuffWasm(source: string): Promise<string> {
 
 export async function formatCode(language: ScriptLanguage, source: string): Promise<string> {
   if (language === 'javascript') {
+    const { prettier, babel, estree } = await getPrettierBundle()
     const formatted = await prettier.format(source, {
       parser: 'babel',
-      plugins: [prettierPluginBabel, prettierPluginEstree],
+      plugins: [babel, estree],
       semi: true,
       singleQuote: true,
       trailingComma: 'all',

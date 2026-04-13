@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Literal
 
+from app.assistant.workflow.system_assets import MONTHLY_REPORT_ASSET_KEY, WEEKLY_REPORT_ASSET_KEY
 from app.system_settings.service import get_default_system_locale, normalize_system_locale
 
 
@@ -28,7 +29,7 @@ class SystemBehaviorFieldDefinition:
 class SystemBehaviorDefaultTarget:
     target_type: SystemBehaviorTargetType
     canonical_name: str
-    workflow_preset_file: str | None = None
+    default_target_asset_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -168,7 +169,7 @@ def _registry(locale: str) -> dict[SystemBehaviorKey, SystemBehaviorDefinition]:
             default_target=SystemBehaviorDefaultTarget(
                 target_type="workflow",
                 canonical_name="system_weekly_report__workflow",
-                workflow_preset_file="workflows/system_weekly_report.json",
+                default_target_asset_key=WEEKLY_REPORT_ASSET_KEY,
             ),
         ),
         "monthly_report_generation": SystemBehaviorDefinition(
@@ -185,7 +186,7 @@ def _registry(locale: str) -> dict[SystemBehaviorKey, SystemBehaviorDefinition]:
             default_target=SystemBehaviorDefaultTarget(
                 target_type="workflow",
                 canonical_name="system_monthly_report__workflow",
-                workflow_preset_file="workflows/system_monthly_report.json",
+                default_target_asset_key=MONTHLY_REPORT_ASSET_KEY,
             ),
         ),
     }

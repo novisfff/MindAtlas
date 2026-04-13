@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -32,21 +32,14 @@ import { useWorkflowEditorStore } from '../stores/workflow-editor-store'
 import { FlowCanvas } from '../components/workflow/FlowCanvas'
 import { NodePalette } from '../components/workflow/NodePalette'
 import {
-  PropertyPanel,
   getPropertyPanelSelectionTargetKey,
   resolveSelectionContextFromTarget,
   type PropertyPanelSelectionTarget,
-} from '../components/workflow/PropertyPanel'
-import { WorkflowCopilotPanel, type WorkflowCopilotLaunchContext } from '../components/workflow/WorkflowCopilotPanel'
-import { WorkflowReadonlyCanvas } from '../components/workflow/WorkflowReadonlyCanvas'
-import { WorkflowTestRunPanel } from '../components/workflow/WorkflowTestRunPanel'
-import { WorkflowValidationChecklistPanel } from '../components/workflow/WorkflowValidationChecklistPanel'
-import { WorkflowEnvVarPanel } from '../components/workflow/WorkflowEnvVarPanel'
+} from '../components/workflow/propertyPanelSelection'
+import type { WorkflowCopilotLaunchContext } from '../components/workflow/WorkflowCopilotPanel'
 import { WorkflowEditorSurfaceShell } from '../components/workflow/WorkflowEditorSurfaceShell'
 import { WorkflowEditorSurfaceRail, type WorkflowEditorSurfaceRailItem } from '../components/workflow/WorkflowEditorSurfaceRail'
 import { serializeToWorkflowInput, deserializeFromWorkflow, deserializeFromWorkflowInput } from '../components/workflow/serialization'
-import { PublishVersionDialog } from '../components/versioning/PublishVersionDialog'
-import { TargetVersionPanel } from '../components/versioning/TargetVersionPanel'
 import {
   buildWorkflowDraftHash,
   buildValidationSignature,
@@ -66,6 +59,28 @@ import {
 } from '../../../components/ui/hover-card'
 
 import '@xyflow/react/dist/style.css'
+
+function lazyNamed<TModule extends Record<string, ComponentType<any>>, TKey extends keyof TModule>(
+  loader: () => Promise<TModule>,
+  exportName: TKey,
+) {
+  return lazy(async () => {
+    const mod = await loader()
+    return { default: mod[exportName] }
+  })
+}
+
+const PropertyPanel = lazyNamed(() => import('../components/workflow/PropertyPanel'), 'PropertyPanel')
+const WorkflowCopilotPanel = lazyNamed(() => import('../components/workflow/WorkflowCopilotPanel'), 'WorkflowCopilotPanel')
+const WorkflowReadonlyCanvas = lazyNamed(() => import('../components/workflow/WorkflowReadonlyCanvas'), 'WorkflowReadonlyCanvas')
+const WorkflowTestRunPanel = lazyNamed(() => import('../components/workflow/WorkflowTestRunPanel'), 'WorkflowTestRunPanel')
+const WorkflowValidationChecklistPanel = lazyNamed(
+  () => import('../components/workflow/WorkflowValidationChecklistPanel'),
+  'WorkflowValidationChecklistPanel',
+)
+const WorkflowEnvVarPanel = lazyNamed(() => import('../components/workflow/WorkflowEnvVarPanel'), 'WorkflowEnvVarPanel')
+const PublishVersionDialog = lazyNamed(() => import('../components/versioning/PublishVersionDialog'), 'PublishVersionDialog')
+const TargetVersionPanel = lazyNamed(() => import('../components/versioning/TargetVersionPanel'), 'TargetVersionPanel')
 
 type CopilotPreviewMode = 'current' | 'proposed'
 type WorkflowEditorSurfaceId = 'copilot' | 'testRun' | 'validation' | 'versionHistory' | 'envVars'
@@ -239,6 +254,17 @@ function getWorkbenchPanelWidthClass(surface: WorkflowEditorSurfaceId | 'propert
     default:
       return 'w-[420px] max-w-[calc(100vw-2rem)]'
   }
+}
+
+function WorkbenchLoadingFallback({ label }: { label: string }) {
+  return (
+    <div className="flex h-full min-h-0 items-center justify-center rounded-[28px] border border-slate-200 bg-white/95 px-6 text-sm text-muted-foreground shadow-[0_18px_50px_rgba(15,23,42,0.12)]">
+      <div className="flex items-center gap-2">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        <span>{label}</span>
+      </div>
+    </div>
+  )
 }
 
 export default function WorkflowEditorPage() {
@@ -486,6 +512,22 @@ export default function WorkflowEditorPage() {
   const rightWorkbenchWidthClass = useMemo(
     () => getWorkbenchPanelWidthClass(visibleSurface),
     [visibleSurface],
+  )
+  const loadingLabel = t('messages.loading')
+  const workbenchLoadingFallback = useMemo(
+    () => <WorkbenchLoadingFallback label={loadingLabel} />,
+    [loadingLabel],
+  )
+  const canvasLoadingFallback = useMemo(
+    () => (
+      <div className="flex h-full min-h-0 items-center justify-center text-sm text-muted-foreground">
+        <div className="flex items-center gap-2">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          <span>{loadingLabel}</span>
+        </div>
+      </div>
+    ),
+    [loadingLabel],
   )
 
 
@@ -1448,99 +1490,109 @@ export default function WorkflowEditorPage() {
                   className="h-full min-h-0 animate-in fade-in-50 slide-in-from-right-1 duration-150"
                 >
                   {visibleSurface === 'property' ? (
-                    <PropertyPanel
-                      tools={workflowTools}
-                      workflows={callableWorkflows}
-                      workflowDescription={workflowDescriptionDraft}
-                      onWorkflowDescriptionChange={setWorkflowDescriptionDraft}
-                      selectionTarget={activePropertyTarget}
-                      onClose={closeActiveSurface}
-                      readOnly={isSystemWorkflow}
-                      onAskAiEdit={({ title, instruction, selection }) => openCopilot({
-                        mode: 'edit_selection',
-                        title,
-                        instruction,
-                        selection,
-                        restoreOnClose: true,
-                      })}
-                    />
+                    <Suspense fallback={workbenchLoadingFallback}>
+                      <PropertyPanel
+                        tools={workflowTools}
+                        workflows={callableWorkflows}
+                        workflowDescription={workflowDescriptionDraft}
+                        onWorkflowDescriptionChange={setWorkflowDescriptionDraft}
+                        selectionTarget={activePropertyTarget}
+                        onClose={closeActiveSurface}
+                        readOnly={isSystemWorkflow}
+                        onAskAiEdit={({ title, instruction, selection }) => openCopilot({
+                          mode: 'edit_selection',
+                          title,
+                          instruction,
+                          selection,
+                          restoreOnClose: true,
+                        })}
+                      />
+                    </Suspense>
                   ) : null}
                   {visibleSurface === 'validation' ? (
-                    <WorkflowValidationChecklistPanel
-                      open
-                      isValidating={isValidating}
-                      errors={validationErrors}
-                      warnings={validationWarnings}
-                      requestError={validationRequestError}
-                      lastValidatedAt={lastValidatedAt}
-                      onClose={closeActiveSurface}
-                      onLocate={handleLocateValidationIssue}
-                      onRefresh={handleValidationRefresh}
-                      onAskAiFix={() => openCopilot({
-                        mode: 'fix_validation',
-                        title: t('settings.skills.workflowCopilot.fixWithAi'),
-                        instruction: t('settings.skills.workflowCopilot.defaultFixInstruction'),
-                        validationContext: {
-                          errors: validationErrors.map((issue) => ({
-                            severity: issue.severity,
-                            nodeId: issue.nodeId,
-                            subflowNodeId: issue.subflowNodeId ?? null,
-                            message: issue.message,
-                            source: issue.source,
-                          })),
-                          warnings: validationWarnings.map((issue) => ({
-                            severity: issue.severity,
-                            nodeId: issue.nodeId,
-                            subflowNodeId: issue.subflowNodeId ?? null,
-                            message: issue.message,
-                            source: issue.source,
-                          })),
-                        },
-                        restoreOnClose: true,
-                      })}
-                    />
+                    <Suspense fallback={workbenchLoadingFallback}>
+                      <WorkflowValidationChecklistPanel
+                        open
+                        isValidating={isValidating}
+                        errors={validationErrors}
+                        warnings={validationWarnings}
+                        requestError={validationRequestError}
+                        lastValidatedAt={lastValidatedAt}
+                        onClose={closeActiveSurface}
+                        onLocate={handleLocateValidationIssue}
+                        onRefresh={handleValidationRefresh}
+                        onAskAiFix={() => openCopilot({
+                          mode: 'fix_validation',
+                          title: t('settings.skills.workflowCopilot.fixWithAi'),
+                          instruction: t('settings.skills.workflowCopilot.defaultFixInstruction'),
+                          validationContext: {
+                            errors: validationErrors.map((issue) => ({
+                              severity: issue.severity,
+                              nodeId: issue.nodeId,
+                              subflowNodeId: issue.subflowNodeId ?? null,
+                              message: issue.message,
+                              source: issue.source,
+                            })),
+                            warnings: validationWarnings.map((issue) => ({
+                              severity: issue.severity,
+                              nodeId: issue.nodeId,
+                              subflowNodeId: issue.subflowNodeId ?? null,
+                              message: issue.message,
+                              source: issue.source,
+                            })),
+                          },
+                          restoreOnClose: true,
+                        })}
+                      />
+                    </Suspense>
                   ) : null}
                   {visibleSurface === 'testRun' && workflowId ? (
-                    <WorkflowTestRunPanel
-                      open
-                      workflowId={workflowId}
-                      startInputMode={startInputMode}
-                      onClose={closeActiveSurface}
-                      onAnalyzeWithAi={(context) => openCopilot({
-                        mode: 'analyze_test_run',
-                        title: t('settings.skills.workflowCopilot.analyzeWithAi'),
-                        instruction: t('settings.skills.workflowCopilot.defaultAnalyzeInstruction'),
-                        testRunContext: context,
-                        restoreOnClose: true,
-                      })}
-                    />
+                    <Suspense fallback={workbenchLoadingFallback}>
+                      <WorkflowTestRunPanel
+                        open
+                        workflowId={workflowId}
+                        startInputMode={startInputMode}
+                        onClose={closeActiveSurface}
+                        onAnalyzeWithAi={(context) => openCopilot({
+                          mode: 'analyze_test_run',
+                          title: t('settings.skills.workflowCopilot.analyzeWithAi'),
+                          instruction: t('settings.skills.workflowCopilot.defaultAnalyzeInstruction'),
+                          testRunContext: context,
+                          restoreOnClose: true,
+                        })}
+                      />
+                    </Suspense>
                   ) : null}
                   {visibleSurface === 'versionHistory' ? (
-                    <TargetVersionPanel
-                      open
-                      loading={versionsLoading}
-                      loadError={versionsError instanceof Error ? versionsError.message : null}
-                      isSystemTarget={Boolean(workflowEntity?.isSystem)}
-                      draftVersionId={workflowVersions?.draftVersionId}
-                      publishedVersionId={workflowVersions?.publishedVersionId}
-                      versions={workflowVersions?.versions ?? []}
-                      clearing={clearVersionsMutation.isPending}
-                      deletingVersionId={deleteVersionMutation.isPending ? deleteVersionMutation.variables : null}
-                      restoringVersionId={rollbackMutation.isPending ? rollbackMutation.variables : null}
-                      onClose={closeActiveSurface}
-                      onRefresh={() => { void refetchVersions() }}
-                      onClear={handleClearVersions}
-                      onDelete={handleDeleteVersion}
-                      onRestore={(versionId) => rollbackMutation.mutate(versionId)}
-                    />
+                    <Suspense fallback={workbenchLoadingFallback}>
+                      <TargetVersionPanel
+                        open
+                        loading={versionsLoading}
+                        loadError={versionsError instanceof Error ? versionsError.message : null}
+                        isSystemTarget={Boolean(workflowEntity?.isSystem)}
+                        draftVersionId={workflowVersions?.draftVersionId}
+                        publishedVersionId={workflowVersions?.publishedVersionId}
+                        versions={workflowVersions?.versions ?? []}
+                        clearing={clearVersionsMutation.isPending}
+                        deletingVersionId={deleteVersionMutation.isPending ? deleteVersionMutation.variables : null}
+                        restoringVersionId={rollbackMutation.isPending ? rollbackMutation.variables : null}
+                        onClose={closeActiveSurface}
+                        onRefresh={() => { void refetchVersions() }}
+                        onClear={handleClearVersions}
+                        onDelete={handleDeleteVersion}
+                        onRestore={(versionId) => rollbackMutation.mutate(versionId)}
+                      />
+                    </Suspense>
                   ) : null}
                   {visibleSurface === 'envVars' ? (
-                    <WorkflowEnvVarPanel
-                      open
-                      envVars={workflowEnvVars}
-                      onClose={closeActiveSurface}
-                      onChange={handleWorkflowEnvVarsChange}
-                    />
+                    <Suspense fallback={workbenchLoadingFallback}>
+                      <WorkflowEnvVarPanel
+                        open
+                        envVars={workflowEnvVars}
+                        onClose={closeActiveSurface}
+                        onChange={handleWorkflowEnvVarsChange}
+                      />
+                    </Suspense>
                   ) : null}
                 </div>
               </div>
@@ -1661,14 +1713,16 @@ export default function WorkflowEditorPage() {
                       </div>
                     )}
                   >
-                    <WorkflowReadonlyCanvas
-                      key={`${effectivePreviewMode}:${effectivePreviewMode === 'current' ? currentDraftHash : activeCopilotProposalKey ?? 'proposal'}`}
-                      className="h-full min-h-0 overflow-hidden rounded-[24px] border border-slate-200 bg-slate-50"
-                      nodes={effectivePreviewWorkflow.nodes}
-                      edges={effectivePreviewWorkflow.edges}
-                      highlightedNodeIds={activeCopilotProposal?.affectedNodeIds ?? []}
-                      showFitViewControl
-                    />
+                    <Suspense fallback={canvasLoadingFallback}>
+                      <WorkflowReadonlyCanvas
+                        key={`${effectivePreviewMode}:${effectivePreviewMode === 'current' ? currentDraftHash : activeCopilotProposalKey ?? 'proposal'}`}
+                        className="h-full min-h-0 overflow-hidden rounded-[24px] border border-slate-200 bg-slate-50"
+                        nodes={effectivePreviewWorkflow.nodes}
+                        edges={effectivePreviewWorkflow.edges}
+                        highlightedNodeIds={activeCopilotProposal?.affectedNodeIds ?? []}
+                        showFitViewControl
+                      />
+                    </Suspense>
                   </WorkflowEditorSurfaceShell>
                 </div>
               ) : null}
@@ -1688,24 +1742,26 @@ export default function WorkflowEditorPage() {
                       showCopilotPreviewPane ? 'w-full min-w-0 max-w-none' : rightWorkbenchWidthClass
                     }`}
                   >
-                    <WorkflowCopilotPanel
-                      open={copilotOpen}
-                      workflowId={workflowId}
-                      draft={workflowInput}
-                      launchContext={copilotLaunchContext}
-                      layout="split"
-                      proposal={activeCopilotProposal}
-                      previewVisible={copilotPreviewVisible}
-                      previewMode={copilotPreviewMode}
-                      isApplyingProposal={isApplyingCopilotProposal}
-                      currentProposalApplyState={currentProposalApplyState}
-                      onClose={handleCloseCopilot}
-                      onProposalChange={setActiveCopilotProposal}
-                      onPreviewVisibleChange={setCopilotPreviewVisible}
-                      onPreviewModeChange={setCopilotPreviewMode}
-                      onApplyProposal={handleApplyCopilotProposal}
-                      onUndoAppliedProposal={handleUndoAppliedCopilot}
-                    />
+                    <Suspense fallback={workbenchLoadingFallback}>
+                      <WorkflowCopilotPanel
+                        open={copilotOpen}
+                        workflowId={workflowId}
+                        draft={workflowInput}
+                        launchContext={copilotLaunchContext}
+                        layout="split"
+                        proposal={activeCopilotProposal}
+                        previewVisible={copilotPreviewVisible}
+                        previewMode={copilotPreviewMode}
+                        isApplyingProposal={isApplyingCopilotProposal}
+                        currentProposalApplyState={currentProposalApplyState}
+                        onClose={handleCloseCopilot}
+                        onProposalChange={setActiveCopilotProposal}
+                        onPreviewVisibleChange={setCopilotPreviewVisible}
+                        onPreviewModeChange={setCopilotPreviewMode}
+                        onApplyProposal={handleApplyCopilotProposal}
+                        onUndoAppliedProposal={handleUndoAppliedCopilot}
+                      />
+                    </Suspense>
                   </div>
                 </div>
               </div>
@@ -1713,13 +1769,17 @@ export default function WorkflowEditorPage() {
           </div>
         ) : null}
 
-        <PublishVersionDialog
-          open={publishDialogOpen}
-          defaultName={defaultPublishVersionName}
-          submitting={publishMutation.isPending}
-          onOpenChange={(nextOpen) => setActiveDialog(nextOpen ? 'publish' : null)}
-          onConfirm={handlePublish}
-        />
+        {publishDialogOpen ? (
+          <Suspense fallback={null}>
+            <PublishVersionDialog
+              open={publishDialogOpen}
+              defaultName={defaultPublishVersionName}
+              submitting={publishMutation.isPending}
+              onOpenChange={(nextOpen) => setActiveDialog(nextOpen ? 'publish' : null)}
+              onConfirm={handlePublish}
+            />
+          </Suspense>
+        ) : null}
       </div>
     </ReactFlowProvider>
   )

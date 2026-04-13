@@ -189,6 +189,54 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertEqual(callable_item["name"], "智能上下文入库工作流")
         self.assertIn("先提取检索线索与最终字段", serialized["description"])
 
+    def test_serialize_targets_include_openclaw_reference_count(self) -> None:
+        from app.openclaw_integration.models import OpenClawCapabilityItem  # noqa: E402
+
+        workflow_svc, workflow = self._system_workflow()
+        agent_svc, agent = self._system_agent()
+
+        self.db.add_all(
+            [
+                OpenClawCapabilityItem(
+                    capability_key="test_workflow_capability",
+                    tool_name="mindatlas_test_workflow_capability",
+                    title="Workflow Capability",
+                    description="workflow reference",
+                    source_type="workflow",
+                    workflow_id=workflow.id,
+                    enabled=True,
+                    is_system_item=False,
+                    input_schema_json={},
+                    output_schema_json={},
+                    input_summary="",
+                    output_summary="",
+                    tool_response_mode="json_schema",
+                ),
+                OpenClawCapabilityItem(
+                    capability_key="test_agent_capability",
+                    tool_name="mindatlas_test_agent_capability",
+                    title="Agent Capability",
+                    description="agent reference",
+                    source_type="agent",
+                    agent_profile_id=agent.id,
+                    enabled=True,
+                    is_system_item=False,
+                    input_schema_json={},
+                    output_schema_json={},
+                    input_summary="",
+                    output_summary="",
+                    tool_response_mode="json_schema",
+                ),
+            ]
+        )
+        self.db.commit()
+
+        workflow_serialized = workflow_svc.serialize_workflow(workflow_svc.get_workflow(workflow.id))
+        agent_serialized = agent_svc.serialize_agent_profile(agent_svc.get_agent_profile(agent.id))
+
+        self.assertEqual(workflow_serialized["openclaw_reference_count"], 1)
+        self.assertEqual(agent_serialized["openclaw_reference_count"], 1)
+
     def test_standalone_system_workflow_start_field_description_explains_create_vs_merge_context(self) -> None:
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 

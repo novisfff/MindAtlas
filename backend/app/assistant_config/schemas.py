@@ -805,6 +805,7 @@ class AssistantWorkflowResponse(OrmModel):
     reference_count: int = 0
     referenced_system_behavior_keys: list[SystemBehaviorKey] = []
     system_behavior_reference_count: int = 0
+    openclaw_reference_count: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -826,6 +827,7 @@ class AssistantAgentProfileResponse(OrmModel):
     reference_count: int = 0
     referenced_system_behavior_keys: list[SystemBehaviorKey] = []
     system_behavior_reference_count: int = 0
+    openclaw_reference_count: int = 0
     created_at: datetime
     updated_at: datetime
 

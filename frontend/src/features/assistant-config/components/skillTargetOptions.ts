@@ -1,4 +1,6 @@
 import type { AssistantAgentProfile } from '../api/agents'
+import type { SystemBehaviorContractField, SystemBehaviorContractSummary } from '../api/system-behaviors'
+import type { CallableWorkflow, WorkflowContractParam } from '../api/workflows'
 import type { AssistantSkill, SkillTargetType } from '../api/skills'
 import type { AssistantWorkflow } from '../api/workflows'
 import { isStructuredStartWorkflowFromNodes } from './workflow/startNodeConfig'
@@ -18,6 +20,7 @@ export interface AssistantExecutableTarget {
   isSystemDefault?: boolean
   referenceCount: number
   systemBehaviorReferenceCount?: number
+  openclawReferenceCount?: number
   referencedSystemBehaviorKeys?: string[]
   bindable: boolean
   disabledReason?: string
@@ -26,6 +29,52 @@ export interface AssistantExecutableTarget {
 interface BuildTargetOptions {
   defaultTargetType?: SkillTargetType | null
   defaultTargetId?: string | null
+  callableWorkflows?: CallableWorkflow[]
+  systemBehaviorContract?: SystemBehaviorContractSummary
+}
+
+function matchesContractField(
+  expected: SystemBehaviorContractField,
+  actual: Pick<WorkflowContractParam, 'paramType' | 'required' | 'itemsType'> | undefined,
+): boolean {
+  if (!actual) return false
+  if ((actual.paramType || '').trim().toLowerCase() !== expected.type) return false
+  if (expected.required && !actual.required) return false
+  if (expected.type === 'array') {
+    return (actual.itemsType || '').trim().toLowerCase() === String(expected.itemsType || '').trim().toLowerCase()
+  }
+  return true
+}
+
+function matchesOutputField(
+  expected: SystemBehaviorContractField,
+  actual: Pick<WorkflowContractParam, 'paramType' | 'itemsType'> | undefined,
+): boolean {
+  if (!actual) return false
+  if ((actual.paramType || '').trim().toLowerCase() !== expected.type) return false
+  if (expected.type === 'array') {
+    return (actual.itemsType || '').trim().toLowerCase() === String(expected.itemsType || '').trim().toLowerCase()
+  }
+  return true
+}
+
+function matchesSystemBehaviorContract(
+  callableWorkflow: CallableWorkflow | undefined,
+  contract: SystemBehaviorContractSummary | undefined,
+): boolean {
+  if (!contract) return true
+  if (!callableWorkflow) return false
+  if (callableWorkflow.inputMode !== 'structured' || callableWorkflow.outputMode !== 'structured') {
+    return false
+  }
+
+  const inputParams = new Map(callableWorkflow.inputParams.map((param) => [param.name, param]))
+  const outputParams = new Map(callableWorkflow.outputParams.map((param) => [param.name, param]))
+
+  return (
+    contract.inputFields.every((field) => matchesContractField(field, inputParams.get(field.name)))
+    && contract.outputFields.every((field) => matchesOutputField(field, outputParams.get(field.name)))
+  )
 }
 
 function inferSystemDefaultTarget(
@@ -68,6 +117,7 @@ export function buildAssistantExecutableTargets(
     isSystem: workflow.isSystem,
     referenceCount: workflow.referenceCount,
     systemBehaviorReferenceCount: workflow.systemBehaviorReferenceCount,
+    openclawReferenceCount: workflow.openclawReferenceCount,
     referencedSystemBehaviorKeys: workflow.referencedSystemBehaviorKeys,
   }))
 
@@ -81,6 +131,7 @@ export function buildAssistantExecutableTargets(
     isSystem: agent.isSystem,
     referenceCount: agent.referenceCount,
     systemBehaviorReferenceCount: agent.systemBehaviorReferenceCount,
+    openclawReferenceCount: agent.openclawReferenceCount,
     referencedSystemBehaviorKeys: agent.referencedSystemBehaviorKeys,
     bindable: true,
   }))
@@ -106,19 +157,21 @@ export function buildSystemBehaviorBindingTargets(
   agents: AssistantAgentProfile[],
   options?: BuildTargetOptions,
 ): AssistantExecutableTarget[] {
+  const callableWorkflowById = new Map((options?.callableWorkflows ?? []).map((workflow) => [workflow.id, workflow]))
   const workflowTargets: AssistantExecutableTarget[] = workflows.map((workflow) => {
-    const isStructured = isStructuredStartWorkflowFromNodes(
-      (workflow.nodes ?? []).map((node) => ({
-        nodeType: node.nodeType,
-        config: node.config,
-      })),
-    )
-    const hasPublishedVersion = Boolean(workflow.publishedVersionId)
+    const callableWorkflow = callableWorkflowById.get(workflow.id)
+    const hasPublishedVersion = Boolean(workflow.publishedVersionId && callableWorkflow?.publishedVersionId)
     const isEnabled = Boolean(workflow.enabled)
+    const isPublishedStructured = callableWorkflow?.inputMode === 'structured'
+    const satisfiesContract = matchesSystemBehaviorContract(
+      callableWorkflow,
+      options?.systemBehaviorContract,
+    )
     let disabledReason: string | undefined
-    if (!isStructured) disabledReason = 'unstructured_workflow'
     if (!hasPublishedVersion) disabledReason = 'unpublished_target'
-    if (!isEnabled) disabledReason = 'unavailable_target'
+    else if (!isPublishedStructured) disabledReason = 'unstructured_workflow'
+    else if (!satisfiesContract) disabledReason = 'contract_mismatch'
+    else if (!isEnabled) disabledReason = 'unavailable_target'
     return {
       key: `workflow:${workflow.id}`,
       id: workflow.id,
@@ -130,8 +183,9 @@ export function buildSystemBehaviorBindingTargets(
       isSystemDefault: false,
       referenceCount: workflow.referenceCount,
       systemBehaviorReferenceCount: workflow.systemBehaviorReferenceCount,
+      openclawReferenceCount: workflow.openclawReferenceCount,
       referencedSystemBehaviorKeys: workflow.referencedSystemBehaviorKeys,
-      bindable: isStructured && hasPublishedVersion && isEnabled,
+      bindable: hasPublishedVersion && isPublishedStructured && satisfiesContract && isEnabled,
       disabledReason,
     }
   })
@@ -139,9 +193,12 @@ export function buildSystemBehaviorBindingTargets(
   const agentTargets: AssistantExecutableTarget[] = agents.map((agent) => {
     const hasPublishedVersion = Boolean(agent.publishedVersionId)
     const isEnabled = Boolean(agent.enabled)
+    // Agents do not currently publish a machine-checkable system-behavior I/O contract.
+    const supportsSystemBehaviorContract = false
     let disabledReason: string | undefined
     if (!hasPublishedVersion) disabledReason = 'unpublished_target'
-    if (!isEnabled) disabledReason = 'unavailable_target'
+    else if (!isEnabled) disabledReason = 'unavailable_target'
+    else if (!supportsSystemBehaviorContract) disabledReason = 'agent_contract_unsupported'
     return {
       key: `agent:${agent.id}`,
       id: agent.id,
@@ -153,8 +210,9 @@ export function buildSystemBehaviorBindingTargets(
       isSystemDefault: false,
       referenceCount: agent.referenceCount,
       systemBehaviorReferenceCount: agent.systemBehaviorReferenceCount,
+      openclawReferenceCount: agent.openclawReferenceCount,
       referencedSystemBehaviorKeys: agent.referencedSystemBehaviorKeys,
-      bindable: hasPublishedVersion && isEnabled,
+      bindable: hasPublishedVersion && supportsSystemBehaviorContract && isEnabled,
       disabledReason,
     }
   })

@@ -352,14 +352,15 @@ class AssistantService:
         yield from self.stream_run(conversation.id, run_id=run.id, after_seq=0)
 
     def stream_run(self, conversation_id: UUID, *, run_id: UUID, after_seq: int = 0) -> Iterator[bytes]:
-        run_svc = AssistantChatRunService(self.db)
-        run = run_svc.get_run(conversation_id=conversation_id, run_id=run_id)
-        if run is None:
-            raise ApiException(status_code=404, code=40400, message=f"Run not found: {run_id}")
-
+        bind = self.db.bind or self.db.get_bind()
+        read_session_factory = sessionmaker(bind=bind, future=True)
+        with read_session_factory() as read_db:
+            run = AssistantChatRunService(read_db).get_run(conversation_id=conversation_id, run_id=run_id)
+            if run is None:
+                raise ApiException(status_code=404, code=40400, message=f"Run not found: {run_id}")
         run_key = str(run_id)
         last_seq = max(0, int(after_seq or 0))
-        read_session_factory = sessionmaker(bind=self.db.get_bind(), future=True)
+        terminal_poll_confirmed = False
         self._mark_run_stream_attached(run_key)
         try:
             while True:
@@ -380,7 +381,13 @@ class AssistantService:
                 status = str(current.status or "")
                 if status in {RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED}:
                     if last_seq >= int(current.last_event_seq or 0):
-                        break
+                        if terminal_poll_confirmed:
+                            break
+                        terminal_poll_confirmed = True
+                    else:
+                        terminal_poll_confirmed = False
+                else:
+                    terminal_poll_confirmed = False
                 time.sleep(_RUN_EVENT_POLL_SEC)
         except GeneratorExit:
             logger.info("assistant run stream disconnected conversation_id=%s run_id=%s", conversation_id, run_id)

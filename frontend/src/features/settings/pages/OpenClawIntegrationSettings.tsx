@@ -649,6 +649,8 @@ export function OpenClawIntegrationSettingsPage() {
     mutationFn: createOpenClawCatalogItem,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: settingsQueryKey })
+      void queryClient.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      void queryClient.invalidateQueries({ queryKey: ['assistant-agents'] })
     },
   })
 
@@ -657,6 +659,8 @@ export function OpenClawIntegrationSettingsPage() {
       updateOpenClawCatalogItem(itemId, payload),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: settingsQueryKey })
+      void queryClient.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      void queryClient.invalidateQueries({ queryKey: ['assistant-agents'] })
     },
   })
 
@@ -664,6 +668,8 @@ export function OpenClawIntegrationSettingsPage() {
     mutationFn: deleteOpenClawCatalogItem,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: settingsQueryKey })
+      void queryClient.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      void queryClient.invalidateQueries({ queryKey: ['assistant-agents'] })
     },
   })
 
@@ -671,6 +677,8 @@ export function OpenClawIntegrationSettingsPage() {
     mutationFn: resetOpenClawSystemItems,
     onSuccess: (data) => {
       queryClient.setQueryData(localizedSettingsQueryKey, data)
+      void queryClient.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      void queryClient.invalidateQueries({ queryKey: ['assistant-agents'] })
     },
   })
 

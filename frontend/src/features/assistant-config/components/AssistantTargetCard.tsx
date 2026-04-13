@@ -112,6 +112,12 @@ export const AssistantTargetCard = memo(function AssistantTargetCard({
                                     <span>{t('settings.systemBehaviors.referenceCount', { count: target.systemBehaviorReferenceCount })}</span>
                                   </div>
                                 )}
+                                {(target.openclawReferenceCount ?? 0) > 0 && (
+                                  <div className="flex items-center gap-1">
+                                    <Hash className="h-3.5 w-3.5" />
+                                    <span>{t('openclawIntegration.referenceCount', { count: target.openclawReferenceCount })}</span>
+                                  </div>
+                                )}
                                 {workflow?.updatedAt && (
                                     <div className="flex items-center gap-1">
                                         <Clock className="h-3.5 w-3.5" />

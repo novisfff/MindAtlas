@@ -626,6 +626,7 @@
     }
   },
   "openclawIntegration": {
+    "referenceCount": "Referenced by {{count}} OpenClaw capabilities",
     "overview": {
       "title": "Connect MindAtlas to OpenClaw",
       "description": "Turn on the integration here, finish the setup steps once, then verify everything from a fresh OpenClaw session.",
@@ -1852,8 +1853,10 @@
       "bindingSettings": "Binding Settings",
       "bindingSettingsDesc": "Choose which workflow or agent this system AI behavior should execute.",
       "targetPickerTitle": "Choose A Target",
-      "targetPickerHint": "The system-default alias is shown first, followed by bindable workflows, bindable agents, and unavailable targets.",
+      "targetPickerHint": "The system-default alias is shown first, followed by bindable workflows. Agents stay unavailable here until they expose an explicit input/output contract, and unavailable workflows stay collapsed at the bottom by default.",
       "targetReady": "Satisfies the current system behavior contract and can be bound directly",
+      "showUnavailableWorkflows": "Show unavailable workflows ({{count}})",
+      "hideUnavailableWorkflows": "Hide unavailable workflows",
       "defaultAliasSource": "Default alias source",
       "createExampleWorkflow": "Create Example Workflow",
       "createExampleWorkflowHint": "You can also generate a workflow example that already matches this contract, then decide whether to bind it right away.",
@@ -1877,8 +1880,19 @@
       "confirmRebindDelete": "Rebind And Delete",
       "disabledReasons": {
         "unstructuredWorkflow": "Does not satisfy the system behavior contract",
+        "contractMismatch": "Published version does not satisfy the system behavior contract",
+        "agentContractUnsupported": "Agent does not expose an explicit published input/output contract for system behaviors",
         "unpublishedTarget": "Published version required",
         "unavailableTarget": "Target unavailable"
+      },
+      "fieldTypes": {
+        "string": "String",
+        "number": "Number",
+        "integer": "Integer",
+        "boolean": "Boolean",
+        "object": "Object",
+        "array": "Array",
+        "arrayOf": "{{type}}[]"
       },
       "behaviors": {
         "weeklyReportGeneration": {

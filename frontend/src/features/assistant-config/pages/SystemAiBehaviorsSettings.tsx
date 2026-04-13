@@ -17,10 +17,12 @@ import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { uiChrome } from '@/components/ui/styles'
+import { isApiError } from '@/lib/api/client'
 import { cn } from '@/lib/utils'
 import type { SystemBehavior } from '../api/system-behaviors'
 import {
   useAgentProfilesQuery,
+  useCallableWorkflowsQuery,
   useCreateSystemBehaviorExampleWorkflowMutation,
   useResetAllSystemBehaviorsMutation,
   useResetSystemBehaviorBindingMutation,
@@ -49,12 +51,19 @@ const BEHAVIOR_LOCALE_KEY: Record<SystemBehavior['behaviorKey'], string> = {
 }
 
 function formatFieldType(
+  t: (key: string, options?: Record<string, unknown>) => string,
   field: { type: string; itemsType?: string | null },
 ) {
   if (field.type === 'array') {
-    return `${field.itemsType ?? 'string'}[]`
+    return t('settings.systemBehaviors.fieldTypes.arrayOf', {
+      type: t(`settings.systemBehaviors.fieldTypes.${field.itemsType ?? 'string'}`, {
+        defaultValue: field.itemsType ?? 'string',
+      }),
+    })
   }
-  return field.type
+  return t(`settings.systemBehaviors.fieldTypes.${field.type}`, {
+    defaultValue: field.type,
+  })
 }
 
 function orderSystemBehaviorTargets(targets: AssistantExecutableTarget[]): AssistantExecutableTarget[] {
@@ -76,6 +85,7 @@ export function SystemAiBehaviorsSettings() {
   const navigate = useNavigate()
   const [expandedBehaviorKey, setExpandedBehaviorKey] = useState<SystemBehavior['behaviorKey'] | null>(null)
   const [pickerOpenBehaviorKey, setPickerOpenBehaviorKey] = useState<SystemBehavior['behaviorKey'] | null>(null)
+  const [showUnavailableWorkflowKeys, setShowUnavailableWorkflowKeys] = useState<SystemBehavior['behaviorKey'][]>([])
   const [showResetAllConfirm, setShowResetAllConfirm] = useState(false)
   const [resetBehaviorPrompt, setResetBehaviorPrompt] = useState<{
     behaviorKey: SystemBehavior['behaviorKey']
@@ -88,6 +98,7 @@ export function SystemAiBehaviorsSettings() {
     workflowName: string
   } | null>(null)
   const { data: workflows = [], isLoading: isLoadingWorkflows } = useWorkflowsQuery()
+  const { data: callableWorkflows = [], isLoading: isLoadingCallableWorkflows } = useCallableWorkflowsQuery()
   const { data: agents = [], isLoading: isLoadingAgents } = useAgentProfilesQuery()
   const { data: behaviors = [], isLoading: isLoadingBehaviors } = useSystemBehaviorsQuery()
   const updateBindingMutation = useUpdateSystemBehaviorBindingMutation()
@@ -104,12 +115,14 @@ export function SystemAiBehaviorsSettings() {
         {
           defaultTargetType: behavior.canonicalDefaultTarget.targetType,
           defaultTargetId: behavior.canonicalDefaultTarget.id,
+          callableWorkflows,
+          systemBehaviorContract: behavior.contract,
         },
       ),
     ]),
-  ), [agents, behaviors, workflows])
+  ), [agents, behaviors, callableWorkflows, workflows])
 
-  const loading = isLoadingBehaviors || isLoadingWorkflows || isLoadingAgents
+  const loading = isLoadingBehaviors || isLoadingWorkflows || isLoadingCallableWorkflows || isLoadingAgents
 
   const targetTypeLabel = (type: 'workflow' | 'agent') => (
     type === 'workflow'
@@ -121,10 +134,34 @@ export function SystemAiBehaviorsSettings() {
     if (target.disabledReason === 'unstructured_workflow') {
       return t('settings.systemBehaviors.disabledReasons.unstructuredWorkflow')
     }
+    if (target.disabledReason === 'contract_mismatch') {
+      return t('settings.systemBehaviors.disabledReasons.contractMismatch')
+    }
+    if (target.disabledReason === 'agent_contract_unsupported') {
+      return t('settings.systemBehaviors.disabledReasons.agentContractUnsupported')
+    }
     if (target.disabledReason === 'unpublished_target') {
       return t('settings.systemBehaviors.disabledReasons.unpublishedTarget')
     }
     return t('settings.systemBehaviors.disabledReasons.unavailableTarget')
+  }
+
+  const resolveBehaviorErrorMessage = (error: unknown) => {
+    if (isApiError(error)) {
+      if (error.code === 42248) return t('settings.systemBehaviors.disabledReasons.unstructuredWorkflow')
+      if (error.code === 42249 || error.code === 42250) {
+        return t('settings.systemBehaviors.disabledReasons.contractMismatch')
+      }
+      if (error.code === 42276) return t('settings.systemBehaviors.disabledReasons.agentContractUnsupported')
+      if (error.code === 40950 || error.code === 40952) {
+        return t('settings.systemBehaviors.disabledReasons.unpublishedTarget')
+      }
+      if (error.code === 40949 || error.code === 40951) {
+        return t('settings.systemBehaviors.disabledReasons.unavailableTarget')
+      }
+      return error.message
+    }
+    return error instanceof Error ? error.message : t('messages.error')
   }
 
   const openTarget = (targetType: 'workflow' | 'agent', id: string) => {
@@ -137,6 +174,14 @@ export function SystemAiBehaviorsSettings() {
 
   const toggleBehavior = (behaviorKey: SystemBehavior['behaviorKey']) => {
     setExpandedBehaviorKey((current) => current === behaviorKey ? null : behaviorKey)
+  }
+
+  const toggleUnavailableWorkflows = (behaviorKey: SystemBehavior['behaviorKey']) => {
+    setShowUnavailableWorkflowKeys((current) => (
+      current.includes(behaviorKey)
+        ? current.filter((item) => item !== behaviorKey)
+        : [...current, behaviorKey]
+    ))
   }
 
   const dismissCreatedExamplePrompt = () => {
@@ -181,8 +226,7 @@ export function SystemAiBehaviorsSettings() {
       setPickerOpenBehaviorKey(null)
       toast.success(t('settings.systemBehaviors.bindingUpdated'))
     } catch (error) {
-      const message = error instanceof Error ? error.message : t('messages.error')
-      toast.error(message)
+      toast.error(resolveBehaviorErrorMessage(error))
     }
   }
 
@@ -192,8 +236,7 @@ export function SystemAiBehaviorsSettings() {
       setResetBehaviorPrompt(null)
       toast.success(t('settings.systemBehaviors.resetSuccess'))
     } catch (error) {
-      const message = error instanceof Error ? error.message : t('messages.error')
-      toast.error(message)
+      toast.error(resolveBehaviorErrorMessage(error))
     }
   }
 
@@ -203,8 +246,7 @@ export function SystemAiBehaviorsSettings() {
       setShowResetAllConfirm(false)
       toast.success(t('settings.systemBehaviors.resetAllSuccess'))
     } catch (error) {
-      const message = error instanceof Error ? error.message : t('settings.systemBehaviors.resetAllError')
-      toast.error(message)
+      toast.error(resolveBehaviorErrorMessage(error) || t('settings.systemBehaviors.resetAllError'))
     }
   }
 
@@ -227,8 +269,7 @@ export function SystemAiBehaviorsSettings() {
         workflowName: payload.createdWorkflow.name,
       })
     } catch (error) {
-      const message = error instanceof Error ? error.message : t('messages.error')
-      toast.error(message)
+      toast.error(resolveBehaviorErrorMessage(error))
     }
   }
 
@@ -247,8 +288,7 @@ export function SystemAiBehaviorsSettings() {
       setCreatedExamplePrompt(null)
       toast.success(t('settings.systemBehaviors.exampleWorkflowCreatedAndBound'))
     } catch (error) {
-      const message = error instanceof Error ? error.message : t('messages.error')
-      toast.error(message)
+      toast.error(resolveBehaviorErrorMessage(error))
     }
   }
 
@@ -305,6 +345,20 @@ export function SystemAiBehaviorsSettings() {
             const isExpanded = expandedBehaviorKey === behavior.behaviorKey
             const resetDisabled = isMutating || behavior.currentBinding.isCanonicalDefault
             const pickerOpen = pickerOpenBehaviorKey === behavior.behaviorKey
+            const showUnavailableWorkflows = showUnavailableWorkflowKeys.includes(behavior.behaviorKey)
+            const hiddenUnavailableWorkflowTargets = orderedTargets.filter((target) => (
+              target.type === 'workflow'
+              && target.key !== SYSTEM_DEFAULT_TARGET_KEY
+              && !target.bindable
+              && target.key !== currentTargetKey
+            ))
+            const visibleTargets = orderedTargets.filter((target) => (
+              showUnavailableWorkflows
+              || target.key === SYSTEM_DEFAULT_TARGET_KEY
+              || target.bindable
+              || target.type !== 'workflow'
+              || target.key === currentTargetKey
+            ))
 
             return (
               <section
@@ -495,7 +549,7 @@ export function SystemAiBehaviorsSettings() {
                                   </p>
                                 </div>
                                 <div className="mt-2 max-h-[400px] space-y-1 overflow-y-auto pr-1">
-                                  {orderedTargets.map((target) => {
+                                  {visibleTargets.map((target) => {
                                     const isSelected = target.key === currentTargetKey
                                     const Icon = target.type === 'workflow' ? Workflow : Bot
                                     return (
@@ -553,6 +607,24 @@ export function SystemAiBehaviorsSettings() {
                                       </button>
                                     )
                                   })}
+
+                                  {hiddenUnavailableWorkflowTargets.length > 0 && (
+                                    <div className="border-t border-border/70 px-2 pb-2 pt-3">
+                                      <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={() => toggleUnavailableWorkflows(behavior.behaviorKey)}
+                                        className="h-auto w-full justify-center px-3 py-2 text-[12px] font-medium text-muted-foreground"
+                                      >
+                                        {showUnavailableWorkflows
+                                          ? t('settings.systemBehaviors.hideUnavailableWorkflows')
+                                          : t('settings.systemBehaviors.showUnavailableWorkflows', {
+                                              count: hiddenUnavailableWorkflowTargets.length,
+                                            })}
+                                      </Button>
+                                    </div>
+                                  )}
                                 </div>
                               </PopoverContent>
                             </Popover>
@@ -613,9 +685,9 @@ export function SystemAiBehaviorsSettings() {
                                   key={field.name}
                                   className="rounded-[12px] border-border/70 bg-background/92 px-2.5 py-1 text-[12px] font-medium text-foreground"
                                 >
-                                  {field.name}
+                                    {field.name}
                                   <span className="ml-1.5 text-[11px] text-muted-foreground/70 font-mono scale-90">
-                                    {formatFieldType(field)}
+                                    {formatFieldType(t, field)}
                                   </span>
                                 </SettingsBadge>
                               ))}
@@ -633,9 +705,9 @@ export function SystemAiBehaviorsSettings() {
                                   key={field.name}
                                   className="rounded-[12px] border-border/70 bg-background/92 px-2.5 py-1 text-[12px] font-medium text-foreground"
                                 >
-                                  {field.name}
+                                    {field.name}
                                   <span className="ml-1.5 text-[11px] text-muted-foreground/70 font-mono scale-90">
-                                    {formatFieldType(field)}
+                                    {formatFieldType(t, field)}
                                   </span>
                                 </SettingsBadge>
                               ))}

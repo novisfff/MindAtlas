@@ -15,6 +15,15 @@ function upsertById<T extends { id: string }>(items: T[] | undefined, item: T): 
   return nextItems
 }
 
+function upsertByBehaviorKey<T extends { behaviorKey: string }>(items: T[] | undefined, item: T): T[] {
+  if (!items || items.length === 0) return [item]
+  const existingIndex = items.findIndex((entry) => entry.behaviorKey === item.behaviorKey)
+  if (existingIndex === -1) return [...items, item]
+  const nextItems = [...items]
+  nextItems[existingIndex] = item
+  return nextItems
+}
+
 function syncWorkflowCaches(qc: QueryClient, workflow: workflowsApi.AssistantWorkflow) {
   qc.setQueryData<workflowsApi.AssistantWorkflow[]>(
     ['assistant-workflows'],
@@ -155,6 +164,12 @@ export const useWorkflowsQuery = () =>
     queryFn: workflowsApi.getWorkflows,
   })
 
+export const useCallableWorkflowsQuery = () =>
+  useQuery({
+    queryKey: ['assistant-callable-workflows'],
+    queryFn: workflowsApi.getCallableWorkflows,
+  })
+
 export const useCreateWorkflowMutation = () => {
   const qc = useQueryClient()
   return useMutation({
@@ -162,6 +177,7 @@ export const useCreateWorkflowMutation = () => {
     onSuccess: (created) => {
       syncWorkflowCaches(qc, created)
       qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-callable-workflows'] })
     },
   })
 }
@@ -173,6 +189,7 @@ export const useUpdateWorkflowMutation = () => {
       workflowsApi.updateWorkflowEntity(id, data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-callable-workflows'] })
       qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
     },
   })
@@ -190,6 +207,7 @@ export const useDeleteWorkflowMutation = () => {
         }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-callable-workflows'] })
       qc.invalidateQueries({ queryKey: ['assistant-skills'] })
       qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
     },
@@ -203,6 +221,7 @@ export const useCopyWorkflowMutation = () => {
     onSuccess: (copied) => {
       syncWorkflowCaches(qc, copied)
       qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-callable-workflows'] })
       qc.invalidateQueries({ queryKey: ['assistant-skills'] })
       qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
     },
@@ -290,10 +309,16 @@ export const useUpdateSystemBehaviorBindingMutation = () => {
       behaviorKey: string
       data: systemBehaviorsApi.UpdateSystemBehaviorBindingRequest
     }) => systemBehaviorsApi.updateSystemBehaviorBinding(behaviorKey, data),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
-      qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
-      qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+    onSuccess: async (updated) => {
+      qc.setQueryData<systemBehaviorsApi.SystemBehavior[]>(
+        ['assistant-system-behaviors'],
+        (current) => upsertByBehaviorKey(current, updated),
+      )
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] }),
+        qc.invalidateQueries({ queryKey: ['assistant-workflows'] }),
+        qc.invalidateQueries({ queryKey: ['assistant-agents'] }),
+      ])
     },
   })
 }
@@ -302,10 +327,16 @@ export const useResetSystemBehaviorBindingMutation = () => {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: systemBehaviorsApi.resetSystemBehaviorBinding,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
-      qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
-      qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+    onSuccess: async (updated) => {
+      qc.setQueryData<systemBehaviorsApi.SystemBehavior[]>(
+        ['assistant-system-behaviors'],
+        (current) => upsertByBehaviorKey(current, updated),
+      )
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] }),
+        qc.invalidateQueries({ queryKey: ['assistant-workflows'] }),
+        qc.invalidateQueries({ queryKey: ['assistant-agents'] }),
+      ])
     },
   })
 }
@@ -314,10 +345,12 @@ export const useResetAllSystemBehaviorsMutation = () => {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: systemBehaviorsApi.resetAllSystemBehaviors,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
-      qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
-      qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] }),
+        qc.invalidateQueries({ queryKey: ['assistant-workflows'] }),
+        qc.invalidateQueries({ queryKey: ['assistant-agents'] }),
+      ])
     },
   })
 }
@@ -332,10 +365,18 @@ export const useCreateSystemBehaviorExampleWorkflowMutation = () => {
       behaviorKey: string
       data?: systemBehaviorsApi.CreateSystemBehaviorExampleWorkflowRequest
     }) => systemBehaviorsApi.createSystemBehaviorExampleWorkflow(behaviorKey, data),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
-      qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
-      qc.invalidateQueries({ queryKey: ['assistant-workflow'] })
+    onSuccess: async (payload) => {
+      qc.setQueryData<systemBehaviorsApi.SystemBehavior[]>(
+        ['assistant-system-behaviors'],
+        (current) => upsertByBehaviorKey(current, payload.systemBehavior),
+      )
+      syncWorkflowCaches(qc, payload.createdWorkflow)
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] }),
+        qc.invalidateQueries({ queryKey: ['assistant-workflows'] }),
+        qc.invalidateQueries({ queryKey: ['assistant-callable-workflows'] }),
+        qc.invalidateQueries({ queryKey: ['assistant-workflow'] }),
+      ])
     },
   })
 }

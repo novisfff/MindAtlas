@@ -62,7 +62,6 @@ from app.assistant_config.workflow_contracts import (
     schema_summary,
     workflow_contract_from_input,
 )
-from app.assistant_config.system_behavior_defaults_loader import get_system_behavior_default_workflow
 from app.assistant_config.system_behavior_registry import (
     SystemBehaviorDefinition,
     SystemBehaviorFieldDefinition,
@@ -72,10 +71,14 @@ from app.assistant_config.system_behavior_registry import (
 from app.assistant_config.standalone_system_target_registry import (
     StandaloneSystemWorkflowDefinition,
     get_standalone_system_workflow_definition,
-    get_standalone_system_workflow_definition_by_canonical_name,
     list_standalone_system_workflow_definitions,
 )
-from app.assistant.skill_catalog.defaults_loader import load_system_workflow_preset_file
+from app.assistant.workflow.system_assets import (
+    get_system_asset_by_canonical_name,
+    get_system_skill_asset,
+    load_system_agent_asset,
+    load_system_workflow_asset,
+)
 from app.common.exceptions import ApiException
 from app.system_settings.service import resolve_system_locale
 
@@ -105,12 +108,6 @@ _SYSTEM_BEHAVIOR_EXAMPLE_WORKFLOW_METADATA: dict[str, dict[str, dict[str, str]]]
             "description": "Monthly report example workflow.",
         },
     },
-}
-_SYSTEM_SKILL_DISPLAY_NAMES: dict[str, dict[str, str]] = {
-    "quick_stats": {"zh": "快速统计工作流", "en": "Quick Stats Workflow"},
-    "smart_capture": {"zh": "智能创建记录工作流", "en": "Smart Capture Workflow"},
-    "periodic_review": {"zh": "周期性回顾工作流", "en": "Periodic Review Workflow"},
-    DEFAULT_SKILL_NAME: {"zh": "默认对话智能体", "en": "General Chat Agent"},
 }
 
 
@@ -674,8 +671,6 @@ class AssistantConfigService:
         if not workflow.is_system:
             return None
 
-        from app.assistant.skill_catalog.defaults_loader import get_system_workflow_baseline
-
         locale = self._current_locale()
         for linked_skill in (workflow.skills or []):
             if not bool(getattr(linked_skill, "is_system", False)):
@@ -683,32 +678,24 @@ class AssistantConfigService:
             name = str(getattr(linked_skill, "name", "") or "").strip()
             if not name:
                 continue
-            baseline = get_system_workflow_baseline(name, locale=locale)
-            if baseline is not None:
-                return baseline
+            asset = get_system_skill_asset(name, locale=locale)
+            if asset is not None and asset.kind == "workflow":
+                return load_system_workflow_asset(asset.asset_key, locale=locale)
 
         workflow_name = str(workflow.name or "").strip()
         if workflow_name:
-            for definition in list_system_behavior_definitions(locale=locale):
-                if definition.default_target.target_type != "workflow":
-                    continue
-                if definition.default_target.canonical_name != workflow_name:
-                    continue
-                return get_system_behavior_default_workflow(definition, locale=locale)
-
-            standalone_definition = get_standalone_system_workflow_definition_by_canonical_name(
+            asset = get_system_asset_by_canonical_name(
                 workflow_name,
+                kind="workflow",
                 locale=locale,
             )
-            if standalone_definition is not None:
-                return load_system_workflow_preset_file(standalone_definition.preset_file)
+            if asset is not None:
+                return load_system_workflow_asset(asset.asset_key, locale=locale)
         return None
 
     def _resolve_system_agent_baseline_draft(self, agent_profile: AssistantAgentProfile) -> AgentPublishDraftInput | None:
         if not agent_profile.is_system:
             return None
-
-        from app.assistant.skill_catalog.defaults_loader import get_system_agent_baseline
 
         locale = self._current_locale()
         for linked_skill in (agent_profile.skills or []):
@@ -717,9 +704,18 @@ class AssistantConfigService:
             name = str(getattr(linked_skill, "name", "") or "").strip()
             if not name:
                 continue
-            baseline = get_system_agent_baseline(name, locale=locale)
-            if baseline is not None:
-                return baseline
+            asset = get_system_skill_asset(name, locale=locale)
+            if asset is not None and asset.kind == "agent":
+                return load_system_agent_asset(asset.asset_key, locale=locale)
+        raw_name = str(agent_profile.name or "").strip()
+        if raw_name:
+            asset = get_system_asset_by_canonical_name(
+                raw_name,
+                kind="agent",
+                locale=locale,
+            )
+            if asset is not None:
+                return load_system_agent_asset(asset.asset_key, locale=locale)
         return None
 
     def _get_workflow_system_baseline_version_id(self, workflow_id: UUID) -> UUID | None:
@@ -1001,6 +997,7 @@ class AssistantConfigService:
         referenced_system_behavior_keys = self._binding_keys_from_relationship(
             getattr(workflow, "system_behavior_bindings", None)
         )
+        openclaw_reference_count = self._workflow_openclaw_reference_count(workflow)
         draft_workflow = self._get_workflow_draft_input(workflow)
         ts = workflow.updated_at or workflow.created_at or self._utcnow()
         return {
@@ -1027,6 +1024,7 @@ class AssistantConfigService:
             "reference_count": len(referenced_skill_ids),
             "referenced_system_behavior_keys": referenced_system_behavior_keys,
             "system_behavior_reference_count": len(referenced_system_behavior_keys),
+            "openclaw_reference_count": openclaw_reference_count,
             "created_at": workflow.created_at,
             "updated_at": workflow.updated_at,
         }
@@ -1042,6 +1040,7 @@ class AssistantConfigService:
         referenced_system_behavior_keys = self._binding_keys_from_relationship(
             getattr(agent_profile, "system_behavior_bindings", None)
         )
+        openclaw_reference_count = self._agent_openclaw_reference_count(agent_profile)
         draft = self._get_agent_profile_draft(agent_profile)
         normalized_kb = dict(draft.kb_config or {})
         normalized_kb["model_source"] = draft.model_source
@@ -1064,6 +1063,7 @@ class AssistantConfigService:
             "reference_count": len(referenced_skill_ids),
             "referenced_system_behavior_keys": referenced_system_behavior_keys,
             "system_behavior_reference_count": len(referenced_system_behavior_keys),
+            "openclaw_reference_count": openclaw_reference_count,
             "created_at": agent_profile.created_at,
             "updated_at": agent_profile.updated_at,
         }
@@ -1101,29 +1101,111 @@ class AssistantConfigService:
             }
         )
 
+    def _load_openclaw_reference_counts(
+        self,
+        *,
+        workflow_ids: list[UUID] | tuple[UUID, ...] = (),
+        agent_profile_ids: list[UUID] | tuple[UUID, ...] = (),
+    ) -> tuple[dict[UUID, int], dict[UUID, int]]:
+        from app.openclaw_integration.models import OpenClawCapabilityItem
+
+        workflow_counts: dict[UUID, int] = {}
+        normalized_workflow_ids = tuple(dict.fromkeys(workflow_ids))
+        if normalized_workflow_ids:
+            workflow_rows = (
+                self.db.query(
+                    OpenClawCapabilityItem.workflow_id,
+                    func.count(OpenClawCapabilityItem.id),
+                )
+                .filter(OpenClawCapabilityItem.workflow_id.in_(normalized_workflow_ids))
+                .group_by(OpenClawCapabilityItem.workflow_id)
+                .all()
+            )
+            workflow_counts = {
+                workflow_id: int(count)
+                for workflow_id, count in workflow_rows
+                if workflow_id is not None
+            }
+
+        agent_counts: dict[UUID, int] = {}
+        normalized_agent_ids = tuple(dict.fromkeys(agent_profile_ids))
+        if normalized_agent_ids:
+            agent_rows = (
+                self.db.query(
+                    OpenClawCapabilityItem.agent_profile_id,
+                    func.count(OpenClawCapabilityItem.id),
+                )
+                .filter(OpenClawCapabilityItem.agent_profile_id.in_(normalized_agent_ids))
+                .group_by(OpenClawCapabilityItem.agent_profile_id)
+                .all()
+            )
+            agent_counts = {
+                agent_profile_id: int(count)
+                for agent_profile_id, count in agent_rows
+                if agent_profile_id is not None
+            }
+
+        return workflow_counts, agent_counts
+
+    def _attach_openclaw_reference_counts(
+        self,
+        *,
+        workflows: list[AssistantWorkflow] | tuple[AssistantWorkflow, ...] = (),
+        agent_profiles: list[AssistantAgentProfile] | tuple[AssistantAgentProfile, ...] = (),
+    ) -> None:
+        workflow_list = [item for item in workflows if getattr(item, "id", None) is not None]
+        agent_list = [item for item in agent_profiles if getattr(item, "id", None) is not None]
+        if not workflow_list and not agent_list:
+            return
+
+        workflow_counts, agent_counts = self._load_openclaw_reference_counts(
+            workflow_ids=[item.id for item in workflow_list],
+            agent_profile_ids=[item.id for item in agent_list],
+        )
+        for workflow in workflow_list:
+            setattr(workflow, "_openclaw_reference_count", workflow_counts.get(workflow.id, 0))
+        for agent_profile in agent_list:
+            setattr(agent_profile, "_openclaw_reference_count", agent_counts.get(agent_profile.id, 0))
+
+    def _workflow_openclaw_reference_count(self, workflow: AssistantWorkflow) -> int:
+        cached = getattr(workflow, "_openclaw_reference_count", None)
+        if isinstance(cached, int):
+            return cached
+        workflow_counts, _ = self._load_openclaw_reference_counts(workflow_ids=[workflow.id])
+        count = workflow_counts.get(workflow.id, 0)
+        setattr(workflow, "_openclaw_reference_count", count)
+        return count
+
+    def _agent_openclaw_reference_count(self, agent_profile: AssistantAgentProfile) -> int:
+        cached = getattr(agent_profile, "_openclaw_reference_count", None)
+        if isinstance(cached, int):
+            return cached
+        _, agent_counts = self._load_openclaw_reference_counts(agent_profile_ids=[agent_profile.id])
+        count = agent_counts.get(agent_profile.id, 0)
+        setattr(agent_profile, "_openclaw_reference_count", count)
+        return count
+
     def _display_workflow_name(self, workflow: AssistantWorkflow, *, locale: str | None = None) -> str:
         raw_name = str(workflow.name or "").strip()
         if not raw_name or not bool(workflow.is_system):
             return raw_name
         normalized_locale = self._current_locale(locale)
-        for definition in list_system_behavior_definitions(locale=normalized_locale):
-            if definition.default_target.target_type != "workflow":
-                continue
-            if definition.default_target.canonical_name == raw_name:
-                return f"{definition.name}工作流" if normalized_locale == "zh" else f"{definition.name} Workflow"
-        standalone_definition = get_standalone_system_workflow_definition_by_canonical_name(
+        asset = get_system_asset_by_canonical_name(
             raw_name,
+            kind="workflow",
             locale=normalized_locale,
         )
-        if standalone_definition is not None and standalone_definition.canonical_name == raw_name:
-            return standalone_definition.display_name
+        if asset is not None:
+            return asset.display_name
         for linked_skill in (workflow.skills or []):
             if not bool(getattr(linked_skill, "is_system", False)):
                 continue
-            display = _SYSTEM_SKILL_DISPLAY_NAMES.get(str(getattr(linked_skill, "name", "") or "").strip(), {})
-            localized = str(display.get(normalized_locale) or "").strip()
-            if localized:
-                return localized
+            asset = get_system_skill_asset(
+                str(getattr(linked_skill, "name", "") or "").strip(),
+                locale=normalized_locale,
+            )
+            if asset is not None and asset.kind == "workflow":
+                return asset.display_name
         return raw_name
 
     def _display_agent_profile_name(
@@ -1136,13 +1218,22 @@ class AssistantConfigService:
         if not raw_name or not bool(agent_profile.is_system):
             return raw_name
         normalized_locale = self._current_locale(locale)
+        asset = get_system_asset_by_canonical_name(
+            raw_name,
+            kind="agent",
+            locale=normalized_locale,
+        )
+        if asset is not None:
+            return asset.display_name
         for linked_skill in (agent_profile.skills or []):
             if not bool(getattr(linked_skill, "is_system", False)):
                 continue
-            display = _SYSTEM_SKILL_DISPLAY_NAMES.get(str(getattr(linked_skill, "name", "") or "").strip(), {})
-            localized = str(display.get(normalized_locale) or "").strip()
-            if localized:
-                return localized
+            asset = get_system_skill_asset(
+                str(getattr(linked_skill, "name", "") or "").strip(),
+                locale=normalized_locale,
+            )
+            if asset is not None and asset.kind == "agent":
+                return asset.display_name
         return raw_name
 
     def _audit_system_target_origins(self) -> dict[str, list[dict[str, Any]]]:
@@ -2025,21 +2116,13 @@ class AssistantConfigService:
                 message=f"Agent target has no published version: {agent_profile.name}",
             )
 
-        normalized_kb = self._normalize_agent_kb_config(
-            kb_config=published_draft.kb_config,
-            model_source=published_draft.model_source,
-            model_id=published_draft.model_id,
-            existing_kb_config=published_draft.kb_config if isinstance(published_draft.kb_config, dict) else {"enabled": False},
-        )
-        self._validate_agent_tool_names(published_draft.tools)
-        return AgentPublishDraftInput.model_validate(
-            {
-                "system_prompt": published_draft.system_prompt,
-                "tools": published_draft.tools,
-                "kb_config": normalized_kb,
-                "model_source": published_draft.model_source,
-                "model_id": published_draft.model_id,
-            }
+        raise ApiException(
+            status_code=422,
+            code=42276,
+            message=(
+                "Agent target does not expose an explicit published input/output contract "
+                f"for system behavior binding: {agent_profile.name}"
+            ),
         )
 
     def _ensure_system_behavior_default_workflow(
@@ -2086,7 +2169,14 @@ class AssistantConfigService:
             self.db.flush()
             changed = True
 
-        workflow_input = get_system_behavior_default_workflow(definition, locale=locale)
+        asset_key = str(definition.default_target.default_target_asset_key or "").strip()
+        if not asset_key:
+            raise ApiException(
+                status_code=500,
+                code=50036,
+                message=f"System behavior '{definition.key}' is missing its default workflow asset key",
+            )
+        workflow_input = load_system_workflow_asset(asset_key, locale=locale)
         changed = self._ensure_system_workflow_baseline_state(
             workflow=workflow,
             workflow_input=workflow_input,
@@ -2114,6 +2204,7 @@ class AssistantConfigService:
         self,
         definition: StandaloneSystemWorkflowDefinition,
     ) -> tuple[AssistantWorkflow, bool]:
+        locale = self._current_locale()
         expected_name = definition.canonical_name
         changed = False
         workflow = (
@@ -2207,7 +2298,7 @@ class AssistantConfigService:
             workflow.name = expected_name
             changed = True
 
-        workflow_input = load_system_workflow_preset_file(definition.preset_file)
+        workflow_input = load_system_workflow_asset(definition.asset_key, locale=locale)
         changed = self._ensure_system_workflow_baseline_state(
             workflow=workflow,
             workflow_input=workflow_input,
@@ -3100,71 +3191,6 @@ class AssistantConfigService:
         workflow.is_system = True
         workflow.enabled = bool(enabled)
         workflow.description = default.description or ""
-        return workflow
-
-    def ensure_system_workflow_asset_from_preset(
-        self,
-        *,
-        canonical_name: str,
-        preset_file: str,
-        description: str,
-        enabled: bool = True,
-    ) -> AssistantWorkflow:
-        workflow = (
-            self.db.query(AssistantWorkflow)
-            .filter(
-                AssistantWorkflow.name == canonical_name,
-                AssistantWorkflow.is_system.is_(True),
-            )
-            .first()
-        )
-        if workflow is None:
-            conflicting = (
-                self.db.query(AssistantWorkflow)
-                .filter(AssistantWorkflow.name == canonical_name)
-                .first()
-            )
-            if conflicting is not None and not bool(conflicting.is_system):
-                raise ApiException(
-                    status_code=409,
-                    code=40946,
-                    message=f"Cannot create system workflow target due to custom name conflict: {canonical_name}",
-                )
-            workflow = AssistantWorkflow(
-                name=canonical_name,
-                description=description,
-                workflow_version=0,
-                workflow_viewport=None,
-                is_system=True,
-                enabled=bool(enabled),
-            )
-            self.db.add(workflow)
-            self.db.flush()
-
-        workflow_input = load_system_workflow_preset_file(preset_file)
-        current_input = self._get_workflow_published_input(workflow)
-        desired_snapshot = self._workflow_input_to_snapshot(workflow_input)
-        current_snapshot = self._workflow_input_to_snapshot(current_input) if current_input is not None else None
-
-        workflow.is_system = True
-        workflow.enabled = bool(enabled)
-        workflow.description = description or ""
-
-        if current_snapshot != desired_snapshot:
-            self._enforce_workflow_structured_input_constraints(
-                workflow=workflow,
-                workflow_input=workflow_input,
-                raise_error=True,
-            )
-            self._apply_workflow_to_workflow_entity(workflow, workflow_input, persist=True)
-            published = self._create_workflow_version(
-                workflow=workflow,
-                workflow_input=workflow_input,
-                version_source="publish",
-                version_name=None,
-            )
-            self._keep_only_workflow_version(workflow, published.id)
-
         return workflow
 
     def _resolve_or_create_system_agent_profile_for_reset(
@@ -4444,7 +4470,9 @@ class AssistantConfigService:
 
     def list_workflows(self, include_disabled: bool = False) -> list[AssistantWorkflow]:
         self.ensure_system_catalog_synced()
-        return self._list_workflows_query(include_disabled=include_disabled)
+        workflows = self._list_workflows_query(include_disabled=include_disabled)
+        self._attach_openclaw_reference_counts(workflows=workflows)
+        return workflows
 
     def get_workflow(self, workflow_id: UUID) -> AssistantWorkflow:
         self.ensure_system_catalog_synced()
@@ -4461,6 +4489,7 @@ class AssistantConfigService:
         )
         if workflow is None:
             raise ApiException(status_code=404, code=40430, message=f"Workflow not found: {workflow_id}")
+        self._attach_openclaw_reference_counts(workflows=[workflow])
         return workflow
 
     def _create_workflow_entity(self, request: AssistantWorkflowCreateRequest) -> AssistantWorkflow:
@@ -4837,7 +4866,9 @@ class AssistantConfigService:
         )
         if not include_disabled:
             q = q.filter(AssistantAgentProfile.enabled.is_(True))
-        return q.all()
+        profiles = q.all()
+        self._attach_openclaw_reference_counts(agent_profiles=profiles)
+        return profiles
 
     def get_agent_profile(self, agent_profile_id: UUID) -> AssistantAgentProfile:
         self.ensure_system_catalog_synced()
@@ -4852,6 +4883,7 @@ class AssistantConfigService:
         )
         if profile is None:
             raise ApiException(status_code=404, code=40431, message=f"Agent profile not found: {agent_profile_id}")
+        self._attach_openclaw_reference_counts(agent_profiles=[profile])
         return profile
 
     def create_agent_profile(self, request: AssistantAgentProfileCreateRequest) -> AssistantAgentProfile:

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Literal
 
+from app.assistant.workflow.system_assets import CONTEXT_CAPTURE_ASSET_KEY
 from app.openclaw_integration.schemas import (
     OPENCLAW_SYSTEM_CAPABILITY_INPUT_MODELS,
     OPENCLAW_SYSTEM_CAPABILITY_OUTPUT_MODELS,
@@ -16,7 +17,7 @@ OpenClawSystemItemSourceType = Literal["tool", "workflow", "agent"]
 OpenClawSystemImplementationType = Literal["entry", "relation", "knowledge_graph", "report", "workflow", "agent"]
 
 OPENCLAW_CONTEXT_CAPTURE_DEFAULT_KEY: OpenClawSystemDefaultKey = "submit_context_capture"
-OPENCLAW_CONTEXT_CAPTURE_WORKFLOW_ASSET_KEY = "context_capture"
+OPENCLAW_CONTEXT_CAPTURE_WORKFLOW_ASSET_KEY = CONTEXT_CAPTURE_ASSET_KEY
 OPENCLAW_SYSTEM_DEFAULT_TOOL_SOURCE_NAMES: dict[OpenClawSystemCapabilityKey, str] = {
     "search_entries": "search_entries",
     "get_entry": "get_entry_detail",

@@ -164,9 +164,13 @@ def reset_caches() -> None:
         pass
 
     try:
-        from app.assistant_config.system_behavior_defaults_loader import clear_system_behavior_defaults_cache
+        from app.assistant.workflow.system_assets import (
+            clear_system_asset_loader_cache,
+            clear_system_asset_registry_cache,
+        )
 
-        clear_system_behavior_defaults_cache()
+        clear_system_asset_registry_cache()
+        clear_system_asset_loader_cache()
     except Exception:
         pass
 
