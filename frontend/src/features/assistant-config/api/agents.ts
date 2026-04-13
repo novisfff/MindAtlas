@@ -12,6 +12,7 @@ export interface AssistantAgentProfile {
   modelSource?: 'default' | 'custom'
   modelId?: string | null
   isSystem: boolean
+  hidden?: boolean
   enabled: boolean
   draftVersionId: string | null
   publishedVersionId: string | null

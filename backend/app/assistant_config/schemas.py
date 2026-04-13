@@ -794,6 +794,7 @@ class AssistantWorkflowResponse(OrmModel):
     name: str
     description: str
     is_system: bool
+    hidden: bool = False
     enabled: bool
     workflow_version: int = 1
     workflow_viewport: dict | None = None
@@ -820,6 +821,7 @@ class AssistantAgentProfileResponse(OrmModel):
     model_source: AgentModelSource = "default"
     model_id: UUID | None = None
     is_system: bool
+    hidden: bool = False
     enabled: bool
     draft_version_id: UUID | None = None
     published_version_id: UUID | None = None

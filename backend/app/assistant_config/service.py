@@ -1005,6 +1005,7 @@ class AssistantConfigService:
             "name": self._display_workflow_name(workflow),
             "description": workflow.description or "",
             "is_system": bool(workflow.is_system),
+            "hidden": self._is_hidden_system_asset("workflow", workflow.name, workflow.is_system),
             "enabled": bool(workflow.enabled),
             "workflow_version": workflow.workflow_version or 1,
             "workflow_viewport": draft_workflow.viewport,
@@ -1056,6 +1057,7 @@ class AssistantConfigService:
             "model_source": model_source,
             "model_id": model_id,
             "is_system": bool(agent_profile.is_system),
+            "hidden": self._is_hidden_system_asset("agent", agent_profile.name, agent_profile.is_system),
             "enabled": bool(agent_profile.enabled),
             "draft_version_id": agent_profile.draft_version_id,
             "published_version_id": agent_profile.published_version_id,
@@ -1078,6 +1080,19 @@ class AssistantConfigService:
         locale: str | None = None,
     ) -> str:
         return self._display_agent_profile_name(agent_profile, locale=locale)
+
+    def _is_hidden_system_asset(self, kind: TargetType, canonical_name: str | None, is_system: bool) -> bool:
+        if not is_system:
+            return False
+        name = str(canonical_name or "").strip()
+        if not name:
+            return False
+        asset = get_system_asset_by_canonical_name(
+            name,
+            kind=kind,
+            locale=self._current_locale(),
+        )
+        return bool(asset.hidden) if asset is not None else False
 
     @staticmethod
     def _serialize_system_behavior_contract_field(

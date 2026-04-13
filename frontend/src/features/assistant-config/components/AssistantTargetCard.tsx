@@ -36,6 +36,21 @@ interface AssistantTargetCardProps {
     disableDelete: boolean
 }
 
+interface ReferenceBadgeProps {
+    count: number
+    label: string
+}
+
+function ReferenceBadge({ count, label }: ReferenceBadgeProps) {
+    if (count <= 0) return null
+    return (
+        <div className="flex items-center gap-1">
+            <Hash className="h-3.5 w-3.5" />
+            <span>{label}</span>
+        </div>
+    )
+}
+
 export const AssistantTargetCard = memo(function AssistantTargetCard({
     target,
     workflow,
@@ -102,22 +117,22 @@ export const AssistantTargetCard = memo(function AssistantTargetCard({
                             </div>
 
                             <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-                                <div className="flex items-center gap-1">
-                                    <Hash className="h-3.5 w-3.5" />
-                                    <span>{t('settings.skills.referenceCount', { count: target.referenceCount })}</span>
-                                </div>
-                                {(target.systemBehaviorReferenceCount ?? 0) > 0 && (
-                                  <div className="flex items-center gap-1">
-                                    <Hash className="h-3.5 w-3.5" />
-                                    <span>{t('settings.systemBehaviors.referenceCount', { count: target.systemBehaviorReferenceCount })}</span>
-                                  </div>
-                                )}
-                                {(target.openclawReferenceCount ?? 0) > 0 && (
-                                  <div className="flex items-center gap-1">
-                                    <Hash className="h-3.5 w-3.5" />
-                                    <span>{t('openclawIntegration.referenceCount', { count: target.openclawReferenceCount })}</span>
-                                  </div>
-                                )}
+                                <ReferenceBadge
+                                    count={target.referenceCount}
+                                    label={t('settings.skills.referenceCount', { count: target.referenceCount })}
+                                />
+                                <ReferenceBadge
+                                    count={target.systemBehaviorReferenceCount ?? 0}
+                                    label={t('settings.systemBehaviors.referenceCount', {
+                                        count: target.systemBehaviorReferenceCount ?? 0,
+                                    })}
+                                />
+                                <ReferenceBadge
+                                    count={target.openclawReferenceCount ?? 0}
+                                    label={t('openclawIntegration.referenceCount', {
+                                        count: target.openclawReferenceCount ?? 0,
+                                    })}
+                                />
                                 {workflow?.updatedAt && (
                                     <div className="flex items-center gap-1">
                                         <Clock className="h-3.5 w-3.5" />
