@@ -17,6 +17,7 @@ export interface AssistantWorkflow {
   name: string
   description: string
   isSystem: boolean
+  hidden?: boolean
   enabled: boolean
   workflowVersion: number
   workflowViewport: { x: number; y: number; zoom: number } | null

@@ -85,7 +85,7 @@ export function SystemAiBehaviorsSettings() {
   const navigate = useNavigate()
   const [expandedBehaviorKey, setExpandedBehaviorKey] = useState<SystemBehavior['behaviorKey'] | null>(null)
   const [pickerOpenBehaviorKey, setPickerOpenBehaviorKey] = useState<SystemBehavior['behaviorKey'] | null>(null)
-  const [showUnavailableWorkflowKeys, setShowUnavailableWorkflowKeys] = useState<SystemBehavior['behaviorKey'][]>([])
+  const [showCollapsedTargetKeys, setShowCollapsedTargetKeys] = useState<SystemBehavior['behaviorKey'][]>([])
   const [showResetAllConfirm, setShowResetAllConfirm] = useState(false)
   const [resetBehaviorPrompt, setResetBehaviorPrompt] = useState<{
     behaviorKey: SystemBehavior['behaviorKey']
@@ -176,8 +176,8 @@ export function SystemAiBehaviorsSettings() {
     setExpandedBehaviorKey((current) => current === behaviorKey ? null : behaviorKey)
   }
 
-  const toggleUnavailableWorkflows = (behaviorKey: SystemBehavior['behaviorKey']) => {
-    setShowUnavailableWorkflowKeys((current) => (
+  const toggleCollapsedTargets = (behaviorKey: SystemBehavior['behaviorKey']) => {
+    setShowCollapsedTargetKeys((current) => (
       current.includes(behaviorKey)
         ? current.filter((item) => item !== behaviorKey)
         : [...current, behaviorKey]
@@ -345,19 +345,17 @@ export function SystemAiBehaviorsSettings() {
             const isExpanded = expandedBehaviorKey === behavior.behaviorKey
             const resetDisabled = isMutating || behavior.currentBinding.isCanonicalDefault
             const pickerOpen = pickerOpenBehaviorKey === behavior.behaviorKey
-            const showUnavailableWorkflows = showUnavailableWorkflowKeys.includes(behavior.behaviorKey)
-            const hiddenUnavailableWorkflowTargets = orderedTargets.filter((target) => (
-              target.type === 'workflow'
-              && target.key !== SYSTEM_DEFAULT_TARGET_KEY
-              && !target.bindable
+            const showCollapsedTargets = showCollapsedTargetKeys.includes(behavior.behaviorKey)
+            const collapsedTargets = orderedTargets.filter((target) => (
+              target.key !== SYSTEM_DEFAULT_TARGET_KEY
               && target.key !== currentTargetKey
+              && (target.hidden || !target.bindable)
             ))
             const visibleTargets = orderedTargets.filter((target) => (
-              showUnavailableWorkflows
+              showCollapsedTargets
               || target.key === SYSTEM_DEFAULT_TARGET_KEY
-              || target.bindable
-              || target.type !== 'workflow'
               || target.key === currentTargetKey
+              || (!target.hidden && target.bindable)
             ))
 
             return (
@@ -608,19 +606,19 @@ export function SystemAiBehaviorsSettings() {
                                     )
                                   })}
 
-                                  {hiddenUnavailableWorkflowTargets.length > 0 && (
+                                  {collapsedTargets.length > 0 && (
                                     <div className="border-t border-border/70 px-2 pb-2 pt-3">
                                       <Button
                                         type="button"
                                         variant="ghost"
                                         size="sm"
-                                        onClick={() => toggleUnavailableWorkflows(behavior.behaviorKey)}
+                                        onClick={() => toggleCollapsedTargets(behavior.behaviorKey)}
                                         className="h-auto w-full justify-center px-3 py-2 text-[12px] font-medium text-muted-foreground"
                                       >
-                                        {showUnavailableWorkflows
-                                          ? t('settings.systemBehaviors.hideUnavailableWorkflows')
-                                          : t('settings.systemBehaviors.showUnavailableWorkflows', {
-                                              count: hiddenUnavailableWorkflowTargets.length,
+                                        {showCollapsedTargets
+                                          ? t('settings.systemBehaviors.hideCollapsedTargets')
+                                          : t('settings.systemBehaviors.showCollapsedTargets', {
+                                              count: collapsedTargets.length,
                                             })}
                                       </Button>
                                     </div>

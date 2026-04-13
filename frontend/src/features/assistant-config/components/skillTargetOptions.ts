@@ -17,6 +17,7 @@ export interface AssistantExecutableTarget {
   description?: string
   enabled: boolean
   isSystem: boolean
+  hidden?: boolean
   isSystemDefault?: boolean
   referenceCount: number
   systemBehaviorReferenceCount?: number
@@ -115,6 +116,7 @@ export function buildAssistantExecutableTargets(
     description: workflow.description,
     enabled: workflow.enabled,
     isSystem: workflow.isSystem,
+    hidden: workflow.hidden,
     referenceCount: workflow.referenceCount,
     systemBehaviorReferenceCount: workflow.systemBehaviorReferenceCount,
     openclawReferenceCount: workflow.openclawReferenceCount,
@@ -129,6 +131,7 @@ export function buildAssistantExecutableTargets(
     description: agent.description,
     enabled: agent.enabled,
     isSystem: agent.isSystem,
+    hidden: agent.hidden,
     referenceCount: agent.referenceCount,
     systemBehaviorReferenceCount: agent.systemBehaviorReferenceCount,
     openclawReferenceCount: agent.openclawReferenceCount,
@@ -180,6 +183,7 @@ export function buildSystemBehaviorBindingTargets(
       description: workflow.description,
       enabled: workflow.enabled,
       isSystem: workflow.isSystem,
+      hidden: workflow.hidden,
       isSystemDefault: false,
       referenceCount: workflow.referenceCount,
       systemBehaviorReferenceCount: workflow.systemBehaviorReferenceCount,
@@ -207,6 +211,7 @@ export function buildSystemBehaviorBindingTargets(
       description: agent.description,
       enabled: agent.enabled,
       isSystem: agent.isSystem,
+      hidden: agent.hidden,
       isSystemDefault: false,
       referenceCount: agent.referenceCount,
       systemBehaviorReferenceCount: agent.systemBehaviorReferenceCount,
