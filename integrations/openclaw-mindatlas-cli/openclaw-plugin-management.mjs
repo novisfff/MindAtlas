@@ -235,6 +235,20 @@ export function readPluginEntryState(config) {
   }
 }
 
+function readPluginInstallState(config) {
+  const install = config?.plugins?.installs?.[PLUGIN_ID]
+  const source = normalizeString(install?.source)
+  const sourcePath = normalizeString(install?.sourcePath)
+  const installPath = normalizeString(install?.installPath)
+
+  return {
+    source,
+    sourcePath,
+    installPath,
+    linked: source === 'path' && !!sourcePath,
+  }
+}
+
 export function normalizePluginRuntimeConfig(rawConfig = {}) {
   return {
     baseUrl: normalizeString(rawConfig.baseUrl),
@@ -674,7 +688,7 @@ export async function runSetupOpenClawPlugin(options = {}) {
     mode: 'setup',
   })
 
-  const installResult = runCommand('openclaw', ['plugins', 'install', LOCAL_PLUGIN_ROOT], {
+  const installResult = runCommand('openclaw', ['plugins', 'install', '--link', LOCAL_PLUGIN_ROOT], {
     env,
     logger,
     runner: options.runner,
@@ -728,6 +742,7 @@ export async function runUpdateOpenClawPlugin(options = {}) {
   const configPath = path.resolve(options.configPath ?? resolveOpenClawConfigPath({ env, homeDir }))
   const initialConfig = readJsonFile(configPath, {})
   const existingEntry = readPluginEntryState(initialConfig)
+  const existingInstall = readPluginInstallState(initialConfig)
   const installPath = resolveInstalledPluginRoot(initialConfig, { env, homeDir })
 
   assertCommandSucceeded(
@@ -765,7 +780,7 @@ export async function runUpdateOpenClawPlugin(options = {}) {
     logger.warn('OpenClaw uninstall did not succeed cleanly; the script will continue with a manual install-path cleanup fallback.')
   }
 
-  if (uninstallResult.status !== 0 || fs.existsSync(installPath)) {
+  if (!existingInstall.linked && (uninstallResult.status !== 0 || fs.existsSync(installPath))) {
     logger.info(`Removing lingering MindAtlas plugin install path: ${installPath}`)
     fs.rmSync(installPath, { recursive: true, force: true })
   }
@@ -780,7 +795,7 @@ export async function runUpdateOpenClawPlugin(options = {}) {
   }
 
   assertCommandSucceeded(
-    runCommand('openclaw', ['plugins', 'install', LOCAL_PLUGIN_ROOT], {
+    runCommand('openclaw', ['plugins', 'install', '--link', LOCAL_PLUGIN_ROOT], {
       env,
       logger,
       runner: options.runner,

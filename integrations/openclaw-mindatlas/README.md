@@ -38,7 +38,7 @@ npm --prefix ./integrations/openclaw-mindatlas run setup:openclaw
 This guided script runs on the OpenClaw host and:
 
 - Prompts for `baseUrl`, `integrationSecret`, `requestTimeoutMs`, and `catalogRefreshTtlSec`
-- Installs the local `openclaw-mindatlas` plugin package
+- Links the local `openclaw-mindatlas` plugin source into OpenClaw so local repo updates are reused directly
 - Writes `plugins.entries.openclaw-mindatlas.config` into `openclaw.json`
 - Preserves or restores `plugins.allow` for `openclaw-mindatlas` when plugin allowlist mode is active, and removes MindAtlas-only legacy `tools.allow` / empty `tools.profile` remnants
 - Backs up same-named old MindAtlas custom skill folders under `~/.openclaw/skills-backup-<timestamp>/`
@@ -92,9 +92,9 @@ The guided update script:
 - Reuses the existing config by default and only prompts for missing fields
 - Temporarily repairs `plugins.allow` before uninstall when plugin allowlist mode is active
 - Attempts `openclaw plugins uninstall openclaw-mindatlas --force`
-- Removes the lingering install path if uninstall does not fully clean it up
+- Removes the lingering copied install path if uninstall does not fully clean it up
 - Clears stale MindAtlas plugin config remnants before reinstall so OpenClaw sees a clean install target
-- Reinstalls the local plugin package
+- Re-links the local plugin source path
 - Rewrites the preserved plugin config
 - Re-runs `configure:skills`
 - Backs up conflicting same-named old MindAtlas custom skills

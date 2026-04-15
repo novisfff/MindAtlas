@@ -185,7 +185,7 @@ test('runSetupOpenClawPlugin prompts for four config fields and writes the plugi
     assert.match(writtenConfig.skills.load.extraDirs[0], /openclaw-mindatlas[\\/]+skills$/)
     assert.deepEqual(runnerState.commands, [
       'openclaw --version',
-      `openclaw plugins install ${LOCAL_PLUGIN_ROOT}`,
+      `openclaw plugins install --link ${LOCAL_PLUGIN_ROOT}`,
       'openclaw gateway restart',
     ])
   } finally {
@@ -257,7 +257,7 @@ test('runUpdateOpenClawPlugin reuses the existing plugin config without reprompt
     assert.deepEqual(runnerState.commands, [
       'openclaw --version',
       'openclaw plugins uninstall openclaw-mindatlas --force',
-      `openclaw plugins install ${LOCAL_PLUGIN_ROOT}`,
+      `openclaw plugins install --link ${LOCAL_PLUGIN_ROOT}`,
       'openclaw gateway restart',
     ])
   } finally {
@@ -328,7 +328,68 @@ test('runUpdateOpenClawPlugin only prompts for missing fields and manually remov
     assert.deepEqual(runnerState.commands, [
       'openclaw --version',
       'openclaw plugins uninstall openclaw-mindatlas --force',
-      `openclaw plugins install ${LOCAL_PLUGIN_ROOT}`,
+      `openclaw plugins install --link ${LOCAL_PLUGIN_ROOT}`,
+      'openclaw gateway restart',
+    ])
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true })
+  }
+})
+
+test('runUpdateOpenClawPlugin does not delete a linked local plugin source path when uninstall fails', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mindatlas-update-openclaw-linked-'))
+  const configPath = path.join(tempRoot, 'openclaw.json')
+  const linkedSourcePath = path.join(tempRoot, 'linked-openclaw-mindatlas')
+  const promptState = createPrompt([])
+  const runnerState = createRunner({ failUninstall: true })
+
+  try {
+    fs.mkdirSync(path.join(linkedSourcePath, 'skills'), { recursive: true })
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify(
+        {
+          plugins: {
+            allow: ['feishu-plugin', 'openclaw-mindatlas'],
+            installs: {
+              'openclaw-mindatlas': {
+                source: 'path',
+                sourcePath: linkedSourcePath,
+                installPath: linkedSourcePath,
+              },
+            },
+            entries: {
+              'openclaw-mindatlas': {
+                enabled: true,
+                config: {
+                  baseUrl: 'http://mindatlas.internal',
+                  integrationSecret: 'existing-secret',
+                  requestTimeoutMs: 15000,
+                  catalogRefreshTtlSec: 300,
+                },
+              },
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    )
+
+    await runUpdateOpenClawPlugin({
+      configPath,
+      homeDir: tempRoot,
+      prompt: promptState.prompt,
+      runner: runnerState.runner,
+      logger: createSilentLogger(),
+    })
+
+    assert.equal(fs.existsSync(linkedSourcePath), true)
+    assert.deepEqual(runnerState.commands, [
+      'openclaw --version',
+      'openclaw plugins uninstall openclaw-mindatlas --force',
+      `openclaw plugins install --link ${LOCAL_PLUGIN_ROOT}`,
       'openclaw gateway restart',
     ])
   } finally {
