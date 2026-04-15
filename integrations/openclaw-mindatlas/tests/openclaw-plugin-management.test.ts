@@ -207,6 +207,7 @@ test('runUpdateOpenClawPlugin reuses the existing plugin config without reprompt
       JSON.stringify(
         {
           plugins: {
+            allow: ['feishu-plugin'],
             installs: {
               'openclaw-mindatlas': {
                 installPath,
@@ -252,6 +253,7 @@ test('runUpdateOpenClawPlugin reuses the existing plugin config without reprompt
         catalogRefreshTtlSec: 900,
       },
     })
+    assert.deepEqual(writtenConfig.plugins.allow, ['feishu-plugin'])
     assert.deepEqual(runnerState.commands, [
       'openclaw --version',
       'openclaw plugins uninstall openclaw-mindatlas --force',

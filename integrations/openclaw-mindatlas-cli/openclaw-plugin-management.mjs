@@ -322,6 +322,69 @@ export function cleanupLegacyMindAtlasConfig(config) {
   }
 }
 
+function ensurePluginAllowlistForManagedConfig(config, options = {}) {
+  const nextConfig = config && typeof config === 'object' ? cloneJson(config) : {}
+  const plugins = nextConfig.plugins && typeof nextConfig.plugins === 'object' ? cloneJson(nextConfig.plugins) : null
+  const currentAllow = Array.isArray(plugins?.allow)
+    ? plugins.allow.filter((entry) => typeof entry === 'string' && entry.trim())
+    : null
+
+  if (!plugins || !currentAllow || currentAllow.length === 0) {
+    return { config: nextConfig, changed: false }
+  }
+
+  const enabled = options.enabled ?? true
+  if (!enabled || currentAllow.includes(PLUGIN_ID)) {
+    return { config: nextConfig, changed: false }
+  }
+
+  plugins.allow = [...currentAllow, PLUGIN_ID]
+  nextConfig.plugins = plugins
+  return { config: nextConfig, changed: true }
+}
+
+function stripMindAtlasPluginState(config) {
+  const nextConfig = config && typeof config === 'object' ? cloneJson(config) : {}
+  const plugins = nextConfig.plugins && typeof nextConfig.plugins === 'object' ? cloneJson(nextConfig.plugins) : null
+  if (!plugins) {
+    return { config: nextConfig, changed: false }
+  }
+
+  let changed = false
+
+  if (plugins.entries && typeof plugins.entries === 'object' && plugins.entries[PLUGIN_ID]) {
+    const entries = cloneJson(plugins.entries)
+    delete entries[PLUGIN_ID]
+    plugins.entries = entries
+    removeIfEmptyObject(plugins, 'entries')
+    changed = true
+  }
+
+  if (plugins.installs && typeof plugins.installs === 'object' && plugins.installs[PLUGIN_ID]) {
+    const installs = cloneJson(plugins.installs)
+    delete installs[PLUGIN_ID]
+    plugins.installs = installs
+    removeIfEmptyObject(plugins, 'installs')
+    changed = true
+  }
+
+  if (Array.isArray(plugins.allow)) {
+    const allow = plugins.allow.filter((entry) => typeof entry === 'string' && entry.trim() && entry !== PLUGIN_ID)
+    if (allow.length !== plugins.allow.length) {
+      if (allow.length > 0) {
+        plugins.allow = allow
+      } else {
+        delete plugins.allow
+      }
+      changed = true
+    }
+  }
+
+  nextConfig.plugins = plugins
+  removeIfEmptyObject(nextConfig, 'plugins')
+  return { config: nextConfig, changed }
+}
+
 export function backupConflictingSkills(options = {}) {
   const env = options.env ?? process.env
   const homeDir = options.homeDir ?? os.homedir()
@@ -683,6 +746,16 @@ export async function runUpdateOpenClawPlugin(options = {}) {
     existingConfig: existingEntry.config,
   })
 
+  const preparedConfig = ensurePluginAllowlistForManagedConfig(initialConfig, {
+    enabled: existingEntry.enabled,
+  })
+  if (preparedConfig.changed) {
+    logger.info(
+      'Temporarily restoring `plugins.allow` for `openclaw-mindatlas` before uninstall so OpenClaw can manage the plugin cleanly under plugin allowlist mode.',
+    )
+    writeJsonFile(configPath, preparedConfig.config)
+  }
+
   const uninstallResult = runCommand('openclaw', ['plugins', 'uninstall', PLUGIN_ID, '--force'], {
     env,
     logger,
@@ -695,6 +768,15 @@ export async function runUpdateOpenClawPlugin(options = {}) {
   if (uninstallResult.status !== 0 || fs.existsSync(installPath)) {
     logger.info(`Removing lingering MindAtlas plugin install path: ${installPath}`)
     fs.rmSync(installPath, { recursive: true, force: true })
+  }
+
+  const postUninstallConfig = readJsonFile(configPath, {})
+  const strippedConfig = stripMindAtlasPluginState(postUninstallConfig)
+  if (strippedConfig.changed) {
+    logger.info(
+      'Removing stale MindAtlas plugin config remnants before reinstall so OpenClaw does not treat them as unknown during installation.',
+    )
+    writeJsonFile(configPath, strippedConfig.config)
   }
 
   assertCommandSucceeded(

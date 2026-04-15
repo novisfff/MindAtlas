@@ -90,8 +90,10 @@ The guided update script:
 
 - Reads the existing `plugins.entries.openclaw-mindatlas.config` first
 - Reuses the existing config by default and only prompts for missing fields
+- Temporarily repairs `plugins.allow` before uninstall when plugin allowlist mode is active
 - Attempts `openclaw plugins uninstall openclaw-mindatlas --force`
 - Removes the lingering install path if uninstall does not fully clean it up
+- Clears stale MindAtlas plugin config remnants before reinstall so OpenClaw sees a clean install target
 - Reinstalls the local plugin package
 - Rewrites the preserved plugin config
 - Re-runs `configure:skills`
