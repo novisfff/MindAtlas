@@ -21,7 +21,7 @@
       "requestTimeoutMs": {
         "type": "integer",
         "minimum": 1,
-        "default": 15000,
+        "default": 300000,
         "description": "HTTP request timeout in milliseconds."
       },
       "catalogRefreshTtlSec": {
@@ -45,7 +45,7 @@
     },
     "requestTimeoutMs": {
       "label": "Request Timeout (ms)",
-      "placeholder": "15000"
+      "placeholder": "300000"
     },
     "catalogRefreshTtlSec": {
       "label": "Catalog Refresh TTL (s)",

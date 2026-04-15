@@ -164,7 +164,7 @@ Configure the plugin under `plugins.entries.openclaw-mindatlas.config`.
         "config": {
           "baseUrl": "http://your-mindatlas-host",
           "integrationSecret": "paste-the-secret-from-mindatlas",
-          "requestTimeoutMs": 15000,
+          "requestTimeoutMs": 300000,
           "catalogRefreshTtlSec": 300
         }
       }
@@ -177,6 +177,7 @@ Notes:
 
 - `baseUrl` should point to the MindAtlas backend origin or reverse-proxy origin that the OpenClaw host can actually reach. A URL ending in `/api` is also accepted.
 - `integrationSecret` is generated from `MindAtlas > Settings > OpenClaw Integration`.
+- `requestTimeoutMs` defaults to `300000` (5 minutes) so long-running MindAtlas capabilities are less likely to be cut off by the plugin layer.
 - `catalogRefreshTtlSec` controls how often the plugin refreshes the remote capability catalog.
 - If you install the plugin before adding config, that is expected to work. The plugin will simply log that configuration is still missing and wait for `baseUrl` plus `integrationSecret`.
 - The package now follows the official OpenClaw `definePluginEntry(...)` SDK path for `2026.4.1+`, so live MindAtlas tools should be exposed through `api.registerTool(...)` during plugin registration rather than through `tools.allow` or `tools.profile`.

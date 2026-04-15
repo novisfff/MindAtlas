@@ -240,7 +240,7 @@ test('resolvePluginConfig reads nested plugin config and normalizes /api suffix'
   assert.deepEqual(resolvePluginConfig(raw), {
     baseUrl: 'https://mindatlas.example.com',
     integrationSecret: 'top-secret',
-    requestTimeoutMs: 15000,
+    requestTimeoutMs: 300000,
     catalogRefreshTtlSec: 300,
   })
 })

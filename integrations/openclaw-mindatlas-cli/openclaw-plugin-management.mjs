@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 
 export const PLUGIN_ID = 'openclaw-mindatlas'
 export const LOCAL_PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'openclaw-mindatlas')
-export const DEFAULT_REQUEST_TIMEOUT_MS = 15000
+export const DEFAULT_REQUEST_TIMEOUT_MS = 300000
 export const DEFAULT_CATALOG_REFRESH_TTL_SEC = 300
 export const MINDATLAS_SKILL_IDS = [
   'mindatlas-overview',
