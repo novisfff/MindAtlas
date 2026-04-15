@@ -86,10 +86,10 @@ test('cleanupLegacyMindAtlasConfig removes only MindAtlas-specific compatibility
     },
   })
 
-  assert.deepEqual(result.config.plugins.allow, ['feishu-plugin'])
+  assert.deepEqual(result.config.plugins.allow, ['openclaw-mindatlas', 'feishu-plugin'])
   assert.deepEqual(result.config.tools.allow, ['feishu_doc'])
   assert.equal(result.config.tools.profile, 'full')
-  assert.equal(result.cleanupMessages.length, 2)
+  assert.equal(result.cleanupMessages.length, 1)
 })
 
 test('cleanupLegacyMindAtlasConfig removes tools.profile only when MindAtlas cleanup empties the tools block', () => {
@@ -102,6 +102,28 @@ test('cleanupLegacyMindAtlasConfig removes tools.profile only when MindAtlas cle
 
   assert.equal(result.config.tools, undefined)
   assert.equal(result.cleanupMessages.length, 2)
+})
+
+test('cleanupLegacyMindAtlasConfig restores the plugin allowlist entry when plugin allowlist mode is active', () => {
+  const result = cleanupLegacyMindAtlasConfig({
+    plugins: {
+      allow: ['feishu-plugin'],
+      entries: {
+        'openclaw-mindatlas': {
+          enabled: true,
+          config: {
+            baseUrl: 'http://localhost:8000',
+            integrationSecret: 'secret',
+          },
+        },
+      },
+    },
+  })
+
+  assert.deepEqual(result.config.plugins.allow, ['feishu-plugin', 'openclaw-mindatlas'])
+  assert.deepEqual(result.cleanupMessages, [
+    'Restoring `plugins.allow` entry for `openclaw-mindatlas` so the plugin stays enabled when plugin allowlist mode is active.',
+  ])
 })
 
 test('backupConflictingSkills moves same-named MindAtlas skill directories into a timestamped backup folder', () => {
@@ -255,6 +277,7 @@ test('runUpdateOpenClawPlugin only prompts for missing fields and manually remov
       JSON.stringify(
         {
           plugins: {
+            allow: ['feishu-plugin'],
             installs: {
               'openclaw-mindatlas': {
                 installPath,
@@ -298,6 +321,7 @@ test('runUpdateOpenClawPlugin only prompts for missing fields and manually remov
       requestTimeoutMs: 12000,
       catalogRefreshTtlSec: 450,
     })
+    assert.deepEqual(writtenConfig.plugins.allow, ['feishu-plugin', 'openclaw-mindatlas'])
     assert.equal(writtenConfig.tools, undefined)
     assert.deepEqual(runnerState.commands, [
       'openclaw --version',

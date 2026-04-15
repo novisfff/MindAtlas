@@ -40,7 +40,7 @@ This guided script runs on the OpenClaw host and:
 - Prompts for `baseUrl`, `integrationSecret`, `requestTimeoutMs`, and `catalogRefreshTtlSec`
 - Installs the local `openclaw-mindatlas` plugin package
 - Writes `plugins.entries.openclaw-mindatlas.config` into `openclaw.json`
-- Removes MindAtlas-only legacy `plugins.allow`, `tools.allow`, and empty `tools.profile` remnants
+- Preserves or restores `plugins.allow` for `openclaw-mindatlas` when plugin allowlist mode is active, and removes MindAtlas-only legacy `tools.allow` / empty `tools.profile` remnants
 - Backs up same-named old MindAtlas custom skill folders under `~/.openclaw/skills-backup-<timestamp>/`
 - Re-runs `configure:skills`
 - Calls `openclaw gateway restart`
@@ -96,7 +96,7 @@ The guided update script:
 - Rewrites the preserved plugin config
 - Re-runs `configure:skills`
 - Backs up conflicting same-named old MindAtlas custom skills
-- Removes MindAtlas-only legacy `plugins.allow`, `tools.allow`, and empty `tools.profile` remnants
+- Preserves or restores `plugins.allow` for `openclaw-mindatlas` when plugin allowlist mode is active, and removes MindAtlas-only legacy `tools.allow` / empty `tools.profile` remnants
 - Calls `openclaw gateway restart`
 
 After the script completes, open a brand-new OpenClaw session and verify from there.

@@ -267,15 +267,23 @@ export function cleanupLegacyMindAtlasConfig(config) {
 
   const plugins = nextConfig.plugins && typeof nextConfig.plugins === 'object' ? cloneJson(nextConfig.plugins) : null
   if (plugins && Array.isArray(plugins.allow)) {
-    const retainedPluginAllow = plugins.allow.filter((entry) => typeof entry === 'string' && entry.trim() && entry !== PLUGIN_ID)
-    if (retainedPluginAllow.length !== plugins.allow.length) {
-      cleanupMessages.push('Removing legacy `plugins.allow` entry for `openclaw-mindatlas`.')
-      if (retainedPluginAllow.length > 0) {
-        plugins.allow = retainedPluginAllow
-      } else {
-        delete plugins.allow
-      }
+    const normalizedPluginAllow = plugins.allow.filter((entry) => typeof entry === 'string' && entry.trim())
+    const pluginEntry = plugins.entries?.[PLUGIN_ID]
+    const pluginShouldBeAllowlisted = pluginEntry && (typeof pluginEntry.enabled !== 'boolean' || pluginEntry.enabled)
+
+    if (pluginShouldBeAllowlisted && !normalizedPluginAllow.includes(PLUGIN_ID)) {
+      normalizedPluginAllow.push(PLUGIN_ID)
+      cleanupMessages.push(
+        'Restoring `plugins.allow` entry for `openclaw-mindatlas` so the plugin stays enabled when plugin allowlist mode is active.',
+      )
     }
+
+    if (normalizedPluginAllow.length > 0) {
+      plugins.allow = [...new Set(normalizedPluginAllow)]
+    } else {
+      delete plugins.allow
+    }
+
     nextConfig.plugins = plugins
     removeIfEmptyObject(nextConfig, 'plugins')
   }
