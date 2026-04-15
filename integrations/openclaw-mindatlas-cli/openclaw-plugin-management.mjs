@@ -158,6 +158,10 @@ export function resolveInstalledPluginRoot(config, options = {}) {
   return path.resolve(resolveOpenClawRoot(options), 'extensions', PLUGIN_ID)
 }
 
+function resolveManagedPluginInstallDir(options = {}) {
+  return path.resolve(resolveOpenClawRoot(options), 'extensions', PLUGIN_ID)
+}
+
 export function ensureSkillsExtraDir(config, extraDir) {
   const nextConfig = config && typeof config === 'object' ? cloneJson(config) : {}
   const skills = nextConfig.skills && typeof nextConfig.skills === 'object' ? cloneJson(nextConfig.skills) : {}
@@ -744,6 +748,7 @@ export async function runUpdateOpenClawPlugin(options = {}) {
   const existingEntry = readPluginEntryState(initialConfig)
   const existingInstall = readPluginInstallState(initialConfig)
   const installPath = resolveInstalledPluginRoot(initialConfig, { env, homeDir })
+  const managedInstallDir = resolveManagedPluginInstallDir({ env, homeDir })
 
   assertCommandSucceeded(
     runCommand('openclaw', ['--version'], { env, logger, runner: options.runner }),
@@ -783,6 +788,10 @@ export async function runUpdateOpenClawPlugin(options = {}) {
   if (!existingInstall.linked && (uninstallResult.status !== 0 || fs.existsSync(installPath))) {
     logger.info(`Removing lingering MindAtlas plugin install path: ${installPath}`)
     fs.rmSync(installPath, { recursive: true, force: true })
+  }
+  if (path.resolve(managedInstallDir) !== path.resolve(installPath) && fs.existsSync(managedInstallDir)) {
+    logger.info(`Removing lingering OpenClaw extension directory for MindAtlas: ${managedInstallDir}`)
+    fs.rmSync(managedInstallDir, { recursive: true, force: true })
   }
 
   const postUninstallConfig = readJsonFile(configPath, {})

@@ -340,11 +340,13 @@ test('runUpdateOpenClawPlugin does not delete a linked local plugin source path 
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mindatlas-update-openclaw-linked-'))
   const configPath = path.join(tempRoot, 'openclaw.json')
   const linkedSourcePath = path.join(tempRoot, 'linked-openclaw-mindatlas')
+  const managedInstallDir = path.join(tempRoot, '.openclaw', 'extensions', 'openclaw-mindatlas')
   const promptState = createPrompt([])
   const runnerState = createRunner({ failUninstall: true })
 
   try {
     fs.mkdirSync(path.join(linkedSourcePath, 'skills'), { recursive: true })
+    fs.mkdirSync(managedInstallDir, { recursive: true })
     fs.writeFileSync(
       configPath,
       JSON.stringify(
@@ -386,6 +388,7 @@ test('runUpdateOpenClawPlugin does not delete a linked local plugin source path 
     })
 
     assert.equal(fs.existsSync(linkedSourcePath), true)
+    assert.equal(fs.existsSync(managedInstallDir), false)
     assert.deepEqual(runnerState.commands, [
       'openclaw --version',
       'openclaw plugins uninstall openclaw-mindatlas --force',
