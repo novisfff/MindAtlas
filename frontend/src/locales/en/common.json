@@ -647,13 +647,15 @@
     },
     "guide": {
       "title": "Quick start",
-      "description": "Follow these 4 steps in order. This page guides the setup, but it cannot automatically confirm plugin installation, Gateway restarts, or tool visibility inside a remote OpenClaw session.",
-      "intro": "MindAtlas owns the capability catalog, knowledge data, and execution runtime. OpenClaw owns the chat entry, tool registration, and conversation orchestration. After installation, the plugin also ships 5 MindAtlas skills: overview, dispatcher, auto-capture, retrieval, and summary. `mindatlas-overview` is the main router, `mindatlas-dispatcher` is the dynamic fallback, and the actual callable tools still come from the live MindAtlas capability catalog. In practice, the agent should route from the session-visible `mindatlas_*` tool surface first, not from an imaginary in-session catalog tool. Follow the sequence on this page from top to bottom: generate the secret, expose catalog items, install the plugin, paste the config, restart the Gateway, then verify one live call from a fresh session.",
+      "description": "Follow these 4 steps in order. This page now recommends the guided setup and update scripts first, while keeping the detailed manual OpenClaw CLI flow as a fallback.",
+      "intro": "MindAtlas owns the capability catalog, knowledge data, and execution runtime. OpenClaw owns the chat entry, tool registration, and conversation orchestration. After installation, the plugin also ships 5 MindAtlas skills: overview, dispatcher, auto-capture, retrieval, and summary. `mindatlas-overview` is the main router, `mindatlas-dispatcher` is the dynamic fallback, and the actual callable tools still come from the live MindAtlas capability catalog. In practice, the agent should route from the session-visible `mindatlas_*` tool surface first, not from an imaginary in-session catalog tool. Follow the sequence on this page from top to bottom: generate the secret, expose catalog items, run the guided plugin script on the OpenClaw host, then verify one live call from a fresh session.",
       "actions": {
         "expand": "Show troubleshooting",
         "collapse": "Hide troubleshooting",
         "copy": "Copy",
-        "jumpToCatalog": "Go to catalog"
+        "jumpToCatalog": "Go to catalog",
+        "showManual": "Show manual steps",
+        "hideManual": "Hide manual steps"
       },
       "stepStatus": {
         "done": "Done",
@@ -675,21 +677,40 @@
         },
         "plugin": {
           "title": "Install and configure the plugin on the OpenClaw host",
-          "description": "Run the commands below on the machine that runs the OpenClaw Gateway, paste the config, and validate it before you restart anything.",
+          "description": "Prefer one guided script below. It will collect or reuse plugin config, clean old MindAtlas remnants, sync shipped skills, and restart the Gateway for you.",
           "hostHint": "Run every command in this step on the OpenClaw Gateway host. This page cannot execute those commands for you.",
           "details": {
-            "install": "Install the plugin from the MindAtlas repository on the same machine that runs OpenClaw. If OpenClaw runs on another server, copy the `integrations/openclaw-mindatlas` folder there first. The install command itself does not require `baseUrl` or `integrationSecret` yet, and you do not need to install the 5 shipped skills separately because they are bundled with the plugin. Running `configure:skills` writes the installed plugin's `skills` directory into `skills.load.extraDirs`, which is the primary path for making those shipped skills visible to the official OpenClaw skills loader. If it finds legacy MindAtlas `tools.allow` or `tools.profile` remnants, it only warns and does not delete user config.",
+            "install": "Install the plugin from the MindAtlas repository on the same machine that runs OpenClaw. If OpenClaw runs on another server, copy the `integrations/openclaw-mindatlas` folder there first. The guided scripts handle plugin install or reinstall, plugin config writes, MindAtlas-only legacy cleanup, conflicting skill backup, `configure:skills`, and `openclaw gateway restart`. The lower-level `configure:skills` command still only wires the shipped skills directory into `skills.load.extraDirs` and prints warnings by itself.",
             "baseUrl": "Set `plugins.entries.openclaw-mindatlas.config.baseUrl` to the MindAtlas backend or reverse-proxy origin that the OpenClaw host can really reach, then paste the bearer secret generated on this page into `integrationSecret`. The shipped skills guide routing, but the actual exposed tools still depend on the session-visible MindAtlas capability surface.",
             "refresh": "Catalog availability changes can be picked up by the plugin refresh cycle. If a tool name, exported title, exported description, or input schema changes, active sessions will not hot-refresh. Start a new session or reload the OpenClaw Gateway or plugin. If a session shows no `mindatlas_*` tools, the agent should say MindAtlas is not exposed in that session instead of silently falling back to generic memory."
           }
         },
         "verify": {
           "title": "Verify from a fresh OpenClaw session",
-          "description": "Restart the Gateway with your own deployment method, open a brand-new OpenClaw session, and check that the session no longer says MindAtlas tools are missing."
+          "description": "The guided scripts already restart the Gateway. This step is just to open a brand-new OpenClaw session and confirm the session no longer says MindAtlas tools are missing."
         }
       },
-      "installTitle": "Install the plugin on the OpenClaw host",
-      "installDescription": "These commands are meant to be run where your OpenClaw Gateway is installed. The plugin package lives in this MindAtlas repository, and installation also brings in the 5 shipped MindAtlas skills. Plugin install registers the package, `configure:skills` wires the shipped skills into the official skills loader path, and a new session is still required before the refreshed skill and tool surface appears in prompts.",
+      "installTitle": "Manual install fallback on the OpenClaw host",
+      "installDescription": "These manual commands are only needed when you cannot use the guided scripts. The plugin package lives in this MindAtlas repository, and installation also brings in the 5 shipped MindAtlas skills. Plugin install registers the package, `configure:skills` wires the shipped skills into the official skills loader path, and a new session is still required before the refreshed skill and tool surface appears in prompts.",
+      "scriptBlocks": {
+        "setup": {
+          "title": "First-time install script",
+          "description": "Use this on the OpenClaw host for the first install. The script always prompts for `baseUrl`, `integrationSecret`, `requestTimeoutMs`, and `catalogRefreshTtlSec`."
+        },
+        "update": {
+          "title": "System upgrade or plugin refresh script",
+          "description": "Use this after a MindAtlas system upgrade, plugin upgrade, or shipped-skill refresh. It reuses existing plugin config by default and only prompts for missing fields."
+        }
+      },
+      "scriptHighlightsTitle": "What the guided scripts do for you",
+      "scriptHighlightsDescription": "Both scripts are meant to be run on the OpenClaw Gateway host and collapse the usual install or upgrade chores into one flow.",
+      "scriptHighlights": {
+        "prompt": "They collect the required plugin config fields directly in the terminal.",
+        "reuse": "The update script reuses the existing MindAtlas plugin config and only asks for fields that are still missing.",
+        "cleanup": "They automatically remove MindAtlas-only legacy `plugins.allow`, `tools.allow`, and empty `tools.profile` compatibility remnants.",
+        "skills": "They back up conflicting old MindAtlas custom skill folders and rerun `configure:skills` for the shipped skills path.",
+        "restart": "They finish by calling `openclaw gateway restart`, then you should validate from a brand-new session."
+      },
       "installBlocks": {
         "locate": {
           "title": "Locate the MindAtlas repository or plugin folder",
@@ -719,11 +740,17 @@
       "configExampleTitle": "Config example to paste into OpenClaw",
       "configExampleDescription": "Replace `baseUrl` with the MindAtlas backend address that OpenClaw can access, and replace `integrationSecret` with the secret generated on this page.",
       "maintenanceTitle": "Upgrade and reinstall guidance",
-      "maintenanceDescription": "Use the paths below after capability changes, MindAtlas system version upgrades, or plugin / shipped-skill upgrades. Prefer `openclaw plugins update` for an already-installed plugin, and only fall back to reinstall when the tracked install does not refresh cleanly.",
+      "maintenanceDescription": "Use the guided scripts first after capability changes, MindAtlas system version upgrades, or plugin / shipped-skill upgrades. Keep the lower manual CLI flow below only as a fallback when scripting is not available.",
       "maintenanceChecks": {
-        "firstInstall": "First install: install the plugin, run `configure:skills`, fill in the plugin config, restart the Gateway, then verify from a brand-new session.",
+        "firstInstall": "First install: prefer `npm --prefix ./integrations/openclaw-mindatlas run setup:openclaw`, then verify from a brand-new session.",
         "catalogChange": "Catalog changes: after creating, editing, deleting, or toggling exposure for capability items, it is best to restart the Gateway and open a new session before you validate the new MindAtlas tool surface.",
-        "upgrade": "After a MindAtlas system upgrade, or after plugin / shipped-skill upgrades, first update the tracked plugin, rerun `configure:skills`, and then restart the Gateway plus open a new session. If the plugin already exists and the new surface still does not appear, use the reinstall fallback below."
+        "upgrade": "After a MindAtlas system upgrade, or after plugin / shipped-skill upgrades, prefer `npm --prefix ./integrations/openclaw-mindatlas run update:openclaw`. The script reuses existing config, reruns shipped-skill sync, and restarts the Gateway before you validate from a new session."
+      },
+      "manualTitle": "Detailed manual steps",
+      "manualDescription": "Open this only if you cannot use the guided scripts on the OpenClaw host. It keeps the older explicit install, config, and recovery commands as a fallback.",
+      "manualSections": {
+        "setupDescription": "Manual setup fallback. Run these on the OpenClaw Gateway host if the guided install script is not available in your environment.",
+        "upgradeDescription": "Manual upgrade and recovery fallback. Use these only when the guided update script cannot be used or when you need to inspect each CLI step yourself."
       },
       "upgradeBlocks": {
         "standard": {
@@ -740,10 +767,10 @@
         }
       },
       "restartTitle": "Restart the OpenClaw Gateway",
-      "restartDescription": "After the config validates, restart the OpenClaw Gateway with your own deployment method. Then open a fresh session because active sessions do not hot-refresh `mindatlas_*` tools or bundled skills.",
+      "restartDescription": "The guided scripts already call `openclaw gateway restart` for you. If you used the manual path instead, restart the OpenClaw Gateway now. In both cases, open a fresh session because active sessions do not hot-refresh `mindatlas_*` tools or bundled skills.",
       "verifyChecksTitle": "What to do next",
       "verifyChecks": {
-        "restart": "Restart the OpenClaw Gateway after installation and config changes.",
+        "restart": "If you used the guided scripts, the Gateway restart already ran. If you used the manual path, restart OpenClaw Gateway now.",
         "session": "Open a brand-new OpenClaw session after the restart.",
         "failure": "If the new session still says MindAtlas is not exposed, return to Step 2 and Step 3."
       },
@@ -765,7 +792,7 @@
       "notes": {
         "catalogOnly": "OpenClaw only sees catalog items that are currently exposed. Hidden or currently unavailable items should not appear as callable tools, and a session with no visible `mindatlas_*` tools cannot route MindAtlas work automatically.",
         "skillBoundary": "The 5 shipped skills tell OpenClaw when it should call MindAtlas and which class of capability to prefer. `mindatlas-overview` is the broad router, `mindatlas-dispatcher` is the dynamic fallback for newly exposed custom capabilities, and summary, retrieval, plus auto-capture are narrower sub-strategies. The actual callable tools still come only from the currently exposed MindAtlas capability catalog.",
-        "refresh": "After creating, deleting, or editing catalog items, refresh the catalog on the OpenClaw side. If a tool name, exported title, exported description, or input schema changes structurally, active sessions still will not hot-refresh, so start a new session or reload the Gateway or plugin as well. If startup registration fails or a previously unavailable tool becomes available later, fix the issue and reload the Gateway because the plugin no longer late-registers tools after startup. If the current session still shows no MindAtlas tools, the agent should say MindAtlas is not exposed in that session instead of silently substituting generic memory."
+        "refresh": "After creating, deleting, or editing catalog items, refresh the catalog on the OpenClaw side. If a tool name, exported title, exported description, or input schema changes structurally, active sessions still will not hot-refresh, so start a new session or reload the Gateway or plugin as well. If startup registration fails or a previously unavailable tool becomes available later, fix the issue and reload the Gateway because the plugin no longer late-registers tools after startup. If the current session still shows no MindAtlas tools, the agent should say MindAtlas is not exposed in that session instead of silently substituting generic memory. After plugin or shipped-skill upgrades, prefer the guided `setup:openclaw` or `update:openclaw` scripts before validating again."
       }
     },
     "secret": {

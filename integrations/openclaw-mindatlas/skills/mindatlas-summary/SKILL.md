@@ -31,7 +31,7 @@ Preferred summary routes:
 2. Topic or custom-process summary
 - If a visible MindAtlas tool or capability clearly represents the requested project review, sprint digest, team workflow, or custom summary path, use it
 - If the needed custom capability is not already visible as a dedicated tool, route back through the dispatcher flow and inspect `mindatlas_list_capabilities`
-- If the current session still looks stale after plugin, shipped-skill, or catalog changes, route back through overview/dispatcher and recommend reinstalling the plugin path, rerunning `configure:skills`, then restarting the Gateway and opening a new session
+- If the current session still looks stale after plugin, shipped-skill, or catalog changes, route back through overview/dispatcher and recommend `npm --prefix ./integrations/openclaw-mindatlas run update:openclaw`, then opening a new session
 
 Mandatory fallback:
 - If no dedicated periodic-review or topic-summary tool is visible but `mindatlas_search_entries` is visible, retrieve the relevant time-bounded records first and then synthesize the answer

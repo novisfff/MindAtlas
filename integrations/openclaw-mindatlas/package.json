@@ -18,6 +18,8 @@
     "node": ">=20"
   },
   "scripts": {
+    "setup:openclaw": "node ./scripts/setup-openclaw-plugin.mjs",
+    "update:openclaw": "node ./scripts/update-openclaw-plugin.mjs",
     "configure:skills": "node ./scripts/configure-openclaw-skills.mjs",
     "install:openclaw": "openclaw plugins install . && node ./scripts/configure-openclaw-skills.mjs",
     "build": "tsc -p tsconfig.json --noEmit",

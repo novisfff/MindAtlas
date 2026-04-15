@@ -40,4 +40,5 @@ Correctness rules:
 - If `mindatlas_list_capabilities` returns no suitable custom capability, fall back to the best dedicated built-in route when one still makes sense
 - If neither dedicated MindAtlas tools nor dispatcher tools are visible, say MindAtlas is not exposed in the current session
 - Dispatcher helps when the current session lacks a dedicated tool for a newly exposed capability, but it does not replace plugin or shipped-skill reinstall after upgrades
-- If the administrator just upgraded the plugin or shipped skills, or if the current session still shows obviously stale guidance, tell them to re-run plugin install, re-run `configure:skills`, restart the Gateway, and open a brand-new session
+- If the administrator just upgraded the plugin or shipped skills, or if the current session still shows obviously stale guidance, tell them to run `npm --prefix ./integrations/openclaw-mindatlas run update:openclaw` on the OpenClaw host and then open a brand-new session
+- If they are still in first-time setup or the plugin is missing entirely, tell them to use `npm --prefix ./integrations/openclaw-mindatlas run setup:openclaw`

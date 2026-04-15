@@ -39,7 +39,8 @@ Dynamic capability rule:
 
 Surface recovery rule:
 - Do not assume the current session already reflects the newest MindAtlas plugin, shipped skill, or capability metadata
-- If the administrator says they just upgraded the plugin or shipped skills, or if the current session still behaves like an older MindAtlas surface, tell them to re-run the plugin install path, re-run `configure:skills`, restart the OpenClaw Gateway, and open a brand-new session
+- If the administrator says they just upgraded the plugin or shipped skills, or if the current session still behaves like an older MindAtlas surface, tell them to run `npm --prefix ./integrations/openclaw-mindatlas run update:openclaw` on the OpenClaw host, then open a brand-new session
+- If this is the first install or the plugin is not configured yet, point them to `npm --prefix ./integrations/openclaw-mindatlas run setup:openclaw` instead
 - If catalog changes were saved but the current session still cannot see the expected `mindatlas_*` surface, recommend a Gateway restart plus a new session before concluding the capability is unavailable
 
 Typical requests include:

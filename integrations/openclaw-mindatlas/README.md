@@ -29,34 +29,45 @@ Current OpenClaw releases do not always surface plugin-manifest `skills` into `o
 
 ## Local Install
 
-Quick path:
+Recommended guided setup:
+
+```bash
+npm --prefix ./integrations/openclaw-mindatlas run setup:openclaw
+```
+
+This guided script runs on the OpenClaw host and:
+
+- Prompts for `baseUrl`, `integrationSecret`, `requestTimeoutMs`, and `catalogRefreshTtlSec`
+- Installs the local `openclaw-mindatlas` plugin package
+- Writes `plugins.entries.openclaw-mindatlas.config` into `openclaw.json`
+- Removes MindAtlas-only legacy `plugins.allow`, `tools.allow`, and empty `tools.profile` remnants
+- Backs up same-named old MindAtlas custom skill folders under `~/.openclaw/skills-backup-<timestamp>/`
+- Re-runs `configure:skills`
+- Calls `openclaw gateway restart`
+
+Open a brand-new OpenClaw session after the script completes so the refreshed skill and tool surface actually enters the prompt.
+
+Manual fallback:
 
 ```bash
 openclaw plugins install ./integrations/openclaw-mindatlas
 npm --prefix ./integrations/openclaw-mindatlas run configure:skills
 ```
 
-Development link mode:
+Development link mode fallback:
 
 ```bash
 openclaw plugins install -l ./integrations/openclaw-mindatlas
 npm --prefix ./integrations/openclaw-mindatlas run configure:skills
 ```
 
-Or from the plugin directory:
+The lower-level `configure:skills` command only writes the installed plugin's `skills` directory into `skills.load.extraDirs`, which is the primary path for making the shipped MindAtlas skills visible to the official OpenClaw skills loader and to new sessions even on builds where plugin-manifest skills are not surfaced consistently.
 
-```bash
-cd integrations/openclaw-mindatlas
-npm run install:openclaw
-```
-
-The install command only registers the plugin package. The additional `configure:skills` step writes the installed plugin's `skills` directory into `skills.load.extraDirs`, which is the primary path for making the shipped MindAtlas skills visible to the official OpenClaw skills loader and to new sessions even on builds where plugin-manifest skills are not surfaced consistently.
-
-If the script detects old MindAtlas-specific `tools.allow` or `tools.profile` compatibility remnants, it prints a warning but does not delete user config. MindAtlas tool visibility should now come from the official OpenClaw SDK required-tool registration path instead of a manual allowlist.
+If you use `configure:skills` by itself and it detects old MindAtlas-specific `tools.allow` or `tools.profile` compatibility remnants, it prints a warning but does not delete user config. The guided `setup:openclaw` and `update:openclaw` scripts handle that cleanup automatically.
 
 You can install first and fill in `baseUrl` / `integrationSecret` afterwards.
 
-After you add the plugin config, restart the OpenClaw Gateway so the plugin can register tools from the current MindAtlas catalog. The plugin still syncs its shipped skills into the active OpenClaw custom skills directory as an extra compatibility fallback, but `configure:skills` is the primary install-time path for making those skills visible to the official skills loader. Start a fresh session after the restart so the updated skill and tool surface actually enters the prompt.
+After you add or update the plugin config, restart the OpenClaw Gateway so the plugin can register tools from the current MindAtlas catalog. The guided scripts already do this for you. The plugin still syncs its shipped skills into the active OpenClaw custom skills directory as an extra compatibility fallback, but `configure:skills` remains the primary install-time path for making those skills visible to the official skills loader. Start a fresh session after the restart so the updated skill and tool surface actually enters the prompt.
 
 ## Upgrade Or Reinstall
 
@@ -67,15 +78,28 @@ Use the same install path again when either of these is true:
 - You upgraded the shipped MindAtlas skills and want OpenClaw to pick up the refreshed guidance
 - You changed exposed MindAtlas capability metadata and want a clean OpenClaw tool / skill surface before validating
 
-Recommended recovery sequence:
+Recommended guided update:
 
-1. Update the MindAtlas checkout on the OpenClaw host to the new system version
-2. Prefer `openclaw plugins update openclaw-mindatlas`
-3. Re-run `npm --prefix ./integrations/openclaw-mindatlas run configure:skills`
-4. Restart the OpenClaw Gateway
-5. Open a brand-new OpenClaw session and verify from there
+```bash
+npm --prefix ./integrations/openclaw-mindatlas run update:openclaw
+```
 
-Preferred path for an already-installed tracked plugin:
+The guided update script:
+
+- Reads the existing `plugins.entries.openclaw-mindatlas.config` first
+- Reuses the existing config by default and only prompts for missing fields
+- Attempts `openclaw plugins uninstall openclaw-mindatlas --force`
+- Removes the lingering install path if uninstall does not fully clean it up
+- Reinstalls the local plugin package
+- Rewrites the preserved plugin config
+- Re-runs `configure:skills`
+- Backs up conflicting same-named old MindAtlas custom skills
+- Removes MindAtlas-only legacy `plugins.allow`, `tools.allow`, and empty `tools.profile` remnants
+- Calls `openclaw gateway restart`
+
+After the script completes, open a brand-new OpenClaw session and verify from there.
+
+Manual fallback for an already-installed tracked plugin:
 
 ```bash
 # after pulling or deploying the upgraded MindAtlas version
@@ -83,7 +107,7 @@ openclaw plugins update openclaw-mindatlas
 npm --prefix ./integrations/openclaw-mindatlas run configure:skills
 ```
 
-If the tracked install does not refresh cleanly, or if you want a full reinstall:
+Manual full reinstall fallback:
 
 ```bash
 openclaw plugins uninstall openclaw-mindatlas --force
@@ -91,11 +115,13 @@ openclaw plugins install ./integrations/openclaw-mindatlas
 npm --prefix ./integrations/openclaw-mindatlas run configure:skills
 ```
 
-If logs show `plugin already exists`, use the `update` path above or uninstall before reinstalling; a plain repeated `openclaw plugins install ...` will not overwrite the existing install path.
+If logs show `plugin already exists`, use the guided `update:openclaw` path above or uninstall before reinstalling; a plain repeated `openclaw plugins install ...` will not overwrite the existing install path.
 
 ## Shipped Skill Upgrade Notes
 
-`configure:skills` refreshes `skills.load.extraDirs`, but shipped skill upgrades can still be blocked by pre-existing custom skills with the same id under `~/.openclaw/skills/`.
+The guided `setup:openclaw` and `update:openclaw` scripts already back up conflicting same-named MindAtlas custom skills before rerunning `configure:skills`.
+
+If you are using the lower-level manual path instead, `configure:skills` can still be blocked by pre-existing custom skills with the same id under `~/.openclaw/skills/`.
 
 If plugin logs say:
 
@@ -119,7 +145,7 @@ done
 npm --prefix ./integrations/openclaw-mindatlas run configure:skills
 ```
 
-Also review old compatibility remnants in `~/.openclaw/openclaw.json`. If `tools.allow` or `tools.profile` still contain removed names like `mindatlas_generate_weekly_report` or `mindatlas_generate_monthly_report`, remove those legacy entries and rely on the official plugin registration path instead.
+Also review old compatibility remnants in `~/.openclaw/openclaw.json`. If `tools.allow` or `tools.profile` still contain removed names like `mindatlas_generate_weekly_report` or `mindatlas_generate_monthly_report`, remove those legacy entries and rely on the official plugin registration path instead. The guided setup and update scripts do this cleanup automatically for MindAtlas-owned remnants.
 
 ## Configuration
 
