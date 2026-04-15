@@ -55,8 +55,6 @@ from app.openclaw_integration.schemas import (
     OpenClawCatalogSourceType,
     OpenClawCreateRelationRequest,
     OpenClawEntryRecordResponse,
-    OpenClawGenerateMonthlyReportRequest,
-    OpenClawGenerateWeeklyReportRequest,
     OpenClawGetEntryRequest,
     OpenClawIntegrationSettingsResponse,
     OpenClawIntegrationUpdateRequest,
@@ -69,7 +67,6 @@ from app.openclaw_integration.schemas import (
     OpenClawToolResponseMode,
 )
 from app.relation.models import RelationType
-from app.report.schemas import MonthlyReportResponse, WeeklyReportResponse
 from app.system_settings.models import AppSetting
 from app.system_settings.runtime_config_service import resolve_runtime_knowledge_graph_config
 from app.system_settings.service import resolve_system_locale
@@ -79,15 +76,24 @@ logger = logging.getLogger(__name__)
 OPENCLAW_INTEGRATION_CONFIG_KEY = "openclaw_integration_config"
 OPENCLAW_CAPABILITY_KEY_RE = re.compile(r"^[a-z0-9_]+$")
 OPENCLAW_SCHEMA_FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-OPENCLAW_SYSTEM_ITEM_VERSION = 9
-OPENCLAW_RETIRED_SOURCE_TOOL_NAMES = frozenset({"openclaw_capture_entry"})
+OPENCLAW_SYSTEM_ITEM_VERSION = 10
+OPENCLAW_CAPTURE_RETIRED_SOURCE_TOOL_NAMES = frozenset({"openclaw_capture_entry"})
+OPENCLAW_PERIODIC_REVIEW_RETIRED_SOURCE_TOOL_NAMES = frozenset(
+    {
+        "generate_weekly_report",
+        "generate_monthly_report",
+        "openclaw_generate_weekly_report",
+        "openclaw_generate_monthly_report",
+    }
+)
+OPENCLAW_RETIRED_SOURCE_TOOL_NAMES = (
+    OPENCLAW_CAPTURE_RETIRED_SOURCE_TOOL_NAMES | OPENCLAW_PERIODIC_REVIEW_RETIRED_SOURCE_TOOL_NAMES
+)
 OPENCLAW_SOURCE_TOOL_ALIAS_MAP: dict[str, str] = {
     "openclaw_search_entries": "search_entries",
     "openclaw_get_entry": "get_entry_detail",
     "openclaw_create_relation": "create_relation",
     "openclaw_query_knowledge_graph": "query_knowledge_graph",
-    "openclaw_generate_weekly_report": "generate_weekly_report",
-    "openclaw_generate_monthly_report": "generate_monthly_report",
 }
 
 OPENCLAW_AUTH_ERROR_CODE = 40161
@@ -734,30 +740,6 @@ def _prepare_query_knowledge_graph_request(
     }
 
 
-def _prepare_weekly_report_request(
-    _service: "OpenClawIntegrationService",
-    raw_payload: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    request = _validate_openclaw_request_model(OpenClawGenerateWeeklyReportRequest, raw_payload or {})
-    normalized_payload = request.model_dump(mode="json", by_alias=True)
-    return normalized_payload, {
-        "week_start": request.week_start.isoformat() if request.week_start else None,
-        "force_regenerate": request.force_regenerate,
-    }
-
-
-def _prepare_monthly_report_request(
-    _service: "OpenClawIntegrationService",
-    raw_payload: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    request = _validate_openclaw_request_model(OpenClawGenerateMonthlyReportRequest, raw_payload or {})
-    normalized_payload = request.model_dump(mode="json", by_alias=True)
-    return normalized_payload, {
-        "month_start": request.month_start.isoformat() if request.month_start else None,
-        "force_regenerate": request.force_regenerate,
-    }
-
-
 def _build_search_entries_response(value: Any) -> dict[str, Any]:
     payload = _load_tool_json_value(value)
     if isinstance(payload, list):
@@ -797,20 +779,6 @@ def _build_query_knowledge_graph_response(value: Any) -> dict[str, Any]:
     return LightRagQueryResponse.model_validate(payload).model_dump(mode="json", by_alias=True)
 
 
-def _build_weekly_report_response(value: Any) -> dict[str, Any]:
-    payload = _load_tool_json_value(value)
-    if not isinstance(payload, dict):
-        raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message="generate_weekly_report returned invalid JSON")
-    return WeeklyReportResponse.model_validate(payload).model_dump(mode="json", by_alias=True)
-
-
-def _build_monthly_report_response(value: Any) -> dict[str, Any]:
-    payload = _load_tool_json_value(value)
-    if not isinstance(payload, dict):
-        raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message="generate_monthly_report returned invalid JSON")
-    return MonthlyReportResponse.model_validate(payload).model_dump(mode="json", by_alias=True)
-
-
 OPENCLAW_TOOL_CONTRACT_ADAPTERS: dict[str, _OpenClawToolContractAdapter] = {
     "search_entries": _OpenClawToolContractAdapter(
         runtime_tool_name="search_entries",
@@ -831,16 +799,6 @@ OPENCLAW_TOOL_CONTRACT_ADAPTERS: dict[str, _OpenClawToolContractAdapter] = {
         runtime_tool_name="query_knowledge_graph",
         prepare_request=_prepare_query_knowledge_graph_request,
         build_response=_build_query_knowledge_graph_response,
-    ),
-    "generate_weekly_report": _OpenClawToolContractAdapter(
-        runtime_tool_name="generate_weekly_report",
-        prepare_request=_prepare_weekly_report_request,
-        build_response=_build_weekly_report_response,
-    ),
-    "generate_monthly_report": _OpenClawToolContractAdapter(
-        runtime_tool_name="generate_monthly_report",
-        prepare_request=_prepare_monthly_report_request,
-        build_response=_build_monthly_report_response,
     ),
 }
 
@@ -998,11 +956,25 @@ class OpenClawIntegrationService:
                 changed = True
         return changed
 
-    def _retired_source_reason(self, *, locale: str) -> str:
+    def _retired_source_reason(self, source_tool_name: str | None, *, locale: str) -> str:
+        normalized = _normalize_optional_text(source_tool_name)
+        lowered = normalized.lower() if normalized else ""
+        if lowered in OPENCLAW_CAPTURE_RETIRED_SOURCE_TOOL_NAMES:
+            return _localized_message(
+                locale,
+                zh="这个字段级创建记录来源已从 OpenClaw 官方能力目录中退役。请改用“智能创建记录（submit_context_capture）”系统能力，或重新绑定到其他来源。",
+                en="This field-level entry creation source has been retired from the official OpenClaw capability catalog. Use the smart create entry system capability instead, or rebind this item to another source.",
+            )
+        if lowered in OPENCLAW_PERIODIC_REVIEW_RETIRED_SOURCE_TOOL_NAMES:
+            return _localized_message(
+                locale,
+                zh="旧的周报/月报来源已从 OpenClaw 官方能力目录中移除。请改用“时间范围回顾（generate_periodic_review）”系统能力，或重新绑定到其他来源。",
+                en="The legacy weekly/monthly report sources have been removed from the official OpenClaw capability catalog. Use the periodic review system capability instead, or rebind this item to another source.",
+            )
         return _localized_message(
             locale,
-            zh="这个字段级创建记录来源已从 OpenClaw 官方能力目录中退役。请改用“智能创建记录（submit_context_capture）”系统能力，或重新绑定到其他来源。",
-            en="This field-level entry creation source has been retired from the official OpenClaw capability catalog. Use the smart create entry system capability instead, or rebind this item to another source.",
+            zh="这个来源已从 OpenClaw 官方能力目录中退役。请重新绑定到其他来源。",
+            en="This source has been retired from the official OpenClaw capability catalog. Rebind this item to another source.",
         )
 
     def _retired_catalog_item_state(
@@ -1014,7 +986,7 @@ class OpenClawIntegrationService:
         if item.source_type != "tool":
             return False, None
         if self._is_retired_source_tool_name(item.source_tool_name):
-            return True, self._retired_source_reason(locale=locale)
+            return True, self._retired_source_reason(item.source_tool_name, locale=locale)
         return False, None
 
     def _resolve_tool_source(
@@ -2095,7 +2067,7 @@ class OpenClawIntegrationService:
                 raise ApiException(
                     status_code=422,
                     code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
-                    message=self._retired_source_reason(locale=locale),
+                    message=self._retired_source_reason(requested_source_tool_name, locale=locale),
                 )
             resolved = self._resolve_tool_source(
                 tool_id=request.tool_id,
@@ -2114,7 +2086,7 @@ class OpenClawIntegrationService:
                 raise ApiException(
                     status_code=422,
                     code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
-                    message=self._retired_source_reason(locale=locale),
+                    message=self._retired_source_reason(resolved.source_tool_name, locale=locale),
                 )
             default_input_schema, default_output_schema, default_input_summary, default_output_summary, default_mode = (
                 self._default_source_contract_for_tool(

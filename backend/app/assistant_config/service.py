@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import re
 import uuid
 from dataclasses import dataclass
@@ -775,6 +776,7 @@ class AssistantConfigService:
     ) -> bool:
         changed = False
         normalized_description = description or ""
+        resolved_workflow_input = self._resolve_system_workflow_asset_references(workflow_input=workflow_input)
 
         if not bool(workflow.is_system):
             workflow.is_system = True
@@ -787,7 +789,7 @@ class AssistantConfigService:
             changed = True
 
         current_published = self._get_workflow_published_input(workflow)
-        desired_snapshot = self._workflow_input_to_snapshot(workflow_input)
+        desired_snapshot = self._workflow_input_to_snapshot(resolved_workflow_input)
         current_snapshot = self._workflow_input_to_snapshot(current_published) if current_published is not None else None
         try:
             current_entity_snapshot = self._workflow_input_to_snapshot(self._to_workflow_input_from_entity(workflow))
@@ -797,13 +799,13 @@ class AssistantConfigService:
         if current_snapshot != desired_snapshot or workflow.published_version_id is None:
             self._enforce_workflow_structured_input_constraints(
                 workflow=workflow,
-                workflow_input=workflow_input,
+                workflow_input=resolved_workflow_input,
                 raise_error=True,
             )
-            self._apply_workflow_to_workflow_entity(workflow, workflow_input, persist=True)
+            self._apply_workflow_to_workflow_entity(workflow, resolved_workflow_input, persist=True)
             published = self._create_workflow_version(
                 workflow=workflow,
-                workflow_input=workflow_input,
+                workflow_input=resolved_workflow_input,
                 version_source="publish",
                 version_name=version_name,
             )
@@ -813,10 +815,10 @@ class AssistantConfigService:
         if current_entity_snapshot != desired_snapshot:
             self._enforce_workflow_structured_input_constraints(
                 workflow=workflow,
-                workflow_input=workflow_input,
+                workflow_input=resolved_workflow_input,
                 raise_error=True,
             )
-            self._apply_workflow_to_workflow_entity(workflow, workflow_input, persist=True)
+            self._apply_workflow_to_workflow_entity(workflow, resolved_workflow_input, persist=True)
             changed = True
 
         keep_version_id = workflow.published_version_id
@@ -828,6 +830,64 @@ class AssistantConfigService:
             changed = True
 
         return changed
+
+    def _resolve_system_workflow_asset_references(
+        self,
+        *,
+        workflow_input: WorkflowInput,
+        locale: str | None = None,
+    ) -> WorkflowInput:
+        normalized_locale = self._current_locale(locale)
+        payload = workflow_input.model_dump(mode="json", by_alias=True)
+        nodes = payload.get("nodes")
+        if not isinstance(nodes, list):
+            return workflow_input
+
+        def _rewrite_nodes(raw_nodes: list[Any]) -> bool:
+            changed = False
+            for node in raw_nodes:
+                if not isinstance(node, dict):
+                    continue
+                node_type = str(node.get("nodeType", node.get("node_type", "")) or "").strip()
+                cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+                if node_type == "workflow_call":
+                    asset_key = str(
+                        self._cfg_get(cfg, "target_system_asset_key", "targetSystemAssetKey", default="") or ""
+                    ).strip()
+                    if asset_key:
+                        target_workflow = self.ensure_standalone_system_workflow_asset(
+                            asset_key,
+                            locale=normalized_locale,
+                        )
+                        if target_workflow.published_version_id is None:
+                            raise ApiException(
+                                status_code=500,
+                                code=50037,
+                                message=(
+                                    "Standalone system workflow asset is missing a published version: "
+                                    f"{asset_key}"
+                                ),
+                            )
+                        next_cfg = dict(cfg)
+                        next_cfg["targetWorkflowId"] = str(target_workflow.id)
+                        next_cfg["bindingMode"] = "pinned"
+                        next_cfg["targetPublishedVersionId"] = str(target_workflow.published_version_id)
+                        next_cfg.pop("targetSystemAssetKey", None)
+                        next_cfg.pop("target_system_asset_key", None)
+                        node["config"] = next_cfg
+                        cfg = next_cfg
+                        changed = True
+
+                if node_type not in {"iteration", "loop"}:
+                    continue
+                body_nodes = self._cfg_get(cfg, "body_nodes", "bodyNodes", default=[])
+                if isinstance(body_nodes, list) and _rewrite_nodes(body_nodes):
+                    changed = True
+            return changed
+
+        if not _rewrite_nodes(nodes):
+            return workflow_input
+        return WorkflowInput.model_validate(copy.deepcopy(payload))
 
     def _ensure_system_agent_baseline_state(
         self,
@@ -1685,7 +1745,11 @@ class AssistantConfigService:
             if workflow_id == current_workflow_id:
                 workflow_input = current_workflow_input
             else:
-                workflow_input = self._get_workflow_draft_input(workflow)
+                try:
+                    workflow_input = self._get_workflow_draft_input(workflow)
+                except Exception:
+                    adjacency[workflow_id] = set()
+                    continue
             refs = self._collect_workflow_call_references_from_input(
                 workflow_input=workflow_input,
                 source_workflow_id=workflow_id,
@@ -4161,6 +4225,7 @@ class AssistantConfigService:
 
         if target_type == "workflow":
             workflow_input = self._workflow_input_from_skill_default(default)
+            workflow_input = self._resolve_system_workflow_asset_references(workflow_input=workflow_input)
             workflow_model = self._resolve_or_create_system_workflow_for_reset(
                 skill=skill,
                 default=default,

@@ -8,15 +8,13 @@ from pydantic import Field, field_validator, model_validator
 
 from app.common.schemas import CamelModel
 from app.lightrag.schemas import LightRagQueryResponse
-from app.report.schemas import MonthlyReportResponse, WeeklyReportResponse
 
 OpenClawSystemCapabilityKey = Literal[
     "search_entries",
     "get_entry",
     "create_relation",
     "query_knowledge_graph",
-    "generate_weekly_report",
-    "generate_monthly_report",
+    "generate_periodic_review",
 ]
 OpenClawSystemDefaultKey = Literal[
     "submit_context_capture",
@@ -24,8 +22,7 @@ OpenClawSystemDefaultKey = Literal[
     "get_entry",
     "create_relation",
     "query_knowledge_graph",
-    "generate_weekly_report",
-    "generate_monthly_report",
+    "generate_periodic_review",
 ]
 OpenClawCapabilitySourceType = Literal["tool", "workflow", "agent"]
 OpenClawCatalogSourceType = Literal["tool", "workflow", "agent"]
@@ -283,50 +280,64 @@ class OpenClawQueryKnowledgeGraphRequest(CamelModel):
         return normalized
 
 
-class OpenClawGenerateWeeklyReportRequest(CamelModel):
-    week_start: date | None = Field(
+class OpenClawGeneratePeriodicReviewRequest(CamelModel):
+    focus: Literal["overview", "type", "tag", "trend"] | None = Field(
         default=None,
-        alias="weekStart",
         description=(
-            "Optional report week start date. Prefer omitting this field or passing null to use the default/latest "
-            "completed week. An empty string is also accepted as a compatibility input and is treated as not "
-            "provided. Format: YYYY-MM-DD."
+            "Optional review focus. Use overview for a general recap, type for entry-type distribution, "
+            "tag for tag hotspots, or trend for activity and change patterns."
         ),
-        examples=["2026-03-23"],
+        examples=["overview"],
     )
-    force_regenerate: bool = Field(
-        default=False,
-        alias="forceRegenerate",
-        description="Whether to regenerate the report even if a cached report already exists.",
+    period: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "Optional natural-language relative period such as last week, this month, the last two weeks, or 2026 Q1. "
+            "Prefer omitting it or passing null when explicit dates are provided."
+        ),
+        examples=["last week"],
+    )
+    start_date: date | None = Field(
+        default=None,
+        alias="startDate",
+        description=(
+            "Optional explicit start date in YYYY-MM-DD. If only one explicit date is provided, the review is treated "
+            "as a single-day recap. Explicit dates take priority over `period`."
+        ),
+        examples=["2026-03-01"],
+    )
+    end_date: date | None = Field(
+        default=None,
+        alias="endDate",
+        description=(
+            "Optional explicit end date in YYYY-MM-DD. If omitted while startDate is provided, the review is treated "
+            "as a single-day recap. Explicit dates take priority over `period`."
+        ),
+        examples=["2026-03-31"],
     )
 
-    @field_validator("week_start", mode="before")
+    @field_validator("focus", "period", mode="before")
     @classmethod
-    def _normalize_optional_week_start(cls, value: Any) -> Any:
+    def _normalize_optional_review_text(cls, value: Any) -> str | None:
+        return _normalize_optional_text_input(value)
+
+    @field_validator("start_date", "end_date", mode="before")
+    @classmethod
+    def _normalize_optional_review_dates(cls, value: Any) -> Any:
         return _normalize_optional_temporal_input(value)
 
+    @model_validator(mode="after")
+    def _validate_date_order(self) -> "OpenClawGeneratePeriodicReviewRequest":
+        if self.start_date and self.end_date and self.start_date > self.end_date:
+            raise ValueError("startDate must be less than or equal to endDate")
+        return self
 
-class OpenClawGenerateMonthlyReportRequest(CamelModel):
-    month_start: date | None = Field(
-        default=None,
-        alias="monthStart",
-        description=(
-            "Optional report month start date. Prefer omitting this field or passing null to use the default "
-            "target month. An empty string is also accepted as a compatibility input and is treated as not "
-            "provided. Format: YYYY-MM-DD."
-        ),
-        examples=["2026-04-01"],
-    )
-    force_regenerate: bool = Field(
-        default=False,
-        alias="forceRegenerate",
-        description="Whether to regenerate the report even if a cached report already exists.",
-    )
 
-    @field_validator("month_start", mode="before")
-    @classmethod
-    def _normalize_optional_month_start(cls, value: Any) -> Any:
-        return _normalize_optional_temporal_input(value)
+class OpenClawPeriodicReviewResponse(CamelModel):
+    content: str = Field(
+        description="A user-facing periodic review in Markdown.",
+    )
 
 
 class OpenClawIntegrationUpdateRequest(CamelModel):
@@ -531,8 +542,7 @@ OPENCLAW_SYSTEM_CAPABILITY_INPUT_MODELS: dict[OpenClawSystemCapabilityKey, type[
     "get_entry": OpenClawGetEntryRequest,
     "create_relation": OpenClawCreateRelationRequest,
     "query_knowledge_graph": OpenClawQueryKnowledgeGraphRequest,
-    "generate_weekly_report": OpenClawGenerateWeeklyReportRequest,
-    "generate_monthly_report": OpenClawGenerateMonthlyReportRequest,
+    "generate_periodic_review": OpenClawGeneratePeriodicReviewRequest,
 }
 
 OPENCLAW_SYSTEM_CAPABILITY_OUTPUT_MODELS: dict[OpenClawSystemCapabilityKey, type[Any]] = {
@@ -540,6 +550,5 @@ OPENCLAW_SYSTEM_CAPABILITY_OUTPUT_MODELS: dict[OpenClawSystemCapabilityKey, type
     "get_entry": OpenClawEntryRecordResponse,
     "create_relation": OpenClawRelationRecordResponse,
     "query_knowledge_graph": LightRagQueryResponse,
-    "generate_weekly_report": WeeklyReportResponse,
-    "generate_monthly_report": MonthlyReportResponse,
+    "generate_periodic_review": OpenClawPeriodicReviewResponse,
 }

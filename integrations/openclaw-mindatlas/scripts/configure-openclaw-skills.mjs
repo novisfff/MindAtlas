@@ -90,6 +90,9 @@ export function detectLegacyMindAtlasToolPolicy(config) {
     : []
   const profile = typeof tools.profile === 'string' ? tools.profile.trim() : ''
   const hasMindAtlasAllow = allow.some((entry) => entry === PLUGIN_ID || entry.startsWith('mindatlas_'))
+  const removedPeriodicReviewTools = allow.filter(
+    (entry) => entry === 'mindatlas_generate_weekly_report' || entry === 'mindatlas_generate_monthly_report',
+  )
 
   if (!hasMindAtlasAllow && profile !== 'full') {
     return []
@@ -99,6 +102,11 @@ export function detectLegacyMindAtlasToolPolicy(config) {
   if (hasMindAtlasAllow) {
     warnings.push(
       'Detected legacy MindAtlas tools.allow entries in OpenClaw config. MindAtlas tool visibility now comes from official SDK registration, so these allowlist entries are deprecated and no longer required.',
+    )
+  }
+  if (removedPeriodicReviewTools.length > 0) {
+    warnings.push(
+      'Detected removed MindAtlas report tool allowlist entries. `mindatlas_generate_weekly_report` and `mindatlas_generate_monthly_report` no longer exist; use `mindatlas_generate_periodic_review` instead.',
     )
   }
   if (profile === 'full' && hasMindAtlasAllow) {

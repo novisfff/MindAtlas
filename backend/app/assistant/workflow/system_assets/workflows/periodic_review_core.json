@@ -1,0 +1,252 @@
+{
+  "nodes": [
+    {
+      "nodeId": "start",
+      "nodeType": "start",
+      "label": "Start",
+      "positionX": 120.0,
+      "positionY": 320.0,
+      "config": {
+        "inputMode": "structured",
+        "structuredFields": [
+          {
+            "name": "focus",
+            "type": "string",
+            "required": false,
+            "nullable": true,
+            "enum": [
+              "overview",
+              "type",
+              "tag",
+              "trend"
+            ],
+            "description": "统计关注点，可选 overview/type/tag/trend。"
+          },
+          {
+            "name": "period",
+            "type": "string",
+            "required": false,
+            "nullable": true,
+            "description": "相对时间周期表达，如上周、本月、最近两周。"
+          },
+          {
+            "name": "startDate",
+            "type": "string",
+            "required": false,
+            "nullable": true,
+            "description": "显式起始日期，格式 YYYY-MM-DD。"
+          },
+          {
+            "name": "endDate",
+            "type": "string",
+            "required": false,
+            "nullable": true,
+            "description": "显式结束日期，格式 YYYY-MM-DD。"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "llm_intent",
+      "nodeType": "llm",
+      "label": "归一化时间范围",
+      "positionX": 530.0,
+      "positionY": 320.0,
+      "config": {
+        "systemPrompt": "你是 MindAtlas 的“周期回顾核心”参数归一化器。今天是 {{sys.date}}。\n你会收到已经结构化好的 4 个字段：focus、period、startDate、endDate。\n任务：输出统一的内部参数，供后续统计工具使用。\n输出规则：\n- intent_dimension 只能是 overview/type/tag/trend 之一；如果 focus 为空，默认 overview。\n- start_date/end_date 必须是 YYYY-MM-DD，且 start_date<=end_date。\n- 如果 startDate/endDate 至少给出一个显式日期，则显式日期优先：\n  - 两个都给出时直接使用，并令 range_source=explicit。\n  - 只给一个日期时按单天处理，令 start_date=end_date 为该日期，range_source=explicit。\n- 如果没有显式日期，但 period 非空，则结合今天日期把相对周期换算成具体 start_date/end_date，range_source=relative。\n- 如果四个字段都没给出有效时间范围，则默认最近 30 天：输出最近 30 天对应的 start_date/end_date，并令 range_source=default。\n- 不要输出 period，也不要输出额外解释。",
+        "userInput": "focus={{start.focus}}\nperiod={{start.period}}\nstartDate={{start.startDate}}\nendDate={{start.endDate}}",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "intent_dimension",
+            "type": "string",
+            "enum": [
+              "overview",
+              "type",
+              "tag",
+              "trend"
+            ]
+          },
+          {
+            "name": "start_date",
+            "type": "string",
+            "nullable": true
+          },
+          {
+            "name": "end_date",
+            "type": "string",
+            "nullable": true
+          },
+          {
+            "name": "range_source",
+            "type": "string",
+            "enum": [
+              "explicit",
+              "relative",
+              "default"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_stats",
+      "nodeType": "tool",
+      "label": "加载范围概况",
+      "positionX": 940.0,
+      "positionY": 170.0,
+      "config": {
+        "toolName": "get_statistics",
+        "inputBindings": {
+          "start_date": "{{llm_intent.start_date}}",
+          "end_date": "{{llm_intent.end_date}}"
+        }
+      }
+    },
+    {
+      "nodeId": "tool_activity",
+      "nodeType": "tool",
+      "label": "分析近期活动",
+      "positionX": 940.0,
+      "positionY": 320.0,
+      "config": {
+        "toolName": "analyze_activity",
+        "inputBindings": {
+          "start_date": "{{llm_intent.start_date}}",
+          "end_date": "{{llm_intent.end_date}}"
+        }
+      }
+    },
+    {
+      "nodeId": "tool_tags",
+      "nodeType": "tool",
+      "label": "分析标签热点",
+      "positionX": 940.0,
+      "positionY": 470.0,
+      "config": {
+        "toolName": "get_tag_statistics",
+        "inputBindings": {
+          "start_date": "{{llm_intent.start_date}}",
+          "end_date": "{{llm_intent.end_date}}",
+          "top_n": "5"
+        }
+      }
+    },
+    {
+      "nodeId": "llm_output",
+      "nodeType": "llm",
+      "label": "生成回顾内容",
+      "positionX": 1350.0,
+      "positionY": 320.0,
+      "config": {
+        "systemPrompt": "你是 MindAtlas 里的回顾助手，刚帮用户把这次想看的时间范围回顾过了一遍。\n你只能根据提供的数据生成结论，不得臆测或补充未给出的事实。\n整体语气要像一个熟悉用户上下文的产品助手：自然、贴近人、像在陪用户一起看数据和回顾这段时间，而不是像系统报告或接口说明。\n输出规则：\n- 使用 Markdown，严格按以下顺序输出 4 个二级标题：## 我先帮你看了下、## 你现在可以先关注这几点、## 这段时间你主要在记录什么、## 顺手补充。\n- 开头第一句要像助手汇报进展，例如“我刚帮你过了一遍……”或“我先帮你看了下……”，先说明你看的时间范围或关注点。\n- 全文用“你”来称呼用户，不要用“用户”“该用户”这类第三人称说法。\n- 每一段至少引用一个具体数字，但数字要服务于理解，不要为了凑数字而堆砌。\n- 前两段里要自然说明这次回顾对应的业务时间范围；如果 range_source=default，要明确这是在未指定时间范围时默认看的最近 30 天。\n- “你现在可以先关注这几点”优先回答用户真正想知道的内容，用 2 到 4 句自然语言说清楚，像是在帮用户抓重点。\n- “这段时间你主要在记录什么”优先响应 intent_dimension：type 时先讲类型，tag 时先讲标签，trend 时先承接近期变化再补充类型/标签，overview 时保持概览式表达。\n- “近期活动”信息要自然融入前两段里，不要单独做一段很硬的技术说明；如果 entries_created=0，直接说这段时间没有新增记录；如果 entries_created<3，直接说样本偏少，先不做强趋势判断。\n- 如果 total_entries=0，明确说明当前窗口内没有命中记录，其余段落不要编造热点或趋势。\n- “顺手补充”保持很短，最多 2 个要点，只在真的有必要时再解释：概况/类型/标签按业务时间统计，近期活动按创建时间统计。尽量不用英文术语，必要时也放在中文后面的括号里。\n- 输出要简洁、友好、有陪伴感，不要使用表格，也不要大段解释内部实现。",
+        "userInput": "focus={{start.focus}}\nperiod={{start.period}}\nstartDate={{start.startDate}}\nendDate={{start.endDate}}\n内部关注点={{llm_intent.intent_dimension}}\n归一化时间范围起点={{llm_intent.start_date}}\n归一化时间范围终点={{llm_intent.end_date}}\n时间来源={{llm_intent.range_source}}\n\n范围概况：\n{{tool_stats.result}}\n\n近期活动：\n{{tool_activity.result}}\n\n标签热点：\n{{tool_tags.result}}",
+        "outputMode": "text"
+      }
+    },
+    {
+      "nodeId": "output_final",
+      "nodeType": "output",
+      "label": "输出",
+      "positionX": 1760.0,
+      "positionY": 320.0,
+      "config": {
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "content",
+            "type": "string",
+            "value": "{{llm_output.response}}"
+          }
+        ]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edgeId": "e_start_intent",
+      "sourceNodeId": "start",
+      "targetNodeId": "llm_intent",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_intent_stats",
+      "sourceNodeId": "llm_intent",
+      "targetNodeId": "tool_stats",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_intent_activity",
+      "sourceNodeId": "llm_intent",
+      "targetNodeId": "tool_activity",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_intent_tags",
+      "sourceNodeId": "llm_intent",
+      "targetNodeId": "tool_tags",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_stats_output",
+      "sourceNodeId": "tool_stats",
+      "targetNodeId": "llm_output",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_activity_output",
+      "sourceNodeId": "tool_activity",
+      "targetNodeId": "llm_output",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_tags_output",
+      "sourceNodeId": "tool_tags",
+      "targetNodeId": "llm_output",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_output_final",
+      "sourceNodeId": "llm_output",
+      "targetNodeId": "output_final",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  }
+}

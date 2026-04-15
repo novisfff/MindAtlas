@@ -4,7 +4,10 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Literal
 
-from app.assistant.workflow.system_assets import CONTEXT_CAPTURE_ASSET_KEY
+from app.assistant.workflow.system_assets import (
+    CONTEXT_CAPTURE_ASSET_KEY,
+    PERIODIC_REVIEW_CORE_ASSET_KEY,
+)
 from app.openclaw_integration.schemas import (
     OPENCLAW_SYSTEM_CAPABILITY_INPUT_MODELS,
     OPENCLAW_SYSTEM_CAPABILITY_OUTPUT_MODELS,
@@ -18,13 +21,13 @@ OpenClawSystemImplementationType = Literal["entry", "relation", "knowledge_graph
 
 OPENCLAW_CONTEXT_CAPTURE_DEFAULT_KEY: OpenClawSystemDefaultKey = "submit_context_capture"
 OPENCLAW_CONTEXT_CAPTURE_WORKFLOW_ASSET_KEY = CONTEXT_CAPTURE_ASSET_KEY
+OPENCLAW_PERIODIC_REVIEW_DEFAULT_KEY: OpenClawSystemDefaultKey = "generate_periodic_review"
+OPENCLAW_PERIODIC_REVIEW_WORKFLOW_ASSET_KEY = PERIODIC_REVIEW_CORE_ASSET_KEY
 OPENCLAW_SYSTEM_DEFAULT_TOOL_SOURCE_NAMES: dict[OpenClawSystemCapabilityKey, str] = {
     "search_entries": "search_entries",
     "get_entry": "get_entry_detail",
     "create_relation": "create_relation",
     "query_knowledge_graph": "query_knowledge_graph",
-    "generate_weekly_report": "generate_weekly_report",
-    "generate_monthly_report": "generate_monthly_report",
 }
 
 
@@ -155,44 +158,6 @@ _TOOL_SYSTEM_ITEM_TEMPLATES: tuple[_ToolSystemItemTemplate, ...] = (
             en="Returns a synthesized answer, cited sources, and query metadata.",
         ),
     ),
-    _ToolSystemItemTemplate(
-        key="generate_weekly_report",
-        tool_name="mindatlas_generate_weekly_report",
-        enabled_by_default=True,
-        implementation_type="report",
-        title=_LocalizedText(zh="生成本周/上周回顾", en="Generate Weekly Report"),
-        description=_LocalizedText(
-            zh="生成或返回指定周的 MindAtlas 周报，适合“我最近一周干了啥”“上周我做了什么”“帮我做个周回顾”这类问题。",
-            en="Generate or return the MindAtlas weekly report for requests like what did I do this week, what did I do last week, or help me make a weekly recap.",
-        ),
-        input_summary=_LocalizedText(
-            zh="可选 weekStart（YYYY-MM-DD）以及是否强制重新生成。推荐省略或传 null 走默认周；空字符串目前也兼容为未提供，但不是推荐写法。",
-            en="Optional weekStart (YYYY-MM-DD) and whether to force regeneration. Prefer omitting it or passing null for the default week; an empty string is still accepted as a compatibility input but is not the recommended contract.",
-        ),
-        output_summary=_LocalizedText(
-            zh="返回周报状态、周期和结构化内容，便于输出 recap、digest 或工作回顾。",
-            en="Returns weekly report status, period, and structured content for recap, digest, or review output.",
-        ),
-    ),
-    _ToolSystemItemTemplate(
-        key="generate_monthly_report",
-        tool_name="mindatlas_generate_monthly_report",
-        enabled_by_default=True,
-        implementation_type="report",
-        title=_LocalizedText(zh="生成本月回顾", en="Generate Monthly Report"),
-        description=_LocalizedText(
-            zh="生成或返回指定月份的 MindAtlas 月报，适合“这个月我做了什么”“帮我做个月回顾”“给我一份月度 digest”这类问题。",
-            en="Generate or return the MindAtlas monthly report for requests like what did I do this month, help me make a monthly recap, or give me a monthly digest.",
-        ),
-        input_summary=_LocalizedText(
-            zh="可选 monthStart（YYYY-MM-DD）以及是否强制重新生成。推荐省略或传 null 走默认月份；空字符串目前也兼容为未提供，但不是推荐写法。",
-            en="Optional monthStart (YYYY-MM-DD) and whether to force regeneration. Prefer omitting it or passing null for the default month; an empty string is still accepted as a compatibility input but is not the recommended contract.",
-        ),
-        output_summary=_LocalizedText(
-            zh="返回月报状态、周期和结构化内容，便于输出 recap、digest 或月度回顾。",
-            en="Returns monthly report status, period, and structured content for recap, digest, or monthly review output.",
-        ),
-    ),
 )
 
 _WORKFLOW_SYSTEM_ITEM_TEMPLATES: tuple[_WorkflowSystemItemTemplate, ...] = (
@@ -214,6 +179,25 @@ _WORKFLOW_SYSTEM_ITEM_TEMPLATES: tuple[_WorkflowSystemItemTemplate, ...] = (
             en="Returns a unified created-or-merged result with the entry id, title, type, summary, tags, time fields, and created/updated timestamps.",
         ),
         workflow_asset_key=OPENCLAW_CONTEXT_CAPTURE_WORKFLOW_ASSET_KEY,
+    ),
+    _WorkflowSystemItemTemplate(
+        key=OPENCLAW_PERIODIC_REVIEW_DEFAULT_KEY,
+        tool_name="mindatlas_generate_periodic_review",
+        enabled_by_default=True,
+        title=_LocalizedText(zh="生成时间范围回顾", en="Generate Periodic Review"),
+        description=_LocalizedText(
+            zh="按任意时间范围回顾 MindAtlas 里的记录，适合“上周我做了什么”“看本月标签分布”“统计某个日期区间内的记录趋势”这类 recap、review、digest 或 summary 请求。",
+            en="Review MindAtlas records across any time range for recap, review, digest, or summary requests such as what did I do last week, show this month's tag distribution, or summarize a specific date range.",
+        ),
+        input_summary=_LocalizedText(
+            zh="可选 focus（overview/type/tag/trend）、period，以及显式 startDate/endDate。显式日期优先于 period；只给一个日期按单天处理；都不传时默认最近 30 天。",
+            en="Optional focus (overview/type/tag/trend), period, and explicit startDate/endDate. Explicit dates take priority over period; one explicit date becomes a single-day review; if none are provided, the workflow defaults to the last 30 days.",
+        ),
+        output_summary=_LocalizedText(
+            zh="返回一段可直接展示给用户的时间范围回顾内容（content）。",
+            en="Returns one user-ready periodic review string in the `content` field.",
+        ),
+        workflow_asset_key=OPENCLAW_PERIODIC_REVIEW_WORKFLOW_ASSET_KEY,
     ),
 )
 

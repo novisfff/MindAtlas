@@ -169,11 +169,11 @@ _SYSTEM_TOOL_DISPLAY_METADATA: dict[str, dict[str, dict[str, str]]] = {
     "get_statistics": {
         "zh": {
             "source_name": "获取统计",
-            "source_description": "读取记录总量、类型分布等整体统计信息。",
+            "source_description": "读取全量或指定业务时间范围内的记录概况、类型分布和高频标签。",
         },
         "en": {
             "source_name": "Get Statistics",
-            "source_description": "Read high-level statistics such as total entries and type distribution.",
+            "source_description": "Read all-time or business-time-scoped statistics such as entry totals, type distribution, and top tags.",
         },
     },
     "get_entries_by_time_range": {
@@ -199,11 +199,11 @@ _SYSTEM_TOOL_DISPLAY_METADATA: dict[str, dict[str, dict[str, str]]] = {
     "get_tag_statistics": {
         "zh": {
             "source_name": "标签统计",
-            "source_description": "汇总各标签下的记录数量与占比。",
+            "source_description": "汇总全量或指定业务时间范围内的高频标签及其记录数量，默认隐藏零使用标签。",
         },
         "en": {
             "source_name": "Get Tag Statistics",
-            "source_description": "Summarize entry counts and ratios for each tag.",
+            "source_description": "Summarize top tags and their counts for all-time or a scoped business-time range, hiding zero-usage tags by default.",
         },
     },
     "list_entry_types": {
@@ -347,34 +347,6 @@ class ToolRegistry(_BaseRegistry):
             {"name": "sources", "param_type": "array", "description": "引用来源列表。"},
             {"name": "metadata", "param_type": "object", "description": "查询元数据。"},
         ],
-        "openclaw_generate_weekly_report": [
-            {"name": "id", "param_type": "string", "description": "周报 UUID。"},
-            {"name": "weekStart", "param_type": "string", "description": "周起始日期。"},
-            {"name": "weekEnd", "param_type": "string", "description": "周结束日期。"},
-            {"name": "entryCount", "param_type": "number", "description": "记录数量。"},
-            {"name": "content", "param_type": "object", "description": "周报内容对象。"},
-            {"name": "contentLocale", "param_type": "string", "description": "内容语言。"},
-            {"name": "status", "param_type": "string", "description": "生成状态。"},
-            {"name": "attempts", "param_type": "number", "description": "生成尝试次数。"},
-            {"name": "lastError", "param_type": "string", "description": "最后一次错误。"},
-            {"name": "generatedAt", "param_type": "string", "description": "生成时间。"},
-            {"name": "createdAt", "param_type": "string", "description": "创建时间。"},
-            {"name": "updatedAt", "param_type": "string", "description": "更新时间。"},
-        ],
-        "openclaw_generate_monthly_report": [
-            {"name": "id", "param_type": "string", "description": "月报 UUID。"},
-            {"name": "monthStart", "param_type": "string", "description": "月起始日期。"},
-            {"name": "monthEnd", "param_type": "string", "description": "月结束日期。"},
-            {"name": "entryCount", "param_type": "number", "description": "记录数量。"},
-            {"name": "content", "param_type": "object", "description": "月报内容对象。"},
-            {"name": "contentLocale", "param_type": "string", "description": "内容语言。"},
-            {"name": "status", "param_type": "string", "description": "生成状态。"},
-            {"name": "attempts", "param_type": "number", "description": "生成尝试次数。"},
-            {"name": "lastError", "param_type": "string", "description": "最后一次错误。"},
-            {"name": "generatedAt", "param_type": "string", "description": "生成时间。"},
-            {"name": "createdAt", "param_type": "string", "description": "创建时间。"},
-            {"name": "updatedAt", "param_type": "string", "description": "更新时间。"},
-        ],
         "get_entry_detail": [
             {"name": "id", "param_type": "string", "description": "记录 UUID。"},
             {"name": "title", "param_type": "string", "description": "记录标题。"},
@@ -421,9 +393,24 @@ class ToolRegistry(_BaseRegistry):
         "get_statistics": [
             {"name": "total_entries", "param_type": "number", "description": "记录总数。"},
             {"name": "total_tags", "param_type": "number", "description": "标签总数。"},
+            {"name": "total_relations", "param_type": "number", "description": "关系总数。"},
             {"name": "total_types", "param_type": "number", "description": "类型总数。"},
+            {"name": "window_scope", "param_type": "string", "description": "统计窗口说明（如 all_time）。"},
+            {"name": "window_start", "param_type": "string", "description": "统计窗口开始日期（YYYY-MM-DD 或 null）。"},
+            {"name": "window_end", "param_type": "string", "description": "统计窗口结束日期（YYYY-MM-DD 或 null）。"},
+            {"name": "time_basis", "param_type": "string", "description": "统计时间口径（business_time）。"},
             {"name": "entries_by_type", "param_type": "object", "description": "按类型名称聚合计数。"},
             {"name": "entries_by_tag", "param_type": "object", "description": "按标签名称聚合计数。"},
+            {
+                "name": "top_types",
+                "param_type": "array",
+                "description": "高频类型列表。元素字段：type_id(string), type_name(string), type_color(string|null), count(number)。",
+            },
+            {
+                "name": "top_tags",
+                "param_type": "array",
+                "description": "高频标签列表。元素字段：id(string), name(string), color(string|null), entry_count(number)。",
+            },
         ],
         "get_entries_by_time_range": [
             {
@@ -437,9 +424,17 @@ class ToolRegistry(_BaseRegistry):
             {"name": "end_date", "param_type": "string", "description": "统计结束日期（YYYY-MM-DD）。"},
             {"name": "days", "param_type": "number", "description": "覆盖天数。"},
             {"name": "period", "param_type": "string", "description": "请求周期参数（week/month/year）。"},
+            {"name": "resolved_period", "param_type": "string", "description": "归一化后的周期标识（如 custom/7d/30d/90d）。"},
+            {"name": "window_scope", "param_type": "string", "description": "统计窗口说明（如 custom_range/recent_window）。"},
             {"name": "entries_created", "param_type": "number", "description": "时间范围内创建记录数。"},
             {"name": "avg_per_day", "param_type": "number", "description": "日均创建量。"},
             {"name": "trend_unit", "param_type": "string", "description": "趋势粒度（day/month）。"},
+            {"name": "metric_scope", "param_type": "string", "description": "活动统计口径（created_at）。"},
+            {"name": "active_buckets", "param_type": "number", "description": "有新增记录的趋势桶数量。"},
+            {"name": "inactive_buckets", "param_type": "number", "description": "无新增记录的趋势桶数量。"},
+            {"name": "peak_bucket", "param_type": "object", "description": "峰值趋势桶（date/count）或 null。"},
+            {"name": "latest_bucket", "param_type": "object", "description": "最新趋势桶（date/count）或 null。"},
+            {"name": "previous_bucket", "param_type": "object", "description": "前一个趋势桶（date/count）或 null。"},
             {
                 "name": "trend",
                 "param_type": "array",
@@ -448,6 +443,12 @@ class ToolRegistry(_BaseRegistry):
         ],
         "get_tag_statistics": [
             {"name": "total_tags", "param_type": "number", "description": "标签总数。"},
+            {"name": "window_scope", "param_type": "string", "description": "统计窗口说明（如 all_time）。"},
+            {"name": "window_start", "param_type": "string", "description": "统计窗口开始日期（YYYY-MM-DD 或 null）。"},
+            {"name": "window_end", "param_type": "string", "description": "统计窗口结束日期（YYYY-MM-DD 或 null）。"},
+            {"name": "time_basis", "param_type": "string", "description": "统计时间口径（business_time）。"},
+            {"name": "top_n", "param_type": "number", "description": "本次返回的标签数量上限。"},
+            {"name": "others_count", "param_type": "number", "description": "未包含在返回结果中的其余非零标签数量。"},
             {
                 "name": "tags",
                 "param_type": "array",

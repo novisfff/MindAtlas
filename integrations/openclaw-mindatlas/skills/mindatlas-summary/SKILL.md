@@ -1,6 +1,6 @@
 ---
 name: mindatlas-summary
-description: Report and recap policy for weekly, monthly, recent-activity, and topic-oriented MindAtlas reviews after the current session confirms visible `mindatlas_*` summary or retrieval tools.
+description: Report and recap policy for time-bounded, recent-activity, topic-oriented, and custom MindAtlas review capabilities after the overview skill has routed the request.
 ---
 
 # MindAtlas Summary
@@ -13,31 +13,28 @@ Treat the current integration as a personal single-user setup unless the adminis
 Primary goal:
 - When the user asks for a recap, review, digest, or summary, use MindAtlas to produce a useful structured result
 
+Priority order:
+1. Prefer a dedicated visible summary or review tool such as `mindatlas_generate_periodic_review`
+2. If no visible dedicated tool clearly matches, let the overview/dispatcher path inspect custom capabilities
+3. If no dedicated or custom summary capability exists but `mindatlas_search_entries` is visible, retrieve evidence first and then synthesize the summary
+
 Session-visible tool rule:
 - Start from the current session's visible `mindatlas_*` tools
 - Prefer visible report, workflow, agent, or retrieval tools that clearly match the requested recap
-- Do not assume a separate catalog tool exists inside the session
-
-If the current session does not expose any `mindatlas_*` tools:
-- Say explicitly that MindAtlas capabilities are not exposed in this session
-- Suggest starting a new OpenClaw session or reloading the Gateway / plugin
-- Do not silently substitute generic local memory for MindAtlas
+- Do not assume the only valid summary path is the system periodic review tool
 
 Preferred summary routes:
+1. Time-bounded summary
+- For requests like "我最近一周干了啥", "上周我做了什么", "看本月标签分布", "统计 2026-03-01 到 2026-03-31", or "what did I do this week", prefer `mindatlas_generate_periodic_review` or another visible review / digest workflow or agent
+- Treat recap, review, digest, and date-range summary requests as review-first when a dedicated periodic review path is available
 
-1. Weekly summary
-- For requests like "我最近一周干了啥", "上周我做了什么", "最近都忙了什么", or "what did I do this week", prefer `mindatlas_generate_weekly_report` or another visible weekly review / digest workflow or agent
-- Treat recent-activity recap as report-first when a weekly review path is available
-
-2. Monthly summary
-- Prefer `mindatlas_generate_monthly_report` or another visible monthly review / digest workflow or agent when the user asks for a monthly review, digest, or recap
-
-3. Topic summary
-- If the visible MindAtlas tool surface exposes a topic-summary, project-summary, workflow, or agent capability that clearly matches the request, use it
-- If no dedicated topic-summary capability exists, retrieve the relevant records first and then synthesize the result
+2. Topic or custom-process summary
+- If a visible MindAtlas tool or capability clearly represents the requested project review, sprint digest, team workflow, or custom summary path, use it
+- If the needed custom capability is not already visible as a dedicated tool, route back through the dispatcher flow and inspect `mindatlas_list_capabilities`
+- If the current session still looks stale after plugin, shipped-skill, or catalog changes, route back through overview/dispatcher and recommend reinstalling the plugin path, rerunning `configure:skills`, then restarting the Gateway and opening a new session
 
 Mandatory fallback:
-- If no dedicated weekly, monthly, or topic report tool is visible but `mindatlas_search_entries` is visible, retrieve the relevant time-bounded records first and then synthesize the answer
+- If no dedicated periodic-review or topic-summary tool is visible but `mindatlas_search_entries` is visible, retrieve the relevant time-bounded records first and then synthesize the answer
 - Use `mindatlas_get_entry` to expand key records when a search result needs more detail
 - Do not abandon MindAtlas just because a dedicated report tool is absent
 
@@ -45,21 +42,7 @@ Yield to retrieval:
 - If the user mainly wants to find one record, verify whether something was recorded, or inspect a specific entry, let the retrieval skill lead
 - If the user mainly wants a recap or review grounded in multiple records, summary stays in front and can still use retrieval as a sub-step
 
-Summary structure:
-- Prefer summaries that highlight main themes, completed work, progress, blockers, and reusable conclusions
-- Do not just concatenate raw records
-- If many records exist, synthesize patterns instead of listing everything
-
-Time-bounded summaries:
-- Honor explicit periods such as this week, last week, this month, the last two weeks, or a named date range
-- If the requested period is vague, use a reasonable interpretation or ask a brief clarifying question when precision matters
-- For recap requests, prefer report-style outputs over raw search result dumps
-
-Topic-oriented summaries:
-- Prefer grouping by major themes, project progress, repeated issues, decisions, and outcomes
-- If evidence is thin, do not overstate patterns
-
 Presentation:
-- Keep the final answer readable and useful
 - Prefer a short overview first, then highlights, then optional deeper detail if needed
-- After a summary, it can help to offer one concise next step such as expanding a topic or showing source records
+- Summaries should highlight main themes, completed work, progress, blockers, and reusable conclusions
+- Do not just concatenate raw records

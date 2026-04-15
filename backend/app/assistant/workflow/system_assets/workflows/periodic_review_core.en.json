@@ -1,0 +1,252 @@
+{
+  "nodes": [
+    {
+      "nodeId": "start",
+      "nodeType": "start",
+      "label": "Start",
+      "positionX": 120.0,
+      "positionY": 320.0,
+      "config": {
+        "inputMode": "structured",
+        "structuredFields": [
+          {
+            "name": "focus",
+            "type": "string",
+            "required": false,
+            "nullable": true,
+            "enum": [
+              "overview",
+              "type",
+              "tag",
+              "trend"
+            ],
+            "description": "Optional review focus: overview, type, tag, or trend."
+          },
+          {
+            "name": "period",
+            "type": "string",
+            "required": false,
+            "nullable": true,
+            "description": "Optional relative period expression such as last week, this month, or the last two weeks."
+          },
+          {
+            "name": "startDate",
+            "type": "string",
+            "required": false,
+            "nullable": true,
+            "description": "Optional explicit start date in YYYY-MM-DD."
+          },
+          {
+            "name": "endDate",
+            "type": "string",
+            "required": false,
+            "nullable": true,
+            "description": "Optional explicit end date in YYYY-MM-DD."
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "llm_intent",
+      "nodeType": "llm",
+      "label": "Normalize Time Range",
+      "positionX": 530.0,
+      "positionY": 320.0,
+      "config": {
+        "systemPrompt": "You are the parameter normalizer for MindAtlas Periodic Review Core. Today is {{sys.date}}.\nYou will receive four already-structured fields: focus, period, startDate, and endDate.\nTask: convert them into the shared internal parameters used by the downstream stats tools.\nOutput rules:\n- intent_dimension must be one of overview, type, tag, or trend. If focus is empty, default to overview.\n- start_date/end_date must be valid YYYY-MM-DD values and start_date must be <= end_date.\n- If at least one explicit date is provided in startDate/endDate, explicit dates win:\n  - When both are present, use them directly and set range_source=explicit.\n  - When only one date is present, treat it as a single-day range by setting start_date=end_date to that date and range_source=explicit.\n- If no explicit date exists but period is non-empty, infer concrete start_date/end_date from today's date and set range_source=relative.\n- If no valid time range is provided at all, default to the last 30 days by returning the concrete start_date/end_date for that window and setting range_source=default.\n- Do not output period or any extra explanation.",
+        "userInput": "focus={{start.focus}}\nperiod={{start.period}}\nstartDate={{start.startDate}}\nendDate={{start.endDate}}",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "intent_dimension",
+            "type": "string",
+            "enum": [
+              "overview",
+              "type",
+              "tag",
+              "trend"
+            ]
+          },
+          {
+            "name": "start_date",
+            "type": "string",
+            "nullable": true
+          },
+          {
+            "name": "end_date",
+            "type": "string",
+            "nullable": true
+          },
+          {
+            "name": "range_source",
+            "type": "string",
+            "enum": [
+              "explicit",
+              "relative",
+              "default"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_stats",
+      "nodeType": "tool",
+      "label": "Load Overview",
+      "positionX": 940.0,
+      "positionY": 170.0,
+      "config": {
+        "toolName": "get_statistics",
+        "inputBindings": {
+          "start_date": "{{llm_intent.start_date}}",
+          "end_date": "{{llm_intent.end_date}}"
+        }
+      }
+    },
+    {
+      "nodeId": "tool_activity",
+      "nodeType": "tool",
+      "label": "Analyze Activity",
+      "positionX": 940.0,
+      "positionY": 320.0,
+      "config": {
+        "toolName": "analyze_activity",
+        "inputBindings": {
+          "start_date": "{{llm_intent.start_date}}",
+          "end_date": "{{llm_intent.end_date}}"
+        }
+      }
+    },
+    {
+      "nodeId": "tool_tags",
+      "nodeType": "tool",
+      "label": "Load Tag Hotspots",
+      "positionX": 940.0,
+      "positionY": 470.0,
+      "config": {
+        "toolName": "get_tag_statistics",
+        "inputBindings": {
+          "start_date": "{{llm_intent.start_date}}",
+          "end_date": "{{llm_intent.end_date}}",
+          "top_n": "5"
+        }
+      }
+    },
+    {
+      "nodeId": "llm_output",
+      "nodeType": "llm",
+      "label": "Generate Review",
+      "positionX": 1350.0,
+      "positionY": 320.0,
+      "config": {
+        "systemPrompt": "You are the MindAtlas review assistant, and you have just reviewed the requested time window for the user.\nOnly use the provided data and do not invent unsupported conclusions.\nThe tone should feel like a helpful product assistant speaking directly to the user, not like a system report or technical note.\nOutput rules:\n- Return Markdown with these four H2 headings in order: ## I took a quick look, ## What stands out first, ## What you’ve mostly been recording, ## A quick note.\n- The first sentence should sound like a progress update, such as “I just reviewed…” or “I took a quick look…”, and briefly say which range or focus you checked.\n- Address the user as “you”, not “the user”.\n- Every section must cite at least one concrete number, but the numbers should help the user understand the picture rather than feel dumped on.\n- In the first two sections, naturally mention the business-time range you reviewed. If range_source=default, explicitly note that this fell back to the last 30 days because no time range was specified.\n- “What stands out first” should answer the user directly in 2 to 4 natural sentences, like you are helping them spot the most useful takeaway.\n- “What you’ve mostly been recording” should prioritize intent_dimension: types first for type requests, tags first for tag requests, and recent movement first for trend requests before adding type/tag context.\n- Recent activity should be woven naturally into the first two sections. If entries_created=0, say there were no new records in that window. If entries_created<3, say the sample is too small for a strong trend conclusion.\n- If total_entries=0, clearly say there were no matching records in the current window and do not fabricate hotspots or trends.\n- Keep “A quick note” very short, at most 2 bullets, and only clarify that overview/type/tag stats use business time while activity uses created_at when that distinction is actually useful.\n- Keep it concise, friendly, and grounded. Do not use tables.",
+        "userInput": "focus={{start.focus}}\nperiod={{start.period}}\nstartDate={{start.startDate}}\nendDate={{start.endDate}}\ninternal_focus={{llm_intent.intent_dimension}}\nnormalized_start={{llm_intent.start_date}}\nnormalized_end={{llm_intent.end_date}}\nrange_source={{llm_intent.range_source}}\n\nScoped overview:\n{{tool_stats.result}}\n\nRecent activity:\n{{tool_activity.result}}\n\nTag hotspots:\n{{tool_tags.result}}",
+        "outputMode": "text"
+      }
+    },
+    {
+      "nodeId": "output_final",
+      "nodeType": "output",
+      "label": "Output",
+      "positionX": 1760.0,
+      "positionY": 320.0,
+      "config": {
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "content",
+            "type": "string",
+            "value": "{{llm_output.response}}"
+          }
+        ]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edgeId": "e_start_intent",
+      "sourceNodeId": "start",
+      "targetNodeId": "llm_intent",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_intent_stats",
+      "sourceNodeId": "llm_intent",
+      "targetNodeId": "tool_stats",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_intent_activity",
+      "sourceNodeId": "llm_intent",
+      "targetNodeId": "tool_activity",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_intent_tags",
+      "sourceNodeId": "llm_intent",
+      "targetNodeId": "tool_tags",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_stats_output",
+      "sourceNodeId": "tool_stats",
+      "targetNodeId": "llm_output",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_activity_output",
+      "sourceNodeId": "tool_activity",
+      "targetNodeId": "llm_output",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_tags_output",
+      "sourceNodeId": "tool_tags",
+      "targetNodeId": "llm_output",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_output_final",
+      "sourceNodeId": "llm_output",
+      "targetNodeId": "output_final",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  }
+}

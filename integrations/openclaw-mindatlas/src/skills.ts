@@ -7,6 +7,7 @@ import { PLUGIN_ID } from './config'
 
 export const BUNDLED_SKILL_IDS = [
   'mindatlas-overview',
+  'mindatlas-dispatcher',
   'mindatlas-auto-capture',
   'mindatlas-retrieval',
   'mindatlas-summary',

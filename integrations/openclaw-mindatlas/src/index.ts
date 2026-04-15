@@ -20,7 +20,11 @@ import { syncBundledSkills } from './skills'
 import {
   buildToolDescription,
   createCapabilityToolRegistration,
+  createListCapabilitiesToolRegistration,
+  createRunCapabilityToolRegistration,
   createTextResult,
+  MINDATLAS_LIST_CAPABILITIES_TOOL_NAME,
+  MINDATLAS_RUN_CAPABILITY_TOOL_NAME,
   type ToolExecutionContextLike,
   type ToolResult,
 } from './tools'
@@ -80,6 +84,12 @@ interface RefreshOptions {
   reason?: 'startup' | 'service-start' | 'ttl' | 'manual'
 }
 
+interface RefreshResult {
+  ok: boolean
+  error?: string
+  snapshot: CatalogSnapshot
+}
+
 export class OpenClawMindAtlasPluginRuntime {
   private readonly api: OpenClawPluginApi
   private readonly logger: PluginLogger | undefined
@@ -88,13 +98,17 @@ export class OpenClawMindAtlasPluginRuntime {
   private config: PluginConfig | null = null
   private snapshot: CatalogSnapshot = {
     integrationName: 'MindAtlas',
+    capabilities: [],
+    itemsByCapabilityKey: new Map(),
     itemsByToolName: new Map(),
+    capabilityKeys: new Set(),
     toolNames: new Set(),
   }
   private registeredToolNames = new Set<string>()
+  private registeredCapabilityToolNames = new Set<string>()
   private staleToolNames = new Set<string>()
   private intervalHandle: NodeJS.Timeout | null = null
-  private refreshing: Promise<void> | null = null
+  private refreshing: Promise<RefreshResult> | null = null
   private reloadRequired = false
   private refreshServiceRegistered = false
   private lastReloadWarningKey = ''
@@ -134,6 +148,7 @@ export class OpenClawMindAtlasPluginRuntime {
       return
     }
 
+    this.registerDispatcherTools()
     await this.refreshCatalog({
       initialRegistration: true,
       reason: 'startup',
@@ -160,21 +175,40 @@ export class OpenClawMindAtlasPluginRuntime {
     }
   }
 
+  getCapabilityByKey(capabilityKey: string): MindAtlasRuntimeCapability | undefined {
+    return this.snapshot.itemsByCapabilityKey.get(capabilityKey)
+  }
+
   getCapabilityByToolName(toolName: string): MindAtlasRuntimeCapability | undefined {
     return this.snapshot.itemsByToolName.get(toolName)
+  }
+
+  isCapabilityToolRegistered(toolName: string): boolean {
+    return this.registeredCapabilityToolNames.has(toolName)
   }
 
   isToolStale(toolName: string): boolean {
     return this.staleToolNames.has(toolName)
   }
 
-  async refreshCatalog(options: RefreshOptions = {}) {
+  listRegisteredToolNames(): string[] {
+    return [...this.registeredToolNames].sort()
+  }
+
+  listStaleToolNames(): string[] {
+    return [...this.staleToolNames].sort()
+  }
+
+  async refreshCatalog(options: RefreshOptions = {}): Promise<RefreshResult> {
     if (!this.config) {
-      return
+      return {
+        ok: false,
+        error: 'MindAtlas plugin configuration is unavailable.',
+        snapshot: this.snapshot,
+      }
     }
     if (this.refreshing) {
-      await this.refreshing
-      return
+      return await this.refreshing
     }
 
     this.refreshing = this.performRefresh({
@@ -182,7 +216,7 @@ export class OpenClawMindAtlasPluginRuntime {
       reason: options.reason ?? 'manual',
     })
     try {
-      await this.refreshing
+      return await this.refreshing
     } finally {
       this.refreshing = null
     }
@@ -231,9 +265,13 @@ export class OpenClawMindAtlasPluginRuntime {
     }
   }
 
-  private async performRefresh(options: Required<RefreshOptions>) {
+  private async performRefresh(options: Required<RefreshOptions>): Promise<RefreshResult> {
     if (!this.config) {
-      return
+      return {
+        ok: false,
+        error: 'MindAtlas plugin configuration is unavailable.',
+        snapshot: this.snapshot,
+      }
     }
 
     try {
@@ -246,7 +284,7 @@ export class OpenClawMindAtlasPluginRuntime {
       const availableCapabilities = discoveredCapabilities.filter((capability) => capability.available)
       const unavailableCapabilities = discoveredCapabilities.filter((capability) => !capability.available)
       const nameDelta = diffToolNames(previousSnapshot.toolNames, nextSnapshot.toolNames)
-      const metadataDelta = diffRegisteredToolMetadata(previousSnapshot, nextSnapshot, this.registeredToolNames)
+      const metadataDelta = diffRegisteredToolMetadata(previousSnapshot, nextSnapshot, this.registeredCapabilityToolNames)
       const newlyAvailableUnregisteredToolNames = availableCapabilities
         .filter((capability) => !this.registeredToolNames.has(capability.toolName))
         .map((capability) => capability.toolName)
@@ -267,6 +305,7 @@ export class OpenClawMindAtlasPluginRuntime {
       }
 
       const registeredToolNames = [...this.registeredToolNames].sort()
+      const registeredCapabilityToolNames = [...this.registeredCapabilityToolNames].sort()
       const availableToolNames = availableCapabilities.map((capability) => capability.toolName).sort()
       log(this.logger, 'info', 'MindAtlas catalog refresh succeeded.', {
         reason: options.reason,
@@ -276,17 +315,18 @@ export class OpenClawMindAtlasPluginRuntime {
         unavailableCapabilities: unavailableCapabilities.length,
         availableToolNames,
         registeredToolNames,
+        registeredCapabilityToolNames,
         reloadRequired: this.reloadRequired,
       })
 
-      if (registeredToolNames.length === 0) {
+      if (registeredCapabilityToolNames.length === 0) {
         if (discoveredCapabilities.length === 0) {
-          log(this.logger, 'warn', 'MindAtlas catalog refresh succeeded but returned no capabilities. No MindAtlas tools are registered in this Gateway process.', {
+          log(this.logger, 'warn', 'MindAtlas catalog refresh succeeded but returned no catalog-backed capabilities. Only dispatcher tools are available in this Gateway process.', {
             integrationName: nextSnapshot.integrationName,
             reloadRequired: this.reloadRequired,
           })
         } else if (availableCapabilities.length === 0) {
-          log(this.logger, 'warn', 'MindAtlas catalog refresh succeeded but all discovered capabilities are currently unavailable. No MindAtlas tools are registered in this Gateway process.', {
+          log(this.logger, 'warn', 'MindAtlas catalog refresh succeeded but all discovered catalog capabilities are currently unavailable. Only dispatcher tools are available in this Gateway process.', {
             integrationName: nextSnapshot.integrationName,
             unavailableCapabilities: unavailableCapabilities.map((capability) => ({
               capabilityKey: capability.capabilityKey,
@@ -296,6 +336,10 @@ export class OpenClawMindAtlasPluginRuntime {
             reloadRequired: this.reloadRequired,
           })
         }
+      }
+      return {
+        ok: true,
+        snapshot: this.snapshot,
       }
     } catch (error) {
       const details = {
@@ -307,13 +351,22 @@ export class OpenClawMindAtlasPluginRuntime {
         log(
           this.logger,
           'warn',
-          'MindAtlas startup catalog fetch failed. No MindAtlas tools were registered. Fix the plugin config or connectivity, then reload the OpenClaw Gateway so fresh sessions can see MindAtlas tools.',
+          'MindAtlas startup catalog fetch failed. Dedicated MindAtlas capability tools were not registered, though dispatcher tools may still be available. Fix the plugin config or connectivity, then reload the OpenClaw Gateway so fresh sessions can see the full MindAtlas tool surface.',
           details,
         )
-        return
+        return {
+          ok: false,
+          error: details.error,
+          snapshot: this.snapshot,
+        }
       }
 
       log(this.logger, 'error', 'Failed to refresh MindAtlas catalog.', details)
+      return {
+        ok: false,
+        error: details.error,
+        snapshot: this.snapshot,
+      }
     }
   }
 
@@ -326,11 +379,11 @@ export class OpenClawMindAtlasPluginRuntime {
     metadataDelta: ReturnType<typeof diffRegisteredToolMetadata>
     newlyAvailableUnregisteredToolNames: string[]
   }) {
-    if (this.registeredToolNames.size > 0 && (nameDelta.changed || metadataDelta.changed)) {
+    if (this.registeredCapabilityToolNames.size > 0 && (nameDelta.changed || metadataDelta.changed)) {
       this.reloadRequired = true
       this.staleToolNames = new Set(
         [
-          ...[...this.registeredToolNames].filter((toolName) => !this.snapshot.toolNames.has(toolName)),
+          ...[...this.registeredCapabilityToolNames].filter((toolName) => !this.snapshot.toolNames.has(toolName)),
           ...metadataDelta.changedToolNames,
         ].sort(),
       )
@@ -384,8 +437,15 @@ export class OpenClawMindAtlasPluginRuntime {
 
     const tool = createCapabilityToolRegistration(capability.toolName, {
       config: this.config,
+      getCatalogSnapshot: () => this.snapshot,
+      getCapabilityByKey: (capabilityKey) => this.getCapabilityByKey(capabilityKey),
       getCapabilityByToolName: (toolName) => this.getCapabilityByToolName(toolName),
+      isCapabilityToolRegistered: (toolName) => this.isCapabilityToolRegistered(toolName),
       isToolStale: (toolName) => this.isToolStale(toolName),
+      listRegisteredToolNames: () => this.listRegisteredToolNames(),
+      listStaleToolNames: () => this.listStaleToolNames(),
+      refreshCatalog: async (reason) => this.refreshCatalog({ reason }),
+      reloadRequired: () => this.reloadRequired,
       logHeaders: (toolName, context) => normalizeContextHeaders(toolName, context),
     })
     tool.description = buildToolDescription(capability)
@@ -393,11 +453,56 @@ export class OpenClawMindAtlasPluginRuntime {
 
     this.api.registerTool(tool as Parameters<OpenClawPluginApi['registerTool']>[0])
     this.registeredToolNames.add(capability.toolName)
+    this.registeredCapabilityToolNames.add(capability.toolName)
 
     log(this.logger, 'info', 'Registered MindAtlas capability tool.', {
       toolName: capability.toolName,
       capabilityKey: capability.capabilityKey,
       sourceType: capability.sourceType,
+    })
+  }
+
+  private registerDispatcherTools() {
+    if (!this.config) {
+      return
+    }
+    this.registerDispatcherTool(createListCapabilitiesToolRegistration({
+      config: this.config,
+      getCatalogSnapshot: () => this.snapshot,
+      getCapabilityByKey: (capabilityKey) => this.getCapabilityByKey(capabilityKey),
+      getCapabilityByToolName: (toolName) => this.getCapabilityByToolName(toolName),
+      isCapabilityToolRegistered: (toolName) => this.isCapabilityToolRegistered(toolName),
+      isToolStale: (toolName) => this.isToolStale(toolName),
+      listRegisteredToolNames: () => this.listRegisteredToolNames(),
+      listStaleToolNames: () => this.listStaleToolNames(),
+      refreshCatalog: async (reason) => this.refreshCatalog({ reason }),
+      reloadRequired: () => this.reloadRequired,
+      logHeaders: (toolName, context) => normalizeContextHeaders(toolName, context),
+    }))
+    this.registerDispatcherTool(createRunCapabilityToolRegistration({
+      config: this.config,
+      getCatalogSnapshot: () => this.snapshot,
+      getCapabilityByKey: (capabilityKey) => this.getCapabilityByKey(capabilityKey),
+      getCapabilityByToolName: (toolName) => this.getCapabilityByToolName(toolName),
+      isCapabilityToolRegistered: (toolName) => this.isCapabilityToolRegistered(toolName),
+      isToolStale: (toolName) => this.isToolStale(toolName),
+      listRegisteredToolNames: () => this.listRegisteredToolNames(),
+      listStaleToolNames: () => this.listStaleToolNames(),
+      refreshCatalog: async (reason) => this.refreshCatalog({ reason }),
+      reloadRequired: () => this.reloadRequired,
+      logHeaders: (toolName, context) => normalizeContextHeaders(toolName, context),
+    }))
+  }
+
+  private registerDispatcherTool(tool: ReturnType<typeof createListCapabilitiesToolRegistration>) {
+    if (this.registeredToolNames.has(tool.name)) {
+      return
+    }
+    this.api.registerTool(tool as Parameters<OpenClawPluginApi['registerTool']>[0])
+    this.registeredToolNames.add(tool.name)
+    log(this.logger, 'info', 'Registered MindAtlas dispatcher tool.', {
+      toolName: tool.name,
+      dispatcher: tool.name === MINDATLAS_LIST_CAPABILITIES_TOOL_NAME || tool.name === MINDATLAS_RUN_CAPABILITY_TOOL_NAME,
     })
   }
 
