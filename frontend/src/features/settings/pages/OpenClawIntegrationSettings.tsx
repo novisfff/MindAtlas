@@ -630,6 +630,7 @@ export function OpenClawIntegrationSettingsPage() {
   const [contractOrigin, setContractOrigin] = useState<ContractOrigin>('source')
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [guideOpen, setGuideOpen] = useState(false)
+  const [manualGuideOpen, setManualGuideOpen] = useState(false)
 
   const integrationMutation = useMutation({
     mutationFn: updateOpenClawIntegrationSettings,
@@ -795,15 +796,39 @@ export function OpenClawIntegrationSettingsPage() {
     t('openclawIntegration.guide.notes.skillBoundary'),
     t('openclawIntegration.guide.notes.refresh'),
   ]
-  const pluginInstallBlocks = [
+  const guidedScriptBlocks = [
     {
       order: '3.1',
+      title: t('openclawIntegration.guide.scriptBlocks.setup.title'),
+      description: t('openclawIntegration.guide.scriptBlocks.setup.description'),
+      code: 'npm --prefix ./integrations/openclaw-mindatlas run setup:openclaw',
+    },
+    {
+      order: '3.2',
+      title: t('openclawIntegration.guide.scriptBlocks.update.title'),
+      description: t('openclawIntegration.guide.scriptBlocks.update.description'),
+      code: 'npm --prefix ./integrations/openclaw-mindatlas run update:openclaw',
+    },
+  ].map((block) => ({
+    ...block,
+    copyLabel: t('openclawIntegration.guide.actions.copy'),
+  }))
+  const scriptHighlights = [
+    t('openclawIntegration.guide.scriptHighlights.prompt'),
+    t('openclawIntegration.guide.scriptHighlights.reuse'),
+    t('openclawIntegration.guide.scriptHighlights.cleanup'),
+    t('openclawIntegration.guide.scriptHighlights.skills'),
+    t('openclawIntegration.guide.scriptHighlights.restart'),
+  ]
+  const pluginInstallBlocks = [
+    {
+      order: 'M1',
       title: t('openclawIntegration.guide.installBlocks.locate.title'),
       description: t('openclawIntegration.guide.installBlocks.locate.description'),
       code: 'cd /path/to/MindAtlas',
     },
     {
-      order: '3.2',
+      order: 'M2',
       title: t('openclawIntegration.guide.installBlocks.install.title'),
       description: t('openclawIntegration.guide.installBlocks.install.description'),
       code: 'openclaw plugins install ./integrations/openclaw-mindatlas\nnpm --prefix ./integrations/openclaw-mindatlas run configure:skills',
@@ -825,20 +850,20 @@ export function OpenClawIntegrationSettingsPage() {
   }
 }`
   const pluginConfigExampleBlock = {
-    order: '3.4',
+    order: 'M4',
     title: t('openclawIntegration.guide.configExampleTitle'),
     description: t('openclawIntegration.guide.configExampleDescription'),
     code: pluginConfigExample,
   }
   const pluginConfigBlocks = [
     {
-      order: '3.3',
+      order: 'M3',
       title: t('openclawIntegration.guide.configBlocks.findConfig.title'),
       description: t('openclawIntegration.guide.configBlocks.findConfig.description'),
       code: 'openclaw config file',
     },
     {
-      order: '3.5',
+      order: 'M5',
       title: t('openclawIntegration.guide.configBlocks.validate.title'),
       description: t('openclawIntegration.guide.configBlocks.validate.description'),
       code: 'openclaw config validate',
@@ -850,11 +875,11 @@ export function OpenClawIntegrationSettingsPage() {
     pluginConfigExampleBlock,
     pluginConfigBlocks[1],
   ]
-  const orderedSetupCards = setupSequenceBlocks.map((block) => ({
+  const manualSetupCards = setupSequenceBlocks.map((block) => ({
     ...block,
     copyLabel: t('openclawIntegration.guide.actions.copy'),
   }))
-  const upgradeCommandCards = [
+  const manualUpgradeCards = [
     {
       order: 'U1',
       title: t('openclawIntegration.guide.upgradeBlocks.standard.title'),
@@ -1413,7 +1438,7 @@ export function OpenClawIntegrationSettingsPage() {
                 </GuideCallout>
 
                 <div className="space-y-4">
-                  {orderedSetupCards.map((block) => (
+                  {guidedScriptBlocks.map((block) => (
                     <CopyableCodeBlock
                       key={block.order}
                       orderLabel={block.order}
@@ -1429,6 +1454,19 @@ export function OpenClawIntegrationSettingsPage() {
                 </div>
 
                 <GuideCallout icon={<Wrench className="h-4 w-4" />}>
+                  <p className="font-semibold">{t('openclawIntegration.guide.scriptHighlightsTitle')}</p>
+                  <p className="mt-1">{t('openclawIntegration.guide.scriptHighlightsDescription')}</p>
+                  <ul className="mt-3 space-y-2">
+                    {scriptHighlights.map((item) => (
+                      <li key={item} className="flex items-start gap-2">
+                        <span className="mt-2 h-1.5 w-1.5 rounded-full bg-current/60" />
+                        <span>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </GuideCallout>
+
+                <GuideCallout icon={<Wrench className="h-4 w-4" />}>
                   <p className="font-semibold">{t('openclawIntegration.guide.maintenanceTitle')}</p>
                   <p className="mt-1">{t('openclawIntegration.guide.maintenanceDescription')}</p>
                   <ul className="mt-3 space-y-2">
@@ -1441,20 +1479,77 @@ export function OpenClawIntegrationSettingsPage() {
                   </ul>
                 </GuideCallout>
 
-                <div className="space-y-4">
-                  {upgradeCommandCards.map((block) => (
-                    <CopyableCodeBlock
-                      key={block.order}
-                      orderLabel={block.order}
-                      title={block.title}
-                      description={block.description}
-                      code={block.code}
-                      copyLabel={block.copyLabel}
-                      onCopy={(value) => {
-                        void copyToClipboard(value, t('openclawIntegration.messages.copied'))
-                      }}
-                    />
-                  ))}
+                <div className={cn(uiChrome.inset, 'overflow-hidden p-0')}>
+                  <button
+                    type="button"
+                    onClick={() => setManualGuideOpen((open) => !open)}
+                    className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left"
+                    aria-expanded={manualGuideOpen}
+                  >
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-3">
+                        <div className="rounded-[16px] bg-slate-100 p-2.5 text-slate-700">
+                          <Wrench className="h-5 w-5" />
+                        </div>
+                        <h3 className="text-base font-semibold text-slate-900">
+                          {t('openclawIntegration.guide.manualTitle')}
+                        </h3>
+                      </div>
+                      <p className="pl-[3.25rem] text-sm leading-6 text-slate-600">
+                        {t('openclawIntegration.guide.manualDescription')}
+                      </p>
+                    </div>
+                    <div className={cn(uiChrome.control, 'flex shrink-0 items-center gap-3 self-start px-3 py-1.5 text-sm text-slate-600 shadow-none')}>
+                      <span>
+                        {manualGuideOpen
+                          ? t('openclawIntegration.guide.actions.hideManual')
+                          : t('openclawIntegration.guide.actions.showManual')}
+                      </span>
+                      <ChevronDown className={cn('h-4 w-4 transition-transform', manualGuideOpen && 'rotate-180')} />
+                    </div>
+                  </button>
+
+                  {manualGuideOpen ? (
+                    <div className="border-t border-slate-200 px-5 pb-5 pt-4">
+                      <p className="text-sm leading-6 text-slate-600">
+                        {t('openclawIntegration.guide.manualSections.setupDescription')}
+                      </p>
+                      <div className="mt-4 space-y-4">
+                        {manualSetupCards.map((block) => (
+                          <CopyableCodeBlock
+                            key={block.order}
+                            orderLabel={block.order}
+                            title={block.title}
+                            description={block.description}
+                            code={block.code}
+                            copyLabel={block.copyLabel}
+                            onCopy={(value) => {
+                              void copyToClipboard(value, t('openclawIntegration.messages.copied'))
+                            }}
+                          />
+                        ))}
+                      </div>
+
+                      <p className="mt-6 text-sm leading-6 text-slate-600">
+                        {t('openclawIntegration.guide.manualSections.upgradeDescription')}
+                      </p>
+                      <div className="mt-4 space-y-4">
+                        {manualUpgradeCards.map((block) => (
+                          <CopyableCodeBlock
+                            key={block.order}
+                            orderLabel={block.order}
+                            title={block.title}
+                            description={block.description}
+                            code={block.code}
+                            copyLabel={block.copyLabel}
+                            onCopy={(value) => {
+                              void copyToClipboard(value, t('openclawIntegration.messages.copied'))
+                            }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               </QuickStartStep>
 

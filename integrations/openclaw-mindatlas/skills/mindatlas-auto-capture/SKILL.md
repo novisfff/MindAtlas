@@ -36,7 +36,7 @@ Custom capability rule:
 - Do not assume the only valid capture path is the built-in submit-context tool
 - Administrators may expose custom capture workflows or agents
 - If the visible dedicated capture tools are insufficient, route back through the dispatcher flow and inspect `mindatlas_list_capabilities`
-- If the current session's MindAtlas capture surface looks stale after plugin, shipped-skill, or catalog changes, route back through overview/dispatcher and recommend reinstalling the plugin path, rerunning `configure:skills`, then restarting the Gateway and opening a new session
+- If the current session's MindAtlas capture surface looks stale after plugin, shipped-skill, or catalog changes, route back through overview/dispatcher and recommend `npm --prefix ./integrations/openclaw-mindatlas run update:openclaw`, then opening a new session
 
 User control:
 - If the user explicitly does not want something recorded, do not store it

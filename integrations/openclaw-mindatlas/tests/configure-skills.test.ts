@@ -11,7 +11,7 @@ const {
   resolveInstalledPluginRoot,
   resolveOpenClawConfigPath,
   resolveOpenClawRoot,
-} = await import('../scripts/configure-openclaw-skills.mjs')
+} = await import('../../openclaw-mindatlas-cli/configure-openclaw-skills.mjs')
 
 test('resolveOpenClawConfigPath prefers OPENCLAW_CONFIG_PATH', () => {
   assert.equal(
