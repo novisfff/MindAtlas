@@ -53,6 +53,39 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
             }
             self.assertEqual(len(workflow.edges), len(edge_keys))
 
+    def test_system_periodic_review_workflow_resolves_core_asset_to_pinned_target(self) -> None:
+        from app.assistant_config.models import AssistantWorkflow  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        svc.sync_standalone_system_targets()
+
+        wrapper = (
+            self.db.query(AssistantWorkflow)
+            .filter(AssistantWorkflow.name == "periodic_review__workflow")
+            .first()
+        )
+        core = (
+            self.db.query(AssistantWorkflow)
+            .filter(AssistantWorkflow.name == "system_periodic_review_core__workflow")
+            .first()
+        )
+
+        self.assertIsNotNone(wrapper)
+        self.assertIsNotNone(core)
+        assert wrapper is not None
+        assert core is not None
+        self.assertIsNotNone(core.published_version_id)
+
+        call_node = next(node for node in (wrapper.nodes or []) if node.node_id == "call_core")
+        cfg = dict(call_node.config or {})
+
+        self.assertEqual(cfg.get("targetWorkflowId"), str(core.id))
+        self.assertEqual(cfg.get("targetPublishedVersionId"), str(core.published_version_id))
+        self.assertEqual(cfg.get("bindingMode"), "pinned")
+        self.assertNotIn("targetSystemAssetKey", cfg)
+
     def test_sync_standalone_system_targets_creates_context_capture_workflow_without_system_skill(self) -> None:
         from app.assistant_config.models import AssistantSkill, AssistantWorkflow  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402

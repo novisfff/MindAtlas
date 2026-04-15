@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import pluginEntry, { OpenClawMindAtlasPluginRuntime, PLUGIN_ID, registerMindAtlasPlugin } from '../src/index'
 import { describePluginConfigIssue, extractPluginEntryConfig, resolvePluginConfig, validatePluginConfig } from '../src/config'
 import { BUNDLED_SKILL_IDS, MANAGED_SKILL_MARKER_FILE, resolveManagedSkillsRoot, syncBundledSkills } from '../src/skills'
+import { MINDATLAS_LIST_CAPABILITIES_TOOL_NAME, MINDATLAS_RUN_CAPABILITY_TOOL_NAME } from '../src/tools'
 
 const TEST_OPENCLAW_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-mindatlas-tests-'))
 
@@ -28,6 +29,12 @@ interface MockService {
   id: string
   start?: (context?: unknown) => void | Promise<void>
   stop?: (context?: unknown) => void | Promise<void>
+}
+
+function findTool(tools: MockTool[], toolName: string): MockTool {
+  const tool = tools.find((item) => item.name === toolName)
+  assert.ok(tool, `Expected tool ${toolName} to be registered.`)
+  return tool
 }
 
 function createResponse(body: unknown, init?: ResponseInit) {
@@ -347,12 +354,14 @@ test('plugin registers only available tools during the official register(api) ph
     globalThis.fetch = originalFetch
   }
 
-  assert.equal(tools.length, 1)
-  assert.equal(tools[0].name, 'mindatlas_submit_context_capture')
+  assert.equal(tools.length, 3)
+  assert.equal(tools.some((tool) => tool.name === MINDATLAS_LIST_CAPABILITIES_TOOL_NAME), true)
+  assert.equal(tools.some((tool) => tool.name === MINDATLAS_RUN_CAPABILITY_TOOL_NAME), true)
+  assert.equal(tools.some((tool) => tool.name === 'mindatlas_submit_context_capture'), true)
   assert.equal(services.length, 1)
 })
 
-test('startup catalog failure does not register tools and tells operators to reload after fixing connectivity', async () => {
+test('startup catalog failure still registers dispatcher tools and tells operators to reload after fixing connectivity', async () => {
   const { api, services, tools, logs } = createMockApi()
 
   const originalFetch = globalThis.fetch
@@ -368,7 +377,9 @@ test('startup catalog failure does not register tools and tells operators to rel
     globalThis.fetch = originalFetch
   }
 
-  assert.equal(tools.length, 0)
+  assert.equal(tools.length, 2)
+  assert.equal(tools.some((tool) => tool.name === MINDATLAS_LIST_CAPABILITIES_TOOL_NAME), true)
+  assert.equal(tools.some((tool) => tool.name === MINDATLAS_RUN_CAPABILITY_TOOL_NAME), true)
   assert.equal(services.length, 1)
   assert.equal(logs.some((entry) => entry.level === 'warn' && /reload the OpenClaw Gateway/i.test(entry.message)), true)
 })
@@ -447,9 +458,235 @@ test('tool execution forwards params and returns textified result', async () => 
   try {
     await runtime.register()
     await services[0].start?.(createServiceContext())
-    const result = await tools[0].execute('tool-call-1', { context: 'hello' }, { channel: 'discord', session: 'session-42' })
+    const captureTool = findTool(tools, 'mindatlas_submit_context_capture')
+    const result = await captureTool.execute('tool-call-1', { context: 'hello' }, { channel: 'discord', session: 'session-42' })
     assert.equal(result.content[0]?.type, 'text')
     assert.match(result.content[0]?.text ?? '', /"entryId": "entry-1"/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('mindatlas_list_capabilities refreshes catalog and marks whether a capability already has a dedicated tool', async () => {
+  const { api, tools } = createMockApi()
+  const runtime = new OpenClawMindAtlasPluginRuntime(api as never, {
+    syncBundledSkills: createBundledSkillSyncStub(),
+  })
+
+  let phase: 'initial' | 'list' = 'initial'
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (input) => {
+    assert.equal(String(input), 'http://127.0.0.1:8000/api/integrations/openclaw/capabilities')
+    if (phase === 'initial') {
+      return createResponse({
+        success: true,
+        code: 0,
+        message: 'OK',
+        data: {
+          integrationName: 'MindAtlas',
+          capabilities: [
+            {
+              capabilityKey: 'submit_context_capture',
+              toolName: 'mindatlas_submit_context_capture',
+              title: 'Smart Save To MindAtlas',
+              description: 'Submit one high-value context block for intelligent persistence.',
+              sourceType: 'tool',
+              implementationType: 'entry',
+              available: true,
+              availabilityReason: null,
+              inputSummary: 'context (string)',
+              outputSummary: 'created/merged result',
+              inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+              outputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+              toolResponseMode: 'json_schema',
+            },
+          ],
+        },
+      })
+    }
+
+    return createResponse({
+      success: true,
+      code: 0,
+      message: 'OK',
+      data: {
+        integrationName: 'MindAtlas',
+        capabilities: [
+          {
+            capabilityKey: 'submit_context_capture',
+            toolName: 'mindatlas_submit_context_capture',
+            title: 'Smart Save To MindAtlas',
+            description: 'Submit one high-value context block for intelligent persistence.',
+            sourceType: 'tool',
+            implementationType: 'entry',
+            available: true,
+            availabilityReason: null,
+            inputSummary: 'context (string)',
+            outputSummary: 'created/merged result',
+            inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+            outputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+            toolResponseMode: 'json_schema',
+          },
+          {
+            capabilityKey: 'custom_project_review',
+            toolName: 'mindatlas_custom_project_review',
+            title: 'Project Review Workflow',
+            description: 'Run the administrator-exposed project review workflow.',
+            sourceType: 'workflow',
+            implementationType: 'workflow',
+            available: true,
+            availabilityReason: null,
+            inputSummary: 'projectName and date range',
+            outputSummary: 'review content',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                projectName: { type: 'string' },
+              },
+              required: ['projectName'],
+              additionalProperties: false,
+            },
+            outputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+            toolResponseMode: 'json_schema',
+          },
+        ],
+      },
+    })
+  }
+
+  try {
+    await runtime.register()
+    phase = 'list'
+    const result = await findTool(tools, MINDATLAS_LIST_CAPABILITIES_TOOL_NAME).execute('tool-call-2', {})
+    const payload = JSON.parse(result.content[0]?.text ?? '{}')
+
+    assert.equal(payload.reloadRequired, true)
+    assert.equal(Array.isArray(payload.availableCapabilities), true)
+    assert.equal(payload.availableCapabilities.some((item: { capabilityKey: string; dedicatedToolRegistered: boolean }) => item.capabilityKey === 'custom_project_review' && item.dedicatedToolRegistered === false), true)
+    assert.equal(payload.registeredToolNames.includes(MINDATLAS_LIST_CAPABILITIES_TOOL_NAME), true)
+    assert.equal(payload.registeredToolNames.includes(MINDATLAS_RUN_CAPABILITY_TOOL_NAME), true)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('mindatlas_run_capability executes a newly exposed capability without a dedicated session-visible tool', async () => {
+  const { api, tools } = createMockApi()
+  const runtime = new OpenClawMindAtlasPluginRuntime(api as never, {
+    syncBundledSkills: createBundledSkillSyncStub(),
+  })
+
+  let calls = 0
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (input, init) => {
+    calls += 1
+    if (calls === 1) {
+      return createResponse({
+        success: true,
+        code: 0,
+        message: 'OK',
+        data: {
+          integrationName: 'MindAtlas',
+          capabilities: [
+            {
+              capabilityKey: 'submit_context_capture',
+              toolName: 'mindatlas_submit_context_capture',
+              title: 'Smart Save To MindAtlas',
+              description: 'Submit one high-value context block for intelligent persistence.',
+              sourceType: 'tool',
+              implementationType: 'entry',
+              available: true,
+              availabilityReason: null,
+              inputSummary: 'context (string)',
+              outputSummary: 'created/merged result',
+              inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+              outputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+              toolResponseMode: 'json_schema',
+            },
+          ],
+        },
+      })
+    }
+
+    if (calls === 2) {
+      assert.equal(String(input), 'http://127.0.0.1:8000/api/integrations/openclaw/capabilities')
+      return createResponse({
+        success: true,
+        code: 0,
+        message: 'OK',
+        data: {
+          integrationName: 'MindAtlas',
+          capabilities: [
+            {
+              capabilityKey: 'submit_context_capture',
+              toolName: 'mindatlas_submit_context_capture',
+              title: 'Smart Save To MindAtlas',
+              description: 'Submit one high-value context block for intelligent persistence.',
+              sourceType: 'tool',
+              implementationType: 'entry',
+              available: true,
+              availabilityReason: null,
+              inputSummary: 'context (string)',
+              outputSummary: 'created/merged result',
+              inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+              outputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+              toolResponseMode: 'json_schema',
+            },
+            {
+              capabilityKey: 'custom_project_review',
+              toolName: 'mindatlas_custom_project_review',
+              title: 'Project Review Workflow',
+              description: 'Run the administrator-exposed project review workflow.',
+              sourceType: 'workflow',
+              implementationType: 'workflow',
+              available: true,
+              availabilityReason: null,
+              inputSummary: 'projectName and date range',
+              outputSummary: 'review content',
+              inputSchema: {
+                type: 'object',
+                properties: {
+                  projectName: { type: 'string' },
+                },
+                required: ['projectName'],
+                additionalProperties: false,
+              },
+              outputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+              toolResponseMode: 'json_schema',
+            },
+          ],
+        },
+      })
+    }
+
+    assert.equal(String(input), 'http://127.0.0.1:8000/api/integrations/openclaw/capabilities/custom_project_review/execute')
+    assert.equal((init?.headers as Record<string, string>)['X-OpenClaw-Tool'], MINDATLAS_RUN_CAPABILITY_TOOL_NAME)
+    assert.deepEqual(JSON.parse(String(init?.body)), { projectName: 'MindAtlas' })
+    return createResponse({
+      success: true,
+      code: 0,
+      message: 'OK',
+      data: {
+        capabilityKey: 'custom_project_review',
+        toolName: 'mindatlas_custom_project_review',
+        result: {
+          content: 'Project review complete',
+        },
+      },
+    })
+  }
+
+  try {
+    await runtime.register()
+    const result = await findTool(tools, MINDATLAS_RUN_CAPABILITY_TOOL_NAME).execute('tool-call-4', {
+      capabilityKey: 'custom_project_review',
+      input: {
+        projectName: 'MindAtlas',
+      },
+    })
+
+    assert.match(result.content[0]?.text ?? '', /Project review complete/)
+    assert.equal(runtime.getState().registeredToolNames.has('mindatlas_custom_project_review'), false)
   } finally {
     globalThis.fetch = originalFetch
   }
@@ -488,16 +725,16 @@ test('ttl refresh marks newly available tools as reload-required instead of late
               toolResponseMode: 'json_schema',
             },
             {
-              capabilityKey: 'generate_weekly_report',
-              toolName: 'mindatlas_generate_weekly_report',
-              title: 'Weekly Report',
-              description: 'Generate a weekly recap',
-              sourceType: 'tool',
-              implementationType: 'report',
+              capabilityKey: 'generate_periodic_review',
+              toolName: 'mindatlas_generate_periodic_review',
+              title: 'Periodic Review',
+              description: 'Generate a time-bounded recap',
+              sourceType: 'workflow',
+              implementationType: 'workflow',
               available: false,
               availabilityReason: 'Warm-up pending',
-              inputSummary: 'startDate (string)',
-              outputSummary: 'summary (string)',
+              inputSummary: 'focus/period/startDate/endDate',
+              outputSummary: 'content (string)',
               inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
               outputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
               toolResponseMode: 'json_schema',
@@ -530,16 +767,16 @@ test('ttl refresh marks newly available tools as reload-required instead of late
             toolResponseMode: 'json_schema',
           },
           {
-            capabilityKey: 'generate_weekly_report',
-            toolName: 'mindatlas_generate_weekly_report',
-            title: 'Weekly Report',
-            description: 'Generate a weekly recap',
-            sourceType: 'tool',
-            implementationType: 'report',
+            capabilityKey: 'generate_periodic_review',
+            toolName: 'mindatlas_generate_periodic_review',
+            title: 'Periodic Review',
+            description: 'Generate a time-bounded recap',
+            sourceType: 'workflow',
+            implementationType: 'workflow',
             available: true,
             availabilityReason: null,
-            inputSummary: 'startDate (string)',
-            outputSummary: 'summary (string)',
+            inputSummary: 'focus/period/startDate/endDate',
+            outputSummary: 'content (string)',
             inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
             outputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
             toolResponseMode: 'json_schema',
@@ -551,12 +788,12 @@ test('ttl refresh marks newly available tools as reload-required instead of late
 
   try {
     await runtime.register()
-    assert.equal(tools.length, 1)
+    assert.equal(tools.length, 3)
 
     phase = 'refresh'
     await runtime.refreshCatalog()
 
-    assert.equal(tools.length, 1)
+    assert.equal(tools.length, 3)
     assert.equal(runtime.getState().reloadRequired, true)
     assert.equal(logs.some((entry) => /does not late-register tools/i.test(entry.message)), true)
   } finally {
@@ -642,13 +879,13 @@ test('metadata drift marks existing tools as stale and asks for reload', async (
 
   try {
     await runtime.register()
-    assert.equal(tools.length, 1)
+    assert.equal(tools.length, 3)
 
     phase = 'drift'
     await runtime.refreshCatalog()
 
     await assert.rejects(
-      () => tools[0].execute('tool-call-3', { context: 'hello' }),
+      () => findTool(tools, 'mindatlas_submit_context_capture').execute('tool-call-3', { context: 'hello' }),
       /Start a new session or reload the OpenClaw plugin or Gateway/,
     )
 

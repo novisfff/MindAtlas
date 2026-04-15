@@ -115,6 +115,11 @@ class OpenClawIntegrationTests(unittest.TestCase):
         workflow = next(item for item in workflows if item.name == "system_context_capture__workflow")
         return str(workflow.id), workflow.name
 
+    def _get_periodic_review_core_workflow(self) -> tuple[str, str]:
+        workflows = AssistantConfigService(self.db).list_workflows(include_disabled=True)
+        workflow = next(item for item in workflows if item.name == "system_periodic_review_core__workflow")
+        return str(workflow.id), workflow.name
+
     def test_settings_defaults_seed_system_items(self) -> None:
         response = self.client.get("/api/system-settings/openclaw-integration")
         self.assertEqual(response.status_code, 200)
@@ -122,7 +127,7 @@ class OpenClawIntegrationTests(unittest.TestCase):
 
         self.assertFalse(data["enabled"])
         self.assertFalse(data["secretConfigured"])
-        self.assertEqual(len(data["catalogItems"]), 7)
+        self.assertEqual(len(data["catalogItems"]), 6)
         by_key = {item["capabilityKey"]: item for item in data["catalogItems"]}
         self.assertEqual(
             set(by_key),
@@ -132,8 +137,7 @@ class OpenClawIntegrationTests(unittest.TestCase):
                 "get_entry",
                 "create_relation",
                 "query_knowledge_graph",
-                "generate_weekly_report",
-                "generate_monthly_report",
+                "generate_periodic_review",
             },
         )
         self.assertTrue(all(item["isSystemItem"] for item in data["catalogItems"]))
@@ -144,8 +148,9 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(by_key["get_entry"]["sourceToolName"], "get_entry_detail")
         self.assertEqual(by_key["create_relation"]["sourceToolName"], "create_relation")
         self.assertEqual(by_key["query_knowledge_graph"]["sourceToolName"], "query_knowledge_graph")
-        self.assertEqual(by_key["generate_weekly_report"]["sourceToolName"], "generate_weekly_report")
-        self.assertEqual(by_key["generate_monthly_report"]["sourceToolName"], "generate_monthly_report")
+        self.assertEqual(by_key["generate_periodic_review"]["sourceType"], "workflow")
+        self.assertIsNotNone(by_key["generate_periodic_review"]["workflowId"])
+        self.assertIsNone(by_key["generate_periodic_review"]["sourceToolName"])
         capture_schema = by_key["submit_context_capture"]["inputSchema"]
         self.assertEqual(set(capture_schema["properties"]), {"context"})
         self.assertEqual(capture_schema["required"], ["context"])
@@ -155,6 +160,12 @@ class OpenClawIntegrationTests(unittest.TestCase):
         workflow_id, workflow_name = self._get_openclaw_capture_workflow()
         self.assertEqual(workflow_name, "system_context_capture__workflow")
         self.assertEqual(by_key["submit_context_capture"]["workflowId"], workflow_id)
+
+        review_schema = by_key["generate_periodic_review"]["inputSchema"]
+        self.assertEqual(set(review_schema["properties"]), {"focus", "period", "startDate", "endDate"})
+        review_workflow_id, review_workflow_name = self._get_periodic_review_core_workflow()
+        self.assertEqual(review_workflow_name, "system_periodic_review_core__workflow")
+        self.assertEqual(by_key["generate_periodic_review"]["workflowId"], review_workflow_id)
 
     def test_workflow_catalog_sources_use_shared_display_names(self) -> None:
         response = self.client.get(
@@ -506,70 +517,77 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertTrue(by_key["search_entries"]["isSystemItem"])
         self.assertIn(custom_item_id, {item["id"] for item in after_reset["catalogItems"]})
 
-    def test_report_system_items_seed_structured_content_schema(self) -> None:
+    def test_periodic_review_system_item_seeds_unified_content_schema(self) -> None:
         response = self.client.get("/api/system-settings/openclaw-integration")
         self.assertEqual(response.status_code, 200, response.text)
         items = response.json()["data"]["catalogItems"]
         by_key = {item["capabilityKey"]: item for item in items}
 
-        weekly_content = by_key["generate_weekly_report"]["outputSchema"]["properties"]["content"]
-        monthly_content = by_key["generate_monthly_report"]["outputSchema"]["properties"]["content"]
+        review_item = by_key["generate_periodic_review"]
+        review_content = review_item["outputSchema"]["properties"]["content"]
 
-        self.assertEqual(weekly_content["type"], "object")
-        self.assertTrue(weekly_content["nullable"])
-        self.assertEqual(set(weekly_content["properties"]), {"summary", "suggestions", "trends"})
-        self.assertEqual(monthly_content["type"], "object")
-        self.assertTrue(monthly_content["nullable"])
-        self.assertEqual(set(monthly_content["properties"]), {"summary", "suggestions", "trends"})
+        self.assertEqual(review_item["sourceType"], "workflow")
+        self.assertEqual(review_content["type"], "string")
+        self.assertEqual(set(review_item["inputSchema"]["properties"]), {"focus", "period", "startDate", "endDate"})
 
-    def test_existing_report_system_item_schema_is_resynced(self) -> None:
+    def test_existing_legacy_report_system_items_are_removed_during_seed(self) -> None:
         self.db.add(
             AppSetting(
                 key="openclaw_integration_config",
                 value_json={
                     "enabled": False,
                     "catalogMigrated": True,
-                    "systemItemVersion": OPENCLAW_SYSTEM_ITEM_VERSION,
+                    "systemItemVersion": OPENCLAW_SYSTEM_ITEM_VERSION - 1,
                 },
             )
         )
-        self.db.add(
-            OpenClawCapabilityItem(
-                capability_key="generate_weekly_report",
-                tool_name="mindatlas_generate_weekly_report",
-                title="旧周报",
-                description="旧 schema",
-                source_type="tool",
-                system_default_key="generate_weekly_report",
-                source_tool_name="openclaw_generate_weekly_report",
-                enabled=True,
-                is_system_item=True,
-                input_schema_json={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
-                output_schema_json={
-                    "type": "object",
-                    "properties": {
-                        "content": {"type": "string"},
-                    },
-                    "required": [],
-                    "additionalProperties": False,
-                },
-                input_summary="",
-                output_summary="",
-                tool_response_mode="json_schema",
-            )
+        self.db.add_all(
+            [
+                OpenClawCapabilityItem(
+                    capability_key="generate_weekly_report",
+                    tool_name="mindatlas_generate_weekly_report",
+                    title="旧周报",
+                    description="旧 schema",
+                    source_type="tool",
+                    system_default_key="generate_weekly_report",
+                    source_tool_name="openclaw_generate_weekly_report",
+                    enabled=True,
+                    is_system_item=True,
+                    input_schema_json={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+                    output_schema_json={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+                    input_summary="",
+                    output_summary="",
+                    tool_response_mode="json_schema",
+                ),
+                OpenClawCapabilityItem(
+                    capability_key="generate_monthly_report",
+                    tool_name="mindatlas_generate_monthly_report",
+                    title="旧月报",
+                    description="旧 schema",
+                    source_type="tool",
+                    system_default_key="generate_monthly_report",
+                    source_tool_name="openclaw_generate_monthly_report",
+                    enabled=True,
+                    is_system_item=True,
+                    input_schema_json={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+                    output_schema_json={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+                    input_summary="",
+                    output_summary="",
+                    tool_response_mode="json_schema",
+                ),
+            ]
         )
         self.db.commit()
 
         response = self.client.get("/api/system-settings/openclaw-integration")
         self.assertEqual(response.status_code, 200, response.text)
         items = response.json()["data"]["catalogItems"]
-        weekly_item = next(item for item in items if item["capabilityKey"] == "generate_weekly_report")
-        weekly_content = weekly_item["outputSchema"]["properties"]["content"]
+        by_key = {item["capabilityKey"]: item for item in items}
 
-        self.assertEqual(weekly_item["sourceToolName"], "generate_weekly_report")
-        self.assertEqual(weekly_content["type"], "object")
-        self.assertTrue(weekly_content["nullable"])
-        self.assertEqual(set(weekly_content["properties"]), {"summary", "suggestions", "trends"})
+        self.assertNotIn("generate_weekly_report", by_key)
+        self.assertNotIn("generate_monthly_report", by_key)
+        self.assertIn("generate_periodic_review", by_key)
+        self.assertEqual(by_key["generate_periodic_review"]["sourceType"], "workflow")
 
     def test_legacy_custom_tool_binding_is_migrated_to_canonical_source_name(self) -> None:
         self._initialize_system()
@@ -609,8 +627,10 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertIn("entry ID is known", definitions["get_entry"].description)
         self.assertIn("connect these items", definitions["create_relation"].description)
         self.assertIn("patterns", definitions["query_knowledge_graph"].description)
-        self.assertIn("what did I do this week", definitions["generate_weekly_report"].description)
-        self.assertIn("what did I do this month", definitions["generate_monthly_report"].description)
+        self.assertEqual(definitions["generate_periodic_review"].tool_name, "mindatlas_generate_periodic_review")
+        self.assertEqual(definitions["generate_periodic_review"].workflow_asset_key, "periodic_review_core")
+        self.assertIn("last week", definitions["generate_periodic_review"].description)
+        self.assertIn("tag distribution", definitions["generate_periodic_review"].description)
 
     def test_submit_context_capture_runtime_schema_is_thin_context_only(self) -> None:
         self._initialize_system(locale="en")
@@ -709,18 +729,12 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(graph_properties["topK"]["default"], 5)
         self.assertEqual(graph_properties["topK"]["examples"], [5])
 
-        weekly_item = by_key["generate_weekly_report"]
-        weekly_properties = weekly_item["inputSchema"]["properties"]
-        self.assertEqual(weekly_properties["weekStart"]["format"], "date")
-        self.assertEqual(weekly_properties["forceRegenerate"]["default"], False)
-        self.assertIn("compatibility input", weekly_properties["weekStart"]["description"])
-
-        monthly_item = by_key["generate_monthly_report"]
-        monthly_properties = monthly_item["inputSchema"]["properties"]
-        self.assertEqual(monthly_properties["monthStart"]["format"], "date")
-        self.assertEqual(monthly_properties["forceRegenerate"]["default"], False)
-        self.assertIn("compatibility input", monthly_properties["monthStart"]["description"])
-        self.assertIn("not the recommended contract", monthly_item["inputSummary"])
+        review_item = by_key["generate_periodic_review"]
+        review_properties = review_item["inputSchema"]["properties"]
+        self.assertEqual(set(review_properties), {"focus", "period", "startDate", "endDate"})
+        self.assertEqual(review_properties["focus"]["enum"], ["overview", "type", "tag", "trend"])
+        self.assertEqual(review_item["outputSchema"]["properties"]["content"]["type"], "string")
+        self.assertIn("last 30 days", review_item["inputSummary"])
 
     def test_settings_catalog_items_include_same_schema_enrichment(self) -> None:
         from app.entry_type.models import EntryType  # noqa: E402
@@ -742,86 +756,61 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(search_properties["timeFrom"]["format"], "date-time")
         self.assertIn("'.' and '*'", search_properties["query"]["description"])
 
-    def test_generate_weekly_report_accepts_structured_content_object(self) -> None:
-        secret = self._rotate_secret()
-        self._enable_integration(secret)
-
-        with patch(
-            "app.assistant.workflow.engine.runtime_helpers.wrap_tool_with_db",
-            return_value=lambda **kwargs: {
-                "id": str(uuid4()),
-                "weekStart": "2026-03-23",
-                "weekEnd": "2026-03-29",
-                "entryCount": 4,
-                "content": {
-                    "summary": "本周推进顺利",
-                    "suggestions": ["继续跟进自动化"],
-                    "trends": "活跃度上升",
-                },
-                "contentLocale": "zh",
-                "status": "ready",
-                "attempts": 1,
-                "lastError": None,
-                "generatedAt": "2026-03-31T09:00:00+00:00",
-                "createdAt": "2026-03-31T09:00:00+00:00",
-                "updatedAt": "2026-03-31T09:00:00+00:00",
-            },
-        ):
-            response = self.client.post(
-                "/api/integrations/openclaw/capabilities/generate_weekly_report/execute",
-                headers=self._auth_headers(secret),
-                json={"weekStart": "2026-03-23", "forceRegenerate": False},
-            )
-
-        self.assertEqual(response.status_code, 200, response.text)
-        result = response.json()["data"]["result"]
-        self.assertEqual(result["content"]["summary"], "本周推进顺利")
-        self.assertEqual(result["content"]["suggestions"], ["继续跟进自动化"])
-        self.assertEqual(result["content"]["trends"], "活跃度上升")
-
-    def test_generate_monthly_report_treats_blank_month_start_as_default_month(self) -> None:
+    def test_generate_periodic_review_executes_workflow_contract(self) -> None:
         self._initialize_system()
         secret = self._rotate_secret()
         self._enable_integration(secret)
 
-        captured_args: dict[str, object] = {}
+        captured_runtime_context: dict[str, object] = {}
 
-        def _fake_runner(**kwargs):  # noqa: ANN003
-            captured_args.update(kwargs)
-            return {
-                "id": str(uuid4()),
-                "monthStart": "2026-03-01",
-                "monthEnd": "2026-03-31",
-                "entryCount": 6,
-                "content": {
-                    "summary": "本月推进顺利",
-                    "suggestions": ["继续完善工具说明"],
-                    "trends": "使用频率上升",
-                },
-                "contentLocale": "zh",
-                "status": "ready",
-                "attempts": 1,
-                "lastError": None,
-                "generatedAt": "2026-04-01T09:00:00+00:00",
-                "createdAt": "2026-04-01T09:00:00+00:00",
-                "updatedAt": "2026-04-01T09:00:00+00:00",
-            }
+        class Engine:
+            def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                captured_runtime_context.update(kwargs["runtime_context"])
+                return iter(
+                    [
+                        json.dumps(
+                            {
+                                "content": "## 我先帮你看了下\n这段时间你一共记录了 4 条内容。",
+                            },
+                            ensure_ascii=False,
+                        )
+                    ]
+                )
+
+        payload = {
+            "focus": "trend",
+            "period": "last week",
+        }
 
         with patch(
-            "app.assistant.workflow.engine.runtime_helpers.wrap_tool_with_db",
-            return_value=_fake_runner,
+            "app.openclaw_integration.service.OpenClawIntegrationService._build_engine",
+            return_value=Engine(),
         ):
             response = self.client.post(
-                "/api/integrations/openclaw/capabilities/generate_monthly_report/execute",
+                "/api/integrations/openclaw/capabilities/generate_periodic_review/execute",
                 headers=self._auth_headers(secret),
-                json={"monthStart": "", "forceRegenerate": False},
+                json=payload,
             )
 
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertIsNone(captured_args["month_start"])
         result = response.json()["data"]["result"]
-        self.assertEqual(result["content"]["summary"], "本月推进顺利")
-        self.assertEqual(result["monthStart"], "2026-03-01")
+        self.assertEqual(result["content"], "## 我先帮你看了下\n这段时间你一共记录了 4 条内容。")
+        self.assertEqual(captured_runtime_context["structured_input"], payload)
+        self.assertEqual(captured_runtime_context["channel_type"], "openclaw_capability")
+
+    def test_legacy_weekly_and_monthly_capability_keys_are_not_found(self) -> None:
+        secret = self._rotate_secret()
+        self._enable_integration(secret)
+
+        for capability_key in ("generate_weekly_report", "generate_monthly_report"):
+            with self.subTest(capability_key=capability_key):
+                response = self.client.post(
+                    f"/api/integrations/openclaw/capabilities/{capability_key}/execute",
+                    headers=self._auth_headers(secret),
+                    json={},
+                )
+                self.assertEqual(response.status_code, 404, response.text)
+                self.assertEqual(response.json()["code"], 40461)
 
     def test_search_entries_treats_blank_optional_filters_as_unset(self) -> None:
         self._initialize_system()

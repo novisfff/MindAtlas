@@ -5,32 +5,106 @@
       "nodeType": "start",
       "label": "Start",
       "positionX": 120.0,
-      "positionY": 220.0,
+      "positionY": 320.0,
       "config": {
         "inputMode": "text",
         "structuredFields": []
       }
     },
     {
+      "nodeId": "llm_intent",
+      "nodeType": "llm",
+      "label": "Normalize Time Range",
+      "positionX": 530.0,
+      "positionY": 320.0,
+      "config": {
+        "systemPrompt": "You are the parameter extractor for MindAtlas Quick Stats. Today is {{sys.date}}.\nTask: identify which statistics dimension the user cares about and normalize any time expression into a date range.\nOutput rules:\n- intent_dimension must be one of overview/type/tag/trend.\n- Use overview for totals, dashboard, or general stats requests.\n- Use type when the user asks about type/category distribution.\n- Use tag when the user asks about tags or commonly used tags.\n- Use trend when the user asks about recent movement or activity.\n- start_date/end_date must be YYYY-MM-DD and start_date must be <= end_date.\n- If the user provides an explicit date range, normalize it directly and set range_source=explicit.\n- If the user provides a relative period like last week, this month, this year, or the last two weeks, infer concrete start_date/end_date from today's date and set range_source=relative.\n- If no time range is specified, return start_date=null, end_date=null, and range_source=default.\n- Do not output a period field.",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "intent_dimension",
+            "type": "string",
+            "enum": [
+              "overview",
+              "type",
+              "tag",
+              "trend"
+            ]
+          },
+          {
+            "name": "start_date",
+            "type": "string",
+            "nullable": true
+          },
+          {
+            "name": "end_date",
+            "type": "string",
+            "nullable": true
+          },
+          {
+            "name": "range_source",
+            "type": "string",
+            "enum": [
+              "explicit",
+              "relative",
+              "default"
+            ]
+          }
+        ]
+      }
+    },
+    {
       "nodeId": "tool_stats",
       "nodeType": "tool",
-      "label": "Load Stats",
-      "positionX": 530.0,
-      "positionY": 220.0,
+      "label": "Load Overview",
+      "positionX": 940.0,
+      "positionY": 170.0,
       "config": {
         "toolName": "get_statistics",
-        "inputBindings": {}
+        "inputBindings": {
+          "start_date": "{{llm_intent.start_date}}",
+          "end_date": "{{llm_intent.end_date}}"
+        }
+      }
+    },
+    {
+      "nodeId": "tool_activity",
+      "nodeType": "tool",
+      "label": "Load Activity",
+      "positionX": 940.0,
+      "positionY": 320.0,
+      "config": {
+        "toolName": "analyze_activity",
+        "inputBindings": {
+          "start_date": "{{llm_intent.start_date}}",
+          "end_date": "{{llm_intent.end_date}}"
+        }
+      }
+    },
+    {
+      "nodeId": "tool_tags",
+      "nodeType": "tool",
+      "label": "Load Tag Hotspots",
+      "positionX": 940.0,
+      "positionY": 470.0,
+      "config": {
+        "toolName": "get_tag_statistics",
+        "inputBindings": {
+          "start_date": "{{llm_intent.start_date}}",
+          "end_date": "{{llm_intent.end_date}}",
+          "top_n": "5"
+        }
       }
     },
     {
       "nodeId": "llm_output",
       "nodeType": "llm",
       "label": "Summarize Stats",
-      "positionX": 940.0,
-      "positionY": 220.0,
+      "positionX": 1350.0,
+      "positionY": 320.0,
       "config": {
-        "systemPrompt": "Summarize the current totals, recent activity signals, and other key MindAtlas statistics in a concise and clear response.",
-        "userInput": "{{tool_stats.result}}",
+        "systemPrompt": "You are the MindAtlas data assistant, and you have just checked the requested stats for the user.\nOnly use the provided data and do not invent unsupported conclusions.\nThe tone should feel like a helpful product assistant speaking directly to the user, not like a system report or technical note.\nOutput rules:\n- Return Markdown with these four H2 headings in order: ## I took a quick look, ## What stands out first, ## What you’ve mostly been recording, ## A quick note.\n- The first sentence should sound like a progress update, such as “I took a quick look…” or “I just checked…”, and briefly say which range or dimensions you reviewed.\n- Address the user as “you”, not “the user”.\n- Do not sound bureaucratic, overly analytical, or developer-facing. Avoid stiff phrases like “the basis is” or “this reflects the user”.\n- Every section must cite at least one concrete number, but the numbers should help the user understand the picture rather than feel dumped on.\n- If start_date/end_date exist, naturally mention that the summary is scoped to that business-time range; if no time range exists, naturally say the overview is all-time and activity defaults to the last 30 days.\n- “What stands out first” should answer the user directly in 2 to 4 natural sentences, like you are helping them spot the most useful takeaway.\n- “What you’ve mostly been recording” should prioritize the requested dimension: types first for type requests, tags first for tag requests, and recent movement first for trend requests before adding type/tag context.\n- Recent activity should be woven naturally into the first two sections. If entries_created=0, say there were no new records in that window. If entries_created<3, say the sample is too small for a strong trend conclusion.\n- If total_entries=0, clearly say there were no matching records in the current window and do not fabricate hotspots or trends.\n- Keep “A quick note” very short, at most 2 bullets, and only clarify that overview/type/tag stats use business time while activity uses created_at when that distinction is actually useful.\n- Keep it concise, friendly, and grounded. Do not use tables.",
+        "userInput": "User request: {{start.user_input}}\nStats focus: {{llm_intent.intent_dimension}}\nNormalized range start: {{llm_intent.start_date}}\nNormalized range end: {{llm_intent.end_date}}\nRange source: {{llm_intent.range_source}}\n\nScoped overview:\n{{tool_stats.result}}\n\nRecent activity:\n{{tool_activity.result}}\n\nTag hotspots:\n{{tool_tags.result}}",
         "outputMode": "text"
       }
     },
@@ -38,8 +112,8 @@
       "nodeId": "output_final",
       "nodeType": "output",
       "label": "Output",
-      "positionX": 1350.0,
-      "positionY": 220.0,
+      "positionX": 1760.0,
+      "positionY": 320.0,
       "config": {
         "outputMode": "text",
         "textTemplate": "{{llm_output.response}}"
@@ -48,8 +122,18 @@
   ],
   "edges": [
     {
-      "edgeId": "e_start_tool",
+      "edgeId": "e_start_intent",
       "sourceNodeId": "start",
+      "targetNodeId": "llm_intent",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_intent_stats",
+      "sourceNodeId": "llm_intent",
       "targetNodeId": "tool_stats",
       "sourceHandle": "output",
       "targetHandle": "input",
@@ -58,7 +142,27 @@
       "label": null
     },
     {
-      "edgeId": "e_tool_output",
+      "edgeId": "e_intent_activity",
+      "sourceNodeId": "llm_intent",
+      "targetNodeId": "tool_activity",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_intent_tags",
+      "sourceNodeId": "llm_intent",
+      "targetNodeId": "tool_tags",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_stats_output",
       "sourceNodeId": "tool_stats",
       "targetNodeId": "llm_output",
       "sourceHandle": "output",
@@ -68,7 +172,27 @@
       "label": null
     },
     {
-      "edgeId": "e_llm_output_final",
+      "edgeId": "e_activity_output",
+      "sourceNodeId": "tool_activity",
+      "targetNodeId": "llm_output",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_tags_output",
+      "sourceNodeId": "tool_tags",
+      "targetNodeId": "llm_output",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_output_final",
       "sourceNodeId": "llm_output",
       "targetNodeId": "output_final",
       "sourceHandle": "output",

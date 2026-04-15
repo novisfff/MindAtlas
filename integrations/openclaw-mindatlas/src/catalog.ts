@@ -24,7 +24,10 @@ export interface CatalogResponse {
 
 export interface CatalogSnapshot {
   integrationName: string
+  capabilities: MindAtlasRuntimeCapability[]
+  itemsByCapabilityKey: Map<string, MindAtlasRuntimeCapability>
   itemsByToolName: Map<string, MindAtlasRuntimeCapability>
+  capabilityKeys: Set<string>
   toolNames: Set<string>
 }
 
@@ -79,8 +82,15 @@ export async function fetchCapabilityCatalog(
 }
 
 export function createCatalogSnapshot(response: CatalogResponse): CatalogSnapshot {
+  const capabilities: MindAtlasRuntimeCapability[] = []
+  const itemsByCapabilityKey = new Map<string, MindAtlasRuntimeCapability>()
   const itemsByToolName = new Map<string, MindAtlasRuntimeCapability>()
   for (const capability of response.capabilities) {
+    if (!capability.capabilityKey) {
+      continue
+    }
+    capabilities.push(capability)
+    itemsByCapabilityKey.set(capability.capabilityKey, capability)
     if (!capability.toolName) {
       continue
     }
@@ -88,7 +98,10 @@ export function createCatalogSnapshot(response: CatalogResponse): CatalogSnapsho
   }
   return {
     integrationName: response.integrationName,
+    capabilities,
+    itemsByCapabilityKey,
     itemsByToolName,
+    capabilityKeys: new Set(itemsByCapabilityKey.keys()),
     toolNames: new Set(itemsByToolName.keys()),
   }
 }

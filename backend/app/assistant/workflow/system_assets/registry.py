@@ -13,6 +13,7 @@ SystemAssistantAssetUsageTag = Literal["skill_default", "standalone_target", "sy
 QUICK_STATS_ASSET_KEY = "quick_stats"
 SMART_CAPTURE_ASSET_KEY = "smart_capture"
 PERIODIC_REVIEW_ASSET_KEY = "periodic_review"
+PERIODIC_REVIEW_CORE_ASSET_KEY = "periodic_review_core"
 GENERAL_CHAT_ASSET_KEY = DEFAULT_SKILL_NAME
 CONTEXT_CAPTURE_ASSET_KEY = "context_capture"
 WEEKLY_REPORT_ASSET_KEY = "weekly_report"
@@ -87,8 +88,8 @@ _ASSET_TEMPLATES: tuple[_SystemAssistantAssetTemplate, ...] = (
             en="Quick Stats Workflow",
         ),
         description=_LocalizedText(
-            zh="快速统计（仅统计 MindAtlas 系统内数据，如我的记录/条目/标签/类型/仪表盘概况；不用于对外部组织/项目/人物的情况总结）",
-            en="Quick statistics for data inside MindAtlas only, such as entries, tags, types, and dashboard-level totals. Do not use this for summarizing external companies, projects, or people.",
+            zh="快速统计（仅统计 MindAtlas 系统内数据，如记录、标签、类型、关系、近期录入活动或指定时间范围内的概况；不用于对外部组织/项目/人物的情况总结）",
+            en="Quick statistics for data inside MindAtlas only, such as entries, tags, types, relations, recent capture activity, or scoped summaries for a specified time range. Do not use this for summarizing external companies, projects, or people.",
         ),
         usage_tags=("skill_default",),
         skill_name="quick_stats",
@@ -97,13 +98,21 @@ _ASSET_TEMPLATES: tuple[_SystemAssistantAssetTemplate, ...] = (
                 "统计一下我在 MindAtlas 里有多少条记录",
                 "看下我的仪表盘数据/数据概况",
                 "我有多少个标签、多少种类型？",
-                "现在的记录总数是多少",
+                "看下我近7天的录入趋势",
+                "按标签统计一下我最近常用什么",
+                "按类型看看我的记录分布",
+                "统计 2026-03-01 到 2026-03-31 的记录概况",
+                "看下我上周的标签分布",
             ),
             en=(
                 "How many entries do I have in MindAtlas?",
                 "Show me my dashboard stats",
                 "How many tags and types do I have?",
-                "What's my total entry count right now?",
+                "Show my capture trend for the last 7 days",
+                "Summarize my most-used tags",
+                "Break down my entries by type",
+                "Summarize my entries from 2026-03-01 to 2026-03-31",
+                "Show my tag distribution from last week",
             ),
         ),
     ),
@@ -166,6 +175,21 @@ _ASSET_TEMPLATES: tuple[_SystemAssistantAssetTemplate, ...] = (
                 "Show me my learning progress for this week",
             ),
         ),
+    ),
+    _SystemAssistantAssetTemplate(
+        asset_key=PERIODIC_REVIEW_CORE_ASSET_KEY,
+        kind="workflow",
+        canonical_name="system_periodic_review_core__workflow",
+        display_name=_LocalizedText(
+            zh="周期回顾核心工作流",
+            en="Periodic Review Core Workflow",
+        ),
+        description=_LocalizedText(
+            zh="供聊天工作流和 OpenClaw 统一复用的结构化周期回顾核心流程，接收关注点和时间范围参数后输出一段用户可直接阅读的回顾内容。",
+            en="A structured periodic-review core workflow shared by chat wrappers and OpenClaw. It accepts focus plus time-range parameters and returns one user-ready review.",
+        ),
+        hidden=True,
+        usage_tags=("standalone_target",),
     ),
     _SystemAssistantAssetTemplate(
         asset_key=GENERAL_CHAT_ASSET_KEY,

@@ -24,8 +24,6 @@ from app.openclaw_integration.schemas import (
     OpenClawCaptureEntryRequest,
     OpenClawCreateRelationRequest,
     OpenClawEntryRecordResponse,
-    OpenClawGenerateMonthlyReportRequest,
-    OpenClawGenerateWeeklyReportRequest,
     OpenClawGetEntryRequest,
     OpenClawQueryKnowledgeGraphRequest,
     OpenClawRelationRecordResponse,
@@ -35,8 +33,6 @@ from app.openclaw_integration.schemas import (
 from app.relation.models import RelationType
 from app.relation.schemas import RelationRequest, RelationResponse
 from app.relation.service import RelationService
-from app.report.schemas import MonthlyReportResponse, WeeklyReportResponse
-from app.report.service import MonthlyReportService, WeeklyReportService
 from app.tag.models import Tag
 
 T = TypeVar("T")
@@ -359,55 +355,3 @@ def openclaw_query_knowledge_graph(
         )
     )
     return _dump_json(LightRagQueryResponse.model_validate(result).model_dump(mode="json", by_alias=True))
-
-
-@tool
-def openclaw_generate_weekly_report(
-    weekStart: str | None = None,
-    forceRegenerate: bool = False,
-) -> str:
-    """Generate or return a MindAtlas weekly report using the compatibility report contract."""
-
-    payload = _validate_payload(
-        OpenClawGenerateWeeklyReportRequest,
-        {
-            "weekStart": weekStart,
-            "forceRegenerate": forceRegenerate,
-        },
-    )
-
-    def _run() -> dict[str, Any]:
-        service = WeeklyReportService(_get_db())
-        week_start = payload.week_start or service.get_last_monday()
-        report = service.get_or_create_for_week(week_start)
-        if payload.force_regenerate or service.should_generate_report(report):
-            report = service.generate_report(report)
-        return WeeklyReportResponse.model_validate(report).model_dump(mode="json", by_alias=True)
-
-    return _tool_result(_run)
-
-
-@tool
-def openclaw_generate_monthly_report(
-    monthStart: str | None = None,
-    forceRegenerate: bool = False,
-) -> str:
-    """Generate or return a MindAtlas monthly report using the compatibility report contract."""
-
-    payload = _validate_payload(
-        OpenClawGenerateMonthlyReportRequest,
-        {
-            "monthStart": monthStart,
-            "forceRegenerate": forceRegenerate,
-        },
-    )
-
-    def _run() -> dict[str, Any]:
-        service = MonthlyReportService(_get_db())
-        month_start = payload.month_start or service.get_last_month_start()
-        report = service.get_or_create_for_month(month_start)
-        if payload.force_regenerate or service.should_generate_report(report):
-            report = service.generate_report(report)
-        return MonthlyReportResponse.model_validate(report).model_dump(mode="json", by_alias=True)
-
-    return _tool_result(_run)

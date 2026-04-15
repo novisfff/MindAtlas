@@ -12,81 +12,80 @@
       }
     },
     {
-      "nodeId": "llm_dates",
+      "nodeId": "llm_request",
       "nodeType": "llm",
-      "label": "Resolve Time Range",
+      "label": "Extract Review Fields",
       "positionX": 530.0,
       "positionY": 320.0,
       "config": {
-        "systemPrompt": "Understand the time range the user wants to review or analyze, then output structured retrieval parameters.\nRules:\n- start_date and end_date must use YYYY-MM-DD format and satisfy start_date <= end_date.\n- If the user does not provide exact dates, infer them from phrases like last week, this month, or this year.",
+        "systemPrompt": "You are the parameter extractor for MindAtlas Periodic Review. Today is {{sys.date}}.\nTask: convert the user's natural-language review request into the shared structured fields that the core review workflow expects.\nOutput rules:\n- focus must be one of overview, type, tag, or trend.\n- Use overview for general review, summary, recap, digest, or retrospective requests.\n- Use type when the user explicitly asks about type/category distribution.\n- Use tag when the user explicitly asks about tags or tag hotspots.\n- Use trend when the user explicitly asks about trends, recent movement, or activity change.\n- period/startDate/endDate are the only ways to express the requested time range.\n- If the user provides an explicit date range, fill startDate/endDate directly and set period=null.\n- If the user provides only one date, treat it as a single-day range by setting startDate=endDate to that date and period=null.\n- If the user provides a relative period such as last week, this month, the last two weeks, or this year, keep that natural-language period in period and leave startDate/endDate null.\n- If the user does not specify a time range, return period=null, startDate=null, and endDate=null.\n- startDate/endDate must be YYYY-MM-DD or null.\n- Do not output any extra fields, and do not convert relative periods into concrete dates here.",
         "outputMode": "structured",
         "outputFields": [
           {
-            "name": "start_date"
+            "name": "focus",
+            "type": "string",
+            "enum": [
+              "overview",
+              "type",
+              "tag",
+              "trend"
+            ]
           },
           {
-            "name": "end_date"
+            "name": "period",
+            "type": "string",
+            "nullable": true
+          },
+          {
+            "name": "startDate",
+            "type": "string",
+            "nullable": true
+          },
+          {
+            "name": "endDate",
+            "type": "string",
+            "nullable": true
           }
         ]
       }
     },
     {
-      "nodeId": "tool_entries",
-      "nodeType": "tool",
-      "label": "Load Entries",
+      "nodeId": "call_core",
+      "nodeType": "workflow_call",
+      "label": "Call Review Core",
       "positionX": 940.0,
-      "positionY": 245.0,
+      "positionY": 320.0,
       "config": {
-        "toolName": "get_entries_by_time_range",
+        "bindingMode": "pinned",
+        "targetSystemAssetKey": "periodic_review_core",
+        "exposedOutputFields": [
+          "content"
+        ],
         "inputBindings": {
-          "start_date": "{{llm_dates.start_date}}",
-          "end_date": "{{llm_dates.end_date}}"
+          "focus": "{{llm_request.focus}}",
+          "period": "{{llm_request.period}}",
+          "startDate": "{{llm_request.startDate}}",
+          "endDate": "{{llm_request.endDate}}"
         }
-      }
-    },
-    {
-      "nodeId": "tool_activity",
-      "nodeType": "tool",
-      "label": "Analyze Activity",
-      "positionX": 940.0,
-      "positionY": 396.0,
-      "config": {
-        "toolName": "analyze_activity",
-        "inputBindings": {
-          "start_date": "{{llm_dates.start_date}}",
-          "end_date": "{{llm_dates.end_date}}"
-        }
-      }
-    },
-    {
-      "nodeId": "llm_output",
-      "nodeType": "llm",
-      "label": "Generate Review",
-      "positionX": 1350.0,
-      "positionY": 315.0,
-      "config": {
-        "systemPrompt": "Generate a structured review that covers key achievements, activity distribution, and meaningful insights.",
-        "userInput": "{{tool_entries.result}}\n\n{{tool_activity.result}}",
-        "outputMode": "text"
       }
     },
     {
       "nodeId": "output_final",
       "nodeType": "output",
       "label": "Output",
-      "positionX": 1760.0,
-      "positionY": 315.0,
+      "positionX": 1350.0,
+      "positionY": 320.0,
       "config": {
         "outputMode": "text",
-        "textTemplate": "{{llm_output.response}}"
+        "textTemplate": "{{call_core.content}}"
       }
     }
   ],
   "edges": [
     {
-      "edgeId": "e_start_dates",
+      "edgeId": "e_start_request",
       "sourceNodeId": "start",
-      "targetNodeId": "llm_dates",
+      "targetNodeId": "llm_request",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
@@ -94,9 +93,9 @@
       "label": null
     },
     {
-      "edgeId": "e_dates_entries",
-      "sourceNodeId": "llm_dates",
-      "targetNodeId": "tool_entries",
+      "edgeId": "e_request_core",
+      "sourceNodeId": "llm_request",
+      "targetNodeId": "call_core",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
@@ -104,38 +103,8 @@
       "label": null
     },
     {
-      "edgeId": "e_dates_activity",
-      "sourceNodeId": "llm_dates",
-      "targetNodeId": "tool_activity",
-      "sourceHandle": "output",
-      "targetHandle": "input",
-      "conditionType": null,
-      "conditionExpr": null,
-      "label": null
-    },
-    {
-      "edgeId": "e_entries_output",
-      "sourceNodeId": "tool_entries",
-      "targetNodeId": "llm_output",
-      "sourceHandle": "output",
-      "targetHandle": "input",
-      "conditionType": null,
-      "conditionExpr": null,
-      "label": null
-    },
-    {
-      "edgeId": "e_activity_output",
-      "sourceNodeId": "tool_activity",
-      "targetNodeId": "llm_output",
-      "sourceHandle": "output",
-      "targetHandle": "input",
-      "conditionType": null,
-      "conditionExpr": null,
-      "label": null
-    },
-    {
-      "edgeId": "e_output_final",
-      "sourceNodeId": "llm_output",
+      "edgeId": "e_core_output",
+      "sourceNodeId": "call_core",
       "targetNodeId": "output_final",
       "sourceHandle": "output",
       "targetHandle": "input",

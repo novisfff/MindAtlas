@@ -16,8 +16,6 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "openclaw_get_entry": ("app.assistant.tools.openclaw_tools", "openclaw_get_entry"),
     "openclaw_create_relation": ("app.assistant.tools.openclaw_tools", "openclaw_create_relation"),
     "openclaw_query_knowledge_graph": ("app.assistant.tools.openclaw_tools", "openclaw_query_knowledge_graph"),
-    "openclaw_generate_weekly_report": ("app.assistant.tools.openclaw_tools", "openclaw_generate_weekly_report"),
-    "openclaw_generate_monthly_report": ("app.assistant.tools.openclaw_tools", "openclaw_generate_monthly_report"),
     "get_statistics": ("app.assistant.tools.stats_tools", "get_statistics"),
     "get_entries_by_time_range": ("app.assistant.tools.stats_tools", "get_entries_by_time_range"),
     "analyze_activity": ("app.assistant.tools.stats_tools", "analyze_activity"),

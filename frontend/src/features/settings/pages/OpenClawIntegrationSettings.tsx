@@ -854,10 +854,39 @@ export function OpenClawIntegrationSettingsPage() {
     ...block,
     copyLabel: t('openclawIntegration.guide.actions.copy'),
   }))
+  const upgradeCommandCards = [
+    {
+      order: 'U1',
+      title: t('openclawIntegration.guide.upgradeBlocks.standard.title'),
+      description: t('openclawIntegration.guide.upgradeBlocks.standard.description'),
+      code: 'openclaw plugins update openclaw-mindatlas\nnpm --prefix ./integrations/openclaw-mindatlas run configure:skills',
+    },
+    {
+      order: 'U2',
+      title: t('openclawIntegration.guide.upgradeBlocks.reinstall.title'),
+      description: t('openclawIntegration.guide.upgradeBlocks.reinstall.description'),
+      code: 'openclaw plugins uninstall openclaw-mindatlas --force\nopenclaw plugins install ./integrations/openclaw-mindatlas\nnpm --prefix ./integrations/openclaw-mindatlas run configure:skills',
+    },
+    {
+      order: 'U3',
+      title: t('openclawIntegration.guide.upgradeBlocks.skills.title'),
+      description: t('openclawIntegration.guide.upgradeBlocks.skills.description'),
+      code:
+        'BACKUP_DIR=$HOME/.openclaw/skills-backup-$(date +%F-%H%M%S)\nmkdir -p "$BACKUP_DIR"\nfor skill in mindatlas-overview mindatlas-auto-capture mindatlas-retrieval mindatlas-summary mindatlas-dispatcher; do\n  [ -d "$HOME/.openclaw/skills/$skill" ] && mv "$HOME/.openclaw/skills/$skill" "$BACKUP_DIR"/\ndone\nnpm --prefix ./integrations/openclaw-mindatlas run configure:skills',
+    },
+  ].map((block) => ({
+    ...block,
+    copyLabel: t('openclawIntegration.guide.actions.copy'),
+  }))
   const verificationChecks = [
     t('openclawIntegration.guide.verifyChecks.restart'),
     t('openclawIntegration.guide.verifyChecks.session'),
     t('openclawIntegration.guide.verifyChecks.failure'),
+  ]
+  const maintenanceChecks = [
+    t('openclawIntegration.guide.maintenanceChecks.firstInstall'),
+    t('openclawIntegration.guide.maintenanceChecks.catalogChange'),
+    t('openclawIntegration.guide.maintenanceChecks.upgrade'),
   ]
   const verificationPrompts = [
     t('openclawIntegration.guide.verifyPrompts.first'),
@@ -943,7 +972,7 @@ export function OpenClawIntegrationSettingsPage() {
         itemId: item.id,
         payload: { enabled },
       })
-      toast.success(t('openclawIntegration.messages.saved'))
+      showCatalogChangeToast(t('openclawIntegration.messages.saved'))
     } catch (error) {
       toast.error(isApiError(error) ? error.message : t('messages.error'))
     }
@@ -982,11 +1011,15 @@ export function OpenClawIntegrationSettingsPage() {
     })
   }
 
+  function showCatalogChangeToast(message: string) {
+    toast.success(`${message} ${t('openclawIntegration.messages.restartRecommended')}`)
+  }
+
   async function handleResetSystemItems() {
     try {
       await resetMutation.mutateAsync()
       setShowResetConfirm(false)
-      toast.success(t('openclawIntegration.messages.systemItemsReset'))
+      showCatalogChangeToast(t('openclawIntegration.messages.systemItemsReset'))
     } catch (error) {
       setShowResetConfirm(false)
       toast.error(isApiError(error) ? error.message : t('messages.error'))
@@ -998,7 +1031,7 @@ export function OpenClawIntegrationSettingsPage() {
     try {
       await deleteItemMutation.mutateAsync(deleteTarget.id)
       setDeleteTarget(null)
-      toast.success(t('openclawIntegration.messages.deleted'))
+      showCatalogChangeToast(t('openclawIntegration.messages.deleted'))
     } catch (error) {
       toast.error(isApiError(error) ? error.message : t('messages.error'))
     }
@@ -1044,7 +1077,7 @@ export function OpenClawIntegrationSettingsPage() {
       }
 
       setDialogOpen(false)
-      toast.success(t('openclawIntegration.messages.saved'))
+      showCatalogChangeToast(t('openclawIntegration.messages.saved'))
     } catch (error) {
       toast.error(isApiError(error) ? error.message : error instanceof Error ? error.message : t('messages.error'))
     }
@@ -1394,6 +1427,35 @@ export function OpenClawIntegrationSettingsPage() {
                     />
                   ))}
                 </div>
+
+                <GuideCallout icon={<Wrench className="h-4 w-4" />}>
+                  <p className="font-semibold">{t('openclawIntegration.guide.maintenanceTitle')}</p>
+                  <p className="mt-1">{t('openclawIntegration.guide.maintenanceDescription')}</p>
+                  <ul className="mt-3 space-y-2">
+                    {maintenanceChecks.map((item) => (
+                      <li key={item} className="flex items-start gap-2">
+                        <span className="mt-2 h-1.5 w-1.5 rounded-full bg-current/60" />
+                        <span>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </GuideCallout>
+
+                <div className="space-y-4">
+                  {upgradeCommandCards.map((block) => (
+                    <CopyableCodeBlock
+                      key={block.order}
+                      orderLabel={block.order}
+                      title={block.title}
+                      description={block.description}
+                      code={block.code}
+                      copyLabel={block.copyLabel}
+                      onCopy={(value) => {
+                        void copyToClipboard(value, t('openclawIntegration.messages.copied'))
+                      }}
+                    />
+                  ))}
+                </div>
               </QuickStartStep>
 
               <QuickStartStep
@@ -1533,6 +1595,10 @@ export function OpenClawIntegrationSettingsPage() {
             <p className="mt-1">{t('openclawIntegration.catalog.blockedDescription')}</p>
           </div>
         ) : null}
+        <div className="mt-5 rounded-[12px] border border-cyan-200 bg-cyan-50/80 px-4 py-4 text-sm leading-6 text-cyan-950">
+          <p className="font-semibold">{t('openclawIntegration.catalog.refreshNoticeTitle')}</p>
+          <p className="mt-1">{t('openclawIntegration.catalog.refreshNoticeDescription')}</p>
+        </div>
         {catalogItems.length ? (
           <div className="mt-5 grid gap-4">
             {catalogItems.map((item) => (

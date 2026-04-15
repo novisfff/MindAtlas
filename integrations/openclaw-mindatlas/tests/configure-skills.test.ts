@@ -98,6 +98,18 @@ test('detectLegacyMindAtlasToolPolicy warns on the deprecated tools allowlist/pr
   assert.match(warnings[1], /tools\.profile/i)
 })
 
+test('detectLegacyMindAtlasToolPolicy warns when removed weekly/monthly tool names are still allowlisted', () => {
+  const warnings = detectLegacyMindAtlasToolPolicy({
+    tools: {
+      allow: ['openclaw-mindatlas', 'mindatlas_generate_weekly_report'],
+    },
+  })
+
+  assert.equal(warnings.length, 2)
+  assert.match(warnings[0], /tools\.allow/i)
+  assert.match(warnings[1], /mindatlas_generate_periodic_review/i)
+})
+
 test('configureOpenClawSkills writes only the installed plugin skills path into openclaw.json', () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mindatlas-configure-skills-'))
   const configPath = path.join(tempRoot, 'openclaw.json')
@@ -154,7 +166,7 @@ test('configureOpenClawSkills falls back to the local plugin skills directory wh
   }
 })
 
-test('configureOpenClawSkills keeps legacy tool settings untouched but warns about them', () => {
+test('configureOpenClawSkills keeps legacy tool settings untouched but warns about removed report names', () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mindatlas-configure-skills-legacy-'))
   const configPath = path.join(tempRoot, 'openclaw.json')
   const pluginRoot = path.join(tempRoot, 'extensions', 'openclaw-mindatlas')
@@ -191,7 +203,8 @@ test('configureOpenClawSkills keeps legacy tool settings untouched but warns abo
       profile: 'full',
       allow: ['openclaw-mindatlas', 'mindatlas_generate_weekly_report'],
     })
-    assert.equal(result.warnings.length, 2)
+    assert.equal(result.warnings.length, 3)
+    assert.match(result.warnings[1], /mindatlas_generate_periodic_review/i)
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true })
   }

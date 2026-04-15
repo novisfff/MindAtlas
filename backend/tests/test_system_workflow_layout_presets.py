@@ -13,10 +13,13 @@ reset_caches()
 
 EXPECTED_WORKFLOW_POSITIONS: dict[str, dict[str, tuple[int, int]]] = {
     "quick_stats": {
-        "start": (120, 220),
-        "tool_stats": (530, 220),
-        "llm_output": (940, 220),
-        "output_final": (1350, 220),
+        "start": (120, 320),
+        "llm_intent": (530, 320),
+        "tool_stats": (940, 170),
+        "tool_activity": (940, 320),
+        "tool_tags": (940, 470),
+        "llm_output": (1350, 320),
+        "output_final": (1760, 320),
     },
     "smart_capture": {
         "start": (80, 320),
@@ -37,11 +40,9 @@ EXPECTED_WORKFLOW_POSITIONS: dict[str, dict[str, tuple[int, int]]] = {
     },
     "periodic_review": {
         "start": (120, 320),
-        "llm_dates": (530, 320),
-        "tool_entries": (940, 245),
-        "tool_activity": (940, 396),
-        "llm_output": (1350, 315),
-        "output_final": (1760, 315),
+        "llm_request": (530, 320),
+        "call_core": (940, 320),
+        "output_final": (1350, 320),
     },
 }
 

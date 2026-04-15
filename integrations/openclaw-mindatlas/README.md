@@ -6,22 +6,24 @@
 
 - Reads `GET /api/integrations/openclaw/capabilities` from MindAtlas
 - Registers one OpenClaw tool per exposed catalog item
+- Registers two stable dispatcher tools: `mindatlas_list_capabilities` and `mindatlas_run_capability`
 - Forwards tool execution to `POST /api/integrations/openclaw/capabilities/{capabilityKey}/execute`
-- Bundles 4 shipped MindAtlas skills that help OpenClaw understand when and how to use the catalog
+- Bundles 5 shipped MindAtlas skills that help OpenClaw understand when and how to use the catalog
 - Syncs those shipped skills into the active OpenClaw custom skills directory as a compatibility fallback when plugin-manifest skills are not surfaced by the current OpenClaw build
 - Refreshes the remote catalog on a TTL
 - Logs catalog refresh summaries and warns when catalog structure changes require a Gateway / plugin reload
 
 ## Shipped Skills
 
-The plugin ships these 4 skills together:
+The plugin ships these 5 skills together:
 
 - `mindatlas-overview`: high-level positioning for what MindAtlas is and when OpenClaw should prefer it
+- `mindatlas-dispatcher`: dynamic capability discovery and fallback execution for newly exposed custom capabilities
 - `mindatlas-auto-capture`: capture policy for durable memory and context submission
 - `mindatlas-retrieval`: retrieval routing across search, detail lookup, and graph-style queries
 - `mindatlas-summary`: summary routing for weekly, monthly, and topic-oriented reviews
 
-These skills ship with the plugin package. They guide OpenClaw's decision-making, while the actual callable tools still come from the live MindAtlas capability catalog.
+These skills ship with the plugin package. They guide OpenClaw's decision-making across both the dedicated built-in `mindatlas_*` tools and any custom capabilities that administrators expose through the live MindAtlas catalog.
 
 Current OpenClaw releases do not always surface plugin-manifest `skills` into `openclaw skills list`. To keep the shipped MindAtlas skills usable, the plugin also syncs them into the active custom skills directory on startup. Existing sessions still may need a new session or Gateway reload before the refreshed skill surface appears.
 
@@ -48,13 +50,76 @@ cd integrations/openclaw-mindatlas
 npm run install:openclaw
 ```
 
-The install command only registers the plugin package. The additional `configure:skills` step writes the installed plugin's `skills` directory into `skills.load.extraDirs`, which keeps `openclaw skills list` plus new sessions able to see the shipped MindAtlas skills even on builds where plugin-manifest skills are not surfaced consistently.
+The install command only registers the plugin package. The additional `configure:skills` step writes the installed plugin's `skills` directory into `skills.load.extraDirs`, which is the primary path for making the shipped MindAtlas skills visible to the official OpenClaw skills loader and to new sessions even on builds where plugin-manifest skills are not surfaced consistently.
 
 If the script detects old MindAtlas-specific `tools.allow` or `tools.profile` compatibility remnants, it prints a warning but does not delete user config. MindAtlas tool visibility should now come from the official OpenClaw SDK required-tool registration path instead of a manual allowlist.
 
 You can install first and fill in `baseUrl` / `integrationSecret` afterwards.
 
-After you add the plugin config, restart the OpenClaw Gateway so the plugin can register tools from the current MindAtlas catalog. The plugin still syncs its shipped skills into the active OpenClaw custom skills directory as an extra compatibility fallback, but `configure:skills` is the primary install-time path for making those skills visible to the official skills loader.
+After you add the plugin config, restart the OpenClaw Gateway so the plugin can register tools from the current MindAtlas catalog. The plugin still syncs its shipped skills into the active OpenClaw custom skills directory as an extra compatibility fallback, but `configure:skills` is the primary install-time path for making those skills visible to the official skills loader. Start a fresh session after the restart so the updated skill and tool surface actually enters the prompt.
+
+## Upgrade Or Reinstall
+
+Use the same install path again when either of these is true:
+
+- You upgraded the MindAtlas repository or deployed a newer MindAtlas system version
+- You upgraded the `openclaw-mindatlas` plugin package
+- You upgraded the shipped MindAtlas skills and want OpenClaw to pick up the refreshed guidance
+- You changed exposed MindAtlas capability metadata and want a clean OpenClaw tool / skill surface before validating
+
+Recommended recovery sequence:
+
+1. Update the MindAtlas checkout on the OpenClaw host to the new system version
+2. Prefer `openclaw plugins update openclaw-mindatlas`
+3. Re-run `npm --prefix ./integrations/openclaw-mindatlas run configure:skills`
+4. Restart the OpenClaw Gateway
+5. Open a brand-new OpenClaw session and verify from there
+
+Preferred path for an already-installed tracked plugin:
+
+```bash
+# after pulling or deploying the upgraded MindAtlas version
+openclaw plugins update openclaw-mindatlas
+npm --prefix ./integrations/openclaw-mindatlas run configure:skills
+```
+
+If the tracked install does not refresh cleanly, or if you want a full reinstall:
+
+```bash
+openclaw plugins uninstall openclaw-mindatlas --force
+openclaw plugins install ./integrations/openclaw-mindatlas
+npm --prefix ./integrations/openclaw-mindatlas run configure:skills
+```
+
+If logs show `plugin already exists`, use the `update` path above or uninstall before reinstalling; a plain repeated `openclaw plugins install ...` will not overwrite the existing install path.
+
+## Shipped Skill Upgrade Notes
+
+`configure:skills` refreshes `skills.load.extraDirs`, but shipped skill upgrades can still be blocked by pre-existing custom skills with the same id under `~/.openclaw/skills/`.
+
+If plugin logs say:
+
+- `Skipping shipped MindAtlas skill because an existing custom skill with the same id is not plugin-managed`
+
+then OpenClaw is preserving those user-owned custom skill directories instead of overwriting them. To let the shipped skills upgrade:
+
+1. Back up or move the conflicting directories under `~/.openclaw/skills/`
+2. Re-run `npm --prefix ./integrations/openclaw-mindatlas run configure:skills`
+3. Restart the OpenClaw Gateway
+4. Open a brand-new session
+
+Example:
+
+```bash
+BACKUP_DIR=$HOME/.openclaw/skills-backup-$(date +%F-%H%M%S)
+mkdir -p "$BACKUP_DIR"
+for skill in mindatlas-overview mindatlas-auto-capture mindatlas-retrieval mindatlas-summary mindatlas-dispatcher; do
+  [ -d "$HOME/.openclaw/skills/$skill" ] && mv "$HOME/.openclaw/skills/$skill" "$BACKUP_DIR"/
+done
+npm --prefix ./integrations/openclaw-mindatlas run configure:skills
+```
+
+Also review old compatibility remnants in `~/.openclaw/openclaw.json`. If `tools.allow` or `tools.profile` still contain removed names like `mindatlas_generate_weekly_report` or `mindatlas_generate_monthly_report`, remove those legacy entries and rely on the official plugin registration path instead.
 
 ## Configuration
 
@@ -95,16 +160,18 @@ Notes:
 5. Add custom Tool / Workflow / Agent catalog items if needed.
 6. Make sure the items you want OpenClaw to see are marked as exposed.
 
-The capability catalog controls which tools OpenClaw can call.
-The shipped skills control how OpenClaw should think about MindAtlas positioning, capture policy, retrieval routing, and summary routing.
+The capability catalog controls which dedicated tools OpenClaw can call.
+The shipped skills control how OpenClaw should think about MindAtlas positioning, capture policy, retrieval routing, summary routing, and dynamic fallback to custom exposed capabilities. The built-in guidance is not limited to system preset capabilities; administrators can expose custom workflows, agents, and tool-backed capabilities that the overview and dispatcher skills should also treat as first-class MindAtlas routes.
 
 ## Runtime Behavior
 
 - The plugin only registers capabilities that are `available = true`.
+- The plugin always registers `mindatlas_list_capabilities` plus `mindatlas_run_capability` when config is valid, even if no catalog-backed dedicated tools are available yet.
 - `available = false` items are skipped and logged.
 - After each successful refresh, the plugin logs a summary with discovered capability counts, available counts, and registered tool names.
-- If a refresh succeeds but registers zero tools, the plugin logs whether the catalog was empty or all discovered capabilities were unavailable.
+- If a refresh succeeds but registers zero dedicated catalog tools, the plugin logs that only dispatcher tools are currently available.
 - On refresh, availability state and execute targets are updated in memory for unchanged tools.
+- `mindatlas_list_capabilities` and `mindatlas_run_capability` proactively refresh the catalog before they act, so newly exposed custom capabilities can be discovered and called without waiting for a dedicated tool to appear in the current session.
 - If startup catalog registration fails, the plugin keeps Gateway startup alive but requires a Gateway reload after the config or network issue is fixed.
 - If a previously unavailable capability becomes available later, the plugin logs that a Gateway reload is required instead of late-registering the new tool.
 - If the remote tool-name set changes because of add / delete / rename, the plugin marks `reloadRequired` and logs a warning.

@@ -22,13 +22,14 @@ class SystemDefaultsLoaderTests(unittest.TestCase):
         workflow_assets = list_system_assets(kind="workflow", locale="zh")
         agent_assets = list_system_assets(kind="agent", locale="zh")
 
-        self.assertEqual(len(workflow_assets), 6)
+        self.assertEqual(len(workflow_assets), 7)
         self.assertEqual(
             {item.asset_key for item in workflow_assets},
             {
                 "quick_stats",
                 "smart_capture",
                 "periodic_review",
+                "periodic_review_core",
                 "context_capture",
                 "weekly_report",
                 "monthly_report",
@@ -122,12 +123,57 @@ class SystemDefaultsLoaderTests(unittest.TestCase):
         workflow = get_system_workflow_baseline("quick_stats", locale="zh")
         self.assertIsNotNone(workflow)
         assert workflow is not None
-        self.assertEqual(len(workflow.nodes), 4)
+        self.assertEqual(len(workflow.nodes), 7)
 
         agent = get_system_agent_baseline("general_chat", locale="zh")
         self.assertIsNotNone(agent)
         assert agent is not None
         self.assertTrue(bool((agent.kb_config or {}).get("enabled", False)))
+
+        quick_stats = next(item for item in defaults if item.name == "quick_stats")
+        self.assertIn("看下我近7天的录入趋势", quick_stats.intent_examples)
+        self.assertIn("按标签统计一下我最近常用什么", quick_stats.intent_examples)
+        self.assertIn("统计 2026-03-01 到 2026-03-31 的记录概况", quick_stats.intent_examples)
+
+    def test_periodic_review_assets_expose_wrapper_and_core_workflows(self) -> None:
+        from app.assistant.workflow.system_assets import load_system_workflow_asset  # noqa: E402
+
+        wrapper = load_system_workflow_asset("periodic_review", locale="zh")
+        core = load_system_workflow_asset("periodic_review_core", locale="zh")
+
+        wrapper_nodes = {node.node_id: node for node in wrapper.nodes}
+        core_nodes = {node.node_id: node for node in core.nodes}
+
+        self.assertEqual(
+            [node.node_id for node in wrapper.nodes],
+            ["start", "llm_request", "call_core", "output_final"],
+        )
+        self.assertEqual(wrapper_nodes["call_core"].node_type, "workflow_call")
+        self.assertEqual(wrapper_nodes["call_core"].config["targetSystemAssetKey"], "periodic_review_core")
+        self.assertEqual(wrapper_nodes["call_core"].config["inputBindings"]["focus"], "{{llm_request.focus}}")
+        self.assertEqual(core_nodes["output_final"].config["outputMode"], "structured")
+        self.assertEqual(core_nodes["output_final"].config["outputFields"][0]["name"], "content")
+
+    def test_quick_stats_asset_uses_focus_extraction_and_parallel_stats_tools(self) -> None:
+        from app.assistant.workflow.system_assets import load_system_workflow_asset  # noqa: E402
+
+        workflow = load_system_workflow_asset("quick_stats", locale="zh")
+        nodes = {node.node_id: node for node in workflow.nodes}
+
+        self.assertEqual(
+            [node.node_id for node in workflow.nodes],
+            ["start", "llm_intent", "tool_stats", "tool_activity", "tool_tags", "llm_output", "output_final"],
+        )
+        self.assertEqual(nodes["llm_intent"].config["outputFields"][1]["name"], "start_date")
+        self.assertEqual(nodes["llm_intent"].config["outputFields"][2]["name"], "end_date")
+        self.assertEqual(nodes["tool_stats"].config["inputBindings"]["start_date"], "{{llm_intent.start_date}}")
+        self.assertEqual(nodes["tool_activity"].config["inputBindings"]["end_date"], "{{llm_intent.end_date}}")
+        self.assertEqual(nodes["tool_tags"].config["toolName"], "get_tag_statistics")
+        self.assertEqual(nodes["tool_tags"].config["inputBindings"]["start_date"], "{{llm_intent.start_date}}")
+        self.assertEqual(nodes["tool_tags"].config["inputBindings"]["top_n"], "5")
+        self.assertIn("## 我先帮你看了下", nodes["llm_output"].config["systemPrompt"])
+        self.assertIn("有陪伴感", nodes["llm_output"].config["systemPrompt"])
+        self.assertIn("归一化时间范围起点", nodes["llm_output"].config["userInput"])
 
     def test_system_behavior_workflows_resolve_from_asset_keys(self) -> None:
         from app.assistant.workflow.system_assets import load_system_workflow_asset  # noqa: E402
