@@ -10,7 +10,7 @@ const {
   cleanupLegacyMindAtlasConfig,
   runSetupOpenClawPlugin,
   runUpdateOpenClawPlugin,
-} = await import('../scripts/openclaw-plugin-management.mjs')
+} = await import('../../openclaw-mindatlas-cli/openclaw-plugin-management.mjs')
 
 function createSilentLogger() {
   return {

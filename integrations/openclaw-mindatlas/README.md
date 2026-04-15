@@ -45,6 +45,8 @@ This guided script runs on the OpenClaw host and:
 - Re-runs `configure:skills`
 - Calls `openclaw gateway restart`
 
+The guided host-management scripts intentionally live outside the plugin package directory, so `openclaw plugins install ./integrations/openclaw-mindatlas` only scans runtime plugin code instead of also scanning local maintenance helpers.
+
 Open a brand-new OpenClaw session after the script completes so the refreshed skill and tool surface actually enters the prompt.
 
 Manual fallback:

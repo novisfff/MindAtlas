@@ -9,7 +9,6 @@
     "README.md",
     "openclaw.plugin.json",
     "package.json",
-    "scripts",
     "skills",
     "src",
     "tsconfig.json"
@@ -18,10 +17,10 @@
     "node": ">=20"
   },
   "scripts": {
-    "setup:openclaw": "node ./scripts/setup-openclaw-plugin.mjs",
-    "update:openclaw": "node ./scripts/update-openclaw-plugin.mjs",
-    "configure:skills": "node ./scripts/configure-openclaw-skills.mjs",
-    "install:openclaw": "openclaw plugins install . && node ./scripts/configure-openclaw-skills.mjs",
+    "setup:openclaw": "node ../openclaw-mindatlas-cli/setup-openclaw-plugin.mjs",
+    "update:openclaw": "node ../openclaw-mindatlas-cli/update-openclaw-plugin.mjs",
+    "configure:skills": "node ../openclaw-mindatlas-cli/configure-openclaw-skills.mjs",
+    "install:openclaw": "openclaw plugins install . && node ../openclaw-mindatlas-cli/configure-openclaw-skills.mjs",
     "build": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test tests/*.test.ts"
   },
