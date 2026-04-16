@@ -695,34 +695,22 @@
           "confirmed_title": "{{human_confirm_write.title}}"
         },
         "exposedOutputFields": [
-          "relation_summary"
+          "relation_status",
+          "relation_candidate_count",
+          "relation_created_count"
         ]
       }
     },
     {
-      "nodeId": "code_finalize_reply",
-      "nodeType": "code_executor",
-      "label": "整理最终回复",
+      "nodeId": "llm_finalize_reply",
+      "nodeType": "llm",
+      "label": "Finalize Reply",
       "positionX": 7280.0,
       "positionY": 320.0,
       "config": {
-        "language": "python",
-        "code": "def _clean(value):\n    return str(value or '').strip()\n\ndef _to_int(value):\n    try:\n        return max(0, int(value or 0))\n    except Exception:\n        return 0\n\ndef _entry_label(value):\n    title = _clean(value)\n    return f'《{title}》' if title else '这条记录'\n\ndef main(\n    candidate_count=None,\n    action=None,\n    merge_target_title=None,\n    create_title=None,\n    update_title=None,\n    confirmed_title=None,\n    relation_summary=None,\n):\n    resolved_action = 'merge_existing' if _clean(action) == 'merge_existing' else 'create_new'\n    candidate_total = _to_int(candidate_count)\n    merge_target = _clean(merge_target_title)\n\n    if resolved_action == 'merge_existing':\n        title = _clean(update_title) or _clean(confirmed_title) or merge_target\n    else:\n        title = _clean(create_title) or _clean(confirmed_title)\n\n    if candidate_total > 0:\n        if resolved_action == 'merge_existing':\n            opening = f'我先帮你查到 {candidate_total} 条相似候选，你最后选择把这次内容合并到{_entry_label(merge_target or title)}。'\n        else:\n            opening = f'我先帮你查到 {candidate_total} 条相似候选，不过你最后还是决定把它作为一条独立记录来保存。'\n    else:\n        if resolved_action == 'merge_existing':\n            opening = f'我先帮你查了一下，这次最终还是按合并更新的方式处理，把内容补到了{_entry_label(merge_target or title)}。'\n        else:\n            opening = '我先帮你查了一下，创建前没有发现明显重复的已有记录，所以这次就按新记录流程处理了。'\n\n    if resolved_action == 'merge_existing':\n        write_summary = f'你确认之后，我已经把内容更新进{_entry_label(title)}。'\n    else:\n        write_summary = f'你确认之后，我已经帮你创建了{_entry_label(title)}。'\n\n    relation_text = _clean(relation_summary)\n    if relation_text:\n        reply = f'{opening}{write_summary}另外，{relation_text}'\n    else:\n        reply = f'{opening}{write_summary}'\n\n    return {\n        'reply': reply,\n    }\n",
-        "entrypoint": "main",
-        "inputBindings": {
-          "candidate_count": "{{code_candidates.candidate_count}}",
-          "action": "{{code_prepare_write_payload.action}}",
-          "merge_target_title": "{{tool_get_existing.title}}",
-          "create_title": "{{tool_create.title}}",
-          "update_title": "{{tool_update.title}}",
-          "confirmed_title": "{{human_confirm_write.title}}",
-          "relation_summary": "{{call_relation_followup.relation_summary}}"
-        },
-        "outputFields": [
-          {
-            "name": "reply"
-          }
-        ]
+        "systemPrompt": "You are the MindAtlas capture assistant, and you have just completed the full smart_capture workflow for the user.\nOnly use the workflow facts provided below. Do not invent outcomes, and do not explain internal implementation details.\nYour job is to turn the workflow result into a natural assistant reply that sounds like you just finished helping the user, not like a system log, state machine, or rigid template.\nOutput rules:\n- Return 1 to 2 short paragraphs in natural English. No headings, no bullets, and no mechanical sections such as duplicate check, decision path, write result, relation follow-up.\n- Speak directly to the user as you, and describe completed actions with I.\n- Naturally connect the reply to original_input so it feels grounded in what the user just asked you to capture, but do not quote large chunks of their input.\n- Cover the key outcomes that actually happened in this run: whether similar candidates were found, whether the user chose create or merge, which record was ultimately affected, and what happened in relation follow-up.\n- If candidate_count=0, naturally say there was no obvious duplicate before writing. If candidate_count>0, naturally mention how many similar candidates were found and whether the user ultimately chose create or merge.\n- If action=create_new, clearly say a new record was created. If action=merge_existing, clearly say the content was merged into or updated in an existing record.\n- When you refer to the final record, prefer updated_entry_title, then created_entry_title. If both are empty, fall back to merge_target_title or confirmed_title.\n- If relation_status=created, mention how many relation recommendations were confirmable and how many relations were actually added.\n- If relation_status=empty, briefly say there were no confirmable relation recommendations this time.\n- If relation_status=rejected or none_selected, briefly say no new relations were added this round, but keep that part secondary.\n- Do not output raw field names or internal variable names such as candidate_count or relation_status.",
+        "userInput": "date: {{sys.date}}\n\noriginal_input:\n{{start.user_input}}\n\ncandidate_count:\n{{code_candidates.candidate_count}}\n\naction:\n{{code_prepare_write_payload.action}}\n\nmerge_target_title:\n{{tool_get_existing.title}}\n\ncreated_entry_title:\n{{tool_create.title}}\n\nupdated_entry_title:\n{{tool_update.title}}\n\nconfirmed_title:\n{{human_confirm_write.title}}\n\nrelation_status:\n{{call_relation_followup.relation_status}}\n\nrelation_candidate_count:\n{{call_relation_followup.relation_candidate_count}}\n\nrelation_created_count:\n{{call_relation_followup.relation_created_count}}",
+        "outputMode": "text"
       }
     },
     {
@@ -733,7 +721,7 @@
       "positionY": 320.0,
       "config": {
         "outputMode": "text",
-        "textTemplate": "{{code_finalize_reply.reply}}"
+        "textTemplate": "{{llm_finalize_reply.response}}"
       }
     }
   ],
@@ -1011,7 +999,7 @@
     {
       "edgeId": "e_relation_followup_finalize",
       "sourceNodeId": "call_relation_followup",
-      "targetNodeId": "code_finalize_reply",
+      "targetNodeId": "llm_finalize_reply",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
@@ -1020,7 +1008,7 @@
     },
     {
       "edgeId": "e_finalize_output",
-      "sourceNodeId": "code_finalize_reply",
+      "sourceNodeId": "llm_finalize_reply",
       "targetNodeId": "output_final",
       "sourceHandle": "output",
       "targetHandle": "input",

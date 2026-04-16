@@ -52,7 +52,7 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
         self.assertIn("human_confirm_write", node_map)
         self.assertIn("if_persist_route", node_map)
         self.assertIn("call_relation_followup", node_map)
-        self.assertIn("code_finalize_reply", node_map)
+        self.assertIn("llm_finalize_reply", node_map)
         self.assertIn("tool_search_primary", node_map)
         self.assertIn("tool_search_secondary", node_map)
         self.assertIn("output_final", node_map)
@@ -177,7 +177,10 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
             else {}
         )
         self.assertEqual(relation_call_cfg.get("targetSystemAssetKey"), "smart_capture_relation_followup")
-        self.assertEqual(relation_call_cfg.get("exposedOutputFields"), ["relation_summary"])
+        self.assertEqual(
+            relation_call_cfg.get("exposedOutputFields"),
+            ["relation_status", "relation_candidate_count", "relation_created_count"],
+        )
         relation_call_bindings = relation_call_cfg.get("inputBindings") or {}
         self.assertEqual(relation_call_bindings.get("action"), "{{code_prepare_write_payload.action}}")
         self.assertEqual(relation_call_bindings.get("create_id"), "{{tool_create.id}}")
@@ -189,18 +192,23 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
             for edge in edges
             if edge.source_node_id == "call_relation_followup"
         ]
-        self.assertEqual(relation_followup_targets, ["code_finalize_reply"])
+        self.assertEqual(relation_followup_targets, ["llm_finalize_reply"])
 
-        finalize_cfg = node_map["code_finalize_reply"].config if isinstance(node_map["code_finalize_reply"].config, dict) else {}
-        finalize_bindings = finalize_cfg.get("inputBindings") or {}
-        self.assertEqual(finalize_bindings.get("candidate_count"), "{{code_candidates.candidate_count}}")
-        self.assertEqual(finalize_bindings.get("merge_target_title"), "{{tool_get_existing.title}}")
-        self.assertEqual(finalize_bindings.get("relation_summary"), "{{call_relation_followup.relation_summary}}")
+        finalize_cfg = node_map["llm_finalize_reply"].config if isinstance(node_map["llm_finalize_reply"].config, dict) else {}
+        self.assertEqual(node_map["llm_finalize_reply"].node_type, "llm")
+        self.assertEqual(finalize_cfg.get("outputMode"), "text")
+        finalize_user_input = str(finalize_cfg.get("userInput") or "")
+        finalize_prompt = str(finalize_cfg.get("systemPrompt") or "")
+        self.assertIn("{{start.user_input}}", finalize_user_input)
+        self.assertIn("{{code_candidates.candidate_count}}", finalize_user_input)
+        self.assertIn("{{call_relation_followup.relation_status}}", finalize_user_input)
+        self.assertIn("自然", finalize_prompt)
+        self.assertIn("不要输出字段名", finalize_prompt)
 
         finalize_targets = [
             edge.target_node_id
             for edge in edges
-            if edge.source_node_id == "code_finalize_reply"
+            if edge.source_node_id == "llm_finalize_reply"
         ]
         self.assertEqual(finalize_targets, ["output_final"])
 
@@ -212,10 +220,13 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
         lookup_cfg = node_map["llm_prepare_lookup"].config if isinstance(node_map["llm_prepare_lookup"].config, dict) else {}
         materialize_cfg = node_map["llm_materialize"].config if isinstance(node_map["llm_materialize"].config, dict) else {}
         merge_cfg = node_map["llm_merge_rewrite"].config if isinstance(node_map["llm_merge_rewrite"].config, dict) else {}
+        finalize_cfg = node_map["llm_finalize_reply"].config if isinstance(node_map["llm_finalize_reply"].config, dict) else {}
 
         lookup_prompt = str(lookup_cfg.get("systemPrompt") or "")
         materialize_prompt = str(materialize_cfg.get("systemPrompt") or "")
         merge_prompt = str(merge_cfg.get("systemPrompt") or "")
+        finalize_prompt = str(finalize_cfg.get("systemPrompt") or "")
+        finalize_user_input = str(finalize_cfg.get("userInput") or "")
 
         self.assertIn("稳定主体", lookup_prompt)
         self.assertIn("same_record_clues", lookup_prompt)
@@ -224,6 +235,10 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
         self.assertIn("不要使用对话历史", materialize_prompt)
         self.assertIn("默认今天", merge_prompt)
         self.assertIn("稳定时间表达", merge_prompt)
+        self.assertIn("original_input", finalize_prompt)
+        self.assertIn("不要机械分段罗列", finalize_prompt)
+        self.assertIn("{{start.user_input}}", finalize_user_input)
+        self.assertIn("{{call_relation_followup.relation_created_count}}", finalize_user_input)
 
     def test_system_workflow_references_match_node_output_contracts(self) -> None:
         from app.assistant.skill_catalog.definitions import SKILLS

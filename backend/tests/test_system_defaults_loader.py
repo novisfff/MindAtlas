@@ -204,13 +204,15 @@ class SystemDefaultsLoaderTests(unittest.TestCase):
         )
         self.assertEqual(
             wrapper_nodes["call_relation_followup"].config["exposedOutputFields"],
-            ["relation_summary"],
+            ["relation_status", "relation_candidate_count", "relation_created_count"],
         )
-        self.assertEqual(wrapper_nodes["code_finalize_reply"].config["inputBindings"]["candidate_count"], "{{code_candidates.candidate_count}}")
-        self.assertEqual(wrapper_nodes["code_finalize_reply"].config["inputBindings"]["merge_target_title"], "{{tool_get_existing.title}}")
+        self.assertEqual(wrapper_nodes["llm_finalize_reply"].node_type, "llm")
+        self.assertEqual(wrapper_nodes["llm_finalize_reply"].config["outputMode"], "text")
+        self.assertIn("{{start.user_input}}", wrapper_nodes["llm_finalize_reply"].config["userInput"])
+        self.assertIn("relation_status", wrapper_nodes["llm_finalize_reply"].config["userInput"])
         self.assertEqual(
             wrapper_nodes["output_final"].config["textTemplate"],
-            "{{code_finalize_reply.reply}}",
+            "{{llm_finalize_reply.response}}",
         )
         self.assertEqual(followup_nodes["start"].config["inputMode"], "structured")
         self.assertEqual(followup_nodes["start"].config["memoryMode"], "off")
