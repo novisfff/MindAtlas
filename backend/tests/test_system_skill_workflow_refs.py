@@ -242,6 +242,36 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
         self.assertIn("{{start.user_input}}", finalize_user_input)
         self.assertIn("{{call_relation_followup.relation_created_count}}", finalize_user_input)
 
+    def test_smart_capture_write_payload_normalizes_dates_for_human_confirm(self) -> None:
+        from app.assistant.skill_catalog.definitions import SMART_CAPTURE
+
+        node_map = {n.node_id: n for n in (SMART_CAPTURE.workflow_nodes or [])}
+        payload_node = node_map["code_prepare_write_payload"]
+        payload_cfg = payload_node.config if isinstance(payload_node.config, dict) else {}
+        code = str(payload_cfg.get("code") or "")
+
+        namespace: dict[str, object] = {}
+        exec(code, namespace)
+        main = namespace["main"]
+
+        result = main(
+            candidate_count=0,
+            triage_action="create_new",
+            create_title="记录标题",
+            create_summary="摘要",
+            create_content="正文",
+            create_type_code="KNOWLEDGE",
+            create_tags=["tag-a"],
+            create_time_mode="POINT",
+            create_time_at="2026-04-16T00:00:00+00:00",
+            create_time_from=None,
+            create_time_to="null",
+        )
+
+        self.assertEqual(result["time_at"], "2026-04-16")
+        self.assertEqual(result["time_from"], "")
+        self.assertEqual(result["time_to"], "")
+
     def test_system_workflow_references_match_node_output_contracts(self) -> None:
         from app.assistant.skill_catalog.definitions import SKILLS
         from app.assistant_config.registry import ToolRegistry
