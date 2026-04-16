@@ -178,7 +178,9 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
         self.assertEqual(relation_call_cfg.get("targetSystemAssetKey"), "smart_capture_relation_followup")
         relation_call_bindings = relation_call_cfg.get("inputBindings") or {}
         self.assertEqual(relation_call_bindings.get("action"), "{{code_prepare_write_payload.action}}")
+        self.assertEqual(relation_call_bindings.get("candidate_count"), "{{code_candidates.candidate_count}}")
         self.assertEqual(relation_call_bindings.get("create_id"), "{{tool_create.id}}")
+        self.assertEqual(relation_call_bindings.get("merge_target_title"), "{{tool_get_existing.title}}")
         self.assertEqual(relation_call_bindings.get("update_id"), "{{tool_update.id}}")
         self.assertEqual(relation_call_bindings.get("confirmed_title"), "{{human_confirm_write.title}}")
 

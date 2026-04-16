@@ -688,8 +688,10 @@
         "targetSystemAssetKey": "smart_capture_relation_followup",
         "inputBindings": {
           "action": "{{code_prepare_write_payload.action}}",
+          "candidate_count": "{{code_candidates.candidate_count}}",
           "create_id": "{{tool_create.id}}",
           "create_title": "{{tool_create.title}}",
+          "merge_target_title": "{{tool_get_existing.title}}",
           "update_id": "{{tool_update.id}}",
           "update_title": "{{tool_update.title}}",
           "confirmed_title": "{{human_confirm_write.title}}"

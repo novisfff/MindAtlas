@@ -18,6 +18,13 @@
             "description": "写入动作，create_new 或 merge_existing。"
           },
           {
+            "name": "candidate_count",
+            "type": "integer",
+            "required": false,
+            "nullable": true,
+            "description": "前置相似记录检索命中的候选数量。"
+          },
+          {
             "name": "create_id",
             "type": "string",
             "required": false,
@@ -30,6 +37,13 @@
             "required": false,
             "nullable": true,
             "description": "新建记录成功后的标题。"
+          },
+          {
+            "name": "merge_target_title",
+            "type": "string",
+            "required": false,
+            "nullable": true,
+            "description": "用户选择的合并目标记录标题。"
           },
           {
             "name": "update_id",
@@ -63,12 +77,14 @@
       "positionY": 320.0,
       "config": {
         "language": "python",
-        "code": "def _clean(value):\n    return str(value or '').strip()\n\ndef main(\n    action=None,\n    create_id=None,\n    create_title=None,\n    update_id=None,\n    update_title=None,\n    confirmed_title=None,\n):\n    resolved_action = 'merge_existing' if _clean(action) == 'merge_existing' else 'create_new'\n    if resolved_action == 'merge_existing':\n        entry_id = _clean(update_id)\n        title = _clean(update_title) or _clean(confirmed_title)\n        action_text = '已合并更新记录'\n    else:\n        entry_id = _clean(create_id)\n        title = _clean(create_title) or _clean(confirmed_title)\n        action_text = '已创建记录'\n    return {\n        'action': resolved_action,\n        'entry_id': entry_id,\n        'title': title,\n        'action_text': action_text,\n    }\n",
+        "code": "def _clean(value):\n    return str(value or '').strip()\n\ndef _to_int(value):\n    try:\n        return max(0, int(value or 0))\n    except Exception:\n        return 0\n\ndef _entry_label(value):\n    title = _clean(value)\n    return f'《{title}》' if title else '该记录'\n\ndef main(\n    action=None,\n    candidate_count=None,\n    create_id=None,\n    create_title=None,\n    merge_target_title=None,\n    update_id=None,\n    update_title=None,\n    confirmed_title=None,\n):\n    resolved_action = 'merge_existing' if _clean(action) == 'merge_existing' else 'create_new'\n    candidate_total = _to_int(candidate_count)\n    merge_target = _clean(merge_target_title)\n\n    if resolved_action == 'merge_existing':\n        entry_id = _clean(update_id)\n        title = _clean(update_title) or _clean(confirmed_title) or merge_target\n        action_text = '已合并更新记录'\n        write_summary = f'经人工确认后，已将本次输入合并更新到{_entry_label(title)}。'\n    else:\n        entry_id = _clean(create_id)\n        title = _clean(create_title) or _clean(confirmed_title)\n        action_text = '已创建记录'\n        write_summary = f'经人工确认后，已创建记录{_entry_label(title)}。'\n\n    if candidate_total > 0:\n        lookup_summary = f'创建前检索到 {candidate_total} 条相似候选。'\n        if resolved_action == 'merge_existing':\n            decision_summary = f'你在相似候选中选择了“合并到已有记录”，目标为{_entry_label(merge_target or title)}。'\n        else:\n            decision_summary = '虽然检索到了相似候选，但你最终选择按独立新记录写入。'\n    else:\n        lookup_summary = '创建前未检索到明显相似的已有记录。'\n        decision_summary = '流程未进入合并分流，直接按新建记录路径整理并确认写入内容。'\n\n    execution_overview = '\\n'.join([\n        '本次智能记录处理已完成：',\n        f'- 查重结果：{lookup_summary}',\n        f'- 路径决策：{decision_summary}',\n        f'- 记录写入：{write_summary}',\n    ])\n\n    return {\n        'action': resolved_action,\n        'entry_id': entry_id,\n        'title': title,\n        'action_text': action_text,\n        'lookup_summary': lookup_summary,\n        'decision_summary': decision_summary,\n        'write_summary': write_summary,\n        'execution_overview': execution_overview,\n    }\n",
         "entrypoint": "main",
         "inputBindings": {
           "action": "{{start.action}}",
+          "candidate_count": "{{start.candidate_count}}",
           "create_id": "{{start.create_id}}",
           "create_title": "{{start.create_title}}",
+          "merge_target_title": "{{start.merge_target_title}}",
           "update_id": "{{start.update_id}}",
           "update_title": "{{start.update_title}}",
           "confirmed_title": "{{start.confirmed_title}}"
@@ -85,6 +101,18 @@
           },
           {
             "name": "action_text"
+          },
+          {
+            "name": "lookup_summary"
+          },
+          {
+            "name": "decision_summary"
+          },
+          {
+            "name": "write_summary"
+          },
+          {
+            "name": "execution_overview"
           }
         ]
       }
@@ -276,7 +304,7 @@
       "positionY": 460.0,
       "config": {
         "outputMode": "text",
-        "textTemplate": "{{code_normalize_persisted.action_text}}《{{code_normalize_persisted.title}}》。系统暂未给出带明确关系类型的可确认关联推荐，因此未新增关联。"
+        "textTemplate": "{{code_normalize_persisted.execution_overview}}\n- 关系处理：系统最终可确认的推荐关系为 0 条，因此未新增关联。"
       }
     },
     {
@@ -312,7 +340,7 @@
       "positionY": 460.0,
       "config": {
         "outputMode": "text",
-        "textTemplate": "{{code_normalize_persisted.action_text}}《{{code_normalize_persisted.title}}》。你选择跳过本轮关系创建，未新增关联。"
+        "textTemplate": "{{code_normalize_persisted.execution_overview}}\n- 关系处理：系统给出了 {{iter_relation_details.count}} 条可确认推荐关系，但你选择跳过本轮关系创建。"
       }
     },
     {
@@ -400,7 +428,7 @@
       "positionY": 460.0,
       "config": {
         "outputMode": "text",
-        "textTemplate": "{{code_normalize_persisted.action_text}}《{{code_normalize_persisted.title}}》。系统给出了推荐关系，但你没有勾选需要创建的项，因此未新增关联。"
+        "textTemplate": "{{code_normalize_persisted.execution_overview}}\n- 关系处理：系统给出了 {{iter_relation_details.count}} 条可确认推荐关系，但你没有勾选需要创建的项。"
       }
     },
     {
@@ -411,7 +439,7 @@
       "positionY": 320.0,
       "config": {
         "outputMode": "text",
-        "textTemplate": "{{code_normalize_persisted.action_text}}《{{code_normalize_persisted.title}}》，并创建了 {{iter_create_relations.count}} 条推荐关系。"
+        "textTemplate": "{{code_normalize_persisted.execution_overview}}\n- 关系处理：系统给出了 {{iter_relation_details.count}} 条可确认推荐关系，最终创建了 {{iter_create_relations.count}} 条。"
       }
     }
   ],

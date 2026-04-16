@@ -27,6 +27,11 @@ The system default `smart_capture` workflow SHALL pre-search similar entries fro
 - **AND** it SHALL filter out recommendations whose relation type is missing before asking for human confirmation
 - **AND** it SHALL allow batch selection of zero or more recommended relations
 
+#### Scenario: Final output summarizes the whole guided capture execution
+- **WHEN** `smart_capture` finishes its create-or-merge flow
+- **THEN** its final text output SHALL summarize the overall execution instead of only the last relation step
+- **AND** the summary SHALL cover duplicate lookup outcome, chosen create-vs-merge path, persistence result, and relation follow-up result
+
 ### Requirement: human_in_loop nodes SHALL support reusable batch multi-select option UIs
 `human_in_loop` nodes SHALL support a reusable array-oriented `checkbox_group` widget and SHALL preserve object-style option payloads for select-like widgets without breaking legacy string-list options.
 

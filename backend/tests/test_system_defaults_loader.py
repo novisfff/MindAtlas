@@ -203,13 +203,37 @@ class SystemDefaultsLoaderTests(unittest.TestCase):
             "smart_capture_relation_followup",
         )
         self.assertEqual(
+            wrapper_nodes["call_relation_followup"].config["inputBindings"]["candidate_count"],
+            "{{code_candidates.candidate_count}}",
+        )
+        self.assertEqual(
+            wrapper_nodes["call_relation_followup"].config["inputBindings"]["merge_target_title"],
+            "{{tool_get_existing.title}}",
+        )
+        self.assertEqual(
             wrapper_nodes["output_final"].config["textTemplate"],
             "{{call_relation_followup.response}}",
         )
         self.assertEqual(followup_nodes["start"].config["inputMode"], "structured")
         self.assertEqual(followup_nodes["start"].config["memoryMode"], "off")
+        followup_start_fields = followup_nodes["start"].config["structuredFields"]
+        followup_start_field_names = [item["name"] for item in followup_start_fields]
+        self.assertIn("candidate_count", followup_start_field_names)
+        self.assertIn("merge_target_title", followup_start_field_names)
+        normalize_output_fields = followup_nodes["code_normalize_persisted"].config["outputFields"]
+        normalize_output_names = [item["name"] for item in normalize_output_fields]
+        self.assertIn("execution_overview", normalize_output_names)
         self.assertEqual(followup_nodes["human_confirm_relations"].config["fields"][0]["widget"], "checkbox_group")
         self.assertEqual(followup_nodes["tool_relation_recs"].config["toolName"], "kb_relation_recommendations")
+        for node_id in (
+            "output_no_relation_candidates",
+            "output_relations_rejected",
+            "output_no_relations_selected",
+            "output_relations_created",
+        ):
+            template = str(followup_nodes[node_id].config["textTemplate"])
+            self.assertIn("{{code_normalize_persisted.execution_overview}}", template)
+            self.assertIn("关系处理：", template)
 
     def test_quick_stats_asset_uses_focus_extraction_and_parallel_stats_tools(self) -> None:
         from app.assistant.workflow.system_assets import load_system_workflow_asset  # noqa: E402
