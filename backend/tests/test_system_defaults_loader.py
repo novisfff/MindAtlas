@@ -16,18 +16,41 @@ class SystemDefaultsLoaderTests(unittest.TestCase):
     def tearDown(self) -> None:
         reset_caches()
 
+    def _assert_code_executor_snippets_compile(self, *, asset_key: str, nodes) -> None:
+        def _visit(raw_nodes, scope: str) -> None:
+            for node in raw_nodes or []:
+                node_id = getattr(node, "node_id", None) or str(getattr(node, "get", lambda *_: "")("nodeId") or "")
+                node_type = getattr(node, "node_type", None) or str(getattr(node, "get", lambda *_: "")("nodeType") or "")
+                cfg = node.config if hasattr(node, "config") and isinstance(node.config, dict) else (
+                    node.get("config") if isinstance(node, dict) and isinstance(node.get("config"), dict) else {}
+                )
+                if node_type == "code_executor":
+                    code = cfg.get("code")
+                    if isinstance(code, str):
+                        try:
+                            compile(code, f"<{asset_key}:{scope}{node_id}>", "exec")
+                        except SyntaxError as exc:
+                            self.fail(f"{asset_key}:{scope}{node_id} code_executor code does not compile: {exc}")
+                if node_type in {"iteration", "loop"}:
+                    body_nodes = cfg.get("bodyNodes") or cfg.get("body_nodes") or []
+                    if isinstance(body_nodes, list):
+                        _visit(body_nodes, f"{scope}{node_id}::")
+
+        _visit(nodes, "")
+
     def test_central_registry_lists_expected_system_assets(self) -> None:
         from app.assistant.workflow.system_assets import list_system_assets  # noqa: E402
 
         workflow_assets = list_system_assets(kind="workflow", locale="zh")
         agent_assets = list_system_assets(kind="agent", locale="zh")
 
-        self.assertEqual(len(workflow_assets), 7)
+        self.assertEqual(len(workflow_assets), 8)
         self.assertEqual(
             {item.asset_key for item in workflow_assets},
             {
                 "quick_stats",
                 "smart_capture",
+                "smart_capture_relation_followup",
                 "periodic_review",
                 "periodic_review_core",
                 "context_capture",
@@ -84,6 +107,17 @@ class SystemDefaultsLoaderTests(unittest.TestCase):
                 self.assertTrue(bool((zh_agent.system_prompt or "").strip()))
                 self.assertTrue(bool((en_agent.system_prompt or "").strip()))
                 self.assertNotEqual(zh_agent.system_prompt, en_agent.system_prompt)
+
+    def test_system_workflow_code_executor_snippets_compile(self) -> None:
+        from app.assistant.workflow.system_assets import load_system_workflow_asset, list_system_assets  # noqa: E402
+
+        for asset in list_system_assets(kind="workflow", locale="zh"):
+            with self.subTest(asset_key=asset.asset_key):
+                workflow = load_system_workflow_asset(asset.asset_key, locale="zh")
+                self._assert_code_executor_snippets_compile(
+                    asset_key=asset.asset_key,
+                    nodes=workflow.nodes,
+                )
 
     def test_invalid_system_asset_requests_fail_fast(self) -> None:
         from app.assistant.workflow.system_assets import load_system_workflow_asset, list_system_assets  # noqa: E402
@@ -153,6 +187,29 @@ class SystemDefaultsLoaderTests(unittest.TestCase):
         self.assertEqual(wrapper_nodes["call_core"].config["inputBindings"]["focus"], "{{llm_request.focus}}")
         self.assertEqual(core_nodes["output_final"].config["outputMode"], "structured")
         self.assertEqual(core_nodes["output_final"].config["outputFields"][0]["name"], "content")
+
+    def test_smart_capture_assets_expose_wrapper_and_relation_followup_workflows(self) -> None:
+        from app.assistant.workflow.system_assets import load_system_workflow_asset  # noqa: E402
+
+        wrapper = load_system_workflow_asset("smart_capture", locale="zh")
+        followup = load_system_workflow_asset("smart_capture_relation_followup", locale="zh")
+
+        wrapper_nodes = {node.node_id: node for node in wrapper.nodes}
+        followup_nodes = {node.node_id: node for node in followup.nodes}
+
+        self.assertEqual(wrapper_nodes["call_relation_followup"].node_type, "workflow_call")
+        self.assertEqual(
+            wrapper_nodes["call_relation_followup"].config["targetSystemAssetKey"],
+            "smart_capture_relation_followup",
+        )
+        self.assertEqual(
+            wrapper_nodes["output_final"].config["textTemplate"],
+            "{{call_relation_followup.response}}",
+        )
+        self.assertEqual(followup_nodes["start"].config["inputMode"], "structured")
+        self.assertEqual(followup_nodes["start"].config["memoryMode"], "off")
+        self.assertEqual(followup_nodes["human_confirm_relations"].config["fields"][0]["widget"], "checkbox_group")
+        self.assertEqual(followup_nodes["tool_relation_recs"].config["toolName"], "kb_relation_recommendations")
 
     def test_quick_stats_asset_uses_focus_extraction_and_parallel_stats_tools(self) -> None:
         from app.assistant.workflow.system_assets import load_system_workflow_asset  # noqa: E402

@@ -6,16 +6,25 @@ export type HumanApprovalFieldWidget =
   | 'switch'
   | 'select'
   | 'radio'
+  | 'checkbox_group'
   | 'tag_selector'
   | 'date'
   | 'time'
+
+export interface HumanApprovalOptionObject {
+  value: string
+  label: string
+  description?: string
+}
+
+export type HumanApprovalOption = string | HumanApprovalOptionObject
 
 export interface HumanApprovalFieldSchema {
   name: string
   label?: string
   type: HumanApprovalFieldType
   widget?: HumanApprovalFieldWidget
-  options?: string[]
+  options?: HumanApprovalOption[]
   allowCustom?: boolean
   placeholder?: string
   required?: boolean

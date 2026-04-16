@@ -33,9 +33,36 @@ def build_human_in_loop_node(
         sys_vars = state.get("sys_vars", {}) or {}
         env_vars = state.get("env_vars", {}) or {}
 
-        instruction = str(node_cfg.get("instruction", "") or "").strip()
+        resolved_title = resolve_node_template_vars(
+            str(node_cfg.get("title", "") or ""),
+            node_outputs,
+            start_inputs,
+            sys_vars,
+            env_vars=env_vars,
+        )
+        instruction = resolve_node_template_vars(
+            str(node_cfg.get("instruction", "") or ""),
+            node_outputs,
+            start_inputs,
+            sys_vars,
+            env_vars=env_vars,
+        ).strip()
         if not instruction:
             raise RuntimeError(f"DAG human_in_loop node {node_id}: instruction is required")
+        resolved_approve_label = resolve_node_template_vars(
+            str(node_cfg.get("approve_label", node_cfg.get("approveLabel", "")) or ""),
+            node_outputs,
+            start_inputs,
+            sys_vars,
+            env_vars=env_vars,
+        )
+        resolved_reject_label = resolve_node_template_vars(
+            str(node_cfg.get("reject_label", node_cfg.get("rejectLabel", "")) or ""),
+            node_outputs,
+            start_inputs,
+            sys_vars,
+            env_vars=env_vars,
+        )
 
         fields = normalize_human_in_loop_fields(node_cfg)
         if not fields:
@@ -48,7 +75,9 @@ def build_human_in_loop_node(
             if not field_name:
                 continue
             field_type = str(field.get("type", "string") or "string").strip().lower() or "string"
-            field_widget = str(field.get("widget", "") or "").strip().lower() or ("switch" if field_type == "boolean" else "input")
+            field_widget = str(field.get("widget", "") or "").strip().lower() or (
+                "switch" if field_type == "boolean" else "tag_selector" if field_type == "array" else "input"
+            )
             value_template = str(field.get("value_template", "") or "")
             rendered = resolve_node_template_vars(
                 value_template,
@@ -77,11 +106,12 @@ def build_human_in_loop_node(
                     rendered=rendered_options,
                     field_name=field_name,
                     option_value_key=str(field.get("option_value_key", "") or ""),
+                    allow_object_options=field_widget in {"select", "radio", "checkbox_group"},
                 )
                 if parsed_options:
                     resolved_options = parsed_options
 
-            if field_widget in {"select", "radio"} and not resolved_options:
+            if field_widget in {"select", "radio", "checkbox_group"} and not resolved_options:
                 raise RuntimeError(
                     f"DAG human_in_loop node {node_id}: field '{field_name}' has no options after template resolution"
                 )
@@ -93,17 +123,17 @@ def build_human_in_loop_node(
                     "type": field_type,
                     "widget": field_widget,
                     "options": resolved_options,
-                    "allowCustom": bool(field.get("allow_custom", False)),
+                    "allowCustom": bool(field.get("allow_custom", field.get("allowCustom", False))),
                     "placeholder": str(field.get("placeholder", "") or ""),
                     "required": bool(field.get("required", False)),
                 }
             )
 
         request_payload = {
-            "title": str(node_cfg.get("title", "") or ""),
+            "title": resolved_title,
             "instruction": instruction,
-            "approveLabel": str(node_cfg.get("approve_label", node_cfg.get("approveLabel", "")) or ""),
-            "rejectLabel": str(node_cfg.get("reject_label", node_cfg.get("rejectLabel", "")) or ""),
+            "approveLabel": resolved_approve_label,
+            "rejectLabel": resolved_reject_label,
             "requireRejectComment": cfg_bool_value(
                 node_cfg,
                 "require_reject_comment",

@@ -1,0 +1,535 @@
+{
+  "nodes": [
+    {
+      "nodeId": "start",
+      "nodeType": "start",
+      "label": "Start",
+      "positionX": 80.0,
+      "positionY": 320.0,
+      "config": {
+        "inputMode": "structured",
+        "memoryMode": "off",
+        "structuredFields": [
+          {
+            "name": "action",
+            "type": "string",
+            "required": false,
+            "nullable": true,
+            "description": "写入动作，create_new 或 merge_existing。"
+          },
+          {
+            "name": "create_id",
+            "type": "string",
+            "required": false,
+            "nullable": true,
+            "description": "新建记录成功后的记录 ID。"
+          },
+          {
+            "name": "create_title",
+            "type": "string",
+            "required": false,
+            "nullable": true,
+            "description": "新建记录成功后的标题。"
+          },
+          {
+            "name": "update_id",
+            "type": "string",
+            "required": false,
+            "nullable": true,
+            "description": "合并更新成功后的记录 ID。"
+          },
+          {
+            "name": "update_title",
+            "type": "string",
+            "required": false,
+            "nullable": true,
+            "description": "合并更新成功后的标题。"
+          },
+          {
+            "name": "confirmed_title",
+            "type": "string",
+            "required": false,
+            "nullable": true,
+            "description": "最终人工确认通过的标题。"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "code_normalize_persisted",
+      "nodeType": "code_executor",
+      "label": "统一写入结果",
+      "positionX": 480.0,
+      "positionY": 320.0,
+      "config": {
+        "language": "python",
+        "code": "def _clean(value):\n    return str(value or '').strip()\n\ndef main(\n    action=None,\n    create_id=None,\n    create_title=None,\n    update_id=None,\n    update_title=None,\n    confirmed_title=None,\n):\n    resolved_action = 'merge_existing' if _clean(action) == 'merge_existing' else 'create_new'\n    if resolved_action == 'merge_existing':\n        entry_id = _clean(update_id)\n        title = _clean(update_title) or _clean(confirmed_title)\n        action_text = '已合并更新记录'\n    else:\n        entry_id = _clean(create_id)\n        title = _clean(create_title) or _clean(confirmed_title)\n        action_text = '已创建记录'\n    return {\n        'action': resolved_action,\n        'entry_id': entry_id,\n        'title': title,\n        'action_text': action_text,\n    }\n",
+        "entrypoint": "main",
+        "inputBindings": {
+          "action": "{{start.action}}",
+          "create_id": "{{start.create_id}}",
+          "create_title": "{{start.create_title}}",
+          "update_id": "{{start.update_id}}",
+          "update_title": "{{start.update_title}}",
+          "confirmed_title": "{{start.confirmed_title}}"
+        },
+        "outputFields": [
+          {
+            "name": "action"
+          },
+          {
+            "name": "entry_id"
+          },
+          {
+            "name": "title"
+          },
+          {
+            "name": "action_text"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_relation_recs",
+      "nodeType": "tool",
+      "label": "推荐关联",
+      "positionX": 880.0,
+      "positionY": 320.0,
+      "config": {
+        "toolName": "kb_relation_recommendations",
+        "inputBindings": {
+          "entry_id": "{{code_normalize_persisted.entry_id}}",
+          "exclude_existing_relations": "true",
+          "include_relation_type": "true",
+          "limit": "5"
+        }
+      }
+    },
+    {
+      "nodeId": "iter_relation_details",
+      "nodeType": "iteration",
+      "label": "补全关联候选详情",
+      "positionX": 1280.0,
+      "positionY": 320.0,
+      "config": {
+        "inputSource": "{{tool_relation_recs.items}}",
+        "outputVariable": "items",
+        "outputSelector": "{{code_build_relation_candidate.candidate}}",
+        "parallelMode": false,
+        "errorStrategy": "skip_item",
+        "flattenOutput": true,
+        "bodyNodes": [
+          {
+            "nodeId": "start",
+            "nodeType": "start",
+            "label": "Start",
+            "config": {}
+          },
+          {
+            "nodeId": "code_unpack_relation_candidate",
+            "nodeType": "code_executor",
+            "label": "解析推荐项",
+            "config": {
+              "language": "python",
+              "code": "def _clean(value):\n    return str(value or '').strip()\n\ndef _as_mapping(value):\n    return value if isinstance(value, dict) else {}\n\ndef main(item=None, source_entry_id=None):\n    payload = _as_mapping(item)\n    relation_type = _clean(payload.get('relationType') or payload.get('relation_type'))\n    target_entry_id = _clean(payload.get('targetEntryId') or payload.get('target_entry_id'))\n    if not relation_type or not target_entry_id:\n        raise ValueError('typed relation recommendation is required')\n    try:\n        score = float(payload.get('score') or 0.0)\n    except Exception:\n        score = 0.0\n    return {\n        'choice_id': f\"{relation_type}:{target_entry_id}\",\n        'source_entry_id': _clean(source_entry_id),\n        'target_entry_id': target_entry_id,\n        'relation_type': relation_type,\n        'score': score,\n    }\n",
+              "entrypoint": "main",
+              "inputBindings": {
+                "item": "{{container.item}}",
+                "source_entry_id": "{{code_normalize_persisted.entry_id}}"
+              },
+              "outputFields": [
+                {
+                  "name": "choice_id"
+                },
+                {
+                  "name": "source_entry_id"
+                },
+                {
+                  "name": "target_entry_id"
+                },
+                {
+                  "name": "relation_type"
+                },
+                {
+                  "name": "score",
+                  "type": "number"
+                }
+              ]
+            }
+          },
+          {
+            "nodeId": "tool_get_relation_target",
+            "nodeType": "tool",
+            "label": "读取候选记录",
+            "config": {
+              "toolName": "get_entry_detail",
+              "inputBindings": {
+                "entry_id": "{{code_unpack_relation_candidate.target_entry_id}}"
+              }
+            }
+          },
+          {
+            "nodeId": "code_build_relation_candidate",
+            "nodeType": "code_executor",
+            "label": "构造关系选项",
+            "config": {
+              "language": "python",
+              "code": "def _clean(value):\n    return str(value or '').strip()\n\ndef main(choice_id=None, source_entry_id=None, target_entry_id=None, relation_type=None, score=None, target_title=None):\n    try:\n        score_value = float(score or 0.0)\n    except Exception:\n        score_value = 0.0\n    title = _clean(target_title) or _clean(target_entry_id)\n    description = f\"{_clean(relation_type)} · {score_value:.2f}\" if _clean(relation_type) else f\"{score_value:.2f}\"\n    return {\n        'candidate': {\n            'value': _clean(choice_id),\n            'label': title,\n            'description': description,\n            'choice_id': _clean(choice_id),\n            'source_entry_id': _clean(source_entry_id),\n            'target_entry_id': _clean(target_entry_id),\n            'target_entry_title': title,\n            'relation_type': _clean(relation_type),\n            'score': score_value,\n        }\n    }\n",
+              "entrypoint": "main",
+              "inputBindings": {
+                "choice_id": "{{code_unpack_relation_candidate.choice_id}}",
+                "source_entry_id": "{{code_unpack_relation_candidate.source_entry_id}}",
+                "target_entry_id": "{{code_unpack_relation_candidate.target_entry_id}}",
+                "relation_type": "{{code_unpack_relation_candidate.relation_type}}",
+                "score": "{{code_unpack_relation_candidate.score}}",
+                "target_title": "{{tool_get_relation_target.title}}"
+              },
+              "outputFields": [
+                {
+                  "name": "candidate",
+                  "type": "object"
+                }
+              ]
+            }
+          }
+        ],
+        "bodyEdges": [
+          {
+            "edgeId": "be1",
+            "sourceNodeId": "start",
+            "targetNodeId": "code_unpack_relation_candidate",
+            "sourceHandle": "output",
+            "targetHandle": "input"
+          },
+          {
+            "edgeId": "be2",
+            "sourceNodeId": "code_unpack_relation_candidate",
+            "targetNodeId": "tool_get_relation_target",
+            "sourceHandle": "output",
+            "targetHandle": "input"
+          },
+          {
+            "edgeId": "be3",
+            "sourceNodeId": "tool_get_relation_target",
+            "targetNodeId": "code_build_relation_candidate",
+            "sourceHandle": "output",
+            "targetHandle": "input"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "if_relation_candidates",
+      "nodeType": "if_else",
+      "label": "是否有可确认关系",
+      "positionX": 1680.0,
+      "positionY": 320.0,
+      "config": {
+        "elseHandle": "none",
+        "branches": [
+          {
+            "id": "has_candidates",
+            "label": "HAS CANDIDATES",
+            "logic": "and",
+            "conditions": [
+              {
+                "id": "typed_relation_count_positive",
+                "variable": "iter_relation_details.count",
+                "operator": "gt",
+                "value": "0"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "human_confirm_relations",
+      "nodeType": "human_in_loop",
+      "label": "确认推荐关系",
+      "positionX": 2080.0,
+      "positionY": 320.0,
+      "config": {
+        "title": "确认推荐关系",
+        "instruction": "{{code_normalize_persisted.action_text}}《{{code_normalize_persisted.title}}》。下面是系统推荐你可以一并建立的关系，可多选；也可以一个都不选直接继续。",
+        "approveLabel": "创建所选关系",
+        "rejectLabel": "跳过关系创建",
+        "requireRejectComment": false,
+        "fields": [
+          {
+            "name": "relations",
+            "label": "推荐关系",
+            "type": "array",
+            "widget": "checkbox_group",
+            "optionsTemplate": "{{iter_relation_details.items}}",
+            "required": false,
+            "valueTemplate": "[]"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "output_no_relation_candidates",
+      "nodeType": "output",
+      "label": "无关系推荐输出",
+      "positionX": 2080.0,
+      "positionY": 460.0,
+      "config": {
+        "outputMode": "text",
+        "textTemplate": "{{code_normalize_persisted.action_text}}《{{code_normalize_persisted.title}}》。系统暂未给出带明确关系类型的可确认关联推荐，因此未新增关联。"
+      }
+    },
+    {
+      "nodeId": "if_selected_relations",
+      "nodeType": "if_else",
+      "label": "是否选择关系",
+      "positionX": 2480.0,
+      "positionY": 320.0,
+      "config": {
+        "elseHandle": "none_selected",
+        "branches": [
+          {
+            "id": "has_selection",
+            "label": "HAS SELECTION",
+            "logic": "and",
+            "conditions": [
+              {
+                "id": "selected_relations_not_empty",
+                "variable": "human_confirm_relations.relations",
+                "operator": "is_not",
+                "value": "[]"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "output_relations_rejected",
+      "nodeType": "output",
+      "label": "跳过关系输出",
+      "positionX": 2480.0,
+      "positionY": 460.0,
+      "config": {
+        "outputMode": "text",
+        "textTemplate": "{{code_normalize_persisted.action_text}}《{{code_normalize_persisted.title}}》。你选择跳过本轮关系创建，未新增关联。"
+      }
+    },
+    {
+      "nodeId": "iter_create_relations",
+      "nodeType": "iteration",
+      "label": "创建关联",
+      "positionX": 2880.0,
+      "positionY": 320.0,
+      "config": {
+        "inputSource": "{{human_confirm_relations.relations}}",
+        "outputVariable": "items",
+        "outputSelector": "{{tool_create_relation.result}}",
+        "parallelMode": false,
+        "errorStrategy": "fail_fast",
+        "flattenOutput": true,
+        "bodyNodes": [
+          {
+            "nodeId": "start",
+            "nodeType": "start",
+            "label": "Start",
+            "config": {}
+          },
+          {
+            "nodeId": "code_resolve_selected_relation",
+            "nodeType": "code_executor",
+            "label": "解析选中关系",
+            "config": {
+              "language": "python",
+              "code": "def _clean(value):\n    return str(value or '').strip()\n\ndef _as_list(value):\n    return value if isinstance(value, list) else []\n\ndef _as_mapping(value):\n    return value if isinstance(value, dict) else {}\n\ndef main(selected_id=None, candidates=None):\n    target_choice = _clean(selected_id)\n    for item in _as_list(candidates):\n        candidate = _as_mapping(item)\n        if not candidate:\n            continue\n        choice_id = _clean(candidate.get('choice_id') or candidate.get('value'))\n        if choice_id != target_choice:\n            continue\n        return {\n            'source_entry_id': _clean(candidate.get('source_entry_id')),\n            'target_entry_id': _clean(candidate.get('target_entry_id')),\n            'relation_type': _clean(candidate.get('relation_type')),\n        }\n    raise ValueError(f'unknown selected relation: {target_choice}')\n",
+              "entrypoint": "main",
+              "inputBindings": {
+                "selected_id": "{{container.item}}",
+                "candidates": "{{iter_relation_details.items}}"
+              },
+              "outputFields": [
+                {
+                  "name": "source_entry_id"
+                },
+                {
+                  "name": "target_entry_id"
+                },
+                {
+                  "name": "relation_type"
+                }
+              ]
+            }
+          },
+          {
+            "nodeId": "tool_create_relation",
+            "nodeType": "tool",
+            "label": "创建关联",
+            "config": {
+              "toolName": "create_relation",
+              "inputBindings": {
+                "source_entry_id": "{{code_resolve_selected_relation.source_entry_id}}",
+                "target_entry_id": "{{code_resolve_selected_relation.target_entry_id}}",
+                "relation_type": "{{code_resolve_selected_relation.relation_type}}"
+              }
+            }
+          }
+        ],
+        "bodyEdges": [
+          {
+            "edgeId": "be1",
+            "sourceNodeId": "start",
+            "targetNodeId": "code_resolve_selected_relation",
+            "sourceHandle": "output",
+            "targetHandle": "input"
+          },
+          {
+            "edgeId": "be2",
+            "sourceNodeId": "code_resolve_selected_relation",
+            "targetNodeId": "tool_create_relation",
+            "sourceHandle": "output",
+            "targetHandle": "input"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "output_no_relations_selected",
+      "nodeType": "output",
+      "label": "未选择关系输出",
+      "positionX": 2880.0,
+      "positionY": 460.0,
+      "config": {
+        "outputMode": "text",
+        "textTemplate": "{{code_normalize_persisted.action_text}}《{{code_normalize_persisted.title}}》。系统给出了推荐关系，但你没有勾选需要创建的项，因此未新增关联。"
+      }
+    },
+    {
+      "nodeId": "output_relations_created",
+      "nodeType": "output",
+      "label": "创建关系输出",
+      "positionX": 3280.0,
+      "positionY": 320.0,
+      "config": {
+        "outputMode": "text",
+        "textTemplate": "{{code_normalize_persisted.action_text}}《{{code_normalize_persisted.title}}》，并创建了 {{iter_create_relations.count}} 条推荐关系。"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edgeId": "e_start_normalize_persisted",
+      "sourceNodeId": "start",
+      "targetNodeId": "code_normalize_persisted",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_normalize_relation_recs",
+      "sourceNodeId": "code_normalize_persisted",
+      "targetNodeId": "tool_relation_recs",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_relation_recs_iter_details",
+      "sourceNodeId": "tool_relation_recs",
+      "targetNodeId": "iter_relation_details",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_iter_details_relation_route",
+      "sourceNodeId": "iter_relation_details",
+      "targetNodeId": "if_relation_candidates",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_no_relation_candidates",
+      "sourceNodeId": "if_relation_candidates",
+      "targetNodeId": "output_no_relation_candidates",
+      "sourceHandle": "none",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_has_relation_candidates",
+      "sourceNodeId": "if_relation_candidates",
+      "targetNodeId": "human_confirm_relations",
+      "sourceHandle": "has_candidates",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_relations_rejected",
+      "sourceNodeId": "human_confirm_relations",
+      "targetNodeId": "output_relations_rejected",
+      "sourceHandle": "rejected",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_relations_approved",
+      "sourceNodeId": "human_confirm_relations",
+      "targetNodeId": "if_selected_relations",
+      "sourceHandle": "approved",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_no_relations_selected",
+      "sourceNodeId": "if_selected_relations",
+      "targetNodeId": "output_no_relations_selected",
+      "sourceHandle": "none_selected",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_has_relations_selected",
+      "sourceNodeId": "if_selected_relations",
+      "targetNodeId": "iter_create_relations",
+      "sourceHandle": "has_selection",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_relations_created_output",
+      "sourceNodeId": "iter_create_relations",
+      "targetNodeId": "output_relations_created",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  }
+}

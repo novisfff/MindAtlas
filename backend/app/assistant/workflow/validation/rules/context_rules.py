@@ -11,6 +11,7 @@ from app.assistant.workflow.validation.contracts import (
     _SYS_FIELDS,
 )
 from app.assistant.workflow.validation.helpers import (
+    extract_container_body,
     iter_config_template_texts,
     resolve_start_env_var_contract,
     resolve_start_input_contract,
@@ -228,6 +229,14 @@ def validate_template_refs(
 ) -> None:
     for nid in ctx.node_ids:
         cfg = ctx.config_map.get(nid, {})
+        local_container_refs: set[str] = set()
+        if ctx.type_map.get(nid) in {"iteration", "loop"}:
+            body_nodes, _ = extract_container_body(cfg)
+            local_container_refs = {
+                str(raw.get("node_id", raw.get("nodeId", "")) or "").strip()
+                for raw in body_nodes
+                if isinstance(raw, dict)
+            }
         for text in iter_config_template_texts(cfg):
             for m in _VAR_RE.finditer(text):
                 ref_node = m.group(1)
@@ -260,6 +269,8 @@ def validate_template_refs(
                         )
                     continue
                 if ref_node == "container" and ctx.type_map.get(nid) in {"iteration", "loop"}:
+                    continue
+                if ref_node in local_container_refs:
                     continue
                 if ref_node not in ctx.node_ids:
                     errors.append(

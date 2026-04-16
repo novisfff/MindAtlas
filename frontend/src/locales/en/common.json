@@ -1511,6 +1511,7 @@
           "switch": "Switch",
           "select": "Select",
           "radio": "Radio",
+          "checkbox_group": "Checkbox Group",
           "tag_selector": "Tag Selector",
           "date": "Date Picker",
           "time": "Time Picker"
@@ -1524,6 +1525,7 @@
           "add": "Add Option",
           "placeholder": "Enter option value",
           "emptySelectRadio": "No options yet. Add at least one option.",
+          "emptyCheckboxGroup": "No checkbox options yet. Add at least one option.",
           "emptyTagSelector": "No suggestion options yet. Custom tags can still be used.",
           "allowCustom": "Allow custom tags",
           "templateLabel": "Dynamic Option Source (Optional)",
@@ -1559,6 +1561,7 @@
         "validationInvalidType": "{{field}} has an invalid value",
         "validationSelectOption": "{{field}} must use one of the predefined options",
         "validationRadioOption": "{{field}} must use one of the predefined options",
+        "validationCheckboxOption": "{{field}} must use the predefined checkbox options",
         "validationTagOption": "{{field}} contains unsupported tags",
         "validationDateFormat": "{{field}} must use YYYY-MM-DD format",
         "validationTimeFormat": "{{field}} must use HH:mm format",

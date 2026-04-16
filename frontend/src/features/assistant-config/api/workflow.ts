@@ -224,16 +224,25 @@ export type HumanInLoopFieldWidget =
   | 'switch'
   | 'select'
   | 'radio'
+  | 'checkbox_group'
   | 'tag_selector'
   | 'date'
   | 'time'
+
+export interface HumanInLoopOptionObject {
+  value: string
+  label: string
+  description?: string
+}
+
+export type HumanInLoopOption = string | HumanInLoopOptionObject
 
 export interface HumanInLoopFieldConfig {
   name: string
   label?: string
   type: HumanInLoopFieldType
   widget?: HumanInLoopFieldWidget
-  options?: string[]
+  options?: HumanInLoopOption[]
   optionsTemplate?: string
   optionValueKey?: string
   allowCustom?: boolean
@@ -341,7 +350,7 @@ export interface WorkflowHumanApproval {
     label?: string
     type: HumanInLoopFieldType
     widget?: HumanInLoopFieldWidget
-    options?: string[]
+    options?: HumanInLoopOption[]
     allowCustom?: boolean
     placeholder?: string
     required?: boolean

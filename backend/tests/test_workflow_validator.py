@@ -731,6 +731,115 @@ class WorkflowValidatorTests(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertTrue(any("must not nest iteration/loop" in e.message for e in result.errors))
 
+    def test_iteration_output_selector_can_reference_container_body_node(self) -> None:
+        from app.assistant.workflow.validation.validator import validate_workflow
+
+        nodes = [
+            {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
+            {
+                "node_id": "iter_1",
+                "node_type": "iteration",
+                "label": "Iter",
+                "config": {
+                    "inputSource": "{{start.user_input}}",
+                    "outputVariable": "results",
+                    "outputSelector": "{{code_body.result}}",
+                    "bodyNodes": [
+                        {"nodeId": "start", "nodeType": "start", "label": "Start", "config": {}},
+                        {
+                            "nodeId": "code_body",
+                            "nodeType": "code_executor",
+                            "label": "Build Result",
+                            "config": {
+                                "language": "python",
+                                "code": "def main(item=None):\n    return {'result': item}\n",
+                                "entrypoint": "main",
+                                "inputBindings": {
+                                    "item": "{{container.item}}",
+                                },
+                                "outputFields": [
+                                    {
+                                        "name": "result",
+                                        "type": "string",
+                                    }
+                                ],
+                            },
+                        },
+                    ],
+                    "bodyEdges": [
+                        {"sourceNodeId": "start", "targetNodeId": "code_body", "sourceHandle": "output"},
+                    ],
+                },
+            },
+        ]
+        edges = [
+            {"source_node_id": "start", "target_node_id": "iter_1", "source_handle": "output"},
+        ]
+        nodes, edges = self._append_output_node(nodes, edges, "iter_1")
+
+        result = validate_workflow(nodes, edges)
+        self.assertTrue(result.valid, [e.message for e in result.errors])
+
+    def test_iteration_body_node_can_reference_upstream_parent_node_output(self) -> None:
+        from app.assistant.workflow.validation.validator import validate_workflow
+
+        nodes = [
+            {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
+            {
+                "node_id": "llm_before",
+                "node_type": "llm",
+                "label": "Before",
+                "config": {
+                    "systemPrompt": "reply",
+                    "outputMode": "text",
+                },
+            },
+            {
+                "node_id": "iter_1",
+                "node_type": "iteration",
+                "label": "Iter",
+                "config": {
+                    "inputSource": "{{start.user_input}}",
+                    "outputVariable": "results",
+                    "outputSelector": "{{container.item}}",
+                    "bodyNodes": [
+                        {"nodeId": "start", "nodeType": "start", "label": "Start", "config": {}},
+                        {
+                            "nodeId": "code_body",
+                            "nodeType": "code_executor",
+                            "label": "Build Result",
+                            "config": {
+                                "language": "python",
+                                "code": "def main(item=None, parent_text=None):\n    return {'result': item or parent_text}\n",
+                                "entrypoint": "main",
+                                "inputBindings": {
+                                    "item": "{{container.item}}",
+                                    "parent_text": "{{llm_before.response}}",
+                                },
+                                "outputFields": [
+                                    {
+                                        "name": "result",
+                                        "type": "string",
+                                    }
+                                ],
+                            },
+                        },
+                    ],
+                    "bodyEdges": [
+                        {"sourceNodeId": "start", "targetNodeId": "code_body", "sourceHandle": "output"},
+                    ],
+                },
+            },
+        ]
+        edges = [
+            {"source_node_id": "start", "target_node_id": "llm_before", "source_handle": "output"},
+            {"source_node_id": "llm_before", "target_node_id": "iter_1", "source_handle": "output"},
+        ]
+        nodes, edges = self._append_output_node(nodes, edges, "iter_1")
+
+        result = validate_workflow(nodes, edges)
+        self.assertTrue(result.valid, [e.message for e in result.errors])
+
     def test_loop_node_max_iterations_range_validation(self) -> None:
         from app.assistant.workflow.validation.validator import validate_workflow
 

@@ -1499,6 +1499,7 @@
           "switch": "开关",
           "select": "下拉选择",
           "radio": "单选项",
+          "checkbox_group": "多选框组",
           "tag_selector": "标签选择",
           "date": "日期选择",
           "time": "时间选择"
@@ -1512,6 +1513,7 @@
           "add": "添加选项",
           "placeholder": "输入一个选项值",
           "emptySelectRadio": "当前没有选项，至少添加一个选项。",
+          "emptyCheckboxGroup": "当前没有可多选的选项，至少添加一个选项。",
           "emptyTagSelector": "可选项为空时可仅使用自定义标签。",
           "allowCustom": "允许自定义标签",
           "templateLabel": "动态选项来源（可选）",
@@ -1547,6 +1549,7 @@
         "validationInvalidType": "{{field}} 类型不合法，请检查输入",
         "validationSelectOption": "{{field}} 必须选择预设选项",
         "validationRadioOption": "{{field}} 必须选择预设选项",
+        "validationCheckboxOption": "{{field}} 只能勾选预设选项",
         "validationTagOption": "{{field}} 包含未允许的标签",
         "validationDateFormat": "{{field}} 需为 YYYY-MM-DD 格式",
         "validationTimeFormat": "{{field}} 需为 HH:mm 格式",

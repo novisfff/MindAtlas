@@ -81,6 +81,7 @@ def _validate_container_body(
     cfg: dict,
     start_allowed_fields: set[str],
     start_env_var_types: dict[str, str],
+    parent_visible_node_ids: set[str],
     errors: list[ValidationError],
 ) -> None:
     body_nodes, body_edges = extract_container_body(cfg)
@@ -194,6 +195,8 @@ def _validate_container_body(
                 if ref_node == "container":
                     continue
                 if ref_node not in body_node_map:
+                    if ref_node in parent_visible_node_ids:
+                        continue
                     errors.append(
                         ValidationError(
                             node_id=node_id,
@@ -218,6 +221,7 @@ def _validate_iteration_node(
     *,
     node_id: str,
     cfg: dict,
+    parent_visible_node_ids: set[str],
     start_allowed_fields: set[str],
     start_env_var_types: dict[str, str],
     errors: list[ValidationError],
@@ -260,6 +264,7 @@ def _validate_iteration_node(
         cfg=cfg,
         start_allowed_fields=start_allowed_fields,
         start_env_var_types=start_env_var_types,
+        parent_visible_node_ids=parent_visible_node_ids,
         errors=errors,
     )
 
@@ -268,6 +273,7 @@ def _validate_loop_node(
     *,
     node_id: str,
     cfg: dict,
+    parent_visible_node_ids: set[str],
     start_allowed_fields: set[str],
     start_env_var_types: dict[str, str],
     errors: list[ValidationError],
@@ -416,6 +422,7 @@ def _validate_loop_node(
         cfg=cfg,
         start_allowed_fields=start_allowed_fields,
         start_env_var_types=start_env_var_types,
+        parent_visible_node_ids=parent_visible_node_ids,
         errors=errors,
     )
 
@@ -1197,6 +1204,11 @@ def validate_node_configs(
             _validate_iteration_node(
                 node_id=nid,
                 cfg=cfg,
+                parent_visible_node_ids={
+                    candidate
+                    for candidate, index in ctx.topo_index.items()
+                    if index < ctx.topo_index.get(nid, 0)
+                },
                 start_allowed_fields=ctx.start_allowed_fields,
                 start_env_var_types=ctx.start_env_var_types,
                 errors=errors,
@@ -1205,6 +1217,11 @@ def validate_node_configs(
             _validate_loop_node(
                 node_id=nid,
                 cfg=cfg,
+                parent_visible_node_ids={
+                    candidate
+                    for candidate, index in ctx.topo_index.items()
+                    if index < ctx.topo_index.get(nid, 0)
+                },
                 start_allowed_fields=ctx.start_allowed_fields,
                 start_env_var_types=ctx.start_env_var_types,
                 errors=errors,

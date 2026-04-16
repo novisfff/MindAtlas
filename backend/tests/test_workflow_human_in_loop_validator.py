@@ -254,7 +254,76 @@ class WorkflowHumanInLoopValidatorTests(unittest.TestCase):
 
         result = validate_workflow(nodes, edges)
         self.assertFalse(result.valid)
-        self.assertTrue(any("optionValueKey is only supported for select/radio/tag_selector" in e.message for e in result.errors))
+        self.assertTrue(any("optionValueKey is only supported for select/radio/checkbox_group/tag_selector" in e.message for e in result.errors))
+
+    def test_human_in_loop_checkbox_group_requires_array_type(self) -> None:
+        from app.assistant.workflow.validation.validator import validate_workflow
+
+        node = self._human_node()
+        node["config"]["fields"] = [
+            {
+                "name": "relations",
+                "type": "string",
+                "widget": "checkbox_group",
+                "options": ["a", "b"],
+                "required": False,
+            }
+        ]
+        nodes = [
+            {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
+            node,
+            {"node_id": "llm_ok", "node_type": "llm", "label": "Approved", "config": {}},
+            {"node_id": "llm_ng", "node_type": "llm", "label": "Rejected", "config": {}},
+            {"node_id": "output_1", "node_type": "output", "label": "Output", "config": {"outputMode": "text", "textTemplate": "{{llm_ok.response}}"}},
+        ]
+        edges = [
+            {"source_node_id": "start", "target_node_id": "hitl_1", "source_handle": "output"},
+            {"source_node_id": "hitl_1", "target_node_id": "llm_ok", "source_handle": "approved"},
+            {"source_node_id": "hitl_1", "target_node_id": "llm_ng", "source_handle": "rejected"},
+            {"source_node_id": "llm_ok", "target_node_id": "output_1", "source_handle": "output"},
+            {"source_node_id": "llm_ng", "target_node_id": "output_1", "source_handle": "output"},
+        ]
+
+        result = validate_workflow(nodes, edges)
+        self.assertFalse(result.valid)
+        self.assertTrue(any("widget 'checkbox_group' is incompatible with type 'string'" in e.message for e in result.errors))
+
+    def test_human_in_loop_checkbox_group_accepts_object_options(self) -> None:
+        from app.assistant.workflow.validation.validator import validate_workflow
+
+        node = self._human_node()
+        node["config"]["fields"] = [
+            {
+                "name": "relations",
+                "type": "array",
+                "widget": "checkbox_group",
+                "options": [
+                    {
+                        "value": "entry-1",
+                        "label": "OpenClaw 接入记录",
+                        "description": "RELATED_TO · 0.92",
+                    }
+                ],
+                "required": False,
+            }
+        ]
+        nodes = [
+            {"node_id": "start", "node_type": "start", "label": "Start", "config": {}},
+            node,
+            {"node_id": "llm_ok", "node_type": "llm", "label": "Approved", "config": {}},
+            {"node_id": "llm_ng", "node_type": "llm", "label": "Rejected", "config": {}},
+            {"node_id": "output_1", "node_type": "output", "label": "Output", "config": {"outputMode": "text", "textTemplate": "{{llm_ok.response}}"}},
+        ]
+        edges = [
+            {"source_node_id": "start", "target_node_id": "hitl_1", "source_handle": "output"},
+            {"source_node_id": "hitl_1", "target_node_id": "llm_ok", "source_handle": "approved"},
+            {"source_node_id": "hitl_1", "target_node_id": "llm_ng", "source_handle": "rejected"},
+            {"source_node_id": "llm_ok", "target_node_id": "output_1", "source_handle": "output"},
+            {"source_node_id": "llm_ng", "target_node_id": "output_1", "source_handle": "output"},
+        ]
+
+        result = validate_workflow(nodes, edges)
+        self.assertTrue(result.valid, [e.message for e in result.errors])
 
 
 if __name__ == "__main__":

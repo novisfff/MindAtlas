@@ -14,6 +14,25 @@ reset_caches()
 import app.ai_registry.models  # noqa: F401,E402
 
 
+EXPECTED_CONTEXT_CAPTURE_POSITIONS = {
+    "start": (80, 320),
+    "tool_types": (490, 245),
+    "tool_tags": (490, 396),
+    "llm_materialize": (900, 320),
+    "llm_prepare_lookup": (1310, 320),
+    "tool_search_primary": (1720, 245),
+    "tool_search_secondary": (1720, 396),
+    "llm_decide": (2130, 320),
+    "if_route": (2540, 320),
+    "tool_get_existing": (2950, 245),
+    "tool_create": (2950, 396),
+    "llm_merge_rewrite": (3360, 245),
+    "tool_update": (3770, 245),
+    "output_created": (3360, 396),
+    "output_merged": (4180, 245),
+}
+
+
 class AssistantConfigServiceMoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.db = make_session()
@@ -83,6 +102,39 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
 
         self.assertEqual(cfg.get("targetWorkflowId"), str(core.id))
         self.assertEqual(cfg.get("targetPublishedVersionId"), str(core.published_version_id))
+        self.assertEqual(cfg.get("bindingMode"), "pinned")
+        self.assertNotIn("targetSystemAssetKey", cfg)
+
+    def test_system_smart_capture_workflow_resolves_relation_followup_asset_to_pinned_target(self) -> None:
+        from app.assistant_config.models import AssistantWorkflow  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        svc.sync_standalone_system_targets()
+
+        wrapper = (
+            self.db.query(AssistantWorkflow)
+            .filter(AssistantWorkflow.name == "smart_capture__workflow")
+            .first()
+        )
+        followup = (
+            self.db.query(AssistantWorkflow)
+            .filter(AssistantWorkflow.name == "system_smart_capture_relation_followup__workflow")
+            .first()
+        )
+
+        self.assertIsNotNone(wrapper)
+        self.assertIsNotNone(followup)
+        assert wrapper is not None
+        assert followup is not None
+        self.assertIsNotNone(followup.published_version_id)
+
+        call_node = next(node for node in (wrapper.nodes or []) if node.node_id == "call_relation_followup")
+        cfg = dict(call_node.config or {})
+
+        self.assertEqual(cfg.get("targetWorkflowId"), str(followup.id))
+        self.assertEqual(cfg.get("targetPublishedVersionId"), str(followup.published_version_id))
         self.assertEqual(cfg.get("bindingMode"), "pinned")
         self.assertNotIn("targetSystemAssetKey", cfg)
 
@@ -301,19 +353,53 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         )
         node_by_id = {node.node_id: node for node in (workflow.nodes or [])}
 
+        start_cfg = dict(node_by_id["start"].config or {})
+        self.assertEqual(start_cfg.get("memoryMode"), "off")
         self.assertIn("llm_prepare_lookup", node_by_id)
-        self.assertNotIn("tool_tags", node_by_id)
+        self.assertIn("tool_tags", node_by_id)
+        self.assertIn("tool_search_primary", node_by_id)
+        self.assertIn("tool_search_secondary", node_by_id)
 
-        search_cfg = dict(node_by_id["tool_search_candidates"].config or {})
-        search_bindings = search_cfg.get("inputBindings") or search_cfg.get("input_bindings") or {}
-        self.assertEqual(search_bindings.get("keyword"), "{{llm_prepare_lookup.search_keyword}}")
-        self.assertEqual(search_bindings.get("type_code"), "{{llm_prepare_lookup.search_type_code}}")
-        self.assertNotIn("tag_names", search_bindings)
+        materialize_sources = {
+            edge.source_node_id
+            for edge in (workflow.edges or [])
+            if edge.target_node_id == "llm_materialize"
+        }
+        self.assertEqual(materialize_sources, {"tool_types", "tool_tags"})
+
+        lookup_sources = {
+            edge.source_node_id
+            for edge in (workflow.edges or [])
+            if edge.target_node_id == "llm_prepare_lookup"
+        }
+        self.assertEqual(lookup_sources, {"llm_materialize"})
+
+        primary_search_cfg = dict(node_by_id["tool_search_primary"].config or {})
+        primary_bindings = primary_search_cfg.get("inputBindings") or primary_search_cfg.get("input_bindings") or {}
+        self.assertEqual(primary_bindings.get("keyword"), "{{llm_prepare_lookup.search_keyword}}")
+        self.assertEqual(primary_bindings.get("type_code"), "{{llm_prepare_lookup.search_type_code}}")
+        self.assertEqual(primary_bindings.get("time_from"), "{{llm_prepare_lookup.search_time_from}}")
+        self.assertEqual(primary_bindings.get("time_to"), "{{llm_prepare_lookup.search_time_to}}")
+        self.assertNotIn("tag_names", primary_bindings)
+
+        secondary_search_cfg = dict(node_by_id["tool_search_secondary"].config or {})
+        secondary_bindings = secondary_search_cfg.get("inputBindings") or secondary_search_cfg.get("input_bindings") or {}
+        self.assertEqual(secondary_bindings.get("keyword"), "{{llm_prepare_lookup.subject_hint}}")
+        self.assertNotIn("type_code", secondary_bindings)
+
+        decide_sources = {
+            edge.source_node_id
+            for edge in (workflow.edges or [])
+            if edge.target_node_id == "llm_decide"
+        }
+        self.assertEqual(decide_sources, {"tool_search_primary", "tool_search_secondary"})
 
         decide_cfg = dict(node_by_id["llm_decide"].config or {})
         output_fields = decide_cfg.get("outputFields") or decide_cfg.get("output_fields") or []
         confidence_field = next(item for item in output_fields if item.get("name") == "confidence")
         self.assertEqual(confidence_field.get("enum"), ["high", "medium", "low"])
+        self.assertIn("primary_candidates", str(decide_cfg.get("userInput") or decide_cfg.get("user_input") or ""))
+        self.assertIn("secondary_candidates", str(decide_cfg.get("userInput") or decide_cfg.get("user_input") or ""))
 
         route_cfg = dict(node_by_id["if_route"].config or {})
         branches = route_cfg.get("branches") or []
@@ -328,6 +414,56 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
             },
             merge_conditions,
         )
+
+    def test_standalone_system_workflow_context_capture_uses_horizontal_parallel_layout(self) -> None:
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        svc.sync_standalone_system_targets()
+
+        workflow = next(
+            item for item in svc.list_workflows(include_disabled=True)
+            if item.name == "system_context_capture__workflow"
+        )
+        position_map = {
+            node.node_id: (int(round(float(node.position_x))), int(round(float(node.position_y))))
+            for node in (workflow.nodes or [])
+        }
+        for node_id, expected in EXPECTED_CONTEXT_CAPTURE_POSITIONS.items():
+            self.assertEqual(position_map.get(node_id), expected, f"context_capture.{node_id} position mismatch")
+
+        for edge in (workflow.edges or []):
+            source = next(node for node in workflow.nodes if node.node_id == edge.source_node_id)
+            target = next(node for node in workflow.nodes if node.node_id == edge.target_node_id)
+            self.assertGreater(
+                int(round(float(target.position_x))),
+                int(round(float(source.position_x))),
+                f"context_capture edge {edge.edge_id} should flow left-to-right",
+            )
+
+    def test_standalone_system_workflow_prompts_include_lookup_and_merge_guardrails(self) -> None:
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        svc.sync_standalone_system_targets()
+
+        workflow = next(
+            item for item in svc.list_workflows(include_disabled=True)
+            if item.name == "system_context_capture__workflow"
+        )
+        node_by_id = {node.node_id: node for node in (workflow.nodes or [])}
+
+        lookup_prompt = str(dict(node_by_id["llm_prepare_lookup"].config or {}).get("systemPrompt") or "")
+        decide_prompt = str(dict(node_by_id["llm_decide"].config or {}).get("systemPrompt") or "")
+        merge_prompt = str(dict(node_by_id["llm_merge_rewrite"].config or {}).get("systemPrompt") or "")
+
+        self.assertIn("稳定主体/持久对象", lookup_prompt)
+        self.assertIn("不要把整句原文照抄", lookup_prompt)
+        self.assertIn("不能单独支撑 high merge", decide_prompt)
+        self.assertIn("兜底默认值", merge_prompt)
+        self.assertIn("今天", merge_prompt)
 
     def test_system_target_audit_reports_only_expected_origins(self) -> None:
         from app.assistant_config.models import AssistantWorkflow  # noqa: E402

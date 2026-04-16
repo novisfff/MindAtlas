@@ -59,13 +59,14 @@ _HTTP_REQUEST_BODY_TYPES = {"none", "json", "raw", "x-www-form-urlencoded", "for
 _HTTP_REQUEST_AUTH_TYPES = {"none", "bearer", "api_key"}
 _HTTP_REQUEST_API_KEY_IN = {"header", "query"}
 _HUMAN_FIELD_TYPES = {"string", "number", "integer", "boolean", "array"}
-_HUMAN_FIELD_WIDGETS = {"input", "textarea", "switch", "select", "radio", "tag_selector", "date", "time"}
+_HUMAN_FIELD_WIDGETS = {"input", "textarea", "switch", "select", "radio", "checkbox_group", "tag_selector", "date", "time"}
 _HUMAN_FIELD_WIDGET_ALLOWED_TYPES: dict[str, set[str]] = {
     "input": {"string", "number", "integer"},
     "textarea": {"string"},
     "switch": {"boolean"},
     "select": {"string", "number", "integer"},
     "radio": {"string", "number", "integer"},
+    "checkbox_group": {"array"},
     "tag_selector": {"array"},
     "date": {"string"},
     "time": {"string"},

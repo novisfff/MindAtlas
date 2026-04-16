@@ -172,7 +172,7 @@ _NODE_ENUM_HINTS: dict[str, dict[str, Any]] = {
     },
     "human_in_loop": {
         "field.type": ["string", "number", "integer", "boolean", "array"],
-        "field.widget": ["input", "textarea", "switch", "select", "radio", "tag_selector", "date", "time"],
+        "field.widget": ["input", "textarea", "switch", "select", "radio", "checkbox_group", "tag_selector", "date", "time"],
     },
     "output": {
         "outputMode": ["text", "structured"],

@@ -8,15 +8,16 @@
       "positionY": 320.0,
       "config": {
         "inputMode": "text",
+        "memoryMode": "off",
         "structuredFields": []
       }
     },
     {
       "nodeId": "tool_types",
       "nodeType": "tool",
-      "label": "Load Entry Types",
-      "positionX": 490.0,
-      "positionY": 245.0,
+      "label": "获取类型列表",
+      "positionX": 480.0,
+      "positionY": 320.0,
       "config": {
         "toolName": "list_entry_types",
         "inputBindings": {}
@@ -25,104 +26,274 @@
     {
       "nodeId": "tool_tags",
       "nodeType": "tool",
-      "label": "Load Tags",
-      "positionX": 490.0,
-      "positionY": 396.0,
+      "label": "获取标签列表",
+      "positionX": 880.0,
+      "positionY": 320.0,
       "config": {
         "toolName": "list_tags",
         "inputBindings": {}
       }
     },
     {
-      "nodeId": "llm_title",
+      "nodeId": "llm_prepare_lookup",
       "nodeType": "llm",
-      "label": "Generate Title",
-      "positionX": 900.0,
-      "positionY": 306.0,
+      "label": "预检索相似记录",
+      "positionX": 1280.0,
+      "positionY": 320.0,
       "config": {
-        "systemPrompt": "You are executing MindAtlas's smart capture skill and generating a structured field before persistence.\nCurrent task: generate the final title field from the user's original content.\nRules: the title should be concise, accurate, and no longer than 30 characters when possible.",
+        "systemPrompt": "你是 MindAtlas 的“智能创建记录”预检索节点。这个工作流主要服务系统技能与应用内 AI 助手，所以原始输入可能很短、很口语、像命令、待办或片段说明。你的任务不是生成最终记录，而是先从原始输入中抽出最稳健的“是否已存在同一条记录”的检索线索。\n\n目标：\n- 先识别稳定主体或持久对象，再识别本次输入里最强的区分线索。\n- 输出 search_keyword、search_type_code、search_time_from、search_time_to、subject_hint、same_record_clues。\n- 不要生成 title、summary、content、tags，也不要替用户补造事实。\n\n工作步骤：\n1. 先剥离客套、语气词、命令口吻和闲聊，只保留真正要被记录的事项。\n2. 判断这条记录真正围绕的稳定主体，例如同一项目、文档、问题单、计划、人物关系、长期事项、交付物或对象。\n3. 再提取本次最能区分它的线索，例如唯一专名、编号、修正对象、关键结果、交付物、阶段变化、决定或里程碑。\n4. 分别构造精确检索词、宽松主题线索，以及“满足什么条件时才算同一条记录”的判定提示。\n\n输出要求：\n- search_keyword 必须是短而具体的精确检索短语，优先由“稳定主体 + 最强区分线索”组成；不要把整句原文照抄进去。\n- search_type_code 只有在输入明确属于某类记录时才填写；如填写，必须且只能从 {{tool_types.items}} 的 code 中选择；不明确时返回 null。\n- search_time_from / search_time_to 只有在输入给出明确且有助于缩小范围的时间窗口时才填写；否则返回 null；相对日期只有在基于当前 date 能无歧义换算时才展开。\n- subject_hint 必须是非空短语，用于宽松表示同一主题或同一主体；它应比 search_keyword 更宽，但不能退化成“进展”“问题”“总结”这种空词。\n- same_record_clues 必须是非空短语，用于概括只有在什么条件下才应该视为同一条记录，例如“同一项目且同一交付物”“同一问题单且同一修正对象”，而不是仅仅主题相近。\n\n边界：\n- 同一主题下的不同实例、同一项目下的不同子任务、同一人物的不同事件、同一公司但不同事项，都不应被描述成同一条记录。\n- 不要输出情绪词、标签建议、完整长句或与输入无关的噪音词。",
+        "userInput": "date: {{sys.date}}\n\noriginal_input:\n{{start.user_input}}\n\navailable_types:\n{{tool_types.items}}",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "search_keyword"
+          },
+          {
+            "name": "search_type_code",
+            "nullable": true
+          },
+          {
+            "name": "search_time_from",
+            "nullable": true
+          },
+          {
+            "name": "search_time_to",
+            "nullable": true
+          },
+          {
+            "name": "subject_hint"
+          },
+          {
+            "name": "same_record_clues"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_search_primary",
+      "nodeType": "tool",
+      "label": "精确检索相似记录",
+      "positionX": 1680.0,
+      "positionY": 180.0,
+      "config": {
+        "toolName": "search_entries",
+        "inputBindings": {
+          "keyword": "{{llm_prepare_lookup.search_keyword}}",
+          "type_code": "{{llm_prepare_lookup.search_type_code}}",
+          "time_from": "{{llm_prepare_lookup.search_time_from}}",
+          "time_to": "{{llm_prepare_lookup.search_time_to}}",
+          "limit": "5"
+        }
+      }
+    },
+    {
+      "nodeId": "tool_search_secondary",
+      "nodeType": "tool",
+      "label": "宽松检索相近主题",
+      "positionX": 1680.0,
+      "positionY": 460.0,
+      "config": {
+        "toolName": "search_entries",
+        "inputBindings": {
+          "keyword": "{{llm_prepare_lookup.subject_hint}}",
+          "limit": "5"
+        }
+      }
+    },
+    {
+      "nodeId": "code_candidates",
+      "nodeType": "code_executor",
+      "label": "整理相似候选",
+      "positionX": 2080.0,
+      "positionY": 320.0,
+      "config": {
+        "language": "python",
+        "code": "def _clean(value):\n    return str(value or '').strip()\n\ndef _time_label(item):\n    mode = _clean(item.get('time_mode')).upper()\n    point = _clean(item.get('time_at'))\n    start = _clean(item.get('time_from'))\n    end = _clean(item.get('time_to'))\n    if mode == 'POINT' and point:\n        return point[:10]\n    if mode == 'RANGE' and (start or end):\n        if start and end:\n            return f'{start[:10]} ~ {end[:10]}'\n        return start[:10] or end[:10]\n    return ''\n\ndef _normalize(item, source, index):\n    if not isinstance(item, dict):\n        return None\n    entry_id = _clean(item.get('id'))\n    title = _clean(item.get('title'))\n    if not entry_id or not title:\n        return None\n    return {\n        'entry_id': entry_id,\n        'title': title,\n        'type_name': _clean(item.get('type')) or _clean(item.get('type_code')),\n        'time_label': _time_label(item),\n        'summary': _clean(item.get('summary')),\n        'rank_score': (100 if source == 'primary' else 40) - index,\n        'sources': {source},\n    }\n\ndef main(primary_items=None, secondary_items=None):\n    merged = {}\n    for source, items in (('primary', primary_items or []), ('secondary', secondary_items or [])):\n        for index, raw in enumerate(items):\n            normalized = _normalize(raw, source, index)\n            if normalized is None:\n                continue\n            key = normalized['entry_id']\n            current = merged.get(key)\n            if current is None:\n                merged[key] = normalized\n                continue\n            current['rank_score'] += normalized['rank_score']\n            current['sources'].update(normalized['sources'])\n            if not current['type_name'] and normalized['type_name']:\n                current['type_name'] = normalized['type_name']\n            if not current['time_label'] and normalized['time_label']:\n                current['time_label'] = normalized['time_label']\n            if not current['summary'] and normalized['summary']:\n                current['summary'] = normalized['summary']\n\n    candidates = []\n    for item in merged.values():\n        source_parts = []\n        if 'primary' in item['sources']:\n            source_parts.append('精确检索')\n        if 'secondary' in item['sources']:\n            source_parts.append('主题检索')\n        description_parts = [part for part in (item['type_name'], item['time_label']) if part]\n        if source_parts:\n            description_parts.append('/'.join(source_parts))\n        if item['summary']:\n            description_parts.append(item['summary'][:48])\n        candidates.append({\n            'entry_id': item['entry_id'],\n            'title': item['title'],\n            'type_name': item['type_name'],\n            'time_label': item['time_label'],\n            'rank_score': item['rank_score'],\n            'option': {\n                'value': item['entry_id'],\n                'label': item['title'],\n                'description': ' | '.join(part for part in description_parts if part) or '相似候选记录',\n            },\n        })\n\n    candidates.sort(key=lambda item: (-item['rank_score'], item['title']))\n    top = candidates[:5]\n    if not top:\n        summary = '未发现明显相似的已有记录。'\n    else:\n        lines = []\n        for index, item in enumerate(top, start=1):\n            extra = ' / '.join(part for part in (item['type_name'], item['time_label']) if part)\n            lines.append(f\"{index}. {item['title']}\" + (f'（{extra}）' if extra else ''))\n        summary = '发现可能相似的已有记录：\\n' + '\\n'.join(lines)\n\n    return {\n        'candidate_count': len(top),\n        'candidate_summary': summary,\n        'merge_target_options': [item['option'] for item in top],\n    }\n",
+        "entrypoint": "main",
+        "inputBindings": {
+          "primary_items": "{{tool_search_primary.items}}",
+          "secondary_items": "{{tool_search_secondary.items}}"
+        },
+        "outputFields": [
+          {
+            "name": "candidate_count",
+            "type": "integer"
+          },
+          {
+            "name": "candidate_summary"
+          },
+          {
+            "name": "merge_target_options",
+            "type": "array",
+            "itemsType": "object"
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "if_has_candidates",
+      "nodeType": "if_else",
+      "label": "是否命中相似记录",
+      "positionX": 2480.0,
+      "positionY": 320.0,
+      "config": {
+        "elseHandle": "no_candidates",
+        "branches": [
+          {
+            "id": "has_candidates",
+            "label": "HAS CANDIDATES",
+            "logic": "and",
+            "conditions": [
+              {
+                "id": "candidate_count_positive",
+                "variable": "code_candidates.candidate_count",
+                "operator": "gt",
+                "value": "0"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "human_triage",
+      "nodeType": "human_in_loop",
+      "label": "人工判断新建或合并",
+      "positionX": 2880.0,
+      "positionY": 170.0,
+      "config": {
+        "title": "发现相似记录，请选择处理方式",
+        "instruction": "系统先根据原始输入检索了相似记录。只有在它们确实描述同一条长期事项、同一对象或同一稳定主体时，才适合走“合并到已有记录”。\n\n同一条记录的关键判定线索：{{llm_prepare_lookup.same_record_clues}}\n\n{{code_candidates.candidate_summary}}\n\n请选择：\n- 新建一条记录：把这次内容当成新的独立记录继续整理\n- 合并到已有记录：后续会基于你选中的目标生成合并后的完整内容，并在再次确认后才真正更新\n\n如果你选择“合并到已有记录”，必须同时选中下面的目标记录。",
+        "approveLabel": "继续",
+        "rejectLabel": "取消本次写入",
+        "requireRejectComment": false,
+        "fields": [
+          {
+            "name": "action",
+            "label": "处理方式",
+            "type": "string",
+            "widget": "radio",
+            "options": [
+              {
+                "value": "create_new",
+                "label": "新建一条记录",
+                "description": "把这次输入保存为新的独立记录"
+              },
+              {
+                "value": "merge_existing",
+                "label": "合并到已有记录",
+                "description": "把这次输入补充或修正到你选择的已有记录"
+              }
+            ],
+            "required": true,
+            "valueTemplate": "create_new"
+          },
+          {
+            "name": "merge_target",
+            "label": "合并目标记录",
+            "type": "string",
+            "widget": "radio",
+            "optionsTemplate": "{{code_candidates.merge_target_options}}",
+            "required": false,
+            "valueTemplate": ""
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "output_triage_cancelled",
+      "nodeType": "output",
+      "label": "取消输出",
+      "positionX": 3280.0,
+      "positionY": 30.0,
+      "config": {
+        "outputMode": "text",
+        "textTemplate": "已取消本次智能创建或合并，未写入任何记录。"
+      }
+    },
+    {
+      "nodeId": "if_triage_route",
+      "nodeType": "if_else",
+      "label": "选择后续路径",
+      "positionX": 3280.0,
+      "positionY": 170.0,
+      "config": {
+        "elseHandle": "create_new",
+        "branches": [
+          {
+            "id": "merge_existing",
+            "label": "MERGE",
+            "logic": "and",
+            "conditions": [
+              {
+                "id": "triage_action_merge",
+                "variable": "human_triage.action",
+                "operator": "is",
+                "value": "merge_existing"
+              },
+              {
+                "id": "triage_target_non_empty",
+                "variable": "human_triage.merge_target",
+                "operator": "is_not_empty",
+                "value": ""
+              }
+            ]
+          },
+          {
+            "id": "merge_target_missing",
+            "label": "MERGE TARGET MISSING",
+            "logic": "and",
+            "conditions": [
+              {
+                "id": "triage_action_merge_without_target",
+                "variable": "human_triage.action",
+                "operator": "is",
+                "value": "merge_existing"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "output_merge_target_required",
+      "nodeType": "output",
+      "label": "缺少合并目标输出",
+      "positionX": 3680.0,
+      "positionY": 30.0,
+      "config": {
+        "outputMode": "text",
+        "textTemplate": "你选择了“合并到已有记录”，但没有选定具体目标，因此本次未写入任何记录。"
+      }
+    },
+    {
+      "nodeId": "llm_materialize",
+      "nodeType": "llm",
+      "label": "整理记录草稿",
+      "positionX": 3680.0,
+      "positionY": 320.0,
+      "config": {
+        "systemPrompt": "你是 MindAtlas 的“智能创建记录”字段物化节点。这个节点发生在“是否新建 / 是否合并”的判断之后。请根据 selected_action，把当前输入整理成后续写入所需的结构化草稿。\n\n你的输出分两种工作模式：\n- 当 selected_action=create_new，或者 selected_action 为空（表示未检索到明显相似记录）时：输出一份可直接新建的记录草稿。\n- 当 selected_action=merge_existing 时：输出一份“待合并的新信息草稿”，只忠实提炼本次输入里新增的事实、进展、修正与时间线索，供后续 merge rewrite 使用；不要提前重写旧记录。\n\n共同目标：\n- 仅基于当前输入、当前日期、可用类型列表和现有标签列表输出 title、summary、content、type_code、tags、time_mode 与时间字段。\n- 不要使用对话历史，不要把猜测写成事实，也不要擅自补全未提供的信息。\n\n工作原则：\n- 先识别稳定主体，再整理当前输入里真正值得保留的信息。\n- 如果输入混有多个话题，只保留最值得单独入库、或与选定合并目标最相关的那个主体。\n- 如果输入像命令、待办、提醒或口语表达，要保留原意，但输出成更清晰、可持久保存的记录表达。\n\n模式约束：\n- create_new 模式下，输出应是完整、可确认的新记录草稿。\n- merge_existing 模式下，输出应偏向“本次新增内容”，不要因为知道后面会合并，就编造旧记录里的背景信息；如果时间缺失而只能使用默认今天，请如实输出，不要替旧记录猜时间。\n\n硬性约束：\n- type_code 必须且只能从 {{tool_types.items}} 的 code 中选择；只有明显无法判断时才选择第一个可用 code。\n- tags 必须输出字符串数组；优先复用 {{tool_tags.items}} 中已有标签名的原写法；最多 5 个；避免动词、情绪词、长句和与类型重复的空泛标签。\n- title 精炼准确，尽量控制在 30 个字以内，优先体现稳定主体与当前关键状态。\n- summary 用 1 段 50-150 字概括最值得保留的事实、结论或状态变化，避免只改写标题。\n- content 可整理为 Markdown，但不要使用一级标题；必要时可按“背景 / 关键信息 / 当前状态”组织。\n- 没有明确时间时，默认输出 time_mode=POINT 且 time_at=今天（YYYY-MM-DD）；相对日期只有在基于当前 date 能无歧义换算时才转成具体日期。\n- time_mode=POINT 时仅填写 time_at；time_mode=RANGE 时仅填写 time_from/time_to，且 time_from<=time_to。",
+        "userInput": "date: {{sys.date}}\n\nselected_action:\n{{human_triage.action}}\n\nselected_merge_target:\n{{human_triage.merge_target}}\n\noriginal_input:\n{{start.user_input}}\n\navailable_types:\n{{tool_types.items}}\n\navailable_tags:\n{{tool_tags.items}}",
         "outputMode": "structured",
         "outputFields": [
           {
             "name": "title"
-          }
-        ]
-      }
-    },
-    {
-      "nodeId": "llm_summary",
-      "nodeType": "llm",
-      "label": "Generate Summary",
-      "positionX": 1310.0,
-      "positionY": 306.0,
-      "config": {
-        "systemPrompt": "You are executing MindAtlas's smart capture skill and generating a structured field before persistence.\nCurrent task: generate the final summary field from the user's original content.\nRules: the summary should be a 50-150 word paragraph that captures the core idea.",
-        "outputMode": "structured",
-        "outputFields": [
+          },
           {
             "name": "summary"
-          }
-        ]
-      }
-    },
-    {
-      "nodeId": "llm_content",
-      "nodeType": "llm",
-      "label": "Generate Content",
-      "positionX": 1720.0,
-      "positionY": 306.0,
-      "config": {
-        "systemPrompt": "You are executing MindAtlas's smart capture skill and generating a structured field before persistence.\nCurrent task: generate the final content field from the user's original content.\nRules: Markdown is allowed. Do not use an H1 heading (#). Do not expand or invent factual details the user did not provide.",
-        "outputMode": "structured",
-        "outputFields": [
+          },
           {
             "name": "content"
-          }
-        ]
-      }
-    },
-    {
-      "nodeId": "llm_type",
-      "nodeType": "llm",
-      "label": "Choose Type",
-      "positionX": 2130.0,
-      "positionY": 306.0,
-      "config": {
-        "systemPrompt": "You are executing MindAtlas's smart capture skill and selecting an entry type for persistence.\nCurrent task: choose the final type_code.\nConstraint: type_code must be selected from the codes in {{tool_types.result}} only (a JSON array with code/name fields). If the type is unclear, choose the first available code.",
-        "outputMode": "structured",
-        "outputFields": [
+          },
           {
             "name": "type_code"
-          }
-        ]
-      }
-    },
-    {
-      "nodeId": "llm_tags",
-      "nodeType": "llm",
-      "label": "Generate Tags",
-      "positionX": 2540.0,
-      "positionY": 306.0,
-      "config": {
-        "systemPrompt": "You are executing MindAtlas's smart capture skill and generating tags for persistence.\nCurrent task: produce the final tags field as comma-separated tag text.\nConstraints: reuse names from {{tool_tags.result}} whenever they match semantically or case-insensitively, and prefer the original spelling from the list. You may add at most 5 new tags. Avoid weak filler tags, do not prepend #, and remove duplicates.",
-        "outputMode": "structured",
-        "outputFields": [
+          },
           {
-            "name": "tags"
-          }
-        ]
-      }
-    },
-    {
-      "nodeId": "llm_time",
-      "nodeType": "llm",
-      "label": "Resolve Time",
-      "positionX": 2950.0,
-      "positionY": 306.0,
-      "config": {
-        "systemPrompt": "You are executing MindAtlas's smart capture skill and identifying time fields for persistence.\nCurrent task: determine time_mode plus the relevant date fields.\nRules:\n- If the user does not provide clear time information, default to time_mode=POINT and time_at=today (YYYY-MM-DD).\n- For POINT, fill time_at and set time_from/time_to to null.\n- For RANGE, fill time_from/time_to in YYYY-MM-DD format with time_from <= time_to, and set time_at to null.",
-        "outputMode": "structured",
-        "outputFields": [
+            "name": "tags",
+            "type": "array",
+            "itemsType": "string"
+          },
           {
             "name": "time_mode",
             "enum": [
@@ -146,66 +317,251 @@
       }
     },
     {
-      "nodeId": "human_confirm",
-      "nodeType": "human_in_loop",
-      "label": "Human Confirmation",
-      "positionX": 3360.0,
-      "positionY": 306.0,
+      "nodeId": "if_write_mode",
+      "nodeType": "if_else",
+      "label": "是否需要合并重写",
+      "positionX": 4080.0,
+      "positionY": 320.0,
       "config": {
-        "title": "Confirm Entry Creation",
-        "instruction": "Please review the generated fields below. Approve to create the entry, or reject to cancel this creation.",
-        "approveLabel": "Create Entry",
-        "rejectLabel": "Cancel",
+        "elseHandle": "create_new",
+        "branches": [
+          {
+            "id": "merge_existing",
+            "label": "MERGE",
+            "logic": "and",
+            "conditions": [
+              {
+                "id": "write_mode_merge",
+                "variable": "human_triage.action",
+                "operator": "is",
+                "value": "merge_existing"
+              },
+              {
+                "id": "write_mode_target_non_empty",
+                "variable": "human_triage.merge_target",
+                "operator": "is_not_empty",
+                "value": ""
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_get_existing",
+      "nodeType": "tool",
+      "label": "读取合并目标记录",
+      "positionX": 4480.0,
+      "positionY": 170.0,
+      "config": {
+        "toolName": "get_entry_detail",
+        "inputBindings": {
+          "entry_id": "{{human_triage.merge_target}}"
+        }
+      }
+    },
+    {
+      "nodeId": "llm_merge_rewrite",
+      "nodeType": "llm",
+      "label": "整合重写记录",
+      "positionX": 4880.0,
+      "positionY": 170.0,
+      "config": {
+        "systemPrompt": "你是 MindAtlas 的人工指导合并重写节点。用户已经明确选择把当前输入合并到 selected_existing_entry。你的任务是基于已有记录和当前输入，输出一份可供人工最终确认的整合后完整记录。\n\n目标：\n- 以 selected_existing_entry 为基础，吸收 incoming_entry 中新增的事实、进展、结论、修正信息与更准确的时间线索。\n- 输出新的 title、summary、content、type_code、tags、time_mode 与时间字段，用于覆盖更新原记录。\n\n整合原则：\n- 优先保留已有记录中的稳定主体、背景事实和仍然有效的结论；不要因为新输入没重复提到就删除稳定信息。\n- 只在新输入明确提供了新增事实、修正或更准确信息时，才覆盖旧表述。\n- 如果新旧信息存在冲突，但当前输入没有明确说明是在纠错，优先保守表达，不要轻易丢弃旧记录里的稳定事实。\n- title 仍应围绕同一稳定主体，而不是改成一次性的动作名称。\n\n硬性约束：\n- 只能基于 selected_existing_entry、incoming_entry 和 original_input 中出现的信息整理，不要编造事实。\n- type_code 必须且只能从 {{tool_types.items}} 的 code 中选择；如果 incoming_entry 的 type_code 看起来只是因为无法判断而使用的兜底默认值，而原输入没有明确支持改类型，应优先保留 selected_existing_entry 的稳定 type。\n- tags 必须优先复用 {{tool_tags.items}} 中已有标签名的原写法；最多 5 个；如果新标签只是泛主题或弱描述，应优先保留旧标签体系。\n- 只有当当前输入给出了更准确、且明确不是兜底默认值的时间线索时，才更新 time 字段；如果 incoming_entry 只是因为时间缺失而默认给了“今天”，不要让默认今天覆盖已有记录的稳定时间表达。\n- 不要把仍然有效的 RANGE 轻易收缩成 POINT，也不要因为默认值就覆盖稳定旧时间。",
+        "userInput": "date: {{sys.date}}\n\nselected_existing_entry:\n{{tool_get_existing.result}}\n\nincoming_entry:\n{{llm_materialize.response}}\n\noriginal_input:\n{{start.user_input}}\n\navailable_types:\n{{tool_types.items}}\n\navailable_tags:\n{{tool_tags.items}}",
+        "outputMode": "structured",
+        "outputFields": [
+          {
+            "name": "title"
+          },
+          {
+            "name": "summary"
+          },
+          {
+            "name": "content"
+          },
+          {
+            "name": "type_code"
+          },
+          {
+            "name": "tags",
+            "type": "array",
+            "itemsType": "string"
+          },
+          {
+            "name": "time_mode",
+            "enum": [
+              "POINT",
+              "RANGE"
+            ]
+          },
+          {
+            "name": "time_at",
+            "nullable": true
+          },
+          {
+            "name": "time_from",
+            "nullable": true
+          },
+          {
+            "name": "time_to",
+            "nullable": true
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "code_prepare_write_payload",
+      "nodeType": "code_executor",
+      "label": "整理待确认写入内容",
+      "positionX": 5280.0,
+      "positionY": 320.0,
+      "config": {
+        "language": "python",
+        "code": "def _clean(value):\n    return str(value or '').strip()\n\ndef _pick(action, create_value, merge_value):\n    if action == 'merge_existing' and merge_value not in (None, ''):\n        return merge_value\n    return create_value\n\ndef _pick_list(action, create_value, merge_value):\n    candidate = _pick(action, create_value, merge_value)\n    return candidate if isinstance(candidate, list) else []\n\ndef main(\n    candidate_count=None,\n    triage_action=None,\n    merge_target=None,\n    existing_title=None,\n    create_title=None,\n    create_summary=None,\n    create_content=None,\n    create_type_code=None,\n    create_tags=None,\n    create_time_mode=None,\n    create_time_at=None,\n    create_time_from=None,\n    create_time_to=None,\n    merge_title=None,\n    merge_summary=None,\n    merge_content=None,\n    merge_type_code=None,\n    merge_tags=None,\n    merge_time_mode=None,\n    merge_time_at=None,\n    merge_time_from=None,\n    merge_time_to=None,\n):\n    try:\n        count_value = int(candidate_count or 0)\n    except Exception:\n        count_value = 0\n    action_text = _clean(triage_action)\n    merge_target_id = _clean(merge_target)\n    action = 'merge_existing' if action_text == 'merge_existing' and merge_target_id else 'create_new'\n    existing_entry_title = _clean(existing_title)\n\n    if action == 'merge_existing':\n        confirm_title = '确认合并后的记录'\n        confirm_instruction = (\n            f\"你选择把当前输入合并到已有记录《{existing_entry_title or '未命名记录'}》。\"\n            '请确认下面的整合结果，批准后会更新该已有记录。'\n        )\n        approve_label = '确认合并更新'\n        reject_label = '取消更新'\n        cancel_message = '已取消这次合并更新，原有记录保持不变。'\n    elif count_value > 0:\n        confirm_title = '确认新建独立记录'\n        confirm_instruction = (\n            '你在相似候选中选择了“新建一条记录”。请确认下面的记录内容，'\n            '批准后会创建一条新的独立记录，不会合并到已有记录。'\n        )\n        approve_label = '确认创建'\n        reject_label = '取消创建'\n        cancel_message = '已取消这次新建记录，未写入任何内容。'\n    else:\n        confirm_title = '确认创建新记录'\n        confirm_instruction = '当前没有检索到明显相似的已有记录。请确认下面的记录内容，批准后会新建记录。'\n        approve_label = '确认创建'\n        reject_label = '取消创建'\n        cancel_message = '已取消这次新建记录，未写入任何内容。'\n\n    return {\n        'action': action,\n        'affected_entry_id': merge_target_id,\n        'confirm_title': confirm_title,\n        'confirm_instruction': confirm_instruction,\n        'approve_label': approve_label,\n        'reject_label': reject_label,\n        'cancel_message': cancel_message,\n        'title': _clean(_pick(action, create_title, merge_title)),\n        'summary': _clean(_pick(action, create_summary, merge_summary)),\n        'content': _clean(_pick(action, create_content, merge_content)),\n        'type_code': _clean(_pick(action, create_type_code, merge_type_code)),\n        'tags': _pick_list(action, create_tags, merge_tags),\n        'time_mode': _clean(_pick(action, create_time_mode, merge_time_mode)),\n        'time_at': _clean(_pick(action, create_time_at, merge_time_at)),\n        'time_from': _clean(_pick(action, create_time_from, merge_time_from)),\n        'time_to': _clean(_pick(action, create_time_to, merge_time_to)),\n    }\n",
+        "entrypoint": "main",
+        "inputBindings": {
+          "candidate_count": "{{code_candidates.candidate_count}}",
+          "triage_action": "{{human_triage.action}}",
+          "merge_target": "{{human_triage.merge_target}}",
+          "existing_title": "{{tool_get_existing.title}}",
+          "create_title": "{{llm_materialize.title}}",
+          "create_summary": "{{llm_materialize.summary}}",
+          "create_content": "{{llm_materialize.content}}",
+          "create_type_code": "{{llm_materialize.type_code}}",
+          "create_tags": "{{llm_materialize.tags}}",
+          "create_time_mode": "{{llm_materialize.time_mode}}",
+          "create_time_at": "{{llm_materialize.time_at}}",
+          "create_time_from": "{{llm_materialize.time_from}}",
+          "create_time_to": "{{llm_materialize.time_to}}",
+          "merge_title": "{{llm_merge_rewrite.title}}",
+          "merge_summary": "{{llm_merge_rewrite.summary}}",
+          "merge_content": "{{llm_merge_rewrite.content}}",
+          "merge_type_code": "{{llm_merge_rewrite.type_code}}",
+          "merge_tags": "{{llm_merge_rewrite.tags}}",
+          "merge_time_mode": "{{llm_merge_rewrite.time_mode}}",
+          "merge_time_at": "{{llm_merge_rewrite.time_at}}",
+          "merge_time_from": "{{llm_merge_rewrite.time_from}}",
+          "merge_time_to": "{{llm_merge_rewrite.time_to}}"
+        },
+        "outputFields": [
+          {
+            "name": "action"
+          },
+          {
+            "name": "affected_entry_id"
+          },
+          {
+            "name": "confirm_title"
+          },
+          {
+            "name": "confirm_instruction"
+          },
+          {
+            "name": "approve_label"
+          },
+          {
+            "name": "reject_label"
+          },
+          {
+            "name": "cancel_message"
+          },
+          {
+            "name": "title"
+          },
+          {
+            "name": "summary"
+          },
+          {
+            "name": "content"
+          },
+          {
+            "name": "type_code"
+          },
+          {
+            "name": "tags",
+            "type": "array",
+            "itemsType": "string"
+          },
+          {
+            "name": "time_mode"
+          },
+          {
+            "name": "time_at",
+            "nullable": true
+          },
+          {
+            "name": "time_from",
+            "nullable": true
+          },
+          {
+            "name": "time_to",
+            "nullable": true
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "human_confirm_write",
+      "nodeType": "human_in_loop",
+      "label": "确认写入内容",
+      "positionX": 5680.0,
+      "positionY": 320.0,
+      "config": {
+        "title": "{{code_prepare_write_payload.confirm_title}}",
+        "instruction": "{{code_prepare_write_payload.confirm_instruction}}",
+        "approveLabel": "{{code_prepare_write_payload.approve_label}}",
+        "rejectLabel": "{{code_prepare_write_payload.reject_label}}",
         "requireRejectComment": false,
         "fields": [
           {
             "name": "title",
-            "label": "Title",
+            "label": "标题",
             "type": "string",
             "widget": "input",
             "required": false,
-            "valueTemplate": "{{llm_title.title}}"
+            "valueTemplate": "{{code_prepare_write_payload.title}}"
           },
           {
             "name": "summary",
-            "label": "Summary",
+            "label": "摘要",
             "type": "string",
             "widget": "textarea",
             "required": false,
-            "valueTemplate": "{{llm_summary.summary}}"
+            "valueTemplate": "{{code_prepare_write_payload.summary}}"
           },
           {
             "name": "content",
-            "label": "Content",
+            "label": "正文",
             "type": "string",
             "widget": "textarea",
             "required": true,
-            "valueTemplate": "{{llm_content.content}}"
+            "valueTemplate": "{{code_prepare_write_payload.content}}"
           },
           {
             "name": "type_code",
-            "label": "Type Code",
+            "label": "类型编码",
             "type": "string",
             "widget": "select",
-            "optionsTemplate": "{{tool_types.result}}",
+            "optionsTemplate": "{{tool_types.items}}",
             "optionValueKey": "code",
             "required": false,
-            "valueTemplate": "{{llm_type.type_code}}"
+            "valueTemplate": "{{code_prepare_write_payload.type_code}}"
           },
           {
             "name": "tags",
-            "label": "Tags",
+            "label": "标签",
             "type": "array",
             "widget": "tag_selector",
-            "optionsTemplate": "{{tool_tags.result}}",
+            "optionsTemplate": "{{tool_tags.items}}",
             "optionValueKey": "name",
             "allowCustom": true,
             "required": false,
-            "valueTemplate": "{{llm_tags.tags}}"
+            "valueTemplate": "{{code_prepare_write_payload.tags}}"
           },
           {
             "name": "time_mode",
-            "label": "Time Mode",
+            "label": "时间模式",
             "type": "string",
             "widget": "radio",
             "options": [
@@ -213,99 +569,142 @@
               "RANGE"
             ],
             "required": false,
-            "valueTemplate": "{{llm_time.time_mode}}"
+            "valueTemplate": "{{code_prepare_write_payload.time_mode}}"
           },
           {
             "name": "time_at",
-            "label": "Point Date",
+            "label": "时间点",
             "type": "string",
             "widget": "date",
             "required": false,
-            "valueTemplate": "{{llm_time.time_at}}"
+            "valueTemplate": "{{code_prepare_write_payload.time_at}}"
           },
           {
             "name": "time_from",
-            "label": "Start Date",
+            "label": "起始日期",
             "type": "string",
             "widget": "date",
             "required": false,
-            "valueTemplate": "{{llm_time.time_from}}"
+            "valueTemplate": "{{code_prepare_write_payload.time_from}}"
           },
           {
             "name": "time_to",
-            "label": "End Date",
+            "label": "结束日期",
             "type": "string",
             "widget": "date",
             "required": false,
-            "valueTemplate": "{{llm_time.time_to}}"
+            "valueTemplate": "{{code_prepare_write_payload.time_to}}"
           }
         ]
       }
     },
     {
-      "nodeId": "tool_create",
-      "nodeType": "tool",
-      "label": "Create Entry",
-      "positionX": 3770.0,
-      "positionY": 245.0,
+      "nodeId": "output_write_cancelled",
+      "nodeType": "output",
+      "label": "取消写入输出",
+      "positionX": 6080.0,
+      "positionY": 460.0,
       "config": {
-        "toolName": "create_entry",
+        "outputMode": "text",
+        "textTemplate": "{{code_prepare_write_payload.cancel_message}}"
+      }
+    },
+    {
+      "nodeId": "if_persist_route",
+      "nodeType": "if_else",
+      "label": "选择写入工具",
+      "positionX": 6080.0,
+      "positionY": 320.0,
+      "config": {
+        "elseHandle": "create_new",
+        "branches": [
+          {
+            "id": "merge_existing",
+            "label": "MERGE",
+            "logic": "and",
+            "conditions": [
+              {
+                "id": "persist_route_merge",
+                "variable": "code_prepare_write_payload.action",
+                "operator": "is",
+                "value": "merge_existing"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_update",
+      "nodeType": "tool",
+      "label": "更新已有记录",
+      "positionX": 6480.0,
+      "positionY": 170.0,
+      "config": {
+        "toolName": "update_entry",
         "inputBindings": {
-          "title": "{{human_confirm.title}}",
-          "summary": "{{human_confirm.summary}}",
-          "content": "{{human_confirm.content}}",
-          "type_code": "{{human_confirm.type_code}}",
-          "tags": "{{human_confirm.tags}}",
-          "time_mode": "{{human_confirm.time_mode}}",
-          "time_at": "{{human_confirm.time_at}}",
-          "time_from": "{{human_confirm.time_from}}",
-          "time_to": "{{human_confirm.time_to}}"
+          "entry_id": "{{code_prepare_write_payload.affected_entry_id}}",
+          "title": "{{human_confirm_write.title}}",
+          "summary": "{{human_confirm_write.summary}}",
+          "content": "{{human_confirm_write.content}}",
+          "type_code": "{{human_confirm_write.type_code}}",
+          "tags": "{{human_confirm_write.tags}}",
+          "time_mode": "{{human_confirm_write.time_mode}}",
+          "time_at": "{{human_confirm_write.time_at}}",
+          "time_from": "{{human_confirm_write.time_from}}",
+          "time_to": "{{human_confirm_write.time_to}}"
         }
       }
     },
     {
-      "nodeId": "llm_cancel",
-      "nodeType": "llm",
-      "label": "Cancellation Message",
-      "positionX": 3770.0,
-      "positionY": 396.0,
+      "nodeId": "tool_create",
+      "nodeType": "tool",
+      "label": "创建记录",
+      "positionX": 6480.0,
+      "positionY": 460.0,
       "config": {
-        "systemPrompt": "The user rejected the creation request. Clearly explain that this entry creation has been cancelled, nothing will be written to the database, and they can revise the details and confirm again later.",
-        "outputMode": "text"
+        "toolName": "create_entry",
+        "inputBindings": {
+          "title": "{{human_confirm_write.title}}",
+          "summary": "{{human_confirm_write.summary}}",
+          "content": "{{human_confirm_write.content}}",
+          "type_code": "{{human_confirm_write.type_code}}",
+          "tags": "{{human_confirm_write.tags}}",
+          "time_mode": "{{human_confirm_write.time_mode}}",
+          "time_at": "{{human_confirm_write.time_at}}",
+          "time_from": "{{human_confirm_write.time_from}}",
+          "time_to": "{{human_confirm_write.time_to}}"
+        }
       }
     },
     {
-      "nodeId": "llm_output",
-      "nodeType": "llm",
-      "label": "Creation Result",
-      "positionX": 4180.0,
-      "positionY": 245.0,
+      "nodeId": "call_relation_followup",
+      "nodeType": "workflow_call",
+      "label": "调用关系补全",
+      "positionX": 6880.0,
+      "positionY": 320.0,
       "config": {
-        "systemPrompt": "Tell the user the entry has been created, mention the title, type, and time information, and suggest that they can continue editing or enriching it.",
-        "userInput": "{{tool_create.result}}",
-        "outputMode": "text"
+        "bindingMode": "pinned",
+        "targetSystemAssetKey": "smart_capture_relation_followup",
+        "inputBindings": {
+          "action": "{{code_prepare_write_payload.action}}",
+          "create_id": "{{tool_create.id}}",
+          "create_title": "{{tool_create.title}}",
+          "update_id": "{{tool_update.id}}",
+          "update_title": "{{tool_update.title}}",
+          "confirmed_title": "{{human_confirm_write.title}}"
+        }
       }
     },
     {
-      "nodeId": "output_created",
+      "nodeId": "output_final",
       "nodeType": "output",
-      "label": "Created Output",
-      "positionX": 4590.0,
-      "positionY": 245.0,
+      "label": "输出",
+      "positionX": 7280.0,
+      "positionY": 320.0,
       "config": {
         "outputMode": "text",
-        "textTemplate": "{{llm_output.response}}"
-      }
-    },
-    {
-      "nodeId": "output_cancelled",
-      "nodeType": "output",
-      "label": "Cancelled Output",
-      "positionX": 4590.0,
-      "positionY": 396.0,
-      "config": {
-        "outputMode": "text",
-        "textTemplate": "{{llm_cancel.response}}"
+        "textTemplate": "{{call_relation_followup.response}}"
       }
     }
   ],
@@ -321,8 +720,8 @@
       "label": null
     },
     {
-      "edgeId": "e_start_tags",
-      "sourceNodeId": "start",
+      "edgeId": "e_types_tags",
+      "sourceNodeId": "tool_types",
       "targetNodeId": "tool_tags",
       "sourceHandle": "output",
       "targetHandle": "input",
@@ -331,19 +730,9 @@
       "label": null
     },
     {
-      "edgeId": "e_types_title",
-      "sourceNodeId": "tool_types",
-      "targetNodeId": "llm_title",
-      "sourceHandle": "output",
-      "targetHandle": "input",
-      "conditionType": null,
-      "conditionExpr": null,
-      "label": null
-    },
-    {
-      "edgeId": "e_tags_title",
+      "edgeId": "e_tags_prepare_lookup",
       "sourceNodeId": "tool_tags",
-      "targetNodeId": "llm_title",
+      "targetNodeId": "llm_prepare_lookup",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
@@ -351,9 +740,9 @@
       "label": null
     },
     {
-      "edgeId": "e_title_summary",
-      "sourceNodeId": "llm_title",
-      "targetNodeId": "llm_summary",
+      "edgeId": "e_prepare_lookup_search_primary",
+      "sourceNodeId": "llm_prepare_lookup",
+      "targetNodeId": "tool_search_primary",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
@@ -361,9 +750,9 @@
       "label": null
     },
     {
-      "edgeId": "e_summary_content",
-      "sourceNodeId": "llm_summary",
-      "targetNodeId": "llm_content",
+      "edgeId": "e_prepare_lookup_search_secondary",
+      "sourceNodeId": "llm_prepare_lookup",
+      "targetNodeId": "tool_search_secondary",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
@@ -371,9 +760,9 @@
       "label": null
     },
     {
-      "edgeId": "e_content_type",
-      "sourceNodeId": "llm_content",
-      "targetNodeId": "llm_type",
+      "edgeId": "e_search_primary_candidates",
+      "sourceNodeId": "tool_search_primary",
+      "targetNodeId": "code_candidates",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
@@ -381,9 +770,9 @@
       "label": null
     },
     {
-      "edgeId": "e_type_tags",
-      "sourceNodeId": "llm_type",
-      "targetNodeId": "llm_tags",
+      "edgeId": "e_search_secondary_candidates",
+      "sourceNodeId": "tool_search_secondary",
+      "targetNodeId": "code_candidates",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
@@ -391,9 +780,9 @@
       "label": null
     },
     {
-      "edgeId": "e_tags_time",
-      "sourceNodeId": "llm_tags",
-      "targetNodeId": "llm_time",
+      "edgeId": "e_candidates_route",
+      "sourceNodeId": "code_candidates",
+      "targetNodeId": "if_has_candidates",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
@@ -401,29 +790,29 @@
       "label": null
     },
     {
-      "edgeId": "e_time_confirm",
-      "sourceNodeId": "llm_time",
-      "targetNodeId": "human_confirm",
-      "sourceHandle": "output",
+      "edgeId": "e_route_has_candidates",
+      "sourceNodeId": "if_has_candidates",
+      "targetNodeId": "human_triage",
+      "sourceHandle": "has_candidates",
       "targetHandle": "input",
       "conditionType": null,
       "conditionExpr": null,
       "label": null
     },
     {
-      "edgeId": "e_confirm_approved",
-      "sourceNodeId": "human_confirm",
-      "targetNodeId": "tool_create",
-      "sourceHandle": "approved",
+      "edgeId": "e_route_no_candidates",
+      "sourceNodeId": "if_has_candidates",
+      "targetNodeId": "llm_materialize",
+      "sourceHandle": "no_candidates",
       "targetHandle": "input",
       "conditionType": null,
       "conditionExpr": null,
       "label": null
     },
     {
-      "edgeId": "e_confirm_rejected",
-      "sourceNodeId": "human_confirm",
-      "targetNodeId": "llm_cancel",
+      "edgeId": "e_triage_rejected",
+      "sourceNodeId": "human_triage",
+      "targetNodeId": "output_triage_cancelled",
       "sourceHandle": "rejected",
       "targetHandle": "input",
       "conditionType": null,
@@ -431,9 +820,149 @@
       "label": null
     },
     {
-      "edgeId": "e_create_output",
+      "edgeId": "e_triage_approved",
+      "sourceNodeId": "human_triage",
+      "targetNodeId": "if_triage_route",
+      "sourceHandle": "approved",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_triage_merge_materialize",
+      "sourceNodeId": "if_triage_route",
+      "targetNodeId": "llm_materialize",
+      "sourceHandle": "merge_existing",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_triage_create_materialize",
+      "sourceNodeId": "if_triage_route",
+      "targetNodeId": "llm_materialize",
+      "sourceHandle": "create_new",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_triage_missing_target",
+      "sourceNodeId": "if_triage_route",
+      "targetNodeId": "output_merge_target_required",
+      "sourceHandle": "merge_target_missing",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_materialize_write_mode",
+      "sourceNodeId": "llm_materialize",
+      "targetNodeId": "if_write_mode",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_write_mode_merge_existing",
+      "sourceNodeId": "if_write_mode",
+      "targetNodeId": "tool_get_existing",
+      "sourceHandle": "merge_existing",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_write_mode_create_prepare",
+      "sourceNodeId": "if_write_mode",
+      "targetNodeId": "code_prepare_write_payload",
+      "sourceHandle": "create_new",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_existing_merge_rewrite",
+      "sourceNodeId": "tool_get_existing",
+      "targetNodeId": "llm_merge_rewrite",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_merge_rewrite_prepare",
+      "sourceNodeId": "llm_merge_rewrite",
+      "targetNodeId": "code_prepare_write_payload",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_prepare_confirm_write",
+      "sourceNodeId": "code_prepare_write_payload",
+      "targetNodeId": "human_confirm_write",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_confirm_write_rejected",
+      "sourceNodeId": "human_confirm_write",
+      "targetNodeId": "output_write_cancelled",
+      "sourceHandle": "rejected",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_confirm_write_approved",
+      "sourceNodeId": "human_confirm_write",
+      "targetNodeId": "if_persist_route",
+      "sourceHandle": "approved",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_persist_route_merge",
+      "sourceNodeId": "if_persist_route",
+      "targetNodeId": "tool_update",
+      "sourceHandle": "merge_existing",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_persist_route_create",
+      "sourceNodeId": "if_persist_route",
+      "targetNodeId": "tool_create",
+      "sourceHandle": "create_new",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_create_relation_followup",
       "sourceNodeId": "tool_create",
-      "targetNodeId": "llm_output",
+      "targetNodeId": "call_relation_followup",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
@@ -441,9 +970,9 @@
       "label": null
     },
     {
-      "edgeId": "e_output_created",
-      "sourceNodeId": "llm_output",
-      "targetNodeId": "output_created",
+      "edgeId": "e_update_relation_followup",
+      "sourceNodeId": "tool_update",
+      "targetNodeId": "call_relation_followup",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
@@ -451,9 +980,9 @@
       "label": null
     },
     {
-      "edgeId": "e_cancel_output",
-      "sourceNodeId": "llm_cancel",
-      "targetNodeId": "output_cancelled",
+      "edgeId": "e_relation_followup_output",
+      "sourceNodeId": "call_relation_followup",
+      "targetNodeId": "output_final",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
