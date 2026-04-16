@@ -45,7 +45,8 @@ EXPECTED_WORKFLOW_POSITIONS: dict[str, dict[str, tuple[int, int]]] = {
         "tool_update": (6480, 170),
         "tool_create": (6480, 460),
         "call_relation_followup": (6880, 320),
-        "output_final": (7280, 320),
+        "code_finalize_reply": (7280, 320),
+        "output_final": (7680, 320),
     },
     "periodic_review": {
         "start": (120, 320),

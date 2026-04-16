@@ -31,6 +31,7 @@ The system default `smart_capture` workflow SHALL pre-search similar entries fro
 - **WHEN** `smart_capture` finishes its create-or-merge flow
 - **THEN** its final text output SHALL summarize the overall execution instead of only the last relation step
 - **AND** the summary SHALL cover duplicate lookup outcome, chosen create-vs-merge path, persistence result, and relation follow-up result
+- **AND** the parent `smart_capture` workflow SHALL assemble that user-facing summary after the relation follow-up child workflow returns its relation outcome, rather than delegating the final conclusion to the child workflow itself
 
 ### Requirement: human_in_loop nodes SHALL support reusable batch multi-select option UIs
 `human_in_loop` nodes SHALL support a reusable array-oriented `checkbox_group` widget and SHALL preserve object-style option payloads for select-like widgets without breaking legacy string-list options.

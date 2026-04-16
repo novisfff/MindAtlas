@@ -52,6 +52,7 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
         self.assertIn("human_confirm_write", node_map)
         self.assertIn("if_persist_route", node_map)
         self.assertIn("call_relation_followup", node_map)
+        self.assertIn("code_finalize_reply", node_map)
         self.assertIn("tool_search_primary", node_map)
         self.assertIn("tool_search_secondary", node_map)
         self.assertIn("output_final", node_map)
@@ -176,11 +177,10 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
             else {}
         )
         self.assertEqual(relation_call_cfg.get("targetSystemAssetKey"), "smart_capture_relation_followup")
+        self.assertEqual(relation_call_cfg.get("exposedOutputFields"), ["relation_summary"])
         relation_call_bindings = relation_call_cfg.get("inputBindings") or {}
         self.assertEqual(relation_call_bindings.get("action"), "{{code_prepare_write_payload.action}}")
-        self.assertEqual(relation_call_bindings.get("candidate_count"), "{{code_candidates.candidate_count}}")
         self.assertEqual(relation_call_bindings.get("create_id"), "{{tool_create.id}}")
-        self.assertEqual(relation_call_bindings.get("merge_target_title"), "{{tool_get_existing.title}}")
         self.assertEqual(relation_call_bindings.get("update_id"), "{{tool_update.id}}")
         self.assertEqual(relation_call_bindings.get("confirmed_title"), "{{human_confirm_write.title}}")
 
@@ -189,7 +189,20 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
             for edge in edges
             if edge.source_node_id == "call_relation_followup"
         ]
-        self.assertEqual(relation_followup_targets, ["output_final"])
+        self.assertEqual(relation_followup_targets, ["code_finalize_reply"])
+
+        finalize_cfg = node_map["code_finalize_reply"].config if isinstance(node_map["code_finalize_reply"].config, dict) else {}
+        finalize_bindings = finalize_cfg.get("inputBindings") or {}
+        self.assertEqual(finalize_bindings.get("candidate_count"), "{{code_candidates.candidate_count}}")
+        self.assertEqual(finalize_bindings.get("merge_target_title"), "{{tool_get_existing.title}}")
+        self.assertEqual(finalize_bindings.get("relation_summary"), "{{call_relation_followup.relation_summary}}")
+
+        finalize_targets = [
+            edge.target_node_id
+            for edge in edges
+            if edge.source_node_id == "code_finalize_reply"
+        ]
+        self.assertEqual(finalize_targets, ["output_final"])
 
     def test_smart_capture_prompts_include_materialization_and_duplicate_guardrails(self) -> None:
         from app.assistant.skill_catalog.definitions import SMART_CAPTURE

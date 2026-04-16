@@ -688,25 +688,52 @@
         "targetSystemAssetKey": "smart_capture_relation_followup",
         "inputBindings": {
           "action": "{{code_prepare_write_payload.action}}",
-          "candidate_count": "{{code_candidates.candidate_count}}",
           "create_id": "{{tool_create.id}}",
           "create_title": "{{tool_create.title}}",
-          "merge_target_title": "{{tool_get_existing.title}}",
           "update_id": "{{tool_update.id}}",
           "update_title": "{{tool_update.title}}",
           "confirmed_title": "{{human_confirm_write.title}}"
-        }
+        },
+        "exposedOutputFields": [
+          "relation_summary"
+        ]
+      }
+    },
+    {
+      "nodeId": "code_finalize_reply",
+      "nodeType": "code_executor",
+      "label": "整理最终回复",
+      "positionX": 7280.0,
+      "positionY": 320.0,
+      "config": {
+        "language": "python",
+        "code": "def _clean(value):\n    return str(value or '').strip()\n\ndef _to_int(value):\n    try:\n        return max(0, int(value or 0))\n    except Exception:\n        return 0\n\ndef _entry_label(value):\n    title = _clean(value)\n    return f'《{title}》' if title else '这条记录'\n\ndef main(\n    candidate_count=None,\n    action=None,\n    merge_target_title=None,\n    create_title=None,\n    update_title=None,\n    confirmed_title=None,\n    relation_summary=None,\n):\n    resolved_action = 'merge_existing' if _clean(action) == 'merge_existing' else 'create_new'\n    candidate_total = _to_int(candidate_count)\n    merge_target = _clean(merge_target_title)\n\n    if resolved_action == 'merge_existing':\n        title = _clean(update_title) or _clean(confirmed_title) or merge_target\n    else:\n        title = _clean(create_title) or _clean(confirmed_title)\n\n    if candidate_total > 0:\n        if resolved_action == 'merge_existing':\n            opening = f'我先帮你查到 {candidate_total} 条相似候选，你最后选择把这次内容合并到{_entry_label(merge_target or title)}。'\n        else:\n            opening = f'我先帮你查到 {candidate_total} 条相似候选，不过你最后还是决定把它作为一条独立记录来保存。'\n    else:\n        if resolved_action == 'merge_existing':\n            opening = f'我先帮你查了一下，这次最终还是按合并更新的方式处理，把内容补到了{_entry_label(merge_target or title)}。'\n        else:\n            opening = '我先帮你查了一下，创建前没有发现明显重复的已有记录，所以这次就按新记录流程处理了。'\n\n    if resolved_action == 'merge_existing':\n        write_summary = f'你确认之后，我已经把内容更新进{_entry_label(title)}。'\n    else:\n        write_summary = f'你确认之后，我已经帮你创建了{_entry_label(title)}。'\n\n    relation_text = _clean(relation_summary)\n    if relation_text:\n        reply = f'{opening}{write_summary}另外，{relation_text}'\n    else:\n        reply = f'{opening}{write_summary}'\n\n    return {\n        'reply': reply,\n    }\n",
+        "entrypoint": "main",
+        "inputBindings": {
+          "candidate_count": "{{code_candidates.candidate_count}}",
+          "action": "{{code_prepare_write_payload.action}}",
+          "merge_target_title": "{{tool_get_existing.title}}",
+          "create_title": "{{tool_create.title}}",
+          "update_title": "{{tool_update.title}}",
+          "confirmed_title": "{{human_confirm_write.title}}",
+          "relation_summary": "{{call_relation_followup.relation_summary}}"
+        },
+        "outputFields": [
+          {
+            "name": "reply"
+          }
+        ]
       }
     },
     {
       "nodeId": "output_final",
       "nodeType": "output",
       "label": "输出",
-      "positionX": 7280.0,
+      "positionX": 7680.0,
       "positionY": 320.0,
       "config": {
         "outputMode": "text",
-        "textTemplate": "{{call_relation_followup.response}}"
+        "textTemplate": "{{code_finalize_reply.reply}}"
       }
     }
   ],
@@ -982,8 +1009,18 @@
       "label": null
     },
     {
-      "edgeId": "e_relation_followup_output",
+      "edgeId": "e_relation_followup_finalize",
       "sourceNodeId": "call_relation_followup",
+      "targetNodeId": "code_finalize_reply",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_finalize_output",
+      "sourceNodeId": "code_finalize_reply",
       "targetNodeId": "output_final",
       "sourceHandle": "output",
       "targetHandle": "input",
