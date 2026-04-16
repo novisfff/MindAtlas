@@ -31,7 +31,6 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
                     f"{skill.name} edge {edge.edge_id} should flow left-to-right",
                 )
 
-        self._assert_branch_targets_have_y_offset(SMART_CAPTURE, "llm_prepare_lookup")
         self._assert_branch_targets_have_y_offset(SMART_CAPTURE, "if_has_candidates")
         self._assert_branch_targets_have_y_offset(SMART_CAPTURE, "if_triage_route")
 
@@ -42,7 +41,8 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
         edges = list(SMART_CAPTURE.workflow_edges or [])
 
         self.assertIn("llm_prepare_lookup", node_map)
-        self.assertIn("code_candidates", node_map)
+        self.assertIn("tool_search_similar", node_map)
+        self.assertIn("llm_rank_candidates", node_map)
         self.assertIn("if_has_candidates", node_map)
         self.assertIn("human_triage", node_map)
         self.assertIn("if_triage_route", node_map)
@@ -53,9 +53,10 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
         self.assertIn("if_persist_route", node_map)
         self.assertIn("call_relation_followup", node_map)
         self.assertIn("llm_finalize_reply", node_map)
-        self.assertIn("tool_search_primary", node_map)
-        self.assertIn("tool_search_secondary", node_map)
         self.assertIn("output_final", node_map)
+        self.assertNotIn("code_candidates", node_map)
+        self.assertNotIn("tool_search_primary", node_map)
+        self.assertNotIn("tool_search_secondary", node_map)
         self.assertNotIn("llm_duplicate_notice", node_map)
         self.assertNotIn("llm_materialize_direct", node_map)
         self.assertNotIn("llm_materialize_create", node_map)
@@ -136,7 +137,7 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
             for item in output_fields
             if isinstance(item, dict)
         }
-        self.assertIn("search_keyword", output_names)
+        self.assertIn("lookup_query", output_names)
         self.assertIn("same_record_clues", output_names)
 
         triage_cfg = node_map["human_triage"].config if isinstance(node_map["human_triage"].config, dict) else {}
@@ -146,6 +147,7 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
         self.assertEqual(triage_fields[0].get("widget"), "radio")
         self.assertEqual(triage_fields[1].get("name"), "merge_target")
         self.assertEqual(triage_fields[1].get("widget"), "radio")
+        self.assertEqual(triage_fields[1].get("optionsTemplate"), "{{llm_rank_candidates.merge_target_options}}")
 
         confirm_cfg = node_map["human_confirm_write"].config if isinstance(node_map["human_confirm_write"].config, dict) else {}
         self.assertEqual(confirm_cfg.get("title"), "{{code_prepare_write_payload.confirm_title}}")
@@ -200,7 +202,7 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
         finalize_user_input = str(finalize_cfg.get("userInput") or "")
         finalize_prompt = str(finalize_cfg.get("systemPrompt") or "")
         self.assertIn("{{start.user_input}}", finalize_user_input)
-        self.assertIn("{{code_candidates.candidate_count}}", finalize_user_input)
+        self.assertIn("{{llm_rank_candidates.candidate_count}}", finalize_user_input)
         self.assertIn("{{call_relation_followup.relation_status}}", finalize_user_input)
         self.assertIn("自然", finalize_prompt)
         self.assertIn("不要输出字段名", finalize_prompt)

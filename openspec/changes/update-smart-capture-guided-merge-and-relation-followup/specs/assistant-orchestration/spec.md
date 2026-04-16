@@ -4,12 +4,12 @@
 The system default `smart_capture` workflow SHALL pre-search similar entries from raw input, conditionally ask the user whether to create a new entry or merge into a selected existing one, require a second human confirmation before `create_entry` or `update_entry`, and optionally follow successful persistence with batch relation confirmation.
 
 #### Scenario: No similar candidates goes straight to create confirmation
-- **WHEN** `smart_capture` cannot find viable similar candidates from its precise and broad raw-input lookups
+- **WHEN** `smart_capture` cannot find viable similar candidates from shared semantic similarity recall
 - **THEN** it SHALL skip the first merge-triage approval step
 - **AND** it SHALL still materialize a create payload and require human confirmation before calling `create_entry`
 
 #### Scenario: Similar candidates require create-vs-merge triage
-- **WHEN** `smart_capture` finds ranked similar candidates from its raw-input lookups
+- **WHEN** `smart_capture` finds ranked similar candidates from shared semantic similarity recall and LLM-based candidate filtering
 - **THEN** it SHALL pause for human triage between `create_new` and `merge_existing`
 - **AND** if the user chooses `merge_existing`, the workflow SHALL require a selected target before continuing
 

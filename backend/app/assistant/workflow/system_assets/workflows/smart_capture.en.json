@@ -37,31 +37,16 @@
     {
       "nodeId": "llm_prepare_lookup",
       "nodeType": "llm",
-      "label": "预检索相似记录",
+      "label": "Prepare Similarity Lookup",
       "positionX": 1280.0,
       "positionY": 320.0,
       "config": {
-        "systemPrompt": "你是 MindAtlas 的“智能创建记录”预检索节点。这个工作流主要服务系统技能与应用内 AI 助手，所以原始输入可能很短、很口语、像命令、待办或片段说明。你的任务不是生成最终记录，而是先从原始输入中抽出最稳健的“是否已存在同一条记录”的检索线索。\n\n目标：\n- 先识别稳定主体或持久对象，再识别本次输入里最强的区分线索。\n- 输出 search_keyword、search_type_code、search_time_from、search_time_to、subject_hint、same_record_clues。\n- 不要生成 title、summary、content、tags，也不要替用户补造事实。\n\n工作步骤：\n1. 先剥离客套、语气词、命令口吻和闲聊，只保留真正要被记录的事项。\n2. 判断这条记录真正围绕的稳定主体，例如同一项目、文档、问题单、计划、人物关系、长期事项、交付物或对象。\n3. 再提取本次最能区分它的线索，例如唯一专名、编号、修正对象、关键结果、交付物、阶段变化、决定或里程碑。\n4. 分别构造精确检索词、宽松主题线索，以及“满足什么条件时才算同一条记录”的判定提示。\n\n输出要求：\n- search_keyword 必须是短而具体的精确检索短语，优先由“稳定主体 + 最强区分线索”组成；不要把整句原文照抄进去。\n- search_type_code 只有在输入明确属于某类记录时才填写；如填写，必须且只能从 {{tool_types.items}} 的 code 中选择；不明确时返回 null。\n- search_time_from / search_time_to 只有在输入给出明确且有助于缩小范围的时间窗口时才填写；否则返回 null；相对日期只有在基于当前 date 能无歧义换算时才展开。\n- subject_hint 必须是非空短语，用于宽松表示同一主题或同一主体；它应比 search_keyword 更宽，但不能退化成“进展”“问题”“总结”这种空词。\n- same_record_clues 必须是非空短语，用于概括只有在什么条件下才应该视为同一条记录，例如“同一项目且同一交付物”“同一问题单且同一修正对象”，而不是仅仅主题相近。\n\n边界：\n- 同一主题下的不同实例、同一项目下的不同子任务、同一人物的不同事件、同一公司但不同事项，都不应被描述成同一条记录。\n- 不要输出情绪词、标签建议、完整长句或与输入无关的噪音词。",
+        "systemPrompt": "You are MindAtlas's smart-capture lookup preparation node. This workflow primarily serves system skills and the in-app AI assistant, so the raw input may be short, casual, imperative, or fragmentary. Your job is not to generate the final record yet. Instead, derive one compact semantic-recall query and one concise same-record rule from the raw input.\n\nGoals:\n- Identify the stable subject or durable object first, then extract the strongest differentiating clue in this input.\n- Output only lookup_query and same_record_clues.\n- Do not generate title, summary, content, or tags here, and do not invent facts.\n\nWork steps:\n1. Remove politeness, filler, command phrasing, and chatter so only the record-worthy matter remains.\n2. Identify the stable anchor of the record, such as the same project, document, issue ticket, plan, relationship, long-running matter, deliverable, or object.\n3. Extract the strongest differentiator in this input, such as a unique name, identifier, correction target, key result, deliverable, phase change, decision, or milestone.\n4. Use those anchors to produce one semantic-recall query and one concise statement of what must be true for an existing entry to count as the same durable record.\n\nOutput requirements:\n- lookup_query must be a short, concrete phrase built from the stable anchor plus the strongest differentiator. Do not paste the whole source sentence, and do not collapse into vague words like progress, issue, or summary.\n- same_record_clues must be a non-empty short phrase describing the necessary conditions for sameness, such as same project and same deliverable or same issue ticket and same correction target, not merely a similar theme.\n- Do not describe different instances under the same theme, project, person, or company as the same record.\n- Do not output emotional words, tag suggestions, long sentences, or irrelevant noise.",
         "userInput": "date: {{sys.date}}\n\noriginal_input:\n{{start.user_input}}\n\navailable_types:\n{{tool_types.items}}",
         "outputMode": "structured",
         "outputFields": [
           {
-            "name": "search_keyword"
-          },
-          {
-            "name": "search_type_code",
-            "nullable": true
-          },
-          {
-            "name": "search_time_from",
-            "nullable": true
-          },
-          {
-            "name": "search_time_to",
-            "nullable": true
-          },
-          {
-            "name": "subject_hint"
+            "name": "lookup_query"
           },
           {
             "name": "same_record_clues"
@@ -70,50 +55,29 @@
       }
     },
     {
-      "nodeId": "tool_search_primary",
+      "nodeId": "tool_search_similar",
       "nodeType": "tool",
-      "label": "精确检索相似记录",
+      "label": "Semantic Similarity Recall",
       "positionX": 1680.0,
-      "positionY": 180.0,
+      "positionY": 320.0,
       "config": {
-        "toolName": "search_entries",
+        "toolName": "search_similar_entries",
         "inputBindings": {
-          "keyword": "{{llm_prepare_lookup.search_keyword}}",
-          "type_code": "{{llm_prepare_lookup.search_type_code}}",
-          "time_from": "{{llm_prepare_lookup.search_time_from}}",
-          "time_to": "{{llm_prepare_lookup.search_time_to}}",
-          "limit": "5"
+          "query": "{{llm_prepare_lookup.lookup_query}}",
+          "limit": "8"
         }
       }
     },
     {
-      "nodeId": "tool_search_secondary",
-      "nodeType": "tool",
-      "label": "宽松检索相近主题",
-      "positionX": 1680.0,
-      "positionY": 460.0,
-      "config": {
-        "toolName": "search_entries",
-        "inputBindings": {
-          "keyword": "{{llm_prepare_lookup.subject_hint}}",
-          "limit": "5"
-        }
-      }
-    },
-    {
-      "nodeId": "code_candidates",
-      "nodeType": "code_executor",
-      "label": "整理相似候选",
+      "nodeId": "llm_rank_candidates",
+      "nodeType": "llm",
+      "label": "Rank Similar Candidates",
       "positionX": 2080.0,
       "positionY": 320.0,
       "config": {
-        "language": "python",
-        "code": "def _clean(value):\n    return str(value or '').strip()\n\ndef _time_label(item):\n    mode = _clean(item.get('time_mode')).upper()\n    point = _clean(item.get('time_at'))\n    start = _clean(item.get('time_from'))\n    end = _clean(item.get('time_to'))\n    if mode == 'POINT' and point:\n        return point[:10]\n    if mode == 'RANGE' and (start or end):\n        if start and end:\n            return f'{start[:10]} ~ {end[:10]}'\n        return start[:10] or end[:10]\n    return ''\n\ndef _normalize(item, source, index):\n    if not isinstance(item, dict):\n        return None\n    entry_id = _clean(item.get('id'))\n    title = _clean(item.get('title'))\n    if not entry_id or not title:\n        return None\n    return {\n        'entry_id': entry_id,\n        'title': title,\n        'type_name': _clean(item.get('type')) or _clean(item.get('type_code')),\n        'time_label': _time_label(item),\n        'summary': _clean(item.get('summary')),\n        'rank_score': (100 if source == 'primary' else 40) - index,\n        'sources': {source},\n    }\n\ndef main(primary_items=None, secondary_items=None):\n    merged = {}\n    for source, items in (('primary', primary_items or []), ('secondary', secondary_items or [])):\n        for index, raw in enumerate(items):\n            normalized = _normalize(raw, source, index)\n            if normalized is None:\n                continue\n            key = normalized['entry_id']\n            current = merged.get(key)\n            if current is None:\n                merged[key] = normalized\n                continue\n            current['rank_score'] += normalized['rank_score']\n            current['sources'].update(normalized['sources'])\n            if not current['type_name'] and normalized['type_name']:\n                current['type_name'] = normalized['type_name']\n            if not current['time_label'] and normalized['time_label']:\n                current['time_label'] = normalized['time_label']\n            if not current['summary'] and normalized['summary']:\n                current['summary'] = normalized['summary']\n\n    candidates = []\n    for item in merged.values():\n        source_parts = []\n        if 'primary' in item['sources']:\n            source_parts.append('精确检索')\n        if 'secondary' in item['sources']:\n            source_parts.append('主题检索')\n        description_parts = [part for part in (item['type_name'], item['time_label']) if part]\n        if source_parts:\n            description_parts.append('/'.join(source_parts))\n        if item['summary']:\n            description_parts.append(item['summary'][:48])\n        candidates.append({\n            'entry_id': item['entry_id'],\n            'title': item['title'],\n            'type_name': item['type_name'],\n            'time_label': item['time_label'],\n            'rank_score': item['rank_score'],\n            'option': {\n                'value': item['entry_id'],\n                'label': item['title'],\n                'description': ' | '.join(part for part in description_parts if part) or '相似候选记录',\n            },\n        })\n\n    candidates.sort(key=lambda item: (-item['rank_score'], item['title']))\n    top = candidates[:5]\n    if not top:\n        summary = '未发现明显相似的已有记录。'\n    else:\n        lines = []\n        for index, item in enumerate(top, start=1):\n            extra = ' / '.join(part for part in (item['type_name'], item['time_label']) if part)\n            lines.append(f\"{index}. {item['title']}\" + (f'（{extra}）' if extra else ''))\n        summary = '发现可能相似的已有记录：\\n' + '\\n'.join(lines)\n\n    return {\n        'candidate_count': len(top),\n        'candidate_summary': summary,\n        'merge_target_options': [item['option'] for item in top],\n    }\n",
-        "entrypoint": "main",
-        "inputBindings": {
-          "primary_items": "{{tool_search_primary.items}}",
-          "secondary_items": "{{tool_search_secondary.items}}"
-        },
+        "systemPrompt": "You are MindAtlas's similar-candidate ranking node. The previous step used LightRAG to recall semantically related entry candidates, but recall alone does not prove that they are the same durable record. Your job is to use the original input, same_record_clues, and the recalled candidates to filter out merely related items and keep only the entries that are worth showing to the user for manual confirmation.\n\nDecision principles:\n- Judge by the stable subject or durable object, not by broad topic overlap alone.\n- The same theme but a different instance, the same project but a different subtask, the same person but a different event, the same client but a different deal, or a different occurrence of the same theme are not the same record.\n- You should mention both why a candidate looks similar and why it still might not be the same record.\n- Do not stuff ambiguous candidates into the list just to reduce duplicates.\n\nOutput requirements:\n- candidate_count: the number of retained candidates, from 0 to 5.\n- merge_target_options: up to 5 objects shaped exactly as {\"value\": \"entry_id\", \"label\": \"title\", \"description\": \"short reason\"}. The description should mention both the matching evidence and the remaining doubt.\n- candidate_summary: if there are no viable candidates, say that no obvious similar record was found. If there are candidates, summarize them briefly in natural English for quick human review.\n- If retrieval_status is unavailable, or no candidate is similar enough, you must output candidate_count=0, empty options, and a no-obvious-duplicate summary.\n- Only keep candidates that are truly worth human confirmation. Do not include entries that are merely topically related.",
+        "userInput": "original_input:\n{{start.user_input}}\n\nsame_record_clues:\n{{llm_prepare_lookup.same_record_clues}}\n\nretrieval_status:\n{{tool_search_similar.status}}\n\nretrieval_message:\n{{tool_search_similar.message}}\n\nrecalled_candidates:\n{{tool_search_similar.items}}",
+        "outputMode": "structured",
         "outputFields": [
           {
             "name": "candidate_count",
@@ -146,7 +110,7 @@
             "conditions": [
               {
                 "id": "candidate_count_positive",
-                "variable": "code_candidates.candidate_count",
+                "variable": "llm_rank_candidates.candidate_count",
                 "operator": "gt",
                 "value": "0"
               }
@@ -163,7 +127,7 @@
       "positionY": 170.0,
       "config": {
         "title": "发现相似记录，请选择处理方式",
-        "instruction": "系统先根据原始输入检索了相似记录。只有在它们确实描述同一条长期事项、同一对象或同一稳定主体时，才适合走“合并到已有记录”。\n\n同一条记录的关键判定线索：{{llm_prepare_lookup.same_record_clues}}\n\n{{code_candidates.candidate_summary}}\n\n请选择：\n- 新建一条记录：把这次内容当成新的独立记录继续整理\n- 合并到已有记录：后续会基于你选中的目标生成合并后的完整内容，并在再次确认后才真正更新\n\n如果你选择“合并到已有记录”，必须同时选中下面的目标记录。",
+        "instruction": "The system first performed semantic similarity recall from your raw input. You should choose merge only when a candidate truly describes the same long-running matter, the same object, or the same stable subject.\n\nSame-record rule of thumb: {{llm_prepare_lookup.same_record_clues}}\n\n{{llm_rank_candidates.candidate_summary}}\n\nChoose one path:\n- Create a new record: treat this input as a new independent record\n- Merge into an existing record: the workflow will draft a merged version for the selected target and ask for confirmation again before updating anything\n\nIf you choose merge into an existing record, you must also choose the target record below.",
         "approveLabel": "继续",
         "rejectLabel": "取消本次写入",
         "requireRejectComment": false,
@@ -193,7 +157,7 @@
             "label": "合并目标记录",
             "type": "string",
             "widget": "radio",
-            "optionsTemplate": "{{code_candidates.merge_target_options}}",
+            "optionsTemplate": "{{llm_rank_candidates.merge_target_options}}",
             "required": false,
             "valueTemplate": ""
           }
@@ -421,7 +385,7 @@
         "code": "def _clean(value):\n    return str(value or '').strip()\n\ndef _pick(action, create_value, merge_value):\n    if action == 'merge_existing' and merge_value not in (None, ''):\n        return merge_value\n    return create_value\n\ndef _pick_list(action, create_value, merge_value):\n    candidate = _pick(action, create_value, merge_value)\n    return candidate if isinstance(candidate, list) else []\n\ndef main(\n    candidate_count=None,\n    triage_action=None,\n    merge_target=None,\n    existing_title=None,\n    create_title=None,\n    create_summary=None,\n    create_content=None,\n    create_type_code=None,\n    create_tags=None,\n    create_time_mode=None,\n    create_time_at=None,\n    create_time_from=None,\n    create_time_to=None,\n    merge_title=None,\n    merge_summary=None,\n    merge_content=None,\n    merge_type_code=None,\n    merge_tags=None,\n    merge_time_mode=None,\n    merge_time_at=None,\n    merge_time_from=None,\n    merge_time_to=None,\n):\n    try:\n        count_value = int(candidate_count or 0)\n    except Exception:\n        count_value = 0\n    action_text = _clean(triage_action)\n    merge_target_id = _clean(merge_target)\n    action = 'merge_existing' if action_text == 'merge_existing' and merge_target_id else 'create_new'\n    existing_entry_title = _clean(existing_title)\n\n    if action == 'merge_existing':\n        confirm_title = '确认合并后的记录'\n        confirm_instruction = (\n            f\"你选择把当前输入合并到已有记录《{existing_entry_title or '未命名记录'}》。\"\n            '请确认下面的整合结果，批准后会更新该已有记录。'\n        )\n        approve_label = '确认合并更新'\n        reject_label = '取消更新'\n        cancel_message = '已取消这次合并更新，原有记录保持不变。'\n    elif count_value > 0:\n        confirm_title = '确认新建独立记录'\n        confirm_instruction = (\n            '你在相似候选中选择了“新建一条记录”。请确认下面的记录内容，'\n            '批准后会创建一条新的独立记录，不会合并到已有记录。'\n        )\n        approve_label = '确认创建'\n        reject_label = '取消创建'\n        cancel_message = '已取消这次新建记录，未写入任何内容。'\n    else:\n        confirm_title = '确认创建新记录'\n        confirm_instruction = '当前没有检索到明显相似的已有记录。请确认下面的记录内容，批准后会新建记录。'\n        approve_label = '确认创建'\n        reject_label = '取消创建'\n        cancel_message = '已取消这次新建记录，未写入任何内容。'\n\n    return {\n        'action': action,\n        'affected_entry_id': merge_target_id,\n        'confirm_title': confirm_title,\n        'confirm_instruction': confirm_instruction,\n        'approve_label': approve_label,\n        'reject_label': reject_label,\n        'cancel_message': cancel_message,\n        'title': _clean(_pick(action, create_title, merge_title)),\n        'summary': _clean(_pick(action, create_summary, merge_summary)),\n        'content': _clean(_pick(action, create_content, merge_content)),\n        'type_code': _clean(_pick(action, create_type_code, merge_type_code)),\n        'tags': _pick_list(action, create_tags, merge_tags),\n        'time_mode': _clean(_pick(action, create_time_mode, merge_time_mode)),\n        'time_at': _clean(_pick(action, create_time_at, merge_time_at)),\n        'time_from': _clean(_pick(action, create_time_from, merge_time_from)),\n        'time_to': _clean(_pick(action, create_time_to, merge_time_to)),\n    }\n",
         "entrypoint": "main",
         "inputBindings": {
-          "candidate_count": "{{code_candidates.candidate_count}}",
+          "candidate_count": "{{llm_rank_candidates.candidate_count}}",
           "triage_action": "{{human_triage.action}}",
           "merge_target": "{{human_triage.merge_target}}",
           "existing_title": "{{tool_get_existing.title}}",
@@ -709,7 +673,7 @@
       "positionY": 320.0,
       "config": {
         "systemPrompt": "You are the MindAtlas capture assistant, and you have just completed the full smart_capture workflow for the user.\nOnly use the workflow facts provided below. Do not invent outcomes, and do not explain internal implementation details.\nYour job is to turn the workflow result into a natural assistant reply that sounds like you just finished helping the user, not like a system log, state machine, or rigid template.\nOutput rules:\n- Return 1 to 2 short paragraphs in natural English. No headings, no bullets, and no mechanical sections such as duplicate check, decision path, write result, relation follow-up.\n- Speak directly to the user as you, and describe completed actions with I.\n- Naturally connect the reply to original_input so it feels grounded in what the user just asked you to capture, but do not quote large chunks of their input.\n- Cover the key outcomes that actually happened in this run: whether similar candidates were found, whether the user chose create or merge, which record was ultimately affected, and what happened in relation follow-up.\n- If candidate_count=0, naturally say there was no obvious duplicate before writing. If candidate_count>0, naturally mention how many similar candidates were found and whether the user ultimately chose create or merge.\n- If action=create_new, clearly say a new record was created. If action=merge_existing, clearly say the content was merged into or updated in an existing record.\n- When you refer to the final record, prefer updated_entry_title, then created_entry_title. If both are empty, fall back to merge_target_title or confirmed_title.\n- If relation_status=created, mention how many relation recommendations were confirmable and how many relations were actually added.\n- If relation_status=empty, briefly say there were no confirmable relation recommendations this time.\n- If relation_status=rejected or none_selected, briefly say no new relations were added this round, but keep that part secondary.\n- Do not output raw field names or internal variable names such as candidate_count or relation_status.",
-        "userInput": "date: {{sys.date}}\n\noriginal_input:\n{{start.user_input}}\n\ncandidate_count:\n{{code_candidates.candidate_count}}\n\naction:\n{{code_prepare_write_payload.action}}\n\nmerge_target_title:\n{{tool_get_existing.title}}\n\ncreated_entry_title:\n{{tool_create.title}}\n\nupdated_entry_title:\n{{tool_update.title}}\n\nconfirmed_title:\n{{human_confirm_write.title}}\n\nrelation_status:\n{{call_relation_followup.relation_status}}\n\nrelation_candidate_count:\n{{call_relation_followup.relation_candidate_count}}\n\nrelation_created_count:\n{{call_relation_followup.relation_created_count}}",
+        "userInput": "date: {{sys.date}}\n\noriginal_input:\n{{start.user_input}}\n\ncandidate_count:\n{{llm_rank_candidates.candidate_count}}\n\naction:\n{{code_prepare_write_payload.action}}\n\nmerge_target_title:\n{{tool_get_existing.title}}\n\ncreated_entry_title:\n{{tool_create.title}}\n\nupdated_entry_title:\n{{tool_update.title}}\n\nconfirmed_title:\n{{human_confirm_write.title}}\n\nrelation_status:\n{{call_relation_followup.relation_status}}\n\nrelation_candidate_count:\n{{call_relation_followup.relation_candidate_count}}\n\nrelation_created_count:\n{{call_relation_followup.relation_created_count}}",
         "outputMode": "text"
       }
     },
@@ -757,9 +721,9 @@
       "label": null
     },
     {
-      "edgeId": "e_prepare_lookup_search_primary",
+      "edgeId": "e_prepare_lookup_search_similar",
       "sourceNodeId": "llm_prepare_lookup",
-      "targetNodeId": "tool_search_primary",
+      "targetNodeId": "tool_search_similar",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
@@ -767,9 +731,9 @@
       "label": null
     },
     {
-      "edgeId": "e_prepare_lookup_search_secondary",
-      "sourceNodeId": "llm_prepare_lookup",
-      "targetNodeId": "tool_search_secondary",
+      "edgeId": "e_search_similar_rank_candidates",
+      "sourceNodeId": "tool_search_similar",
+      "targetNodeId": "llm_rank_candidates",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
@@ -777,28 +741,8 @@
       "label": null
     },
     {
-      "edgeId": "e_search_primary_candidates",
-      "sourceNodeId": "tool_search_primary",
-      "targetNodeId": "code_candidates",
-      "sourceHandle": "output",
-      "targetHandle": "input",
-      "conditionType": null,
-      "conditionExpr": null,
-      "label": null
-    },
-    {
-      "edgeId": "e_search_secondary_candidates",
-      "sourceNodeId": "tool_search_secondary",
-      "targetNodeId": "code_candidates",
-      "sourceHandle": "output",
-      "targetHandle": "input",
-      "conditionType": null,
-      "conditionExpr": null,
-      "label": null
-    },
-    {
-      "edgeId": "e_candidates_route",
-      "sourceNodeId": "code_candidates",
+      "edgeId": "e_rank_candidates_route",
+      "sourceNodeId": "llm_rank_candidates",
       "targetNodeId": "if_has_candidates",
       "sourceHandle": "output",
       "targetHandle": "input",

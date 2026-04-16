@@ -41,27 +41,12 @@
       "positionX": 1280.0,
       "positionY": 320.0,
       "config": {
-        "systemPrompt": "你是 MindAtlas 的“智能创建记录”预检索节点。这个工作流主要服务系统技能与应用内 AI 助手，所以原始输入可能很短、很口语、像命令、待办或片段说明。你的任务不是生成最终记录，而是先从原始输入中抽出最稳健的“是否已存在同一条记录”的检索线索。\n\n目标：\n- 先识别稳定主体或持久对象，再识别本次输入里最强的区分线索。\n- 输出 search_keyword、search_type_code、search_time_from、search_time_to、subject_hint、same_record_clues。\n- 不要生成 title、summary、content、tags，也不要替用户补造事实。\n\n工作步骤：\n1. 先剥离客套、语气词、命令口吻和闲聊，只保留真正要被记录的事项。\n2. 判断这条记录真正围绕的稳定主体，例如同一项目、文档、问题单、计划、人物关系、长期事项、交付物或对象。\n3. 再提取本次最能区分它的线索，例如唯一专名、编号、修正对象、关键结果、交付物、阶段变化、决定或里程碑。\n4. 分别构造精确检索词、宽松主题线索，以及“满足什么条件时才算同一条记录”的判定提示。\n\n输出要求：\n- search_keyword 必须是短而具体的精确检索短语，优先由“稳定主体 + 最强区分线索”组成；不要把整句原文照抄进去。\n- search_type_code 只有在输入明确属于某类记录时才填写；如填写，必须且只能从 {{tool_types.items}} 的 code 中选择；不明确时返回 null。\n- search_time_from / search_time_to 只有在输入给出明确且有助于缩小范围的时间窗口时才填写；否则返回 null；相对日期只有在基于当前 date 能无歧义换算时才展开。\n- subject_hint 必须是非空短语，用于宽松表示同一主题或同一主体；它应比 search_keyword 更宽，但不能退化成“进展”“问题”“总结”这种空词。\n- same_record_clues 必须是非空短语，用于概括只有在什么条件下才应该视为同一条记录，例如“同一项目且同一交付物”“同一问题单且同一修正对象”，而不是仅仅主题相近。\n\n边界：\n- 同一主题下的不同实例、同一项目下的不同子任务、同一人物的不同事件、同一公司但不同事项，都不应被描述成同一条记录。\n- 不要输出情绪词、标签建议、完整长句或与输入无关的噪音词。",
+        "systemPrompt": "你是 MindAtlas 的“智能创建记录”预检索节点。这个工作流主要服务系统技能与应用内 AI 助手，所以原始输入可能很短、很口语、像命令、待办或片段说明。你的任务不是生成最终记录，而是先从原始输入中提炼一个最适合语义召回的查询短语，并补充“什么才算同一条记录”的判断线索。\n\n目标：\n- 先识别稳定主体或持久对象，再识别本次输入里最强的区分线索。\n- 只输出 lookup_query 和 same_record_clues。\n- 不要生成 title、summary、content、tags，也不要替用户补造事实。\n\n工作步骤：\n1. 去掉客套、语气词、命令口吻和闲聊，只保留真正要被记录的事项。\n2. 找出这条记录真正围绕的稳定主体，例如同一项目、文档、问题单、计划、人物关系、长期事项、交付物或对象。\n3. 提炼本次最能区分它的线索，例如唯一专名、编号、修正对象、关键结果、交付物、阶段变化、决定或里程碑。\n4. 基于前面两步，写出一个适合向量召回的短查询，以及一句“满足什么条件才算同一条记录”的判断线索。\n\n输出要求：\n- lookup_query 必须是短而具体的短语，优先由“稳定主体 + 最强区分线索”组成；不要把整句原文照抄进去，也不要退化成‘进展’‘问题’‘总结’这类空词。\n- same_record_clues 必须是非空短语，用于概括只有在什么条件下才应该视为同一条记录，例如‘同一项目且同一交付物’‘同一问题单且同一修正对象’，而不是仅仅主题相近。\n- 同一主题下的不同实例、同一项目下的不同子任务、同一人物的不同事件、同一公司但不同事项，都不应被描述成同一条记录。\n- 不要输出情绪词、标签建议、完整长句或与输入无关的噪音词。",
         "userInput": "date: {{sys.date}}\n\noriginal_input:\n{{start.user_input}}\n\navailable_types:\n{{tool_types.items}}",
         "outputMode": "structured",
         "outputFields": [
           {
-            "name": "search_keyword"
-          },
-          {
-            "name": "search_type_code",
-            "nullable": true
-          },
-          {
-            "name": "search_time_from",
-            "nullable": true
-          },
-          {
-            "name": "search_time_to",
-            "nullable": true
-          },
-          {
-            "name": "subject_hint"
+            "name": "lookup_query"
           },
           {
             "name": "same_record_clues"
@@ -70,50 +55,29 @@
       }
     },
     {
-      "nodeId": "tool_search_primary",
+      "nodeId": "tool_search_similar",
       "nodeType": "tool",
-      "label": "精确检索相似记录",
+      "label": "向量召回相似记录",
       "positionX": 1680.0,
-      "positionY": 180.0,
+      "positionY": 320.0,
       "config": {
-        "toolName": "search_entries",
+        "toolName": "search_similar_entries",
         "inputBindings": {
-          "keyword": "{{llm_prepare_lookup.search_keyword}}",
-          "type_code": "{{llm_prepare_lookup.search_type_code}}",
-          "time_from": "{{llm_prepare_lookup.search_time_from}}",
-          "time_to": "{{llm_prepare_lookup.search_time_to}}",
-          "limit": "5"
+          "query": "{{llm_prepare_lookup.lookup_query}}",
+          "limit": "8"
         }
       }
     },
     {
-      "nodeId": "tool_search_secondary",
-      "nodeType": "tool",
-      "label": "宽松检索相近主题",
-      "positionX": 1680.0,
-      "positionY": 460.0,
-      "config": {
-        "toolName": "search_entries",
-        "inputBindings": {
-          "keyword": "{{llm_prepare_lookup.subject_hint}}",
-          "limit": "5"
-        }
-      }
-    },
-    {
-      "nodeId": "code_candidates",
-      "nodeType": "code_executor",
-      "label": "整理相似候选",
+      "nodeId": "llm_rank_candidates",
+      "nodeType": "llm",
+      "label": "筛选相似候选",
       "positionX": 2080.0,
       "positionY": 320.0,
       "config": {
-        "language": "python",
-        "code": "def _clean(value):\n    return str(value or '').strip()\n\ndef _time_label(item):\n    mode = _clean(item.get('time_mode')).upper()\n    point = _clean(item.get('time_at'))\n    start = _clean(item.get('time_from'))\n    end = _clean(item.get('time_to'))\n    if mode == 'POINT' and point:\n        return point[:10]\n    if mode == 'RANGE' and (start or end):\n        if start and end:\n            return f'{start[:10]} ~ {end[:10]}'\n        return start[:10] or end[:10]\n    return ''\n\ndef _normalize(item, source, index):\n    if not isinstance(item, dict):\n        return None\n    entry_id = _clean(item.get('id'))\n    title = _clean(item.get('title'))\n    if not entry_id or not title:\n        return None\n    return {\n        'entry_id': entry_id,\n        'title': title,\n        'type_name': _clean(item.get('type')) or _clean(item.get('type_code')),\n        'time_label': _time_label(item),\n        'summary': _clean(item.get('summary')),\n        'rank_score': (100 if source == 'primary' else 40) - index,\n        'sources': {source},\n    }\n\ndef main(primary_items=None, secondary_items=None):\n    merged = {}\n    for source, items in (('primary', primary_items or []), ('secondary', secondary_items or [])):\n        for index, raw in enumerate(items):\n            normalized = _normalize(raw, source, index)\n            if normalized is None:\n                continue\n            key = normalized['entry_id']\n            current = merged.get(key)\n            if current is None:\n                merged[key] = normalized\n                continue\n            current['rank_score'] += normalized['rank_score']\n            current['sources'].update(normalized['sources'])\n            if not current['type_name'] and normalized['type_name']:\n                current['type_name'] = normalized['type_name']\n            if not current['time_label'] and normalized['time_label']:\n                current['time_label'] = normalized['time_label']\n            if not current['summary'] and normalized['summary']:\n                current['summary'] = normalized['summary']\n\n    candidates = []\n    for item in merged.values():\n        source_parts = []\n        if 'primary' in item['sources']:\n            source_parts.append('精确检索')\n        if 'secondary' in item['sources']:\n            source_parts.append('主题检索')\n        description_parts = [part for part in (item['type_name'], item['time_label']) if part]\n        if source_parts:\n            description_parts.append('/'.join(source_parts))\n        if item['summary']:\n            description_parts.append(item['summary'][:48])\n        candidates.append({\n            'entry_id': item['entry_id'],\n            'title': item['title'],\n            'type_name': item['type_name'],\n            'time_label': item['time_label'],\n            'rank_score': item['rank_score'],\n            'option': {\n                'value': item['entry_id'],\n                'label': item['title'],\n                'description': ' | '.join(part for part in description_parts if part) or '相似候选记录',\n            },\n        })\n\n    candidates.sort(key=lambda item: (-item['rank_score'], item['title']))\n    top = candidates[:5]\n    if not top:\n        summary = '未发现明显相似的已有记录。'\n    else:\n        lines = []\n        for index, item in enumerate(top, start=1):\n            extra = ' / '.join(part for part in (item['type_name'], item['time_label']) if part)\n            lines.append(f\"{index}. {item['title']}\" + (f'（{extra}）' if extra else ''))\n        summary = '发现可能相似的已有记录：\\n' + '\\n'.join(lines)\n\n    return {\n        'candidate_count': len(top),\n        'candidate_summary': summary,\n        'merge_target_options': [item['option'] for item in top],\n    }\n",
-        "entrypoint": "main",
-        "inputBindings": {
-          "primary_items": "{{tool_search_primary.items}}",
-          "secondary_items": "{{tool_search_secondary.items}}"
-        },
+        "systemPrompt": "你是 MindAtlas 的相似候选筛选节点。上一步已经通过 LightRAG 召回了一批语义上相近的记录候选，但这些候选不等于“同一条记录”。你的任务是基于原始输入、same_record_clues 和召回候选，筛掉只是主题接近的项，只保留真正值得让用户手动确认的候选。\n\n判断原则：\n- 必须围绕稳定主体/持久对象判断，而不是围绕大主题或关键词判断。\n- 同主题不同实例、同项目不同子任务、同人物不同事件、同客户不同单子、同一主题的不同发生次数，都不算同一条记录。\n- 需要同时说明“为什么像”，也要说明“哪里仍可能不是同一条记录”。\n- 不要因为想减少重复就把模糊候选也放进去。\n\n输出要求：\n- candidate_count: 最终保留的候选数量，范围 0-5。\n- merge_target_options: 最多 5 个对象，形状必须是 {\"value\": \"entry_id\", \"label\": \"标题\", \"description\": \"简短原因\"}。description 要同时包含相似依据和保留疑点。\n- candidate_summary: 如果没有候选，写“未发现明显相似的已有记录。”；如果有候选，用简短自然中文列出它们，方便用户快速判断。\n- 如果 retrieval_status 是 unavailable，或没有足够像的候选，也必须输出 candidate_count=0、空 options，并把摘要写成未发现明显相似记录。\n- 只输出真正值得人工确认的候选，不要把任何只是主题相近的记录塞进列表。",
+        "userInput": "original_input:\n{{start.user_input}}\n\nsame_record_clues:\n{{llm_prepare_lookup.same_record_clues}}\n\nretrieval_status:\n{{tool_search_similar.status}}\n\nretrieval_message:\n{{tool_search_similar.message}}\n\nrecalled_candidates:\n{{tool_search_similar.items}}",
+        "outputMode": "structured",
         "outputFields": [
           {
             "name": "candidate_count",
@@ -146,7 +110,7 @@
             "conditions": [
               {
                 "id": "candidate_count_positive",
-                "variable": "code_candidates.candidate_count",
+                "variable": "llm_rank_candidates.candidate_count",
                 "operator": "gt",
                 "value": "0"
               }
@@ -163,7 +127,7 @@
       "positionY": 170.0,
       "config": {
         "title": "发现相似记录，请选择处理方式",
-        "instruction": "系统先根据原始输入检索了相似记录。只有在它们确实描述同一条长期事项、同一对象或同一稳定主体时，才适合走“合并到已有记录”。\n\n同一条记录的关键判定线索：{{llm_prepare_lookup.same_record_clues}}\n\n{{code_candidates.candidate_summary}}\n\n请选择：\n- 新建一条记录：把这次内容当成新的独立记录继续整理\n- 合并到已有记录：后续会基于你选中的目标生成合并后的完整内容，并在再次确认后才真正更新\n\n如果你选择“合并到已有记录”，必须同时选中下面的目标记录。",
+        "instruction": "系统先根据原始输入做了语义相似记录召回。只有在候选确实描述同一条长期事项、同一对象或同一稳定主体时，才适合走“合并到已有记录”。\n\n同一条记录的关键判定线索：{{llm_prepare_lookup.same_record_clues}}\n\n{{llm_rank_candidates.candidate_summary}}\n\n请选择：\n- 新建一条记录：把这次内容当成新的独立记录继续整理\n- 合并到已有记录：后续会基于你选中的目标生成合并后的完整内容，并在再次确认后才真正更新\n\n如果你选择“合并到已有记录”，必须同时选中下面的目标记录。",
         "approveLabel": "继续",
         "rejectLabel": "取消本次写入",
         "requireRejectComment": false,
@@ -193,7 +157,7 @@
             "label": "合并目标记录",
             "type": "string",
             "widget": "radio",
-            "optionsTemplate": "{{code_candidates.merge_target_options}}",
+            "optionsTemplate": "{{llm_rank_candidates.merge_target_options}}",
             "required": false,
             "valueTemplate": ""
           }
@@ -421,7 +385,7 @@
         "code": "def _clean(value):\n    return str(value or '').strip()\n\ndef _pick(action, create_value, merge_value):\n    if action == 'merge_existing' and merge_value not in (None, ''):\n        return merge_value\n    return create_value\n\ndef _pick_list(action, create_value, merge_value):\n    candidate = _pick(action, create_value, merge_value)\n    return candidate if isinstance(candidate, list) else []\n\ndef main(\n    candidate_count=None,\n    triage_action=None,\n    merge_target=None,\n    existing_title=None,\n    create_title=None,\n    create_summary=None,\n    create_content=None,\n    create_type_code=None,\n    create_tags=None,\n    create_time_mode=None,\n    create_time_at=None,\n    create_time_from=None,\n    create_time_to=None,\n    merge_title=None,\n    merge_summary=None,\n    merge_content=None,\n    merge_type_code=None,\n    merge_tags=None,\n    merge_time_mode=None,\n    merge_time_at=None,\n    merge_time_from=None,\n    merge_time_to=None,\n):\n    try:\n        count_value = int(candidate_count or 0)\n    except Exception:\n        count_value = 0\n    action_text = _clean(triage_action)\n    merge_target_id = _clean(merge_target)\n    action = 'merge_existing' if action_text == 'merge_existing' and merge_target_id else 'create_new'\n    existing_entry_title = _clean(existing_title)\n\n    if action == 'merge_existing':\n        confirm_title = '确认合并后的记录'\n        confirm_instruction = (\n            f\"你选择把当前输入合并到已有记录《{existing_entry_title or '未命名记录'}》。\"\n            '请确认下面的整合结果，批准后会更新该已有记录。'\n        )\n        approve_label = '确认合并更新'\n        reject_label = '取消更新'\n        cancel_message = '已取消这次合并更新，原有记录保持不变。'\n    elif count_value > 0:\n        confirm_title = '确认新建独立记录'\n        confirm_instruction = (\n            '你在相似候选中选择了“新建一条记录”。请确认下面的记录内容，'\n            '批准后会创建一条新的独立记录，不会合并到已有记录。'\n        )\n        approve_label = '确认创建'\n        reject_label = '取消创建'\n        cancel_message = '已取消这次新建记录，未写入任何内容。'\n    else:\n        confirm_title = '确认创建新记录'\n        confirm_instruction = '当前没有检索到明显相似的已有记录。请确认下面的记录内容，批准后会新建记录。'\n        approve_label = '确认创建'\n        reject_label = '取消创建'\n        cancel_message = '已取消这次新建记录，未写入任何内容。'\n\n    return {\n        'action': action,\n        'affected_entry_id': merge_target_id,\n        'confirm_title': confirm_title,\n        'confirm_instruction': confirm_instruction,\n        'approve_label': approve_label,\n        'reject_label': reject_label,\n        'cancel_message': cancel_message,\n        'title': _clean(_pick(action, create_title, merge_title)),\n        'summary': _clean(_pick(action, create_summary, merge_summary)),\n        'content': _clean(_pick(action, create_content, merge_content)),\n        'type_code': _clean(_pick(action, create_type_code, merge_type_code)),\n        'tags': _pick_list(action, create_tags, merge_tags),\n        'time_mode': _clean(_pick(action, create_time_mode, merge_time_mode)),\n        'time_at': _clean(_pick(action, create_time_at, merge_time_at)),\n        'time_from': _clean(_pick(action, create_time_from, merge_time_from)),\n        'time_to': _clean(_pick(action, create_time_to, merge_time_to)),\n    }\n",
         "entrypoint": "main",
         "inputBindings": {
-          "candidate_count": "{{code_candidates.candidate_count}}",
+          "candidate_count": "{{llm_rank_candidates.candidate_count}}",
           "triage_action": "{{human_triage.action}}",
           "merge_target": "{{human_triage.merge_target}}",
           "existing_title": "{{tool_get_existing.title}}",
@@ -709,7 +673,7 @@
       "positionY": 320.0,
       "config": {
         "systemPrompt": "你是 MindAtlas 里的智能记录助手，刚刚已经替用户完成了一次 smart_capture 的整条流程。\n你只能根据给定的流程事实生成最终回复，不能臆测没有提供的结果，也不要补写内部实现细节。\n你的任务是把这次执行过程自然地讲给用户听，让回复像助手在汇报刚刚帮他处理完的事情，而不是像系统日志、状态机或固定模板。\n输出规则：\n- 只输出 1 到 2 段自然中文，不要标题，不要列表，不要机械分段罗列查重结果、路径决策、写入结果、关系处理。\n- 语气要顺畅、灵活、有助手感，直接对用户说你，用我来描述已完成的动作。\n- 要自然结合 original_input，让用户一看就知道你是在回应他刚才这次输入，但不要大段复述原话，也不要生硬引用整句。\n- 需要覆盖这次流程里真正发生的关键结果：是否查到相似候选、最后是新建还是合并、实际影响了哪条记录、关系推荐后续怎么处理了。\n- 如果 candidate_count=0，就自然说明创建前没有发现明显重复记录；如果 candidate_count>0，就自然说明查到了多少条相似候选，以及用户最后选了新建还是合并。\n- 如果 action=create_new，要明确说已经创建了记录；如果 action=merge_existing，要明确说已经把内容更新到已有记录。\n- 提及最终写入影响到的记录时，优先使用 updated_entry_title，其次是 created_entry_title；如果它们都为空，再退回 merge_target_title 或 confirmed_title。\n- 如果 relation_status=created，要说明系统给出了多少条可确认关系建议，并最终补上了多少条关系。\n- 如果 relation_status=empty，要简短说明这次没有可确认的关系推荐。\n- 如果 relation_status=rejected 或 none_selected，要简短说明这次没有继续新增关系，但不要让这部分喧宾夺主。\n- 不要输出字段名，不要写成开发说明，不要出现诸如 candidate_count、relation_status 这类内部变量名。",
-        "userInput": "date: {{sys.date}}\n\noriginal_input:\n{{start.user_input}}\n\ncandidate_count:\n{{code_candidates.candidate_count}}\n\naction:\n{{code_prepare_write_payload.action}}\n\nmerge_target_title:\n{{tool_get_existing.title}}\n\ncreated_entry_title:\n{{tool_create.title}}\n\nupdated_entry_title:\n{{tool_update.title}}\n\nconfirmed_title:\n{{human_confirm_write.title}}\n\nrelation_status:\n{{call_relation_followup.relation_status}}\n\nrelation_candidate_count:\n{{call_relation_followup.relation_candidate_count}}\n\nrelation_created_count:\n{{call_relation_followup.relation_created_count}}",
+        "userInput": "date: {{sys.date}}\n\noriginal_input:\n{{start.user_input}}\n\ncandidate_count:\n{{llm_rank_candidates.candidate_count}}\n\naction:\n{{code_prepare_write_payload.action}}\n\nmerge_target_title:\n{{tool_get_existing.title}}\n\ncreated_entry_title:\n{{tool_create.title}}\n\nupdated_entry_title:\n{{tool_update.title}}\n\nconfirmed_title:\n{{human_confirm_write.title}}\n\nrelation_status:\n{{call_relation_followup.relation_status}}\n\nrelation_candidate_count:\n{{call_relation_followup.relation_candidate_count}}\n\nrelation_created_count:\n{{call_relation_followup.relation_created_count}}",
         "outputMode": "text"
       }
     },
@@ -757,9 +721,9 @@
       "label": null
     },
     {
-      "edgeId": "e_prepare_lookup_search_primary",
+      "edgeId": "e_prepare_lookup_search_similar",
       "sourceNodeId": "llm_prepare_lookup",
-      "targetNodeId": "tool_search_primary",
+      "targetNodeId": "tool_search_similar",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
@@ -767,9 +731,9 @@
       "label": null
     },
     {
-      "edgeId": "e_prepare_lookup_search_secondary",
-      "sourceNodeId": "llm_prepare_lookup",
-      "targetNodeId": "tool_search_secondary",
+      "edgeId": "e_search_similar_rank_candidates",
+      "sourceNodeId": "tool_search_similar",
+      "targetNodeId": "llm_rank_candidates",
       "sourceHandle": "output",
       "targetHandle": "input",
       "conditionType": null,
@@ -777,28 +741,8 @@
       "label": null
     },
     {
-      "edgeId": "e_search_primary_candidates",
-      "sourceNodeId": "tool_search_primary",
-      "targetNodeId": "code_candidates",
-      "sourceHandle": "output",
-      "targetHandle": "input",
-      "conditionType": null,
-      "conditionExpr": null,
-      "label": null
-    },
-    {
-      "edgeId": "e_search_secondary_candidates",
-      "sourceNodeId": "tool_search_secondary",
-      "targetNodeId": "code_candidates",
-      "sourceHandle": "output",
-      "targetHandle": "input",
-      "conditionType": null,
-      "conditionExpr": null,
-      "label": null
-    },
-    {
-      "edgeId": "e_candidates_route",
-      "sourceNodeId": "code_candidates",
+      "edgeId": "e_rank_candidates_route",
+      "sourceNodeId": "llm_rank_candidates",
       "targetNodeId": "if_has_candidates",
       "sourceHandle": "output",
       "targetHandle": "input",

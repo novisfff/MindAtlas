@@ -1,21 +1,27 @@
 """Entry 相关工具函数"""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from typing import Any, Optional
 from uuid import UUID
 
 from langchain_core.tools import tool
 from sqlalchemy import func
+from sqlalchemy.orm import joinedload, selectinload
 
+from app.common.exceptions import ApiException
 from app.common.color_utils import pick_material_600_color
 from app.entry.models import Entry, TimeMode
 from app.entry.schemas import EntryRequest, EntrySearchRequest
 from app.entry.service import EntryService
 from app.entry_type.models import EntryType
+from app.lightrag.schemas import LightRagSource
+from app.lightrag.service import LightRagService
 from app.tag.models import Tag
 
 logger = logging.getLogger(__name__)
@@ -29,6 +35,25 @@ def _get_db():
 
 def _format_entry_datetime(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
+
+
+def _run_async(factory):
+    """Run an async coroutine from a sync tool function with a hard timeout."""
+    from app.config import get_settings
+
+    timeout_sec = float(getattr(get_settings(), "lightrag_query_timeout_sec", 60.0) or 60.0) + 10.0
+
+    async def _runner():
+        return await asyncio.wait_for(factory(), timeout=timeout_sec)
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_runner())
+
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(lambda: asyncio.run(_runner()))
+        return fut.result(timeout=timeout_sec + 5.0)
 
 
 def _serialize_entry_search_item(entry: Entry) -> dict[str, Any]:
@@ -46,6 +71,160 @@ def _serialize_entry_search_item(entry: Entry) -> dict[str, Any]:
         "time_to": _format_entry_datetime(entry.time_to),
         "created_at": entry.created_at.isoformat() if entry.created_at else "",
         "updated_at": entry.updated_at.isoformat() if entry.updated_at else "",
+    }
+
+
+def _truncate_text(value: Any, limit: int) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
+
+
+def _normalize_similar_limit(limit: int) -> int:
+    try:
+        value = int(limit)
+    except Exception:
+        value = 10
+    return max(1, min(value, 20))
+
+
+def _normalize_similar_query(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _recall_similar_sources(*, query: str, top_k: int) -> list[LightRagSource]:
+    return _run_async(
+        lambda: LightRagService().recall_sources(
+            query=query,
+            mode="hybrid",
+            top_k=top_k,
+        )
+    )
+
+
+def build_search_similar_entries_payload(*, query: str, limit: int = 10) -> dict[str, Any]:
+    db = _get_db()
+    cleaned_query = _normalize_similar_query(query)
+    resolved_limit = _normalize_similar_limit(limit)
+    if not cleaned_query:
+        return {
+            "status": "ok",
+            "message": "查询为空，未执行相似记录召回。",
+            "total": 0,
+            "items": [],
+        }
+
+    top_k = min(max(resolved_limit * 6, 20), 50)
+    try:
+        sources = _recall_similar_sources(query=cleaned_query, top_k=top_k)
+    except ApiException as exc:
+        if exc.code == 40410:
+            return {
+                "status": "unavailable",
+                "message": "LightRAG is not enabled.",
+                "total": 0,
+                "items": [],
+            }
+        logger.warning("search_similar_entries failed with LightRAG API exception", exc_info=True)
+        return {
+            "status": "unavailable",
+            "message": "LightRAG similarity recall failed.",
+            "total": 0,
+            "items": [],
+        }
+    except Exception:
+        logger.warning("search_similar_entries failed unexpectedly", exc_info=True)
+        return {
+            "status": "unavailable",
+            "message": "LightRAG similarity recall failed.",
+            "total": 0,
+            "items": [],
+        }
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for index, source in enumerate(sources or []):
+        if not isinstance(source, LightRagSource):
+            continue
+        entry_id = str(source.entry_id or "").strip()
+        if not entry_id:
+            continue
+        group = grouped.setdefault(
+            entry_id,
+            {
+                "entry_id": entry_id,
+                "first_index": index,
+                "entry_hit_count": 0,
+                "attachment_hit_count": 0,
+                "matched_source_kinds": [],
+                "matched_snippets": [],
+            },
+        )
+        kind = str(source.kind or ("attachment" if source.attachment_id else "entry")).strip().lower() or "entry"
+        if kind not in group["matched_source_kinds"]:
+            group["matched_source_kinds"].append(kind)
+        if kind == "attachment":
+            group["attachment_hit_count"] += 1
+        else:
+            group["entry_hit_count"] += 1
+
+        snippet = _truncate_text(source.content, 160)
+        if snippet and snippet not in group["matched_snippets"] and len(group["matched_snippets"]) < 2:
+            group["matched_snippets"].append(snippet)
+
+    if not grouped:
+        return {
+            "status": "ok",
+            "message": "未召回到相似记录候选。",
+            "total": 0,
+            "items": [],
+        }
+
+    entry_ids: list[UUID] = []
+    for entry_id in grouped:
+        try:
+            entry_ids.append(UUID(entry_id))
+        except ValueError:
+            continue
+    if not entry_ids:
+        return {
+            "status": "ok",
+            "message": "未召回到可解析的记录候选。",
+            "total": 0,
+            "items": [],
+        }
+
+    entries = (
+        db.query(Entry)
+        .options(joinedload(Entry.type), selectinload(Entry.tags))
+        .filter(Entry.id.in_(entry_ids))
+        .all()
+    )
+    entry_by_id = {str(entry.id): entry for entry in entries}
+
+    ordered_groups = sorted(
+        (group for group in grouped.values() if group["entry_id"] in entry_by_id),
+        key=lambda item: (
+            0 if item["entry_hit_count"] > 0 else 1,
+            item["first_index"],
+            -item["attachment_hit_count"],
+        ),
+    )
+
+    items: list[dict[str, Any]] = []
+    for retrieval_rank, group in enumerate(ordered_groups[:resolved_limit], start=1):
+        entry = entry_by_id[group["entry_id"]]
+        item = _serialize_entry_search_item(entry)
+        item["retrieval_rank"] = retrieval_rank
+        item["matched_source_kinds"] = list(group["matched_source_kinds"])
+        item["matched_snippets"] = list(group["matched_snippets"])
+        items.append(item)
+
+    return {
+        "status": "ok",
+        "message": "已返回相似记录候选。",
+        "total": len(items),
+        "items": items,
     }
 
 
@@ -162,6 +341,27 @@ def search_entries(
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+@tool
+def search_similar_entries(
+    query: str,
+    limit: int = 10,
+) -> str:
+    """通过 LightRAG 向量召回相似记录候选。
+
+    Args:
+        query: 用于语义召回的查询短语
+        limit: 返回候选记录数量限制，默认10条
+
+    Returns:
+        相似记录候选对象（JSON格式），包含 status、message、total 与 items 字段
+    """
+    result = build_search_similar_entries_payload(
+        query=query,
+        limit=limit,
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 def _remove_level1_headings(md: str) -> str:
     """移除 Markdown 中的一级标题，转换为二级标题"""
     lines = (md or "").splitlines()
@@ -247,6 +447,23 @@ def _parse_date_yyyy_mm_dd(date_str: str | None):
         return None
 
 
+def _normalize_optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _parse_date_yyyy_mm_dd_strict(date_str: Any, *, field_name: str) -> datetime | None:
+    normalized = _normalize_optional_text(date_str)
+    if normalized is None:
+        return None
+    try:
+        return datetime.strptime(normalized, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"{field_name} 必须是 YYYY-MM-DD 格式的有效日期") from exc
+
+
 def _serialize_entry_tool_result(entry: Entry) -> str:
     result = {
         "id": str(entry.id),
@@ -263,6 +480,66 @@ def _serialize_entry_tool_result(entry: Entry) -> str:
         "updated_at": entry.updated_at.isoformat() if entry.updated_at else "",
     }
     return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def _resolve_entry_time_fields(
+    *,
+    time_mode: Optional[str],
+    time_at: Optional[str],
+    time_from: Optional[str],
+    time_to: Optional[str],
+) -> tuple[TimeMode, datetime | None, datetime | None, datetime | None]:
+    mode_text = _normalize_optional_text(time_mode)
+    has_explicit_mode = mode_text is not None
+    if has_explicit_mode:
+        normalized_mode = mode_text.upper()
+        if normalized_mode not in {"POINT", "RANGE"}:
+            raise ValueError(f"无效的 time_mode: {mode_text}")
+    else:
+        normalized_mode = None
+
+    time_at_text = _normalize_optional_text(time_at)
+    time_from_text = _normalize_optional_text(time_from)
+    time_to_text = _normalize_optional_text(time_to)
+
+    parsed_time_at = _parse_date_yyyy_mm_dd_strict(time_at_text, field_name="time_at")
+    parsed_time_from = _parse_date_yyyy_mm_dd_strict(time_from_text, field_name="time_from")
+    parsed_time_to = _parse_date_yyyy_mm_dd_strict(time_to_text, field_name="time_to")
+
+    has_time_at = parsed_time_at is not None
+    has_time_from = parsed_time_from is not None
+    has_time_to = parsed_time_to is not None
+
+    if has_explicit_mode:
+        if normalized_mode == "POINT":
+            if not has_time_at:
+                raise ValueError("time_mode=POINT 时必须提供合法的 time_at")
+            if has_time_from or has_time_to:
+                raise ValueError("time_mode=POINT 时不能同时提供 time_from/time_to")
+            return TimeMode.POINT, parsed_time_at, None, None
+
+        if has_time_at:
+            raise ValueError("time_mode=RANGE 时不能同时提供 time_at")
+        if not has_time_from or not has_time_to:
+            raise ValueError("time_mode=RANGE 时必须同时提供合法的 time_from 和 time_to")
+        if parsed_time_from > parsed_time_to:
+            raise ValueError("time_from 必须早于或等于 time_to")
+        return TimeMode.RANGE, None, parsed_time_from, parsed_time_to
+
+    if not has_time_at and not has_time_from and not has_time_to:
+        today_parsed = _parse_date_yyyy_mm_dd(date.today().isoformat())
+        assert today_parsed is not None
+        return TimeMode.POINT, today_parsed, None, None
+
+    if has_time_at and not has_time_from and not has_time_to:
+        return TimeMode.POINT, parsed_time_at, None, None
+
+    if not has_time_at and has_time_from and has_time_to:
+        if parsed_time_from > parsed_time_to:
+            raise ValueError("time_from 必须早于或等于 time_to")
+        return TimeMode.RANGE, None, parsed_time_from, parsed_time_to
+
+    raise ValueError("时间字段组合无效：请提供单个 time_at，或同时提供 time_from 和 time_to")
 
 
 def _build_entry_request(
@@ -343,33 +620,20 @@ def _build_entry_request(
         for item in enabled_types
         if (item.code or "").strip()
     }
-    requested_code = (str(type_code).strip() if type_code is not None else "").strip()
-    chosen_type = enabled_type_by_code.get(requested_code.lower()) if requested_code else None
-    if not chosen_type:
+    requested_code = _normalize_optional_text(type_code)
+    if requested_code is None:
         chosen_type = default_type
+    else:
+        chosen_type = enabled_type_by_code.get(requested_code.lower())
+        if chosen_type is None:
+            raise ValueError(f"无效的 type_code: {requested_code}")
 
-    today_parsed = _parse_date_yyyy_mm_dd(date.today().isoformat())
-    final_time_mode = TimeMode.POINT
-    final_time_at = today_parsed
-    final_time_from = None
-    final_time_to = None
-
-    mode = (str(time_mode).strip().upper() if isinstance(time_mode, str) and time_mode.strip() else "POINT")
-    if mode not in ("POINT", "RANGE"):
-        mode = "POINT"
-
-    if mode == "POINT":
-        parsed = _parse_date_yyyy_mm_dd(time_at)
-        if parsed:
-            final_time_at = parsed
-    elif mode == "RANGE":
-        from_parsed = _parse_date_yyyy_mm_dd(time_from)
-        to_parsed = _parse_date_yyyy_mm_dd(time_to)
-        if from_parsed and to_parsed and from_parsed <= to_parsed:
-            final_time_mode = TimeMode.RANGE
-            final_time_at = None
-            final_time_from = from_parsed
-            final_time_to = to_parsed
+    final_time_mode, final_time_at, final_time_from, final_time_to = _resolve_entry_time_fields(
+        time_mode=time_mode,
+        time_at=time_at,
+        time_from=time_from,
+        time_to=time_to,
+    )
 
     return EntryRequest.model_validate(
         {
@@ -418,9 +682,9 @@ def create_entry(
         title: 记录标题（可选；为空时会从内容中推断）
         summary: 摘要（可选；为空时会从内容中截取）
         content: 正文内容（必填）
-        type_code: 记录类型编码（可选；为空或无效时使用默认类型）
+        type_code: 记录类型编码（可选；为空时使用默认类型，非空但无效时报错）
         tags: 标签名称列表（可选；大小写不敏感复用，最多新建 5 个）
-        time_mode: 时间模式，"POINT" 或 "RANGE"（可选；默认 "POINT"）
+        time_mode: 时间模式，"POINT" 或 "RANGE"（可选；为空时按提供的时间字段推断，否则默认今天）
         time_at: 当 time_mode="POINT" 时的日期 (YYYY-MM-DD)
         time_from: 当 time_mode="RANGE" 时的起始日期 (YYYY-MM-DD)
         time_to: 当 time_mode="RANGE" 时的结束日期 (YYYY-MM-DD)
@@ -465,9 +729,9 @@ def update_entry(
         title: 记录标题
         summary: 摘要
         content: 正文内容
-        type_code: 记录类型编码
+        type_code: 记录类型编码（为空时使用默认类型，非空但无效时报错）
         tags: 标签名称列表
-        time_mode: 时间模式，"POINT" 或 "RANGE"
+        time_mode: 时间模式，"POINT" 或 "RANGE"（为空时按提供的时间字段推断，否则默认今天）
         time_at: 当 time_mode="POINT" 时的日期 (YYYY-MM-DD)
         time_from: 当 time_mode="RANGE" 时的起始日期 (YYYY-MM-DD)
         time_to: 当 time_mode="RANGE" 时的结束日期 (YYYY-MM-DD)

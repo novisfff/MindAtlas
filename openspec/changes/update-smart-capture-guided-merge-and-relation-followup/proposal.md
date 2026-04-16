@@ -5,7 +5,7 @@
 
 ## What Changes
 - Redefine `smart_capture` as a staged human-guided create-or-merge workflow:
-  - pre-search similar entries from raw input
+  - pre-search similar entries from raw input through shared semantic similarity recall
   - conditional human triage for `create_new` vs `merge_existing`
   - materialize payload after that choice
   - split write confirmation for create vs merge

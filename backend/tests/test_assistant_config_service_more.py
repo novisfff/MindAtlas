@@ -20,16 +20,16 @@ EXPECTED_CONTEXT_CAPTURE_POSITIONS = {
     "tool_tags": (490, 396),
     "llm_materialize": (900, 320),
     "llm_prepare_lookup": (1310, 320),
-    "tool_search_primary": (1720, 245),
-    "tool_search_secondary": (1720, 396),
-    "llm_decide": (2130, 320),
-    "if_route": (2540, 320),
-    "tool_get_existing": (2950, 245),
-    "tool_create": (2950, 396),
-    "llm_merge_rewrite": (3360, 245),
-    "tool_update": (3770, 245),
-    "output_created": (3360, 396),
-    "output_merged": (4180, 245),
+    "tool_search_similar": (1720, 320),
+    "code_pick_top1": (2130, 320),
+    "llm_decide": (2540, 320),
+    "if_route": (2950, 320),
+    "tool_get_existing": (3360, 245),
+    "tool_create": (3360, 396),
+    "llm_merge_rewrite": (3770, 245),
+    "tool_update": (4180, 245),
+    "output_created": (3770, 396),
+    "output_merged": (4590, 245),
 }
 
 
@@ -340,7 +340,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
 
         self.assertIn("新建记录还是修正、合并到已有记录", str(context_field.get("description") or ""))
 
-    def test_standalone_system_workflow_uses_lookup_preparation_and_confidence_gate(self) -> None:
+    def test_standalone_system_workflow_uses_lookup_preparation_and_top1_merge_gate(self) -> None:
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
         svc = AssistantConfigService(self.db)
@@ -357,8 +357,8 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertEqual(start_cfg.get("memoryMode"), "off")
         self.assertIn("llm_prepare_lookup", node_by_id)
         self.assertIn("tool_tags", node_by_id)
-        self.assertIn("tool_search_primary", node_by_id)
-        self.assertIn("tool_search_secondary", node_by_id)
+        self.assertIn("tool_search_similar", node_by_id)
+        self.assertIn("code_pick_top1", node_by_id)
 
         materialize_sources = {
             edge.source_node_id
@@ -374,32 +374,35 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         }
         self.assertEqual(lookup_sources, {"llm_materialize"})
 
-        primary_search_cfg = dict(node_by_id["tool_search_primary"].config or {})
-        primary_bindings = primary_search_cfg.get("inputBindings") or primary_search_cfg.get("input_bindings") or {}
-        self.assertEqual(primary_bindings.get("keyword"), "{{llm_prepare_lookup.search_keyword}}")
-        self.assertEqual(primary_bindings.get("type_code"), "{{llm_prepare_lookup.search_type_code}}")
-        self.assertEqual(primary_bindings.get("time_from"), "{{llm_prepare_lookup.search_time_from}}")
-        self.assertEqual(primary_bindings.get("time_to"), "{{llm_prepare_lookup.search_time_to}}")
-        self.assertNotIn("tag_names", primary_bindings)
+        search_cfg = dict(node_by_id["tool_search_similar"].config or {})
+        search_bindings = search_cfg.get("inputBindings") or search_cfg.get("input_bindings") or {}
+        self.assertEqual(search_cfg.get("toolName") or search_cfg.get("tool_name"), "search_similar_entries")
+        self.assertEqual(search_bindings.get("query"), "{{llm_prepare_lookup.lookup_query}}")
+        self.assertEqual(search_bindings.get("limit"), "8")
 
-        secondary_search_cfg = dict(node_by_id["tool_search_secondary"].config or {})
-        secondary_bindings = secondary_search_cfg.get("inputBindings") or secondary_search_cfg.get("input_bindings") or {}
-        self.assertEqual(secondary_bindings.get("keyword"), "{{llm_prepare_lookup.subject_hint}}")
-        self.assertNotIn("type_code", secondary_bindings)
+        top1_sources = {
+            edge.source_node_id
+            for edge in (workflow.edges or [])
+            if edge.target_node_id == "code_pick_top1"
+        }
+        self.assertEqual(top1_sources, {"tool_search_similar"})
 
         decide_sources = {
             edge.source_node_id
             for edge in (workflow.edges or [])
             if edge.target_node_id == "llm_decide"
         }
-        self.assertEqual(decide_sources, {"tool_search_primary", "tool_search_secondary"})
+        self.assertEqual(decide_sources, {"code_pick_top1"})
 
         decide_cfg = dict(node_by_id["llm_decide"].config or {})
         output_fields = decide_cfg.get("outputFields") or decide_cfg.get("output_fields") or []
-        confidence_field = next(item for item in output_fields if item.get("name") == "confidence")
-        self.assertEqual(confidence_field.get("enum"), ["high", "medium", "low"])
-        self.assertIn("primary_candidates", str(decide_cfg.get("userInput") or decide_cfg.get("user_input") or ""))
-        self.assertIn("secondary_candidates", str(decide_cfg.get("userInput") or decide_cfg.get("user_input") or ""))
+        output_names = {item.get("name") for item in output_fields if isinstance(item, dict)}
+        self.assertEqual(output_names, {"action", "entry_id", "reason"})
+        decide_user_input = str(decide_cfg.get("userInput") or decide_cfg.get("user_input") or "")
+        self.assertIn("top1_candidate", decide_user_input)
+        self.assertIn("candidate_found", decide_user_input)
+        self.assertNotIn("primary_candidates", decide_user_input)
+        self.assertNotIn("secondary_candidates", decide_user_input)
 
         route_cfg = dict(node_by_id["if_route"].config or {})
         branches = route_cfg.get("branches") or []
@@ -407,10 +410,19 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         merge_conditions = merge_branch.get("conditions") or []
         self.assertIn(
             {
-                "id": "merge_confidence",
-                "variable": "llm_decide.confidence",
+                "id": "merge_action",
+                "variable": "llm_decide.action",
                 "operator": "is",
-                "value": "high",
+                "value": "merge",
+            },
+            merge_conditions,
+        )
+        self.assertIn(
+            {
+                "id": "merge_entry_id",
+                "variable": "llm_decide.entry_id",
+                "operator": "is_not_empty",
+                "value": "",
             },
             merge_conditions,
         )
@@ -461,7 +473,8 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
 
         self.assertIn("稳定主体/持久对象", lookup_prompt)
         self.assertIn("不要把整句原文照抄", lookup_prompt)
-        self.assertIn("不能单独支撑 high merge", decide_prompt)
+        self.assertIn("只负责找候选", decide_prompt)
+        self.assertIn("宁可多建一条，也不要错并", decide_prompt)
         self.assertIn("兜底默认值", merge_prompt)
         self.assertIn("今天", merge_prompt)
 

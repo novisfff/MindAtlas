@@ -4,7 +4,7 @@
 - The current workflow engine does not support convenient reconvergence of mutually exclusive branches, so the upgraded `smart_capture` should favor explicit lane-based topology instead of trying to generalize DAG branch-merge semantics in the same change.
 
 ## Goals
-- Let `smart_capture` search for similar entries before field materialization.
+- Let `smart_capture` search for similar entries before field materialization through the shared LightRAG-backed semantic retrieval tool.
 - Make merge vs create a human-selected decision.
 - Keep a second human write gate before `create_entry` or `update_entry`.
 - Add reusable batch relation confirmation via `human_in_loop.checkbox_group`.
@@ -18,6 +18,7 @@
 ## Decisions
 - Add `checkbox_group` as a first-class `human_in_loop` widget for array fields.
 - Preserve object options end-to-end for `select`, `radio`, and `checkbox_group`, while keeping legacy string option lists valid.
+- Replace the old precise/broad duplicate lookup idea with one semantic recall call to `search_similar_entries`, then let an LLM filter and rank the returned candidates before human triage.
 - Rebuild `smart_capture` as explicit straight-line lanes:
   - direct create lane when no similar candidates exist
   - triaged create lane when candidates exist but the user chooses `create_new`

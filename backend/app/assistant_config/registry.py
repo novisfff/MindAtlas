@@ -96,6 +96,16 @@ _SYSTEM_TOOL_DISPLAY_METADATA: dict[str, dict[str, dict[str, str]]] = {
             "source_description": "Search saved entries by keyword, type, tags, or time range.",
         },
     },
+    "search_similar_entries": {
+        "zh": {
+            "source_name": "检索相似记录",
+            "source_description": "通过 LightRAG 向量召回与输入语义相近的记录候选。",
+        },
+        "en": {
+            "source_name": "Search Similar Entries",
+            "source_description": "Use LightRAG vector recall to find semantically similar entry candidates.",
+        },
+    },
     "get_entry_detail": {
         "zh": {
             "source_name": "获取记录详情",
@@ -251,6 +261,16 @@ class ToolRegistry(_BaseRegistry):
                 "name": "items",
                 "param_type": "array",
                 "description": "记录列表。元素字段：id(string), title(string), content(string), type(string), type_code(string), summary(string), tags(array[string]), time_mode(string), time_at(string|null, ISO8601), time_from(string|null, ISO8601), time_to(string|null, ISO8601), created_at(string, ISO8601), updated_at(string, ISO8601)。",
+            },
+        ],
+        "search_similar_entries": [
+            {"name": "status", "param_type": "string", "description": "召回状态（ok 或 unavailable）。"},
+            {"name": "message", "param_type": "string", "description": "召回结果说明。"},
+            {"name": "total", "param_type": "number", "description": "返回的候选记录数量。"},
+            {
+                "name": "items",
+                "param_type": "array",
+                "description": "相似记录候选列表。元素字段：id(string), title(string), content(string), type(string), type_code(string), summary(string), tags(array[string]), time_mode(string), time_at(string|null, ISO8601), time_from(string|null, ISO8601), time_to(string|null, ISO8601), created_at(string, ISO8601), updated_at(string, ISO8601), retrieval_rank(number), matched_source_kinds(array[string]), matched_snippets(array[string])。",
             },
         ],
         "create_relation": [

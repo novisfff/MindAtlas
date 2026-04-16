@@ -4,6 +4,7 @@ from typing import Any
 
 _EXPORTS: dict[str, tuple[str, str]] = {
     "search_entries": ("app.assistant.tools.entry_tools", "search_entries"),
+    "search_similar_entries": ("app.assistant.tools.entry_tools", "search_similar_entries"),
     "get_entry_detail": ("app.assistant.tools.entry_tools", "get_entry_detail"),
     "create_entry": ("app.assistant.tools.entry_tools", "create_entry"),
     "update_entry": ("app.assistant.tools.entry_tools", "update_entry"),
@@ -28,6 +29,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
 
 __all__ = [
     "search_entries",
+    "search_similar_entries",
     "get_entry_detail",
     "create_entry",
     "update_entry",
