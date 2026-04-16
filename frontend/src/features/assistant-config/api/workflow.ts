@@ -336,6 +336,7 @@ export type NodeConfig =
 export interface WorkflowHumanApproval {
   id: string
   runId: string
+  runtimeWaiting?: boolean
   channelType: string
   conversationId: string | null
   messageId: string | null

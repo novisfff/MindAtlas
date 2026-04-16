@@ -38,6 +38,7 @@ import type {
   NodeType,
   StartStructuredField,
   WorkflowCopilotTestRunContext,
+  WorkflowHumanApproval,
   WorkflowTestSessionMemory,
 } from '../../api/workflow'
 import { WorkflowEditorSurfaceShell } from './WorkflowEditorSurfaceShell'
@@ -251,21 +252,22 @@ export function WorkflowTestRunPanel({ open, workflowId, startInputMode, onAnaly
   }, [activeTab, isConversationMode])
 
   const handleSubmitApprovalDecision = async (
-    approvalId: string,
+    approval: WorkflowHumanApproval,
     payload: { decision: 'approved' | 'rejected'; values: Record<string, unknown>; comment?: string },
   ) => {
-    if (!activeRunId) {
+    const targetRunId = `${approval.runId || activeRunId || ''}`.trim()
+    if (!targetRunId) {
       toast.error(t('settings.skills.humanApproval.noActiveRun'))
       return
     }
-    setSubmittingApprovalId(approvalId)
+    setSubmittingApprovalId(approval.id)
     try {
-      const approval = await submitWorkflowRunApprovalDecision(activeRunId, approvalId, payload)
+      const resolvedApproval = await submitWorkflowRunApprovalDecision(targetRunId, approval.id, payload)
       ingestEvent({
         event: 'human_approval_resolved',
         data: {
-          runId: activeRunId,
-          approval,
+          runId: targetRunId,
+          approval: resolvedApproval,
           ts: new Date().toISOString(),
         },
       })
@@ -827,7 +829,7 @@ export function WorkflowTestRunPanel({ open, workflowId, startInputMode, onAnaly
                         key={approval.id}
                         approval={approval}
                         submitting={submittingApprovalId === approval.id}
-                        onSubmit={(payload) => handleSubmitApprovalDecision(approval.id, payload)}
+                        onSubmit={(payload) => handleSubmitApprovalDecision(approval, payload)}
                       />
                     ))}
                   </div>
