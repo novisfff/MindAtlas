@@ -506,11 +506,27 @@ def build_node_snapshot_input(
             parsed = rt.parse_loose_json_value(rendered)
             try:
                 field_name = str(field.get("name", ""))
-                resolved_initial_values[field_name] = rt.coerce_human_field_value(
+                coerced_value = rt.coerce_human_field_value(
                     field_name,
                     str(field.get("type", "string")),
                     parsed,
                 )
+                field_widget = str(field.get("widget", "") or "").strip().lower()
+                if field_widget == "date":
+                    coerced_value = rt.validate_human_field_date_value(
+                        field_name=field_name,
+                        value=coerced_value,
+                        error_cls=RuntimeError,
+                        subject="human_in_loop field",
+                    )
+                elif field_widget == "time":
+                    coerced_value = rt.validate_human_field_time_value(
+                        field_name=field_name,
+                        value=coerced_value,
+                        error_cls=RuntimeError,
+                        subject="human_in_loop field",
+                    )
+                resolved_initial_values[field_name] = coerced_value
             except Exception:
                 field_name = str(field.get("name", ""))
                 resolved_initial_values[field_name] = rendered

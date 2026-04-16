@@ -306,6 +306,104 @@ class WorkflowHumanInLoopNodeTests(unittest.TestCase):
         )
         self.assertEqual(preview["initialValues"], {"relations": ["entry-2"]})
 
+    def test_runtime_normalizes_iso_datetime_initial_value_for_date_widget(self) -> None:
+        from app.assistant.workflow.engine.node_builders.human_in_loop_node import build_human_in_loop_node  # noqa: E402
+        from app.assistant.workflow.human_approval_runtime import HumanLoopRuntime  # noqa: E402
+
+        captured: dict[str, object] = {}
+
+        class FakeRuntime(HumanLoopRuntime):
+            def __init__(self) -> None:
+                pass
+
+            def create_and_wait(self, **kwargs):  # noqa: ANN003
+                captured.update(kwargs)
+                return {
+                    "id": "approval-date-1",
+                    "decision": "approved",
+                    "submittedValues": {},
+                    "comment": "",
+                }
+
+        node_fn = build_human_in_loop_node(
+            "human_confirm_date",
+            {
+                "__node_label": "日期确认",
+                "title": "确认日期",
+                "instruction": "请确认日期",
+                "approveLabel": "继续",
+                "rejectLabel": "取消",
+                "requireRejectComment": False,
+                "fields": [
+                    {
+                        "name": "time_at",
+                        "label": "时间点",
+                        "type": "string",
+                        "widget": "date",
+                        "required": False,
+                        "valueTemplate": "{{llm_duplicate_notice.time_at}}",
+                    }
+                ],
+            },
+        )
+        node_outputs = self._node_outputs()
+        node_outputs["llm_duplicate_notice"]["json_fields"]["time_at"] = "2026-04-16T00:00:00+00:00"
+
+        node_fn(
+            {
+                "metadata": {"human_loop_runtime": FakeRuntime()},
+                "node_outputs": node_outputs,
+                "sys_vars": {"date": "2026-04-15"},
+                "env_vars": {},
+            }
+        )
+
+        self.assertEqual(captured["initial_values"], {"time_at": "2026-04-16"})
+
+    def test_snapshot_preview_normalizes_iso_datetime_initial_value_for_date_widget(self) -> None:
+        from app.assistant.workflow.engine.snapshot_input_resolvers import (  # noqa: E402
+            SnapshotInputContext,
+            build_node_snapshot_input,
+        )
+
+        preview = build_node_snapshot_input(
+            "human_in_loop",
+            {
+                "title": "确认日期",
+                "instruction": "请确认日期",
+                "approveLabel": "继续",
+                "rejectLabel": "取消",
+                "fields": [
+                    {
+                        "name": "time_at",
+                        "label": "时间点",
+                        "type": "string",
+                        "widget": "date",
+                        "required": False,
+                        "valueTemplate": "{{llm_duplicate_notice.time_at}}",
+                    }
+                ],
+            },
+            SnapshotInputContext(
+                state={"user_input": "", "structured_input": {}},
+                node_outputs={
+                    "llm_duplicate_notice": {
+                        "status": "ok",
+                        "text": "",
+                        "raw": {"time_at": "2026-04-16T00:00:00+00:00"},
+                        "json_fields": {"time_at": "2026-04-16T00:00:00+00:00"},
+                    }
+                },
+                start_inputs={"user_input": ""},
+                sys_vars={},
+                env_vars={},
+                env_specs={},
+                text_preview_limit=8000,
+            ),
+        )
+
+        self.assertEqual(preview["initialValues"], {"time_at": "2026-04-16"})
+
 
 if __name__ == "__main__":
     unittest.main()

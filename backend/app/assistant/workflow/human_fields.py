@@ -275,6 +275,12 @@ def validate_human_field_date_value(
     text = str(value).strip()
     if not text:
         return ""
+    if text.lower() == "null":
+        return ""
+    if "T" in text:
+        text = text.split("T", 1)[0].strip()
+    elif len(text) >= 10 and text[4:5] == "-" and text[7:8] == "-":
+        text = text[:10]
     if not HUMAN_FIELD_DATE_RE.fullmatch(text):
         _raise_field_error(
             error_cls=error_cls,

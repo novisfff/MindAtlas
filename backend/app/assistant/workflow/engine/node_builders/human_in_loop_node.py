@@ -13,6 +13,7 @@ from app.assistant.workflow.engine.runtime_helpers import (
     parse_loose_json_value,
     resolve_node_template_vars,
 )
+from app.assistant.workflow.human_fields import validate_human_field_date_value, validate_human_field_time_value
 from app.assistant.workflow.engine.state import NodeOutput, WorkflowState
 from app.assistant.workflow.human_approval_runtime import HumanLoopRuntime
 
@@ -88,7 +89,22 @@ def build_human_in_loop_node(
             )
             parsed = parse_loose_json_value(rendered)
             try:
-                initial_values[field_name] = coerce_human_field_value(field_name, field_type, parsed)
+                coerced_value = coerce_human_field_value(field_name, field_type, parsed)
+                if field_widget == "date":
+                    coerced_value = validate_human_field_date_value(
+                        field_name=field_name,
+                        value=coerced_value,
+                        error_cls=RuntimeError,
+                        subject="human_in_loop field",
+                    )
+                elif field_widget == "time":
+                    coerced_value = validate_human_field_time_value(
+                        field_name=field_name,
+                        value=coerced_value,
+                        error_cls=RuntimeError,
+                        subject="human_in_loop field",
+                    )
+                initial_values[field_name] = coerced_value
             except Exception:
                 initial_values[field_name] = rendered
 
