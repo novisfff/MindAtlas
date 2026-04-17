@@ -14,6 +14,11 @@ type WorkflowReadonlyPreviewProps = {
 
 function WorkflowReadonlyPreviewInner({ skill, workflow, onOpenEditor }: WorkflowReadonlyPreviewProps) {
   const { t } = useTranslation()
+  const previewSourceKey = workflow
+    ? `workflow:${workflow.id}:${workflow.updatedAt}:${workflow.workflowVersion}`
+    : skill
+      ? `skill:${skill.id}:${skill.updatedAt}:${skill.workflowVersion ?? 'na'}`
+      : 'workflow-preview:empty'
 
   const { nodes, edges } = useMemo(() => {
     if (!skill && !workflow) {
@@ -41,14 +46,14 @@ function WorkflowReadonlyPreviewInner({ skill, workflow, onOpenEditor }: Workflo
           onOpenEditor()
         }
       }}
-      className="w-full rounded-xl border border-primary/20 bg-primary/5 p-4 cursor-pointer hover:border-primary/40 hover:bg-primary/10 transition-colors"
+      className="w-full cursor-pointer rounded-[24px] border border-white/80 bg-white/92 p-4 shadow-[0_18px_44px_rgba(15,23,42,0.08)] ring-1 ring-slate-900/5 backdrop-blur-xl transition-colors hover:border-slate-200/90 hover:bg-white/96"
     >
       <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-primary">
+        <div className="flex items-center gap-2 text-slate-800">
           <Workflow className="w-4 h-4" />
           <span className="text-sm font-semibold">{t('settings.skills.workflowPreviewTitle')}</span>
         </div>
-        <ArrowRight className="w-4 h-4 text-primary/70" />
+        <ArrowRight className="w-4 h-4 text-slate-400" />
       </div>
       <p className="mt-1 text-xs text-muted-foreground">{t('settings.skills.workflowPreviewDesc')}</p>
 
@@ -58,14 +63,15 @@ function WorkflowReadonlyPreviewInner({ skill, workflow, onOpenEditor }: Workflo
         </div>
       ) : (
         <WorkflowReadonlyCanvas
-          className="mt-3 h-56 overflow-hidden rounded-lg border bg-background"
+          key={previewSourceKey}
+          className="mt-3 h-56 overflow-hidden rounded-[20px] border border-slate-200/80 bg-[linear-gradient(180deg,rgba(248,250,252,0.88),rgba(255,255,255,0.96))] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.75)]"
           nodes={nodes}
           edges={edges}
           variant="thumbnail"
         />
       )}
 
-      <div className="mt-3 text-xs font-medium text-primary">{t('settings.skills.workflowPreviewOpen')}</div>
+      <div className="mt-3 text-xs font-medium text-slate-700">{t('settings.skills.workflowPreviewOpen')}</div>
     </div>
   )
 }

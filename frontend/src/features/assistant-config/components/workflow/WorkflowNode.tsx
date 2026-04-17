@@ -35,23 +35,24 @@ import {
   estimateContainerNodeSizeFromConfig,
   getIfElseNodeHeight,
 } from './workflowGeometry'
+import { resolveWorkflowNodeTone } from './workflowNodeVisuals'
 
-const NODE_STYLES: Record<NodeType, { header: string; icon: typeof Play; iconColor: string }> = {
-  start: { header: 'bg-gradient-to-r from-emerald-100/90 to-green-100/90 border-b border-emerald-200', icon: Play, iconColor: 'text-emerald-700' },
-  llm: { header: 'bg-gradient-to-r from-violet-100/90 to-purple-100/90 border-b border-violet-200', icon: Brain, iconColor: 'text-violet-700' },
-  agent: { header: 'bg-gradient-to-r from-indigo-100/90 to-sky-100/90 border-b border-indigo-200', icon: Bot, iconColor: 'text-indigo-700' },
-  tool: { header: 'bg-gradient-to-r from-sky-100/90 to-blue-100/90 border-b border-sky-200', icon: Wrench, iconColor: 'text-sky-700' },
-  workflow_call: { header: 'bg-gradient-to-r from-emerald-100/90 to-teal-100/90 border-b border-emerald-200', icon: Network, iconColor: 'text-emerald-700' },
-  if_else: { header: 'bg-gradient-to-r from-amber-100/90 to-yellow-100/90 border-b border-amber-200', icon: GitBranch, iconColor: 'text-amber-700' },
-  parameter_extractor: { header: 'bg-gradient-to-r from-fuchsia-100/90 to-pink-100/90 border-b border-fuchsia-200', icon: ScanSearch, iconColor: 'text-fuchsia-700' },
-  knowledge_retrieval: { header: 'bg-gradient-to-r from-teal-100/90 to-emerald-100/90 border-b border-teal-200', icon: BookOpen, iconColor: 'text-teal-700' },
-  iteration: { header: 'bg-gradient-to-r from-cyan-100/90 to-sky-100/90 border-b border-cyan-200', icon: RefreshCw, iconColor: 'text-cyan-700' },
-  loop: { header: 'bg-gradient-to-r from-indigo-100/90 to-blue-100/90 border-b border-indigo-200', icon: Infinity, iconColor: 'text-indigo-700' },
-  code_executor: { header: 'bg-gradient-to-r from-orange-100/90 to-amber-100/90 border-b border-orange-200', icon: FileCode2, iconColor: 'text-orange-700' },
-  http_request: { header: 'bg-gradient-to-r from-blue-100/90 to-indigo-100/90 border-b border-blue-200', icon: Globe, iconColor: 'text-blue-700' },
-  variable_assign: { header: 'bg-gradient-to-r from-lime-100/90 to-emerald-100/90 border-b border-lime-200', icon: Equal, iconColor: 'text-lime-700' },
-  human_in_loop: { header: 'bg-gradient-to-r from-blue-100/90 to-cyan-100/90 border-b border-blue-200', icon: UserCheck, iconColor: 'text-blue-700' },
-  output: { header: 'bg-gradient-to-r from-rose-100/90 to-orange-100/90 border-b border-rose-200', icon: SendHorizontal, iconColor: 'text-rose-700' },
+const NODE_ICON_MAP: Record<NodeType, typeof Play> = {
+  start: Play,
+  llm: Brain,
+  agent: Bot,
+  tool: Wrench,
+  workflow_call: Network,
+  if_else: GitBranch,
+  parameter_extractor: ScanSearch,
+  knowledge_retrieval: BookOpen,
+  iteration: RefreshCw,
+  loop: Infinity,
+  code_executor: FileCode2,
+  http_request: Globe,
+  variable_assign: Equal,
+  human_in_loop: UserCheck,
+  output: SendHorizontal,
 }
 const HANDLE_CLICK_THRESHOLD = 5
 const CONTAINER_INPUT_HANDLE_ID = 'container_input'
@@ -388,8 +389,8 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
   const setSelectedSubflowSelection = useWorkflowEditorStore((s) => s.setSelectedSubflowSelection)
   const updateNodeInternals = useUpdateNodeInternals()
   const isSelected = selectedNodeId === id
-  const style = NODE_STYLES[nodeData.nodeType] ?? NODE_STYLES.llm
-  const Icon = style.icon
+  const tone = resolveWorkflowNodeTone(nodeData.nodeType)
+  const Icon = NODE_ICON_MAP[nodeData.nodeType] ?? Brain
   const runtimeStatusRaw = (nodeData as { runtimeStatus?: unknown }).runtimeStatus
   const runtimeStatus = runtimeStatusRaw === 'running' || runtimeStatusRaw === 'success' || runtimeStatusRaw === 'error'
     ? (runtimeStatusRaw as RuntimeStatus)
@@ -560,8 +561,8 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
       }}
     >
       {/* Header */}
-      <div className={`flex items-center gap-2 px-3 py-1.5 rounded-t-xl ${style.header}`}>
-        <div className={`p-1 rounded-md bg-white/80 shadow-sm ${style.iconColor}`}>
+      <div className={`flex items-center gap-2 px-3 py-1.5 rounded-t-xl ${tone.editorHeaderClass}`}>
+        <div className={`p-1 rounded-md bg-white/80 shadow-sm ${tone.editorIconColorClass}`}>
           <Icon className="w-3.5 h-3.5" />
         </div>
         <span className="text-xs font-semibold text-foreground/90 truncate flex-1">
