@@ -1,7 +1,11 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { X } from 'lucide-react'
-import type { HumanApprovalFieldSchema, HumanApprovalFieldWidget } from './types'
+import type {
+  HumanApprovalFieldSchema,
+  HumanApprovalFieldWidget,
+  HumanApprovalOption,
+} from './types'
 
 interface HumanApprovalFieldFormProps {
   fields: HumanApprovalFieldSchema[]
@@ -22,16 +26,38 @@ function normalizeWidget(field: HumanApprovalFieldSchema): HumanApprovalFieldWid
   return defaultWidgetForType(field.type)
 }
 
-function normalizeOptions(field: HumanApprovalFieldSchema): string[] {
+type NormalizedOption = {
+  value: string
+  label: string
+  description?: string
+}
+
+function normalizeOptions(field: HumanApprovalFieldSchema): NormalizedOption[] {
   if (!Array.isArray(field.options)) return []
-  const deduped: string[] = []
+  const deduped: NormalizedOption[] = []
   const seen = new Set<string>()
-  field.options.forEach((item) => {
-    if (typeof item !== 'string') return
-    const text = item.trim()
-    if (!text || seen.has(text)) return
-    seen.add(text)
-    deduped.push(text)
+  field.options.forEach((item: HumanApprovalOption) => {
+    let normalized: NormalizedOption | null = null
+    if (typeof item === 'string') {
+      const text = item.trim()
+      if (text) {
+        normalized = { value: text, label: text }
+      }
+    } else if (item && typeof item === 'object') {
+      const value = String(item.value ?? '').trim()
+      const label = String(item.label ?? value).trim()
+      const description = String(item.description ?? '').trim()
+      if (value && label) {
+        normalized = {
+          value,
+          label,
+          ...(description ? { description } : {}),
+        }
+      }
+    }
+    if (!normalized || seen.has(normalized.value)) return
+    seen.add(normalized.value)
+    deduped.push(normalized)
   })
   return deduped
 }
@@ -123,20 +149,20 @@ function TagSelectorField({ field, value, disabled, onChange }: TagSelectorField
       {options.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {options.map((option) => {
-            const active = selected.includes(option)
+            const active = selected.includes(option.value)
             return (
               <button
-                key={option}
+                key={option.value}
                 type="button"
                 disabled={disabled}
-                onClick={() => toggleOption(option)}
+                onClick={() => toggleOption(option.value)}
                 className={`rounded-full border px-2 py-1 text-[11px] ${
                   active
                     ? 'border-primary/40 bg-primary/10 text-primary'
                     : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                 }`}
               >
-                {option}
+                {option.label}
               </button>
             )
           })}
@@ -229,7 +255,7 @@ export function HumanApprovalFieldForm({
               >
                 <option value="">-</option>
                 {options.map((option) => (
-                  <option key={option} value={option}>{option}</option>
+                  <option key={option.value} value={option.value}>{option.label}</option>
                 ))}
               </select>
             ) : null}
@@ -237,17 +263,56 @@ export function HumanApprovalFieldForm({
             {widget === 'radio' ? (
               <div className="space-y-1">
                 {options.map((option) => (
-                  <label key={option} className="inline-flex items-center gap-2 text-xs text-slate-700">
+                  <label key={option.value} className="flex items-start gap-2 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700">
                     <input
                       type="radio"
                       name={`approval-${field.name}`}
-                      checked={toStringValue(value) === option}
-                      onChange={() => onChange(field.name, option)}
+                      checked={toStringValue(value) === option.value}
+                      onChange={() => onChange(field.name, option.value)}
                       disabled={disabled}
+                      className="mt-0.5"
                     />
-                    {option}
+                    <span className="min-w-0">
+                      <span className="block font-medium text-slate-700">{option.label}</span>
+                      {option.description ? (
+                        <span className="mt-0.5 block text-[11px] text-slate-500">{option.description}</span>
+                      ) : null}
+                    </span>
                   </label>
                 ))}
+              </div>
+            ) : null}
+
+            {widget === 'checkbox_group' ? (
+              <div className="space-y-1.5">
+                {options.map((option) => {
+                  const selectedValues = new Set(toStringArray(value))
+                  const checked = selectedValues.has(option.value)
+                  return (
+                    <label key={option.value} className="flex items-start gap-2 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={disabled}
+                        className="mt-0.5"
+                        onChange={(event) => {
+                          const current = toStringArray(value)
+                          if (event.target.checked) {
+                            onChange(field.name, [...new Set([...current, option.value])])
+                            return
+                          }
+                          onChange(field.name, current.filter((item) => item !== option.value))
+                        }}
+                      />
+                      <span className="min-w-0">
+                        <span className="block font-medium text-slate-700">{option.label}</span>
+                        {option.description ? (
+                          <span className="mt-0.5 block text-[11px] text-slate-500">{option.description}</span>
+                        ) : null}
+                      </span>
+                    </label>
+                  )
+                })}
               </div>
             ) : null}
 

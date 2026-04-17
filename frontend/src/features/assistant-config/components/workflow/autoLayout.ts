@@ -1,48 +1,24 @@
 import dagre from 'dagre'
 import type { Edge, Node } from '@xyflow/react'
-import type { ContainerBodyEdge, ContainerBodyNode } from '../../api/workflow'
+import type { ContainerBodyEdge, ContainerBodyNode, ContainerBodyNodeType } from '../../api/workflow'
 import type { WfNodeData } from '../../stores/workflow-editor-store'
-import { estimateContainerNodeSizeFromConfig } from './containerLayout'
-import { normalizeIfElseConfig } from './ifElseConfig'
-
-const DEFAULT_NODE_SIZE: Record<string, { width: number; height: number }> = {
-  start: { width: 160, height: 64 },
-  llm: { width: 260, height: 120 },
-  tool: { width: 260, height: 120 },
-  if_else: { width: 300, height: 160 },
-  parameter_extractor: { width: 260, height: 96 },
-  knowledge_retrieval: { width: 260, height: 96 },
-  code_executor: { width: 260, height: 128 },
-  http_request: { width: 260, height: 120 },
-  variable_assign: { width: 260, height: 112 },
-  human_in_loop: { width: 260, height: 152 },
-  iteration: { width: 320, height: 220 },
-  loop: { width: 320, height: 220 },
-  output: { width: 260, height: 112 },
-}
-
-const SUBFLOW_NODE_SIZE: Record<string, { width: number; height: number }> = {
-  start: { width: 240, height: 96 },
-  llm: { width: 240, height: 112 },
-  tool: { width: 240, height: 112 },
-  if_else: { width: 240, height: 160 },
-  parameter_extractor: { width: 240, height: 112 },
-  knowledge_retrieval: { width: 240, height: 112 },
-  code_executor: { width: 240, height: 128 },
-  http_request: { width: 240, height: 116 },
-  variable_assign: { width: 240, height: 112 },
-  human_in_loop: { width: 240, height: 152 },
-}
+import {
+  CONTAINER_NODE_HANDLE_TOP,
+  MAIN_NODE_HANDLE_TOP,
+  SUBFLOW_NODE_HANDLE_TOP,
+  estimateMainNodeSizeWithOptions,
+  getSubflowNodeFrame,
+  isMultiOutputNodeType,
+} from './workflowGeometry'
 
 const HORIZONTAL_ALIGN_MAX_CENTER_DELTA = 96
 const HORIZONTAL_ALIGN_COLLISION_PADDING = 20
-const MAIN_NODE_HANDLE_TOP = 28
-const MAIN_CONTAINER_NODE_HANDLE_TOP = 20
-const SUBFLOW_NODE_HANDLE_TOP = 20
+const SUBFLOW_LAYOUT_ORIGIN_X = 40
+const SUBFLOW_LAYOUT_ORIGIN_Y = 56
 
 type LinearLayoutNode = {
   id: string
-  nodeType: string
+  nodeType: WfNodeData['nodeType'] | ContainerBodyNodeType
   width: number
   height: number
   linearHandleTop: number
@@ -60,28 +36,70 @@ type NodeBounds = {
   bottom: number
 }
 
+type SubflowLayoutBounds = {
+  width: number
+  height: number
+}
+
 function getNodeSize(node: Node<WfNodeData>): { width: number; height: number } {
-  if ((node.data.nodeType === 'iteration' || node.data.nodeType === 'loop') && node.data.config) {
-    const dynamic = estimateContainerNodeSizeFromConfig(node.data.config)
-    return { width: dynamic.width, height: dynamic.height }
-  }
-  const measured = (node as unknown as { measured?: { width?: number; height?: number } }).measured
-  const fallback = DEFAULT_NODE_SIZE[node.data.nodeType] ?? { width: 240, height: 96 }
-  const width = node.width ?? measured?.width ?? fallback.width
-  const height = node.height ?? measured?.height ?? fallback.height
-  return { width, height }
+  return estimateMainNodeSizeWithOptions(node, { preferMeasured: false })
 }
 
 function getSubflowNodeSize(node: ContainerBodyNode): { width: number; height: number } {
-  const fallback = SUBFLOW_NODE_SIZE[node.nodeType] ?? SUBFLOW_NODE_SIZE.llm
-  if (node.nodeType !== 'if_else') return fallback
-  const normalized = normalizeIfElseConfig((node.config ?? {}) as Record<string, unknown>)
-  const branchCount = Math.max(1, normalized.branches.length + 1)
-  const ifElseHeight = Math.max(126, 50 + branchCount * 28 + 24)
-  return {
-    width: fallback.width,
-    height: Math.max(fallback.height, ifElseHeight),
+  return getSubflowNodeFrame(node.nodeType, (node.config ?? null) as Record<string, unknown> | null)
+}
+
+function normalizeSubflowBodyNodePositions(bodyNodes: ContainerBodyNode[]): ContainerBodyNode[] {
+  return bodyNodes.map((node, index) => ({
+    ...node,
+    positionX: Number.isFinite(Number(node.positionX)) ? Number(node.positionX) : 26 + index * 260,
+    positionY: Number.isFinite(Number(node.positionY)) ? Number(node.positionY) : 64,
+  }))
+}
+
+function measureSubflowLayoutBounds(bodyNodes: ContainerBodyNode[]): SubflowLayoutBounds {
+  if (bodyNodes.length === 0) {
+    return { width: 0, height: 0 }
   }
+  let minX = Number.POSITIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY
+  let maxRight = Number.NEGATIVE_INFINITY
+  let maxBottom = Number.NEGATIVE_INFINITY
+
+  bodyNodes.forEach((node) => {
+    const x = Number(node.positionX ?? 0)
+    const y = Number(node.positionY ?? 0)
+    const size = getSubflowNodeSize(node)
+    minX = Math.min(minX, x)
+    minY = Math.min(minY, y)
+    maxRight = Math.max(maxRight, x + size.width)
+    maxBottom = Math.max(maxBottom, y + size.height)
+  })
+
+  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxRight) || !Number.isFinite(maxBottom)) {
+    return { width: 0, height: 0 }
+  }
+
+  return {
+    width: Math.max(0, Math.round(maxRight - minX)),
+    height: Math.max(0, Math.round(maxBottom - minY)),
+  }
+}
+
+function normalizeSubflowLayoutOrigin(nodes: ContainerBodyNode[]): ContainerBodyNode[] {
+  let minX = Number.POSITIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY
+  nodes.forEach((node) => {
+    minX = Math.min(minX, Number(node.positionX ?? 0))
+    minY = Math.min(minY, Number(node.positionY ?? 0))
+  })
+  const shiftX = Number.isFinite(minX) ? SUBFLOW_LAYOUT_ORIGIN_X - minX : 0
+  const shiftY = Number.isFinite(minY) ? SUBFLOW_LAYOUT_ORIGIN_Y - minY : 0
+  return nodes.map((node) => ({
+    ...node,
+    positionX: Math.round(Number(node.positionX ?? 0) + shiftX),
+    positionY: Math.round(Number(node.positionY ?? 0) + shiftY),
+  }))
 }
 
 function boundsFromPosition(
@@ -137,7 +155,7 @@ function alignHorizontalLinearChains(
     const sourceNode = nodesById.get(edge.sourceId)
     const targetNode = nodesById.get(edge.targetId)
     if (!sourceNode || !targetNode) return
-    if (sourceNode.nodeType === 'if_else' || targetNode.nodeType === 'if_else') return
+    if (isMultiOutputNodeType(sourceNode.nodeType) || isMultiOutputNodeType(targetNode.nodeType)) return
     if ((outDegree.get(edge.sourceId) ?? 0) !== 1) return
     if ((inDegree.get(edge.targetId) ?? 0) !== 1) return
 
@@ -230,7 +248,7 @@ function alignHorizontalLinearChains(
 
 function resolveMainLinearHandleTop(nodeType: WfNodeData['nodeType']): number {
   if (nodeType === 'iteration' || nodeType === 'loop') {
-    return MAIN_CONTAINER_NODE_HANDLE_TOP
+    return CONTAINER_NODE_HANDLE_TOP
   }
   return MAIN_NODE_HANDLE_TOP
 }
@@ -328,18 +346,14 @@ export function autoLayoutContainerBodyNodes(
 ): ContainerBodyNode[] {
   if (bodyNodes.length === 0) return bodyNodes
 
-  const normalizedNodes = bodyNodes.map((node, index) => ({
-    ...node,
-    positionX: Number.isFinite(Number(node.positionX)) ? Number(node.positionX) : 26 + index * 260,
-    positionY: Number.isFinite(Number(node.positionY)) ? Number(node.positionY) : 64,
-  }))
+  const normalizedNodes = normalizeSubflowBodyNodePositions(bodyNodes)
 
   const graph = new dagre.graphlib.Graph()
   graph.setDefaultEdgeLabel(() => ({}))
   graph.setGraph({
     rankdir: 'LR',
-    ranksep: 130,
-    nodesep: 52,
+    ranksep: 84,
+    nodesep: 40,
     marginx: 20,
     marginy: 20,
   })
@@ -357,20 +371,6 @@ export function autoLayoutContainerBodyNodes(
 
   dagre.layout(graph)
 
-  const startNode = normalizedNodes.find((node) => node.nodeType === 'start')
-  const anchorNode = startNode ?? normalizedNodes[0]
-  const anchorTarget = graph.node(anchorNode.nodeId) as { x: number; y: number } | undefined
-  const anchorSize = getSubflowNodeSize(anchorNode)
-  const anchorCurrent = {
-    x: Number(anchorNode.positionX ?? 0),
-    y: Number(anchorNode.positionY ?? 0),
-  }
-  const anchorLaidOut = anchorTarget
-    ? { x: anchorTarget.x - anchorSize.width / 2, y: anchorTarget.y - anchorSize.height / 2 }
-    : anchorCurrent
-  const offsetX = anchorCurrent.x - anchorLaidOut.x
-  const offsetY = anchorCurrent.y - anchorLaidOut.y
-
   const positionMap = new Map<string, { x: number; y: number }>()
   normalizedNodes.forEach((node) => {
     const dagreNode = graph.node(node.nodeId) as { x: number; y: number } | undefined
@@ -383,8 +383,8 @@ export function autoLayoutContainerBodyNodes(
     }
     const size = getSubflowNodeSize(node)
     positionMap.set(node.nodeId, {
-      x: Math.round(dagreNode.x - size.width / 2 + offsetX),
-      y: Math.round(dagreNode.y - size.height / 2 + offsetY),
+      x: Math.round(dagreNode.x - size.width / 2),
+      y: Math.round(dagreNode.y - size.height / 2),
     })
   })
 
@@ -405,7 +405,7 @@ export function autoLayoutContainerBodyNodes(
   }))
   const alignedPositionMap = alignHorizontalLinearChains(layoutNodes, layoutEdges, positionMap)
 
-  return normalizedNodes.map((node) => {
+  return normalizeSubflowLayoutOrigin(normalizedNodes.map((node) => {
     const nextPosition = alignedPositionMap.get(node.nodeId)
     if (!nextPosition) return node
     return {
@@ -413,7 +413,36 @@ export function autoLayoutContainerBodyNodes(
       positionX: nextPosition.x,
       positionY: nextPosition.y,
     }
-  })
+  }))
+}
+
+export function normalizeContainerPreviewBodyNodes(
+  bodyNodes: ContainerBodyNode[],
+  bodyEdges: ContainerBodyEdge[],
+): ContainerBodyNode[] {
+  if (bodyNodes.length === 0) return bodyNodes
+
+  const normalizedNodes = normalizeSubflowBodyNodePositions(bodyNodes)
+  const hasMissingPositions = bodyNodes.some((node) => (
+    !Number.isFinite(Number(node.positionX)) || !Number.isFinite(Number(node.positionY))
+  ))
+  if (hasMissingPositions) {
+    return autoLayoutContainerBodyNodes(bodyNodes, bodyEdges)
+  }
+  if (bodyEdges.length === 0) {
+    return normalizedNodes
+  }
+
+  const currentBounds = measureSubflowLayoutBounds(normalizedNodes)
+  const compactNodes = autoLayoutContainerBodyNodes(bodyNodes, bodyEdges)
+  const compactBounds = measureSubflowLayoutBounds(compactNodes)
+  if (compactBounds.width <= 0 || compactBounds.height <= 0) {
+    return normalizedNodes
+  }
+
+  const widthTooSparse = currentBounds.width > compactBounds.width * 1.35
+  const heightTooSparse = currentBounds.height > compactBounds.height * 1.35
+  return widthTooSparse || heightTooSparse ? compactNodes : normalizedNodes
 }
 
 function isContainerNodeType(nodeType: WfNodeData['nodeType']): boolean {
@@ -424,8 +453,7 @@ export function autoLayoutWorkflowWithSubflows(
   nodes: Node<WfNodeData>[],
   edges: Edge[],
 ): Node<WfNodeData>[] {
-  const mainLaidOut = autoLayoutWorkflowNodes(nodes, edges)
-  return mainLaidOut.map((node) => {
+  const nodesWithLaidOutSubflows = nodes.map((node) => {
     if (!isContainerNodeType(node.data.nodeType)) return node
     const config = node.data.config
     if (!config || typeof config !== 'object' || Array.isArray(config)) return node
@@ -468,4 +496,5 @@ export function autoLayoutWorkflowWithSubflows(
       },
     }
   })
+  return autoLayoutWorkflowNodes(nodesWithLaidOutSubflows, edges)
 }

@@ -493,6 +493,7 @@ def build_node_snapshot_input(
     if node_type == "human_in_loop":
         fields = rt.normalize_human_in_loop_fields(node_cfg)
         resolved_initial_values: dict[str, Any] = {}
+        resolved_field_rows: list[dict[str, Any]] = []
         for field in fields:
             value_template = str(field.get("value_template", "") or "")
             rendered = rt.resolve_node_template_vars(
@@ -504,39 +505,102 @@ def build_node_snapshot_input(
             )
             parsed = rt.parse_loose_json_value(rendered)
             try:
-                resolved_initial_values[str(field.get("name", ""))] = rt.coerce_human_field_value(
-                    str(field.get("name", "")),
+                field_name = str(field.get("name", ""))
+                coerced_value = rt.coerce_human_field_value(
+                    field_name,
                     str(field.get("type", "string")),
                     parsed,
                 )
+                field_widget = str(field.get("widget", "") or "").strip().lower()
+                if field_widget == "date":
+                    coerced_value = rt.validate_human_field_date_value(
+                        field_name=field_name,
+                        value=coerced_value,
+                        error_cls=RuntimeError,
+                        subject="human_in_loop field",
+                    )
+                elif field_widget == "time":
+                    coerced_value = rt.validate_human_field_time_value(
+                        field_name=field_name,
+                        value=coerced_value,
+                        error_cls=RuntimeError,
+                        subject="human_in_loop field",
+                    )
+                resolved_initial_values[field_name] = coerced_value
             except Exception:
-                resolved_initial_values[str(field.get("name", ""))] = rendered
+                field_name = str(field.get("name", ""))
+                resolved_initial_values[field_name] = rendered
+
+            resolved_options = list(field.get("options", []) or [])
+            options_template = str(field.get("options_template", "") or "")
+            if options_template.strip():
+                rendered_options = rt.resolve_node_template_vars(
+                    template=options_template,
+                    node_outputs=ctx.node_outputs,
+                    start_inputs=ctx.start_inputs,
+                    sys_vars=ctx.sys_vars,
+                    env_vars=ctx.env_vars,
+                )
+                parsed_options = rt.parse_human_field_options_from_rendered(
+                    rendered=rendered_options,
+                    field_name=field_name,
+                    option_value_key=str(field.get("option_value_key", "") or ""),
+                    allow_object_options=str(field.get("widget", "") or "").strip().lower()
+                    in {"select", "radio", "checkbox_group"},
+                )
+                if parsed_options:
+                    resolved_options = parsed_options
+
+            resolved_field_rows.append(
+                {
+                    "name": field_name,
+                    "label": str(field.get("label", "") or ""),
+                    "type": str(field.get("type", "string") or "string"),
+                    "widget": str(field.get("widget", "") or ""),
+                    "options": resolved_options,
+                    "optionsTemplate": str(field.get("options_template", "") or ""),
+                    "optionValueKey": str(field.get("option_value_key", "") or ""),
+                    "allowCustom": bool(field.get("allow_custom", field.get("allowCustom", False))),
+                    "placeholder": str(field.get("placeholder", "") or ""),
+                    "required": bool(field.get("required", False)),
+                }
+            )
         return {
-            "title": str(node_cfg.get("title", "") or ""),
-            "instruction": str(node_cfg.get("instruction", "") or ""),
-            "approveLabel": str(node_cfg.get("approve_label", node_cfg.get("approveLabel", "")) or ""),
-            "rejectLabel": str(node_cfg.get("reject_label", node_cfg.get("rejectLabel", "")) or ""),
+            "title": rt.resolve_node_template_vars(
+                template=str(node_cfg.get("title", "") or ""),
+                node_outputs=ctx.node_outputs,
+                start_inputs=ctx.start_inputs,
+                sys_vars=ctx.sys_vars,
+                env_vars=ctx.env_vars,
+            ),
+            "instruction": rt.resolve_node_template_vars(
+                template=str(node_cfg.get("instruction", "") or ""),
+                node_outputs=ctx.node_outputs,
+                start_inputs=ctx.start_inputs,
+                sys_vars=ctx.sys_vars,
+                env_vars=ctx.env_vars,
+            ),
+            "approveLabel": rt.resolve_node_template_vars(
+                template=str(node_cfg.get("approve_label", node_cfg.get("approveLabel", "")) or ""),
+                node_outputs=ctx.node_outputs,
+                start_inputs=ctx.start_inputs,
+                sys_vars=ctx.sys_vars,
+                env_vars=ctx.env_vars,
+            ),
+            "rejectLabel": rt.resolve_node_template_vars(
+                template=str(node_cfg.get("reject_label", node_cfg.get("rejectLabel", "")) or ""),
+                node_outputs=ctx.node_outputs,
+                start_inputs=ctx.start_inputs,
+                sys_vars=ctx.sys_vars,
+                env_vars=ctx.env_vars,
+            ),
             "requireRejectComment": rt.cfg_bool_value(
                 node_cfg,
                 "require_reject_comment",
                 "requireRejectComment",
                 default=True,
             ),
-            "fields": [
-                {
-                    "name": str(field.get("name", "") or ""),
-                    "label": str(field.get("label", "") or ""),
-                    "type": str(field.get("type", "string") or "string"),
-                    "widget": str(field.get("widget", "") or ""),
-                    "options": list(field.get("options", []) or []),
-                    "optionsTemplate": str(field.get("options_template", "") or ""),
-                    "optionValueKey": str(field.get("option_value_key", "") or ""),
-                    "allowCustom": bool(field.get("allow_custom", False)),
-                    "placeholder": str(field.get("placeholder", "") or ""),
-                    "required": bool(field.get("required", False)),
-                }
-                for field in fields
-            ],
+            "fields": resolved_field_rows,
             "initialValues": resolved_initial_values,
         }
 

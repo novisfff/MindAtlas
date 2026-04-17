@@ -15,6 +15,8 @@ from app.assistant.workflow.human_fields import (
     normalize_human_field_options,
     normalize_human_field_type,
     normalize_human_field_widget,
+    validate_human_field_date_value,
+    validate_human_field_time_value,
 )
 from app.assistant.workflow.engine.state import NodeOutput, StepOutput
 from app.assistant.workflow.env_vars import WorkflowEnvVarSpec, parse_env_var_specs
@@ -898,8 +900,11 @@ def normalize_human_in_loop_fields(node_cfg: dict[str, Any]) -> list[dict[str, A
             continue
         field_type = normalize_human_field_type(item.get("type", "string"))
         widget = normalize_human_field_widget(field_type, item.get("widget"))
-        options = normalize_human_field_options(item.get("options"))
-        if widget in {"select", "radio"} and not options:
+        options = normalize_human_field_options(
+            item.get("options"),
+            allow_objects=widget in {"select", "radio", "checkbox_group"},
+        )
+        if widget in {"select", "radio", "checkbox_group"} and not options:
             options = []
         raw_allow_custom = item.get("allow_custom", item.get("allowCustom", None))
         allow_custom = bool(raw_allow_custom) if isinstance(raw_allow_custom, bool) else True
@@ -930,7 +935,8 @@ def parse_human_field_options_from_rendered(
     rendered: str,
     field_name: str,
     option_value_key: str = "",
-) -> list[str]:
+    allow_object_options: bool = False,
+) -> list[str | dict[str, str]]:
     parsed = parse_loose_json_value(rendered)
     candidate_items: list[Any]
     if isinstance(parsed, list):
@@ -952,15 +958,19 @@ def parse_human_field_options_from_rendered(
     else:
         candidate_items = []
 
-    normalized: list[str] = []
+    normalized: list[str | dict[str, str]] = []
     seen: set[str] = set()
     for item in candidate_items:
+        normalized_item: str | dict[str, str] | None = None
         value_text = ""
         if isinstance(item, str):
             value_text = item.strip()
+            normalized_item = value_text if value_text else None
         elif isinstance(item, (int, float, bool)):
             value_text = str(item).strip()
+            normalized_item = value_text if value_text else None
         elif isinstance(item, dict):
+            description_text = str(item.get("description", "") or "").strip()
             if option_value_key:
                 raw = item.get(option_value_key)
                 if raw is not None:
@@ -974,10 +984,29 @@ def parse_human_field_options_from_rendered(
                     if candidate:
                         value_text = candidate
                         break
-        if not value_text or value_text in seen:
+            if allow_object_options and value_text:
+                label_text = ""
+                for key in ("label", "name", "title", "code", "id", "type", "value"):
+                    raw = item.get(key)
+                    if raw is None:
+                        continue
+                    candidate = str(raw).strip()
+                    if candidate:
+                        label_text = candidate
+                        break
+                normalized_object = {
+                    "value": value_text,
+                    "label": label_text or value_text,
+                }
+                if description_text:
+                    normalized_object["description"] = description_text
+                normalized_item = normalized_object
+            elif value_text:
+                normalized_item = value_text
+        if not value_text or value_text in seen or normalized_item is None:
             continue
         seen.add(value_text)
-        normalized.append(value_text)
+        normalized.append(normalized_item)
 
     if rendered.strip() and not normalized:
         logger.warning(

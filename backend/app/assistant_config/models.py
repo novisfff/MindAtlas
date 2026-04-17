@@ -1,11 +1,97 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
+import uuid
+
 from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
 from app.common.models import TimestampMixin, UuidPrimaryKeyMixin
 from app.database import Base
+
+
+@dataclass
+class AssistantWorkflowNode:
+    node_id: str
+    node_type: str
+    label: str = ""
+    position_x: float = 0.0
+    position_y: float = 0.0
+    config: dict | None = None
+    id: uuid.UUID | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass
+class AssistantWorkflowEdge:
+    edge_id: str
+    source_node_id: str
+    target_node_id: str
+    source_handle: str = "output"
+    target_handle: str = "input"
+    condition_type: str | None = None
+    condition_expr: dict | None = None
+    label: str | None = None
+    id: uuid.UUID | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+AssistantSkillNode = AssistantWorkflowNode
+AssistantSkillEdge = AssistantWorkflowEdge
+
+
+def _graph_timestamp(owner: TimestampMixin) -> datetime:
+    return owner.updated_at or owner.created_at or datetime.utcnow()
+
+
+def _workflow_nodes_from_snapshot(*, workflow_id: uuid.UUID, snapshot: dict | None, ts: datetime) -> list[AssistantWorkflowNode]:
+    payload = snapshot if isinstance(snapshot, dict) else {}
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list):
+        return []
+    return [
+        AssistantWorkflowNode(
+            id=uuid.uuid5(uuid.NAMESPACE_URL, f"{workflow_id}:node:{str(item.get('node_id') or '')}"),
+            node_id=str(item.get("node_id") or ""),
+            node_type=str(item.get("node_type") or ""),
+            label=str(item.get("label") or ""),
+            position_x=float(item.get("position_x") or 0.0),
+            position_y=float(item.get("position_y") or 0.0),
+            config=item.get("config") if isinstance(item.get("config"), dict) else {},
+            created_at=ts,
+            updated_at=ts,
+        )
+        for item in nodes
+        if isinstance(item, dict)
+    ]
+
+
+def _workflow_edges_from_snapshot(*, workflow_id: uuid.UUID, snapshot: dict | None, ts: datetime) -> list[AssistantWorkflowEdge]:
+    payload = snapshot if isinstance(snapshot, dict) else {}
+    edges = payload.get("edges")
+    if not isinstance(edges, list):
+        return []
+    return [
+        AssistantWorkflowEdge(
+            id=uuid.uuid5(uuid.NAMESPACE_URL, f"{workflow_id}:edge:{str(item.get('edge_id') or '')}"),
+            edge_id=str(item.get("edge_id") or ""),
+            source_node_id=str(item.get("source_node_id") or ""),
+            target_node_id=str(item.get("target_node_id") or ""),
+            source_handle=str(item.get("source_handle") or "output"),
+            target_handle=str(item.get("target_handle") or "input"),
+            condition_type=str(item.get("condition_type")) if item.get("condition_type") is not None else None,
+            condition_expr=item.get("condition_expr") if isinstance(item.get("condition_expr"), dict) else None,
+            label=str(item.get("label")) if item.get("label") is not None else None,
+            created_at=ts,
+            updated_at=ts,
+        )
+        for item in edges
+        if isinstance(item, dict)
+    ]
 
 
 class AssistantTool(UuidPrimaryKeyMixin, TimestampMixin, Base):
@@ -87,19 +173,6 @@ class AssistantSkill(UuidPrimaryKeyMixin, TimestampMixin, Base):
     workflow = relationship("AssistantWorkflow", back_populates="skills")
     agent_profile = relationship("AssistantAgentProfile", back_populates="skills")
 
-    nodes = relationship(
-        "AssistantSkillNode",
-        back_populates="skill",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-    )
-    edges = relationship(
-        "AssistantSkillEdge",
-        back_populates="skill",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-    )
-
     __table_args__ = (
         CheckConstraint(
             "(workflow_id IS NOT NULL AND agent_profile_id IS NULL) OR "
@@ -107,6 +180,20 @@ class AssistantSkill(UuidPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_assistant_skill_single_target_binding",
         ),
     )
+
+    @property
+    def nodes(self) -> list[AssistantSkillNode]:
+        workflow = getattr(self, "workflow", None)
+        if workflow is None:
+            return []
+        return list(getattr(workflow, "nodes", []) or [])
+
+    @property
+    def edges(self) -> list[AssistantSkillEdge]:
+        workflow = getattr(self, "workflow", None)
+        if workflow is None:
+            return []
+        return list(getattr(workflow, "edges", []) or [])
 
 
 class AssistantWorkflow(UuidPrimaryKeyMixin, TimestampMixin, Base):
@@ -131,18 +218,17 @@ class AssistantWorkflow(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
     is_system = Column(Boolean, nullable=False, default=False)
     enabled = Column(Boolean, nullable=False, default=True)
-
-    nodes = relationship(
-        "AssistantWorkflowNode",
-        back_populates="workflow",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
+    draft_version = relationship(
+        "AssistantWorkflowVersion",
+        foreign_keys=[draft_version_id],
+        uselist=False,
+        post_update=True,
     )
-    edges = relationship(
-        "AssistantWorkflowEdge",
-        back_populates="workflow",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
+    published_version = relationship(
+        "AssistantWorkflowVersion",
+        foreign_keys=[published_version_id],
+        uselist=False,
+        post_update=True,
     )
     versions = relationship(
         "AssistantWorkflowVersion",
@@ -154,60 +240,39 @@ class AssistantWorkflow(UuidPrimaryKeyMixin, TimestampMixin, Base):
     skills = relationship("AssistantSkill", back_populates="workflow")
     system_behavior_bindings = relationship("AssistantSystemBehaviorBinding", back_populates="workflow")
 
+    @property
+    def graph_snapshot(self) -> dict:
+        draft_version = getattr(self, "draft_version", None)
+        if (
+            draft_version is not None
+            and getattr(draft_version, "id", None) == getattr(self, "draft_version_id", None)
+            and isinstance(getattr(draft_version, "snapshot", None), dict)
+        ):
+            return dict(draft_version.snapshot)
+        published_version = getattr(self, "published_version", None)
+        if (
+            published_version is not None
+            and getattr(published_version, "id", None) == getattr(self, "published_version_id", None)
+            and isinstance(getattr(published_version, "snapshot", None), dict)
+        ):
+            return dict(published_version.snapshot)
+        return {}
 
-class AssistantWorkflowNode(UuidPrimaryKeyMixin, TimestampMixin, Base):
-    """独立 Workflow DAG 节点"""
-    __tablename__ = "assistant_workflow_node"
+    @property
+    def nodes(self) -> list[AssistantWorkflowNode]:
+        return _workflow_nodes_from_snapshot(
+            workflow_id=self.id,
+            snapshot=self.graph_snapshot,
+            ts=_graph_timestamp(self),
+        )
 
-    workflow_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("assistant_workflow.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    node_id = Column(String(128), nullable=False)
-    node_type = Column(String(32), nullable=False)
-    label = Column(String(256), nullable=False, default="")
-    position_x = Column(Float, nullable=False, default=0.0)
-    position_y = Column(Float, nullable=False, default=0.0)
-    config = Column(JSON, nullable=True)
-
-    workflow = relationship("AssistantWorkflow", back_populates="nodes")
-
-    __table_args__ = (
-        Index("uq_workflow_node_id", "workflow_id", "node_id", unique=True),
-    )
-
-
-class AssistantWorkflowEdge(UuidPrimaryKeyMixin, TimestampMixin, Base):
-    """独立 Workflow DAG 边"""
-    __tablename__ = "assistant_workflow_edge"
-
-    workflow_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("assistant_workflow.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    edge_id = Column(String(128), nullable=False)
-    source_node_id = Column(String(128), nullable=False)
-    target_node_id = Column(String(128), nullable=False)
-    source_handle = Column(String(64), nullable=False, default="output")
-    target_handle = Column(String(64), nullable=False, default="input")
-    condition_type = Column(String(32), nullable=True)
-    condition_expr = Column(JSON, nullable=True)
-    label = Column(String(256), nullable=True)
-
-    workflow = relationship("AssistantWorkflow", back_populates="edges")
-
-    __table_args__ = (
-        Index(
-            "uq_workflow_edge",
-            "workflow_id", "source_node_id", "source_handle",
-            "target_node_id", "target_handle",
-            unique=True,
-        ),
-    )
+    @property
+    def edges(self) -> list[AssistantWorkflowEdge]:
+        return _workflow_edges_from_snapshot(
+            workflow_id=self.id,
+            snapshot=self.graph_snapshot,
+            ts=_graph_timestamp(self),
+        )
 
 
 class AssistantWorkflowVersion(UuidPrimaryKeyMixin, TimestampMixin, Base):
@@ -333,60 +398,6 @@ class AssistantSystemBehaviorBinding(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "(workflow_id IS NOT NULL AND agent_profile_id IS NULL AND target_type = 'workflow') OR "
             "(workflow_id IS NULL AND agent_profile_id IS NOT NULL AND target_type = 'agent')",
             name="ck_assistant_system_behavior_binding_single_target",
-        ),
-    )
-
-class AssistantSkillNode(UuidPrimaryKeyMixin, TimestampMixin, Base):
-    """工作流 DAG 节点"""
-    __tablename__ = "assistant_skill_node"
-
-    skill_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("assistant_skill.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    node_id = Column(String(128), nullable=False)
-    node_type = Column(String(32), nullable=False)
-    label = Column(String(256), nullable=False, default="")
-    position_x = Column(Float, nullable=False, default=0.0)
-    position_y = Column(Float, nullable=False, default=0.0)
-    config = Column(JSON, nullable=True)
-
-    skill = relationship("AssistantSkill", back_populates="nodes")
-
-    __table_args__ = (
-        Index("uq_skill_node_id", "skill_id", "node_id", unique=True),
-    )
-
-
-class AssistantSkillEdge(UuidPrimaryKeyMixin, TimestampMixin, Base):
-    """工作流 DAG 边"""
-    __tablename__ = "assistant_skill_edge"
-
-    skill_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("assistant_skill.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    edge_id = Column(String(128), nullable=False)
-    source_node_id = Column(String(128), nullable=False)
-    target_node_id = Column(String(128), nullable=False)
-    source_handle = Column(String(64), nullable=False, default="output")
-    target_handle = Column(String(64), nullable=False, default="input")
-    condition_type = Column(String(32), nullable=True)
-    condition_expr = Column(JSON, nullable=True)
-    label = Column(String(256), nullable=True)
-
-    skill = relationship("AssistantSkill", back_populates="edges")
-
-    __table_args__ = (
-        Index(
-            "uq_skill_edge",
-            "skill_id", "source_node_id", "source_handle",
-            "target_node_id", "target_handle",
-            unique=True,
         ),
     )
 

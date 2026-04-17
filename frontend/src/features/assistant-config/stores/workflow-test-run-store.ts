@@ -256,6 +256,29 @@ function upsertPendingApproval(
   return [...next, approval]
 }
 
+function removePendingApproval(
+  approvals: WorkflowHumanApproval[],
+  approvalId: string,
+): WorkflowHumanApproval[] {
+  return approvals.filter((item) => item.id !== approvalId)
+}
+
+function updateTurnPendingApprovals(
+  turnsByRunId: Record<string, WorkflowTestTurnRecord>,
+  runId: string,
+  updater: (approvals: WorkflowHumanApproval[]) => WorkflowHumanApproval[],
+): Record<string, WorkflowTestTurnRecord> {
+  const current = turnsByRunId[runId]
+  if (!current) return turnsByRunId
+  return {
+    ...turnsByRunId,
+    [runId]: {
+      ...current,
+      pendingApprovals: updater(current.pendingApprovals),
+    },
+  }
+}
+
 function upsertToolCall(
   toolCalls: WorkflowTestToolTrace[] | undefined,
   nextToolCall: WorkflowTestToolTrace,
@@ -480,6 +503,42 @@ export const useWorkflowTestRunStore = create<WorkflowTestRunState>()((set, get)
             state.activeAssistantMessageId,
             (message) => ({ ...message, runId: event.data.runId }),
           ),
+        }
+      }
+
+      if (event.event === 'human_approval_requested') {
+        const traceEvents = capTraceEvents([...state.traceEvents, event])
+        const nextTurns = updateTurnPendingApprovals(
+          state.turnsByRunId,
+          event.data.runId,
+          (approvals) => upsertPendingApproval(approvals, event.data.approval),
+        )
+        const shouldUpdateVisibleApprovals = state.activeRunId === event.data.runId || state.selectedRunId === event.data.runId
+        return {
+          ...state,
+          traceEvents,
+          turnsByRunId: nextTurns,
+          pendingApprovals: shouldUpdateVisibleApprovals
+            ? upsertPendingApproval(state.pendingApprovals, event.data.approval)
+            : state.pendingApprovals,
+        }
+      }
+
+      if (event.event === 'human_approval_resolved') {
+        const traceEvents = capTraceEvents([...state.traceEvents, event])
+        const nextTurns = updateTurnPendingApprovals(
+          state.turnsByRunId,
+          event.data.runId,
+          (approvals) => removePendingApproval(approvals, event.data.approval.id),
+        )
+        const shouldUpdateVisibleApprovals = state.activeRunId === event.data.runId || state.selectedRunId === event.data.runId
+        return {
+          ...state,
+          traceEvents,
+          turnsByRunId: nextTurns,
+          pendingApprovals: shouldUpdateVisibleApprovals
+            ? removePendingApproval(state.pendingApprovals, event.data.approval.id)
+            : state.pendingApprovals,
         }
       }
 
@@ -757,24 +816,6 @@ export const useWorkflowTestRunStore = create<WorkflowTestRunState>()((set, get)
             ...state.result,
             errorMessage: event.data.message,
           },
-        }
-      }
-
-      if (event.event === 'human_approval_requested') {
-        const traceEvents = capTraceEvents([...state.traceEvents, event])
-        return {
-          ...state,
-          traceEvents,
-          pendingApprovals: upsertPendingApproval(state.pendingApprovals, event.data.approval),
-        }
-      }
-
-      if (event.event === 'human_approval_resolved') {
-        const traceEvents = capTraceEvents([...state.traceEvents, event])
-        return {
-          ...state,
-          traceEvents,
-          pendingApprovals: state.pendingApprovals.filter((item) => item.id !== event.data.approval.id),
         }
       }
 

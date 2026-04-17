@@ -1,8 +1,10 @@
 import { useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { ArrowLeft, Loader2, Plus, Pencil, Trash2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
+import { getAgentProfile } from '../api/agents'
 import {
   useAgentProfilesQuery,
   useCreateAgentProfileMutation,
@@ -14,6 +16,7 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 export function AgentSettings() {
   const { t } = useTranslation()
   const navigate = useNavigate()
+  const qc = useQueryClient()
   const { data: agents = [], isLoading } = useAgentProfilesQuery()
   const createMutation = useCreateAgentProfileMutation()
   const updateMutation = useUpdateAgentProfileMutation()
@@ -34,14 +37,25 @@ export function AgentSettings() {
     setEditingId(null)
   }
 
-  const beginEdit = (id: string) => {
+  const beginEdit = async (id: string) => {
     const row = agents.find((item) => item.id === id)
     if (!row) return
-    setName(row.name)
-    setDescription(row.description)
-    setSystemPrompt(row.systemPrompt || '')
-    setEditingId(id)
-    setIsAdding(false)
+    try {
+      const detail = row.detailsLoaded
+        ? row
+        : await qc.fetchQuery({
+            queryKey: ['assistant-agent-profile', id],
+            queryFn: () => getAgentProfile(id),
+          })
+      setName(detail.name)
+      setDescription(detail.description)
+      setSystemPrompt(detail.systemPrompt || '')
+      setEditingId(id)
+      setIsAdding(false)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t('common.error')
+      toast.error(message)
+    }
   }
 
   const submit = async () => {
@@ -162,7 +176,7 @@ export function AgentSettings() {
                     {t('settings.skills.referenceCount', { count: item.referenceCount, defaultValue: '{{count}} skills bound' })}
                   </div>
                 </div>
-                <button onClick={() => beginEdit(item.id)} className="p-2 rounded hover:bg-muted">
+                <button onClick={() => void beginEdit(item.id)} className="p-2 rounded hover:bg-muted">
                   <Pencil className="w-4 h-4" />
                 </button>
                 <button

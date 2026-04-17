@@ -95,7 +95,7 @@ def update_system_tool_enabled(
 
 @router.get("/tools", response_model=ApiResponse)
 def list_tools(
-    sync_system: bool = Query(True),
+    sync_system: bool = Query(False),
     include_disabled: bool = Query(True),
     db: Session = Depends(get_db),
 ) -> ApiResponse:
@@ -139,7 +139,7 @@ def delete_tool(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
 
 @router.get("/skills", response_model=ApiResponse)
 def list_skills(
-    sync_system: bool = Query(True),
+    sync_system: bool = Query(False),
     include_disabled: bool = Query(True),
     db: Session = Depends(get_db),
 ) -> ApiResponse:
@@ -278,7 +278,7 @@ def list_agent_profiles(
     service = AssistantConfigService(db)
     items = service.list_agent_profiles(include_disabled=include_disabled)
     return ApiResponse.ok([
-        AssistantAgentProfileResponse.model_validate(service.serialize_agent_profile(item)).model_dump(by_alias=True)
+        AssistantAgentProfileResponse.model_validate(service.serialize_agent_profile_summary(item)).model_dump(by_alias=True)
         for item in items
     ])
 
@@ -435,7 +435,7 @@ def list_workflows(
     service = AssistantConfigService(db)
     items = service.list_workflows(include_disabled=include_disabled)
     return ApiResponse.ok([
-        AssistantWorkflowResponse.model_validate(service.serialize_workflow(item)).model_dump(by_alias=True)
+        AssistantWorkflowResponse.model_validate(service.serialize_workflow_summary(item)).model_dump(by_alias=True)
         for item in items
     ])
 

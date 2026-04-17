@@ -23,26 +23,52 @@ EXPECTED_WORKFLOW_POSITIONS: dict[str, dict[str, tuple[int, int]]] = {
     },
     "smart_capture": {
         "start": (80, 320),
-        "tool_types": (490, 245),
-        "tool_tags": (490, 396),
-        "llm_title": (900, 306),
-        "llm_summary": (1310, 306),
-        "llm_content": (1720, 306),
-        "llm_type": (2130, 306),
-        "llm_tags": (2540, 306),
-        "llm_time": (2950, 306),
-        "human_confirm": (3360, 306),
-        "tool_create": (3770, 245),
-        "llm_cancel": (3770, 396),
-        "llm_output": (4180, 245),
-        "output_created": (4590, 245),
-        "output_cancelled": (4590, 396),
+        "tool_types": (480, 320),
+        "tool_tags": (880, 320),
+        "llm_prepare_lookup": (1280, 320),
+        "tool_search_similar": (1680, 320),
+        "llm_rank_candidates": (2080, 320),
+        "if_has_candidates": (2480, 320),
+        "human_triage": (2880, 170),
+        "output_triage_cancelled": (3280, 30),
+        "if_triage_route": (3280, 170),
+        "output_merge_target_required": (3680, 30),
+        "llm_materialize": (3680, 320),
+        "if_write_mode": (4080, 320),
+        "tool_get_existing": (4480, 170),
+        "llm_merge_rewrite": (4880, 170),
+        "code_prepare_write_payload": (5280, 320),
+        "human_confirm_write": (5680, 320),
+        "output_write_cancelled": (6080, 460),
+        "if_persist_route": (6080, 320),
+        "tool_update": (6480, 170),
+        "tool_create": (6480, 460),
+        "call_relation_followup": (6880, 320),
+        "llm_finalize_reply": (7280, 320),
+        "output_final": (7680, 320),
     },
     "periodic_review": {
         "start": (120, 320),
         "llm_request": (530, 320),
         "call_core": (940, 320),
         "output_final": (1350, 320),
+    },
+}
+
+EXPECTED_STANDALONE_WORKFLOW_POSITIONS: dict[str, dict[str, tuple[int, int]]] = {
+    "smart_capture_relation_followup": {
+        "start": (80, 320),
+        "code_normalize_persisted": (480, 320),
+        "tool_relation_recs": (880, 320),
+        "iter_relation_details": (1280, 320),
+        "if_relation_candidates": (1680, 320),
+        "human_confirm_relations": (2080, 320),
+        "output_no_relation_candidates": (1680, 460),
+        "if_selected_relations": (2480, 320),
+        "output_relations_rejected": (2080, 460),
+        "iter_create_relations": (2880, 320),
+        "output_no_relations_selected": (2480, 460),
+        "output_relations_created": (3280, 320),
     },
 }
 
@@ -170,3 +196,19 @@ class SystemWorkflowLayoutPresetTests(unittest.TestCase):
         self.assertIsNotNone(refreshed)
         self.assertIsNotNone(refreshed.workflow)
         self.assertIsNone(refreshed.workflow.workflow_viewport)
+
+    def test_standalone_relation_followup_asset_uses_vertical_exit_layout(self) -> None:
+        from app.assistant.workflow.system_assets import load_system_workflow_asset  # noqa: E402
+
+        for locale in ("zh", "en"):
+            workflow = load_system_workflow_asset("smart_capture_relation_followup", locale=locale)
+            position_map = {
+                node.node_id: (int(round(float(node.position_x))), int(round(float(node.position_y))))
+                for node in (workflow.nodes or [])
+            }
+            for node_id, expected in EXPECTED_STANDALONE_WORKFLOW_POSITIONS["smart_capture_relation_followup"].items():
+                self.assertEqual(
+                    position_map.get(node_id),
+                    expected,
+                    f"smart_capture_relation_followup[{locale}].{node_id} position mismatch",
+                )

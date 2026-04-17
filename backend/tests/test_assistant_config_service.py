@@ -287,44 +287,75 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertEqual(skill.langgraph_pattern, "workflow_dag")
 
     def test_sync_system_skills_migrates_tool_text_refs_to_result(self) -> None:
+        from app.assistant_config.schemas import WorkflowInput  # noqa: E402
+
         svc, skill = self._get_seeded_system_skill("smart_capture")
         self.assertIsNotNone(skill)
         self.assertIsNotNone(skill.workflow)
 
-        llm_node = next((node for node in (skill.workflow.nodes or []) if node.node_id == "llm_output"), None)
+        workflow = svc.get_workflow(skill.workflow_id)
+        original_input = svc._get_workflow_draft_input(workflow)  # noqa: SLF001
+        payload = original_input.model_dump(by_alias=True)
+        llm_node = next((node for node in (payload.get("nodes") or []) if node.get("nodeId") == "llm_finalize_reply"), None)
         self.assertIsNotNone(llm_node)
-        llm_node.config = {
-            **dict(llm_node.config or {}),
-            "userInput": "{{tool_create.text}}",
-        }
+        cfg = llm_node.get("config") if isinstance(llm_node.get("config"), dict) else {}
+        cfg["userInput"] = "{{tool_create.text}}"
+        llm_node["config"] = cfg
+        mutated_input = WorkflowInput.model_validate(payload)
+        svc._apply_workflow_to_workflow_entity(workflow, mutated_input, persist=True)  # noqa: SLF001
+        mutated_version = svc._create_workflow_version(  # noqa: SLF001
+            workflow=workflow,
+            workflow_input=mutated_input,
+            version_source="publish",
+            version_name="Legacy tool text ref",
+        )
+        workflow.draft_version_id = mutated_version.id
+        workflow.published_version_id = mutated_version.id
         self.db.commit()
 
         svc.sync_system_skills()
 
         refreshed = svc.get_skill(skill.id)
         self.assertIsNotNone(refreshed.workflow)
-        llm_node = next((node for node in (refreshed.workflow.nodes or []) if node.node_id == "llm_output"), None)
+        llm_node = next((node for node in (refreshed.workflow.nodes or []) if node.node_id == "llm_finalize_reply"), None)
         self.assertIsNotNone(llm_node)
-        self.assertEqual(llm_node.config.get("userInput"), "{{tool_create.result}}")
+        self.assertEqual(
+            llm_node.config.get("userInput"),
+            next(node.config.get("userInput") for node in original_input.nodes if node.node_id == "llm_finalize_reply"),
+        )
 
     def test_sync_system_skills_migrates_legacy_workflow_output_to_output_node(self) -> None:
+        from app.assistant_config.schemas import WorkflowInput  # noqa: E402
+
         svc, skill = self._get_seeded_system_skill("smart_capture")
         self.assertIsNotNone(skill)
         self.assertIsNotNone(skill.workflow)
 
-        workflow = skill.workflow
-        for node in list(workflow.nodes or []):
-            if node.node_id in {"output_created", "output_cancelled"}:
-                self.db.delete(node)
-        for edge in list(workflow.edges or []):
-            if edge.target_node_id in {"output_created", "output_cancelled"} or edge.source_node_id in {
-                "output_created",
-                "output_cancelled",
-            }:
-                self.db.delete(edge)
-        llm_node = next((node for node in (workflow.nodes or []) if node.node_id == "llm_output"), None)
+        workflow = svc.get_workflow(skill.workflow_id)
+        payload = svc._get_workflow_draft_input(workflow).model_dump(by_alias=True)  # noqa: SLF001
+        nodes = list(payload.get("nodes") or [])
+        edges = list(payload.get("edges") or [])
+        llm_node = next((node for node in nodes if node.get("nodeId") == "llm_finalize_reply"), None)
         self.assertIsNotNone(llm_node)
-        llm_node.config = {**dict(llm_node.config or {}), "isOutput": True}
+        cfg = llm_node.get("config") if isinstance(llm_node.get("config"), dict) else {}
+        cfg["isOutput"] = True
+        llm_node["config"] = cfg
+        payload["nodes"] = [node for node in nodes if node.get("nodeId") != "output_final"]
+        payload["edges"] = [
+            edge
+            for edge in edges
+            if edge.get("sourceNodeId") != "output_final" and edge.get("targetNodeId") != "output_final"
+        ]
+        mutated_input = WorkflowInput.model_validate(payload)
+        svc._apply_workflow_to_workflow_entity(workflow, mutated_input, persist=True)  # noqa: SLF001
+        mutated_version = svc._create_workflow_version(  # noqa: SLF001
+            workflow=workflow,
+            workflow_input=mutated_input,
+            version_source="publish",
+            version_name="Legacy output topology",
+        )
+        workflow.draft_version_id = mutated_version.id
+        workflow.published_version_id = mutated_version.id
         self.db.commit()
 
         svc.sync_system_skills()
@@ -334,11 +365,10 @@ class AssistantConfigServiceTests(unittest.TestCase):
         nodes = list(refreshed.workflow.nodes or [])
         edges = list(refreshed.workflow.edges or [])
         output_nodes = sorted(node.node_id for node in nodes if node.node_type == "output")
-        self.assertEqual(output_nodes, ["output_cancelled", "output_created"])
+        self.assertIn("output_final", output_nodes)
         self.assertFalse(any(isinstance(node.config, dict) and "isOutput" in node.config for node in nodes))
-        self.assertTrue(any(edge.target_node_id == "output_created" for edge in edges))
-        self.assertTrue(any(edge.target_node_id == "output_cancelled" for edge in edges))
-        self.assertFalse(any(edge.source_node_id in {"output_created", "output_cancelled"} for edge in edges))
+        self.assertTrue(any(edge.target_node_id == "output_final" and edge.source_node_id == "llm_finalize_reply" for edge in edges))
+        self.assertFalse(any(edge.source_node_id == "output_final" for edge in edges))
 
     def test_reset_skill_restores_langgraph_pattern(self) -> None:
         from app.assistant_config.models import AssistantSkill  # noqa: E402

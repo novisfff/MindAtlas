@@ -14,6 +14,7 @@ from app.assistant.run_control import AssistantRunCancelled, ensure_not_cancelle
 from app.assistant.workflow.human_fields import (
     HUMAN_FIELD_TYPES,
     coerce_human_field_value_by_type,
+    human_field_option_value,
     normalize_human_field_options,
     normalize_human_field_type,
     normalize_human_field_widget,
@@ -42,8 +43,11 @@ def _normalize_widget(field_type: str, field_schema: dict[str, Any]) -> str:
     return normalize_human_field_widget(field_type, field_schema.get("widget"))
 
 
-def _normalize_options(raw: Any) -> list[str]:
-    return normalize_human_field_options(raw)
+def _normalize_options(field_schema: dict[str, Any], widget: str) -> list[str | dict[str, str]]:
+    return normalize_human_field_options(
+        field_schema.get("options"),
+        allow_objects=widget in {"select", "radio", "checkbox_group"},
+    )
 
 
 def _coerce_field_value(field_schema: dict[str, Any], value: Any, *, field_name: str) -> Any:
@@ -58,17 +62,27 @@ def _coerce_field_value(field_schema: dict[str, Any], value: Any, *, field_name:
         subject="field",
     )
 
-    options = _normalize_options(field_schema.get("options"))
+    options = _normalize_options(field_schema, widget)
+    option_values = {human_field_option_value(option) for option in options if human_field_option_value(option)}
 
     if widget in {"select", "radio"}:
         if not options:
             raise ValueError(f"field '{field_name}' requires options")
-        option_set = set(options)
         candidates = {str(coerced).strip()}
         if isinstance(coerced, float) and coerced.is_integer():
             candidates.add(str(int(coerced)))
-        if not any(candidate in option_set for candidate in candidates):
+        if not any(candidate in option_values for candidate in candidates):
             raise ValueError(f"field '{field_name}' must be one of configured options")
+
+    if widget == "checkbox_group":
+        if not options:
+            raise ValueError(f"field '{field_name}' requires options")
+        if not isinstance(coerced, list):
+            raise ValueError(f"field '{field_name}' expects string array")
+        invalid = [item for item in coerced if str(item).strip() not in option_values]
+        if invalid:
+            raise ValueError(f"field '{field_name}' must use configured options")
+        coerced = list(dict.fromkeys(str(item).strip() for item in coerced if str(item).strip()))
 
     if widget == "tag_selector":
         if not isinstance(coerced, list):
@@ -76,7 +90,7 @@ def _coerce_field_value(field_schema: dict[str, Any], value: Any, *, field_name:
         raw_allow_custom = field_schema.get("allowCustom", field_schema.get("allow_custom", None))
         allow_custom = bool(raw_allow_custom) if isinstance(raw_allow_custom, bool) else True
         if not allow_custom and options:
-            unknown = [tag for tag in coerced if tag not in options]
+            unknown = [tag for tag in coerced if tag not in option_values]
             if unknown:
                 raise ValueError(f"field '{field_name}' contains unsupported tag values")
 

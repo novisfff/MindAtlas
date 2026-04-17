@@ -19,6 +19,7 @@ class AssistantKnowledgeBaseToolsTests(unittest.TestCase):
         from app.assistant_config.registry import ToolRegistry  # noqa: E402
 
         self.assertNotIn("kb_search", getattr(assistant_tools, "__all__", []))
+        self.assertIn("search_similar_entries", getattr(assistant_tools, "__all__", []))
         self.assertIn("update_entry", getattr(assistant_tools, "__all__", []))
         self.assertIn("create_relation", getattr(assistant_tools, "__all__", []))
         self.assertIn("query_knowledge_graph", getattr(assistant_tools, "__all__", []))
@@ -31,6 +32,7 @@ class AssistantKnowledgeBaseToolsTests(unittest.TestCase):
 
         # Tool objects created by @tool should expose `name`.
         self.assertEqual(self._tool_name(assistant_tools.kb_search), "kb_search")
+        self.assertEqual(self._tool_name(assistant_tools.search_similar_entries), "search_similar_entries")
         self.assertEqual(self._tool_name(assistant_tools.update_entry), "update_entry")
         self.assertEqual(self._tool_name(assistant_tools.create_relation), "create_relation")
         self.assertEqual(self._tool_name(assistant_tools.query_knowledge_graph), "query_knowledge_graph")
@@ -44,6 +46,7 @@ class AssistantKnowledgeBaseToolsTests(unittest.TestCase):
 
         names = {t.name for t in ToolRegistry.list_system_tools()}
         self.assertNotIn("kb_search", names)
+        self.assertIn("search_similar_entries", names)
         self.assertIn("update_entry", names)
         self.assertIn("create_relation", names)
         self.assertIn("query_knowledge_graph", names)
@@ -124,6 +127,7 @@ class AssistantKnowledgeBaseToolsTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.text)
             by_name = {item["name"]: item for item in response.json()["data"]}
             self.assertEqual(by_name["search_entries"]["displayName"], "搜索记录")
+            self.assertEqual(by_name["search_similar_entries"]["displayName"], "检索相似记录")
             self.assertEqual(by_name["update_entry"]["displayName"], "更新记录")
             self.assertEqual(by_name["kb_relation_recommendations"]["displayName"], "关系推荐")
             self.assertTrue(by_name["get_tag_statistics"]["displayDescription"])
@@ -135,6 +139,7 @@ class AssistantKnowledgeBaseToolsTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.text)
             by_name = {item["name"]: item for item in response.json()["data"]}
             self.assertEqual(by_name["search_entries"]["displayName"], "Search Entries")
+            self.assertEqual(by_name["search_similar_entries"]["displayName"], "Search Similar Entries")
             self.assertEqual(by_name["update_entry"]["displayName"], "Update Entry")
             self.assertEqual(by_name["kb_relation_recommendations"]["displayName"], "Relation Recommendations")
         finally:

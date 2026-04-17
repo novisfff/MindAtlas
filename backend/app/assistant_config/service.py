@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import copy
-import re
+import hashlib
+import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 from uuid import UUID
@@ -21,12 +22,8 @@ from app.assistant_config.models import (
     AssistantAgentProfile,
     AssistantAgentProfileVersion,
     AssistantSkill,
-    AssistantSkillEdge,
-    AssistantSkillNode,
     AssistantSystemBehaviorBinding,
     AssistantWorkflow,
-    AssistantWorkflowEdge,
-    AssistantWorkflowNode,
     AssistantWorkflowVersion,
     AssistantTool,
 )
@@ -77,16 +74,18 @@ from app.assistant_config.standalone_system_target_registry import (
 from app.assistant.workflow.system_assets import (
     get_system_asset_by_canonical_name,
     get_system_skill_asset,
+    list_system_assets,
     load_system_agent_asset,
     load_system_workflow_asset,
 )
 from app.common.exceptions import ApiException
+from app.system_settings.models import AppSetting
 from app.system_settings.service import resolve_system_locale
 
 
 _SYSTEM_CATALOG_SYNC_LOCK_KEY = 2026040901
+_SYSTEM_CATALOG_SIGNATURE_SETTING_KEY = "assistant_config_system_catalog_signature"
 
-_TOOL_TEXT_REF_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\.text\s*\}\}")
 _TARGET_VERSION_LIMIT = 100
 _SYSTEM_BEHAVIOR_EXAMPLE_WORKFLOW_METADATA: dict[str, dict[str, dict[str, str]]] = {
     "weekly_report_generation": {
@@ -228,6 +227,7 @@ class AssistantConfigService:
 
     @staticmethod
     def _to_workflow_input_from_entity(workflow: AssistantWorkflow) -> WorkflowInput:
+        snapshot = workflow.graph_snapshot if isinstance(getattr(workflow, "graph_snapshot", None), dict) else {}
         nodes = [
             {
                 "node_id": node.node_id,
@@ -256,7 +256,7 @@ class AssistantConfigService:
             {
                 "nodes": nodes,
                 "edges": edges,
-                "viewport": workflow.workflow_viewport,
+                "viewport": snapshot.get("viewport") if isinstance(snapshot.get("viewport"), dict) else workflow.workflow_viewport,
             }
         )
 
@@ -504,6 +504,17 @@ class AssistantConfigService:
                     return self._workflow_input_from_snapshot(draft.snapshot)
                 except Exception:
                     pass
+        if workflow.published_version_id:
+            published = (
+                self.db.query(AssistantWorkflowVersion)
+                .filter(
+                    AssistantWorkflowVersion.id == workflow.published_version_id,
+                    AssistantWorkflowVersion.workflow_id == workflow.id,
+                )
+                .first()
+            )
+            if published and isinstance(published.snapshot, dict):
+                return self._workflow_input_from_snapshot(published.snapshot)
         return self._to_workflow_input_from_entity(workflow)
 
     @staticmethod
@@ -787,14 +798,15 @@ class AssistantConfigService:
         if (workflow.description or "") != normalized_description:
             workflow.description = normalized_description
             changed = True
+        desired_viewport = resolved_workflow_input.viewport
+        if workflow.workflow_viewport != desired_viewport:
+            workflow.workflow_viewport = desired_viewport
+            changed = True
 
         current_published = self._get_workflow_published_input(workflow)
+        current_draft = self._get_workflow_draft_input(workflow) if workflow.draft_version_id is not None else None
         desired_snapshot = self._workflow_input_to_snapshot(resolved_workflow_input)
         current_snapshot = self._workflow_input_to_snapshot(current_published) if current_published is not None else None
-        try:
-            current_entity_snapshot = self._workflow_input_to_snapshot(self._to_workflow_input_from_entity(workflow))
-        except Exception:
-            current_entity_snapshot = None
 
         if current_snapshot != desired_snapshot or workflow.published_version_id is None:
             self._enforce_workflow_structured_input_constraints(
@@ -812,13 +824,9 @@ class AssistantConfigService:
             self._keep_only_workflow_version(workflow, published.id)
             return True
 
-        if current_entity_snapshot != desired_snapshot:
-            self._enforce_workflow_structured_input_constraints(
-                workflow=workflow,
-                workflow_input=resolved_workflow_input,
-                raise_error=True,
-            )
-            self._apply_workflow_to_workflow_entity(workflow, resolved_workflow_input, persist=True)
+        current_draft_snapshot = self._workflow_input_to_snapshot(current_draft) if current_draft is not None else None
+        if current_draft_snapshot != desired_snapshot and workflow.published_version_id is not None:
+            workflow.draft_version_id = workflow.published_version_id
             changed = True
 
         keep_version_id = workflow.published_version_id
@@ -1052,6 +1060,35 @@ class AssistantConfigService:
                 continue
             self.db.delete(item)
 
+    def _serialize_workflow_summary(self, workflow: AssistantWorkflow) -> dict[str, Any]:
+        referenced_skill_ids = [s.id for s in (workflow.skills or [])]
+        referenced_system_behavior_keys = self._binding_keys_from_relationship(
+            getattr(workflow, "system_behavior_bindings", None)
+        )
+        openclaw_reference_count = self._workflow_openclaw_reference_count(workflow)
+        return {
+            "id": workflow.id,
+            "name": self._display_workflow_name(workflow),
+            "description": workflow.description or "",
+            "details_loaded": False,
+            "is_system": bool(workflow.is_system),
+            "hidden": self._is_hidden_system_asset("workflow", workflow.name, workflow.is_system),
+            "enabled": bool(workflow.enabled),
+            "workflow_version": workflow.workflow_version or 1,
+            "workflow_viewport": None,
+            "nodes": [],
+            "edges": [],
+            "draft_version_id": workflow.draft_version_id,
+            "published_version_id": workflow.published_version_id,
+            "referenced_skill_ids": referenced_skill_ids,
+            "reference_count": len(referenced_skill_ids),
+            "referenced_system_behavior_keys": referenced_system_behavior_keys,
+            "system_behavior_reference_count": len(referenced_system_behavior_keys),
+            "openclaw_reference_count": openclaw_reference_count,
+            "created_at": workflow.created_at,
+            "updated_at": workflow.updated_at,
+        }
+
     def _serialize_workflow(self, workflow: AssistantWorkflow) -> dict[str, Any]:
         referenced_skill_ids = [s.id for s in (workflow.skills or [])]
         referenced_system_behavior_keys = self._binding_keys_from_relationship(
@@ -1064,6 +1101,7 @@ class AssistantConfigService:
             "id": workflow.id,
             "name": self._display_workflow_name(workflow),
             "description": workflow.description or "",
+            "details_loaded": True,
             "is_system": bool(workflow.is_system),
             "hidden": self._is_hidden_system_asset("workflow", workflow.name, workflow.is_system),
             "enabled": bool(workflow.enabled),
@@ -1093,8 +1131,43 @@ class AssistantConfigService:
     def serialize_workflow(self, workflow: AssistantWorkflow) -> dict[str, Any]:
         return self._serialize_workflow(workflow)
 
+    def serialize_workflow_summary(self, workflow: AssistantWorkflow) -> dict[str, Any]:
+        return self._serialize_workflow_summary(workflow)
+
     def display_workflow_name(self, workflow: AssistantWorkflow, *, locale: str | None = None) -> str:
         return self._display_workflow_name(workflow, locale=locale)
+
+    def _serialize_agent_profile_summary(self, agent_profile: AssistantAgentProfile) -> dict[str, Any]:
+        referenced_skill_ids = [s.id for s in (agent_profile.skills or [])]
+        referenced_system_behavior_keys = self._binding_keys_from_relationship(
+            getattr(agent_profile, "system_behavior_bindings", None)
+        )
+        openclaw_reference_count = self._agent_openclaw_reference_count(agent_profile)
+        raw_kb = agent_profile.kb_config if isinstance(agent_profile.kb_config, dict) else {"enabled": False}
+        model_source, model_id = self._read_agent_model_config(raw_kb)
+        return {
+            "id": agent_profile.id,
+            "name": self._display_agent_profile_name(agent_profile),
+            "description": agent_profile.description or "",
+            "details_loaded": False,
+            "system_prompt": None,
+            "tools": None,
+            "kb_config": None,
+            "model_source": model_source,
+            "model_id": model_id,
+            "is_system": bool(agent_profile.is_system),
+            "hidden": self._is_hidden_system_asset("agent", agent_profile.name, agent_profile.is_system),
+            "enabled": bool(agent_profile.enabled),
+            "draft_version_id": agent_profile.draft_version_id,
+            "published_version_id": agent_profile.published_version_id,
+            "referenced_skill_ids": referenced_skill_ids,
+            "reference_count": len(referenced_skill_ids),
+            "referenced_system_behavior_keys": referenced_system_behavior_keys,
+            "system_behavior_reference_count": len(referenced_system_behavior_keys),
+            "openclaw_reference_count": openclaw_reference_count,
+            "created_at": agent_profile.created_at,
+            "updated_at": agent_profile.updated_at,
+        }
 
     def _serialize_agent_profile(self, agent_profile: AssistantAgentProfile) -> dict[str, Any]:
         referenced_skill_ids = [s.id for s in (agent_profile.skills or [])]
@@ -1111,6 +1184,7 @@ class AssistantConfigService:
             "id": agent_profile.id,
             "name": self._display_agent_profile_name(agent_profile),
             "description": agent_profile.description or "",
+            "details_loaded": True,
             "system_prompt": draft.system_prompt,
             "tools": draft.tools or [],
             "kb_config": normalized_kb,
@@ -1132,6 +1206,9 @@ class AssistantConfigService:
 
     def serialize_agent_profile(self, agent_profile: AssistantAgentProfile) -> dict[str, Any]:
         return self._serialize_agent_profile(agent_profile)
+
+    def serialize_agent_profile_summary(self, agent_profile: AssistantAgentProfile) -> dict[str, Any]:
+        return self._serialize_agent_profile_summary(agent_profile)
 
     def display_agent_profile_name(
         self,
@@ -1877,7 +1954,6 @@ class AssistantConfigService:
         ]
 
     def list_callable_workflows(self) -> list[dict[str, Any]]:
-        self.ensure_system_catalog_synced()
         workflows = (
             self.db.query(AssistantWorkflow)
             .filter(AssistantWorkflow.enabled.is_(True))
@@ -2214,8 +2290,8 @@ class AssistantConfigService:
         workflow = (
             self.db.query(AssistantWorkflow)
             .options(
-                joinedload(AssistantWorkflow.nodes),
-                joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantWorkflow.draft_version),
+                joinedload(AssistantWorkflow.published_version),
                 joinedload(AssistantWorkflow.system_behavior_bindings),
             )
             .filter(
@@ -2289,8 +2365,8 @@ class AssistantConfigService:
         workflow = (
             self.db.query(AssistantWorkflow)
             .options(
-                joinedload(AssistantWorkflow.nodes),
-                joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantWorkflow.draft_version),
+                joinedload(AssistantWorkflow.published_version),
                 joinedload(AssistantWorkflow.skills),
                 joinedload(AssistantWorkflow.system_behavior_bindings),
             )
@@ -2305,8 +2381,8 @@ class AssistantConfigService:
             legacy_workflows = (
                 self.db.query(AssistantWorkflow)
                 .options(
-                    joinedload(AssistantWorkflow.nodes),
-                    joinedload(AssistantWorkflow.edges),
+                    joinedload(AssistantWorkflow.draft_version),
+                    joinedload(AssistantWorkflow.published_version),
                     joinedload(AssistantWorkflow.skills),
                     joinedload(AssistantWorkflow.system_behavior_bindings),
                 )
@@ -2540,7 +2616,6 @@ class AssistantConfigService:
 
     def list_system_behaviors(self) -> list[dict[str, Any]]:
         locale = self._current_locale()
-        self.ensure_system_catalog_synced()
         bindings = {
             item.behavior_key: item
             for item in (
@@ -2884,10 +2959,27 @@ class AssistantConfigService:
         agent_profile = skill.agent_profile
 
         if target_type == "workflow":
-            nodes = (workflow.nodes if workflow is not None else skill.nodes) or []
-            edges = (workflow.edges if workflow is not None else skill.edges) or []
+            draft_workflow = self._get_workflow_draft_input(workflow) if workflow is not None else None
+            nodes = (
+                self._workflow_response_nodes_from_input(
+                    workflow_id=workflow.id,
+                    workflow=draft_workflow,
+                    ts=workflow.updated_at or workflow.created_at or self._utcnow(),
+                )
+                if workflow is not None and draft_workflow is not None
+                else []
+            )
+            edges = (
+                self._workflow_response_edges_from_input(
+                    workflow_id=workflow.id,
+                    workflow=draft_workflow,
+                    ts=workflow.updated_at or workflow.created_at or self._utcnow(),
+                )
+                if workflow is not None and draft_workflow is not None
+                else []
+            )
             workflow_version = (workflow.workflow_version if workflow is not None else skill.workflow_version) or 1
-            workflow_viewport = workflow.workflow_viewport if workflow is not None else skill.workflow_viewport
+            workflow_viewport = draft_workflow.viewport if draft_workflow is not None else skill.workflow_viewport
             tools = skill.tools or []
             kb_config = skill.kb_config if isinstance(skill.kb_config, dict) else None
             system_prompt = None
@@ -2996,47 +3088,6 @@ class AssistantConfigService:
         if not persist:
             return workflow_tool_names
 
-        # Replace persisted DAG children via direct deletes, then expire the
-        # relationship collections before attaching rebuilt nodes/edges. This
-        # avoids stale in-memory edge rows being re-inserted on a later flush
-        # during repeated system-baseline restores.
-        (
-            self.db.query(AssistantWorkflowEdge)
-            .filter(AssistantWorkflowEdge.workflow_id == workflow_model.id)
-            .delete(synchronize_session=False)
-        )
-        (
-            self.db.query(AssistantWorkflowNode)
-            .filter(AssistantWorkflowNode.workflow_id == workflow_model.id)
-            .delete(synchronize_session=False)
-        )
-        self.db.flush()
-        self.db.expire(workflow_model, ["edges", "nodes"])
-
-        workflow_model.nodes = [
-            AssistantWorkflowNode(
-                node_id=n.node_id,
-                node_type=n.node_type,
-                label=n.label,
-                position_x=n.position_x,
-                position_y=n.position_y,
-                config=n.config,
-            )
-            for n in workflow.nodes
-        ]
-        workflow_model.edges = [
-            AssistantWorkflowEdge(
-                edge_id=e.edge_id,
-                source_node_id=e.source_node_id,
-                target_node_id=e.target_node_id,
-                source_handle=e.source_handle,
-                target_handle=e.target_handle,
-                condition_type=e.condition_type,
-                condition_expr=e.condition_expr.model_dump() if e.condition_expr else None,
-                label=e.label,
-            )
-            for e in workflow.edges
-        ]
         workflow_model.workflow_version = (workflow_model.workflow_version or 0) + 1
         workflow_model.workflow_viewport = workflow.viewport
         return workflow_tool_names
@@ -3340,6 +3391,7 @@ class AssistantConfigService:
         )
         workflow.draft_version_id = keep_version_id
         workflow.published_version_id = keep_version_id
+        self.db.expire(workflow, ["draft_version", "published_version", "versions"])
 
     def _keep_only_agent_version(self, agent_profile: AssistantAgentProfile, keep_version_id: UUID) -> None:
         (
@@ -3352,6 +3404,7 @@ class AssistantConfigService:
         )
         agent_profile.draft_version_id = keep_version_id
         agent_profile.published_version_id = keep_version_id
+        self.db.expire(agent_profile, ["versions"])
 
     def _acquire_system_catalog_sync_lock(self) -> None:
         bind = self.db.get_bind()
@@ -3363,17 +3416,209 @@ class AssistantConfigService:
             {"key": _SYSTEM_CATALOG_SYNC_LOCK_KEY},
         )
 
-    def ensure_system_catalog_synced(self) -> None:
-        self._acquire_system_catalog_sync_lock()
+    def _expected_system_catalog_names(self, *, locale: str | None = None) -> dict[str, set[str]]:
+        normalized_locale = self._current_locale(locale)
+        assets = list_system_assets(locale=normalized_locale)
+        return {
+            "skill_names": {
+                definition.name
+                for definition in SkillRegistry.list_system_skill_definitions(locale=normalized_locale)
+                if definition.name
+            },
+            "workflow_names": {
+                asset.canonical_name
+                for asset in assets
+                if asset.kind == "workflow" and asset.canonical_name
+            },
+            "agent_names": {
+                asset.canonical_name
+                for asset in assets
+                if asset.kind == "agent" and asset.canonical_name
+            },
+            "behavior_keys": {
+                definition.key
+                for definition in list_system_behavior_definitions(locale=normalized_locale)
+                if definition.key
+            },
+        }
+
+    def _compute_system_catalog_signature(self, *, locale: str | None = None) -> str:
+        normalized_locale = self._current_locale(locale)
+        assets = list_system_assets(locale=normalized_locale)
+        payload = {
+            "locale": normalized_locale,
+            "internal_tool_names": sorted(ToolRegistry.INTERNAL_TOOL_NAMES or []),
+            "system_tool_definitions": [
+                asdict(item)
+                for item in ToolRegistry.list_system_tool_definitions(locale=normalized_locale)
+            ],
+            "system_skill_definitions": [
+                asdict(item)
+                for item in SkillRegistry.list_system_skill_definitions(locale=normalized_locale)
+            ],
+            "system_asset_definitions": [asdict(item) for item in assets],
+            "system_behavior_definitions": [
+                asdict(item)
+                for item in list_system_behavior_definitions(locale=normalized_locale)
+            ],
+            "system_workflow_assets": {
+                asset.asset_key: load_system_workflow_asset(asset.asset_key, locale=normalized_locale).model_dump(
+                    by_alias=True,
+                    mode="json",
+                )
+                for asset in assets
+                if asset.kind == "workflow"
+            },
+            "system_agent_assets": {
+                asset.asset_key: load_system_agent_asset(asset.asset_key, locale=normalized_locale).model_dump(
+                    by_alias=True,
+                    mode="json",
+                )
+                for asset in assets
+                if asset.kind == "agent"
+            },
+        }
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _load_persisted_system_catalog_signature(self) -> dict[str, Any] | None:
+        setting = (
+            self.db.query(AppSetting)
+            .filter(AppSetting.key == _SYSTEM_CATALOG_SIGNATURE_SETTING_KEY)
+            .first()
+        )
+        if setting is None or not isinstance(setting.value_json, dict):
+            return None
+        return dict(setting.value_json)
+
+    def _store_system_catalog_signature(self, *, locale: str, signature: str) -> None:
+        setting = (
+            self.db.query(AppSetting)
+            .filter(AppSetting.key == _SYSTEM_CATALOG_SIGNATURE_SETTING_KEY)
+            .first()
+        )
+        payload = {
+            "locale": locale,
+            "signature": signature,
+            "updated_at": self._utcnow().isoformat(),
+        }
+        if setting is None:
+            setting = AppSetting(
+                key=_SYSTEM_CATALOG_SIGNATURE_SETTING_KEY,
+                value_json=payload,
+            )
+            self.db.add(setting)
+            return
+        setting.value_json = payload
+
+    def _has_minimal_system_catalog_presence(self, *, locale: str | None = None) -> bool:
+        expected = self._expected_system_catalog_names(locale=locale)
+
+        expected_skill_names = expected["skill_names"]
+        if expected_skill_names:
+            existing_skill_names = {
+                str(name)
+                for name, in (
+                    self.db.query(AssistantSkill.name)
+                    .filter(
+                        AssistantSkill.is_system.is_(True),
+                        AssistantSkill.name.in_(tuple(expected_skill_names)),
+                    )
+                    .all()
+                )
+                if name
+            }
+            if existing_skill_names != expected_skill_names:
+                return False
+
+        expected_workflow_names = expected["workflow_names"]
+        if expected_workflow_names:
+            existing_workflows = {
+                str(name)
+                for name, published_version_id in (
+                    self.db.query(AssistantWorkflow.name, AssistantWorkflow.published_version_id)
+                    .filter(
+                        AssistantWorkflow.is_system.is_(True),
+                        AssistantWorkflow.name.in_(tuple(expected_workflow_names)),
+                    )
+                    .all()
+                )
+                if name and published_version_id is not None
+            }
+            if existing_workflows != expected_workflow_names:
+                return False
+
+        expected_agent_names = expected["agent_names"]
+        if expected_agent_names:
+            existing_agents = {
+                str(name)
+                for name, published_version_id in (
+                    self.db.query(AssistantAgentProfile.name, AssistantAgentProfile.published_version_id)
+                    .filter(
+                        AssistantAgentProfile.is_system.is_(True),
+                        AssistantAgentProfile.name.in_(tuple(expected_agent_names)),
+                    )
+                    .all()
+                )
+                if name and published_version_id is not None
+            }
+            if existing_agents != expected_agent_names:
+                return False
+
+        expected_behavior_keys = expected["behavior_keys"]
+        if expected_behavior_keys:
+            existing_behavior_keys = {
+                str(key)
+                for key, in (
+                    self.db.query(AssistantSystemBehaviorBinding.behavior_key)
+                    .filter(AssistantSystemBehaviorBinding.behavior_key.in_(tuple(expected_behavior_keys)))
+                    .all()
+                )
+                if key
+            }
+            if existing_behavior_keys != expected_behavior_keys:
+                return False
+
+        return True
+
+    def _system_catalog_needs_sync(self, *, locale: str | None = None) -> bool:
+        normalized_locale = self._current_locale(locale)
+        persisted = self._load_persisted_system_catalog_signature()
+        if not persisted:
+            return True
+        if persisted.get("locale") != normalized_locale:
+            return True
+        if not self._has_minimal_system_catalog_presence(locale=normalized_locale):
+            return True
+        current_signature = self._compute_system_catalog_signature(locale=normalized_locale)
+        return str(persisted.get("signature") or "") != current_signature
+
+    def _sync_system_catalog_locked(self, *, locale: str | None = None) -> None:
+        normalized_locale = self._current_locale(locale)
         self.sync_system_tools(commit=False)
         self.sync_system_skills(commit=False)
         self.sync_standalone_system_targets(commit=False)
         self.ensure_system_behaviors(commit=False)
+        signature = self._compute_system_catalog_signature(locale=normalized_locale)
+        self._store_system_catalog_signature(locale=normalized_locale, signature=signature)
         try:
             self.db.commit()
         except IntegrityError as exc:
             self.db.rollback()
             raise ApiException(status_code=409, code=40969, message="Sync system catalog failed") from exc
+
+    def ensure_system_catalog_synced(self) -> None:
+        self._acquire_system_catalog_sync_lock()
+        self._sync_system_catalog_locked()
+
+    def ensure_system_catalog_warm(self) -> bool:
+        normalized_locale = self._current_locale()
+        self._acquire_system_catalog_sync_lock()
+        if not self._system_catalog_needs_sync(locale=normalized_locale):
+            self.db.rollback()
+            return False
+        self._sync_system_catalog_locked(locale=normalized_locale)
+        return True
 
     # -------------------------
     # System seed / sync
@@ -3578,142 +3823,12 @@ class AssistantConfigService:
                     continue
                 raise ApiException(status_code=409, code=40920, message="Sync system skills failed") from exc
 
-    @staticmethod
-    def _replace_tool_text_refs_in_value(value: Any, tool_node_ids: set[str]) -> tuple[Any, bool]:
-        changed = False
-
-        if isinstance(value, str):
-            def _repl(match: re.Match[str]) -> str:
-                nonlocal changed
-                node_id = match.group(1)
-                if node_id in tool_node_ids:
-                    changed = True
-                    return f"{{{{{node_id}.result}}}}"
-                return match.group(0)
-
-            return _TOOL_TEXT_REF_RE.sub(_repl, value), changed
-
-        if isinstance(value, list):
-            out: list[Any] = []
-            for item in value:
-                new_item, item_changed = AssistantConfigService._replace_tool_text_refs_in_value(item, tool_node_ids)
-                out.append(new_item)
-                changed = changed or item_changed
-            return out, changed
-
-        if isinstance(value, dict):
-            out: dict[Any, Any] = {}
-            for k, v in value.items():
-                new_v, v_changed = AssistantConfigService._replace_tool_text_refs_in_value(v, tool_node_ids)
-                out[k] = new_v
-                changed = changed or v_changed
-            return out, changed
-
-        return value, False
-
-    def _migrate_workflow_tool_text_refs(self, skill: AssistantSkill) -> None:
-        nodes = getattr(skill, "nodes", None) or []
-        if not nodes:
-            return
-        tool_node_ids = {
-            str(getattr(node, "node_id", "") or "").strip()
-            for node in nodes
-            if str(getattr(node, "node_type", "") or "").strip() == "tool"
-        }
-        tool_node_ids.discard("")
-        if not tool_node_ids:
-            return
-
-        for node in nodes:
-            cfg = getattr(node, "config", None)
-            if not isinstance(cfg, dict):
-                continue
-            new_cfg, changed = self._replace_tool_text_refs_in_value(cfg, tool_node_ids)
-            if changed:
-                node.config = new_cfg
-
-    @staticmethod
-    def _requires_system_workflow_output_migration(skill: AssistantSkill) -> bool:
-        """Detect legacy system workflow graphs that do not use output-node terminal semantics."""
-        nodes = list(getattr(skill, "nodes", None) or [])
-        edges = list(getattr(skill, "edges", None) or [])
-        if not nodes:
-            return True
-
-        output_nodes = [
-            node
-            for node in nodes
-            if str(getattr(node, "node_type", "") or "").strip().lower() == "output"
-        ]
-        if len(output_nodes) != 1:
-            return True
-
-        output_node_id = str(getattr(output_nodes[0], "node_id", "") or "").strip()
-        if not output_node_id:
-            return True
-
-        has_incoming = any(
-            str(getattr(edge, "target_node_id", "") or "").strip() == output_node_id
-            for edge in edges
-        )
-        has_outgoing = any(
-            str(getattr(edge, "source_node_id", "") or "").strip() == output_node_id
-            for edge in edges
-        )
-        if has_outgoing or not has_incoming:
-            return True
-
-        for node in nodes:
-            cfg = getattr(node, "config", None)
-            if isinstance(cfg, dict) and ("isOutput" in cfg or "is_output" in cfg):
-                return True
-
-        return False
-
-    def _replace_workflow_with_default(self, skill: AssistantSkill, default) -> None:
-        """Replace only workflow graph (nodes/edges) from system default definition."""
-        skill.edges = []
-        skill.nodes = []
-        self.db.flush()
-
-        if getattr(default, "workflow_nodes", None):
-            skill.nodes = [
-                AssistantSkillNode(
-                    node_id=n.node_id,
-                    node_type=n.node_type,
-                    label=n.label,
-                    position_x=n.position_x,
-                    position_y=n.position_y,
-                    config=n.config,
-                )
-                for n in default.workflow_nodes
-            ]
-        else:
-            skill.nodes = []
-
-        if getattr(default, "workflow_edges", None):
-            skill.edges = [
-                AssistantSkillEdge(
-                    edge_id=e.edge_id,
-                    source_node_id=e.source_node_id,
-                    target_node_id=e.target_node_id,
-                    source_handle=e.source_handle,
-                    target_handle=e.target_handle,
-                    condition_type=e.condition_type,
-                    condition_expr=e.condition_expr.model_dump() if e.condition_expr else None,
-                    label=e.label,
-                )
-                for e in default.workflow_edges
-            ]
-        else:
-            skill.edges = []
-
     # -------------------------
     # Tools CRUD
     # -------------------------
-    def list_tools(self, sync_system: bool = True, include_disabled: bool = False) -> list[AssistantTool]:
-        if sync_system:
-            self.sync_system_tools()
+    def list_tools(self, sync_system: bool = False, include_disabled: bool = False) -> list[AssistantTool]:
+        # Deprecated compatibility flag: reads are now always side-effect free.
+        _ = sync_system
         # 仅返回自定义（remote）工具；系统工具定义不落库
         q = (
             self.db.query(AssistantTool)
@@ -3894,14 +4009,14 @@ class AssistantConfigService:
     # -------------------------
     # Skills CRUD
     # -------------------------
-    def list_skills(self, sync_system: bool = True, include_disabled: bool = False) -> list[AssistantSkill]:
-        if sync_system:
-            self.sync_system_skills()
+    def list_skills(self, sync_system: bool = False, include_disabled: bool = False) -> list[AssistantSkill]:
+        # Deprecated compatibility flag: reads are now always side-effect free.
+        _ = sync_system
         q = (
             self.db.query(AssistantSkill)
             .options(
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.nodes),
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.draft_version),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.published_version),
                 joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.skills),
                 joinedload(AssistantSkill.agent_profile).joinedload(AssistantAgentProfile.skills),
             )
@@ -3914,9 +4029,10 @@ class AssistantConfigService:
     def get_skill(self, id: UUID) -> AssistantSkill:
         skill = (
             self.db.query(AssistantSkill)
+            .populate_existing()
             .options(
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.nodes),
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.draft_version),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.published_version),
                 joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.skills),
                 joinedload(AssistantSkill.agent_profile).joinedload(AssistantAgentProfile.skills),
             )
@@ -4537,8 +4653,6 @@ class AssistantConfigService:
         q = (
             self.db.query(AssistantWorkflow)
             .options(
-                joinedload(AssistantWorkflow.nodes),
-                joinedload(AssistantWorkflow.edges),
                 joinedload(AssistantWorkflow.skills),
                 joinedload(AssistantWorkflow.system_behavior_bindings),
             )
@@ -4549,18 +4663,17 @@ class AssistantConfigService:
         return q.all()
 
     def list_workflows(self, include_disabled: bool = False) -> list[AssistantWorkflow]:
-        self.ensure_system_catalog_synced()
         workflows = self._list_workflows_query(include_disabled=include_disabled)
         self._attach_openclaw_reference_counts(workflows=workflows)
         return workflows
 
     def get_workflow(self, workflow_id: UUID) -> AssistantWorkflow:
-        self.ensure_system_catalog_synced()
         workflow = (
             self.db.query(AssistantWorkflow)
+            .populate_existing()
             .options(
-                joinedload(AssistantWorkflow.nodes),
-                joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantWorkflow.draft_version),
+                joinedload(AssistantWorkflow.published_version),
                 joinedload(AssistantWorkflow.skills),
                 joinedload(AssistantWorkflow.system_behavior_bindings),
             )
@@ -4935,7 +5048,6 @@ class AssistantConfigService:
     # Agent Profiles CRUD
     # -------------------------
     def list_agent_profiles(self, include_disabled: bool = False) -> list[AssistantAgentProfile]:
-        self.ensure_system_catalog_synced()
         q = (
             self.db.query(AssistantAgentProfile)
             .options(
@@ -4951,7 +5063,6 @@ class AssistantConfigService:
         return profiles
 
     def get_agent_profile(self, agent_profile_id: UUID) -> AssistantAgentProfile:
-        self.ensure_system_catalog_synced()
         profile = (
             self.db.query(AssistantAgentProfile)
             .options(

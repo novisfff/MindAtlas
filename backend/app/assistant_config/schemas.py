@@ -793,6 +793,7 @@ class AssistantWorkflowResponse(OrmModel):
     id: UUID
     name: str
     description: str
+    details_loaded: bool = True
     is_system: bool
     hidden: bool = False
     enabled: bool
@@ -815,6 +816,7 @@ class AssistantAgentProfileResponse(OrmModel):
     id: UUID
     name: str
     description: str
+    details_loaded: bool = True
     system_prompt: str | None
     tools: list[str] | None
     kb_config: dict | None

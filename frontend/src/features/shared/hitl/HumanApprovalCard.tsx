@@ -8,6 +8,7 @@ import type {
   HumanApprovalDecisionPayload,
   HumanApprovalFieldSchema,
   HumanApprovalFieldWidget,
+  HumanApprovalOption,
   HumanApprovalRecord,
 } from './types'
 
@@ -61,16 +62,38 @@ function normalizeWidget(field: HumanApprovalFieldSchema): HumanApprovalFieldWid
   return defaultWidgetForType(field.type)
 }
 
-function normalizeOptions(field: HumanApprovalFieldSchema): string[] {
+type NormalizedOption = {
+  value: string
+  label: string
+  description?: string
+}
+
+function normalizeOptions(field: HumanApprovalFieldSchema): NormalizedOption[] {
   if (!Array.isArray(field.options)) return []
-  const deduped: string[] = []
+  const deduped: NormalizedOption[] = []
   const seen = new Set<string>()
-  field.options.forEach((item) => {
-    if (typeof item !== 'string') return
-    const text = item.trim()
-    if (!text || seen.has(text)) return
-    seen.add(text)
-    deduped.push(text)
+  field.options.forEach((item: HumanApprovalOption) => {
+    let normalized: NormalizedOption | null = null
+    if (typeof item === 'string') {
+      const text = item.trim()
+      if (text) {
+        normalized = { value: text, label: text }
+      }
+    } else if (item && typeof item === 'object') {
+      const value = String(item.value ?? '').trim()
+      const label = String(item.label ?? value).trim()
+      const description = String(item.description ?? '').trim()
+      if (value && label) {
+        normalized = {
+          value,
+          label,
+          ...(description ? { description } : {}),
+        }
+      }
+    }
+    if (!normalized || seen.has(normalized.value)) return
+    seen.add(normalized.value)
+    deduped.push(normalized)
   })
   return deduped
 }
@@ -131,6 +154,7 @@ function isEmptyValue(field: HumanApprovalFieldSchema, raw: unknown): boolean {
 function coerceFieldValue(field: HumanApprovalFieldSchema, raw: unknown): unknown {
   const widget = normalizeWidget(field)
   const options = normalizeOptions(field)
+  const optionValues = options.map((item) => item.value)
 
   if (field.type === 'string') {
     const value = typeof raw === 'string' ? raw : String(raw ?? '')
@@ -158,7 +182,7 @@ function coerceFieldValue(field: HumanApprovalFieldSchema, raw: unknown): unknow
     }
     if (widget === 'select' || widget === 'radio') {
       const normalized = value.trim()
-      if (!options.includes(normalized)) {
+      if (!optionValues.includes(normalized)) {
         throw new Error(widget)
       }
       return normalized
@@ -168,10 +192,17 @@ function coerceFieldValue(field: HumanApprovalFieldSchema, raw: unknown): unknow
 
   if (field.type === 'array') {
     const values = toStringArray(raw)
+    if (widget === 'checkbox_group') {
+      const invalid = values.filter((item) => !optionValues.includes(item))
+      if (invalid.length > 0) {
+        throw new Error('checkbox_group')
+      }
+      return Array.from(new Set(values))
+    }
     if (widget === 'tag_selector') {
       const allowCustom = field.allowCustom ?? true
-      if (!allowCustom && options.length > 0) {
-        const unknown = values.filter((item) => !options.includes(item))
+      if (!allowCustom && optionValues.length > 0) {
+        const unknown = values.filter((item) => !optionValues.includes(item))
         if (unknown.length > 0) {
           throw new Error('tag')
         }
@@ -194,7 +225,7 @@ function coerceFieldValue(field: HumanApprovalFieldSchema, raw: unknown): unknow
     }
     if (widget === 'select' || widget === 'radio') {
       const candidates = [String(parsed), String(Math.trunc(parsed))]
-      if (!candidates.some((item) => options.includes(item))) {
+      if (!candidates.some((item) => optionValues.includes(item))) {
         throw new Error(widget)
       }
     }
@@ -207,7 +238,7 @@ function coerceFieldValue(field: HumanApprovalFieldSchema, raw: unknown): unknow
     }
     if (widget === 'select' || widget === 'radio') {
       const candidates = [String(parsed), Number.isInteger(parsed) ? String(Math.trunc(parsed)) : '']
-      if (!candidates.some((item) => item && options.includes(item))) {
+      if (!candidates.some((item) => item && optionValues.includes(item))) {
         throw new Error(widget)
       }
     }
@@ -279,6 +310,10 @@ export function HumanApprovalCard({
         }
         if (code === 'radio') {
           toast.error(t('settings.skills.humanApproval.validationRadioOption', { field: field.label || field.name }))
+          return
+        }
+        if (code === 'checkbox_group') {
+          toast.error(t('settings.skills.humanApproval.validationCheckboxOption', { field: field.label || field.name }))
           return
         }
         if (code === 'tag') {

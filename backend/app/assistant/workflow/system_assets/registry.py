@@ -12,6 +12,7 @@ SystemAssistantAssetUsageTag = Literal["skill_default", "standalone_target", "sy
 
 QUICK_STATS_ASSET_KEY = "quick_stats"
 SMART_CAPTURE_ASSET_KEY = "smart_capture"
+SMART_CAPTURE_RELATION_FOLLOWUP_ASSET_KEY = "smart_capture_relation_followup"
 PERIODIC_REVIEW_ASSET_KEY = "periodic_review"
 PERIODIC_REVIEW_CORE_ASSET_KEY = "periodic_review_core"
 GENERAL_CHAT_ASSET_KEY = DEFAULT_SKILL_NAME
@@ -125,8 +126,8 @@ _ASSET_TEMPLATES: tuple[_SystemAssistantAssetTemplate, ...] = (
             en="Smart Capture Workflow",
         ),
         description=_LocalizedText(
-            zh="智能创建记录（将用户内容写入/保存为 MindAtlas 的一条记录；在用户要求创建/新增/添加/记录/保存/入库时或用户直接提供内容时使用）",
-            en="Smart entry creation for saving user-provided content into MindAtlas. Use this when the user wants to create, add, save, record, or store something, or when they directly provide content that should be captured.",
+            zh="智能创建记录（面向系统技能与应用内 AI 助手优先使用的引导式记录入库流程：先检索相似记录，再由用户决定新建或合并，写入成功后还可继续确认推荐关系；也适用于通用的创建/新增/记录/保存诉求）",
+            en="A guided capture workflow used primarily by system skills and the in-app AI assistant: it checks for similar entries first, lets the user choose create-new vs merge-into-existing, and can follow successful writes with relation suggestions. It still serves general create/add/save/capture intents as a reusable workflow.",
         ),
         usage_tags=("skill_default",),
         skill_name="smart_capture",
@@ -146,6 +147,21 @@ _ASSET_TEMPLATES: tuple[_SystemAssistantAssetTemplate, ...] = (
                 "Today I learned about the new features in React 19",
             ),
         ),
+    ),
+    _SystemAssistantAssetTemplate(
+        asset_key=SMART_CAPTURE_RELATION_FOLLOWUP_ASSET_KEY,
+        kind="workflow",
+        canonical_name="system_smart_capture_relation_followup__workflow",
+        display_name=_LocalizedText(
+            zh="智能创建记录关系补全工作流",
+            en="Smart Capture Relation Follow-up Workflow",
+        ),
+        description=_LocalizedText(
+            zh="供 smart_capture 在记录写入成功后复用的关系推荐与人工确认子流程，负责补全候选关系、批量确认并创建所选关联。",
+            en="A hidden follow-up workflow reused by smart_capture after record persistence. It enriches relation recommendations, asks for batch human confirmation, and creates the selected relations.",
+        ),
+        hidden=True,
+        usage_tags=("standalone_target",),
     ),
     _SystemAssistantAssetTemplate(
         asset_key=PERIODIC_REVIEW_ASSET_KEY,

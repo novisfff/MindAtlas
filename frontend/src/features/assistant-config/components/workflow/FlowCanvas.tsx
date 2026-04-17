@@ -22,7 +22,15 @@ import { normalizeIfElseConfig } from './ifElseConfig'
 import { WorkflowDeletableEdge } from './WorkflowDeletableEdge'
 import { createMainFlowNode } from './nodeFactory'
 import type { QuickAddPayload } from './QuickAddPopover'
-import { estimateContainerNodeSizeFromConfig } from './containerLayout'
+import {
+  CONTAINER_NODE_HANDLE_TOP,
+  HUMAN_IN_LOOP_NODE_HEIGHT,
+  IF_ELSE_HANDLE_BASE_TOP,
+  IF_ELSE_HANDLE_STEP,
+  MAIN_NODE_HANDLE_TOP,
+  MAIN_NODE_WIDTH,
+  estimateMainNodeSize,
+} from './workflowGeometry'
 import { FlowControls } from './FlowControls'
 
 const nodeTypes: NodeTypes = {
@@ -53,14 +61,8 @@ const QUICK_ADD_X_OFFSET = 220
 const QUICK_ADD_Y_STEP = 88
 const NODE_COLLISION_X = 140
 const NODE_COLLISION_Y = 84
-const HANDLE_TOP_OFFSET = 28
-const CONTAINER_HANDLE_TOP = 20
 const CONTAINER_INPUT_HANDLE_ID = 'container_input'
 const CONTAINER_OUTPUT_HANDLE_ID = 'container_output'
-const IF_ELSE_HANDLE_BASE_TOP = 50
-const IF_ELSE_HANDLE_STEP = 28
-const DEFAULT_NODE_WIDTH = 240
-const DEFAULT_NODE_HEIGHT = 112
 
 function quickAddHandlesForNode(node: Node<WfNodeData>): string[] {
   const outputs = sourceHandlesForNode(node)
@@ -139,47 +141,17 @@ function sourceHandlesForNode(node: Node<WfNodeData>): string[] {
 function resolveHandleRelativeTop(node: Node<WfNodeData>, sourceHandle: string): number {
   if (sourceHandle === 'input') {
     return node.data.nodeType === 'iteration' || node.data.nodeType === 'loop'
-      ? CONTAINER_HANDLE_TOP
-      : HANDLE_TOP_OFFSET
+      ? CONTAINER_NODE_HANDLE_TOP
+      : MAIN_NODE_HANDLE_TOP
   }
   if (node.data.nodeType !== 'if_else' && node.data.nodeType !== 'human_in_loop') {
     return node.data.nodeType === 'iteration' || node.data.nodeType === 'loop'
-      ? CONTAINER_HANDLE_TOP
-      : HANDLE_TOP_OFFSET
+      ? CONTAINER_NODE_HANDLE_TOP
+      : MAIN_NODE_HANDLE_TOP
   }
   const handles = sourceHandlesForNode(node)
   const idx = Math.max(0, handles.indexOf(sourceHandle))
   return IF_ELSE_HANDLE_BASE_TOP + idx * IF_ELSE_HANDLE_STEP
-}
-
-function estimateMainNodeSize(node: Node<WfNodeData>): { width: number; height: number } {
-  const measured = node as Node<WfNodeData> & {
-    measured?: { width?: number; height?: number }
-    width?: number
-    height?: number
-  }
-  const measuredWidth = Number(measured.measured?.width ?? measured.width)
-  const measuredHeight = Number(measured.measured?.height ?? measured.height)
-  if (Number.isFinite(measuredWidth) && Number.isFinite(measuredHeight) && measuredWidth > 0 && measuredHeight > 0) {
-    return { width: measuredWidth, height: measuredHeight }
-  }
-
-  if (node.data.nodeType === 'iteration' || node.data.nodeType === 'loop') {
-    const size = estimateContainerNodeSizeFromConfig(node.data.config ?? null)
-    return { width: size.width, height: size.height }
-  }
-  if (node.data.nodeType === 'if_else') {
-    const normalized = normalizeIfElseConfig((node.data.config ?? {}) as Record<string, unknown>)
-    const height = 50 + ((normalized.branches.length + 1) * 28) + 12
-    return { width: DEFAULT_NODE_WIDTH, height }
-  }
-  if (node.data.nodeType === 'human_in_loop') {
-    return { width: DEFAULT_NODE_WIDTH, height: 152 }
-  }
-  if (node.data.nodeType === 'start') {
-    return { width: DEFAULT_NODE_WIDTH, height: 96 }
-  }
-  return { width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT }
 }
 
 function rectsOverlap(

@@ -109,7 +109,7 @@ export const getToolsWithParams = (params?: { includeDisabled?: boolean; syncSys
   apiClient.get<AssistantTool[]>('/api/assistant-config/tools', {
     query: {
       include_disabled: params?.includeDisabled ?? true,
-      sync_system: params?.syncSystem ?? true,
+      sync_system: params?.syncSystem ?? false,
     },
   })
 

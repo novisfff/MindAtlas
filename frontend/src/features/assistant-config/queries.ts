@@ -24,10 +24,30 @@ function upsertByBehaviorKey<T extends { behaviorKey: string }>(items: T[] | und
   return nextItems
 }
 
+function toWorkflowSummary(workflow: workflowsApi.AssistantWorkflow): workflowsApi.AssistantWorkflow {
+  return {
+    ...workflow,
+    detailsLoaded: false,
+    workflowViewport: null,
+    nodes: [],
+    edges: [],
+  }
+}
+
+function toAgentSummary(agent: agentsApi.AssistantAgentProfile): agentsApi.AssistantAgentProfile {
+  return {
+    ...agent,
+    detailsLoaded: false,
+    systemPrompt: null,
+    tools: null,
+    kbConfig: null,
+  }
+}
+
 function syncWorkflowCaches(qc: QueryClient, workflow: workflowsApi.AssistantWorkflow) {
   qc.setQueryData<workflowsApi.AssistantWorkflow[]>(
     ['assistant-workflows'],
-    (current) => upsertById(current, workflow),
+    (current) => upsertById(current, toWorkflowSummary(workflow)),
   )
   qc.setQueryData(['assistant-workflow', workflow.id], workflow)
 }
@@ -35,7 +55,7 @@ function syncWorkflowCaches(qc: QueryClient, workflow: workflowsApi.AssistantWor
 function syncAgentCaches(qc: QueryClient, agent: agentsApi.AssistantAgentProfile) {
   qc.setQueryData<agentsApi.AssistantAgentProfile[]>(
     ['assistant-agents'],
-    (current) => upsertById(current, agent),
+    (current) => upsertById(current, toAgentSummary(agent)),
   )
   qc.setQueryData(['assistant-agent-profile', agent.id], agent)
 }
@@ -170,6 +190,13 @@ export const useCallableWorkflowsQuery = () =>
     queryFn: workflowsApi.getCallableWorkflows,
   })
 
+export const useWorkflowDetailQuery = (workflowId: string | null | undefined, enabled = true) =>
+  useQuery({
+    queryKey: ['assistant-workflow', workflowId],
+    queryFn: () => workflowsApi.getWorkflow(String(workflowId)),
+    enabled: enabled && !!workflowId,
+  })
+
 export const useCreateWorkflowMutation = () => {
   const qc = useQueryClient()
   return useMutation({
@@ -234,6 +261,13 @@ export const useAgentProfilesQuery = () =>
   useQuery({
     queryKey: ['assistant-agents'],
     queryFn: agentsApi.getAgentProfiles,
+  })
+
+export const useAgentProfileDetailQuery = (agentProfileId: string | null | undefined, enabled = true) =>
+  useQuery({
+    queryKey: ['assistant-agent-profile', agentProfileId],
+    queryFn: () => agentsApi.getAgentProfile(String(agentProfileId)),
+    enabled: enabled && !!agentProfileId,
   })
 
 export const useCreateAgentProfileMutation = () => {

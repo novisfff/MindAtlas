@@ -37,6 +37,7 @@ from app.ai_provider.router import router as ai_provider_router
 from app.ai_registry.router import credential_router, model_router, binding_router
 from app.ai.router import router as ai_router
 from app.assistant.router import router as assistant_router
+from app.assistant_config.bootstrap import warm_assistant_config_system_catalog
 from app.assistant_config.router import router as assistant_config_router
 from app.stats.router import router as stats_router
 from app.graph.router import router as graph_router
@@ -61,6 +62,7 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan: startup and shutdown events."""
+    warm_assistant_config_system_catalog()
     setup_scheduler()
     yield
     shutdown_scheduler()

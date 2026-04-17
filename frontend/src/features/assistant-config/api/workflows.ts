@@ -16,6 +16,7 @@ export interface AssistantWorkflow {
   id: string
   name: string
   description: string
+  detailsLoaded: boolean
   isSystem: boolean
   hidden?: boolean
   enabled: boolean

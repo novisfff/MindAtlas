@@ -34,6 +34,7 @@ interface AssistantTargetCardProps {
     disableCopy: boolean
     isDeleting: boolean
     disableDelete: boolean
+    isDetailLoading?: boolean
 }
 
 interface ReferenceBadgeProps {
@@ -64,6 +65,7 @@ export const AssistantTargetCard = memo(function AssistantTargetCard({
     disableCopy,
     isDeleting,
     disableDelete,
+    isDetailLoading = false,
 }: AssistantTargetCardProps) {
     const { t } = useTranslation()
     const isWorkflow = target.type === 'workflow'
@@ -215,91 +217,104 @@ export const AssistantTargetCard = memo(function AssistantTargetCard({
                 )}
             >
                 <div className="overflow-hidden">
-                    <div className="mt-4 border-t border-border/70 pt-4">
-                        <div className="space-y-4">
-                            {isWorkflow ? (
-                                workflow ? (
-                                    <div className="space-y-4">
-                                        {workflow.description && (
-                                            <SettingsInset className="text-sm leading-6 text-muted-foreground">
-                                                {workflow.description}
-                                            </SettingsInset>
-                                        )}
-                                        <div className="overflow-hidden rounded-[20px] border border-border/70 bg-muted/20">
-                                            <WorkflowReadonlyPreview
-                                                workflow={workflow}
-                                                onOpenEditor={onEdit}
-                                            />
+                    {isExpanded ? (
+                        <div className="mt-4 border-t border-border/70 pt-4">
+                            <div className="space-y-4">
+                                {isWorkflow ? (
+                                    isDetailLoading ? (
+                                        <div className="flex items-center justify-center py-10 text-muted-foreground">
+                                            <Loader2 className="h-5 w-5 animate-spin" />
                                         </div>
-                                    </div>
+                                    ) : workflow ? (
+                                        <div className="space-y-4">
+                                            {workflow.description && (
+                                                <SettingsInset className="text-sm leading-6 text-muted-foreground">
+                                                    {workflow.description}
+                                                </SettingsInset>
+                                            )}
+                                            <div className="overflow-hidden rounded-[20px] border border-border/70 bg-muted/20">
+                                                <WorkflowReadonlyPreview
+                                                    key={`workflow-preview:${workflow.id}:${workflow.updatedAt}:${workflow.workflowVersion}`}
+                                                    workflow={workflow}
+                                                    onOpenEditor={onEdit}
+                                                />
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <p className="text-sm text-muted-foreground">{t('messages.noData')}</p>
+                                    )
                                 ) : (
-                                    <p className="text-sm text-muted-foreground">{t('messages.noData')}</p>
-                                )
-                            ) : (
-                                <div className="grid gap-6">
-                                    <div className="grid gap-4 md:grid-cols-2">
-                                        <SettingsInset className="space-y-1.5">
+                                    isDetailLoading ? (
+                                        <div className="flex items-center justify-center py-10 text-muted-foreground">
+                                            <Loader2 className="h-5 w-5 animate-spin" />
+                                        </div>
+                                    ) : (
+                                    <div className="grid gap-6">
+                                        <div className="grid gap-4 md:grid-cols-2">
+                                            <SettingsInset className="space-y-1.5">
+                                                <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                                                    {t('settings.skills.description')}
+                                                </label>
+                                                <div className={cn(uiChrome.control, 'px-3 py-3 text-sm shadow-none')}>
+                                                    {agent?.description || '-'}
+                                                </div>
+                                            </SettingsInset>
+
+                                            <SettingsInset className="space-y-1.5">
+                                                <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                                                    {t('settings.skills.targetRuntimeConfig')}
+                                                </label>
+                                                <div className={cn(uiChrome.control, 'flex items-center gap-2 px-3 py-3 text-sm shadow-none')}>
+                                                    <div className={cn(
+                                                        "w-2 h-2 rounded-full",
+                                                        agent?.kbConfig?.enabled ? "bg-green-500" : "bg-gray-300"
+                                                    )} />
+                                                    <span>
+                                                        {t('settings.skills.agentKbEnabled')}:{' '}
+                                                        <span className="font-medium">
+                                                            {agent?.kbConfig?.enabled
+                                                                ? t('settings.skills.enabledStateOn')
+                                                                : t('settings.skills.enabledStateOff')}
+                                                        </span>
+                                                    </span>
+                                                </div>
+                                            </SettingsInset>
+                                        </div>
+
+                                        <SettingsInset className="space-y-2">
                                             <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                                                {t('settings.skills.description')}
+                                                {t('settings.skills.agentTools')}
                                             </label>
-                                            <div className={cn(uiChrome.control, 'px-3 py-3 text-sm shadow-none')}>
-                                                {agent?.description || '-'}
-                                            </div>
+                                            {agentTools.length === 0 ? (
+                                                <p className="text-sm text-muted-foreground italic">{t('settings.skills.noToolsSelected')}</p>
+                                            ) : (
+                                                <div className="flex flex-wrap gap-2">
+                                                    {agentTools.map((tool: string) => (
+                                                        <SettingsBadge
+                                                            key={tool}
+                                                            className="border-primary/15 bg-primary/10 text-primary"
+                                                        >
+                                                            {tool}
+                                                        </SettingsBadge>
+                                                    ))}
+                                                </div>
+                                            )}
                                         </SettingsInset>
 
-                                        <SettingsInset className="space-y-1.5">
+                                        <SettingsInset className="space-y-2">
                                             <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                                                {t('settings.skills.targetRuntimeConfig')}
+                                                {t('settings.skills.systemPrompt')}
                                             </label>
-                                            <div className={cn(uiChrome.control, 'flex items-center gap-2 px-3 py-3 text-sm shadow-none')}>
-                                                <div className={cn(
-                                                    "w-2 h-2 rounded-full",
-                                                    agent?.kbConfig?.enabled ? "bg-green-500" : "bg-gray-300"
-                                                )} />
-                                                <span>
-                                                    {t('settings.skills.agentKbEnabled')}:{' '}
-                                                    <span className="font-medium">
-                                                        {agent?.kbConfig?.enabled
-                                                            ? t('settings.skills.enabledStateOn')
-                                                            : t('settings.skills.enabledStateOff')}
-                                                    </span>
-                                                </span>
+                                            <div className="max-h-64 overflow-y-auto rounded-[12px] border border-border/70 bg-background/92 p-4 font-mono text-sm text-muted-foreground whitespace-pre-wrap">
+                                                {agent?.systemPrompt || '-'}
                                             </div>
                                         </SettingsInset>
                                     </div>
-
-                                    <SettingsInset className="space-y-2">
-                                        <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                                            {t('settings.skills.agentTools')}
-                                        </label>
-                                        {agentTools.length === 0 ? (
-                                            <p className="text-sm text-muted-foreground italic">{t('settings.skills.noToolsSelected')}</p>
-                                        ) : (
-                                            <div className="flex flex-wrap gap-2">
-                                                {agentTools.map((tool: string) => (
-                                                    <SettingsBadge
-                                                        key={tool}
-                                                        className="border-primary/15 bg-primary/10 text-primary"
-                                                    >
-                                                        {tool}
-                                                    </SettingsBadge>
-                                                ))}
-                                            </div>
-                                        )}
-                                    </SettingsInset>
-
-                                    <SettingsInset className="space-y-2">
-                                        <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                                            {t('settings.skills.systemPrompt')}
-                                        </label>
-                                        <div className="max-h-64 overflow-y-auto rounded-[12px] border border-border/70 bg-background/92 p-4 font-mono text-sm text-muted-foreground whitespace-pre-wrap">
-                                            {agent?.systemPrompt || '-'}
-                                        </div>
-                                    </SettingsInset>
-                                </div>
-                            )}
+                                    )
+                                )}
+                            </div>
                         </div>
-                    </div>
+                    ) : null}
                 </div>
             </div>
         </div>

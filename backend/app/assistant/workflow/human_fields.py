@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
-from typing import Any, TypeVar
+from typing import Any, TypeAlias, TypeVar
 
 HUMAN_FIELD_TYPES = {"string", "number", "integer", "boolean", "array"}
 HUMAN_FIELD_WIDGET_ALLOWED_TYPES: dict[str, set[str]] = {
@@ -12,14 +12,19 @@ HUMAN_FIELD_WIDGET_ALLOWED_TYPES: dict[str, set[str]] = {
     "switch": {"boolean"},
     "select": {"string", "number", "integer"},
     "radio": {"string", "number", "integer"},
+    "checkbox_group": {"array"},
     "tag_selector": {"array"},
     "date": {"string"},
     "time": {"string"},
 }
 HUMAN_FIELD_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 HUMAN_FIELD_TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+HUMAN_FIELD_OPTION_VALUE_KEYS = ("value", "code", "name", "label", "id", "type")
+HUMAN_FIELD_OPTION_LABEL_KEYS = ("label", "name", "title", "code", "id", "type", "value")
 
 _ErrorType = TypeVar("_ErrorType", bound=Exception)
+HumanFieldOptionObject: TypeAlias = dict[str, str]
+HumanFieldOption: TypeAlias = str | HumanFieldOptionObject
 
 
 def normalize_human_field_type(raw: Any) -> str:
@@ -30,7 +35,11 @@ def normalize_human_field_type(raw: Any) -> str:
 
 
 def default_human_field_widget(field_type: str) -> str:
-    return "switch" if field_type == "boolean" else "input"
+    if field_type == "boolean":
+        return "switch"
+    if field_type == "array":
+        return "tag_selector"
+    return "input"
 
 
 def normalize_human_field_widget(field_type: str, raw_widget: Any) -> str:
@@ -42,17 +51,66 @@ def normalize_human_field_widget(field_type: str, raw_widget: Any) -> str:
     return widget
 
 
-def normalize_human_field_options(raw_options: Any) -> list[str]:
+def _extract_option_value_from_object(item: dict[str, Any]) -> str:
+    for key in HUMAN_FIELD_OPTION_VALUE_KEYS:
+        raw = item.get(key)
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        if value:
+            return value
+    return ""
+
+
+def _extract_option_label_from_object(item: dict[str, Any], *, fallback: str) -> str:
+    for key in HUMAN_FIELD_OPTION_LABEL_KEYS:
+        raw = item.get(key)
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        if value:
+            return value
+    return fallback
+
+
+def normalize_human_field_options(
+    raw_options: Any,
+    *,
+    allow_objects: bool = False,
+) -> list[HumanFieldOption]:
     if not isinstance(raw_options, list):
         return []
-    options: list[str] = []
+    options: list[HumanFieldOption] = []
+    seen_values: set[str] = set()
     for item in raw_options:
-        if not isinstance(item, str):
+        normalized: HumanFieldOption | None = None
+        option_value = ""
+        if isinstance(item, str):
+            option_value = item.strip()
+            normalized = option_value if option_value else None
+        elif allow_objects and isinstance(item, dict):
+            option_value = _extract_option_value_from_object(item)
+            if option_value:
+                option_label = _extract_option_label_from_object(item, fallback=option_value)
+                option_description = str(item.get("description", "") or "").strip()
+                normalized_object: HumanFieldOptionObject = {
+                    "value": option_value,
+                    "label": option_label,
+                }
+                if option_description:
+                    normalized_object["description"] = option_description
+                normalized = normalized_object
+        if normalized is None or not option_value or option_value in seen_values:
             continue
-        text = item.strip()
-        if text:
-            options.append(text)
-    return list(dict.fromkeys(options))
+        seen_values.add(option_value)
+        options.append(normalized)
+    return options
+
+
+def human_field_option_value(option: HumanFieldOption) -> str:
+    if isinstance(option, str):
+        return option.strip()
+    return str(option.get("value", "") or "").strip()
 
 
 def _raise_field_error(
@@ -217,6 +275,12 @@ def validate_human_field_date_value(
     text = str(value).strip()
     if not text:
         return ""
+    if text.lower() == "null":
+        return ""
+    if "T" in text:
+        text = text.split("T", 1)[0].strip()
+    elif len(text) >= 10 and text[4:5] == "-" and text[7:8] == "-":
+        text = text[:10]
     if not HUMAN_FIELD_DATE_RE.fullmatch(text):
         _raise_field_error(
             error_cls=error_cls,

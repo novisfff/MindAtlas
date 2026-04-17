@@ -6,6 +6,7 @@ export interface AssistantAgentProfile {
   id: string
   name: string
   description: string
+  detailsLoaded: boolean
   systemPrompt: string | null
   tools: string[] | null
   kbConfig: { enabled?: boolean } | null

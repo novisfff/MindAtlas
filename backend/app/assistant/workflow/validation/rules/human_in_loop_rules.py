@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.assistant.workflow.human_fields import normalize_human_field_options
 from app.assistant.workflow.validation.contracts import (
     _HUMAN_FIELD_TYPES,
     _HUMAN_FIELD_WIDGET_ALLOWED_TYPES,
@@ -196,11 +197,11 @@ def validate_human_in_loop_node_config(
         elif isinstance(raw_option_value_key, str):
             option_value_key = raw_option_value_key.strip()
 
-        if option_value_key and widget not in {"select", "radio", "tag_selector"}:
+        if option_value_key and widget not in {"select", "radio", "checkbox_group", "tag_selector"}:
             errors.append(
                 ValidationError(
                     node_id=node_id,
-                    message=f"{subject} field '{field_name}' optionValueKey is only supported for select/radio/tag_selector",
+                    message=f"{subject} field '{field_name}' optionValueKey is only supported for select/radio/checkbox_group/tag_selector",
                 )
             )
 
@@ -209,31 +210,36 @@ def validate_human_in_loop_node_config(
                 errors.append(
                     ValidationError(
                         node_id=node_id,
-                        message=f"{subject} field '{field_name}' options must be a string list",
+                        message=f"{subject} field '{field_name}' options must be a list",
                     )
                 )
             else:
-                normalized_options = [
-                    str(opt).strip()
-                    for opt in options
-                    if isinstance(opt, str) and str(opt).strip()
-                ]
+                normalized_options = normalize_human_field_options(
+                    options,
+                    allow_objects=widget in {"select", "radio", "checkbox_group"},
+                )
                 if len(normalized_options) != len(options):
                     errors.append(
                         ValidationError(
                             node_id=node_id,
-                            message=f"{subject} field '{field_name}' options must be non-empty strings",
+                            message=(
+                                f"{subject} field '{field_name}' options must be non-empty strings"
+                                if widget not in {"select", "radio", "checkbox_group"}
+                                else (
+                                    f"{subject} field '{field_name}' options must be non-empty strings or option "
+                                    "objects with value/label"
+                                )
+                            ),
                         )
                     )
-                deduped_options = list(dict.fromkeys(normalized_options))
-                if widget in {"select", "radio"} and not deduped_options:
+                if widget in {"select", "radio", "checkbox_group"} and not normalized_options:
                     errors.append(
                         ValidationError(
                             node_id=node_id,
                             message=f"{subject} field '{field_name}' options must be non-empty for {widget}",
                         )
                     )
-        elif widget in {"select", "radio"} and not has_options_template:
+        elif widget in {"select", "radio", "checkbox_group"} and not has_options_template:
             errors.append(
                 ValidationError(
                     node_id=node_id,

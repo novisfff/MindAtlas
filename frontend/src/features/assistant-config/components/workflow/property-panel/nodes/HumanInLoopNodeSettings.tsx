@@ -14,6 +14,7 @@ type HumanFieldWidget =
   | 'switch'
   | 'select'
   | 'radio'
+  | 'checkbox_group'
   | 'tag_selector'
   | 'date'
   | 'time'
@@ -53,7 +54,7 @@ const WIDGETS_BY_TYPE: Record<HumanFieldType, HumanFieldWidget[]> = {
   number: ['input', 'select', 'radio'],
   integer: ['input', 'select', 'radio'],
   boolean: ['switch'],
-  array: ['tag_selector'],
+  array: ['tag_selector', 'checkbox_group'],
 }
 
 const WIDGET_LABEL_KEYS: Record<HumanFieldWidget, string> = {
@@ -62,6 +63,7 @@ const WIDGET_LABEL_KEYS: Record<HumanFieldWidget, string> = {
   switch: 'settings.skills.humanInLoop.widgets.switch',
   select: 'settings.skills.humanInLoop.widgets.select',
   radio: 'settings.skills.humanInLoop.widgets.radio',
+  checkbox_group: 'settings.skills.humanInLoop.widgets.checkbox_group',
   tag_selector: 'settings.skills.humanInLoop.widgets.tag_selector',
   date: 'settings.skills.humanInLoop.widgets.date',
   time: 'settings.skills.humanInLoop.widgets.time',
@@ -102,7 +104,7 @@ function normalizeField(raw: Partial<HumanField>): HumanField {
     : defaultWidgetForType(type)
 
   const options = normalizeOptions(raw.options)
-  const supportsOptions = widget === 'select' || widget === 'radio' || widget === 'tag_selector'
+  const supportsOptions = widget === 'select' || widget === 'radio' || widget === 'checkbox_group' || widget === 'tag_selector'
   const supportsCustom = widget === 'tag_selector'
 
   return {
@@ -154,7 +156,7 @@ function serializeField(field: HumanField): HumanFieldPayload {
     valueTemplate: normalized.valueTemplate,
   }
 
-  const supportsOptions = payload.widget === 'select' || payload.widget === 'radio' || payload.widget === 'tag_selector'
+  const supportsOptions = payload.widget === 'select' || payload.widget === 'radio' || payload.widget === 'checkbox_group' || payload.widget === 'tag_selector'
   if (supportsOptions) {
     const options = normalizeOptions(normalized.options)
     if (options.length > 0) {
@@ -509,7 +511,7 @@ export function HumanInLoopNodeSettings({ config, onUpdate, mentionParams }: Nod
                           </label>
                         )}
                       </div>
-                      {(field.widget === 'select' || field.widget === 'radio' || field.widget === 'tag_selector') && (
+                      {(field.widget === 'select' || field.widget === 'radio' || field.widget === 'checkbox_group' || field.widget === 'tag_selector') && (
                         <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
                           <div className="flex items-center justify-between gap-2">
                             <span className="text-sm font-medium text-slate-700">
@@ -591,7 +593,9 @@ export function HumanInLoopNodeSettings({ config, onUpdate, mentionParams }: Nod
                                   <div className="text-xs text-slate-500 text-center py-2 border border-dashed border-slate-300 rounded-lg bg-white/50">
                                     {field.widget === 'tag_selector'
                                       ? t('settings.skills.humanInLoop.options.emptyTagSelector')
-                                      : t('settings.skills.humanInLoop.options.emptySelectRadio')}
+                                      : field.widget === 'checkbox_group'
+                                        ? t('settings.skills.humanInLoop.options.emptyCheckboxGroup')
+                                        : t('settings.skills.humanInLoop.options.emptySelectRadio')}
                                   </div>
                                 ) : (
                                   (field.options ?? []).map((option, optionIndex) => (

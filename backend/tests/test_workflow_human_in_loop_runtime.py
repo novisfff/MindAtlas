@@ -221,6 +221,71 @@ class WorkflowHumanInLoopRuntimeTests(unittest.TestCase):
         self.assertEqual(payload['submittedValues']['record_date'], '')
         self.assertEqual(payload['submittedValues']['record_time'], '')
 
+    def test_submit_checkbox_group_accepts_object_options(self) -> None:
+        from app.assistant.workflow.human_approval_runtime import submit_human_approval_decision
+
+        row = self._create_pending_approval(
+            field_schema=[
+                {
+                    'name': 'relations',
+                    'type': 'array',
+                    'widget': 'checkbox_group',
+                    'options': [
+                        {
+                            'value': 'entry-1',
+                            'label': 'OpenClaw 接入记录',
+                            'description': 'RELATED_TO · 0.91',
+                        },
+                        {
+                            'value': 'entry-2',
+                            'label': '系统工作流说明',
+                        },
+                    ],
+                    'required': False,
+                },
+            ],
+            initial_values={'relations': ['entry-2']},
+        )
+
+        payload = submit_human_approval_decision(
+            self.db,
+            approval_id=row.id,
+            decision='approved',
+            values={'relations': ['entry-1', 'entry-2']},
+            comment='',
+            expected_run_id='run_hitl_1',
+        )
+
+        self.assertEqual(payload['submittedValues']['relations'], ['entry-1', 'entry-2'])
+
+    def test_submit_checkbox_group_rejects_unknown_selection(self) -> None:
+        from app.assistant.workflow.human_approval_runtime import submit_human_approval_decision
+
+        row = self._create_pending_approval(
+            field_schema=[
+                {
+                    'name': 'relations',
+                    'type': 'array',
+                    'widget': 'checkbox_group',
+                    'options': ['entry-1', 'entry-2'],
+                    'required': False,
+                },
+            ],
+            initial_values={'relations': []},
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            submit_human_approval_decision(
+                self.db,
+                approval_id=row.id,
+                decision='approved',
+                values={'relations': ['entry-3']},
+                comment='',
+                expected_run_id='run_hitl_1',
+            )
+
+        self.assertIn('configured options', str(ctx.exception))
+
     def test_cancel_pending_human_approvals_for_run_marks_cancelled(self) -> None:
         from app.assistant.workflow.human_approval_runtime import cancel_pending_human_approvals_for_run
 
