@@ -41,6 +41,13 @@ import { WorkflowDeletableEdge } from './WorkflowDeletableEdge'
 import type { CallableWorkflowDefinition, WorkflowToolDefinition } from './types'
 import { QuickAddPopover, type QuickAddPayload } from './QuickAddPopover'
 import { createSubflowNode, resolveCallableWorkflowVersion } from './nodeFactory'
+import {
+  IF_ELSE_HANDLE_BASE_TOP,
+  IF_ELSE_HANDLE_STEP,
+  SUBFLOW_NODE_HANDLE_TOP,
+  getSubflowNodeFrame,
+  getNodeOutputHandleIds,
+} from './workflowGeometry'
 
 const edgeTypes = {
   workflowBezier: WorkflowDeletableEdge,
@@ -77,10 +84,6 @@ const NODE_ICON_MAP: Record<ContainerBodyNodeType, typeof Play> = {
   workflow_call: Network,
 }
 
-const SUBFLOW_NODE_HANDLE_TOP = 20
-const SUBFLOW_NODE_WIDTH = 240
-const IF_ELSE_HANDLE_BASE_TOP = 50
-const IF_ELSE_HANDLE_STEP = 28
 const IF_ELSE_HANDLE_RIGHT_OFFSET = -5
 const HANDLE_CLICK_THRESHOLD = 5
 const CONTAINER_INPUT_HANDLE_ID = 'container_input'
@@ -230,14 +233,7 @@ type SubflowNodeExtent = [[number, number], [number, number]]
 type SubflowFitReason = 'structure' | 'delete-node'
 
 function sourceHandlesForNode(nodeType: ContainerBodyNodeType, config?: Record<string, unknown> | null): string[] {
-  if (nodeType === 'if_else') {
-    const normalized = normalizeIfElseConfig(config ?? {})
-    return [...normalized.branches.map((item) => item.id), normalized.elseHandle || 'else']
-  }
-  if (nodeType === 'human_in_loop') {
-    return ['approved', 'rejected']
-  }
-  return ['output']
+  return getNodeOutputHandleIds(nodeType, config)
 }
 
 function normalizeSubflowSourceHandle(
@@ -293,15 +289,16 @@ function resolveSubflowSourceAnchor(
 ): { x: number; y: number } {
   const baseX = Number(sourceNode.positionX ?? 0)
   const baseY = Number(sourceNode.positionY ?? 0)
+  const sourceSize = getSubflowNodeFrame(sourceNode.nodeType, sourceNode.config ?? null)
   const handleTop = resolveSubflowHandleTop(sourceNode.nodeType, sourceNode.config ?? null, sourceHandle)
   if (sourceNode.nodeType === 'if_else') {
     return {
-      x: baseX + SUBFLOW_NODE_WIDTH - IF_ELSE_HANDLE_RIGHT_OFFSET,
+      x: baseX + sourceSize.width - IF_ELSE_HANDLE_RIGHT_OFFSET,
       y: baseY + handleTop,
     }
   }
   return {
-    x: baseX + SUBFLOW_NODE_WIDTH,
+    x: baseX + sourceSize.width,
     y: baseY + handleTop,
   }
 }
@@ -386,7 +383,7 @@ function SubflowFitViewSync({
     raf1 = requestAnimationFrame(() => {
       refreshNodeInternals()
       raf2 = requestAnimationFrame(() => {
-        void runFitView(fitReason === 'delete-node' ? 0.24 : 0.2).finally(() => {
+        void runFitView(fitReason === 'delete-node' ? 0.12 : 0.08).finally(() => {
           raf3 = requestAnimationFrame(() => {
             refreshNodeInternals()
           })
@@ -397,11 +394,11 @@ function SubflowFitViewSync({
     if (fitReason === 'delete-node') {
       timer120 = window.setTimeout(() => {
         refreshNodeInternals()
-        void runFitView(0.28)
+        void runFitView(0.16)
       }, 120)
       timer260 = window.setTimeout(() => {
         refreshNodeInternals()
-        void runFitView(0.28)
+        void runFitView(0.16)
       }, 260)
     }
 
@@ -740,10 +737,7 @@ function refreshDraftEdgeAnchors(
 }
 
 function estimateSubflowNodeHeight(node: Node<SubflowNodeData>): number {
-  if (node.data.nodeType === 'start') return 96
-  if (node.data.nodeType !== 'if_else') return 112
-  const handles = sourceHandlesForNode(node.data.nodeType, node.data.config ?? null)
-  return Math.max(126, IF_ELSE_HANDLE_BASE_TOP + Math.max(1, handles.length) * IF_ELSE_HANDLE_STEP + 24)
+  return getSubflowNodeFrame(node.data.nodeType, node.data.config ?? null).height
 }
 
 function resolveSubflowNodeExtent(
@@ -752,8 +746,8 @@ function resolveSubflowNodeExtent(
   canvasHeight: number,
 ): SubflowNodeExtent {
   const maxNodeRight = nodes.reduce(
-    (max, node) => Math.max(max, node.position.x + SUBFLOW_NODE_WIDTH),
-    SUBFLOW_NODE_WIDTH,
+    (max, node) => Math.max(max, node.position.x + getSubflowNodeFrame(node.data.nodeType, node.data.config ?? null).width),
+    getSubflowNodeFrame('start').width,
   )
   const maxNodeBottom = nodes.reduce(
     (max, node) => Math.max(max, node.position.y + estimateSubflowNodeHeight(node)),
@@ -1090,8 +1084,8 @@ export function ContainerSubflowCanvas({
   }, [onSelectionChange, selectedEdgeId, selectedNodeId])
 
   const nodeExtent = useMemo(
-    () => resolveSubflowNodeExtent(flowNodes, canvasWidth, canvasHeight),
-    [canvasHeight, canvasWidth, flowNodes],
+    () => resolveSubflowNodeExtent(draftNodes, canvasWidth, canvasHeight),
+    [canvasHeight, canvasWidth, draftNodes],
   )
 
   const fitSignature = useMemo(
@@ -1099,7 +1093,7 @@ export function ContainerSubflowCanvas({
       fitNonce,
       canvasHeight,
       Math.round(Number(canvasWidth) || 0),
-      ...draftNodes.map((node) => node.id),
+      ...draftNodes.map((node) => `${node.id}:${Math.round(node.position.x)}:${Math.round(node.position.y)}`),
       ...draftEdges.map((edge) => `${edge.id}:${edge.source}:${edge.sourceHandle ?? 'output'}:${edge.target}:${edge.targetHandle ?? 'input'}`),
     ].join('|'),
     [canvasHeight, canvasWidth, draftEdges, draftNodes, fitNonce],

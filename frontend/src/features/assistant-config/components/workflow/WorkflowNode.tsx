@@ -25,10 +25,16 @@ import type { ContainerBodyNodeType, NodeType } from '../../api/workflow'
 import { normalizeIfElseConfig } from './ifElseConfig'
 import { defaultLabelForNodeType } from './labelUtils'
 import { ContainerSubflowCanvas } from './ContainerSubflowCanvas'
-import { estimateContainerNodeSizeFromConfig } from './containerLayout'
 import { resolveCallableWorkflowVersion } from './nodeFactory'
 import type { CallableWorkflowDefinition, WorkflowToolDefinition } from './types'
 import { QuickAddPopover, type QuickAddPayload } from './QuickAddPopover'
+import { normalizeContainerPreviewBodyNodes } from './autoLayout'
+import {
+  CONTAINER_NODE_HANDLE_TOP,
+  MAIN_NODE_HANDLE_TOP,
+  estimateContainerNodeSizeFromConfig,
+  getIfElseNodeHeight,
+} from './workflowGeometry'
 
 const NODE_STYLES: Record<NodeType, { header: string; icon: typeof Play; iconColor: string }> = {
   start: { header: 'bg-gradient-to-r from-emerald-100/90 to-green-100/90 border-b border-emerald-200', icon: Play, iconColor: 'text-emerald-700' },
@@ -47,8 +53,6 @@ const NODE_STYLES: Record<NodeType, { header: string; icon: typeof Play; iconCol
   human_in_loop: { header: 'bg-gradient-to-r from-blue-100/90 to-cyan-100/90 border-b border-blue-200', icon: UserCheck, iconColor: 'text-blue-700' },
   output: { header: 'bg-gradient-to-r from-rose-100/90 to-orange-100/90 border-b border-rose-200', icon: SendHorizontal, iconColor: 'text-rose-700' },
 }
-const HANDLE_TOP_OFFSET = 28
-const CONTAINER_HANDLE_TOP = 20
 const HANDLE_CLICK_THRESHOLD = 5
 const CONTAINER_INPUT_HANDLE_ID = 'container_input'
 const CONTAINER_OUTPUT_HANDLE_ID = 'container_output'
@@ -400,11 +404,21 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
   const containerConfig = ((nodeData.config ?? {}) as Record<string, unknown>)
   const bodyNodes = isContainer ? normalizeContainerBodyNodes(containerConfig) : []
   const bodyEdges = isContainer ? normalizeContainerBodyEdges(containerConfig) : []
+  const previewBodyNodes = useMemo(
+    () => (isContainer ? normalizeContainerPreviewBodyNodes(bodyNodes, bodyEdges) : bodyNodes),
+    [bodyEdges, bodyNodes, isContainer],
+  )
   const containerBodySignature = useMemo(
     () => buildContainerBodySignature(bodyNodes, bodyEdges),
     [bodyEdges, bodyNodes],
   )
-  const containerSize = isContainer ? estimateContainerNodeSizeFromConfig(containerConfig) : null
+  const containerSize = isContainer
+    ? estimateContainerNodeSizeFromConfig({
+      ...containerConfig,
+      bodyNodes: previewBodyNodes,
+      bodyEdges,
+    })
+    : null
   const quickAddHandles = Array.isArray((nodeData as { quickAddHandles?: unknown }).quickAddHandles)
     ? ((nodeData as { quickAddHandles?: unknown[] }).quickAddHandles ?? [])
       .filter((item): item is string => typeof item === 'string')
@@ -423,7 +437,7 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
   const isReadOnly = Boolean((nodeData as { readOnly?: unknown }).readOnly)
   const [openQuickAddHandle, setOpenQuickAddHandle] = useState<string | null>(null)
   const pointerDownRef = useRef<{ handleId: string; x: number; y: number } | null>(null)
-  const nodeHandleTop = isContainer ? CONTAINER_HANDLE_TOP : HANDLE_TOP_OFFSET
+  const nodeHandleTop = isContainer ? CONTAINER_NODE_HANDLE_TOP : MAIN_NODE_HANDLE_TOP
   const inputHandleId = isContainer ? CONTAINER_INPUT_HANDLE_ID : 'input'
   const outputHandleId = isContainer ? CONTAINER_OUTPUT_HANDLE_ID : 'output'
   const ifElseHandleCount = useMemo(() => {
@@ -539,7 +553,7 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
       style={{
         width: isContainer && containerSize ? `${containerSize.width}px` : undefined,
         minHeight: isIfElse
-          ? `${50 + ((normalizeIfElseConfig(nodeData.config as any).branches.length + 1) * 28) + 12}px`
+          ? `${getIfElseNodeHeight((nodeData.config ?? null) as Record<string, unknown> | null)}px`
           : isContainer
             ? `${containerSize?.height ?? 248}px`
             : undefined
@@ -579,13 +593,13 @@ function WorkflowNodeInner({ id, data }: NodeProps) {
       {isContainer && (
         <div className="px-3 pb-3 pt-2">
           <ContainerSubflowCanvas
-            bodyNodes={bodyNodes}
+            bodyNodes={previewBodyNodes}
             bodyEdges={bodyEdges}
             tools={quickAddTools}
             workflows={quickAddWorkflows}
             floatingUiEpoch={floatingUiEpoch}
             canvasHeight={containerSize?.canvasHeight ?? 168}
-            canvasWidth={containerSize?.width}
+            canvasWidth={containerSize?.canvasWidth}
             readOnly={isReadOnly}
             onSelectionChange={handleSubflowSelectionChange}
             onChange={(nextNodes, nextEdges) => persistContainerBody(nextNodes, nextEdges)}
