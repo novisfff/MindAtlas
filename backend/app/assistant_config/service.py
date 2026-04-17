@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import re
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -23,12 +22,8 @@ from app.assistant_config.models import (
     AssistantAgentProfile,
     AssistantAgentProfileVersion,
     AssistantSkill,
-    AssistantSkillEdge,
-    AssistantSkillNode,
     AssistantSystemBehaviorBinding,
     AssistantWorkflow,
-    AssistantWorkflowEdge,
-    AssistantWorkflowNode,
     AssistantWorkflowVersion,
     AssistantTool,
 )
@@ -91,7 +86,6 @@ from app.system_settings.service import resolve_system_locale
 _SYSTEM_CATALOG_SYNC_LOCK_KEY = 2026040901
 _SYSTEM_CATALOG_SIGNATURE_SETTING_KEY = "assistant_config_system_catalog_signature"
 
-_TOOL_TEXT_REF_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\.text\s*\}\}")
 _TARGET_VERSION_LIMIT = 100
 _SYSTEM_BEHAVIOR_EXAMPLE_WORKFLOW_METADATA: dict[str, dict[str, dict[str, str]]] = {
     "weekly_report_generation": {
@@ -233,6 +227,7 @@ class AssistantConfigService:
 
     @staticmethod
     def _to_workflow_input_from_entity(workflow: AssistantWorkflow) -> WorkflowInput:
+        snapshot = workflow.graph_snapshot if isinstance(getattr(workflow, "graph_snapshot", None), dict) else {}
         nodes = [
             {
                 "node_id": node.node_id,
@@ -261,7 +256,7 @@ class AssistantConfigService:
             {
                 "nodes": nodes,
                 "edges": edges,
-                "viewport": workflow.workflow_viewport,
+                "viewport": snapshot.get("viewport") if isinstance(snapshot.get("viewport"), dict) else workflow.workflow_viewport,
             }
         )
 
@@ -509,6 +504,17 @@ class AssistantConfigService:
                     return self._workflow_input_from_snapshot(draft.snapshot)
                 except Exception:
                     pass
+        if workflow.published_version_id:
+            published = (
+                self.db.query(AssistantWorkflowVersion)
+                .filter(
+                    AssistantWorkflowVersion.id == workflow.published_version_id,
+                    AssistantWorkflowVersion.workflow_id == workflow.id,
+                )
+                .first()
+            )
+            if published and isinstance(published.snapshot, dict):
+                return self._workflow_input_from_snapshot(published.snapshot)
         return self._to_workflow_input_from_entity(workflow)
 
     @staticmethod
@@ -792,14 +798,15 @@ class AssistantConfigService:
         if (workflow.description or "") != normalized_description:
             workflow.description = normalized_description
             changed = True
+        desired_viewport = resolved_workflow_input.viewport
+        if workflow.workflow_viewport != desired_viewport:
+            workflow.workflow_viewport = desired_viewport
+            changed = True
 
         current_published = self._get_workflow_published_input(workflow)
+        current_draft = self._get_workflow_draft_input(workflow) if workflow.draft_version_id is not None else None
         desired_snapshot = self._workflow_input_to_snapshot(resolved_workflow_input)
         current_snapshot = self._workflow_input_to_snapshot(current_published) if current_published is not None else None
-        try:
-            current_entity_snapshot = self._workflow_input_to_snapshot(self._to_workflow_input_from_entity(workflow))
-        except Exception:
-            current_entity_snapshot = None
 
         if current_snapshot != desired_snapshot or workflow.published_version_id is None:
             self._enforce_workflow_structured_input_constraints(
@@ -817,13 +824,9 @@ class AssistantConfigService:
             self._keep_only_workflow_version(workflow, published.id)
             return True
 
-        if current_entity_snapshot != desired_snapshot:
-            self._enforce_workflow_structured_input_constraints(
-                workflow=workflow,
-                workflow_input=resolved_workflow_input,
-                raise_error=True,
-            )
-            self._apply_workflow_to_workflow_entity(workflow, resolved_workflow_input, persist=True)
+        current_draft_snapshot = self._workflow_input_to_snapshot(current_draft) if current_draft is not None else None
+        if current_draft_snapshot != desired_snapshot and workflow.published_version_id is not None:
+            workflow.draft_version_id = workflow.published_version_id
             changed = True
 
         keep_version_id = workflow.published_version_id
@@ -2287,8 +2290,8 @@ class AssistantConfigService:
         workflow = (
             self.db.query(AssistantWorkflow)
             .options(
-                joinedload(AssistantWorkflow.nodes),
-                joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantWorkflow.draft_version),
+                joinedload(AssistantWorkflow.published_version),
                 joinedload(AssistantWorkflow.system_behavior_bindings),
             )
             .filter(
@@ -2362,8 +2365,8 @@ class AssistantConfigService:
         workflow = (
             self.db.query(AssistantWorkflow)
             .options(
-                joinedload(AssistantWorkflow.nodes),
-                joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantWorkflow.draft_version),
+                joinedload(AssistantWorkflow.published_version),
                 joinedload(AssistantWorkflow.skills),
                 joinedload(AssistantWorkflow.system_behavior_bindings),
             )
@@ -2378,8 +2381,8 @@ class AssistantConfigService:
             legacy_workflows = (
                 self.db.query(AssistantWorkflow)
                 .options(
-                    joinedload(AssistantWorkflow.nodes),
-                    joinedload(AssistantWorkflow.edges),
+                    joinedload(AssistantWorkflow.draft_version),
+                    joinedload(AssistantWorkflow.published_version),
                     joinedload(AssistantWorkflow.skills),
                     joinedload(AssistantWorkflow.system_behavior_bindings),
                 )
@@ -2956,10 +2959,27 @@ class AssistantConfigService:
         agent_profile = skill.agent_profile
 
         if target_type == "workflow":
-            nodes = (workflow.nodes if workflow is not None else skill.nodes) or []
-            edges = (workflow.edges if workflow is not None else skill.edges) or []
+            draft_workflow = self._get_workflow_draft_input(workflow) if workflow is not None else None
+            nodes = (
+                self._workflow_response_nodes_from_input(
+                    workflow_id=workflow.id,
+                    workflow=draft_workflow,
+                    ts=workflow.updated_at or workflow.created_at or self._utcnow(),
+                )
+                if workflow is not None and draft_workflow is not None
+                else []
+            )
+            edges = (
+                self._workflow_response_edges_from_input(
+                    workflow_id=workflow.id,
+                    workflow=draft_workflow,
+                    ts=workflow.updated_at or workflow.created_at or self._utcnow(),
+                )
+                if workflow is not None and draft_workflow is not None
+                else []
+            )
             workflow_version = (workflow.workflow_version if workflow is not None else skill.workflow_version) or 1
-            workflow_viewport = workflow.workflow_viewport if workflow is not None else skill.workflow_viewport
+            workflow_viewport = draft_workflow.viewport if draft_workflow is not None else skill.workflow_viewport
             tools = skill.tools or []
             kb_config = skill.kb_config if isinstance(skill.kb_config, dict) else None
             system_prompt = None
@@ -3068,47 +3088,6 @@ class AssistantConfigService:
         if not persist:
             return workflow_tool_names
 
-        # Replace persisted DAG children via direct deletes, then expire the
-        # relationship collections before attaching rebuilt nodes/edges. This
-        # avoids stale in-memory edge rows being re-inserted on a later flush
-        # during repeated system-baseline restores.
-        (
-            self.db.query(AssistantWorkflowEdge)
-            .filter(AssistantWorkflowEdge.workflow_id == workflow_model.id)
-            .delete(synchronize_session=False)
-        )
-        (
-            self.db.query(AssistantWorkflowNode)
-            .filter(AssistantWorkflowNode.workflow_id == workflow_model.id)
-            .delete(synchronize_session=False)
-        )
-        self.db.flush()
-        self.db.expire(workflow_model, ["edges", "nodes"])
-
-        workflow_model.nodes = [
-            AssistantWorkflowNode(
-                node_id=n.node_id,
-                node_type=n.node_type,
-                label=n.label,
-                position_x=n.position_x,
-                position_y=n.position_y,
-                config=n.config,
-            )
-            for n in workflow.nodes
-        ]
-        workflow_model.edges = [
-            AssistantWorkflowEdge(
-                edge_id=e.edge_id,
-                source_node_id=e.source_node_id,
-                target_node_id=e.target_node_id,
-                source_handle=e.source_handle,
-                target_handle=e.target_handle,
-                condition_type=e.condition_type,
-                condition_expr=e.condition_expr.model_dump() if e.condition_expr else None,
-                label=e.label,
-            )
-            for e in workflow.edges
-        ]
         workflow_model.workflow_version = (workflow_model.workflow_version or 0) + 1
         workflow_model.workflow_viewport = workflow.viewport
         return workflow_tool_names
@@ -3412,6 +3391,7 @@ class AssistantConfigService:
         )
         workflow.draft_version_id = keep_version_id
         workflow.published_version_id = keep_version_id
+        self.db.expire(workflow, ["draft_version", "published_version", "versions"])
 
     def _keep_only_agent_version(self, agent_profile: AssistantAgentProfile, keep_version_id: UUID) -> None:
         (
@@ -3424,6 +3404,7 @@ class AssistantConfigService:
         )
         agent_profile.draft_version_id = keep_version_id
         agent_profile.published_version_id = keep_version_id
+        self.db.expire(agent_profile, ["versions"])
 
     def _acquire_system_catalog_sync_lock(self) -> None:
         bind = self.db.get_bind()
@@ -3842,136 +3823,6 @@ class AssistantConfigService:
                     continue
                 raise ApiException(status_code=409, code=40920, message="Sync system skills failed") from exc
 
-    @staticmethod
-    def _replace_tool_text_refs_in_value(value: Any, tool_node_ids: set[str]) -> tuple[Any, bool]:
-        changed = False
-
-        if isinstance(value, str):
-            def _repl(match: re.Match[str]) -> str:
-                nonlocal changed
-                node_id = match.group(1)
-                if node_id in tool_node_ids:
-                    changed = True
-                    return f"{{{{{node_id}.result}}}}"
-                return match.group(0)
-
-            return _TOOL_TEXT_REF_RE.sub(_repl, value), changed
-
-        if isinstance(value, list):
-            out: list[Any] = []
-            for item in value:
-                new_item, item_changed = AssistantConfigService._replace_tool_text_refs_in_value(item, tool_node_ids)
-                out.append(new_item)
-                changed = changed or item_changed
-            return out, changed
-
-        if isinstance(value, dict):
-            out: dict[Any, Any] = {}
-            for k, v in value.items():
-                new_v, v_changed = AssistantConfigService._replace_tool_text_refs_in_value(v, tool_node_ids)
-                out[k] = new_v
-                changed = changed or v_changed
-            return out, changed
-
-        return value, False
-
-    def _migrate_workflow_tool_text_refs(self, skill: AssistantSkill) -> None:
-        nodes = getattr(skill, "nodes", None) or []
-        if not nodes:
-            return
-        tool_node_ids = {
-            str(getattr(node, "node_id", "") or "").strip()
-            for node in nodes
-            if str(getattr(node, "node_type", "") or "").strip() == "tool"
-        }
-        tool_node_ids.discard("")
-        if not tool_node_ids:
-            return
-
-        for node in nodes:
-            cfg = getattr(node, "config", None)
-            if not isinstance(cfg, dict):
-                continue
-            new_cfg, changed = self._replace_tool_text_refs_in_value(cfg, tool_node_ids)
-            if changed:
-                node.config = new_cfg
-
-    @staticmethod
-    def _requires_system_workflow_output_migration(skill: AssistantSkill) -> bool:
-        """Detect legacy system workflow graphs that do not use output-node terminal semantics."""
-        nodes = list(getattr(skill, "nodes", None) or [])
-        edges = list(getattr(skill, "edges", None) or [])
-        if not nodes:
-            return True
-
-        output_nodes = [
-            node
-            for node in nodes
-            if str(getattr(node, "node_type", "") or "").strip().lower() == "output"
-        ]
-        if len(output_nodes) != 1:
-            return True
-
-        output_node_id = str(getattr(output_nodes[0], "node_id", "") or "").strip()
-        if not output_node_id:
-            return True
-
-        has_incoming = any(
-            str(getattr(edge, "target_node_id", "") or "").strip() == output_node_id
-            for edge in edges
-        )
-        has_outgoing = any(
-            str(getattr(edge, "source_node_id", "") or "").strip() == output_node_id
-            for edge in edges
-        )
-        if has_outgoing or not has_incoming:
-            return True
-
-        for node in nodes:
-            cfg = getattr(node, "config", None)
-            if isinstance(cfg, dict) and ("isOutput" in cfg or "is_output" in cfg):
-                return True
-
-        return False
-
-    def _replace_workflow_with_default(self, skill: AssistantSkill, default) -> None:
-        """Replace only workflow graph (nodes/edges) from system default definition."""
-        skill.edges = []
-        skill.nodes = []
-        self.db.flush()
-
-        if getattr(default, "workflow_nodes", None):
-            skill.nodes = [
-                AssistantSkillNode(
-                    node_id=n.node_id,
-                    node_type=n.node_type,
-                    label=n.label,
-                    position_x=n.position_x,
-                    position_y=n.position_y,
-                    config=n.config,
-                )
-                for n in default.workflow_nodes
-            ]
-        else:
-            skill.nodes = []
-
-        if getattr(default, "workflow_edges", None):
-            skill.edges = [
-                AssistantSkillEdge(
-                    edge_id=e.edge_id,
-                    source_node_id=e.source_node_id,
-                    target_node_id=e.target_node_id,
-                    source_handle=e.source_handle,
-                    target_handle=e.target_handle,
-                    condition_type=e.condition_type,
-                    condition_expr=e.condition_expr.model_dump() if e.condition_expr else None,
-                    label=e.label,
-                )
-                for e in default.workflow_edges
-            ]
-        else:
-            skill.edges = []
-
     # -------------------------
     # Tools CRUD
     # -------------------------
@@ -4164,8 +4015,8 @@ class AssistantConfigService:
         q = (
             self.db.query(AssistantSkill)
             .options(
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.nodes),
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.draft_version),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.published_version),
                 joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.skills),
                 joinedload(AssistantSkill.agent_profile).joinedload(AssistantAgentProfile.skills),
             )
@@ -4178,9 +4029,10 @@ class AssistantConfigService:
     def get_skill(self, id: UUID) -> AssistantSkill:
         skill = (
             self.db.query(AssistantSkill)
+            .populate_existing()
             .options(
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.nodes),
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.draft_version),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.published_version),
                 joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.skills),
                 joinedload(AssistantSkill.agent_profile).joinedload(AssistantAgentProfile.skills),
             )
@@ -4818,9 +4670,10 @@ class AssistantConfigService:
     def get_workflow(self, workflow_id: UUID) -> AssistantWorkflow:
         workflow = (
             self.db.query(AssistantWorkflow)
+            .populate_existing()
             .options(
-                joinedload(AssistantWorkflow.nodes),
-                joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantWorkflow.draft_version),
+                joinedload(AssistantWorkflow.published_version),
                 joinedload(AssistantWorkflow.skills),
                 joinedload(AssistantWorkflow.system_behavior_bindings),
             )

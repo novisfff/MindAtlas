@@ -333,6 +333,7 @@ class SystemAiBehaviorBindingTests(unittest.TestCase):
         self.assertTrue(weekly["current_binding"]["is_canonical_default"])
 
         restored = svc.get_workflow(weekly_default_id)
+        self.db.refresh(restored)
         self.assertEqual(self._node_by_id(restored, "tool_entries").label, "加载记录")
         self.assertEqual(self._node_by_id(restored, "llm_report").label, "生成周报")
         self.assertIn("请为 MindAtlas 生成一份简洁、扎实的中文周报", self._node_by_id(restored, "llm_report").config["systemPrompt"])

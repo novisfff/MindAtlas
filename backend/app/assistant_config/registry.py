@@ -4,7 +4,7 @@ import inspect
 from dataclasses import dataclass
 from typing import Any, get_args, get_origin
 
-from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy.orm import Session, joinedload
 
 from app.assistant_config.models import (
     AssistantSkill,
@@ -928,11 +928,9 @@ class SkillRegistry(_BaseRegistry):
             query = query.filter(AssistantSkill.enabled.is_(True))
         if include_workflow:
             query = query.options(
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.nodes),
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.edges),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.draft_version),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.published_version),
                 joinedload(AssistantSkill.agent_profile),
-                joinedload(AssistantSkill.nodes),
-                joinedload(AssistantSkill.edges),
             )
         return query.order_by(AssistantSkill.created_at.desc()).all()
 
@@ -982,11 +980,9 @@ class SkillRegistry(_BaseRegistry):
             query = query.options(
                 # Avoid joined-loading multiple collection relationships in one query,
                 # which can create large cartesian result sets and stall skill execution.
-                joinedload(AssistantSkill.workflow).selectinload(AssistantWorkflow.nodes),
-                joinedload(AssistantSkill.workflow).selectinload(AssistantWorkflow.edges),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.draft_version),
+                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.published_version),
                 joinedload(AssistantSkill.agent_profile),
-                selectinload(AssistantSkill.nodes),
-                selectinload(AssistantSkill.edges),
             )
         record = query.filter(AssistantSkill.name == skill_name).first()
 
