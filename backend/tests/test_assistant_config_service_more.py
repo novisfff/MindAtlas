@@ -44,14 +44,14 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
         svc = AssistantConfigService(self.db)
-        svc.sync_system_skills()
+        svc.ensure_system_catalog_synced()
         return svc, next(item for item in svc.list_workflows(include_disabled=True) if item.is_system)
 
     def _system_agent(self):
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
         svc = AssistantConfigService(self.db)
-        svc.sync_system_skills()
+        svc.ensure_system_catalog_synced()
         return svc, next(item for item in svc.list_agent_profiles(include_disabled=True) if item.is_system)
 
     def test_sync_system_skills_and_list_workflows_keep_system_workflow_edges_unique(self) -> None:
@@ -322,6 +322,37 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertEqual(workflow_serialized["openclaw_reference_count"], 1)
         self.assertEqual(agent_serialized["openclaw_reference_count"], 1)
 
+    def test_list_serializers_omit_heavy_workflow_graph_and_agent_draft_fields(self) -> None:
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        svc.sync_standalone_system_targets()
+
+        workflow = next(
+            item for item in svc.list_workflows(include_disabled=True)
+            if item.name == "system_context_capture__workflow"
+        )
+        workflow_summary = svc.serialize_workflow_summary(workflow)
+        self.assertFalse(workflow_summary["details_loaded"])
+        self.assertEqual(workflow_summary["nodes"], [])
+        self.assertEqual(workflow_summary["edges"], [])
+        self.assertIsNone(workflow_summary["workflow_viewport"])
+
+        agent = next(item for item in svc.list_agent_profiles(include_disabled=True) if item.is_system)
+        agent_summary = svc.serialize_agent_profile_summary(agent)
+        self.assertFalse(agent_summary["details_loaded"])
+        self.assertIsNone(agent_summary["system_prompt"])
+        self.assertIsNone(agent_summary["tools"])
+        self.assertIsNone(agent_summary["kb_config"])
+
+        workflow_detail = svc.serialize_workflow(svc.get_workflow(workflow.id))
+        agent_detail = svc.serialize_agent_profile(svc.get_agent_profile(agent.id))
+        self.assertTrue(workflow_detail["details_loaded"])
+        self.assertTrue(len(workflow_detail["nodes"]) > 0)
+        self.assertTrue(agent_detail["details_loaded"])
+        self.assertIsInstance(agent_detail["system_prompt"], str)
+
     def test_standalone_system_workflow_start_field_description_explains_create_vs_merge_context(self) -> None:
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
@@ -544,17 +575,108 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         behaviors_mock.assert_called_once_with(commit=False)
         commit_mock.assert_called_once_with()
 
-    def test_list_endpoints_reuse_system_catalog_sync_helper(self) -> None:
+    def test_read_endpoints_do_not_trigger_system_catalog_sync(self) -> None:
+        from app.assistant_config.schemas import AssistantAgentProfileCreateRequest, AssistantWorkflowCreateRequest  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
         svc = AssistantConfigService(self.db)
-        with patch.object(svc, "ensure_system_catalog_synced") as sync_mock:
+        workflow = svc.create_workflow(
+            AssistantWorkflowCreateRequest(
+                name=f"read_only_wf_{uuid4().hex[:8]}",
+                description="read only workflow",
+                enabled=True,
+            )
+        )
+        agent = svc.create_agent_profile(
+            AssistantAgentProfileCreateRequest(
+                name=f"read_only_agent_{uuid4().hex[:8]}",
+                description="read only agent",
+                system_prompt="Stay helpful.",
+                tools=[],
+                kb_config={"enabled": False},
+                enabled=True,
+                model_source="default",
+            )
+        )
+
+        with patch.object(svc, "ensure_system_catalog_synced") as sync_mock, patch.object(
+            svc, "sync_system_tools"
+        ) as tools_sync_mock, patch.object(svc, "sync_system_skills") as skills_sync_mock:
+            svc.list_tools(sync_system=True, include_disabled=True)
+            svc.list_skills(sync_system=True, include_disabled=True)
             svc.list_workflows(include_disabled=True)
+            svc.get_workflow(workflow.id)
             svc.list_agent_profiles(include_disabled=True)
+            svc.get_agent_profile(agent.id)
             svc.list_callable_workflows()
             svc.list_system_behaviors()
 
-        self.assertEqual(sync_mock.call_count, 4)
+        sync_mock.assert_not_called()
+        tools_sync_mock.assert_not_called()
+        skills_sync_mock.assert_not_called()
+
+    def test_system_catalog_warm_skips_full_sync_when_signature_matches(self) -> None:
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.ensure_system_catalog_synced()
+
+        with patch.object(svc, "_sync_system_catalog_locked") as sync_mock:
+            changed = svc.ensure_system_catalog_warm()
+
+        self.assertFalse(changed)
+        sync_mock.assert_not_called()
+
+    def test_system_catalog_warm_runs_full_sync_when_signature_missing(self) -> None:
+        from app.assistant_config.service import (
+            AssistantConfigService,
+            _SYSTEM_CATALOG_SIGNATURE_SETTING_KEY,
+        )  # noqa: E402
+        from app.system_settings.models import AppSetting  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.ensure_system_catalog_synced()
+        self.db.query(AppSetting).filter(AppSetting.key == _SYSTEM_CATALOG_SIGNATURE_SETTING_KEY).delete()
+        self.db.commit()
+
+        with patch.object(svc, "_sync_system_catalog_locked") as sync_mock:
+            changed = svc.ensure_system_catalog_warm()
+
+        self.assertTrue(changed)
+        sync_mock.assert_called_once()
+
+    def test_system_catalog_warm_runs_full_sync_when_expected_asset_is_missing(self) -> None:
+        from app.assistant_config.models import AssistantWorkflow  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.ensure_system_catalog_synced()
+        (
+            self.db.query(AssistantWorkflow)
+            .filter(AssistantWorkflow.name == "system_context_capture__workflow")
+            .delete(synchronize_session=False)
+        )
+        self.db.commit()
+
+        with patch.object(svc, "_sync_system_catalog_locked") as sync_mock:
+            changed = svc.ensure_system_catalog_warm()
+
+        self.assertTrue(changed)
+        sync_mock.assert_called_once()
+
+    def test_startup_catalog_warmup_runs_explicit_sync_once(self) -> None:
+        from app.assistant_config.bootstrap import warm_assistant_config_system_catalog  # noqa: E402
+
+        fake_db = unittest.mock.MagicMock()
+        with patch("app.assistant_config.bootstrap.SessionLocal", return_value=fake_db) as session_mock, patch(
+            "app.assistant_config.bootstrap.AssistantConfigService"
+        ) as service_cls:
+            warm_assistant_config_system_catalog()
+
+        session_mock.assert_called_once_with()
+        service_cls.assert_called_once_with(fake_db)
+        service_cls.return_value.ensure_system_catalog_warm.assert_called_once_with()
+        fake_db.close.assert_called_once_with()
 
     def test_create_update_delete_remote_tool(self) -> None:
         from app.assistant_config.models import AssistantTool  # noqa: E402
@@ -1145,13 +1267,16 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
 
         copied = svc.copy_workflow(workflow.id)
         refreshed_system = svc.get_workflow(workflow.id)
+        copied_input = svc._get_workflow_draft_input(copied)  # noqa: SLF001
+        refreshed_input = svc._get_workflow_draft_input(refreshed_system)  # noqa: SLF001
 
         self.assertFalse(copied.is_system)
         self.assertEqual(
-            svc._workflow_input_to_snapshot(svc._get_workflow_draft_input(copied)),  # noqa: SLF001
-            svc._workflow_input_to_snapshot(svc._get_workflow_draft_input(refreshed_system)),  # noqa: SLF001
+            svc._workflow_input_to_snapshot(copied_input),  # noqa: SLF001
+            svc._workflow_input_to_snapshot(baseline),  # noqa: SLF001
         )
-        self.assertNotEqual(copied.description, "mutated description")
+        self.assertEqual(refreshed_input.nodes[0].label, "Mutated Baseline")
+        self.assertEqual(copied.description, "mutated description")
 
     def test_copy_custom_agent_uses_current_draft(self) -> None:
         from app.assistant_config.schemas import AssistantAgentProfileCreateRequest, AssistantAgentProfileUpdateRequest  # noqa: E402
@@ -1211,6 +1336,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         system_draft = svc._get_agent_profile_draft(refreshed_system)  # noqa: SLF001
 
         self.assertFalse(copied.is_system)
-        self.assertEqual(copied_draft.system_prompt, system_draft.system_prompt)
-        self.assertEqual(list(copied_draft.tools or []), list(system_draft.tools or []))
-        self.assertNotEqual(copied.description, "mutated description")
+        self.assertEqual(copied_draft.system_prompt, baseline.system_prompt)
+        self.assertEqual(list(copied_draft.tools or []), list(baseline.tools or []))
+        self.assertEqual(system_draft.system_prompt, "Mutated prompt")
+        self.assertEqual(copied.description, "mutated description")

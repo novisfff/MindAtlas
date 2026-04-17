@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 from uuid import UUID
@@ -77,14 +79,17 @@ from app.assistant_config.standalone_system_target_registry import (
 from app.assistant.workflow.system_assets import (
     get_system_asset_by_canonical_name,
     get_system_skill_asset,
+    list_system_assets,
     load_system_agent_asset,
     load_system_workflow_asset,
 )
 from app.common.exceptions import ApiException
+from app.system_settings.models import AppSetting
 from app.system_settings.service import resolve_system_locale
 
 
 _SYSTEM_CATALOG_SYNC_LOCK_KEY = 2026040901
+_SYSTEM_CATALOG_SIGNATURE_SETTING_KEY = "assistant_config_system_catalog_signature"
 
 _TOOL_TEXT_REF_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\.text\s*\}\}")
 _TARGET_VERSION_LIMIT = 100
@@ -1052,6 +1057,35 @@ class AssistantConfigService:
                 continue
             self.db.delete(item)
 
+    def _serialize_workflow_summary(self, workflow: AssistantWorkflow) -> dict[str, Any]:
+        referenced_skill_ids = [s.id for s in (workflow.skills or [])]
+        referenced_system_behavior_keys = self._binding_keys_from_relationship(
+            getattr(workflow, "system_behavior_bindings", None)
+        )
+        openclaw_reference_count = self._workflow_openclaw_reference_count(workflow)
+        return {
+            "id": workflow.id,
+            "name": self._display_workflow_name(workflow),
+            "description": workflow.description or "",
+            "details_loaded": False,
+            "is_system": bool(workflow.is_system),
+            "hidden": self._is_hidden_system_asset("workflow", workflow.name, workflow.is_system),
+            "enabled": bool(workflow.enabled),
+            "workflow_version": workflow.workflow_version or 1,
+            "workflow_viewport": None,
+            "nodes": [],
+            "edges": [],
+            "draft_version_id": workflow.draft_version_id,
+            "published_version_id": workflow.published_version_id,
+            "referenced_skill_ids": referenced_skill_ids,
+            "reference_count": len(referenced_skill_ids),
+            "referenced_system_behavior_keys": referenced_system_behavior_keys,
+            "system_behavior_reference_count": len(referenced_system_behavior_keys),
+            "openclaw_reference_count": openclaw_reference_count,
+            "created_at": workflow.created_at,
+            "updated_at": workflow.updated_at,
+        }
+
     def _serialize_workflow(self, workflow: AssistantWorkflow) -> dict[str, Any]:
         referenced_skill_ids = [s.id for s in (workflow.skills or [])]
         referenced_system_behavior_keys = self._binding_keys_from_relationship(
@@ -1064,6 +1098,7 @@ class AssistantConfigService:
             "id": workflow.id,
             "name": self._display_workflow_name(workflow),
             "description": workflow.description or "",
+            "details_loaded": True,
             "is_system": bool(workflow.is_system),
             "hidden": self._is_hidden_system_asset("workflow", workflow.name, workflow.is_system),
             "enabled": bool(workflow.enabled),
@@ -1093,8 +1128,43 @@ class AssistantConfigService:
     def serialize_workflow(self, workflow: AssistantWorkflow) -> dict[str, Any]:
         return self._serialize_workflow(workflow)
 
+    def serialize_workflow_summary(self, workflow: AssistantWorkflow) -> dict[str, Any]:
+        return self._serialize_workflow_summary(workflow)
+
     def display_workflow_name(self, workflow: AssistantWorkflow, *, locale: str | None = None) -> str:
         return self._display_workflow_name(workflow, locale=locale)
+
+    def _serialize_agent_profile_summary(self, agent_profile: AssistantAgentProfile) -> dict[str, Any]:
+        referenced_skill_ids = [s.id for s in (agent_profile.skills or [])]
+        referenced_system_behavior_keys = self._binding_keys_from_relationship(
+            getattr(agent_profile, "system_behavior_bindings", None)
+        )
+        openclaw_reference_count = self._agent_openclaw_reference_count(agent_profile)
+        raw_kb = agent_profile.kb_config if isinstance(agent_profile.kb_config, dict) else {"enabled": False}
+        model_source, model_id = self._read_agent_model_config(raw_kb)
+        return {
+            "id": agent_profile.id,
+            "name": self._display_agent_profile_name(agent_profile),
+            "description": agent_profile.description or "",
+            "details_loaded": False,
+            "system_prompt": None,
+            "tools": None,
+            "kb_config": None,
+            "model_source": model_source,
+            "model_id": model_id,
+            "is_system": bool(agent_profile.is_system),
+            "hidden": self._is_hidden_system_asset("agent", agent_profile.name, agent_profile.is_system),
+            "enabled": bool(agent_profile.enabled),
+            "draft_version_id": agent_profile.draft_version_id,
+            "published_version_id": agent_profile.published_version_id,
+            "referenced_skill_ids": referenced_skill_ids,
+            "reference_count": len(referenced_skill_ids),
+            "referenced_system_behavior_keys": referenced_system_behavior_keys,
+            "system_behavior_reference_count": len(referenced_system_behavior_keys),
+            "openclaw_reference_count": openclaw_reference_count,
+            "created_at": agent_profile.created_at,
+            "updated_at": agent_profile.updated_at,
+        }
 
     def _serialize_agent_profile(self, agent_profile: AssistantAgentProfile) -> dict[str, Any]:
         referenced_skill_ids = [s.id for s in (agent_profile.skills or [])]
@@ -1111,6 +1181,7 @@ class AssistantConfigService:
             "id": agent_profile.id,
             "name": self._display_agent_profile_name(agent_profile),
             "description": agent_profile.description or "",
+            "details_loaded": True,
             "system_prompt": draft.system_prompt,
             "tools": draft.tools or [],
             "kb_config": normalized_kb,
@@ -1132,6 +1203,9 @@ class AssistantConfigService:
 
     def serialize_agent_profile(self, agent_profile: AssistantAgentProfile) -> dict[str, Any]:
         return self._serialize_agent_profile(agent_profile)
+
+    def serialize_agent_profile_summary(self, agent_profile: AssistantAgentProfile) -> dict[str, Any]:
+        return self._serialize_agent_profile_summary(agent_profile)
 
     def display_agent_profile_name(
         self,
@@ -1877,7 +1951,6 @@ class AssistantConfigService:
         ]
 
     def list_callable_workflows(self) -> list[dict[str, Any]]:
-        self.ensure_system_catalog_synced()
         workflows = (
             self.db.query(AssistantWorkflow)
             .filter(AssistantWorkflow.enabled.is_(True))
@@ -2540,7 +2613,6 @@ class AssistantConfigService:
 
     def list_system_behaviors(self) -> list[dict[str, Any]]:
         locale = self._current_locale()
-        self.ensure_system_catalog_synced()
         bindings = {
             item.behavior_key: item
             for item in (
@@ -3363,17 +3435,209 @@ class AssistantConfigService:
             {"key": _SYSTEM_CATALOG_SYNC_LOCK_KEY},
         )
 
-    def ensure_system_catalog_synced(self) -> None:
-        self._acquire_system_catalog_sync_lock()
+    def _expected_system_catalog_names(self, *, locale: str | None = None) -> dict[str, set[str]]:
+        normalized_locale = self._current_locale(locale)
+        assets = list_system_assets(locale=normalized_locale)
+        return {
+            "skill_names": {
+                definition.name
+                for definition in SkillRegistry.list_system_skill_definitions(locale=normalized_locale)
+                if definition.name
+            },
+            "workflow_names": {
+                asset.canonical_name
+                for asset in assets
+                if asset.kind == "workflow" and asset.canonical_name
+            },
+            "agent_names": {
+                asset.canonical_name
+                for asset in assets
+                if asset.kind == "agent" and asset.canonical_name
+            },
+            "behavior_keys": {
+                definition.key
+                for definition in list_system_behavior_definitions(locale=normalized_locale)
+                if definition.key
+            },
+        }
+
+    def _compute_system_catalog_signature(self, *, locale: str | None = None) -> str:
+        normalized_locale = self._current_locale(locale)
+        assets = list_system_assets(locale=normalized_locale)
+        payload = {
+            "locale": normalized_locale,
+            "internal_tool_names": sorted(ToolRegistry.INTERNAL_TOOL_NAMES or []),
+            "system_tool_definitions": [
+                asdict(item)
+                for item in ToolRegistry.list_system_tool_definitions(locale=normalized_locale)
+            ],
+            "system_skill_definitions": [
+                asdict(item)
+                for item in SkillRegistry.list_system_skill_definitions(locale=normalized_locale)
+            ],
+            "system_asset_definitions": [asdict(item) for item in assets],
+            "system_behavior_definitions": [
+                asdict(item)
+                for item in list_system_behavior_definitions(locale=normalized_locale)
+            ],
+            "system_workflow_assets": {
+                asset.asset_key: load_system_workflow_asset(asset.asset_key, locale=normalized_locale).model_dump(
+                    by_alias=True,
+                    mode="json",
+                )
+                for asset in assets
+                if asset.kind == "workflow"
+            },
+            "system_agent_assets": {
+                asset.asset_key: load_system_agent_asset(asset.asset_key, locale=normalized_locale).model_dump(
+                    by_alias=True,
+                    mode="json",
+                )
+                for asset in assets
+                if asset.kind == "agent"
+            },
+        }
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _load_persisted_system_catalog_signature(self) -> dict[str, Any] | None:
+        setting = (
+            self.db.query(AppSetting)
+            .filter(AppSetting.key == _SYSTEM_CATALOG_SIGNATURE_SETTING_KEY)
+            .first()
+        )
+        if setting is None or not isinstance(setting.value_json, dict):
+            return None
+        return dict(setting.value_json)
+
+    def _store_system_catalog_signature(self, *, locale: str, signature: str) -> None:
+        setting = (
+            self.db.query(AppSetting)
+            .filter(AppSetting.key == _SYSTEM_CATALOG_SIGNATURE_SETTING_KEY)
+            .first()
+        )
+        payload = {
+            "locale": locale,
+            "signature": signature,
+            "updated_at": self._utcnow().isoformat(),
+        }
+        if setting is None:
+            setting = AppSetting(
+                key=_SYSTEM_CATALOG_SIGNATURE_SETTING_KEY,
+                value_json=payload,
+            )
+            self.db.add(setting)
+            return
+        setting.value_json = payload
+
+    def _has_minimal_system_catalog_presence(self, *, locale: str | None = None) -> bool:
+        expected = self._expected_system_catalog_names(locale=locale)
+
+        expected_skill_names = expected["skill_names"]
+        if expected_skill_names:
+            existing_skill_names = {
+                str(name)
+                for name, in (
+                    self.db.query(AssistantSkill.name)
+                    .filter(
+                        AssistantSkill.is_system.is_(True),
+                        AssistantSkill.name.in_(tuple(expected_skill_names)),
+                    )
+                    .all()
+                )
+                if name
+            }
+            if existing_skill_names != expected_skill_names:
+                return False
+
+        expected_workflow_names = expected["workflow_names"]
+        if expected_workflow_names:
+            existing_workflows = {
+                str(name)
+                for name, published_version_id in (
+                    self.db.query(AssistantWorkflow.name, AssistantWorkflow.published_version_id)
+                    .filter(
+                        AssistantWorkflow.is_system.is_(True),
+                        AssistantWorkflow.name.in_(tuple(expected_workflow_names)),
+                    )
+                    .all()
+                )
+                if name and published_version_id is not None
+            }
+            if existing_workflows != expected_workflow_names:
+                return False
+
+        expected_agent_names = expected["agent_names"]
+        if expected_agent_names:
+            existing_agents = {
+                str(name)
+                for name, published_version_id in (
+                    self.db.query(AssistantAgentProfile.name, AssistantAgentProfile.published_version_id)
+                    .filter(
+                        AssistantAgentProfile.is_system.is_(True),
+                        AssistantAgentProfile.name.in_(tuple(expected_agent_names)),
+                    )
+                    .all()
+                )
+                if name and published_version_id is not None
+            }
+            if existing_agents != expected_agent_names:
+                return False
+
+        expected_behavior_keys = expected["behavior_keys"]
+        if expected_behavior_keys:
+            existing_behavior_keys = {
+                str(key)
+                for key, in (
+                    self.db.query(AssistantSystemBehaviorBinding.behavior_key)
+                    .filter(AssistantSystemBehaviorBinding.behavior_key.in_(tuple(expected_behavior_keys)))
+                    .all()
+                )
+                if key
+            }
+            if existing_behavior_keys != expected_behavior_keys:
+                return False
+
+        return True
+
+    def _system_catalog_needs_sync(self, *, locale: str | None = None) -> bool:
+        normalized_locale = self._current_locale(locale)
+        persisted = self._load_persisted_system_catalog_signature()
+        if not persisted:
+            return True
+        if persisted.get("locale") != normalized_locale:
+            return True
+        if not self._has_minimal_system_catalog_presence(locale=normalized_locale):
+            return True
+        current_signature = self._compute_system_catalog_signature(locale=normalized_locale)
+        return str(persisted.get("signature") or "") != current_signature
+
+    def _sync_system_catalog_locked(self, *, locale: str | None = None) -> None:
+        normalized_locale = self._current_locale(locale)
         self.sync_system_tools(commit=False)
         self.sync_system_skills(commit=False)
         self.sync_standalone_system_targets(commit=False)
         self.ensure_system_behaviors(commit=False)
+        signature = self._compute_system_catalog_signature(locale=normalized_locale)
+        self._store_system_catalog_signature(locale=normalized_locale, signature=signature)
         try:
             self.db.commit()
         except IntegrityError as exc:
             self.db.rollback()
             raise ApiException(status_code=409, code=40969, message="Sync system catalog failed") from exc
+
+    def ensure_system_catalog_synced(self) -> None:
+        self._acquire_system_catalog_sync_lock()
+        self._sync_system_catalog_locked()
+
+    def ensure_system_catalog_warm(self) -> bool:
+        normalized_locale = self._current_locale()
+        self._acquire_system_catalog_sync_lock()
+        if not self._system_catalog_needs_sync(locale=normalized_locale):
+            self.db.rollback()
+            return False
+        self._sync_system_catalog_locked(locale=normalized_locale)
+        return True
 
     # -------------------------
     # System seed / sync
@@ -3711,9 +3975,9 @@ class AssistantConfigService:
     # -------------------------
     # Tools CRUD
     # -------------------------
-    def list_tools(self, sync_system: bool = True, include_disabled: bool = False) -> list[AssistantTool]:
-        if sync_system:
-            self.sync_system_tools()
+    def list_tools(self, sync_system: bool = False, include_disabled: bool = False) -> list[AssistantTool]:
+        # Deprecated compatibility flag: reads are now always side-effect free.
+        _ = sync_system
         # 仅返回自定义（remote）工具；系统工具定义不落库
         q = (
             self.db.query(AssistantTool)
@@ -3894,9 +4158,9 @@ class AssistantConfigService:
     # -------------------------
     # Skills CRUD
     # -------------------------
-    def list_skills(self, sync_system: bool = True, include_disabled: bool = False) -> list[AssistantSkill]:
-        if sync_system:
-            self.sync_system_skills()
+    def list_skills(self, sync_system: bool = False, include_disabled: bool = False) -> list[AssistantSkill]:
+        # Deprecated compatibility flag: reads are now always side-effect free.
+        _ = sync_system
         q = (
             self.db.query(AssistantSkill)
             .options(
@@ -4537,8 +4801,6 @@ class AssistantConfigService:
         q = (
             self.db.query(AssistantWorkflow)
             .options(
-                joinedload(AssistantWorkflow.nodes),
-                joinedload(AssistantWorkflow.edges),
                 joinedload(AssistantWorkflow.skills),
                 joinedload(AssistantWorkflow.system_behavior_bindings),
             )
@@ -4549,13 +4811,11 @@ class AssistantConfigService:
         return q.all()
 
     def list_workflows(self, include_disabled: bool = False) -> list[AssistantWorkflow]:
-        self.ensure_system_catalog_synced()
         workflows = self._list_workflows_query(include_disabled=include_disabled)
         self._attach_openclaw_reference_counts(workflows=workflows)
         return workflows
 
     def get_workflow(self, workflow_id: UUID) -> AssistantWorkflow:
-        self.ensure_system_catalog_synced()
         workflow = (
             self.db.query(AssistantWorkflow)
             .options(
@@ -4935,7 +5195,6 @@ class AssistantConfigService:
     # Agent Profiles CRUD
     # -------------------------
     def list_agent_profiles(self, include_disabled: bool = False) -> list[AssistantAgentProfile]:
-        self.ensure_system_catalog_synced()
         q = (
             self.db.query(AssistantAgentProfile)
             .options(
@@ -4951,7 +5210,6 @@ class AssistantConfigService:
         return profiles
 
     def get_agent_profile(self, agent_profile_id: UUID) -> AssistantAgentProfile:
-        self.ensure_system_catalog_synced()
         profile = (
             self.db.query(AssistantAgentProfile)
             .options(

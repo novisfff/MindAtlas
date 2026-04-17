@@ -34,6 +34,7 @@ interface AssistantTargetCardProps {
     disableCopy: boolean
     isDeleting: boolean
     disableDelete: boolean
+    isDetailLoading?: boolean
 }
 
 interface ReferenceBadgeProps {
@@ -64,6 +65,7 @@ export const AssistantTargetCard = memo(function AssistantTargetCard({
     disableCopy,
     isDeleting,
     disableDelete,
+    isDetailLoading = false,
 }: AssistantTargetCardProps) {
     const { t } = useTranslation()
     const isWorkflow = target.type === 'workflow'
@@ -218,7 +220,11 @@ export const AssistantTargetCard = memo(function AssistantTargetCard({
                     <div className="mt-4 border-t border-border/70 pt-4">
                         <div className="space-y-4">
                             {isWorkflow ? (
-                                workflow ? (
+                                isDetailLoading ? (
+                                    <div className="flex items-center justify-center py-10 text-muted-foreground">
+                                        <Loader2 className="h-5 w-5 animate-spin" />
+                                    </div>
+                                ) : workflow ? (
                                     <div className="space-y-4">
                                         {workflow.description && (
                                             <SettingsInset className="text-sm leading-6 text-muted-foreground">
@@ -236,6 +242,11 @@ export const AssistantTargetCard = memo(function AssistantTargetCard({
                                     <p className="text-sm text-muted-foreground">{t('messages.noData')}</p>
                                 )
                             ) : (
+                                isDetailLoading ? (
+                                    <div className="flex items-center justify-center py-10 text-muted-foreground">
+                                        <Loader2 className="h-5 w-5 animate-spin" />
+                                    </div>
+                                ) : (
                                 <div className="grid gap-6">
                                     <div className="grid gap-4 md:grid-cols-2">
                                         <SettingsInset className="space-y-1.5">
@@ -297,6 +308,7 @@ export const AssistantTargetCard = memo(function AssistantTargetCard({
                                         </div>
                                     </SettingsInset>
                                 </div>
+                                )
                             )}
                         </div>
                     </div>

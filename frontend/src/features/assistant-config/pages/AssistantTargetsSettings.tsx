@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import {
   useAgentProfilesQuery,
+  useAgentProfileDetailQuery,
   useCopyAgentProfileMutation,
   useCopyWorkflowMutation,
   useCreateAgentProfileMutation,
@@ -12,6 +13,7 @@ import {
   useDeleteAgentProfileMutation,
   useDeleteWorkflowMutation,
   useSkillsQuery,
+  useWorkflowDetailQuery,
   useWorkflowsQuery,
 } from '../queries'
 import { Button } from '@/components/ui/button'
@@ -79,6 +81,26 @@ export function AssistantTargetsSettings() {
   const agentById = useMemo(
     () => new Map(agents.map((item) => [item.id, item])),
     [agents],
+  )
+  const expandedTarget = useMemo(
+    () => targets.find((item) => item.key === expandedTargetKey) ?? null,
+    [expandedTargetKey, targets],
+  )
+  const expandedWorkflowSummary = expandedTarget?.type === 'workflow'
+    ? workflowById.get(expandedTarget.id)
+    : undefined
+  const expandedAgentSummary = expandedTarget?.type === 'agent'
+    ? agentById.get(expandedTarget.id)
+    : undefined
+  const shouldLoadExpandedWorkflow = !!expandedWorkflowSummary && !expandedWorkflowSummary.detailsLoaded
+  const shouldLoadExpandedAgent = !!expandedAgentSummary && !expandedAgentSummary.detailsLoaded
+  const { data: expandedWorkflowDetail, isLoading: isLoadingExpandedWorkflow } = useWorkflowDetailQuery(
+    expandedTarget?.type === 'workflow' ? expandedTarget.id : null,
+    shouldLoadExpandedWorkflow,
+  )
+  const { data: expandedAgentDetail, isLoading: isLoadingExpandedAgent } = useAgentProfileDetailQuery(
+    expandedTarget?.type === 'agent' ? expandedTarget.id : null,
+    shouldLoadExpandedAgent,
   )
 
   const beginCreate = (type: Exclude<CreateTargetType, null>) => {
@@ -320,8 +342,17 @@ export function AssistantTargetsSettings() {
             <div className="grid gap-4">
               {targets.map((target) => {
                 const isWorkflow = target.type === 'workflow'
-                const workflow = isWorkflow ? workflowById.get(target.id) : undefined
-                const agent = isWorkflow ? undefined : agentById.get(target.id)
+                const isExpanded = expandedTargetKey === target.key
+                const workflow = isWorkflow
+                  ? (isExpanded && expandedWorkflowDetail?.id === target.id
+                    ? expandedWorkflowDetail
+                    : workflowById.get(target.id))
+                  : undefined
+                const agent = isWorkflow
+                  ? undefined
+                  : (isExpanded && expandedAgentDetail?.id === target.id
+                    ? expandedAgentDetail
+                    : agentById.get(target.id))
                 const isDeleting = (
                   deleteWorkflowMutation.isPending
                   || deleteAgentMutation.isPending
@@ -334,7 +365,7 @@ export function AssistantTargetsSettings() {
                     target={target}
                     workflow={workflow}
                     agent={agent}
-                    isExpanded={expandedTargetKey === target.key}
+                    isExpanded={isExpanded}
                     onToggleExpand={() => setExpandedTargetKey((prev) => (prev === target.key ? null : target.key))}
                     onEdit={() => handleEdit(target)}
                     onCopy={() => void handleCopy(target)}
@@ -343,6 +374,7 @@ export function AssistantTargetsSettings() {
                     disableCopy={isCopyingAny}
                     isDeleting={isDeleting}
                     disableDelete={disableDelete}
+                    isDetailLoading={isExpanded ? (isWorkflow ? isLoadingExpandedWorkflow : isLoadingExpandedAgent) : false}
                   />
                 )
               })}

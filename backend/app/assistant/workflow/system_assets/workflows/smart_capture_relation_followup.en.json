@@ -275,7 +275,7 @@
       "nodeId": "output_no_relation_candidates",
       "nodeType": "output",
       "label": "无关系推荐输出",
-      "positionX": 2080.0,
+      "positionX": 1680.0,
       "positionY": 460.0,
       "config": {
         "outputMode": "structured",
@@ -332,7 +332,7 @@
       "nodeId": "output_relations_rejected",
       "nodeType": "output",
       "label": "跳过关系输出",
-      "positionX": 2480.0,
+      "positionX": 2080.0,
       "positionY": 460.0,
       "config": {
         "outputMode": "structured",
@@ -441,7 +441,7 @@
       "nodeId": "output_no_relations_selected",
       "nodeType": "output",
       "label": "未选择关系输出",
-      "positionX": 2880.0,
+      "positionX": 2480.0,
       "positionY": 460.0,
       "config": {
         "outputMode": "structured",

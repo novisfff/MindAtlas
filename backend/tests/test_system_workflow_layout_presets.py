@@ -55,6 +55,23 @@ EXPECTED_WORKFLOW_POSITIONS: dict[str, dict[str, tuple[int, int]]] = {
     },
 }
 
+EXPECTED_STANDALONE_WORKFLOW_POSITIONS: dict[str, dict[str, tuple[int, int]]] = {
+    "smart_capture_relation_followup": {
+        "start": (80, 320),
+        "code_normalize_persisted": (480, 320),
+        "tool_relation_recs": (880, 320),
+        "iter_relation_details": (1280, 320),
+        "if_relation_candidates": (1680, 320),
+        "human_confirm_relations": (2080, 320),
+        "output_no_relation_candidates": (1680, 460),
+        "if_selected_relations": (2480, 320),
+        "output_relations_rejected": (2080, 460),
+        "iter_create_relations": (2880, 320),
+        "output_no_relations_selected": (2480, 460),
+        "output_relations_created": (3280, 320),
+    },
+}
+
 
 def _node_position_map(workflow) -> dict[str, tuple[int, int]]:
     return {
@@ -179,3 +196,19 @@ class SystemWorkflowLayoutPresetTests(unittest.TestCase):
         self.assertIsNotNone(refreshed)
         self.assertIsNotNone(refreshed.workflow)
         self.assertIsNone(refreshed.workflow.workflow_viewport)
+
+    def test_standalone_relation_followup_asset_uses_vertical_exit_layout(self) -> None:
+        from app.assistant.workflow.system_assets import load_system_workflow_asset  # noqa: E402
+
+        for locale in ("zh", "en"):
+            workflow = load_system_workflow_asset("smart_capture_relation_followup", locale=locale)
+            position_map = {
+                node.node_id: (int(round(float(node.position_x))), int(round(float(node.position_y))))
+                for node in (workflow.nodes or [])
+            }
+            for node_id, expected in EXPECTED_STANDALONE_WORKFLOW_POSITIONS["smart_capture_relation_followup"].items():
+                self.assertEqual(
+                    position_map.get(node_id),
+                    expected,
+                    f"smart_capture_relation_followup[{locale}].{node_id} position mismatch",
+                )

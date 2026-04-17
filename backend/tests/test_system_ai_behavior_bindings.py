@@ -30,6 +30,9 @@ class _FakeLangGraphEngine:
 class SystemAiBehaviorBindingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.db = make_session()
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        AssistantConfigService(self.db).ensure_system_catalog_synced()
 
     def tearDown(self) -> None:
         self.db.close()
