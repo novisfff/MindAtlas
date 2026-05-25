@@ -16,6 +16,40 @@ class AiRegistryServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()
 
+    def test_delete_model_clears_component_bindings(self) -> None:
+        from app.common.exceptions import ApiException  # noqa: E402
+        from app.ai_registry.models import AiComponentBinding, AiCredential, AiModel  # noqa: E402
+        from app.ai_registry.service import AiModelService  # noqa: E402
+        from tests._db import make_session  # noqa: E402
+
+        db = make_session()
+        try:
+            cred = AiCredential(
+                name="OpenAI",
+                base_url="https://api.example.com/v1",
+                api_key_encrypted="enc",
+                api_key_hint="****",
+            )
+            model = AiModel(credential=cred, name="gpt-4o-mini", model_type="llm")
+            db.add_all([cred, model])
+            db.flush()
+            binding = AiComponentBinding(component="assistant", llm_model_id=model.id)
+            db.add(binding)
+            db.commit()
+
+            with self.assertRaises(ApiException) as ctx:
+                AiModelService(db).delete(model.id)
+            self.assertEqual(ctx.exception.code, 40911)
+            self.assertEqual(ctx.exception.details["action"], "confirm_unbind_then_delete")
+
+            AiModelService(db).delete(model.id, confirm_bound_bindings=True)
+
+            self.assertIsNone(db.query(AiModel).filter(AiModel.id == model.id).first())
+            db.refresh(binding)
+            self.assertIsNone(binding.llm_model_id)
+        finally:
+            db.close()
+
     def test_build_openai_compat_headers_trims_api_key(self) -> None:
         from app.ai_registry.service import _build_openai_compat_headers  # noqa: E402
 

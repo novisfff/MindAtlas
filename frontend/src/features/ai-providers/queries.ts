@@ -189,8 +189,16 @@ export function useUpdateModelMutation() {
 export function useDeleteModelMutation() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (id: string) => deleteModel(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: modelsKeys.all }),
+    mutationFn: (
+      payload: string | { id: string; confirmBoundBindings?: boolean }
+    ) => {
+      if (typeof payload === 'string') return deleteModel(payload)
+      return deleteModel(payload.id, { confirmBoundBindings: payload.confirmBoundBindings })
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: modelsKeys.all })
+      queryClient.invalidateQueries({ queryKey: bindingsKeys.all })
+    },
   })
 }
 
