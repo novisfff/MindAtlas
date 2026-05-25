@@ -49,6 +49,11 @@ export async function updateModel(id: string, data: AiModelUpdateRequest): Promi
   return apiClient.put(`/api/ai-models/${id}`, { body: data })
 }
 
-export async function deleteModel(id: string): Promise<void> {
-  return apiClient.delete(`/api/ai-models/${id}`)
+export async function deleteModel(
+  id: string,
+  options: { confirmBoundBindings?: boolean } = {}
+): Promise<void> {
+  return apiClient.delete(`/api/ai-models/${id}`, {
+    query: { confirmBoundBindings: options.confirmBoundBindings },
+  })
 }

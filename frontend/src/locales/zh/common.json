@@ -1119,6 +1119,8 @@
       "unknownModel": "未知模型",
       "addModel": "添加模型",
       "editModel": "编辑模型",
+      "deleteBoundModelTitle": "删除已绑定模型？",
+      "deleteBoundModelDescription": "模型「{{model}}」正在作为以下默认模型使用：\n{{bindings}}\n\n确认删除后，这些默认绑定会被清空，需要重新选择模型。",
       "selectType": "选择类型",
       "modelName": "模型名称",
       "hints": {

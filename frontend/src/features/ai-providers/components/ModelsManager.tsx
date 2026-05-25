@@ -8,6 +8,7 @@ import {
   useUpdateModelMutation,
   useDeleteModelMutation,
   useDiscoverModelsByCredentialMutation,
+  useModelBindingsQuery,
 } from '../queries'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import type { AiModelType } from '../api/models'
@@ -16,6 +17,7 @@ export function ModelsManager() {
   const { t } = useTranslation()
   const { data: models = [] } = useModelsQuery()
   const { data: credentials = [] } = useCredentialsQuery()
+  const { data: bindings } = useModelBindingsQuery()
   const createMutation = useCreateModelMutation()
   const updateMutation = useUpdateModelMutation()
   const deleteMutation = useDeleteModelMutation()
@@ -61,9 +63,39 @@ export function ModelsManager() {
     }
   }
 
+  const getBoundUsages = (modelId: string | null) => {
+    if (!modelId || !bindings) return []
+    const usages: string[] = []
+    if (bindings.assistant?.llmModelId === modelId) {
+      usages.push(`${t('settings.ai.roles.system')} / ${t('settings.ai.modelTypes.llm')}`)
+    }
+    if (bindings.assistant?.embeddingModelId === modelId) {
+      usages.push(`${t('settings.ai.roles.system')} / ${t('settings.ai.modelTypes.embedding')}`)
+    }
+    if (bindings.lightrag?.llmModelId === modelId) {
+      usages.push(`${t('settings.ai.roles.lightrag')} / ${t('settings.ai.modelTypes.llm')}`)
+    }
+    if (bindings.lightrag?.embeddingModelId === modelId) {
+      usages.push(`${t('settings.ai.roles.lightrag')} / ${t('settings.ai.modelTypes.embedding')}`)
+    }
+    if (bindings.workflowCopilot?.llmModelId === modelId) {
+      usages.push(`${t('settings.ai.roles.workflowCopilot')} / ${t('settings.ai.modelTypes.llm')}`)
+    }
+    if (bindings.workflowCopilot?.embeddingModelId === modelId) {
+      usages.push(`${t('settings.ai.roles.workflowCopilot')} / ${t('settings.ai.modelTypes.embedding')}`)
+    }
+    return usages
+  }
+
+  const deletingModel = models.find((model) => model.id === deleteId)
+  const boundUsages = getBoundUsages(deleteId)
+
   const handleDelete = async () => {
     if (deleteId) {
-      await deleteMutation.mutateAsync(deleteId)
+      await deleteMutation.mutateAsync({
+        id: deleteId,
+        confirmBoundBindings: boundUsages.length > 0,
+      })
       setDeleteId(null)
     }
   }
@@ -236,9 +268,22 @@ export function ModelsManager() {
         isOpen={!!deleteId}
         onCancel={() => setDeleteId(null)}
         onConfirm={handleDelete}
-        title={t('actions.delete')}
-        description={t('messages.confirmDelete')}
+        title={
+          boundUsages.length > 0
+            ? t('settings.ai.deleteBoundModelTitle')
+            : t('actions.delete')
+        }
+        description={
+          boundUsages.length > 0
+            ? t('settings.ai.deleteBoundModelDescription', {
+                model: deletingModel?.name ?? '',
+                bindings: boundUsages.join('\n'),
+              })
+            : t('messages.confirmDelete')
+        }
+        confirmText={t('actions.delete')}
         variant="destructive"
+        isLoading={deleteMutation.isPending}
       />
     </div>
   )

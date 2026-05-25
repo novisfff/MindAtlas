@@ -120,9 +120,13 @@ def update_model(id: UUID, request: AiModelUpdateRequest, db: Session = Depends(
 
 
 @model_router.delete("/{id}", response_model=ApiResponse)
-def delete_model(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
+def delete_model(
+    id: UUID,
+    confirm_bound_bindings: bool = Query(False, alias="confirmBoundBindings"),
+    db: Session = Depends(get_db),
+) -> ApiResponse:
     svc = AiModelService(db)
-    svc.delete(id)
+    svc.delete(id, confirm_bound_bindings=confirm_bound_bindings)
     return ApiResponse.ok(None)
 
 

@@ -1130,6 +1130,8 @@
       "unknownModel": "Unknown model",
       "addModel": "Add Model",
       "editModel": "Edit Model",
+      "deleteBoundModelTitle": "Delete bound model?",
+      "deleteBoundModelDescription": "Model \"{{model}}\" is currently used by these default bindings:\n{{bindings}}\n\nAfter deletion, these default bindings will be cleared and need a new model.",
       "selectType": "Select Type",
       "modelName": "Model Name",
       "hints": {

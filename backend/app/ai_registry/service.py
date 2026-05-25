@@ -254,15 +254,33 @@ class AiModelService:
         self.db.refresh(m)
         return m
 
-    def delete(self, id: UUID) -> None:
+    def delete(self, id: UUID, *, confirm_bound_bindings: bool = False) -> None:
         m = self.find_by_id(id)
-        in_use = (
+        bound_components = (
             self.db.query(AiComponentBinding)
             .filter((AiComponentBinding.llm_model_id == m.id) | (AiComponentBinding.embedding_model_id == m.id))
-            .first()
+            .all()
         )
-        if in_use:
-            raise ApiException(status_code=409, code=40911, message="Model is in use by component bindings")
+        if bound_components and not confirm_bound_bindings:
+            raise ApiException(
+                status_code=409,
+                code=40911,
+                message="Model is in use by component bindings",
+                details={
+                    "action": "confirm_unbind_then_delete",
+                    "components": [str(item.component) for item in bound_components],
+                },
+            )
+        (
+            self.db.query(AiComponentBinding)
+            .filter(AiComponentBinding.llm_model_id == m.id)
+            .update({AiComponentBinding.llm_model_id: None}, synchronize_session=False)
+        )
+        (
+            self.db.query(AiComponentBinding)
+            .filter(AiComponentBinding.embedding_model_id == m.id)
+            .update({AiComponentBinding.embedding_model_id: None}, synchronize_session=False)
+        )
         self.db.delete(m)
         self.db.commit()
 
