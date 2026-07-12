@@ -79,8 +79,7 @@ MindAtlas/
 ├── frontend/                       # React app, initialization flow, settings pages, dashboard
 ├── deploy/                         # Docker Compose deployment and overrides
 ├── docs/                           # User manuals and supporting docs
-├── integrations/openclaw-mindatlas/ # OpenClaw plugin package
-└── openspec/                       # Project specs and change history
+└── integrations/openclaw-mindatlas/ # OpenClaw plugin package
 ```
 
 ## Quick Start

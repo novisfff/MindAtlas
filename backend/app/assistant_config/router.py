@@ -13,9 +13,14 @@ from app.assistant_config.schemas import (
     AssistantAgentProfileCreateRequest,
     AssistantAgentProfileResponse,
     AssistantAgentProfileUpdateRequest,
+    AssistantFolderMoveRequest,
     AssistantSkillCreateRequest,
     AssistantSkillResponse,
     AssistantSkillUpdateRequest,
+    AssistantTargetFolderCreateRequest,
+    AssistantTargetFolderResponse,
+    AssistantTargetFolderUpdateRequest,
+    AssistantTargetMoveRequest,
     AssistantToolCreateRequest,
     AssistantToolResponse,
     AssistantToolUpdateRequest,
@@ -133,6 +138,58 @@ def delete_tool(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
     service = AssistantConfigService(db)
     service.delete_tool(id)
     return ApiResponse.ok(None, "Tool deleted")
+
+
+@router.get("/target-folders", response_model=ApiResponse)
+def list_target_folders(db: Session = Depends(get_db)) -> ApiResponse:
+    service = AssistantConfigService(db)
+    items = service.list_target_folders()
+    return ApiResponse.ok([
+        AssistantTargetFolderResponse.model_validate(item).model_dump(by_alias=True)
+        for item in items
+    ])
+
+
+@router.post("/target-folders", response_model=ApiResponse)
+def create_target_folder(
+    request: AssistantTargetFolderCreateRequest,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = AssistantConfigService(db)
+    item = service.create_target_folder(request)
+    return ApiResponse.ok(AssistantTargetFolderResponse.model_validate(item).model_dump(by_alias=True))
+
+
+@router.put("/target-folders/{id}", response_model=ApiResponse)
+def update_target_folder(
+    id: UUID,
+    request: AssistantTargetFolderUpdateRequest,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = AssistantConfigService(db)
+    item = service.update_target_folder(id, request)
+    return ApiResponse.ok(AssistantTargetFolderResponse.model_validate(item).model_dump(by_alias=True))
+
+
+@router.delete("/target-folders/{id}", response_model=ApiResponse)
+def delete_target_folder(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
+    service = AssistantConfigService(db)
+    service.delete_target_folder(id)
+    return ApiResponse.ok(None, "Target folder deleted")
+
+
+@router.post("/target-folders/move-target", response_model=ApiResponse)
+def move_target_to_folder(request: AssistantTargetMoveRequest, db: Session = Depends(get_db)) -> ApiResponse:
+    service = AssistantConfigService(db)
+    service.move_target_to_folder(request)
+    return ApiResponse.ok(None, "Target moved")
+
+
+@router.post("/target-folders/move-folder", response_model=ApiResponse)
+def move_target_folder(request: AssistantFolderMoveRequest, db: Session = Depends(get_db)) -> ApiResponse:
+    service = AssistantConfigService(db)
+    service.move_target_folder(request)
+    return ApiResponse.ok(None, "Folder moved")
 
 
 # ==================== Skills ====================

@@ -22,6 +22,7 @@ export interface AssistantAgentProfile {
   referencedSystemBehaviorKeys: string[]
   systemBehaviorReferenceCount: number
   openclawReferenceCount: number
+  folderId: string | null
   createdAt: string
   updatedAt: string
 }
@@ -35,6 +36,7 @@ export interface CreateAgentProfileRequest {
   modelSource?: 'default' | 'custom'
   modelId?: string | null
   enabled?: boolean
+  folderId?: string | null
 }
 
 export interface UpdateAgentProfileRequest {
@@ -46,6 +48,7 @@ export interface UpdateAgentProfileRequest {
   modelSource?: 'default' | 'custom'
   modelId?: string | null
   enabled?: boolean
+  folderId?: string | null
 }
 
 export interface AgentVersionRecord {

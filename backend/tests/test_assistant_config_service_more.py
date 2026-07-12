@@ -1340,3 +1340,185 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertEqual(list(copied_draft.tools or []), list(baseline.tools or []))
         self.assertEqual(system_draft.system_prompt, "Mutated prompt")
         self.assertEqual(copied.description, "mutated description")
+
+    def test_target_folder_move_target_and_copy_preserve_folder(self) -> None:
+        from app.assistant_config.schemas import (  # noqa: E402
+            AssistantTargetFolderCreateRequest,
+            AssistantTargetMoveRequest,
+            AssistantWorkflowCreateRequest,
+        )
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        folder = svc.create_target_folder(
+            AssistantTargetFolderCreateRequest(
+                name="Folder Alpha",
+                color_token="sky",
+            )
+        )
+        workflow = svc.create_workflow(
+            AssistantWorkflowCreateRequest(
+                name="foldered_workflow",
+                description="workflow",
+                folder_id=folder["id"],
+            )
+        )
+
+        svc.move_target_to_folder(
+            AssistantTargetMoveRequest(
+                target_type="workflow",
+                target_id=workflow.id,
+                folder_id=folder["id"],
+            )
+        )
+        moved = svc.get_workflow(workflow.id)
+        copied = svc.copy_workflow(workflow.id)
+
+        self.assertEqual(str(moved.folder_id), str(folder["id"]))
+        self.assertEqual(str(copied.folder_id), str(folder["id"]))
+
+    def test_target_folder_rejects_whitespace_only_name(self) -> None:
+        from app.assistant_config.schemas import AssistantTargetFolderCreateRequest  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+        from app.common.exceptions import ApiException  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+
+        with self.assertRaises(ApiException) as ctx:
+            svc.create_target_folder(AssistantTargetFolderCreateRequest(name="   "))
+
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_target_folder_delete_lifts_children_and_targets(self) -> None:
+        from app.assistant_config.schemas import (  # noqa: E402
+            AssistantTargetFolderCreateRequest,
+            AssistantWorkflowCreateRequest,
+        )
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        parent = svc.create_target_folder(AssistantTargetFolderCreateRequest(name="Parent"))
+        child = svc.create_target_folder(
+            AssistantTargetFolderCreateRequest(
+                name="Child",
+                parent_id=parent["id"],
+            )
+        )
+        grandchild = svc.create_target_folder(
+            AssistantTargetFolderCreateRequest(
+                name="Grandchild",
+                parent_id=child["id"],
+            )
+        )
+        workflow = svc.create_workflow(
+            AssistantWorkflowCreateRequest(
+                name="child_workflow",
+                folder_id=child["id"],
+            )
+        )
+
+        svc.delete_target_folder(child["id"])
+
+        refreshed_workflow = svc.get_workflow(workflow.id)
+        refreshed_grandchild = svc._get_target_folder(grandchild["id"])  # noqa: SLF001
+        self.assertEqual(str(refreshed_workflow.folder_id), str(parent["id"]))
+        self.assertEqual(str(refreshed_grandchild.parent_id), str(parent["id"]))
+
+    def test_target_folder_delete_renames_lifted_child_on_name_conflict(self) -> None:
+        from app.assistant_config.schemas import AssistantTargetFolderCreateRequest  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.create_target_folder(AssistantTargetFolderCreateRequest(name="Child"))
+        parent = svc.create_target_folder(AssistantTargetFolderCreateRequest(name="Parent"))
+        nested_child = svc.create_target_folder(
+            AssistantTargetFolderCreateRequest(name="Child", parent_id=parent["id"])
+        )
+
+        svc.delete_target_folder(parent["id"])
+
+        lifted_child = svc._get_target_folder(nested_child["id"])  # noqa: SLF001
+        self.assertIsNone(lifted_child.parent_id)
+        self.assertEqual(lifted_child.name, "Child (2)")
+
+    def test_target_folder_delete_keeps_conflict_rename_within_name_limit(self) -> None:
+        from app.assistant_config.schemas import AssistantTargetFolderCreateRequest  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        long_name = "x" * 128
+        svc.create_target_folder(AssistantTargetFolderCreateRequest(name=long_name))
+        parent = svc.create_target_folder(AssistantTargetFolderCreateRequest(name="Parent"))
+        nested_child = svc.create_target_folder(
+            AssistantTargetFolderCreateRequest(name=long_name, parent_id=parent["id"])
+        )
+
+        svc.delete_target_folder(parent["id"])
+
+        lifted_child = svc._get_target_folder(nested_child["id"])  # noqa: SLF001
+        self.assertEqual(len(lifted_child.name), 128)
+        self.assertTrue(lifted_child.name.endswith(" (2)"))
+
+    def test_target_folder_move_rejects_cycles(self) -> None:
+        from app.assistant_config.schemas import (  # noqa: E402
+            AssistantFolderMoveRequest,
+            AssistantTargetFolderCreateRequest,
+        )
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+        from app.common.exceptions import ApiException  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        parent = svc.create_target_folder(AssistantTargetFolderCreateRequest(name="Cycle Parent"))
+        child = svc.create_target_folder(
+            AssistantTargetFolderCreateRequest(
+                name="Cycle Child",
+                parent_id=parent["id"],
+            )
+        )
+
+        with self.assertRaises(ApiException) as ctx:
+            svc.move_target_folder(
+                AssistantFolderMoveRequest(
+                    folder_id=parent["id"],
+                    parent_id=child["id"],
+                )
+            )
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(ctx.exception.code, 40035)
+
+    def test_target_folder_listing_reports_persisted_cycle_without_recursing(self) -> None:
+        from app.assistant_config.schemas import AssistantTargetFolderCreateRequest  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+        from app.common.exceptions import ApiException  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        first = svc.create_target_folder(AssistantTargetFolderCreateRequest(name="First"))
+        second = svc.create_target_folder(
+            AssistantTargetFolderCreateRequest(name="Second", parent_id=first["id"])
+        )
+        first_model = svc._get_target_folder(first["id"])  # noqa: SLF001
+        first_model.parent_id = second["id"]
+        self.db.commit()
+
+        with self.assertRaises(ApiException) as ctx:
+            svc.list_target_folders()
+
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.code, 40971)
+
+    def test_sync_system_catalog_assigns_system_targets_to_builtin_folder(self) -> None:
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.ensure_system_catalog_synced()
+
+        system_workflow = next(item for item in svc.list_workflows(include_disabled=True) if item.is_system)
+        system_agent = next(item for item in svc.list_agent_profiles(include_disabled=True) if item.is_system)
+        folders = svc.list_target_folders()
+        builtin = next(item for item in folders if item["name"] == "系统内置")
+
+        self.assertIsNotNone(system_workflow.folder_id)
+        self.assertEqual(str(system_workflow.folder_id), str(builtin["id"]))
+        self.assertIsNotNone(system_agent.folder_id)
+        self.assertEqual(str(system_agent.folder_id), str(builtin["id"]))

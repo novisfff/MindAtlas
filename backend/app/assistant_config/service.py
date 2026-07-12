@@ -23,6 +23,7 @@ from app.assistant_config.models import (
     AssistantAgentProfileVersion,
     AssistantSkill,
     AssistantSystemBehaviorBinding,
+    AssistantTargetFolder,
     AssistantWorkflow,
     AssistantWorkflowVersion,
     AssistantTool,
@@ -34,8 +35,13 @@ from app.assistant_config.schemas import (
     AgentVersionListResponse,
     AssistantAgentProfileCreateRequest,
     AssistantAgentProfileUpdateRequest,
+    AssistantFolderMoveRequest,
     AssistantSkillCreateRequest,
     AssistantSkillUpdateRequest,
+    AssistantTargetFolderCreateRequest,
+    AssistantTargetFolderResponse,
+    AssistantTargetFolderUpdateRequest,
+    AssistantTargetMoveRequest,
     AssistantToolCreateRequest,
     AssistantToolUpdateRequest,
     AssistantWorkflowCreateRequest,
@@ -84,6 +90,7 @@ from app.system_settings.service import resolve_system_locale
 
 
 _SYSTEM_CATALOG_SYNC_LOCK_KEY = 2026040901
+_TARGET_FOLDER_MUTATION_LOCK_KEY = 2026041901
 _SYSTEM_CATALOG_SIGNATURE_SETTING_KEY = "assistant_config_system_catalog_signature"
 
 _TARGET_VERSION_LIMIT = 100
@@ -132,6 +139,17 @@ class ResolvedWorkflowCallTarget:
     version: AssistantWorkflowVersion
     workflow_input: WorkflowInput
     contract: WorkflowContractSnapshot
+
+
+@dataclass(frozen=True)
+class TargetFolderStats:
+    folder_count: int
+    workflow_count: int
+    agent_count: int
+    direct_folder_count: int
+    direct_workflow_count: int
+    direct_agent_count: int
+    last_activity_at: datetime
 
 
 class AssistantConfigService:
@@ -350,6 +368,256 @@ class AssistantConfigService:
             if not exists(candidate):
                 return candidate
             index += 1
+
+    def _get_target_folder(self, folder_id: UUID) -> AssistantTargetFolder:
+        folder = (
+            self.db.query(AssistantTargetFolder)
+            .filter(AssistantTargetFolder.id == folder_id)
+            .first()
+        )
+        if folder is None:
+            raise ApiException(status_code=404, code=40435, message=f"Target folder not found: {folder_id}")
+        return folder
+
+    def _target_folder_name_exists(
+        self,
+        name: str,
+        *,
+        parent_id: UUID | None,
+        exclude_id: UUID | None = None,
+    ) -> bool:
+        candidate = str(name or "").strip().lower()
+        if not candidate:
+            return False
+        q = self.db.query(AssistantTargetFolder.id).filter(func.lower(AssistantTargetFolder.name) == candidate)
+        if parent_id is None:
+            q = q.filter(AssistantTargetFolder.parent_id.is_(None))
+        else:
+            q = q.filter(AssistantTargetFolder.parent_id == parent_id)
+        if exclude_id is not None:
+            q = q.filter(AssistantTargetFolder.id != exclude_id)
+        return q.first() is not None
+
+    def _ensure_target_folder_name_available(
+        self,
+        name: str,
+        *,
+        parent_id: UUID | None,
+        exclude_id: UUID | None = None,
+    ) -> None:
+        if self._target_folder_name_exists(name, parent_id=parent_id, exclude_id=exclude_id):
+            raise ApiException(status_code=400, code=40033, message=f"Target folder name exists: {name}")
+
+    def _next_available_target_folder_name(
+        self,
+        name: str,
+        *,
+        parent_id: UUID | None,
+        exclude_id: UUID | None = None,
+    ) -> str:
+        normalized = self._normalize_target_folder_name(name)
+        if not self._target_folder_name_exists(normalized, parent_id=parent_id, exclude_id=exclude_id):
+            return normalized
+        index = 2
+        while True:
+            suffix = f" ({index})"
+            candidate = f"{normalized[:128 - len(suffix)]}{suffix}"
+            if not self._target_folder_name_exists(candidate, parent_id=parent_id, exclude_id=exclude_id):
+                return candidate
+            index += 1
+
+    @staticmethod
+    def _normalize_target_folder_name(name: str) -> str:
+        normalized = str(name or "").strip()
+        if not normalized:
+            raise ApiException(status_code=400, code=40036, message="Target folder name cannot be blank")
+        return normalized
+
+    def _normalize_target_folder_style(self, color_token: str | None, icon_key: str | None) -> tuple[str, str]:
+        normalized_color = str(color_token or "slate").strip() or "slate"
+        normalized_icon = str(icon_key or "folder").strip() or "folder"
+        return normalized_color[:32], normalized_icon[:32]
+
+    def _assert_target_folder_parent_valid(
+        self,
+        *,
+        folder_id: UUID | None,
+        parent_id: UUID | None,
+    ) -> AssistantTargetFolder | None:
+        if parent_id is None:
+            return None
+        parent = self._get_target_folder(parent_id)
+        if folder_id is None:
+            return parent
+        if folder_id == parent_id:
+            raise ApiException(status_code=400, code=40034, message="Folder cannot be its own parent")
+
+        current = parent
+        while current is not None:
+            if current.id == folder_id:
+                raise ApiException(status_code=400, code=40035, message="Folder move would create a cycle")
+            current = current.parent
+        return parent
+
+    def _validate_folder_assignment(self, folder_id: UUID | None) -> AssistantTargetFolder | None:
+        if folder_id is None:
+            return None
+        return self._get_target_folder(folder_id)
+
+    def _compute_target_folder_payloads(self) -> list[dict[str, Any]]:
+        folders = self.db.query(AssistantTargetFolder).order_by(AssistantTargetFolder.created_at.asc()).all()
+        workflow_rows = self.db.query(
+            AssistantWorkflow.folder_id,
+            AssistantWorkflow.updated_at,
+        ).all()
+        agent_rows = self.db.query(
+            AssistantAgentProfile.folder_id,
+            AssistantAgentProfile.updated_at,
+        ).all()
+
+        folder_map = {folder.id: folder for folder in folders}
+        children_map: dict[UUID | None, list[AssistantTargetFolder]] = {}
+        for folder in folders:
+            children_map.setdefault(folder.parent_id, []).append(folder)
+
+        workflow_updates: dict[UUID | None, list[datetime]] = {}
+        for folder_id, updated_at in workflow_rows:
+            workflow_updates.setdefault(folder_id, []).append(updated_at or self._utcnow())
+
+        agent_updates: dict[UUID | None, list[datetime]] = {}
+        for folder_id, updated_at in agent_rows:
+            agent_updates.setdefault(folder_id, []).append(updated_at or self._utcnow())
+
+        path_cache: dict[UUID, list[dict[str, Any]]] = {}
+        stats_cache: dict[UUID, TargetFolderStats] = {}
+        path_visiting: set[UUID] = set()
+        stats_visiting: set[UUID] = set()
+
+        def resolve_path(folder: AssistantTargetFolder) -> list[dict[str, Any]]:
+            cached = path_cache.get(folder.id)
+            if cached is not None:
+                return cached
+            if folder.id in path_visiting:
+                raise ApiException(status_code=409, code=40971, message="Target folder hierarchy contains a cycle")
+            path_visiting.add(folder.id)
+            if folder.parent_id is None:
+                path = [{"id": folder.id, "name": folder.name}]
+            else:
+                parent = folder_map.get(folder.parent_id)
+                path = [*resolve_path(parent), {"id": folder.id, "name": folder.name}] if parent else [{"id": folder.id, "name": folder.name}]
+            path_visiting.remove(folder.id)
+            path_cache[folder.id] = path
+            return path
+
+        def resolve_stats(folder: AssistantTargetFolder) -> TargetFolderStats:
+            cached = stats_cache.get(folder.id)
+            if cached is not None:
+                return cached
+            if folder.id in stats_visiting:
+                raise ApiException(status_code=409, code=40971, message="Target folder hierarchy contains a cycle")
+            stats_visiting.add(folder.id)
+            child_folders = children_map.get(folder.id, [])
+            direct_workflow_updates = workflow_updates.get(folder.id, [])
+            direct_agent_updates = agent_updates.get(folder.id, [])
+            folder_count = len(child_folders)
+            workflow_count = len(direct_workflow_updates)
+            agent_count = len(direct_agent_updates)
+            last_activity = folder.updated_at or folder.created_at or self._utcnow()
+            if direct_workflow_updates:
+                last_activity = max([last_activity, *direct_workflow_updates])
+            if direct_agent_updates:
+                last_activity = max([last_activity, *direct_agent_updates])
+            for child in child_folders:
+                child_stats = resolve_stats(child)
+                folder_count += child_stats.folder_count
+                workflow_count += child_stats.workflow_count
+                agent_count += child_stats.agent_count
+                last_activity = max(last_activity, child_stats.last_activity_at)
+            stats = TargetFolderStats(
+                folder_count=folder_count,
+                workflow_count=workflow_count,
+                agent_count=agent_count,
+                direct_folder_count=len(child_folders),
+                direct_workflow_count=len(direct_workflow_updates),
+                direct_agent_count=len(direct_agent_updates),
+                last_activity_at=last_activity,
+            )
+            stats_visiting.remove(folder.id)
+            stats_cache[folder.id] = stats
+            return stats
+
+        payloads: list[dict[str, Any]] = []
+        for folder in folders:
+            stats = resolve_stats(folder)
+            payloads.append(
+                {
+                    "id": folder.id,
+                    "name": folder.name,
+                    "description": folder.description or "",
+                    "parent_id": folder.parent_id,
+                    "color_token": folder.color_token or "slate",
+                    "icon_key": folder.icon_key or "folder",
+                    "path": resolve_path(folder),
+                    "folder_count": stats.folder_count,
+                    "workflow_count": stats.workflow_count,
+                    "agent_count": stats.agent_count,
+                    "direct_folder_count": stats.direct_folder_count,
+                    "direct_workflow_count": stats.direct_workflow_count,
+                    "direct_agent_count": stats.direct_agent_count,
+                    "last_activity_at": stats.last_activity_at,
+                    "created_at": folder.created_at,
+                    "updated_at": folder.updated_at,
+                }
+            )
+        payloads.sort(key=lambda item: (item["last_activity_at"], item["updated_at"]), reverse=True)
+        return payloads
+
+    def _serialize_target_folder(self, folder: AssistantTargetFolder) -> dict[str, Any]:
+        payload = next((item for item in self._compute_target_folder_payloads() if item["id"] == folder.id), None)
+        if payload is None:
+            raise ApiException(status_code=404, code=40435, message=f"Target folder not found: {folder.id}")
+        return AssistantTargetFolderResponse.model_validate(payload).model_dump()
+
+    def _ensure_system_targets_folder(self) -> None:
+        self._acquire_target_folder_mutation_lock()
+        pending_workflows = self.db.query(AssistantWorkflow.id).filter(
+            AssistantWorkflow.is_system.is_(True),
+            AssistantWorkflow.folder_id.is_(None),
+        ).first()
+        pending_agents = self.db.query(AssistantAgentProfile.id).filter(
+            AssistantAgentProfile.is_system.is_(True),
+            AssistantAgentProfile.folder_id.is_(None),
+        ).first()
+        if pending_workflows is None and pending_agents is None:
+            return
+
+        folder = (
+            self.db.query(AssistantTargetFolder)
+            .filter(
+                AssistantTargetFolder.parent_id.is_(None),
+                func.lower(AssistantTargetFolder.name) == "系统内置".lower(),
+            )
+            .first()
+        )
+        if folder is None:
+            folder = AssistantTargetFolder(
+                name="系统内置",
+                description="",
+                parent_id=None,
+                color_token="amber",
+                icon_key="folder",
+            )
+            self.db.add(folder)
+            self.db.flush()
+
+        self.db.query(AssistantWorkflow).filter(
+            AssistantWorkflow.is_system.is_(True),
+            AssistantWorkflow.folder_id.is_(None),
+        ).update({AssistantWorkflow.folder_id: folder.id}, synchronize_session=False)
+        self.db.query(AssistantAgentProfile).filter(
+            AssistantAgentProfile.is_system.is_(True),
+            AssistantAgentProfile.folder_id.is_(None),
+        ).update({AssistantAgentProfile.folder_id: folder.id}, synchronize_session=False)
 
     @staticmethod
     def _workflow_input_to_snapshot(workflow: WorkflowInput) -> dict[str, Any]:
@@ -1085,6 +1353,7 @@ class AssistantConfigService:
             "referenced_system_behavior_keys": referenced_system_behavior_keys,
             "system_behavior_reference_count": len(referenced_system_behavior_keys),
             "openclaw_reference_count": openclaw_reference_count,
+            "folder_id": workflow.folder_id,
             "created_at": workflow.created_at,
             "updated_at": workflow.updated_at,
         }
@@ -1124,6 +1393,7 @@ class AssistantConfigService:
             "referenced_system_behavior_keys": referenced_system_behavior_keys,
             "system_behavior_reference_count": len(referenced_system_behavior_keys),
             "openclaw_reference_count": openclaw_reference_count,
+            "folder_id": workflow.folder_id,
             "created_at": workflow.created_at,
             "updated_at": workflow.updated_at,
         }
@@ -1165,6 +1435,7 @@ class AssistantConfigService:
             "referenced_system_behavior_keys": referenced_system_behavior_keys,
             "system_behavior_reference_count": len(referenced_system_behavior_keys),
             "openclaw_reference_count": openclaw_reference_count,
+            "folder_id": agent_profile.folder_id,
             "created_at": agent_profile.created_at,
             "updated_at": agent_profile.updated_at,
         }
@@ -1200,6 +1471,7 @@ class AssistantConfigService:
             "referenced_system_behavior_keys": referenced_system_behavior_keys,
             "system_behavior_reference_count": len(referenced_system_behavior_keys),
             "openclaw_reference_count": openclaw_reference_count,
+            "folder_id": agent_profile.folder_id,
             "created_at": agent_profile.created_at,
             "updated_at": agent_profile.updated_at,
         }
@@ -3416,6 +3688,16 @@ class AssistantConfigService:
             {"key": _SYSTEM_CATALOG_SYNC_LOCK_KEY},
         )
 
+    def _acquire_target_folder_mutation_lock(self) -> None:
+        bind = self.db.get_bind()
+        dialect_name = getattr(getattr(bind, "dialect", None), "name", None)
+        if dialect_name != "postgresql":
+            return
+        self.db.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"),
+            {"key": _TARGET_FOLDER_MUTATION_LOCK_KEY},
+        )
+
     def _expected_system_catalog_names(self, *, locale: str | None = None) -> dict[str, set[str]]:
         normalized_locale = self._current_locale(locale)
         assets = list_system_assets(locale=normalized_locale)
@@ -3599,6 +3881,7 @@ class AssistantConfigService:
         self.sync_system_skills(commit=False)
         self.sync_standalone_system_targets(commit=False)
         self.ensure_system_behaviors(commit=False)
+        self._ensure_system_targets_folder()
         signature = self._compute_system_catalog_signature(locale=normalized_locale)
         self._store_system_catalog_signature(locale=normalized_locale, signature=signature)
         try:
@@ -4647,6 +4930,123 @@ class AssistantConfigService:
             )
 
     # -------------------------
+    # Target Folders CRUD
+    # -------------------------
+    def list_target_folders(self) -> list[dict[str, Any]]:
+        return [
+            AssistantTargetFolderResponse.model_validate(item).model_dump()
+            for item in self._compute_target_folder_payloads()
+        ]
+
+    def create_target_folder(self, request: AssistantTargetFolderCreateRequest) -> dict[str, Any]:
+        self._acquire_target_folder_mutation_lock()
+        parent = self._assert_target_folder_parent_valid(folder_id=None, parent_id=request.parent_id)
+        normalized_name = self._normalize_target_folder_name(request.name)
+        self._ensure_target_folder_name_available(normalized_name, parent_id=parent.id if parent else None)
+        color_token, icon_key = self._normalize_target_folder_style(request.color_token, request.icon_key)
+        folder = AssistantTargetFolder(
+            name=normalized_name,
+            description=request.description or "",
+            parent_id=parent.id if parent else None,
+            color_token=color_token,
+            icon_key=icon_key,
+        )
+        self.db.add(folder)
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40965, message="Create target folder failed") from exc
+        return self._serialize_target_folder(self._get_target_folder(folder.id))
+
+    def update_target_folder(self, folder_id: UUID, request: AssistantTargetFolderUpdateRequest) -> dict[str, Any]:
+        self._acquire_target_folder_mutation_lock()
+        folder = self._get_target_folder(folder_id)
+        fields_set = request.model_fields_set
+        next_parent_id = request.parent_id if "parent_id" in fields_set else folder.parent_id
+        parent = self._assert_target_folder_parent_valid(folder_id=folder.id, parent_id=next_parent_id)
+        if request.name is not None:
+            normalized_name = self._normalize_target_folder_name(request.name)
+            self._ensure_target_folder_name_available(
+                normalized_name,
+                parent_id=parent.id if parent else None,
+                exclude_id=folder.id,
+            )
+            folder.name = normalized_name
+        elif "parent_id" in fields_set and request.parent_id != folder.parent_id:
+            self._ensure_target_folder_name_available(folder.name, parent_id=parent.id if parent else None, exclude_id=folder.id)
+        if request.description is not None:
+            folder.description = request.description
+        if "parent_id" in fields_set and request.parent_id != folder.parent_id:
+            folder.parent_id = parent.id if parent else None
+        if request.color_token is not None or request.icon_key is not None:
+            color_token, icon_key = self._normalize_target_folder_style(
+                request.color_token if request.color_token is not None else folder.color_token,
+                request.icon_key if request.icon_key is not None else folder.icon_key,
+            )
+            folder.color_token = color_token
+            folder.icon_key = icon_key
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40966, message="Update target folder failed") from exc
+        return self._serialize_target_folder(self._get_target_folder(folder.id))
+
+    def delete_target_folder(self, folder_id: UUID) -> None:
+        self._acquire_target_folder_mutation_lock()
+        folder = self._get_target_folder(folder_id)
+        child_folders = self.db.query(AssistantTargetFolder).filter(AssistantTargetFolder.parent_id == folder.id).all()
+        for child in child_folders:
+            child.name = self._next_available_target_folder_name(
+                child.name,
+                parent_id=folder.parent_id,
+                exclude_id=child.id,
+            )
+            child.parent_id = folder.parent_id
+        self.db.query(AssistantWorkflow).filter(AssistantWorkflow.folder_id == folder.id).update(
+            {AssistantWorkflow.folder_id: folder.parent_id},
+            synchronize_session=False,
+        )
+        self.db.query(AssistantAgentProfile).filter(AssistantAgentProfile.folder_id == folder.id).update(
+            {AssistantAgentProfile.folder_id: folder.parent_id},
+            synchronize_session=False,
+        )
+        self.db.delete(folder)
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40967, message="Delete target folder failed") from exc
+
+    def move_target_to_folder(self, request: AssistantTargetMoveRequest) -> None:
+        self._acquire_target_folder_mutation_lock()
+        self._validate_folder_assignment(request.folder_id)
+        if request.target_type == "workflow":
+            workflow = self.get_workflow(request.target_id)
+            workflow.folder_id = request.folder_id
+        else:
+            profile = self.get_agent_profile(request.target_id)
+            profile.folder_id = request.folder_id
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40968, message="Move target failed") from exc
+
+    def move_target_folder(self, request: AssistantFolderMoveRequest) -> None:
+        self._acquire_target_folder_mutation_lock()
+        folder = self._get_target_folder(request.folder_id)
+        parent = self._assert_target_folder_parent_valid(folder_id=folder.id, parent_id=request.parent_id)
+        self._ensure_target_folder_name_available(folder.name, parent_id=parent.id if parent else None, exclude_id=folder.id)
+        folder.parent_id = parent.id if parent else None
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(status_code=409, code=40970, message="Move folder failed") from exc
+
+    # -------------------------
     # Workflows CRUD
     # -------------------------
     def _list_workflows_query(self, *, include_disabled: bool) -> list[AssistantWorkflow]:
@@ -4689,6 +5089,7 @@ class AssistantConfigService:
         if self._workflow_name_exists(request.name):
             raise ApiException(status_code=400, code=40030, message=f"Workflow name exists: {request.name}")
         workflow_input = request.workflow or self._build_default_workflow_input()
+        folder = self._validate_folder_assignment(request.folder_id)
         workflow = AssistantWorkflow(
             name=request.name,
             description=request.description or "",
@@ -4696,6 +5097,7 @@ class AssistantConfigService:
             workflow_viewport=None,
             is_system=False,
             enabled=request.enabled,
+            folder_id=folder.id if folder else None,
         )
         self.db.add(workflow)
         self.db.flush()
@@ -4736,6 +5138,7 @@ class AssistantConfigService:
                 name=name,
                 description=description,
                 enabled=bool(source_workflow.enabled),
+                folder_id=source_workflow.folder_id,
                 workflow=workflow_input,
             )
         )
@@ -4770,6 +5173,9 @@ class AssistantConfigService:
             workflow.description = request.description
         if request.enabled is not None:
             workflow.enabled = request.enabled
+        if "folder_id" in request.model_fields_set:
+            folder = self._validate_folder_assignment(request.folder_id)
+            workflow.folder_id = folder.id if folder else None
         if request.workflow is not None:
             self._enforce_workflow_structured_input_constraints(
                 workflow=workflow,
@@ -5081,6 +5487,7 @@ class AssistantConfigService:
         existing = self.db.query(AssistantAgentProfile).filter(AssistantAgentProfile.name.ilike(request.name)).first()
         if existing:
             raise ApiException(status_code=400, code=40032, message=f"Agent profile name exists: {request.name}")
+        folder = self._validate_folder_assignment(request.folder_id)
         normalized_kb_config = self._normalize_agent_kb_config(
             kb_config=request.kb_config,
             model_source=request.model_source,
@@ -5096,6 +5503,7 @@ class AssistantConfigService:
             kb_config=normalized_kb_config,
             is_system=False,
             enabled=request.enabled,
+            folder_id=folder.id if folder else None,
         )
         self.db.add(profile)
         self.db.flush()
@@ -5155,6 +5563,7 @@ class AssistantConfigService:
                 enabled=bool(source_profile.enabled),
                 model_source=draft.model_source,
                 model_id=draft.model_id,
+                folder_id=source_profile.folder_id,
             )
         )
 
@@ -5172,6 +5581,9 @@ class AssistantConfigService:
             profile.description = request.description
         if request.enabled is not None:
             profile.enabled = request.enabled
+        if "folder_id" in request.model_fields_set:
+            folder = self._validate_folder_assignment(request.folder_id)
+            profile.folder_id = folder.id if folder else None
 
         has_runtime_update = any(
             value is not None

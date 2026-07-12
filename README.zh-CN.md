@@ -79,8 +79,7 @@ MindAtlas/
 ├── frontend/                        # React 应用、初始化流程、设置页、仪表盘
 ├── deploy/                          # Docker Compose 部署与覆盖配置
 ├── docs/                            # 用户手册与辅助文档
-├── integrations/openclaw-mindatlas/ # OpenClaw 插件包
-└── openspec/                        # 项目规格与变更记录
+└── integrations/openclaw-mindatlas/ # OpenClaw 插件包
 ```
 
 ## 快速开始

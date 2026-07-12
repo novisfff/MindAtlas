@@ -15,6 +15,7 @@ export interface AssistantExecutableTarget {
   type: SkillTargetType
   name: string
   description?: string
+  folderId?: string | null
   enabled: boolean
   isSystem: boolean
   hidden?: boolean
@@ -114,6 +115,7 @@ export function buildAssistantExecutableTargets(
     type: 'workflow',
     name: workflow.name,
     description: workflow.description,
+    folderId: workflow.folderId,
     enabled: workflow.enabled,
     isSystem: workflow.isSystem,
     hidden: workflow.hidden,
@@ -129,6 +131,7 @@ export function buildAssistantExecutableTargets(
     type: 'agent',
     name: agent.name,
     description: agent.description,
+    folderId: agent.folderId,
     enabled: agent.enabled,
     isSystem: agent.isSystem,
     hidden: agent.hidden,
@@ -181,6 +184,7 @@ export function buildSystemBehaviorBindingTargets(
       type: 'workflow',
       name: workflow.name,
       description: workflow.description,
+      folderId: workflow.folderId,
       enabled: workflow.enabled,
       isSystem: workflow.isSystem,
       hidden: workflow.hidden,
@@ -209,6 +213,7 @@ export function buildSystemBehaviorBindingTargets(
       type: 'agent',
       name: agent.name,
       description: agent.description,
+      folderId: agent.folderId,
       enabled: agent.enabled,
       isSystem: agent.isSystem,
       hidden: agent.hidden,

@@ -196,6 +196,40 @@ class AssistantSkill(UuidPrimaryKeyMixin, TimestampMixin, Base):
         return list(getattr(workflow, "edges", []) or [])
 
 
+class AssistantTargetFolder(UuidPrimaryKeyMixin, TimestampMixin, Base):
+    """Folder for organizing reusable workflow and agent targets."""
+
+    __tablename__ = "assistant_target_folder"
+
+    name = Column(String(128), nullable=False, index=True)
+    description = Column(String(512), nullable=False, default="")
+    parent_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_target_folder.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    color_token = Column(String(32), nullable=False, default="slate")
+    icon_key = Column(String(32), nullable=False, default="folder")
+
+    parent = relationship(
+        "AssistantTargetFolder",
+        remote_side="AssistantTargetFolder.id",
+        back_populates="children",
+    )
+    children = relationship(
+        "AssistantTargetFolder",
+        back_populates="parent",
+        foreign_keys="AssistantTargetFolder.parent_id",
+    )
+    workflows = relationship("AssistantWorkflow", back_populates="folder")
+    agent_profiles = relationship("AssistantAgentProfile", back_populates="folder")
+
+    __table_args__ = (
+        Index("ix_assistant_target_folder_parent_name", "parent_id", "name"),
+    )
+
+
 class AssistantWorkflow(UuidPrimaryKeyMixin, TimestampMixin, Base):
     """可复用 Workflow 执行体"""
     __tablename__ = "assistant_workflow"
@@ -218,6 +252,13 @@ class AssistantWorkflow(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
     is_system = Column(Boolean, nullable=False, default=False)
     enabled = Column(Boolean, nullable=False, default=True)
+    folder_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_target_folder.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    folder = relationship("AssistantTargetFolder", back_populates="workflows")
     draft_version = relationship(
         "AssistantWorkflowVersion",
         foreign_keys=[draft_version_id],
@@ -326,6 +367,13 @@ class AssistantAgentProfile(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
     is_system = Column(Boolean, nullable=False, default=False)
     enabled = Column(Boolean, nullable=False, default=True)
+    folder_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_target_folder.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    folder = relationship("AssistantTargetFolder", back_populates="agent_profiles")
 
     skills = relationship("AssistantSkill", back_populates="agent_profile")
     versions = relationship(
