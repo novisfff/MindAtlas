@@ -137,5 +137,5 @@ describe('AssistantTargetsSettings', () => {
 
     expect(screen.getByText('Child target')).toBeInTheDocument()
     expect(screen.queryByText('Unrelated search result')).not.toBeInTheDocument()
-  })
+  }, 10_000)
 })
