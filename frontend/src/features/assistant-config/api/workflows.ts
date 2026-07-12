@@ -31,6 +31,7 @@ export interface AssistantWorkflow {
   referencedSystemBehaviorKeys: string[]
   systemBehaviorReferenceCount: number
   openclawReferenceCount: number
+  folderId: string | null
   createdAt: string
   updatedAt: string
 }
@@ -39,6 +40,7 @@ export interface CreateWorkflowRequest {
   name: string
   description?: string
   enabled?: boolean
+  folderId?: string | null
   workflow?: WorkflowInput
 }
 
@@ -46,6 +48,7 @@ export interface UpdateWorkflowRequest {
   name?: string
   description?: string
   enabled?: boolean
+  folderId?: string | null
   workflow?: WorkflowInput
 }
 

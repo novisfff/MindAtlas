@@ -5,6 +5,7 @@ import * as skillsApi from './api/skills'
 import * as workflowsApi from './api/workflows'
 import * as agentsApi from './api/agents'
 import * as systemBehaviorsApi from './api/system-behaviors'
+import * as targetFoldersApi from './api/target-folders'
 
 function upsertById<T extends { id: string }>(items: T[] | undefined, item: T): T[] {
   if (!items || items.length === 0) return [item]
@@ -64,6 +65,7 @@ const invalidateAfterSkillReset = (qc: QueryClient) => {
   qc.invalidateQueries({ queryKey: ['assistant-skills'] })
   qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
   qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+  qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
   qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
   qc.invalidateQueries({ queryKey: ['assistant-workflow'] })
   qc.invalidateQueries({ queryKey: ['assistant-agent-profile'] })
@@ -204,6 +206,7 @@ export const useCreateWorkflowMutation = () => {
     onSuccess: (created) => {
       syncWorkflowCaches(qc, created)
       qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
       qc.invalidateQueries({ queryKey: ['assistant-callable-workflows'] })
     },
   })
@@ -216,6 +219,7 @@ export const useUpdateWorkflowMutation = () => {
       workflowsApi.updateWorkflowEntity(id, data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
       qc.invalidateQueries({ queryKey: ['assistant-callable-workflows'] })
       qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
     },
@@ -234,6 +238,7 @@ export const useDeleteWorkflowMutation = () => {
         }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
       qc.invalidateQueries({ queryKey: ['assistant-callable-workflows'] })
       qc.invalidateQueries({ queryKey: ['assistant-skills'] })
       qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
@@ -248,6 +253,7 @@ export const useCopyWorkflowMutation = () => {
     onSuccess: (copied) => {
       syncWorkflowCaches(qc, copied)
       qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
       qc.invalidateQueries({ queryKey: ['assistant-callable-workflows'] })
       qc.invalidateQueries({ queryKey: ['assistant-skills'] })
       qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
@@ -277,6 +283,7 @@ export const useCreateAgentProfileMutation = () => {
     onSuccess: (created) => {
       syncAgentCaches(qc, created)
       qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+      qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
     },
   })
 }
@@ -288,6 +295,7 @@ export const useUpdateAgentProfileMutation = () => {
       agentsApi.updateAgentProfile(id, data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+      qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
       qc.invalidateQueries({ queryKey: ['assistant-skills'] })
       qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
     },
@@ -306,6 +314,7 @@ export const useDeleteAgentProfileMutation = () => {
         }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+      qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
       qc.invalidateQueries({ queryKey: ['assistant-skills'] })
       qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
     },
@@ -319,8 +328,85 @@ export const useCopyAgentProfileMutation = () => {
     onSuccess: (copied) => {
       syncAgentCaches(qc, copied)
       qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+      qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
       qc.invalidateQueries({ queryKey: ['assistant-skills'] })
       qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
+    },
+  })
+}
+
+// ==================== Target Folders ====================
+
+export const useTargetFoldersQuery = () =>
+  useQuery({
+    queryKey: ['assistant-target-folders'],
+    queryFn: targetFoldersApi.getTargetFolders,
+  })
+
+export const useCreateTargetFolderMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: targetFoldersApi.createTargetFolder,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+    },
+  })
+}
+
+export const useUpdateTargetFolderMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: targetFoldersApi.UpdateTargetFolderRequest }) =>
+      targetFoldersApi.updateTargetFolder(id, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+    },
+  })
+}
+
+export const useDeleteTargetFolderMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: targetFoldersApi.deleteTargetFolder,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflow'] })
+      qc.invalidateQueries({ queryKey: ['assistant-agent-profile'] })
+    },
+  })
+}
+
+export const useMoveTargetToFolderMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: targetFoldersApi.moveTargetToFolder,
+    onSuccess: (_result, variables) => {
+      qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-agents'] })
+      qc.invalidateQueries({
+        queryKey: variables.targetType === 'workflow'
+          ? ['assistant-workflow', variables.targetId]
+          : ['assistant-agent-profile', variables.targetId],
+      })
+    },
+  })
+}
+
+export const useMoveTargetFolderMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: targetFoldersApi.moveFolder,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
+      qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
+      qc.invalidateQueries({ queryKey: ['assistant-agents'] })
     },
   })
 }

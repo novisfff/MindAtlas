@@ -591,6 +591,7 @@ class AssistantWorkflowCreateRequest(CamelModel):
     name: str = Field(..., min_length=1, max_length=128)
     description: str = Field(default="", max_length=512)
     enabled: bool = True
+    folder_id: UUID | None = None
     workflow: WorkflowInput | None = None
 
 
@@ -598,6 +599,7 @@ class AssistantWorkflowUpdateRequest(CamelModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     description: str | None = Field(default=None, max_length=512)
     enabled: bool | None = None
+    folder_id: UUID | None = None
     workflow: WorkflowInput | None = None
 
 
@@ -616,6 +618,7 @@ class AssistantAgentProfileCreateRequest(CamelModel):
     model_source: AgentModelSource = "default"
     model_id: UUID | None = None
     enabled: bool = True
+    folder_id: UUID | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> "AssistantAgentProfileCreateRequest":
@@ -637,6 +640,7 @@ class AssistantAgentProfileUpdateRequest(CamelModel):
     model_source: AgentModelSource | None = None
     model_id: UUID | None = None
     enabled: bool | None = None
+    folder_id: UUID | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> "AssistantAgentProfileUpdateRequest":
@@ -647,6 +651,38 @@ class AssistantAgentProfileUpdateRequest(CamelModel):
         if self.model_source == "default":
             self.model_id = None
         return self
+
+
+class TargetFolderPathItem(CamelModel):
+    id: UUID
+    name: str
+
+
+class AssistantTargetFolderCreateRequest(CamelModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    description: str = Field(default="", max_length=512)
+    parent_id: UUID | None = None
+    color_token: str = Field(default="slate", max_length=32)
+    icon_key: str = Field(default="folder", max_length=32)
+
+
+class AssistantTargetFolderUpdateRequest(CamelModel):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+    parent_id: UUID | None = None
+    color_token: str | None = Field(default=None, max_length=32)
+    icon_key: str | None = Field(default=None, max_length=32)
+
+
+class AssistantTargetMoveRequest(CamelModel):
+    target_type: TargetType
+    target_id: UUID
+    folder_id: UUID | None = None
+
+
+class AssistantFolderMoveRequest(CamelModel):
+    folder_id: UUID
+    parent_id: UUID | None = None
 
 
 class AgentPublishDraftInput(CamelModel):
@@ -808,6 +844,7 @@ class AssistantWorkflowResponse(OrmModel):
     referenced_system_behavior_keys: list[SystemBehaviorKey] = []
     system_behavior_reference_count: int = 0
     openclaw_reference_count: int = 0
+    folder_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -832,6 +869,26 @@ class AssistantAgentProfileResponse(OrmModel):
     referenced_system_behavior_keys: list[SystemBehaviorKey] = []
     system_behavior_reference_count: int = 0
     openclaw_reference_count: int = 0
+    folder_id: UUID | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AssistantTargetFolderResponse(OrmModel):
+    id: UUID
+    name: str
+    description: str
+    parent_id: UUID | None = None
+    color_token: str = "slate"
+    icon_key: str = "folder"
+    path: list[TargetFolderPathItem] = []
+    folder_count: int = 0
+    workflow_count: int = 0
+    agent_count: int = 0
+    direct_folder_count: int = 0
+    direct_workflow_count: int = 0
+    direct_agent_count: int = 0
+    last_activity_at: datetime
     created_at: datetime
     updated_at: datetime
 
