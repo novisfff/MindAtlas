@@ -1062,6 +1062,14 @@ def test_downgrade_succeeds_for_derived_shadow_only(engine: Engine) -> None:
 
 
 def test_two_session_sequence_conflict(engine: Engine) -> None:
+    """Prove package/sequence uniqueness under concurrent writers.
+
+    A single-threaded "two connection" pattern deadlocks on PostgreSQL: the second
+    INSERT waits for the first transaction's unique-index lock, but the first commit
+    never runs until that INSERT returns. Use threads so both writers race for real.
+    """
+    import threading
+
     suffix = uuid.uuid4().hex[:8]
     with engine.begin() as conn:
         package_id, _ = _insert_package_and_save_version(
@@ -1070,65 +1078,88 @@ def test_two_session_sequence_conflict(engine: Engine) -> None:
             origin="legacy",
             sequence_no=1,
         )
+        # Keep lock waits bounded if a future change reintroduces blocking races.
+        conn.execute(text("SET lock_timeout = '5s'"))
 
-    engine2 = create_engine(
-        _as_sqlalchemy_url(_POSTGRES_URL), future=True, pool_pre_ping=True
+    insert_sql = text(
+        """
+        INSERT INTO assistant_skill_version (
+            id, skill_package_id, sequence_no, version_name, version_source,
+            source_draft_version_id, origin, skill_md, mindatlas_yaml,
+            frontmatter, extension_manifest, resource_index,
+            skill_md_digest, manifest_digest, resource_index_digest,
+            content_digest, binding_set_digest, version_digest, created_at
+        ) VALUES (
+            :id, :pkg, :seq, :vname, 'save',
+            NULL, 'legacy', :skill_md, NULL,
+            CAST(:frontmatter AS json), NULL, CAST(:resource_index AS json),
+            :d1, :d2, :d3, :d4, NULL, NULL, NOW()
+        )
+        """
     )
-    try:
-        c1 = engine.connect()
-        c2 = engine2.connect()
+
+    barrier = threading.Barrier(2, timeout=10)
+    outcomes: list[str] = []
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def worker(vname: str, content_digest: str) -> None:
+        eng = create_engine(
+            _as_sqlalchemy_url(_POSTGRES_URL), future=True, pool_pre_ping=True
+        )
         try:
-            t1 = c1.begin()
-            t2 = c2.begin()
-            params_common = {
-                "pkg": package_id,
-                "seq": 2,
-                "skill_md": "---\nname: x\ndescription: y\n---\n",
-                "frontmatter": '{"name":"x","description":"y"}',
-                "resource_index": "[]",
-                "d1": _DIGEST_A,
-                "d2": _DIGEST_B,
-                "d3": _DIGEST_C,
-            }
-            insert_sql = text(
-                """
-                INSERT INTO assistant_skill_version (
-                    id, skill_package_id, sequence_no, version_name, version_source,
-                    source_draft_version_id, origin, skill_md, mindatlas_yaml,
-                    frontmatter, extension_manifest, resource_index,
-                    skill_md_digest, manifest_digest, resource_index_digest,
-                    content_digest, binding_set_digest, version_digest, created_at
-                ) VALUES (
-                    :id, :pkg, :seq, :vname, 'save',
-                    NULL, 'legacy', :skill_md, NULL,
-                    CAST(:frontmatter AS json), NULL, CAST(:resource_index AS json),
-                    :d1, :d2, :d3, :d4, NULL, NULL, NOW()
-                )
-                """
-            )
-            c1.execute(
-                insert_sql,
-                {
-                    **params_common,
-                    "id": uuid.uuid4(),
-                    "vname": "draft-2a",
-                    "d4": "1" * 64,
-                },
-            )
-            c2.execute(
-                insert_sql,
-                {
-                    **params_common,
-                    "id": uuid.uuid4(),
-                    "vname": "draft-2b",
-                    "d4": "2" * 64,
-                },
-            )
-            t1.commit()
-            with pytest.raises((IntegrityError, DBAPIError)):
-                t2.commit()
+            with eng.connect() as conn:
+                conn.execute(text("SET lock_timeout = '5s'"))
+                trans = conn.begin()
+                try:
+                    barrier.wait()
+                    conn.execute(
+                        insert_sql,
+                        {
+                            "id": uuid.uuid4(),
+                            "pkg": package_id,
+                            "seq": 2,
+                            "vname": vname,
+                            "skill_md": "---\nname: x\ndescription: y\n---\n",
+                            "frontmatter": '{"name":"x","description":"y"}',
+                            "resource_index": "[]",
+                            "d1": _DIGEST_A,
+                            "d2": _DIGEST_B,
+                            "d3": _DIGEST_C,
+                            "d4": content_digest,
+                        },
+                    )
+                    trans.commit()
+                    with lock:
+                        outcomes.append("committed")
+                except BaseException as exc:  # noqa: BLE001 — collect race outcomes
+                    try:
+                        trans.rollback()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    with lock:
+                        errors.append(exc)
+                        outcomes.append("failed")
         finally:
-            c1.close()
-            c2.close()
-    finally:
-        engine2.dispose()
+            eng.dispose()
+
+    t1 = threading.Thread(target=worker, args=("draft-2a", "1" * 64), daemon=True)
+    t2 = threading.Thread(target=worker, args=("draft-2b", "2" * 64), daemon=True)
+    t1.start()
+    t2.start()
+    t1.join(timeout=20)
+    t2.join(timeout=20)
+    assert not t1.is_alive() and not t2.is_alive(), "two-session sequence race hung"
+    assert outcomes.count("committed") == 1, outcomes
+    assert outcomes.count("failed") == 1, outcomes
+    assert any(isinstance(e, (IntegrityError, DBAPIError)) for e in errors), errors
+
+    with engine.connect() as conn:
+        count = conn.execute(
+            text(
+                "SELECT COUNT(*) FROM assistant_skill_version "
+                "WHERE skill_package_id = :pkg AND sequence_no = 2"
+            ),
+            {"pkg": package_id},
+        ).scalar_one()
+    assert int(count) == 1
