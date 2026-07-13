@@ -239,7 +239,12 @@ def remote_tool_input_schema(tool: AssistantTool) -> dict[str, JsonValue]:
                 details={"toolId": str(tool.id)},
             )
         param_type = str(item.get("param_type") or item.get("paramType") or "string").strip()
+        # JSON Schema publish treats integer as number (lossless for remote tools).
+        if param_type == "integer":
+            param_type = "number"
         items_type = item.get("items_type") or item.get("itemsType")
+        if items_type is not None and str(items_type).strip() == "integer":
+            items_type = "number"
         contracts.append(
             ToolParamContract(
                 name=name,
@@ -1158,6 +1163,11 @@ class CapabilityReferenceResolver:
         for call in collect_workflow_call_references(workflow_input.nodes):
             self._count_node()
             self._count_ref()
+            call_node_path = (
+                f"{call.source_container_node_id}::{call.source_node_id}"
+                if call.source_container_node_id
+                else call.source_node_id
+            )
             if call.binding_mode != "pinned" or call.target_published_version_id is None:
                 raise _publish_error(
                     "workflow_call must be pinned to an exact published version for skill publication",
@@ -1165,7 +1175,7 @@ class CapabilityReferenceResolver:
                         "reason": "unpinned_workflow_call",
                         "targetWorkflowId": str(call.target_workflow_id),
                         "bindingMode": call.binding_mode,
-                        "path": path_prefix,
+                        "path": f"{path_prefix}/workflow_call:{call_node_path}",
                     },
                 )
             if call.target_published_version_id in stack:
@@ -1174,7 +1184,26 @@ class CapabilityReferenceResolver:
                     details={
                         "reason": "workflow_call_cycle",
                         "targetVersionId": str(call.target_published_version_id),
-                        "path": path_prefix,
+                        "path": f"{path_prefix}/workflow_call:{call_node_path}",
+                    },
+                )
+            nested_workflow = self.db.get(AssistantWorkflow, call.target_workflow_id)
+            if nested_workflow is None:
+                raise _publish_error(
+                    "pinned workflow_call target workflow not found",
+                    details={
+                        "targetWorkflowId": str(call.target_workflow_id),
+                        "targetVersionId": str(call.target_published_version_id),
+                        "path": f"{path_prefix}/workflow_call:{call_node_path}",
+                    },
+                )
+            if not bool(nested_workflow.enabled):
+                raise _publish_error(
+                    f"workflow_call target is disabled: {nested_workflow.name}",
+                    details={
+                        "reason": "target_disabled",
+                        "targetWorkflowId": str(call.target_workflow_id),
+                        "path": f"{path_prefix}/workflow_call:{call_node_path}",
                     },
                 )
             nested_version = (
@@ -1194,7 +1223,7 @@ class CapabilityReferenceResolver:
                         "targetVersionId": str(call.target_published_version_id),
                     },
                 )
-            nested_path = f"{path_prefix}/workflow_call:{call.source_node_id}"
+            nested_path = f"{path_prefix}/workflow_call:{call_node_path}"
             nested_snapshot = nested_version.snapshot
             nested_digest = sha256_canonical_json(nested_snapshot)
             try:
@@ -1273,10 +1302,26 @@ class CapabilityReferenceResolver:
                     details={"reason": "conflicting_dependency_path"},
                 )
             by_path[dep.dependency_path] = dep
-        ordered = [
-            dep.model_copy(update={"ordinal": index})
-            for index, dep in enumerate(by_path[path] for path in sorted(by_path))
-        ]
+        ordered = []
+        for index, path in enumerate(sorted(by_path)):
+            dep = by_path[path]
+            ordered.append(
+                finalize_dependency(
+                    ordinal=index,
+                    dependency_path=dep.dependency_path,
+                    dependency_type=dep.dependency_type,
+                    target_identity=dep.target_identity,
+                    resolved_tool_id=dep.resolved_tool_id,
+                    resolved_workflow_version_id=dep.resolved_workflow_version_id,
+                    resolved_agent_version_id=dep.resolved_agent_version_id,
+                    resolved_model_id=dep.resolved_model_id,
+                    target_revision=dep.target_revision,
+                    input_schema=dep.input_schema,
+                    output_schema=dep.output_schema,
+                    resolution_snapshot=dep.resolution_snapshot,
+                    resolution_digest=dep.resolution_digest,
+                )
+            )
         return tuple(ordered)
 
     def _collect_agent_closure(
@@ -1355,10 +1400,26 @@ class CapabilityReferenceResolver:
                     details={"reason": "conflicting_dependency_path"},
                 )
             by_path[dep.dependency_path] = dep
-        ordered = [
-            dep.model_copy(update={"ordinal": index})
-            for index, dep in enumerate(by_path[path] for path in sorted(by_path))
-        ]
+        ordered = []
+        for index, path in enumerate(sorted(by_path)):
+            dep = by_path[path]
+            ordered.append(
+                finalize_dependency(
+                    ordinal=index,
+                    dependency_path=dep.dependency_path,
+                    dependency_type=dep.dependency_type,
+                    target_identity=dep.target_identity,
+                    resolved_tool_id=dep.resolved_tool_id,
+                    resolved_workflow_version_id=dep.resolved_workflow_version_id,
+                    resolved_agent_version_id=dep.resolved_agent_version_id,
+                    resolved_model_id=dep.resolved_model_id,
+                    target_revision=dep.target_revision,
+                    input_schema=dep.input_schema,
+                    output_schema=dep.output_schema,
+                    resolution_snapshot=dep.resolution_snapshot,
+                    resolution_digest=dep.resolution_digest,
+                )
+            )
         return tuple(ordered)
 
     def _freeze_tool_dependency(

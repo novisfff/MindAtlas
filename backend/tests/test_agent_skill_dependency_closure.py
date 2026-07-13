@@ -250,6 +250,120 @@ class DependencyClosureFocusedTests(unittest.TestCase):
             nested_dep.input_schema_digest,
         )
 
+    def test_dependency_digest_includes_final_ordinal(self) -> None:
+        """After sorting, ordinal is part of the dependency digest payload."""
+        from tests.agent_skill_test_support import (
+            create_default_model_binding,
+            create_published_agent,
+        )
+        from app.assistant.skills.contracts import (
+            CapabilityBindingContract,
+            CapabilityDeclaration,
+        )
+        from app.assistant.skills.resolution import (
+            CapabilityReferenceResolver,
+            finalize_dependency,
+            _dependency_payload_without_digest,
+        )
+        from app.assistant.domain.digests import sha256_canonical_json
+
+        create_default_model_binding(self.db)
+        create_published_agent(
+            self.db,
+            name="ordinal_agent",
+            tools=["search_entries", "list_tags", "get_entry_detail"],
+        )
+        self.db.commit()
+        resolver = CapabilityReferenceResolver(self.db)
+        binding = resolver.resolve_many(
+            (
+                CapabilityDeclaration(
+                    type="agent",
+                    key="ordinal_agent",
+                    contract=CapabilityBindingContract(
+                        input_schema={"type": "object", "properties": {}},
+                        output_schema={"type": "string"},
+                    ),
+                ),
+            )
+        )[0]
+        self.assertGreaterEqual(len(binding.dependencies), 3)
+        for index, dep in enumerate(binding.dependencies):
+            self.assertEqual(dep.ordinal, index)
+            recomputed = sha256_canonical_json(_dependency_payload_without_digest(dep))
+            self.assertEqual(dep.dependency_digest, recomputed)
+            # Rebuilding with finalize_dependency at the final ordinal matches.
+            rebuilt = finalize_dependency(
+                ordinal=dep.ordinal,
+                dependency_path=dep.dependency_path,
+                dependency_type=dep.dependency_type,
+                target_identity=dep.target_identity,
+                resolved_tool_id=dep.resolved_tool_id,
+                resolved_workflow_version_id=dep.resolved_workflow_version_id,
+                resolved_agent_version_id=dep.resolved_agent_version_id,
+                resolved_model_id=dep.resolved_model_id,
+                target_revision=dep.target_revision,
+                input_schema=dep.input_schema,
+                output_schema=dep.output_schema,
+                resolution_snapshot=dep.resolution_snapshot,
+                resolution_digest=dep.resolution_digest,
+            )
+            self.assertEqual(rebuilt.dependency_digest, dep.dependency_digest)
+            # A different ordinal must change the digest.
+            if index > 0:
+                shifted = finalize_dependency(
+                    ordinal=0,
+                    dependency_path=dep.dependency_path,
+                    dependency_type=dep.dependency_type,
+                    target_identity=dep.target_identity,
+                    resolved_tool_id=dep.resolved_tool_id,
+                    resolved_workflow_version_id=dep.resolved_workflow_version_id,
+                    resolved_agent_version_id=dep.resolved_agent_version_id,
+                    resolved_model_id=dep.resolved_model_id,
+                    target_revision=dep.target_revision,
+                    input_schema=dep.input_schema,
+                    output_schema=dep.output_schema,
+                    resolution_snapshot=dep.resolution_snapshot,
+                    resolution_digest=dep.resolution_digest,
+                )
+                self.assertNotEqual(shifted.dependency_digest, dep.dependency_digest)
+
+    def test_nested_disabled_workflow_call_is_rejected(self) -> None:
+        from tests.agent_skill_test_support import (
+            create_default_model_binding,
+            create_published_workflow,
+        )
+        from app.assistant.skills.contracts import CapabilityDeclaration
+        from app.assistant.skills.resolution import CapabilityReferenceResolver
+        from app.common.exceptions import ApiException
+
+        create_default_model_binding(self.db)
+        nested, nested_version = create_published_workflow(
+            self.db,
+            name="nested_disabled_wf",
+            tool_names=["search_entries"],
+        )
+        nested.enabled = False
+        create_published_workflow(
+            self.db,
+            name="parent_disabled_call_wf",
+            nested_calls=[
+                {
+                    "target_workflow_id": str(nested.id),
+                    "binding_mode": "pinned",
+                    "target_published_version_id": str(nested_version.id),
+                }
+            ],
+        )
+        self.db.commit()
+        resolver = CapabilityReferenceResolver(self.db)
+        with self.assertRaises(ApiException) as ctx:
+            resolver.resolve_many(
+                (CapabilityDeclaration(type="workflow", key="parent_disabled_call_wf"),)
+            )
+        self.assertEqual(ctx.exception.code, 42293)
+        self.assertEqual(ctx.exception.details.get("reason"), "target_disabled")
+
 
 if __name__ == "__main__":
     unittest.main()

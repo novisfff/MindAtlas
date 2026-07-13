@@ -822,9 +822,30 @@ class AgentSkillModelContractTests(unittest.TestCase):
             )
         )
 
+        # Nested production-shaped snapshot (resolutionDigest under target) is accepted.
+        nested = {
+            "inputSchemaDigest": DIGEST_A,
+            "outputSchemaDigest": DIGEST_B,
+            "target": {"resolutionDigest": DIGEST_C},
+            "dependencyClosureDigest": DIGEST_D,
+            "bindingContractDigest": DIGEST_E,
+        }
+        self.assertFalse(
+            migration.resolved_snapshot_digest_mismatch(
+                nested,
+                resolution_digest=DIGEST_C,
+                dependency_closure_digest=DIGEST_D,
+                binding_contract_digest=DIGEST_E,
+                input_schema_digest=DIGEST_A,
+                output_schema_digest=DIGEST_B,
+            )
+        )
+
         # Migration SQL must require keys, not optional `snap ? key AND ...` only.
+        # Accepts top-level or nested target.resolutionDigest (Plan-locked shape).
         migration_src = _MIGRATION_PATH.read_text(encoding="utf-8")
         self.assertIn("NOT (snap ? 'resolutionDigest')", migration_src)
+        self.assertIn("target,resolutionDigest", migration_src)
         self.assertIn("NOT (snap ? 'dependencyClosureDigest')", migration_src)
         self.assertIn("NOT (snap ? 'bindingContractDigest')", migration_src)
         self.assertNotIn(

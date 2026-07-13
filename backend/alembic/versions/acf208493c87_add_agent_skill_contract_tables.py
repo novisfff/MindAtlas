@@ -57,6 +57,18 @@ def profile_version_origin_blocks_downgrade(origin: str) -> bool:
     return origin not in PROFILE_VERSION_DOWNGRADE_ALLOWED_ORIGINS
 
 
+def _snapshot_resolution_digest(snapshot: dict) -> str | None:
+    """Accept Plan-locked nested target.resolutionDigest or legacy top-level key."""
+    if "resolutionDigest" in snapshot:
+        value = snapshot.get("resolutionDigest")
+        return value if isinstance(value, str) else None
+    target = snapshot.get("target")
+    if isinstance(target, dict) and "resolutionDigest" in target:
+        value = target.get("resolutionDigest")
+        return value if isinstance(value, str) else None
+    return None
+
+
 def resolved_snapshot_digest_mismatch(
     snapshot: dict | None,
     *,
@@ -70,7 +82,9 @@ def resolved_snapshot_digest_mismatch(
 
     For resolved bindings, resolutionDigest / dependencyClosureDigest /
     bindingContractDigest keys must exist and equal row columns (not only when
-    present). Input/output schema digests keep pairing semantics.
+    present). ``resolutionDigest`` may live at the top level (legacy/test) or
+    under ``target`` (production ``build_binding_snapshot`` shape). Input/output
+    schema digests keep pairing semantics.
     """
     if snapshot is None:
         return True
@@ -78,8 +92,10 @@ def resolved_snapshot_digest_mismatch(
         return True
     if snapshot.get("outputSchemaDigest") != output_schema_digest:
         return True
+    snap_resolution = _snapshot_resolution_digest(snapshot)
+    if snap_resolution is None or snap_resolution != resolution_digest:
+        return True
     required = {
-        "resolutionDigest": resolution_digest,
         "dependencyClosureDigest": dependency_closure_digest,
         "bindingContractDigest": binding_contract_digest,
     }
@@ -1375,14 +1391,22 @@ def _create_binding_closure_guard() -> None:
 
                 -- Resolved bindings require digest keys to exist and equal columns
                 -- (not only when present). Input/output pairing stays required.
+                -- resolutionDigest may be top-level (legacy) or under target
+                -- (production build_binding_snapshot path).
                 IF (NOT (snap ? 'inputSchemaDigest'))
                    OR (NOT (snap ? 'outputSchemaDigest'))
-                   OR (NOT (snap ? 'resolutionDigest'))
+                   OR (
+                        (NOT (snap ? 'resolutionDigest'))
+                        AND (snap #>> '{target,resolutionDigest}') IS NULL
+                      )
                    OR (NOT (snap ? 'dependencyClosureDigest'))
                    OR (NOT (snap ? 'bindingContractDigest'))
                    OR (snap->>'inputSchemaDigest') IS DISTINCT FROM rec.input_schema_digest
                    OR (snap->>'outputSchemaDigest') IS DISTINCT FROM rec.output_schema_digest
-                   OR (snap->>'resolutionDigest') IS DISTINCT FROM rec.resolution_digest
+                   OR COALESCE(
+                        snap->>'resolutionDigest',
+                        snap #>> '{target,resolutionDigest}'
+                      ) IS DISTINCT FROM rec.resolution_digest
                    OR (snap->>'dependencyClosureDigest')
                         IS DISTINCT FROM rec.dependency_closure_digest
                    OR (snap->>'bindingContractDigest')
@@ -1506,7 +1530,8 @@ def _create_revision_guards() -> None:
             rev_delta integer;
         BEGIN
             exec_changed := (
-                NEW.kind IS DISTINCT FROM OLD.kind
+                NEW.name IS DISTINCT FROM OLD.name
+                OR NEW.kind IS DISTINCT FROM OLD.kind
                 OR NEW.endpoint_url IS DISTINCT FROM OLD.endpoint_url
                 OR NEW.http_method IS DISTINCT FROM OLD.http_method
                 OR NEW.headers IS DISTINCT FROM OLD.headers
