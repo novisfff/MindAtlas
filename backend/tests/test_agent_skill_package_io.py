@@ -397,6 +397,29 @@ def test_extra_extension_keys_fail() -> None:
         )
 
 
+def test_policy_budgets_reject_booleans() -> None:
+    """Pydantic must not coerce true→1 / false→0 for skill budget fields."""
+    true_budget = (
+        "version: 1\n"
+        "policy:\n"
+        "  max_skill_calls: true\n"
+    )
+    with pytest.raises(ValueError, match="budget|integer|max_skill_calls"):
+        parse_skill_directory_files(
+            _files(mindatlas=true_budget.encode("utf-8"), include_mindatlas=True)
+        )
+
+    false_budget = (
+        "version: 1\n"
+        "policy:\n"
+        "  max_same_read_calls: false\n"
+    )
+    with pytest.raises(ValueError, match="budget|integer|max_same_read_calls"):
+        parse_skill_directory_files(
+            _files(mindatlas=false_budget.encode("utf-8"), include_mindatlas=True)
+        )
+
+
 def test_capability_pair_uniqueness_and_limits() -> None:
     yaml_text = """
 version: 1
@@ -599,6 +622,34 @@ def test_yaml_aliases_merge_keys_duplicates_custom_tags_non_string_keys_multi_do
     with pytest.raises(ValueError):
         parse_skill_directory_files(
             _files(mindatlas=tag_yaml, include_mindatlas=True)
+        )
+
+    # non-plain YAML core types rejected even though SafeLoader accepts them
+    binary_yaml = b"version: 1\nmetadata:\n  blob: !!binary aGVsbG8=\n"
+    with pytest.raises(ValueError, match="tag|binary|YAML"):
+        parse_skill_directory_files(
+            _files(mindatlas=binary_yaml, include_mindatlas=True)
+        )
+
+    set_yaml = b"version: 1\nmetadata:\n  tags: !!set\n    ? a\n    ? b\n"
+    with pytest.raises(ValueError, match="tag|set|YAML"):
+        parse_skill_directory_files(
+            _files(mindatlas=set_yaml, include_mindatlas=True)
+        )
+
+    omap_yaml = b"version: 1\nmetadata:\n  ordered: !!omap\n    - k: v\n"
+    with pytest.raises(ValueError, match="tag|omap|YAML"):
+        parse_skill_directory_files(
+            _files(mindatlas=omap_yaml, include_mindatlas=True)
+        )
+
+    binary_fm = (
+        b"---\nname: weekly-review\ndescription: desc\n"
+        b"license: !!binary aGVsbG8=\n---\n\n# b\n"
+    )
+    with pytest.raises(ValueError, match="tag|binary|YAML|frontmatter"):
+        parse_skill_directory_files(
+            _files(skill_md=binary_fm, include_mindatlas=False)
         )
 
     # non-string keys
@@ -955,6 +1006,34 @@ def test_markdown_links_local_and_remote() -> None:
         )
     )
     assert pkg.canonical_name == "weekly-review"
+
+
+def test_markdown_links_to_package_root_files() -> None:
+    """SKILL.md may link to package-root files when those files are present."""
+    skill = _minimal_skill_md(
+        body=(
+            "# t\n\n"
+            "See [manifest](mindatlas.yaml) and [self](SKILL.md).\n"
+        )
+    )
+    pkg = parse_skill_directory_files(
+        _files(
+            skill_md=skill,
+            mindatlas=b"version: 1\n",
+            include_mindatlas=True,
+        )
+    )
+    assert pkg.canonical_name == "weekly-review"
+    assert pkg.mindatlas_yaml_bytes == b"version: 1\n"
+
+    # Missing root target still fails (no mindatlas.yaml in package).
+    skill_missing = _minimal_skill_md(
+        body="# t\n\nSee [manifest](mindatlas.yaml).\n"
+    )
+    with pytest.raises(ValueError, match="link"):
+        parse_skill_directory_files(
+            _files(skill_md=skill_missing, include_mindatlas=False)
+        )
 
 
 def test_script_mode_bits_discarded_executable_false() -> None:

@@ -88,48 +88,28 @@ _EXT_MEDIA_TYPES: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Strict YAML loader: no aliases, merge keys, duplicate keys, custom tags,
 # non-string mapping keys, or multi-doc streams.
+# Only plain JSON-like YAML core types are allowed.
 # ---------------------------------------------------------------------------
+
+_ALLOWED_YAML_TAGS = frozenset(
+    {
+        "tag:yaml.org,2002:map",
+        "tag:yaml.org,2002:seq",
+        "tag:yaml.org,2002:str",
+        "tag:yaml.org,2002:int",
+        "tag:yaml.org,2002:float",
+        "tag:yaml.org,2002:bool",
+        "tag:yaml.org,2002:null",
+    }
+)
 
 
 class _StrictSafeConstructor(SafeConstructor):
     def construct_object(self, node, deep=False):  # type: ignore[no-untyped-def]
-        if node.tag not in (
-            "tag:yaml.org,2002:map",
-            "tag:yaml.org,2002:seq",
-            "tag:yaml.org,2002:str",
-            "tag:yaml.org,2002:int",
-            "tag:yaml.org,2002:float",
-            "tag:yaml.org,2002:bool",
-            "tag:yaml.org,2002:null",
-            "tag:yaml.org,2002:timestamp",
-        ) and not (
-            isinstance(node, ScalarNode)
-            and node.tag.startswith("tag:yaml.org,2002:")
-            and node.tag
-            in {
-                "tag:yaml.org,2002:str",
-                "tag:yaml.org,2002:int",
-                "tag:yaml.org,2002:float",
-                "tag:yaml.org,2002:bool",
-                "tag:yaml.org,2002:null",
-                "tag:yaml.org,2002:timestamp",
-            }
-        ):
-            # Allow only core safe types resolved by SafeConstructor.
-            if node.tag not in SafeConstructor.yaml_constructors and not node.tag.startswith(
-                "tag:yaml.org,2002:"
-            ):
-                raise ValueError(f"custom YAML tags are forbidden: {node.tag}")
-            if node.tag.startswith("tag:yaml.org,2002:") is False and node.tag != "!":
-                # unresolved / custom
-                if node.tag not in (
-                    "tag:yaml.org,2002:map",
-                    "tag:yaml.org,2002:seq",
-                    "tag:yaml.org,2002:str",
-                ):
-                    # Fall through to parent for standard types; reject others.
-                    if node.tag.startswith("!"):
-                        raise ValueError(f"custom YAML tags are forbidden: {node.tag}")
+        # Allowlist only plain JSON-like core types. Reject !!binary/!!set/!!omap
+        # /!!timestamp and every other non-core or custom tag before construction.
+        if node.tag not in _ALLOWED_YAML_TAGS:
+            raise ValueError(f"YAML tag not allowed: {node.tag}")
         return super().construct_object(node, deep=deep)
 
     def flatten_mapping(self, node):  # type: ignore[no-untyped-def]
@@ -488,8 +468,12 @@ def _build_package(
         for item in resources
     )
 
-    # Link validation sees every package path including resources + optional manifest file names.
+    # Link validation sees resources plus package-root files when present.
+    # SKILL.md / mindatlas.yaml are stored separately from resources but are valid local targets.
     link_paths = {item.path for item in resources}
+    link_paths.add("SKILL.md")
+    if mindatlas_yaml_bytes is not None:
+        link_paths.add("mindatlas.yaml")
     validate_skill_md_links(skill_md_bytes, link_paths)
 
     skill_md_digest = sha256_bytes(skill_md_bytes)

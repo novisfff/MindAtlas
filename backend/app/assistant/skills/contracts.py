@@ -307,10 +307,11 @@ class SkillPolicyContract(FrozenContract):
             out.append(item)
         return tuple(out)
 
-    @field_validator("max_skill_calls", "max_same_read_calls")
+    @field_validator("max_skill_calls", "max_same_read_calls", mode="before")
     @classmethod
-    def _validate_budget(cls, value: int) -> int:
-        if not isinstance(value, int) or isinstance(value, bool):
+    def _validate_budget(cls, value: Any) -> int:
+        # mode="before" so bool is not coerced to int (True→1 / False→0).
+        if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError("budget must be an integer")
         if value < 0 or value > MAX_MAX_SKILL_CALLS:
             raise ValueError("budget out of range")
