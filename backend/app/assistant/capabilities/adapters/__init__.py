@@ -7,11 +7,13 @@ aliases, or re-resolve by name/latest.
 
 from __future__ import annotations
 
+from app.assistant.capabilities.adapters.agent import AgentCapabilityAdapter
 from app.assistant.capabilities.adapters.base import CapabilityAdapter
 from app.assistant.capabilities.adapters.tool import ToolCapabilityAdapter
 from app.assistant.capabilities.adapters.workflow import WorkflowCapabilityAdapter
 
 __all__ = [
+    "AgentCapabilityAdapter",
     "CapabilityAdapter",
     "ToolCapabilityAdapter",
     "WorkflowCapabilityAdapter",

@@ -316,20 +316,21 @@ def create_published_agent(
     model_id: UUID | None = None,
     kb_enabled: bool = False,
 ) -> tuple[AssistantAgentProfile, AssistantAgentProfileVersion]:
+    tool_names = list(tools) if tools is not None else ["search_entries"]
     agent = AssistantAgentProfile(
         name=name or f"agent_{uuid4().hex[:8]}",
         description="test agent",
         enabled=True,
         is_system=False,
         system_prompt="You are a test agent.",
-        tools=tools or ["search_entries"],
+        tools=tool_names,
         kb_config={"enabled": kb_enabled},
     )
     db.add(agent)
     db.flush()
     snapshot = {
         "system_prompt": "You are a test agent.",
-        "tools": list(tools or ["search_entries"]),
+        "tools": tool_names,
         "kb_config": {
             "enabled": kb_enabled,
             "model_source": model_source,
