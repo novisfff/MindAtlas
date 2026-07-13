@@ -6,6 +6,7 @@ Task 3: scripted provider + core direct/single-call agent loop.
 Task 4: stream assembly, event ordering, and soft finalization.
 Task 5: multi-call sibling scheduling, waiting/resume, and cancellation sealing.
 Task 7: harmless model capability probe orchestration.
+Task 9: internal/test-only Capability Gateway composition.
 """
 
 from __future__ import annotations
@@ -130,6 +131,23 @@ from app.assistant.provider_loop.probe import (
     compute_probe_digest,
     run_model_capability_probe,
 )
+from app.assistant.provider_loop.runtime import (
+    ClassificationDriftError,
+    GatewayCurrentDescriptorVerifier,
+    GatewayToolDispatcher,
+    IsolatedGatewayDispatcherFactory,
+    TestAuthorizationEvidenceFactory,
+    TestAuthorizationEvidenceVerifier,
+    TestGrantRegistry,
+    TestOnlyToolsProvider,
+    TrackingSessionFactory,
+    append_test_capability_grant,
+    build_test_provider_loop_ports,
+    capability_ref_from_binding,
+    default_test_evidence_verifiers,
+    descriptors_equal_for_freshness,
+    run_internal_test_provider_loop,
+)
 
 __all__ = [
     "ARGUMENTS_BYTE_LIMIT",
@@ -182,6 +200,10 @@ __all__ = [
     "ProviderWaitingResolution",
     "PROBE_CONTRACT_VERSION",
     "CapabilityObservation",
+    "ClassificationDriftError",
+    "GatewayCurrentDescriptorVerifier",
+    "GatewayToolDispatcher",
+    "IsolatedGatewayDispatcherFactory",
     "ModelCapabilityObservations",
     "ModelCapabilityProbeEvidence",
     "ProbePolicy",
@@ -193,21 +215,31 @@ __all__ = [
     "SequentialSiblingExecutor",
     "SiblingExecutionGroup",
     "SiblingExecutionPort",
+    "TestAuthorizationEvidenceFactory",
+    "TestAuthorizationEvidenceVerifier",
+    "TestGrantRegistry",
+    "TestOnlyToolsProvider",
     "ToolDispatcher",
     "ToolSurfaceResolution",
     "ToolsProvider",
+    "TrackingSessionFactory",
     "aggregate_provider_usage",
     "allocate_provider_aliases",
+    "append_test_capability_grant",
     "assemble_provider_round",
     "assert_not_serializable_port",
     "build_endpoint_identity",
     "build_model_config_digest",
     "build_provider_tool_surface",
+    "build_test_provider_loop_ports",
+    "capability_ref_from_binding",
     "compute_alias_map_digest",
     "compute_probe_digest",
     "compute_scope_digest",
     "compute_surface_digest",
     "create_execution_scope",
+    "default_test_evidence_verifiers",
+    "descriptors_equal_for_freshness",
     "digest_arguments",
     "digest_provider_message",
     "digest_provider_transcript",
@@ -218,6 +250,7 @@ __all__ = [
     "is_parallel_eligible",
     "is_safe_request_id",
     "is_valid_provider_alias",
+    "run_internal_test_provider_loop",
     "lookup_tool_by_alias",
     "make_cancelled_envelope",
     "merge_parallel_manifests",
