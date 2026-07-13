@@ -168,6 +168,56 @@ class AssistantConfigService:
     def __init__(self, db: Session):
         self.db = db
 
+    def _best_effort_shadow_sync_one(self, legacy_skill_id: UUID | None) -> None:
+        """Post-commit shadow reconciliation; never fails the legacy operation."""
+        if legacy_skill_id is None:
+            return
+        try:
+            from app.assistant.skills.legacy_adapter import best_effort_sync_one
+
+            best_effort_sync_one(self.db, legacy_skill_id)
+        except Exception:
+            # Defense in depth: adapter already swallows errors.
+            pass
+
+    def _best_effort_shadow_sync_for_workflow(self, workflow_id: UUID | None) -> None:
+        if workflow_id is None:
+            return
+        try:
+            skill_ids = [
+                row[0]
+                for row in self.db.query(AssistantSkill.id)
+                .filter(AssistantSkill.workflow_id == workflow_id)
+                .all()
+            ]
+            for skill_id in skill_ids:
+                self._best_effort_shadow_sync_one(skill_id)
+        except Exception:
+            pass
+
+    def _best_effort_shadow_sync_for_agent(self, agent_profile_id: UUID | None) -> None:
+        if agent_profile_id is None:
+            return
+        try:
+            skill_ids = [
+                row[0]
+                for row in self.db.query(AssistantSkill.id)
+                .filter(AssistantSkill.agent_profile_id == agent_profile_id)
+                .all()
+            ]
+            for skill_id in skill_ids:
+                self._best_effort_shadow_sync_one(skill_id)
+        except Exception:
+            pass
+
+    def _best_effort_shadow_sync_all(self) -> None:
+        try:
+            from app.assistant.skills.legacy_adapter import best_effort_sync_all
+
+            best_effort_sync_all(self.db)
+        except Exception:
+            pass
+
     def _current_locale(self, preferred_locale: str | None = None) -> str:
         return resolve_system_locale(self.db, preferred_locale=preferred_locale)
 
@@ -3690,8 +3740,39 @@ class AssistantConfigService:
         return profile
 
     def _keep_only_workflow_version(self, workflow: AssistantWorkflow, keep_version_id: UUID) -> None:
-        protected_ids = self._get_workflow_protected_version_ids(workflow)
-        protected_ids.add(keep_version_id)
+        # Preserve only Skill-package references (and the keep target). System baseline
+        # restore must not retain superseded draft/published/baseline pointers.
+        protected_ids = {keep_version_id}
+        for row in (
+            self.db.query(AssistantSkillCapabilityBinding.resolved_workflow_version_id)
+            .filter(AssistantSkillCapabilityBinding.resolved_workflow_version_id.isnot(None))
+            .all()
+        ):
+            version_id = row[0]
+            if version_id is None:
+                continue
+            owner = (
+                self.db.query(AssistantWorkflowVersion.workflow_id)
+                .filter(AssistantWorkflowVersion.id == version_id)
+                .scalar()
+            )
+            if owner == workflow.id:
+                protected_ids.add(version_id)
+        for row in (
+            self.db.query(AssistantSkillCapabilityDependency.resolved_workflow_version_id)
+            .filter(AssistantSkillCapabilityDependency.resolved_workflow_version_id.isnot(None))
+            .all()
+        ):
+            version_id = row[0]
+            if version_id is None:
+                continue
+            owner = (
+                self.db.query(AssistantWorkflowVersion.workflow_id)
+                .filter(AssistantWorkflowVersion.id == version_id)
+                .scalar()
+            )
+            if owner == workflow.id:
+                protected_ids.add(version_id)
         (
             self.db.query(AssistantWorkflowVersion)
             .filter(
@@ -3705,8 +3786,39 @@ class AssistantConfigService:
         self.db.expire(workflow, ["draft_version", "published_version", "versions"])
 
     def _keep_only_agent_version(self, agent_profile: AssistantAgentProfile, keep_version_id: UUID) -> None:
-        protected_ids = self._get_agent_protected_version_ids(agent_profile)
-        protected_ids.add(keep_version_id)
+        # Preserve only Skill-package references (and the keep target). System baseline
+        # restore must not retain superseded draft/published/baseline pointers.
+        protected_ids = {keep_version_id}
+        for row in (
+            self.db.query(AssistantSkillCapabilityBinding.resolved_agent_version_id)
+            .filter(AssistantSkillCapabilityBinding.resolved_agent_version_id.isnot(None))
+            .all()
+        ):
+            version_id = row[0]
+            if version_id is None:
+                continue
+            owner = (
+                self.db.query(AssistantAgentProfileVersion.agent_profile_id)
+                .filter(AssistantAgentProfileVersion.id == version_id)
+                .scalar()
+            )
+            if owner == agent_profile.id:
+                protected_ids.add(version_id)
+        for row in (
+            self.db.query(AssistantSkillCapabilityDependency.resolved_agent_version_id)
+            .filter(AssistantSkillCapabilityDependency.resolved_agent_version_id.isnot(None))
+            .all()
+        ):
+            version_id = row[0]
+            if version_id is None:
+                continue
+            owner = (
+                self.db.query(AssistantAgentProfileVersion.agent_profile_id)
+                .filter(AssistantAgentProfileVersion.id == version_id)
+                .scalar()
+            )
+            if owner == agent_profile.id:
+                protected_ids.add(version_id)
         (
             self.db.query(AssistantAgentProfileVersion)
             .filter(
@@ -3930,6 +4042,8 @@ class AssistantConfigService:
         except IntegrityError as exc:
             self.db.rollback()
             raise ApiException(status_code=409, code=40969, message="Sync system catalog failed") from exc
+        # After tools/workflows/agents/skills are present, mirror into disabled shadows.
+        self._best_effort_shadow_sync_all()
 
     def ensure_system_catalog_synced(self) -> None:
         self._acquire_system_catalog_sync_lock()
@@ -4476,7 +4590,9 @@ class AssistantConfigService:
         except IntegrityError as exc:
             self.db.rollback()
             raise ApiException(status_code=409, code=40920, message="Create skill failed") from exc
-        return self.get_skill(skill.id)
+        created = self.get_skill(skill.id)
+        self._best_effort_shadow_sync_one(created.id)
+        return created
 
     def update_skill(self, id: UUID, request: AssistantSkillUpdateRequest) -> AssistantSkill:
         skill = self.get_skill(id)
@@ -4572,7 +4688,9 @@ class AssistantConfigService:
         except IntegrityError as exc:
             self.db.rollback()
             raise ApiException(status_code=409, code=40921, message="Update skill failed") from exc
-        return self.get_skill(skill.id)
+        updated = self.get_skill(skill.id)
+        self._best_effort_shadow_sync_one(updated.id)
+        return updated
 
     def reset_skill(self, id: UUID, confirm: bool) -> AssistantSkill:
         """复位系统技能到默认配置"""
@@ -4597,6 +4715,7 @@ class AssistantConfigService:
             self.db.rollback()
             raise ApiException(status_code=409, code=40922, message="Reset skill failed") from exc
         self.db.refresh(skill)
+        self._best_effort_shadow_sync_one(skill.id)
         return skill
 
     def delete_skill(self, id: UUID) -> None:
@@ -5274,7 +5393,9 @@ class AssistantConfigService:
         except IntegrityError as exc:
             self.db.rollback()
             raise ApiException(status_code=409, code=40937, message="Publish workflow failed") from exc
-        return self.get_workflow(workflow.id)
+        published_workflow = self.get_workflow(workflow.id)
+        self._best_effort_shadow_sync_for_workflow(published_workflow.id)
+        return published_workflow
 
     def rollback_workflow_version(self, workflow_id: UUID, version_id: UUID) -> RollbackVersionResponse:
         workflow = self.get_workflow(workflow_id)
@@ -5738,7 +5859,9 @@ class AssistantConfigService:
         except IntegrityError as exc:
             self.db.rollback()
             raise ApiException(status_code=409, code=40939, message="Publish agent profile failed") from exc
-        return self.get_agent_profile(profile.id)
+        published_profile = self.get_agent_profile(profile.id)
+        self._best_effort_shadow_sync_for_agent(published_profile.id)
+        return published_profile
 
     def rollback_agent_profile_version(self, agent_profile_id: UUID, version_id: UUID) -> RollbackVersionResponse:
         profile = self.get_agent_profile(agent_profile_id)

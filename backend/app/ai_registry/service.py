@@ -404,4 +404,12 @@ class AiBindingService:
             self.db.rollback()
             raise ApiException(status_code=409, code=40900, message="Update failed due to constraint violation") from exc
         self.db.refresh(row)
+        # Default-model binding repair: reconcile unresolved shadow publications.
+        if component == "assistant":
+            try:
+                from app.assistant.skills.legacy_adapter import best_effort_sync_all
+
+                best_effort_sync_all(self.db)
+            except Exception:
+                pass
         return row
