@@ -338,6 +338,84 @@ class TestCreateOnlyImport:
         finally:
             db2.close()
 
+    def test_post_flush_failure_rolls_back_all_import_residue(self, monkeypatch) -> None:
+        """Failure after package flush must leave zero net import residue.
+
+        Preflight conflict tests never insert a package row. This case forces an
+        error after package/alias/version/resource/blob rows are staged so rollback
+        is proven for the full unit of work.
+        """
+        from app.assistant.skills.models import (
+            AssistantSkillPackage,
+            AssistantSkillPackageAlias,
+            AssistantSkillResourceBlob,
+            AssistantSkillVersion,
+            AssistantSkillVersionResource,
+        )
+        from app.common.exceptions import ApiException
+
+        before_pkg = self.db.query(AssistantSkillPackage).count()
+        before_alias = self.db.query(AssistantSkillPackageAlias).count()
+        before_ver = self.db.query(AssistantSkillVersion).count()
+        before_res = self.db.query(AssistantSkillVersionResource).count()
+        before_blob = self.db.query(AssistantSkillResourceBlob).count()
+
+        def _boom(_package_id) -> None:
+            raise ApiException(
+                status_code=413,
+                code=41391,
+                message="forced post-flush blob quota failure",
+            )
+
+        monkeypatch.setattr(self.svc, "_enforce_package_blob_quota", _boom)
+
+        with pytest.raises(ApiException) as ctx:
+            self.svc.import_package(
+                _parse(
+                    name="post-flush-fail",
+                    mindatlas=_mindatlas_yaml(legacy_aliases=["post_flush_alias"]),
+                    resources={"references/note.md": b"# residue probe\n"},
+                ),
+                actor_id=None,
+                origin="import",
+            )
+        assert ctx.value.code == 41391
+
+        assert self.db.query(AssistantSkillPackage).count() == before_pkg
+        assert self.db.query(AssistantSkillPackageAlias).count() == before_alias
+        assert self.db.query(AssistantSkillVersion).count() == before_ver
+        assert self.db.query(AssistantSkillVersionResource).count() == before_res
+        assert self.db.query(AssistantSkillResourceBlob).count() == before_blob
+
+        # Same guarantee when draft insert itself fails immediately after package flush.
+        monkeypatch.setattr(
+            self.svc,
+            "_insert_draft_version",
+            lambda **_kwargs: (_ for _ in ()).throw(
+                ApiException(
+                    status_code=500,
+                    code=50000,
+                    message="forced post-flush draft insert failure",
+                )
+            ),
+        )
+        with pytest.raises(ApiException) as ctx2:
+            self.svc.import_package(
+                _parse(
+                    name="post-flush-fail-draft",
+                    mindatlas=_mindatlas_yaml(legacy_aliases=["post_flush_draft_alias"]),
+                    resources={"references/note.md": b"# residue probe 2\n"},
+                ),
+                actor_id=None,
+                origin="import",
+            )
+        assert ctx2.value.code == 50000
+        assert self.db.query(AssistantSkillPackage).count() == before_pkg
+        assert self.db.query(AssistantSkillPackageAlias).count() == before_alias
+        assert self.db.query(AssistantSkillVersion).count() == before_ver
+        assert self.db.query(AssistantSkillVersionResource).count() == before_res
+        assert self.db.query(AssistantSkillResourceBlob).count() == before_blob
+
     def test_imported_package_unpublished_and_catalog_disabled(self) -> None:
         detail = self.svc.import_package(
             _parse_fixture(), actor_id=None, origin="import"
