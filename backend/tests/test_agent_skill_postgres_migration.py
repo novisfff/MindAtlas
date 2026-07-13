@@ -116,6 +116,40 @@ def _err_text(exc: BaseException) -> str:
     return " | ".join(parts)
 
 
+def _disable_immutable_triggers(conn, *tables: str):
+    """Temporarily disable USER triggers so disposable cleanup can rewrite immutable rows."""
+    for table in tables:
+        conn.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
+
+
+def _enable_immutable_triggers(conn, *tables: str):
+    for table in tables:
+        conn.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER USER"))
+
+
+def _rewrite_version_origins_to_legacy(conn, package_id: uuid.UUID | None = None) -> None:
+    """Rewrite skill version origins past immutability (CI/disposable superuser only)."""
+    _disable_immutable_triggers(conn, "assistant_skill_version")
+    try:
+        if package_id is None:
+            conn.execute(
+                text(
+                    "UPDATE assistant_skill_version SET origin = 'legacy' "
+                    "WHERE origin IN ('api','import')"
+                )
+            )
+        else:
+            conn.execute(
+                text(
+                    "UPDATE assistant_skill_version SET origin = 'legacy' "
+                    "WHERE skill_package_id = :id"
+                ),
+                {"id": package_id},
+            )
+    finally:
+        _enable_immutable_triggers(conn, "assistant_skill_version")
+
+
 def _insert_package_and_save_version(
     conn,
     *,
@@ -297,22 +331,35 @@ def test_legacy_rows_survive_parent_to_head_upgrade() -> None:
             )
             conn.execute(
                 text(
-                    "UPDATE assistant_skill_version SET origin = 'legacy' "
-                    "WHERE origin IN ('api','import')"
-                )
-            )
-            conn.execute(
-                text(
                     "UPDATE assistant_main_agent_profile SET migration_state = 'shadow' "
                     "WHERE migration_state IN ('native','cutover')"
                 )
             )
-            conn.execute(
-                text(
-                    "UPDATE assistant_main_agent_profile_version SET origin = 'bootstrap' "
-                    "WHERE origin NOT IN ('bootstrap','legacy')"
-                )
+            # Immutable version tables need USER triggers disabled before origin rewrite.
+            _disable_immutable_triggers(
+                conn,
+                "assistant_skill_version",
+                "assistant_main_agent_profile_version",
             )
+            try:
+                conn.execute(
+                    text(
+                        "UPDATE assistant_skill_version SET origin = 'legacy' "
+                        "WHERE origin IN ('api','import')"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE assistant_main_agent_profile_version SET origin = 'bootstrap' "
+                        "WHERE origin NOT IN ('bootstrap','legacy')"
+                    )
+                )
+            finally:
+                _enable_immutable_triggers(
+                    conn,
+                    "assistant_skill_version",
+                    "assistant_main_agent_profile_version",
+                )
 
     _run_alembic("downgrade", PRE_PLAN01_HEAD)
 
@@ -561,6 +608,18 @@ def test_revision_guards_tool_model_credential(engine: Engine) -> None:
         ).scalar()
         assert int(rev) == 2
 
+    # Double revision increment (+2) rejected.
+    with engine.begin() as conn:
+        with pytest.raises((IntegrityError, DBAPIError)) as exc_info:
+            conn.execute(
+                text(
+                    "UPDATE assistant_tool SET endpoint_url = 'https://example.com/c', "
+                    "config_revision = 4 WHERE id = :id"
+                ),
+                {"id": tool_id},
+            )
+        assert "MINDATLAS_PLAN01_REVISION" in _err_text(exc_info.value)
+
     # Model: skipped increment rejected; valid accepted.
     with engine.begin() as conn:
         with pytest.raises((IntegrityError, DBAPIError)) as exc_info:
@@ -613,16 +672,18 @@ def test_ownership_deferred_guards_reject_cross_package_pointers(engine: Engine)
             conn, canonical_name=f"own-b-{suffix}", origin="legacy"
         )
 
-    # Cross-package draft pointer rejected at commit.
-    with engine.begin() as conn:
+    # Cross-package draft pointer rejected at commit (DEFERRABLE INITIALLY DEFERRED).
+    with engine.connect() as conn:
+        trans = conn.begin()
+        conn.execute(
+            text(
+                "UPDATE assistant_skill_package SET draft_version_id = :ver "
+                "WHERE id = :pkg"
+            ),
+            {"pkg": pkg_a, "ver": ver_b},
+        )
         with pytest.raises((IntegrityError, DBAPIError)) as exc_info:
-            conn.execute(
-                text(
-                    "UPDATE assistant_skill_package SET draft_version_id = :ver "
-                    "WHERE id = :pkg"
-                ),
-                {"pkg": pkg_a, "ver": ver_b},
-            )
+            trans.commit()
         assert "MINDATLAS_PLAN01_POINTER_OWNERSHIP" in _err_text(exc_info.value)
 
     # Same-package save pointer accepted.
@@ -636,15 +697,17 @@ def test_ownership_deferred_guards_reject_cross_package_pointers(engine: Engine)
 
     # Wrong version_source for published pointer: create publish shape is hard without
     # source_draft; attempting published_version_id -> save row must fail POINTER_SOURCE.
-    with engine.begin() as conn:
+    with engine.connect() as conn:
+        trans = conn.begin()
+        conn.execute(
+            text(
+                "UPDATE assistant_skill_package SET published_version_id = :ver "
+                "WHERE id = :pkg"
+            ),
+            {"pkg": pkg_a, "ver": ver_a},
+        )
         with pytest.raises((IntegrityError, DBAPIError)) as exc_info:
-            conn.execute(
-                text(
-                    "UPDATE assistant_skill_package SET published_version_id = :ver "
-                    "WHERE id = :pkg"
-                ),
-                {"pkg": pkg_a, "ver": ver_a},
-            )
+            trans.commit()
         msg = _err_text(exc_info.value)
         assert (
             "MINDATLAS_PLAN01_POINTER_SOURCE" in msg
@@ -652,39 +715,41 @@ def test_ownership_deferred_guards_reject_cross_package_pointers(engine: Engine)
         )
 
     # Publish source_draft must belong to same package.
-    with engine.begin() as conn:
+    with engine.connect() as conn:
+        trans = conn.begin()
         publish_id = uuid.uuid4()
+        conn.execute(
+            text(
+                """
+                INSERT INTO assistant_skill_version (
+                    id, skill_package_id, sequence_no, version_name, version_source,
+                    source_draft_version_id, origin, skill_md, mindatlas_yaml,
+                    frontmatter, extension_manifest, resource_index,
+                    skill_md_digest, manifest_digest, resource_index_digest,
+                    content_digest, binding_set_digest, version_digest, created_at
+                ) VALUES (
+                    :id, :pkg, 2, 'pub-1', 'publish',
+                    :src, 'legacy', '---\nname: x\ndescription: y\n---\n', NULL,
+                    CAST(:frontmatter AS json), NULL, CAST(:resource_index AS json),
+                    :d1, :d2, :d3, :d4, :d5, :d5, NOW()
+                )
+                """
+            ),
+            {
+                "id": publish_id,
+                "pkg": pkg_a,
+                "src": ver_b,  # other package
+                "frontmatter": '{"name":"x","description":"y"}',
+                "resource_index": "[]",
+                "d1": _DIGEST_A,
+                "d2": _DIGEST_B,
+                "d3": _DIGEST_C,
+                "d4": _DIGEST_D,
+                "d5": _DIGEST_E,
+            },
+        )
         with pytest.raises((IntegrityError, DBAPIError)) as exc_info:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO assistant_skill_version (
-                        id, skill_package_id, sequence_no, version_name, version_source,
-                        source_draft_version_id, origin, skill_md, mindatlas_yaml,
-                        frontmatter, extension_manifest, resource_index,
-                        skill_md_digest, manifest_digest, resource_index_digest,
-                        content_digest, binding_set_digest, version_digest, created_at
-                    ) VALUES (
-                        :id, :pkg, 2, 'pub-1', 'publish',
-                        :src, 'legacy', '---\nname: x\ndescription: y\n---\n', NULL,
-                        CAST(:frontmatter AS json), NULL, CAST(:resource_index AS json),
-                        :d1, :d2, :d3, :d4, :d5, :d5, NOW()
-                    )
-                    """
-                ),
-                {
-                    "id": publish_id,
-                    "pkg": pkg_a,
-                    "src": ver_b,  # other package
-                    "frontmatter": '{"name":"x","description":"y"}',
-                    "resource_index": "[]",
-                    "d1": _DIGEST_A,
-                    "d2": _DIGEST_B,
-                    "d3": _DIGEST_C,
-                    "d4": _DIGEST_D,
-                    "d5": _DIGEST_E,
-                },
-            )
+            trans.commit()
         assert "MINDATLAS_PLAN01_SOURCE_DRAFT" in _err_text(exc_info.value)
 
 
@@ -699,50 +764,54 @@ def test_binding_closure_deferred_guard_rejects_missing_digest_keys(engine: Engi
         _pkg, version_id = _insert_package_and_save_version(
             conn, canonical_name=f"closure-{suffix}", origin="legacy"
         )
-        binding_id = uuid.uuid4()
-        # Snapshot omits required digest keys and has empty closure index while
-        # we will also insert a dependency row → count mismatch / missing keys.
-        bad_snapshot = (
-            '{"inputSchemaDigest":"'
-            + _DIGEST_A
-            + '","outputSchemaDigest":"'
-            + _DIGEST_B
-            + '","dependencyClosure":[]}'
+
+    binding_id = uuid.uuid4()
+    # Snapshot omits required digest keys (resolutionDigest / dependencyClosureDigest /
+    # bindingContractDigest). Guard is DEFERRABLE INITIALLY DEFERRED → assert on commit.
+    bad_snapshot = (
+        '{"inputSchemaDigest":"'
+        + _DIGEST_A
+        + '","outputSchemaDigest":"'
+        + _DIGEST_B
+        + '","dependencyClosure":[]}'
+    )
+    with engine.connect() as conn:
+        trans = conn.begin()
+        conn.execute(
+            text(
+                """
+                INSERT INTO assistant_skill_capability_binding (
+                    id, skill_version_id, ordinal, capability_type, capability_key,
+                    resolution_status, target_identity,
+                    resolved_tool_id, resolved_workflow_version_id, resolved_agent_version_id,
+                    resolved_revision, input_schema_digest, output_schema_digest,
+                    config_digest, executable_revision, resolution_digest,
+                    dependency_closure_digest, binding_contract_digest,
+                    resolution_snapshot, created_at
+                ) VALUES (
+                    :id, :ver, 0, 'tool', 'search_entries',
+                    'resolved', 'system-tool:search_entries',
+                    NULL, NULL, NULL,
+                    NULL, :d1, :d2,
+                    :d3, 'build-1', :d4,
+                    :d5, :d5,
+                    CAST(:snap AS json), NOW()
+                )
+                """
+            ),
+            {
+                "id": binding_id,
+                "ver": version_id,
+                "d1": _DIGEST_A,
+                "d2": _DIGEST_B,
+                "d3": _DIGEST_C,
+                "d4": _DIGEST_D,
+                "d5": _DIGEST_E,
+                "snap": bad_snapshot,
+            },
         )
         with pytest.raises((IntegrityError, DBAPIError)) as exc_info:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO assistant_skill_capability_binding (
-                        id, skill_version_id, ordinal, capability_type, capability_key,
-                        resolution_status, target_identity,
-                        resolved_tool_id, resolved_workflow_version_id, resolved_agent_version_id,
-                        resolved_revision, input_schema_digest, output_schema_digest,
-                        config_digest, executable_revision, resolution_digest,
-                        dependency_closure_digest, binding_contract_digest,
-                        resolution_snapshot, created_at
-                    ) VALUES (
-                        :id, :ver, 0, 'tool', 'search_entries',
-                        'resolved', 'system-tool:search_entries',
-                        NULL, NULL, NULL,
-                        NULL, :d1, :d2,
-                        :d3, 'build-1', :d4,
-                        :d5, :d5,
-                        CAST(:snap AS json), NOW()
-                    )
-                    """
-                ),
-                {
-                    "id": binding_id,
-                    "ver": version_id,
-                    "d1": _DIGEST_A,
-                    "d2": _DIGEST_B,
-                    "d3": _DIGEST_C,
-                    "d4": _DIGEST_D,
-                    "d5": _DIGEST_E,
-                    "snap": bad_snapshot,
-                },
-            )
+            trans.commit()
         assert "MINDATLAS_PLAN01_CLOSURE" in _err_text(exc_info.value)
 
 
@@ -752,56 +821,59 @@ def test_binding_closure_rejects_dependency_index_mismatch(engine: Engine) -> No
         _pkg, version_id = _insert_package_and_save_version(
             conn, canonical_name=f"closure2-{suffix}", origin="legacy"
         )
-        binding_id = uuid.uuid4()
-        # Complete digest keys but index claims a dependency that is not inserted.
-        snap = (
-            "{"
-            f'"inputSchemaDigest":"{_DIGEST_A}",'
-            f'"outputSchemaDigest":"{_DIGEST_B}",'
-            f'"resolutionDigest":"{_DIGEST_D}",'
-            f'"dependencyClosureDigest":"{_DIGEST_E}",'
-            f'"bindingContractDigest":"{_DIGEST_E}",'
-            '"dependencyClosure":['
-            f'{{"ordinal":0,"path":"tool:search_entries","dependencyDigest":"{_DIGEST_C}"}}'
-            "]"
-            "}"
+
+    binding_id = uuid.uuid4()
+    # Complete digest keys but index claims a dependency that is not inserted.
+    snap = (
+        "{"
+        f'"inputSchemaDigest":"{_DIGEST_A}",'
+        f'"outputSchemaDigest":"{_DIGEST_B}",'
+        f'"resolutionDigest":"{_DIGEST_D}",'
+        f'"dependencyClosureDigest":"{_DIGEST_E}",'
+        f'"bindingContractDigest":"{_DIGEST_E}",'
+        '"dependencyClosure":['
+        f'{{"ordinal":0,"path":"tool:search_entries","dependencyDigest":"{_DIGEST_C}"}}'
+        "]"
+        "}"
+    )
+    with engine.connect() as conn:
+        trans = conn.begin()
+        conn.execute(
+            text(
+                """
+                INSERT INTO assistant_skill_capability_binding (
+                    id, skill_version_id, ordinal, capability_type, capability_key,
+                    resolution_status, target_identity,
+                    resolved_tool_id, resolved_workflow_version_id, resolved_agent_version_id,
+                    resolved_revision, input_schema_digest, output_schema_digest,
+                    config_digest, executable_revision, resolution_digest,
+                    dependency_closure_digest, binding_contract_digest,
+                    resolution_snapshot, created_at
+                ) VALUES (
+                    :id, :ver, 0, 'tool', 'search_entries',
+                    'resolved', 'system-tool:search_entries',
+                    NULL, NULL, NULL,
+                    NULL, :d1, :d2,
+                    :d3, 'build-1', :d4,
+                    :d5, :d5,
+                    CAST(:snap AS json), NOW()
+                )
+                """
+            ),
+            {
+                "id": binding_id,
+                "ver": version_id,
+                "d1": _DIGEST_A,
+                "d2": _DIGEST_B,
+                "d3": _DIGEST_C,
+                "d4": _DIGEST_D,
+                "d5": _DIGEST_E,
+                "snap": snap,
+            },
         )
         with pytest.raises((IntegrityError, DBAPIError)) as exc_info:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO assistant_skill_capability_binding (
-                        id, skill_version_id, ordinal, capability_type, capability_key,
-                        resolution_status, target_identity,
-                        resolved_tool_id, resolved_workflow_version_id, resolved_agent_version_id,
-                        resolved_revision, input_schema_digest, output_schema_digest,
-                        config_digest, executable_revision, resolution_digest,
-                        dependency_closure_digest, binding_contract_digest,
-                        resolution_snapshot, created_at
-                    ) VALUES (
-                        :id, :ver, 0, 'tool', 'search_entries',
-                        'resolved', 'system-tool:search_entries',
-                        NULL, NULL, NULL,
-                        NULL, :d1, :d2,
-                        :d3, 'build-1', :d4,
-                        :d5, :d5,
-                        CAST(:snap AS json), NOW()
-                    )
-                    """
-                ),
-                {
-                    "id": binding_id,
-                    "ver": version_id,
-                    "d1": _DIGEST_A,
-                    "d2": _DIGEST_B,
-                    "d3": _DIGEST_C,
-                    "d4": _DIGEST_D,
-                    "d5": _DIGEST_E,
-                    "snap": snap,
-                },
-            )
-        msg = _err_text(exc_info.value)
-        assert "MINDATLAS_PLAN01_CLOSURE" in msg
+            trans.commit()
+        assert "MINDATLAS_PLAN01_CLOSURE" in _err_text(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
@@ -836,13 +908,8 @@ def test_downgrade_preflight_blocks_native_data(engine: Engine) -> None:
             ),
             {"id": package_id},
         )
-        conn.execute(
-            text(
-                "UPDATE assistant_skill_version SET origin = 'legacy' "
-                "WHERE skill_package_id = :id"
-            ),
-            {"id": package_id},
-        )
+        # assistant_skill_version is immutable — disable USER triggers before origin rewrite.
+        _rewrite_version_origins_to_legacy(conn, package_id)
 
 
 def test_downgrade_preflight_blocks_each_predicate_separately(engine: Engine) -> None:
@@ -861,13 +928,7 @@ def test_downgrade_preflight_blocks_each_predicate_separately(engine: Engine) ->
         _run_alembic("downgrade", PRE_PLAN01_HEAD)
     assert DOWNGRADE_BLOCKED_TOKEN in _err_text(exc_info.value)
     with engine.begin() as conn:
-        conn.execute(
-            text(
-                "UPDATE assistant_skill_version SET origin = 'legacy' "
-                "WHERE skill_package_id = :id"
-            ),
-            {"id": pkg_id},
-        )
+        _rewrite_version_origins_to_legacy(conn, pkg_id)
 
     # 2) main agent profile native state
     profile_id = uuid.uuid4()
@@ -931,12 +992,7 @@ def test_downgrade_preflight_blocks_each_predicate_separately(engine: Engine) ->
     assert DOWNGRADE_BLOCKED_TOKEN in _err_text(exc_info.value)
     with engine.begin() as conn:
         # Neutralize immutable origin via temporary trigger disable (CI superuser).
-        conn.execute(
-            text(
-                "ALTER TABLE assistant_main_agent_profile_version "
-                "DISABLE TRIGGER USER"
-            )
-        )
+        _disable_immutable_triggers(conn, "assistant_main_agent_profile_version")
         try:
             conn.execute(
                 text(
@@ -946,12 +1002,7 @@ def test_downgrade_preflight_blocks_each_predicate_separately(engine: Engine) ->
                 {"id": version_id},
             )
         finally:
-            conn.execute(
-                text(
-                    "ALTER TABLE assistant_main_agent_profile_version "
-                    "ENABLE TRIGGER USER"
-                )
-            )
+            _enable_immutable_triggers(conn, "assistant_main_agent_profile_version")
 
 
 def test_downgrade_succeeds_for_derived_shadow_only(engine: Engine) -> None:
@@ -965,14 +1016,18 @@ def test_downgrade_succeeds_for_derived_shadow_only(engine: Engine) -> None:
                 "WHERE migration_state IN ('native','cutover')"
             )
         )
+        conn.execute(
+            text(
+                "UPDATE assistant_main_agent_profile SET migration_state = 'shadow' "
+                "WHERE migration_state IN ('native','cutover')"
+            )
+        )
         # Disable immutability triggers briefly to rewrite origins for disposable CI DB.
-        for table in (
+        _disable_immutable_triggers(
+            conn,
             "assistant_skill_version",
             "assistant_main_agent_profile_version",
-        ):
-            conn.execute(
-                text(f"ALTER TABLE {table} DISABLE TRIGGER USER")
-            )
+        )
         try:
             conn.execute(
                 text(
@@ -982,22 +1037,16 @@ def test_downgrade_succeeds_for_derived_shadow_only(engine: Engine) -> None:
             )
             conn.execute(
                 text(
-                    "UPDATE assistant_main_agent_profile SET migration_state = 'shadow' "
-                    "WHERE migration_state IN ('native','cutover')"
-                )
-            )
-            conn.execute(
-                text(
                     "UPDATE assistant_main_agent_profile_version SET origin = 'bootstrap' "
                     "WHERE origin NOT IN ('bootstrap','legacy')"
                 )
             )
         finally:
-            for table in (
+            _enable_immutable_triggers(
+                conn,
                 "assistant_skill_version",
                 "assistant_main_agent_profile_version",
-            ):
-                conn.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER USER"))
+            )
 
     _run_alembic("downgrade", PRE_PLAN01_HEAD)
     with _engine() as eng:
