@@ -49,7 +49,12 @@ def build_tool_node(
                 try:
                     result = wrapped(**tool_args)
                 except Exception as e:
-                    logger.error("Tool %s failed: %s", tool_name, e)
+                    logger.error(
+                        "capability_safe_execution stage=agent_tool_node exc_class=%s tool_name=%s",
+                        type(e).__name__,
+                        tool_name,
+                    )
+                    # Keep Legacy string contract for agent_loop; avoid raw exception text only in logs.
                     status = "error"
                     result = _copy.build_tool_execution_failed_message(locale, e)
 

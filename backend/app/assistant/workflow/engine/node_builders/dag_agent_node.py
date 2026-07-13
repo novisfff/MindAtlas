@@ -100,7 +100,9 @@ def build_dag_agent_node(
     tool_map: dict[str, Any],
     db_bind: Any,
     node_llms: dict[str, ChatOpenAI] | None = None,
+    execution_scope: Any | None = None,
 ) -> Callable[[WorkflowState], dict]:
+    _ = execution_scope
     def agent_node(state: WorkflowState) -> dict:
         metadata = state.get("metadata", {})
         node_outputs = dict(state.get("node_outputs", {}))

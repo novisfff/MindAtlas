@@ -26,6 +26,7 @@ def build_loop_node(
     tool_map: dict[str, Any],
     db_bind: Any,
     node_llms: dict[str, ChatOpenAI] | None = None,
+    execution_scope: Any | None = None,
 ) -> Callable[[WorkflowState], dict]:
     def loop_node(state: WorkflowState) -> dict:
         metadata = state.get("metadata", {})
@@ -91,6 +92,7 @@ def build_loop_node(
                 node_llms=node_llms,
                 container_input=start_inputs.get("user_input", state.get("user_input", "")),
                 container_fields=container_fields,
+                execution_scope=execution_scope,
             )
             env_vars = dict(body_result.get("env_vars", env_vars) or env_vars)
             iteration_outputs.append(body_result.get("node_outputs", {}))

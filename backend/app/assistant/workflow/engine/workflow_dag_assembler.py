@@ -5,6 +5,9 @@ from typing import Any, Callable
 
 from langchain_openai import ChatOpenAI
 
+from app.assistant.workflow.engine.runtime_dependency_resolver import (
+    WorkflowEngineExecutionScope,
+)
 from app.assistant.workflow.engine.state import WorkflowState
 from app.assistant.workflow.engine.workflow_dag_plan import WorkflowDagPlan
 
@@ -16,6 +19,8 @@ class WorkflowNodeBuilderDeps:
     tool_map: dict[str, Any]
     db_bind: Any
     node_llms: dict[str, ChatOpenAI] | None
+    # Explicit non-serializable Capability scope; never stored in WorkflowState.
+    execution_scope: WorkflowEngineExecutionScope | None
     build_start_node: Callable[[dict[str, Any]], Callable[[WorkflowState], dict]]
     build_dag_llm_node: Callable[..., Callable[[WorkflowState], dict]]
     build_dag_agent_node: Callable[..., Callable[[WorkflowState], dict]]
@@ -40,10 +45,13 @@ def _build_workflow_node_fn(
     node_cfg: dict[str, Any],
     deps: WorkflowNodeBuilderDeps,
 ) -> Callable[[WorkflowState], dict]:
+    scope = deps.execution_scope
     if node_type == "start":
         return deps.build_start_node(node_cfg)
     if node_type == "llm":
-        return deps.build_dag_llm_node(node_id, node_cfg, deps.llm, node_llms=deps.node_llms)
+        return deps.build_dag_llm_node(
+            node_id, node_cfg, deps.llm, node_llms=deps.node_llms, execution_scope=scope
+        )
     if node_type == "agent":
         return deps.build_dag_agent_node(
             node_id,
@@ -52,19 +60,27 @@ def _build_workflow_node_fn(
             deps.tool_map,
             deps.db_bind,
             node_llms=deps.node_llms,
+            execution_scope=scope,
         )
     if node_type == "output":
         return deps.build_output_node(node_id, node_cfg)
     if node_type == "tool":
-        return deps.build_dag_tool_node(node_id, node_cfg, deps.tool_map, deps.args_llm, deps.db_bind)
+        return deps.build_dag_tool_node(
+            node_id,
+            node_cfg,
+            deps.tool_map,
+            deps.args_llm,
+            deps.db_bind,
+            execution_scope=scope,
+        )
     if node_type == "code_executor":
-        return deps.build_code_executor_node(node_id, node_cfg)
+        return deps.build_code_executor_node(node_id, node_cfg, execution_scope=scope)
     if node_type == "http_request":
-        return deps.build_http_request_node(node_id, node_cfg)
+        return deps.build_http_request_node(node_id, node_cfg, execution_scope=scope)
     if node_type == "variable_assign":
         return deps.build_variable_assign_node(node_id, node_cfg)
     if node_type == "human_in_loop":
-        return deps.build_human_in_loop_node(node_id, node_cfg)
+        return deps.build_human_in_loop_node(node_id, node_cfg, execution_scope=scope)
     if node_type == "workflow_call":
         return deps.build_workflow_call_node(
             node_id,
@@ -73,13 +89,18 @@ def _build_workflow_node_fn(
             deps.args_llm,
             deps.tool_map,
             deps.db_bind,
+            execution_scope=scope,
         )
     if node_type == "if_else":
         return deps.build_if_else_node(node_id, node_cfg)
     if node_type == "parameter_extractor":
-        return deps.build_param_extractor_node(node_id, node_cfg, deps.llm, node_llms=deps.node_llms)
+        return deps.build_param_extractor_node(
+            node_id, node_cfg, deps.llm, node_llms=deps.node_llms, execution_scope=scope
+        )
     if node_type == "knowledge_retrieval":
-        return deps.build_kr_node(node_id, node_cfg, deps.tool_map, deps.db_bind)
+        return deps.build_kr_node(
+            node_id, node_cfg, deps.tool_map, deps.db_bind, execution_scope=scope
+        )
     if node_type == "iteration":
         return deps.build_iteration_node(
             node_id,
@@ -89,6 +110,7 @@ def _build_workflow_node_fn(
             deps.tool_map,
             deps.db_bind,
             node_llms=deps.node_llms,
+            execution_scope=scope,
         )
     if node_type == "loop":
         return deps.build_loop_node(
@@ -99,6 +121,7 @@ def _build_workflow_node_fn(
             deps.tool_map,
             deps.db_bind,
             node_llms=deps.node_llms,
+            execution_scope=scope,
         )
     raise ValueError(f"Unknown node type: {node_type}")
 

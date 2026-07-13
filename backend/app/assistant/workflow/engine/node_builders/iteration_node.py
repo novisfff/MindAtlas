@@ -25,6 +25,7 @@ def build_iteration_node(
     tool_map: dict[str, Any],
     db_bind: Any,
     node_llms: dict[str, ChatOpenAI] | None = None,
+    execution_scope: Any | None = None,
 ) -> Callable[[WorkflowState], dict]:
     def iteration_node(state: WorkflowState) -> dict:
         metadata = state.get("metadata", {})
@@ -75,6 +76,7 @@ def build_iteration_node(
                 node_llms=node_llms,
                 container_input=item,
                 container_fields=container_fields,
+                execution_scope=execution_scope,
             )
             next_env_vars = dict(body_result.get("env_vars", env_snapshot) or env_snapshot)
             selected_text = resolve_node_template_vars(

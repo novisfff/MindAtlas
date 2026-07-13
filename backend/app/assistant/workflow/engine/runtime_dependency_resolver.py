@@ -11,6 +11,10 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
+# Plan 02 platform execution ceiling (independent from Plan 01 closure depth 16).
+# Root starts at 0; each nested workflow_call increments once; depth 5 is denied.
+MAX_CAPABILITY_NESTING_DEPTH = 4
+
 
 class ExactRuntimeDependencyResolver(Protocol):
     def require_tool(
@@ -48,6 +52,7 @@ class WorkflowEngineExecutionScope:
 
 
 __all__ = [
+    "MAX_CAPABILITY_NESTING_DEPTH",
     "ExactRuntimeDependencyResolver",
     "WorkflowEngineExecutionScope",
 ]

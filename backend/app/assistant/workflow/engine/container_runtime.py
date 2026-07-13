@@ -308,6 +308,7 @@ def execute_container_body(
     node_llms: dict[str, ChatOpenAI] | None = None,
     container_input: Any = "",
     container_fields: dict[str, Any] | None = None,
+    execution_scope: Any | None = None,
 ) -> dict[str, Any]:
     from app.assistant.workflow.engine import engine as engine_runtime
 
@@ -402,7 +403,9 @@ def execute_container_body(
         }
 
         if node_type == "llm":
-            node_fn = engine_runtime._build_dag_llm_node(current, cfg, llm, node_llms=scoped_node_llms)
+            node_fn = engine_runtime._build_dag_llm_node(
+                current, cfg, llm, node_llms=scoped_node_llms, execution_scope=execution_scope
+            )
         elif node_type == "agent":
             node_fn = engine_runtime._build_dag_agent_node(
                 current,
@@ -411,23 +414,36 @@ def execute_container_body(
                 tool_map,
                 db_bind,
                 node_llms=scoped_node_llms,
+                execution_scope=execution_scope,
             )
         elif node_type == "tool":
-            node_fn = engine_runtime._build_dag_tool_node(current, cfg, tool_map, args_llm, db_bind)
+            node_fn = engine_runtime._build_dag_tool_node(
+                current, cfg, tool_map, args_llm, db_bind, execution_scope=execution_scope
+            )
         elif node_type == "if_else":
             node_fn = engine_runtime._build_if_else_node(current, cfg)
         elif node_type == "parameter_extractor":
-            node_fn = engine_runtime._build_param_extractor_node(current, cfg, llm, node_llms=scoped_node_llms)
+            node_fn = engine_runtime._build_param_extractor_node(
+                current, cfg, llm, node_llms=scoped_node_llms, execution_scope=execution_scope
+            )
         elif node_type == "knowledge_retrieval":
-            node_fn = engine_runtime._build_kr_node(current, cfg, tool_map, db_bind)
+            node_fn = engine_runtime._build_kr_node(
+                current, cfg, tool_map, db_bind, execution_scope=execution_scope
+            )
         elif node_type == "code_executor":
-            node_fn = engine_runtime._build_code_executor_node(current, cfg)
+            node_fn = engine_runtime._build_code_executor_node(
+                current, cfg, execution_scope=execution_scope
+            )
         elif node_type == "http_request":
-            node_fn = engine_runtime._build_http_request_node(current, cfg)
+            node_fn = engine_runtime._build_http_request_node(
+                current, cfg, execution_scope=execution_scope
+            )
         elif node_type == "variable_assign":
             node_fn = engine_runtime._build_variable_assign_node(current, cfg)
         elif node_type == "human_in_loop":
-            node_fn = engine_runtime._build_human_in_loop_node(current, cfg)
+            node_fn = engine_runtime._build_human_in_loop_node(
+                current, cfg, execution_scope=execution_scope
+            )
         elif node_type == "workflow_call":
             node_fn = engine_runtime._build_workflow_call_node(
                 current,
@@ -436,6 +452,7 @@ def execute_container_body(
                 args_llm,
                 tool_map,
                 db_bind,
+                execution_scope=execution_scope,
             )
         elif node_type == "start":
             node_fn = _build_container_start_node(container_input, container_ctx)

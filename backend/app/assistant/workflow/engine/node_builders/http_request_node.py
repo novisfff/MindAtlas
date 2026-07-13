@@ -58,7 +58,9 @@ def _normalize_kv_rows(
 def build_http_request_node(
     node_id: str,
     node_cfg: dict,
+    execution_scope: Any | None = None,
 ) -> Callable[[WorkflowState], dict]:
+    _ = execution_scope
     def http_request_node(state: WorkflowState) -> dict:
         metadata = state.get("metadata", {})
         node_outputs = dict(state.get("node_outputs", {}))

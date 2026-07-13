@@ -19,6 +19,7 @@ def build_kr_node(
     node_cfg: dict,
     tool_map: dict[str, Any],
     db_bind: Any,
+    execution_scope: Any | None = None,
 ) -> Callable[[WorkflowState], dict]:
     def kr_node(state: WorkflowState) -> dict:
         metadata = state.get("metadata", {})
@@ -49,6 +50,20 @@ def build_kr_node(
         emit(metadata, "on_node_start", node_id=node_id, node_type="knowledge_retrieval")
 
         kb_tool = tool_map.get("kb_search")
+        if not kb_tool and execution_scope is not None:
+            for locator in (
+                f"root/node:{node_id}/tool:kb_search",
+                "root/tool:kb_search",
+            ):
+                try:
+                    target = execution_scope.dependency_resolver.require_tool(
+                        source_locator=locator,
+                        tool_name="kb_search",
+                    )
+                    kb_tool = getattr(target, "tool_object_or_record", target)
+                    break
+                except Exception:
+                    continue
         result_text = ""
         raw_payload: Any = ""
         if kb_tool:
@@ -67,10 +82,23 @@ def build_kr_node(
                     if parsed is not None:
                         raw_payload = parsed
             except Exception as e:
-                logger.warning("KR node %s failed: %s", node_id, e)
-                result_text = _copy.build_knowledge_failure_message(locale, e)
-                raw_payload = {"error": str(e)}
+                if execution_scope is not None and getattr(execution_scope, "safe_diagnostics", False):
+                    logger.warning(
+                        "capability_safe_execution stage=knowledge_node node_id=%s exc_class=%s",
+                        node_id,
+                        type(e).__name__,
+                    )
+                    result_text = "knowledge retrieval failed"
+                    raw_payload = {"error": "knowledge_retrieval_failed"}
+                else:
+                    logger.warning("KR node %s failed: %s", node_id, e)
+                    result_text = _copy.build_knowledge_failure_message(locale, e)
+                    raw_payload = {"error": str(e)}
         else:
+            if execution_scope is not None:
+                raise RuntimeError(
+                    f"DAG knowledge_retrieval node {node_id}: kb_search not in capability closure"
+                )
             result_text = _copy.build_knowledge_unavailable_message(locale)
             raw_payload = {"error": "kb_search not available"}
 

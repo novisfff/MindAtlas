@@ -24,6 +24,7 @@ def build_dag_tool_node(
     tool_map: dict[str, Any],
     args_llm: ChatOpenAI,
     db_bind: Any,
+    execution_scope: Any | None = None,
 ) -> Callable[[WorkflowState], dict]:
     def dag_tool_node(state: WorkflowState) -> dict:
         metadata = state.get("metadata", {})
@@ -36,6 +37,25 @@ def build_dag_tool_node(
         tool_call_id = f"tool_{uuid.uuid4().hex[:8]}"
 
         tool = tool_map.get(tool_name)
+        if not tool and execution_scope is not None:
+            # Exact closure only — never Registry name fallback under Capability scope.
+            locator = f"root/node:{node_id}/tool:{tool_name}"
+            try:
+                target = execution_scope.dependency_resolver.require_tool(
+                    source_locator=locator,
+                    tool_name=str(tool_name or ""),
+                )
+                tool = getattr(target, "tool_object_or_record", target)
+            except Exception as exc:
+                if getattr(execution_scope, "safe_diagnostics", False):
+                    logger.error(
+                        "capability_safe_execution stage=tool_node_resolve node_id=%s exc_class=%s",
+                        node_id,
+                        type(exc).__name__,
+                    )
+                raise RuntimeError(
+                    f"DAG tool node {node_id}: tool not found under capability scope"
+                ) from None
         if not tool:
             raise RuntimeError(f"DAG tool node {node_id}: tool not found: {tool_name}")
 
@@ -112,11 +132,20 @@ def build_dag_tool_node(
                     "on_tool_call_start",
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
-                    args=call_args,
+                    args={} if execution_scope is not None and getattr(execution_scope, "safe_diagnostics", False) else call_args,
                 )
-            logger.error("DAG tool %s failed: %s", tool_name, e)
-            status = "error"
-            result = _copy.build_tool_execution_failed_message(locale, e)
+            if execution_scope is not None and getattr(execution_scope, "safe_diagnostics", False):
+                logger.error(
+                    "capability_safe_execution stage=tool_node_invoke node_id=%s exc_class=%s",
+                    node_id,
+                    type(e).__name__,
+                )
+                status = "error"
+                result = "tool execution failed"
+            else:
+                logger.error("DAG tool %s failed: %s", tool_name, e)
+                status = "error"
+                result = _copy.build_tool_execution_failed_message(locale, e)
 
         result_str = stringify(result)
         raw: Any = result

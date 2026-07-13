@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from app.assistant.capabilities.adapters.base import CapabilityAdapter
 from app.assistant.capabilities.adapters.tool import ToolCapabilityAdapter
+from app.assistant.capabilities.adapters.workflow import WorkflowCapabilityAdapter
 
 __all__ = [
     "CapabilityAdapter",
     "ToolCapabilityAdapter",
+    "WorkflowCapabilityAdapter",
 ]
