@@ -105,12 +105,15 @@ services:
       context: ../backend
       dockerfile: Dockerfile
       target: runtime
+      args:
+        APP_BUILD_REVISION: ${APP_BUILD_REVISION:-development}
     container_name: mindatlas-api
     environment:
       # Database
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-mindatlas}
       # Quick-start friendly defaults. Override these from `.env` in production if needed.
       AI_PROVIDER_FERNET_KEY: ${AI_PROVIDER_FERNET_KEY:-b98esSSrtceWc4IUOFGR-f_6I8FfnxtpjjYQZN51RCw=}
+      APP_BUILD_REVISION: ${APP_BUILD_REVISION:-development}
       LIGHTRAG_ENABLED: "${LIGHTRAG_ENABLED:-true}"
       DOCLING_WORKER_ENABLED: "${DOCLING_WORKER_ENABLED:-true}"
       SCHEDULER_ENABLED: "${SCHEDULER_ENABLED:-true}"

@@ -68,6 +68,7 @@ class AiCredentialService:
             base_url=base_url,
             api_key_encrypted=encrypted,
             api_key_hint=api_key_hint(api_key),
+            runtime_revision=1,
         )
         self.db.add(cred)
         self.db.commit()
@@ -75,7 +76,18 @@ class AiCredentialService:
         return cred
 
     def update(self, id: UUID, *, name: str | None, base_url: str | None, api_key: str | None) -> AiCredential:
-        cred = self.find_by_id(id)
+        from app.assistant.skills.resolution import credential_runtime_sensitive_payload
+
+        cred = (
+            self.db.query(AiCredential)
+            .filter(AiCredential.id == id)
+            .with_for_update()
+            .first()
+        )
+        if not cred:
+            raise ApiException(status_code=404, code=40400, message=f"AiCredential not found: {id}")
+
+        before = credential_runtime_sensitive_payload(cred)
 
         if name is not None and cred.name.lower() != name.lower():
             existing = self.db.query(AiCredential).filter(AiCredential.name.ilike(name)).first()
@@ -94,6 +106,10 @@ class AiCredentialService:
                 raise ApiException(status_code=500, code=50001, message="AI_PROVIDER_FERNET_KEY not configured") from exc
             cred.api_key_hint = api_key_hint(api_key)
 
+        after = credential_runtime_sensitive_payload(cred)
+        if before != after:
+            cred.runtime_revision = int(cred.runtime_revision or 1) + 1
+
         try:
             self.db.commit()
         except IntegrityError as exc:
@@ -103,6 +119,8 @@ class AiCredentialService:
         return cred
 
     def delete(self, id: UUID) -> None:
+        from app.assistant.skills.resolution import find_skill_refs_for_model, skill_reference_conflict
+
         cred = self.find_by_id(id)
 
         # 检查是否有模型被绑定使用
@@ -118,9 +136,26 @@ class AiCredentialService:
             )
             if in_use:
                 raise ApiException(status_code=409, code=40910, message="Credential is in use by model bindings")
+            for model_id in model_ids:
+                refs = find_skill_refs_for_model(self.db, model_id)
+                if refs:
+                    package_id, version_id = refs[0]
+                    raise skill_reference_conflict(
+                        package_id=package_id,
+                        version_id=version_id,
+                        message="Credential model is referenced by a published skill dependency",
+                    )
 
-        self.db.delete(cred)
-        self.db.commit()
+        try:
+            self.db.delete(cred)
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(
+                status_code=409,
+                code=40994,
+                message="Credential is referenced by a published skill dependency",
+            ) from exc
 
     def test_connection(self, id: UUID) -> tuple[bool, int | None, str]:
         cred = self.find_by_id(id)
@@ -230,7 +265,7 @@ class AiModelService:
         if not cred:
             raise ApiException(status_code=404, code=40400, message=f"AiCredential not found: {credential_id}")
 
-        m = AiModel(credential_id=credential_id, name=name, model_type=model_type)
+        m = AiModel(credential_id=credential_id, name=name, model_type=model_type, runtime_revision=1)
         self.db.add(m)
         try:
             self.db.commit()
@@ -241,11 +276,24 @@ class AiModelService:
         return m
 
     def update(self, id: UUID, *, name: str | None, model_type: AiModelType | None) -> AiModel:
-        m = self.find_by_id(id)
+        from app.assistant.skills.resolution import model_runtime_sensitive_payload
+
+        m = (
+            self.db.query(AiModel)
+            .filter(AiModel.id == id)
+            .with_for_update()
+            .first()
+        )
+        if not m:
+            raise ApiException(status_code=404, code=40400, message=f"AiModel not found: {id}")
+        before = model_runtime_sensitive_payload(m)
         if name is not None:
             m.name = name
         if model_type is not None:
             m.model_type = model_type
+        after = model_runtime_sensitive_payload(m)
+        if before != after:
+            m.runtime_revision = int(m.runtime_revision or 1) + 1
         try:
             self.db.commit()
         except IntegrityError as exc:
@@ -255,7 +303,17 @@ class AiModelService:
         return m
 
     def delete(self, id: UUID, *, confirm_bound_bindings: bool = False) -> None:
+        from app.assistant.skills.resolution import find_skill_refs_for_model, skill_reference_conflict
+
         m = self.find_by_id(id)
+        refs = find_skill_refs_for_model(self.db, m.id)
+        if refs:
+            package_id, version_id = refs[0]
+            raise skill_reference_conflict(
+                package_id=package_id,
+                version_id=version_id,
+                message="Model is referenced by a published skill dependency",
+            )
         bound_components = (
             self.db.query(AiComponentBinding)
             .filter((AiComponentBinding.llm_model_id == m.id) | (AiComponentBinding.embedding_model_id == m.id))
@@ -281,8 +339,16 @@ class AiModelService:
             .filter(AiComponentBinding.embedding_model_id == m.id)
             .update({AiComponentBinding.embedding_model_id: None}, synchronize_session=False)
         )
-        self.db.delete(m)
-        self.db.commit()
+        try:
+            self.db.delete(m)
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(
+                status_code=409,
+                code=40994,
+                message="Model is referenced by a published skill dependency",
+            ) from exc
 
 
 class AiBindingService:

@@ -24,14 +24,22 @@ from app.assistant.skills.contracts import (
 )
 from app.assistant.skills.models import (
     AssistantSkillCapabilityBinding,
+    AssistantSkillCapabilityDependency,
     AssistantSkillPackage,
     AssistantSkillPackageAlias,
     AssistantSkillResourceBlob,
     AssistantSkillVersion,
     AssistantSkillVersionResource,
 )
+from app.assistant.skills.resolution import (
+    CapabilityReferenceResolver,
+    binding_set_digest_from_bindings,
+    reconstruct_binding_snapshot,
+    version_digest_from_parts,
+)
 from app.assistant.skills.schemas import (
     CreateSkillPackageCommand,
+    PublishSkillVersionCommand,
     SaveSkillDraftCommand,
     SkillPackageAliasSummary,
     SkillPackageDetail,
@@ -216,6 +224,207 @@ class AgentSkillService:
             package.description = parsed.frontmatter.description
             self.db.commit()
             return self._version_summary(version)
+        except ApiException:
+            self.db.rollback()
+            raise
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise self._translate_integrity_error(exc) from exc
+
+    # ------------------------------------------------------------------
+    # Publish
+    # ------------------------------------------------------------------
+
+    def publish(
+        self,
+        package_id: UUID,
+        command: PublishSkillVersionCommand,
+    ) -> SkillVersionSummary:
+        """Create an immutable publish version from an owned draft.
+
+        Always inserts a new ``version_source=publish`` row. The draft is never
+        mutated. ``catalog_enabled`` remains false throughout Plan 01.
+        """
+        try:
+            package = self._lock_package(package_id)
+            draft = (
+                self.db.query(AssistantSkillVersion)
+                .filter(
+                    AssistantSkillVersion.id == command.draft_version_id,
+                    AssistantSkillVersion.skill_package_id == package.id,
+                    AssistantSkillVersion.version_source == "save",
+                )
+                .one_or_none()
+            )
+            if draft is None:
+                raise ApiException(
+                    status_code=404,
+                    code=40491,
+                    message=(
+                        f"owned draft version not found: {command.draft_version_id}"
+                    ),
+                )
+
+            # Reconstruct declarations from the immutable draft payload.
+            from app.assistant.skills.package_io import parse_skill_directory_files
+
+            files: dict[str, bytes] = {
+                "SKILL.md": (draft.skill_md or "").encode("utf-8"),
+            }
+            if draft.mindatlas_yaml:
+                files["mindatlas.yaml"] = draft.mindatlas_yaml.encode("utf-8")
+            resource_rows = (
+                self.db.query(AssistantSkillVersionResource, AssistantSkillResourceBlob)
+                .join(
+                    AssistantSkillResourceBlob,
+                    AssistantSkillResourceBlob.id == AssistantSkillVersionResource.blob_id,
+                )
+                .filter(AssistantSkillVersionResource.skill_version_id == draft.id)
+                .all()
+            )
+            for resource, blob in resource_rows:
+                files[resource.path] = bytes(blob.content)
+
+            parsed = parse_skill_directory_files(
+                files,
+                expected_root_name=package.canonical_name,
+            )
+            if parsed.content_digest != draft.content_digest:
+                raise ApiException(
+                    status_code=409,
+                    code=40993,
+                    message="draft content digest mismatch during publish reconstruction",
+                )
+
+            declarations = (
+                tuple(parsed.manifest.capabilities) if parsed.manifest is not None else ()
+            )
+            # Resolve complete closures before inserting any publish row.
+            resolver = CapabilityReferenceResolver(self.db)
+            resolved_bindings = resolver.resolve_many(declarations)
+            ordered_bindings = sorted(
+                resolved_bindings,
+                key=lambda b: (b.capability_type, b.capability_key),
+            )
+            set_digest = binding_set_digest_from_bindings(ordered_bindings)
+            ver_digest = version_digest_from_parts(
+                content_digest=draft.content_digest,
+                binding_set_digest=set_digest,
+            )
+
+            sequence_no = self._next_sequence(package.id)
+            publish_version = AssistantSkillVersion(
+                skill_package_id=package.id,
+                sequence_no=sequence_no,
+                version_name=f"publish-{sequence_no}",
+                version_source="publish",
+                source_draft_version_id=draft.id,
+                origin=draft.origin,
+                skill_md=draft.skill_md,
+                mindatlas_yaml=draft.mindatlas_yaml,
+                frontmatter=draft.frontmatter,
+                extension_manifest=draft.extension_manifest,
+                resource_index=draft.resource_index,
+                skill_md_digest=draft.skill_md_digest,
+                manifest_digest=draft.manifest_digest,
+                resource_index_digest=draft.resource_index_digest,
+                content_digest=draft.content_digest,
+                binding_set_digest=set_digest,
+                version_digest=ver_digest,
+            )
+            self.db.add(publish_version)
+            self.db.flush()
+
+            # Copy resource references deterministically.
+            for resource, blob in sorted(resource_rows, key=lambda item: item[0].path):
+                self.db.add(
+                    AssistantSkillVersionResource(
+                        skill_version_id=publish_version.id,
+                        path=resource.path,
+                        resource_kind=resource.resource_kind,
+                        media_type=resource.media_type,
+                        byte_size=resource.byte_size,
+                        sha256=resource.sha256,
+                        blob_id=blob.id,
+                        executable=False,
+                    )
+                )
+
+            # Insert resolved bindings + dependencies in canonical order.
+            binding_rows: list[AssistantSkillCapabilityBinding] = []
+            for ordinal, resolved in enumerate(ordered_bindings):
+                binding_row = AssistantSkillCapabilityBinding(
+                    skill_version_id=publish_version.id,
+                    ordinal=ordinal,
+                    capability_type=resolved.capability_type,
+                    capability_key=resolved.capability_key,
+                    resolution_status="resolved",
+                    target_identity=resolved.target_identity,
+                    resolved_tool_id=resolved.resolved_tool_id,
+                    resolved_workflow_version_id=resolved.resolved_workflow_version_id,
+                    resolved_agent_version_id=resolved.resolved_agent_version_id,
+                    resolved_revision=resolved.resolved_revision,
+                    input_schema_digest=resolved.input_schema_digest,
+                    output_schema_digest=resolved.output_schema_digest,
+                    config_digest=resolved.config_digest,
+                    executable_revision=resolved.executable_revision,
+                    resolution_digest=resolved.resolution_digest,
+                    dependency_closure_digest=resolved.dependency_closure_digest,
+                    binding_contract_digest=resolved.binding_contract_digest,
+                    resolution_snapshot=resolved.resolution_snapshot,
+                )
+                self.db.add(binding_row)
+                self.db.flush()
+                binding_rows.append(binding_row)
+                for dep in sorted(resolved.dependencies, key=lambda d: d.ordinal):
+                    self.db.add(
+                        AssistantSkillCapabilityDependency(
+                            binding_id=binding_row.id,
+                            ordinal=dep.ordinal,
+                            dependency_path=dep.dependency_path,
+                            dependency_type=dep.dependency_type,
+                            target_identity=dep.target_identity,
+                            resolved_tool_id=dep.resolved_tool_id,
+                            resolved_workflow_version_id=dep.resolved_workflow_version_id,
+                            resolved_agent_version_id=dep.resolved_agent_version_id,
+                            resolved_model_id=dep.resolved_model_id,
+                            target_revision=dep.target_revision,
+                            input_schema_digest=dep.input_schema_digest,
+                            output_schema_digest=dep.output_schema_digest,
+                            resolution_digest=dep.resolution_digest,
+                            dependency_digest=dep.dependency_digest,
+                            resolution_snapshot=dep.resolution_snapshot,
+                        )
+                    )
+            self.db.flush()
+
+            # Re-read/reconstruct every lossless snapshot and verify digests.
+            for binding_row, resolved in zip(binding_rows, ordered_bindings, strict=True):
+                dep_rows = (
+                    self.db.query(AssistantSkillCapabilityDependency)
+                    .filter(AssistantSkillCapabilityDependency.binding_id == binding_row.id)
+                    .order_by(AssistantSkillCapabilityDependency.ordinal.asc())
+                    .all()
+                )
+                reconstructed = reconstruct_binding_snapshot(binding_row, dep_rows)
+                if reconstructed.get("bindingContractDigest") != resolved.binding_contract_digest:
+                    raise ApiException(
+                        status_code=409,
+                        code=40993,
+                        message="published binding_contract_digest reconstruction mismatch",
+                    )
+                if reconstructed.get("dependencyClosureDigest") != resolved.dependency_closure_digest:
+                    raise ApiException(
+                        status_code=409,
+                        code=40993,
+                        message="published dependency_closure_digest reconstruction mismatch",
+                    )
+
+            package.published_version_id = publish_version.id
+            # Plan 01: never enable catalog.
+            package.catalog_enabled = False
+            self.db.commit()
+            return self._version_summary(publish_version)
         except ApiException:
             self.db.rollback()
             raise
