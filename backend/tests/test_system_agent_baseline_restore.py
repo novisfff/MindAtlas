@@ -102,5 +102,34 @@ class SystemAgentBaselineRestoreTests(unittest.TestCase):
         self.assertEqual(list((remaining_versions[0].snapshot or {}).get("tools") or []), list(canonical.tools or []))
 
 
+    def test_general_chat_legacy_row_unaffected_by_shadow_bridge(self) -> None:
+        """Legacy runtime invariance: general_chat remains the old-runtime skill."""
+        from app.assistant.skills.legacy_adapter import LegacySkillShadowAdapter
+        from app.assistant.skills.models import AssistantSkillPackage
+        from app.assistant_config.models import AssistantSkill
+        from app.assistant_config.service import AssistantConfigService
+
+        svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        skill = (
+            self.db.query(AssistantSkill)
+            .filter(AssistantSkill.name == "general_chat", AssistantSkill.is_system.is_(True))
+            .one()
+        )
+        before_enabled = skill.enabled
+        before_agent = skill.agent_profile_id
+        LegacySkillShadowAdapter().sync_one(self.db, skill.id)
+        reloaded = self.db.get(AssistantSkill, skill.id)
+        assert reloaded is not None
+        self.assertEqual(reloaded.enabled, before_enabled)
+        self.assertEqual(reloaded.agent_profile_id, before_agent)
+        self.assertEqual(reloaded.name, "general_chat")
+        self.assertIsNone(
+            self.db.query(AssistantSkillPackage)
+            .filter(AssistantSkillPackage.canonical_name.in_(("general-chat", "general_chat")))
+            .one_or_none()
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

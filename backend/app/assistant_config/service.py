@@ -66,6 +66,18 @@ from app.assistant_config.workflow_contracts import (
     schema_summary,
     workflow_contract_from_input,
 )
+from app.assistant_config.workflow_references import (
+    collect_workflow_call_references as pure_collect_workflow_call_references,
+    collect_workflow_custom_model_ids as pure_collect_workflow_custom_model_ids,
+    collect_workflow_tool_names as pure_collect_workflow_tool_names,
+    cfg_get as pure_cfg_get,
+    iter_workflow_call_node_configs as pure_iter_workflow_call_node_configs,
+    parse_uuid_value as pure_parse_uuid_value,
+)
+from app.assistant.skills.models import (
+    AssistantSkillCapabilityBinding,
+    AssistantSkillCapabilityDependency,
+)
 from app.assistant_config.system_behavior_registry import (
     SystemBehaviorDefinition,
     SystemBehaviorFieldDefinition,
@@ -155,6 +167,56 @@ class TargetFolderStats:
 class AssistantConfigService:
     def __init__(self, db: Session):
         self.db = db
+
+    def _best_effort_shadow_sync_one(self, legacy_skill_id: UUID | None) -> None:
+        """Post-commit shadow reconciliation; never fails the legacy operation."""
+        if legacy_skill_id is None:
+            return
+        try:
+            from app.assistant.skills.legacy_adapter import best_effort_sync_one
+
+            best_effort_sync_one(self.db, legacy_skill_id)
+        except Exception:
+            # Defense in depth: adapter already swallows errors.
+            pass
+
+    def _best_effort_shadow_sync_for_workflow(self, workflow_id: UUID | None) -> None:
+        if workflow_id is None:
+            return
+        try:
+            skill_ids = [
+                row[0]
+                for row in self.db.query(AssistantSkill.id)
+                .filter(AssistantSkill.workflow_id == workflow_id)
+                .all()
+            ]
+            for skill_id in skill_ids:
+                self._best_effort_shadow_sync_one(skill_id)
+        except Exception:
+            pass
+
+    def _best_effort_shadow_sync_for_agent(self, agent_profile_id: UUID | None) -> None:
+        if agent_profile_id is None:
+            return
+        try:
+            skill_ids = [
+                row[0]
+                for row in self.db.query(AssistantSkill.id)
+                .filter(AssistantSkill.agent_profile_id == agent_profile_id)
+                .all()
+            ]
+            for skill_id in skill_ids:
+                self._best_effort_shadow_sync_one(skill_id)
+        except Exception:
+            pass
+
+    def _best_effort_shadow_sync_all(self) -> None:
+        try:
+            from app.assistant.skills.legacy_adapter import best_effort_sync_all
+
+            best_effort_sync_all(self.db)
+        except Exception:
+            pass
 
     def _current_locale(self, preferred_locale: str | None = None) -> str:
         return resolve_system_locale(self.db, preferred_locale=preferred_locale)
@@ -1280,6 +1342,41 @@ class AssistantConfigService:
             baseline_id = self._get_workflow_system_baseline_version_id(workflow.id)
             if baseline_id is not None:
                 protected_ids.add(baseline_id)
+        # Skill binding/dependency FKs protect exact published history.
+        for row in (
+            self.db.query(AssistantSkillCapabilityBinding.resolved_workflow_version_id)
+            .filter(
+                AssistantSkillCapabilityBinding.resolved_workflow_version_id.isnot(None),
+            )
+            .all()
+        ):
+            version_id = row[0]
+            if version_id is None:
+                continue
+            owner = (
+                self.db.query(AssistantWorkflowVersion.workflow_id)
+                .filter(AssistantWorkflowVersion.id == version_id)
+                .scalar()
+            )
+            if owner == workflow.id:
+                protected_ids.add(version_id)
+        for row in (
+            self.db.query(AssistantSkillCapabilityDependency.resolved_workflow_version_id)
+            .filter(
+                AssistantSkillCapabilityDependency.resolved_workflow_version_id.isnot(None),
+            )
+            .all()
+        ):
+            version_id = row[0]
+            if version_id is None:
+                continue
+            owner = (
+                self.db.query(AssistantWorkflowVersion.workflow_id)
+                .filter(AssistantWorkflowVersion.id == version_id)
+                .scalar()
+            )
+            if owner == workflow.id:
+                protected_ids.add(version_id)
         return protected_ids
 
     def _get_agent_protected_version_ids(self, agent_profile: AssistantAgentProfile) -> set[UUID]:
@@ -1292,6 +1389,36 @@ class AssistantConfigService:
             baseline_id = self._get_agent_system_baseline_version_id(agent_profile.id)
             if baseline_id is not None:
                 protected_ids.add(baseline_id)
+        for row in (
+            self.db.query(AssistantSkillCapabilityBinding.resolved_agent_version_id)
+            .filter(AssistantSkillCapabilityBinding.resolved_agent_version_id.isnot(None))
+            .all()
+        ):
+            version_id = row[0]
+            if version_id is None:
+                continue
+            owner = (
+                self.db.query(AssistantAgentProfileVersion.agent_profile_id)
+                .filter(AssistantAgentProfileVersion.id == version_id)
+                .scalar()
+            )
+            if owner == agent_profile.id:
+                protected_ids.add(version_id)
+        for row in (
+            self.db.query(AssistantSkillCapabilityDependency.resolved_agent_version_id)
+            .filter(AssistantSkillCapabilityDependency.resolved_agent_version_id.isnot(None))
+            .all()
+        ):
+            version_id = row[0]
+            if version_id is None:
+                continue
+            owner = (
+                self.db.query(AssistantAgentProfileVersion.agent_profile_id)
+                .filter(AssistantAgentProfileVersion.id == version_id)
+                .scalar()
+            )
+            if owner == agent_profile.id:
+                protected_ids.add(version_id)
         return protected_ids
 
     def _trim_workflow_versions(self, workflow: AssistantWorkflow) -> None:
@@ -1856,22 +1983,11 @@ class AssistantConfigService:
 
     @staticmethod
     def _cfg_get(cfg: dict[str, Any], *keys: str, default: Any = None) -> Any:
-        for key in keys:
-            if key in cfg:
-                return cfg.get(key)
-        return default
+        return pure_cfg_get(cfg, *keys, default=default)
 
     @staticmethod
     def _parse_uuid_value(value: Any) -> UUID | None:
-        if value is None:
-            return None
-        text = str(value).strip()
-        if not text:
-            return None
-        try:
-            return UUID(text)
-        except Exception:
-            return None
+        return pure_parse_uuid_value(value)
 
     @staticmethod
     def _iter_workflow_call_node_configs(
@@ -1879,34 +1995,10 @@ class AssistantConfigService:
         *,
         container_node_id: str | None = None,
     ) -> list[tuple[str, str | None, dict[str, Any]]]:
-        refs: list[tuple[str, str | None, dict[str, Any]]] = []
-        for raw_node in nodes:
-            if isinstance(raw_node, dict):
-                node_id = str(raw_node.get("node_id", raw_node.get("nodeId", "")) or "").strip()
-                node_type = str(raw_node.get("node_type", raw_node.get("nodeType", "")) or "").strip()
-                cfg = raw_node.get("config") if isinstance(raw_node.get("config"), dict) else {}
-            else:
-                node_id = str(getattr(raw_node, "node_id", "") or "").strip()
-                node_type = str(getattr(raw_node, "node_type", "") or "").strip()
-                cfg = getattr(raw_node, "config", None) if isinstance(getattr(raw_node, "config", None), dict) else {}
-
-            if not node_id:
-                continue
-
-            if node_type == "workflow_call":
-                refs.append((node_id, container_node_id, dict(cfg)))
-
-            if node_type not in {"iteration", "loop"}:
-                continue
-            body_nodes = AssistantConfigService._cfg_get(cfg, "body_nodes", "bodyNodes", default=[])
-            if isinstance(body_nodes, list):
-                refs.extend(
-                    AssistantConfigService._iter_workflow_call_node_configs(
-                        body_nodes,
-                        container_node_id=node_id,
-                    )
-                )
-        return refs
+        return pure_iter_workflow_call_node_configs(
+            nodes,
+            container_node_id=container_node_id,
+        )
 
     def _collect_workflow_call_references_from_input(
         self,
@@ -1920,29 +2012,20 @@ class AssistantConfigService:
         source_version_source: str | None = None,
     ) -> list[WorkflowCallReference]:
         refs: list[WorkflowCallReference] = []
-        for node_id, container_node_id, cfg in self._iter_workflow_call_node_configs(workflow_input.nodes):
-            target_workflow_id = self._parse_uuid_value(
-                self._cfg_get(cfg, "target_workflow_id", "targetWorkflowId", default=None)
-            )
-            if target_workflow_id is None:
-                continue
-            target_version_id = self._parse_uuid_value(
-                self._cfg_get(cfg, "target_published_version_id", "targetPublishedVersionId", default=None)
-            )
-            binding_mode = str(self._cfg_get(cfg, "binding_mode", "bindingMode", default="pinned") or "pinned").strip().lower()
+        for pure_ref in pure_collect_workflow_call_references(workflow_input.nodes):
             refs.append(
                 WorkflowCallReference(
                     source_workflow_id=source_workflow_id,
                     source_workflow_name=source_workflow_name,
                     source_kind=source_kind,
-                    source_node_id=node_id,
-                    source_container_node_id=container_node_id,
+                    source_node_id=pure_ref.source_node_id,
+                    source_container_node_id=pure_ref.source_container_node_id,
                     source_version_id=source_version_id,
                     source_version_name=source_version_name,
                     source_version_source=source_version_source,
-                    target_workflow_id=target_workflow_id,
-                    binding_mode=binding_mode,
-                    target_published_version_id=target_version_id,
+                    target_workflow_id=pure_ref.target_workflow_id,
+                    binding_mode=pure_ref.binding_mode,
+                    target_published_version_id=pure_ref.target_published_version_id,
                 )
             )
         return refs
@@ -2155,15 +2238,19 @@ class AssistantConfigService:
         workflows = self._list_workflows_query(include_disabled=True)
         for workflow in workflows:
             workflow_name = self._display_workflow_name(workflow)
-            draft_input = self._get_workflow_draft_input(workflow)
-            refs.extend(
-                self._collect_workflow_call_references_from_input(
-                    workflow_input=draft_input,
-                    source_workflow_id=workflow.id,
-                    source_workflow_name=workflow_name,
-                    source_kind="draft",
+            try:
+                draft_input = self._get_workflow_draft_input(workflow)
+            except Exception:
+                draft_input = None
+            if draft_input is not None:
+                refs.extend(
+                    self._collect_workflow_call_references_from_input(
+                        workflow_input=draft_input,
+                        source_workflow_id=workflow.id,
+                        source_workflow_name=workflow_name,
+                        source_kind="draft",
+                    )
                 )
-            )
             if not include_versions:
                 continue
             versions = (
@@ -3653,11 +3740,44 @@ class AssistantConfigService:
         return profile
 
     def _keep_only_workflow_version(self, workflow: AssistantWorkflow, keep_version_id: UUID) -> None:
+        # Preserve only Skill-package references (and the keep target). System baseline
+        # restore must not retain superseded draft/published/baseline pointers.
+        protected_ids = {keep_version_id}
+        for row in (
+            self.db.query(AssistantSkillCapabilityBinding.resolved_workflow_version_id)
+            .filter(AssistantSkillCapabilityBinding.resolved_workflow_version_id.isnot(None))
+            .all()
+        ):
+            version_id = row[0]
+            if version_id is None:
+                continue
+            owner = (
+                self.db.query(AssistantWorkflowVersion.workflow_id)
+                .filter(AssistantWorkflowVersion.id == version_id)
+                .scalar()
+            )
+            if owner == workflow.id:
+                protected_ids.add(version_id)
+        for row in (
+            self.db.query(AssistantSkillCapabilityDependency.resolved_workflow_version_id)
+            .filter(AssistantSkillCapabilityDependency.resolved_workflow_version_id.isnot(None))
+            .all()
+        ):
+            version_id = row[0]
+            if version_id is None:
+                continue
+            owner = (
+                self.db.query(AssistantWorkflowVersion.workflow_id)
+                .filter(AssistantWorkflowVersion.id == version_id)
+                .scalar()
+            )
+            if owner == workflow.id:
+                protected_ids.add(version_id)
         (
             self.db.query(AssistantWorkflowVersion)
             .filter(
                 AssistantWorkflowVersion.workflow_id == workflow.id,
-                AssistantWorkflowVersion.id != keep_version_id,
+                AssistantWorkflowVersion.id.notin_(list(protected_ids)),
             )
             .delete(synchronize_session=False)
         )
@@ -3666,11 +3786,44 @@ class AssistantConfigService:
         self.db.expire(workflow, ["draft_version", "published_version", "versions"])
 
     def _keep_only_agent_version(self, agent_profile: AssistantAgentProfile, keep_version_id: UUID) -> None:
+        # Preserve only Skill-package references (and the keep target). System baseline
+        # restore must not retain superseded draft/published/baseline pointers.
+        protected_ids = {keep_version_id}
+        for row in (
+            self.db.query(AssistantSkillCapabilityBinding.resolved_agent_version_id)
+            .filter(AssistantSkillCapabilityBinding.resolved_agent_version_id.isnot(None))
+            .all()
+        ):
+            version_id = row[0]
+            if version_id is None:
+                continue
+            owner = (
+                self.db.query(AssistantAgentProfileVersion.agent_profile_id)
+                .filter(AssistantAgentProfileVersion.id == version_id)
+                .scalar()
+            )
+            if owner == agent_profile.id:
+                protected_ids.add(version_id)
+        for row in (
+            self.db.query(AssistantSkillCapabilityDependency.resolved_agent_version_id)
+            .filter(AssistantSkillCapabilityDependency.resolved_agent_version_id.isnot(None))
+            .all()
+        ):
+            version_id = row[0]
+            if version_id is None:
+                continue
+            owner = (
+                self.db.query(AssistantAgentProfileVersion.agent_profile_id)
+                .filter(AssistantAgentProfileVersion.id == version_id)
+                .scalar()
+            )
+            if owner == agent_profile.id:
+                protected_ids.add(version_id)
         (
             self.db.query(AssistantAgentProfileVersion)
             .filter(
                 AssistantAgentProfileVersion.agent_profile_id == agent_profile.id,
-                AssistantAgentProfileVersion.id != keep_version_id,
+                AssistantAgentProfileVersion.id.notin_(list(protected_ids)),
             )
             .delete(synchronize_session=False)
         )
@@ -3889,6 +4042,8 @@ class AssistantConfigService:
         except IntegrityError as exc:
             self.db.rollback()
             raise ApiException(status_code=409, code=40969, message="Sync system catalog failed") from exc
+        # After tools/workflows/agents/skills are present, mirror into disabled shadows.
+        self._best_effort_shadow_sync_all()
 
     def ensure_system_catalog_synced(self) -> None:
         self._acquire_system_catalog_sync_lock()
@@ -4220,6 +4375,7 @@ class AssistantConfigService:
             api_key_hint=hint,
             timeout_seconds=request.timeout_seconds,
             payload_wrapper=request.payload_wrapper,
+            config_revision=1,
         )
         self.db.add(tool)
         try:
@@ -4231,7 +4387,21 @@ class AssistantConfigService:
         return tool
 
     def update_tool(self, id: UUID, request: AssistantToolUpdateRequest) -> AssistantTool:
-        tool = self.get_tool(id)
+        from app.assistant.skills.resolution import (
+            execution_sensitive_changed,
+            find_skill_refs_for_tool,
+            skill_reference_conflict,
+            tool_execution_sensitive_payload,
+        )
+
+        tool = (
+            self.db.query(AssistantTool)
+            .filter(AssistantTool.id == id)
+            .with_for_update()
+            .first()
+        )
+        if not tool:
+            raise ApiException(status_code=404, code=40410, message=f"Tool not found: {id}")
 
         if tool.is_system:
             # 系统工具只允许修改 enabled
@@ -4240,7 +4410,19 @@ class AssistantConfigService:
             else:
                 raise ApiException(status_code=400, code=40012, message="System tool can only update enabled")
         else:
-            if request.name is not None:
+            before = tool_execution_sensitive_payload(tool)
+            if request.name is not None and request.name != tool.name:
+                refs = find_skill_refs_for_tool(self.db, tool.id)
+                if refs:
+                    package_id, version_id = refs[0]
+                    raise skill_reference_conflict(
+                        package_id=package_id,
+                        version_id=version_id,
+                        message=(
+                            "Remote tool is referenced by a published skill binding; "
+                            "rename requires republish or explicit conflict resolution"
+                        ),
+                    )
                 tool.name = request.name
             if request.description is not None:
                 tool.description = request.description
@@ -4273,6 +4455,9 @@ class AssistantConfigService:
             if request.api_key is not None:
                 tool.api_key_encrypted = encrypt_api_key(request.api_key)
                 tool.api_key_hint = api_key_hint(request.api_key)
+            after = tool_execution_sensitive_payload(tool)
+            if execution_sensitive_changed(before, after):
+                tool.config_revision = int(tool.config_revision or 1) + 1
 
         try:
             self.db.commit()
@@ -4283,11 +4468,29 @@ class AssistantConfigService:
         return tool
 
     def delete_tool(self, id: UUID) -> None:
+        from app.assistant.skills.resolution import find_skill_refs_for_tool, skill_reference_conflict
+
         tool = self.get_tool(id)
         if tool.is_system:
             raise ApiException(status_code=400, code=40013, message="System tool cannot be deleted")
-        self.db.delete(tool)
-        self.db.commit()
+        refs = find_skill_refs_for_tool(self.db, tool.id)
+        if refs:
+            package_id, version_id = refs[0]
+            raise skill_reference_conflict(
+                package_id=package_id,
+                version_id=version_id,
+                message="Remote tool is referenced by a published skill binding/dependency",
+            )
+        try:
+            self.db.delete(tool)
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(
+                status_code=409,
+                code=40994,
+                message="Remote tool is referenced by a published skill binding/dependency",
+            ) from exc
 
     # -------------------------
     # Skills CRUD
@@ -4387,7 +4590,9 @@ class AssistantConfigService:
         except IntegrityError as exc:
             self.db.rollback()
             raise ApiException(status_code=409, code=40920, message="Create skill failed") from exc
-        return self.get_skill(skill.id)
+        created = self.get_skill(skill.id)
+        self._best_effort_shadow_sync_one(created.id)
+        return created
 
     def update_skill(self, id: UUID, request: AssistantSkillUpdateRequest) -> AssistantSkill:
         skill = self.get_skill(id)
@@ -4483,7 +4688,9 @@ class AssistantConfigService:
         except IntegrityError as exc:
             self.db.rollback()
             raise ApiException(status_code=409, code=40921, message="Update skill failed") from exc
-        return self.get_skill(skill.id)
+        updated = self.get_skill(skill.id)
+        self._best_effort_shadow_sync_one(updated.id)
+        return updated
 
     def reset_skill(self, id: UUID, confirm: bool) -> AssistantSkill:
         """复位系统技能到默认配置"""
@@ -4508,14 +4715,47 @@ class AssistantConfigService:
             self.db.rollback()
             raise ApiException(status_code=409, code=40922, message="Reset skill failed") from exc
         self.db.refresh(skill)
+        self._best_effort_shadow_sync_one(skill.id)
         return skill
 
     def delete_skill(self, id: UUID) -> None:
         skill = self.get_skill(id)
         if skill.is_system:
             raise ApiException(status_code=400, code=40022, message="System skill cannot be deleted")
+        self._retire_shadow_packages_for_legacy_skill(skill)
         self.db.delete(skill)
         self.db.commit()
+
+    def _retire_shadow_packages_for_legacy_skill(self, skill: AssistantSkill) -> None:
+        """Retire shadow packages tied to a legacy skill so package names can be reclaimed.
+
+        Clears the current published pointer (history rows stay), renames the package
+        to a retired unique canonical name, and detaches ``legacy_skill_id``.
+
+        Alias rows are append-only/immutable under Plan 01 PG guards, so they are
+        left in place as historical tombstones. The package rename frees
+        ``assistant_skill_package.canonical_name`` uniqueness for a future package.
+        """
+        from uuid import uuid4
+
+        from app.assistant.skills.models import AssistantSkillPackage
+
+        packages = (
+            self.db.query(AssistantSkillPackage)
+            .filter(AssistantSkillPackage.legacy_skill_id == skill.id)
+            .all()
+        )
+        for package in packages:
+            if package.published_version_id is not None:
+                package.published_version_id = None
+            # Free the package-table canonical name for future reclaim.
+            old_name = package.canonical_name or "skill"
+            token = uuid4().hex[:12]
+            prefix = f"retired-{token}-"
+            max_old = max(1, 64 - len(prefix))
+            package.canonical_name = f"{prefix}{old_name[:max_old]}"
+            package.catalog_enabled = False
+            package.legacy_skill_id = None
 
     def reset_all_system_skills(self, confirm: bool, *, commit: bool = True) -> dict:
         """重置所有系统技能到默认配置，并清理已下线的系统技能"""
@@ -4585,6 +4825,7 @@ class AssistantConfigService:
             except IntegrityError as exc:
                 self.db.rollback()
                 raise ApiException(status_code=409, code=40923, message="Reset all skills failed") from exc
+            self._best_effort_shadow_sync_all()
 
         return {
             "resetCount": reset_count,
@@ -4754,81 +4995,11 @@ class AssistantConfigService:
 
     @staticmethod
     def _collect_workflow_tool_names(workflow_nodes: list) -> set[str]:
-        tool_names: set[str] = set()
-
-        def _walk(nodes: list) -> None:
-            for node in nodes:
-                if isinstance(node, dict):
-                    node_type = node.get("node_type") or node.get("nodeType")
-                    cfg = node.get("config") or {}
-                else:
-                    node_type = getattr(node, "node_type", None)
-                    cfg = getattr(node, "config", None) or {}
-
-                if node_type == "tool" and isinstance(cfg, dict):
-                    tool_name = cfg.get("toolName") or cfg.get("tool_name")
-                    if isinstance(tool_name, str) and tool_name.strip():
-                        tool_names.add(tool_name.strip())
-
-                if node_type == "knowledge_retrieval":
-                    tool_names.add("kb_search")
-
-                if node_type == "agent" and isinstance(cfg, dict):
-                    raw_tool_names = cfg.get("toolNames", cfg.get("tool_names"))
-                    if isinstance(raw_tool_names, list):
-                        for raw_name in raw_tool_names:
-                            if not isinstance(raw_name, str):
-                                continue
-                            tool_name = raw_name.strip()
-                            if tool_name:
-                                tool_names.add(tool_name)
-                    knowledge_enabled = cfg.get("knowledgeEnabled", cfg.get("knowledge_enabled"))
-                    if isinstance(knowledge_enabled, bool) and knowledge_enabled:
-                        tool_names.add("kb_search")
-
-                if node_type in {"iteration", "loop"} and isinstance(cfg, dict):
-                    body_nodes = cfg.get("bodyNodes", cfg.get("body_nodes"))
-                    if isinstance(body_nodes, list):
-                        _walk(body_nodes)
-
-        _walk(workflow_nodes)
-        return tool_names
+        return pure_collect_workflow_tool_names(workflow_nodes)
 
     @staticmethod
     def _collect_workflow_custom_model_ids(workflow_nodes: list) -> set[UUID]:
-        model_ids: set[UUID] = set()
-
-        def _walk(nodes: list) -> None:
-            for node in nodes:
-                if isinstance(node, dict):
-                    node_type = node.get("node_type") or node.get("nodeType")
-                    cfg = node.get("config") or {}
-                else:
-                    node_type = getattr(node, "node_type", None)
-                    cfg = getattr(node, "config", None) or {}
-
-                if node_type in {"llm", "parameter_extractor", "agent"} and isinstance(cfg, dict):
-                    model_source_raw = cfg.get("modelSource", cfg.get("model_source", "default"))
-                    model_source = str(model_source_raw or "default").strip().lower()
-                    if model_source == "custom":
-                        model_id_raw = cfg.get("modelId", cfg.get("model_id"))
-                        if isinstance(model_id_raw, str):
-                            model_id_text = model_id_raw.strip()
-                            if model_id_text:
-                                try:
-                                    model_ids.add(UUID(model_id_text))
-                                except Exception:
-                                    # UUID format is validated in workflow validator. Ignore here.
-                                    pass
-
-                if node_type in {"iteration", "loop"} and isinstance(cfg, dict):
-                    body_nodes = cfg.get("bodyNodes", cfg.get("body_nodes"))
-                    if isinstance(body_nodes, list):
-                        _walk(body_nodes)
-
-        _walk(workflow_nodes)
-
-        return model_ids
+        return pure_collect_workflow_custom_model_ids(workflow_nodes)
 
     def _validate_workflow_tool_names(self, tool_names: set[str]) -> None:
         if not tool_names:
@@ -5255,7 +5426,9 @@ class AssistantConfigService:
         except IntegrityError as exc:
             self.db.rollback()
             raise ApiException(status_code=409, code=40937, message="Publish workflow failed") from exc
-        return self.get_workflow(workflow.id)
+        published_workflow = self.get_workflow(workflow.id)
+        self._best_effort_shadow_sync_for_workflow(published_workflow.id)
+        return published_workflow
 
     def rollback_workflow_version(self, workflow_id: UUID, version_id: UUID) -> RollbackVersionResponse:
         workflow = self.get_workflow(workflow_id)
@@ -5303,6 +5476,11 @@ class AssistantConfigService:
         )
 
     def delete_workflow_version(self, workflow_id: UUID, version_id: UUID) -> DeleteVersionResponse:
+        from app.assistant.skills.resolution import (
+            find_skill_refs_for_workflow_version,
+            skill_reference_conflict,
+        )
+
         workflow = self.get_workflow(workflow_id)
         if workflow.is_system:
             self._raise_system_workflow_readonly()
@@ -5316,6 +5494,15 @@ class AssistantConfigService:
         )
         if version is None:
             raise ApiException(status_code=404, code=40434, message=f"Workflow version not found: {version_id}")
+
+        skill_refs = find_skill_refs_for_workflow_version(self.db, version.id)
+        if skill_refs:
+            package_id, skill_version_id = skill_refs[0]
+            raise skill_reference_conflict(
+                package_id=package_id,
+                version_id=skill_version_id,
+                message="Workflow version is referenced by a published skill binding/dependency",
+            )
 
         pinned_refs = self._workflow_call_referrers_for_workflow_version(version.id)
         if pinned_refs:
@@ -5396,9 +5583,19 @@ class AssistantConfigService:
         )
 
     def delete_workflow(self, workflow_id: UUID, *, confirm_rebind_system_behaviors: bool = False) -> None:
+        from app.assistant.skills.resolution import find_skill_refs_for_workflow, skill_reference_conflict
+
         workflow = self.get_workflow(workflow_id)
         if workflow.is_system:
             self._raise_system_workflow_readonly()
+        skill_refs = find_skill_refs_for_workflow(self.db, workflow.id)
+        if skill_refs:
+            package_id, skill_version_id = skill_refs[0]
+            raise skill_reference_conflict(
+                package_id=package_id,
+                version_id=skill_version_id,
+                message="Workflow is referenced by a published skill binding/dependency",
+            )
         workflow_call_refs = self._workflow_call_referrers_for_workflow(workflow.id)
         if workflow_call_refs:
             raise ApiException(
@@ -5695,7 +5892,9 @@ class AssistantConfigService:
         except IntegrityError as exc:
             self.db.rollback()
             raise ApiException(status_code=409, code=40939, message="Publish agent profile failed") from exc
-        return self.get_agent_profile(profile.id)
+        published_profile = self.get_agent_profile(profile.id)
+        self._best_effort_shadow_sync_for_agent(published_profile.id)
+        return published_profile
 
     def rollback_agent_profile_version(self, agent_profile_id: UUID, version_id: UUID) -> RollbackVersionResponse:
         profile = self.get_agent_profile(agent_profile_id)
@@ -5757,6 +5956,11 @@ class AssistantConfigService:
         )
 
     def delete_agent_profile_version(self, agent_profile_id: UUID, version_id: UUID) -> DeleteVersionResponse:
+        from app.assistant.skills.resolution import (
+            find_skill_refs_for_agent_version,
+            skill_reference_conflict,
+        )
+
         profile = self.get_agent_profile(agent_profile_id)
         if profile.is_system:
             self._raise_system_agent_readonly()
@@ -5770,6 +5974,15 @@ class AssistantConfigService:
         )
         if version is None:
             raise ApiException(status_code=404, code=40435, message=f"Agent version not found: {version_id}")
+
+        skill_refs = find_skill_refs_for_agent_version(self.db, version.id)
+        if skill_refs:
+            package_id, skill_version_id = skill_refs[0]
+            raise skill_reference_conflict(
+                package_id=package_id,
+                version_id=skill_version_id,
+                message="Agent version is referenced by a published skill binding/dependency",
+            )
 
         protected_ids = self._get_agent_protected_version_ids(profile)
         if version.id in protected_ids:
@@ -5835,9 +6048,19 @@ class AssistantConfigService:
         )
 
     def delete_agent_profile(self, agent_profile_id: UUID, *, confirm_rebind_system_behaviors: bool = False) -> None:
+        from app.assistant.skills.resolution import find_skill_refs_for_agent, skill_reference_conflict
+
         profile = self.get_agent_profile(agent_profile_id)
         if profile.is_system:
             self._raise_system_agent_readonly()
+        skill_refs = find_skill_refs_for_agent(self.db, profile.id)
+        if skill_refs:
+            package_id, skill_version_id = skill_refs[0]
+            raise skill_reference_conflict(
+                package_id=package_id,
+                version_id=skill_version_id,
+                message="Agent profile is referenced by a published skill binding/dependency",
+            )
         if profile.skills:
             skill_names = ", ".join(sorted(s.name for s in profile.skills))
             raise ApiException(

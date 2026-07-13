@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     app_env: str = Field(default="development", alias="APP_ENV")
     debug: bool = Field(default=False, alias="DEBUG")
     app_default_locale: str = Field(default="zh", alias="APP_DEFAULT_LOCALE")
+    # Immutable image/git revision in staging/production. Local/test may use "development".
+    app_build_revision: str = Field(default="development", alias="APP_BUILD_REVISION")
 
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")

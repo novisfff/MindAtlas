@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import CheckConstraint, Column, ForeignKey, Index, String, Text
+from sqlalchemy import CheckConstraint, Column, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -16,6 +16,13 @@ class AiCredential(UuidPrimaryKeyMixin, TimestampMixin, Base):
     base_url = Column(String(2048), nullable=False)
     api_key_encrypted = Column(Text, nullable=False)
     api_key_hint = Column(String(64), nullable=False)
+    # Execution-sensitive credential-slot revision (Plan 01 Decision 8).
+    runtime_revision = Column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default=text("1"),
+    )
 
     models = relationship(
         "AiModel",
@@ -38,6 +45,13 @@ class AiModel(UuidPrimaryKeyMixin, TimestampMixin, Base):
     name = Column(String(255), nullable=False)
     # llm | embedding
     model_type = Column(String(32), nullable=False)
+    # Execution-sensitive model revision (Plan 01 Decision 8).
+    runtime_revision = Column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default=text("1"),
+    )
 
     credential = relationship("AiCredential", back_populates="models")
 

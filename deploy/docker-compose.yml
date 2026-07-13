@@ -100,17 +100,26 @@ services:
       - mindatlas-network
 
   # Backend API
+  # Production-like deploys must set a non-development APP_BUILD_REVISION
+  # (required substitution below). For local quick-start, use
+  # docker-compose.override.yml or export APP_BUILD_REVISION / APP_ENV.
   api:
     build:
       context: ../backend
       dockerfile: Dockerfile
       target: runtime
+      args:
+        # Require an explicit revision for image labels (no development default).
+        APP_BUILD_REVISION: ${APP_BUILD_REVISION:?Set APP_BUILD_REVISION to a deployment-immutable value}
     container_name: mindatlas-api
     environment:
       # Database
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-mindatlas}
       # Quick-start friendly defaults. Override these from `.env` in production if needed.
       AI_PROVIDER_FERNET_KEY: ${AI_PROVIDER_FERNET_KEY:-b98esSSrtceWc4IUOFGR-f_6I8FfnxtpjjYQZN51RCw=}
+      APP_ENV: ${APP_ENV:-production}
+      # Required substitution: do not default to development in this compose file.
+      APP_BUILD_REVISION: ${APP_BUILD_REVISION:?Set APP_BUILD_REVISION to a deployment-immutable value}
       LIGHTRAG_ENABLED: "${LIGHTRAG_ENABLED:-true}"
       DOCLING_WORKER_ENABLED: "${DOCLING_WORKER_ENABLED:-true}"
       SCHEDULER_ENABLED: "${SCHEDULER_ENABLED:-true}"

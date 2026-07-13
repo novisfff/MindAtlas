@@ -22,9 +22,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Stage 2: Base - Common runtime configuration
 FROM python:3.11-slim AS base
 
+# Immutable image/git revision for skill capability publication (override at build).
+ARG APP_BUILD_REVISION=development
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/opt/venv/bin:$PATH"
+    PATH="/opt/venv/bin:$PATH" \
+    APP_BUILD_REVISION=${APP_BUILD_REVISION}
 
 WORKDIR /app
 
