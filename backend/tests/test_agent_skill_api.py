@@ -636,6 +636,64 @@ class AgentSkillApiTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, blob)
 
+    def test_map_package_io_error_size_vs_validation(self) -> None:
+        """Bare 'file ' must not force 41392; only size/count phrases do."""
+        from app.assistant.skills.router import _map_package_io_error
+
+        size_msgs = [
+            "file 'refs/a.md' exceeds size limit of 100 bytes",
+            "SKILL.md exceeds size limit",
+            "package entry count exceeds limit",
+            "ZIP entry count exceeds limit",
+            "ZIP entry 'x' declared size exceeds limit of 10",
+            "ZIP entry 'x' streamed size exceeds limit of 10",
+        ]
+        for msg in size_msgs:
+            mapped = _map_package_io_error(ValueError(msg))
+            self.assertEqual(mapped.status_code, 413, msg)
+            self.assertEqual(mapped.code, 41392, msg)
+
+        validation_msgs = [
+            "package file map must be a non-empty mapping",
+            "ZIP archive has no file entries",
+            "file path must be a non-empty string",
+            "file path must not contain backslashes",
+            "file path must be relative (no absolute paths)",
+        ]
+        for msg in validation_msgs:
+            mapped = _map_package_io_error(ValueError(msg))
+            self.assertEqual(mapped.status_code, 422, msg)
+            self.assertEqual(mapped.code, 42292, msg)
+
+    def test_sort_key_created_desc_secondary_id_desc(self) -> None:
+        """Equal timestamps must sort by id DESC for stable list order."""
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+        from uuid import UUID
+
+        from app.assistant.skills.router import _sort_key_created_desc
+
+        ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        low = SimpleNamespace(
+            created_at=ts, id=UUID("00000000-0000-0000-0000-000000000001")
+        )
+        mid = SimpleNamespace(
+            created_at=ts, id=UUID("00000000-0000-0000-0000-000000000002")
+        )
+        high = SimpleNamespace(
+            created_at=ts, id=UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+        )
+        items = [low, mid, high]
+        items.sort(key=_sort_key_created_desc)
+        self.assertEqual(
+            [str(item.id) for item in items],
+            [
+                "ffffffff-ffff-ffff-ffff-ffffffffffff",
+                "00000000-0000-0000-0000-000000000002",
+                "00000000-0000-0000-0000-000000000001",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

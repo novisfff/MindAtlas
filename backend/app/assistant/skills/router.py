@@ -210,15 +210,15 @@ def _map_package_io_error(exc: Exception) -> ApiException:
     if "total uncompressed" in lower or "total decoded" in lower:
         return ApiException(status_code=413, code=41391, message=msg)
 
+    # Size / entry-count limits only. Do not match bare "file " — messages like
+    # "package file map must be…", "ZIP archive has no file entries", or
+    # "file path must be…" are archive/path validation (42292).
     if any(
         token in lower
         for token in (
             "exceeds size limit",
             "entry count",
-            "path length",
-            "utf-8 bytes",
-            "file ",
-            "exceeds limit",
+            "size exceeds limit",
         )
     ):
         return ApiException(status_code=413, code=41392, message=msg)
@@ -308,11 +308,14 @@ def _attachment_disposition(filename: str) -> str:
     return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded}"
 
 
-def _sort_key_created_desc(item: Any) -> tuple[Any, str]:
+def _sort_key_created_desc(item: Any) -> tuple[Any, tuple[int, ...]]:
+    """Stable list ordering: created_at DESC, then id DESC."""
     created = getattr(item, "created_at", None)
     # None created_at sorts last among DESC (treat as minimal).
     ts = created.timestamp() if created is not None else float("-inf")
-    return (-ts, str(getattr(item, "id", "")))
+    # Ascending sort on negated ordinals yields reverse lexicographic id order.
+    id_str = str(getattr(item, "id", ""))
+    return (-ts, tuple(-ord(c) for c in id_str))
 
 
 # ---------------------------------------------------------------------------
