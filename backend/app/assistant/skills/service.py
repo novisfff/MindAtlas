@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.assistant.domain.contracts import ResolvedSkillRef
+from app.assistant.domain.digests import sha256_bytes
 from app.assistant.skills.contracts import (
     ParsedSkillPackage,
     is_reserved_skill_lookup_name,
@@ -351,20 +352,27 @@ class AgentSkillService:
                 code=40492,
                 message=f"Skill resource blob missing for: {path}",
             )
-        # Verify exact bytes match stored digest/size.
+        # Verify exact bytes match stored digest/size and content digests.
+        content = bytes(blob.content)
         if blob.byte_size != resource.byte_size or blob.sha256 != resource.sha256:
             raise ApiException(
                 status_code=409,
                 code=40993,
                 message="resource blob metadata mismatch",
             )
-        if len(blob.content) != blob.byte_size:
+        if len(content) != blob.byte_size:
             raise ApiException(
                 status_code=409,
                 code=40993,
                 message="resource blob size mismatch",
             )
-        return bytes(blob.content)
+        if sha256_bytes(content) != blob.sha256:
+            raise ApiException(
+                status_code=409,
+                code=40993,
+                message="resource blob content digest mismatch",
+            )
+        return content
 
     def resolve_published_alias(self, name: str) -> ResolvedSkillRef:
         try:

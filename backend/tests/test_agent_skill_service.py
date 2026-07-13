@@ -504,6 +504,54 @@ class AgentSkillServiceLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(raw, b"secret-bytes-xyz")
 
+    def test_get_resource_bytes_fails_closed_when_blob_content_corrupted(self) -> None:
+        from app.assistant.skills.models import (
+            AssistantSkillResourceBlob,
+            AssistantSkillVersionResource,
+        )
+        from app.assistant.skills.schemas import CreateSkillPackageCommand
+        from app.common.exceptions import ApiException
+
+        original = b"trusted-resource-bytes"
+        created = self.svc.create_native_package(
+            CreateSkillPackageCommand(
+                parsed=_parse(
+                    name="corrupt-blob-pack",
+                    resources={"references/guide.md": original},
+                ),
+                version_name="s1",
+            )
+        )
+        resource = (
+            self.db.query(AssistantSkillVersionResource)
+            .filter(
+                AssistantSkillVersionResource.skill_version_id
+                == created.draft_version.id,
+                AssistantSkillVersionResource.path == "references/guide.md",
+            )
+            .one()
+        )
+        blob = self.db.get(AssistantSkillResourceBlob, resource.blob_id)
+        assert blob is not None
+        stored_sha = blob.sha256
+        stored_size = blob.byte_size
+        # Corrupt payload in place while leaving digest/size columns unchanged.
+        blob.content = b"x" * stored_size
+        self.db.commit()
+        reloaded = self.db.get(AssistantSkillResourceBlob, resource.blob_id)
+        assert reloaded is not None
+        self.assertEqual(reloaded.sha256, stored_sha)
+        self.assertEqual(reloaded.byte_size, stored_size)
+        self.assertEqual(len(reloaded.content), stored_size)
+        self.assertNotEqual(bytes(reloaded.content), original)
+
+        with self.assertRaises(ApiException) as ctx:
+            self.svc.get_resource_bytes(
+                created.id, created.draft_version.id, "references/guide.md"
+            )
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.code, 40993)
+
     def test_native_create_cannot_assign_shadow_and_stays_catalog_disabled(self) -> None:
         from app.assistant.skills.schemas import CreateSkillPackageCommand
         from app.assistant.skills.models import AssistantSkillPackage
