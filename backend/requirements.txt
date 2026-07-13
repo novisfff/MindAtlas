@@ -12,6 +12,11 @@ langchain>=0.3.0
 langchain-openai>=0.2.0
 langchain-core>=0.3.0,<1.0
 langgraph==0.3.34
+# Direct pin for Plan 03 Chat Completions adapter. Intersection of clean
+# Python 3.11 langchain-openai 0.3.35 metadata (openai>=1.104.2,<3.0.0) and
+# the SDK APIs exercised by adapter tests (OpenAI client, streaming create,
+# httpx transport injection, APIStatusError/timeout/connection errors).
+openai>=1.104.2,<3.0.0
 lightrag-hku==1.4.9.11
 neo4j>=5,<6
 apscheduler>=3.10,<4
