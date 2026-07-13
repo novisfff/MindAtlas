@@ -10,6 +10,9 @@ from app.ai_registry.schemas import (
     AiCredentialResponse,
     AiCredentialTestConnectionResponse,
     AiCredentialUpdateRequest,
+    AiModelCapabilityProbeCapabilityItem,
+    AiModelCapabilityProbeResponse,
+    AiModelCapabilityProbeRunRequest,
     AiModelCreateRequest,
     AiModelResponse,
     AiModelUpdateRequest,
@@ -19,7 +22,14 @@ from app.ai_registry.schemas import (
     ModelBindingsResponse,
     UpdateModelBindingsRequest,
 )
-from app.ai_registry.service import AiBindingService, AiCredentialService, AiModelService
+from app.ai_registry.service import (
+    AiBindingService,
+    AiCredentialService,
+    AiModelCapabilityProbeService,
+    AiModelService,
+    LiveProbeResult,
+)
+from app.ai_registry.models import AiModelCapabilityProbe
 from app.common.responses import ApiResponse
 from app.database import get_db
 
@@ -128,6 +138,96 @@ def delete_model(
     svc = AiModelService(db)
     svc.delete(id, confirm_bound_bindings=confirm_bound_bindings)
     return ApiResponse.ok(None)
+
+
+def _probe_capabilities_payload(raw: object) -> dict[str, dict[str, object | None]]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, object | None]] = {}
+    for key, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        out[str(key)] = {
+            "observation": value.get("observation"),
+            "safeReasonCode": value.get("safeReasonCode") or value.get("safe_reason_code"),
+        }
+    return out
+
+
+def _probe_to_response(
+    probe: AiModelCapabilityProbe,
+    *,
+    is_current: bool,
+    is_stale: bool,
+    promotion_outcome: str | None = None,
+) -> dict:
+    caps_raw = _probe_capabilities_payload(probe.capabilities)
+    caps = {
+        key: AiModelCapabilityProbeCapabilityItem(
+            observation=item["observation"],  # type: ignore[arg-type]
+            safe_reason_code=item.get("safeReasonCode"),  # type: ignore[arg-type]
+        )
+        for key, item in caps_raw.items()
+        if item.get("observation") in {"passed", "failed", "not_observed"}
+    }
+    payload = AiModelCapabilityProbeResponse(
+        id=probe.id,
+        model_id=probe.model_id,
+        probe_contract_version=int(probe.probe_contract_version),
+        adapter_key=probe.adapter_key,
+        adapter_revision=probe.adapter_revision,
+        model_config_digest=probe.model_config_digest,
+        status=probe.status,  # type: ignore[arg-type]
+        capabilities=caps,
+        probe_digest=probe.probe_digest,
+        safe_error_code=probe.safe_error_code,
+        safe_error_summary=probe.safe_error_summary,
+        created_at=probe.created_at,
+        is_current=is_current,
+        is_stale_for_current_config=is_stale,
+        promotion_outcome=promotion_outcome,  # type: ignore[arg-type]
+    )
+    return payload.model_dump(by_alias=True)
+
+
+@model_router.post("/{model_id}/capability-probe", response_model=ApiResponse)
+def run_capability_probe(
+    model_id: UUID,
+    request: AiModelCapabilityProbeRunRequest,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    svc = AiModelCapabilityProbeService(db)
+    result: LiveProbeResult = svc.run_live_probe(
+        model_id,
+        adapter_key=request.adapter_key,
+        confirm_provider_call=request.confirm_provider_call,
+        promote=request.promote,
+    )
+    return ApiResponse.ok(
+        _probe_to_response(
+            result.probe,
+            is_current=result.is_current,
+            is_stale=result.is_stale_for_current_config,
+            promotion_outcome=result.promotion_outcome,
+        )
+    )
+
+
+@model_router.get("/{model_id}/capability-probes", response_model=ApiResponse)
+def list_capability_probes(
+    model_id: UUID,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    svc = AiModelCapabilityProbeService(db)
+    items = svc.list_for_model(model_id, limit=limit, offset=offset)
+    return ApiResponse.ok(
+        [
+            _probe_to_response(probe, is_current=is_current, is_stale=is_stale)
+            for probe, is_current, is_stale in items
+        ]
+    )
 
 
 # ==================== Bindings ====================

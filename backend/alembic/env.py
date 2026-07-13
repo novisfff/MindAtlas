@@ -20,7 +20,12 @@ from app.entry.models import Entry, entry_tag  # noqa: E402, F401
 from app.relation.models import Relation, RelationType  # noqa: E402, F401
 from app.attachment.models import Attachment  # noqa: E402, F401
 from app.ai_provider.models import AiProvider  # noqa: E402, F401
-from app.ai_registry.models import AiCredential, AiModel, AiComponentBinding  # noqa: E402, F401
+from app.ai_registry.models import (  # noqa: E402, F401
+    AiCredential,
+    AiModel,
+    AiModelCapabilityProbe,
+    AiComponentBinding,
+)
 from app.assistant.models import Conversation, Message  # noqa: E402, F401
 from app.assistant.skills.models import (  # noqa: E402, F401
     AssistantMainAgentProfile,

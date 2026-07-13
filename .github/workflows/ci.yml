@@ -111,7 +111,7 @@ jobs:
           alembic heads
 
       - name: PostgreSQL migration preservation and guard tests
-        run: python -m pytest tests/test_agent_skill_postgres_migration.py -q
+        run: python -m pytest tests/test_agent_skill_postgres_migration.py tests/test_provider_model_probe_postgres.py -q
 
       - name: System tool golden digest smoke
         run: python -m pytest tests/test_binding_json_schema.py::test_system_tool_golden_schemas_and_contract_set_digest_are_stable -q

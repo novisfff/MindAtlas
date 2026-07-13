@@ -37,6 +37,13 @@ class Settings(BaseSettings):
         alias="OPENCLAW_CAPABILITY_RUNTIME_MODE",
     )
 
+    # Plan 03 live model capability probe (paid Provider call). Default-disabled.
+    # confirmProviderCall=true is cost acknowledgement only, not authentication.
+    ai_model_capability_probe_enabled: bool = Field(
+        default=False,
+        alias="AI_MODEL_CAPABILITY_PROBE_ENABLED",
+    )
+
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_json: bool = Field(default=False, alias="LOG_JSON")

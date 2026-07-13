@@ -1,17 +1,33 @@
 from __future__ import annotations
 
+import threading
+from dataclasses import dataclass
+from typing import Any, Callable, Literal
 from uuid import UUID
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from sqlalchemy import desc
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.ai_provider.crypto import api_key_hint, decrypt_api_key, encrypt_api_key
-from app.ai_registry.models import AiComponentBinding, AiCredential, AiModel
+from app.ai_registry.models import (
+    AiComponentBinding,
+    AiCredential,
+    AiModel,
+    AiModelCapabilityProbe,
+)
+from app.ai_registry.runtime import (
+    invalidate_model_probe_pointers,
+    lock_credential,
+    lock_model_with_credential,
+    lock_models_for_credential_sorted,
+)
 from app.ai_registry.schemas import AiComponent, AiModelType, DiscoveredModel
 from app.common.exceptions import ApiException
 from app.common.ssrf import normalize_openai_base_url, validate_url_ssrf
+from app.config import get_settings
 
 _OPENAI_COMPAT_DEFAULT_HEADERS = {
     "content-type": "application/json",
@@ -19,6 +35,21 @@ _OPENAI_COMPAT_DEFAULT_HEADERS = {
     "user-agent": "MindAtlas/1.0",
 }
 _AI_COMPONENTS: tuple[AiComponent, ...] = ("assistant", "lightrag", "workflow_copilot")
+
+PromotionOutcome = Literal["promoted", "not_requested", "config_changed"]
+
+# Per-process single-flight for paid live probes (cost safeguard only).
+_PROBE_FLIGHT_LOCK = threading.Lock()
+_PROBE_IN_FLIGHT: set[UUID] = set()
+
+
+def _credential_runtime_snapshot(cred: AiCredential) -> dict[str, Any]:
+    """Plan 01 credential execution snapshot with normalized base URL semantics."""
+    from app.assistant.skills.resolution import credential_runtime_sensitive_payload
+
+    payload = credential_runtime_sensitive_payload(cred)
+    payload["base_url"] = normalize_openai_base_url(str(payload.get("base_url") or ""))
+    return payload
 
 
 def _infer_model_type(model_id: str) -> AiModelType:
@@ -76,18 +107,12 @@ class AiCredentialService:
         return cred
 
     def update(self, id: UUID, *, name: str | None, base_url: str | None, api_key: str | None) -> AiCredential:
-        from app.assistant.skills.resolution import credential_runtime_sensitive_payload
-
-        cred = (
-            self.db.query(AiCredential)
-            .filter(AiCredential.id == id)
-            .with_for_update()
-            .first()
-        )
+        # Canonical lock order: credential first, then associated models sorted by id.
+        cred = lock_credential(self.db, id)
         if not cred:
             raise ApiException(status_code=404, code=40400, message=f"AiCredential not found: {id}")
 
-        before = credential_runtime_sensitive_payload(cred)
+        before = _credential_runtime_snapshot(cred)
 
         if name is not None and cred.name.lower() != name.lower():
             existing = self.db.query(AiCredential).filter(AiCredential.name.ilike(name)).first()
@@ -100,16 +125,21 @@ class AiCredentialService:
             cred.base_url = base_url
 
         if api_key is not None:
+            # Any supplied API-key replacement is treated as execution-sensitive
+            # (Fernet ciphertext always changes).
             try:
                 cred.api_key_encrypted = encrypt_api_key(api_key)
             except Exception as exc:
                 raise ApiException(status_code=500, code=50001, message="AI_PROVIDER_FERNET_KEY not configured") from exc
             cred.api_key_hint = api_key_hint(api_key)
 
-        after = credential_runtime_sensitive_payload(cred)
+        after = _credential_runtime_snapshot(cred)
         runtime_sensitive_changed = before != after
         if runtime_sensitive_changed:
+            # Lock models in sorted order inside the same transaction before mutating revision/pointers.
+            models = lock_models_for_credential_sorted(self.db, cred.id)
             cred.runtime_revision = int(cred.runtime_revision or 1) + 1
+            invalidate_model_probe_pointers(models)
 
         try:
             self.db.commit()
@@ -287,12 +317,8 @@ class AiModelService:
     def update(self, id: UUID, *, name: str | None, model_type: AiModelType | None) -> AiModel:
         from app.assistant.skills.resolution import model_runtime_sensitive_payload
 
-        m = (
-            self.db.query(AiModel)
-            .filter(AiModel.id == id)
-            .with_for_update()
-            .first()
-        )
+        # Canonical lock order: credential then model.
+        _cred, m = lock_model_with_credential(self.db, id)
         if not m:
             raise ApiException(status_code=404, code=40400, message=f"AiModel not found: {id}")
         before = model_runtime_sensitive_payload(m)
@@ -304,6 +330,7 @@ class AiModelService:
         runtime_sensitive_changed = before != after
         if runtime_sensitive_changed:
             m.runtime_revision = int(m.runtime_revision or 1) + 1
+            invalidate_model_probe_pointers([m])
         try:
             self.db.commit()
         except IntegrityError as exc:
@@ -431,3 +458,497 @@ class AiBindingService:
             except Exception:
                 pass
         return row
+
+
+@dataclass(frozen=True)
+class LiveProbeResult:
+    """Persisted probe evidence plus promotion metadata for API responses."""
+
+    probe: AiModelCapabilityProbe
+    promotion_outcome: PromotionOutcome
+    is_current: bool
+    is_stale_for_current_config: bool
+
+
+@dataclass(frozen=True)
+class _ProbeConfigSnapshot:
+    model_id: UUID
+    model_name: str
+    model_type: str
+    model_runtime_revision: int
+    credential_id: UUID
+    credential_runtime_revision: int
+    base_url: str
+    model_config_digest: str
+    endpoint_identity: dict[str, Any]
+    adapter_key: str
+    adapter_revision: str
+    app_build_revision: str
+
+
+class AiModelCapabilityProbeService:
+    """Persist immutable capability probe evidence and manage the current pointer.
+
+    There is intentionally no update/delete method. Probe rows are append-only.
+    """
+
+    def __init__(
+        self,
+        db: Session,
+        *,
+        enabled: bool | None = None,
+        provider_runner: Callable[..., Any] | None = None,
+        app_build_revision: str | None = None,
+        adapter_revision: str | None = None,
+    ):
+        self.db = db
+        settings = get_settings()
+        self.enabled = (
+            bool(settings.ai_model_capability_probe_enabled)
+            if enabled is None
+            else bool(enabled)
+        )
+        self._provider_runner = provider_runner
+        self._app_build_revision = (
+            app_build_revision
+            if app_build_revision is not None
+            else str(settings.app_build_revision or "development")
+        )
+        if adapter_revision is not None:
+            self._adapter_revision = adapter_revision
+        else:
+            from app.assistant.provider_loop.adapters.openai_chat import (
+                DEFAULT_ADAPTER_REVISION,
+            )
+
+            self._adapter_revision = DEFAULT_ADAPTER_REVISION
+
+    def list_for_model(
+        self,
+        model_id: UUID,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[tuple[AiModelCapabilityProbe, bool, bool]]:
+        """Return newest-first history with (probe, is_current, is_stale) markers."""
+        model = self.db.query(AiModel).filter(AiModel.id == model_id).first()
+        if not model:
+            raise ApiException(status_code=404, code=40400, message=f"AiModel not found: {model_id}")
+
+        current_digest = self._try_current_config_digest(model)
+        rows = (
+            self.db.query(AiModelCapabilityProbe)
+            .filter(AiModelCapabilityProbe.model_id == model_id)
+            .order_by(
+                desc(AiModelCapabilityProbe.created_at),
+                desc(AiModelCapabilityProbe.id),
+            )
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        out: list[tuple[AiModelCapabilityProbe, bool, bool]] = []
+        for row in rows:
+            is_current = model.current_capability_probe_id == row.id
+            is_stale = (
+                current_digest is None
+                or row.model_config_digest != current_digest
+            )
+            out.append((row, is_current, is_stale))
+        return out
+
+    def run_live_probe(
+        self,
+        model_id: UUID,
+        *,
+        adapter_key: str,
+        confirm_provider_call: bool,
+        promote: bool = True,
+    ) -> LiveProbeResult:
+        """Run one explicit live probe, persist evidence, optionally promote."""
+        from app.assistant.provider_loop.adapters.openai_chat import ADAPTER_KEY
+        from app.assistant.provider_loop.probe import (
+            ModelCapabilityProbeEvidence,
+            PROBE_CONTRACT_VERSION,
+            build_endpoint_identity,
+            build_model_config_digest,
+            run_model_capability_probe,
+        )
+        from app.assistant.domain.contracts import create_model_ref, create_provider_ref
+        from app.assistant.provider_loop.adapters.openai_chat import (
+            ExactOpenAIChatRuntimeConfig,
+            OpenAIChatCompletionsAdapter,
+        )
+        from app.assistant.provider_loop.aliases import OPENAI_CHAT_PROVIDER_PROTOCOL
+
+        # 1. Gate / confirmation / adapter / model type — before decrypt/Provider.
+        if not self.enabled:
+            raise ApiException(
+                status_code=403,
+                code=40380,
+                message="Live model capability probe is disabled",
+            )
+        if not confirm_provider_call:
+            raise ApiException(
+                status_code=400,
+                code=40080,
+                message="confirmProviderCall=true is required for live probing",
+            )
+        if (adapter_key or "").strip() != ADAPTER_KEY:
+            raise ApiException(
+                status_code=400,
+                code=40081,
+                message=f"Unsupported adapterKey; only {ADAPTER_KEY} is available",
+            )
+
+        model = self.db.query(AiModel).filter(AiModel.id == model_id).first()
+        if not model:
+            raise ApiException(status_code=404, code=40400, message=f"AiModel not found: {model_id}")
+        if (model.model_type or "").strip() != "llm":
+            raise ApiException(
+                status_code=400,
+                code=40082,
+                message="Capability probe is only supported for llm models",
+            )
+        cred = (
+            self.db.query(AiCredential)
+            .filter(AiCredential.id == model.credential_id)
+            .first()
+        )
+        if not cred:
+            raise ApiException(
+                status_code=404,
+                code=40400,
+                message=f"AiCredential not found for model: {model_id}",
+            )
+
+        # Per-model single-flight (process-local cost safeguard).
+        with _PROBE_FLIGHT_LOCK:
+            if model_id in _PROBE_IN_FLIGHT:
+                raise ApiException(
+                    status_code=409,
+                    code=40980,
+                    message="Capability probe already running for this model",
+                )
+            _PROBE_IN_FLIGHT.add(model_id)
+
+        try:
+            # 2. Snapshot runtime config under short lock; release before Provider I/O.
+            snapshot = self._snapshot_locked_config(
+                model_id=model_id,
+                adapter_key=ADAPTER_KEY,
+            )
+
+            # 3. Secret-free endpoint revalidation + SSRF before decrypt.
+            try:
+                endpoint_identity = build_endpoint_identity(snapshot.base_url)
+            except Exception as exc:
+                raise ApiException(
+                    status_code=400,
+                    code=40083,
+                    message="Provider base URL rejected (user-info/query/fragment or invalid endpoint)",
+                ) from exc
+            if endpoint_identity != snapshot.endpoint_identity:
+                raise ApiException(
+                    status_code=409,
+                    code=40981,
+                    message="Provider endpoint identity drift before probe",
+                )
+            try:
+                validate_url_ssrf(
+                    normalize_openai_base_url(snapshot.base_url),
+                    raise_api_exception=True,
+                )
+            except ApiException:
+                raise
+            except Exception as exc:
+                raise ApiException(
+                    status_code=400,
+                    code=40023,
+                    message="Provider base URL failed SSRF validation",
+                ) from exc
+
+            try:
+                api_key = decrypt_api_key(
+                    self.db.query(AiCredential)
+                    .filter(AiCredential.id == snapshot.credential_id)
+                    .one()
+                    .api_key_encrypted
+                )
+            except Exception as exc:
+                raise ApiException(
+                    status_code=500,
+                    code=50002,
+                    message="Failed to decrypt API key",
+                ) from exc
+            api_key = (api_key or "").strip()
+            if not api_key:
+                raise ApiException(
+                    status_code=500,
+                    code=50002,
+                    message="Failed to decrypt API key",
+                )
+
+            # 4. Run bounded probe outside a long DB transaction.
+            if self._provider_runner is not None:
+                evidence = self._provider_runner(
+                    snapshot=snapshot,
+                    api_key=api_key,
+                )
+            else:
+                runtime_config = ExactOpenAIChatRuntimeConfig(
+                    model_id=snapshot.model_id,
+                    model_name=snapshot.model_name,
+                    model_type=snapshot.model_type,
+                    model_runtime_revision=snapshot.model_runtime_revision,
+                    credential_id=snapshot.credential_id,
+                    credential_runtime_revision=snapshot.credential_runtime_revision,
+                    model_config_digest=snapshot.model_config_digest,
+                    adapter_key=snapshot.adapter_key,
+                    adapter_revision=snapshot.adapter_revision,
+                    app_build_revision=snapshot.app_build_revision,
+                    base_url=snapshot.base_url,
+                    api_key=api_key,
+                    endpoint_identity=snapshot.endpoint_identity,
+                )
+                provider = OpenAIChatCompletionsAdapter(runtime_config=runtime_config)
+                provider_ref = create_provider_ref(
+                    provider_protocol=OPENAI_CHAT_PROVIDER_PROTOCOL,
+                    provider_config_id=snapshot.credential_id,
+                    provider_runtime_revision=snapshot.credential_runtime_revision,
+                    provider_config_digest=None,
+                    adapter_key=snapshot.adapter_key,
+                    adapter_revision=snapshot.adapter_revision,
+                    protocol_revision=None,
+                    app_build_revision=snapshot.app_build_revision,
+                )
+                model_ref = create_model_ref(
+                    model_id=snapshot.model_id,
+                    model_name=snapshot.model_name,
+                    model_type=snapshot.model_type,  # type: ignore[arg-type]
+                    model_runtime_revision=snapshot.model_runtime_revision,
+                    credential_id=snapshot.credential_id,
+                    credential_runtime_revision=snapshot.credential_runtime_revision,
+                    credential_config_digest=None,
+                    model_config_digest=snapshot.model_config_digest,
+                    provider_ref_digest=provider_ref.provider_ref_digest,
+                    capability_probe_id=None,
+                    capability_probe_digest=None,
+                )
+                evidence = run_model_capability_probe(
+                    provider=provider,
+                    model_ref=model_ref,
+                    app_build_revision=snapshot.app_build_revision,
+                )
+
+            if not isinstance(evidence, ModelCapabilityProbeEvidence):
+                raise ApiException(
+                    status_code=500,
+                    code=50080,
+                    message="Probe runner returned invalid evidence",
+                )
+
+            # 5-7. Re-lock, recompute digest, insert history, optional promote.
+            return self._persist_evidence(
+                model_id=model_id,
+                original_snapshot=snapshot,
+                evidence=evidence,
+                promote=promote,
+            )
+        finally:
+            with _PROBE_FLIGHT_LOCK:
+                _PROBE_IN_FLIGHT.discard(model_id)
+
+    def _snapshot_locked_config(
+        self,
+        *,
+        model_id: UUID,
+        adapter_key: str,
+    ) -> _ProbeConfigSnapshot:
+        from app.assistant.provider_loop.probe import (
+            PROBE_CONTRACT_VERSION,
+            build_endpoint_identity,
+            build_model_config_digest,
+        )
+
+        cred, model = lock_model_with_credential(self.db, model_id)
+        if not model or not cred:
+            self.db.rollback()
+            raise ApiException(status_code=404, code=40400, message=f"AiModel not found: {model_id}")
+
+        base_url = normalize_openai_base_url(cred.base_url)
+        try:
+            endpoint_identity = build_endpoint_identity(base_url)
+        except Exception as exc:
+            self.db.rollback()
+            raise ApiException(
+                status_code=400,
+                code=40083,
+                message="Provider base URL rejected (user-info/query/fragment or invalid endpoint)",
+            ) from exc
+
+        digest = build_model_config_digest(
+            model_id=model.id,
+            model_name=model.name,
+            model_type=model.model_type,
+            model_runtime_revision=int(model.runtime_revision or 1),
+            credential_id=cred.id,
+            credential_runtime_revision=int(cred.runtime_revision or 1),
+            endpoint_identity=endpoint_identity,
+            adapter_key=adapter_key,
+            adapter_revision=self._adapter_revision,
+            app_build_revision=self._app_build_revision,
+        )
+        snapshot = _ProbeConfigSnapshot(
+            model_id=model.id,
+            model_name=model.name,
+            model_type=model.model_type,
+            model_runtime_revision=int(model.runtime_revision or 1),
+            credential_id=cred.id,
+            credential_runtime_revision=int(cred.runtime_revision or 1),
+            base_url=base_url,
+            model_config_digest=digest,
+            endpoint_identity=dict(endpoint_identity),
+            adapter_key=adapter_key,
+            adapter_revision=self._adapter_revision,
+            app_build_revision=self._app_build_revision,
+        )
+        # Release the short snapshot transaction before Provider I/O.
+        self.db.commit()
+        return snapshot
+
+    def _persist_evidence(
+        self,
+        *,
+        model_id: UUID,
+        original_snapshot: _ProbeConfigSnapshot,
+        evidence: Any,
+        promote: bool,
+    ) -> LiveProbeResult:
+        from app.assistant.provider_loop.probe import (
+            build_endpoint_identity,
+            build_model_config_digest,
+            observations_payload,
+        )
+
+        cred, model = lock_model_with_credential(self.db, model_id)
+        if not model or not cred:
+            self.db.rollback()
+            raise ApiException(status_code=404, code=40400, message=f"AiModel not found: {model_id}")
+
+        base_url = normalize_openai_base_url(cred.base_url)
+        try:
+            current_endpoint = build_endpoint_identity(base_url)
+        except Exception:
+            current_endpoint = None
+        current_digest = None
+        if current_endpoint is not None:
+            current_digest = build_model_config_digest(
+                model_id=model.id,
+                model_name=model.name,
+                model_type=model.model_type,
+                model_runtime_revision=int(model.runtime_revision or 1),
+                credential_id=cred.id,
+                credential_runtime_revision=int(cred.runtime_revision or 1),
+                endpoint_identity=current_endpoint,
+                adapter_key=original_snapshot.adapter_key,
+                adapter_revision=original_snapshot.adapter_revision,
+                app_build_revision=original_snapshot.app_build_revision,
+            )
+
+        # Config identity is recomputed from locked rows; also compare the
+        # original snapshot fields so mid-flight execution changes are exact.
+        field_changed = (
+            int(model.runtime_revision or 1) != int(original_snapshot.model_runtime_revision)
+            or int(cred.runtime_revision or 1) != int(original_snapshot.credential_runtime_revision)
+            or (model.name or "") != original_snapshot.model_name
+            or (model.model_type or "") != original_snapshot.model_type
+            or base_url != original_snapshot.base_url
+            or model.credential_id != original_snapshot.credential_id
+        )
+        digest_changed = (
+            current_digest is None
+            or current_digest != original_snapshot.model_config_digest
+        )
+        config_changed = field_changed or digest_changed
+
+        # Always persist against the original snapshot config digest.
+        capabilities_json = observations_payload(evidence.capabilities)
+        probe = AiModelCapabilityProbe(
+            model_id=model_id,
+            probe_contract_version=int(evidence.probe_contract_version),
+            adapter_key=evidence.adapter_key,
+            adapter_revision=evidence.adapter_revision,
+            model_config_digest=original_snapshot.model_config_digest,
+            status=evidence.status,
+            capabilities=capabilities_json,
+            probe_digest=evidence.probe_digest,
+            safe_error_code=evidence.safe_error_code,
+            safe_error_summary=evidence.safe_error_summary,
+        )
+        self.db.add(probe)
+        self.db.flush()
+
+        if config_changed:
+            outcome: PromotionOutcome = "config_changed"
+        elif not promote:
+            outcome = "not_requested"
+        else:
+            model.current_capability_probe_id = probe.id
+            outcome = "promoted"
+            # Promotion must not bump model runtime revision.
+
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ApiException(
+                status_code=409,
+                code=40900,
+                message="Failed to persist capability probe evidence",
+            ) from exc
+        self.db.refresh(probe)
+        self.db.refresh(model)
+
+        is_current = model.current_capability_probe_id == probe.id
+        is_stale = (
+            current_digest is None
+            or probe.model_config_digest != current_digest
+        )
+        return LiveProbeResult(
+            probe=probe,
+            promotion_outcome=outcome,
+            is_current=is_current,
+            is_stale_for_current_config=is_stale,
+        )
+
+    def _try_current_config_digest(self, model: AiModel) -> str | None:
+        from app.assistant.provider_loop.adapters.openai_chat import ADAPTER_KEY
+        from app.assistant.provider_loop.probe import (
+            build_endpoint_identity,
+            build_model_config_digest,
+        )
+
+        cred = (
+            self.db.query(AiCredential)
+            .filter(AiCredential.id == model.credential_id)
+            .first()
+        )
+        if not cred:
+            return None
+        try:
+            endpoint = build_endpoint_identity(normalize_openai_base_url(cred.base_url))
+        except Exception:
+            return None
+        return build_model_config_digest(
+            model_id=model.id,
+            model_name=model.name,
+            model_type=model.model_type,
+            model_runtime_revision=int(model.runtime_revision or 1),
+            credential_id=cred.id,
+            credential_runtime_revision=int(cred.runtime_revision or 1),
+            endpoint_identity=endpoint,
+            adapter_key=ADAPTER_KEY,
+            adapter_revision=self._adapter_revision,
+            app_build_revision=self._app_build_revision,
+        )
