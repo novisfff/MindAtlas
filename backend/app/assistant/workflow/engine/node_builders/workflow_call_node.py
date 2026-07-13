@@ -312,6 +312,7 @@ def build_workflow_call_node(
     tool_map: dict[str, Any],
     db_bind: Any,
     execution_scope: Any | None = None,
+    container_node_id: str | None = None,
 ) -> Callable[[WorkflowState], dict]:
     def workflow_call_node(state: WorkflowState) -> dict:
         from app.assistant.workflow.engine import engine as engine_runtime
@@ -347,6 +348,12 @@ def build_workflow_call_node(
                 default=None,
             )
         )
+        container_id = str(
+            container_node_id
+            or node_cfg.get("__container_node_id")
+            or node_cfg.get("container_node_id")
+            or ""
+        ).strip() or None
 
         # Capability scope: exact frozen child only; never latest / graph_snapshot / Registry.
         if execution_scope is not None:
@@ -359,35 +366,37 @@ def build_workflow_call_node(
                 raise RuntimeError(
                     f"DAG workflow_call node {node_id}: capability nesting depth denied"
                 )
-            source_locator = f"root/workflow_call:{node_id}"
-            # Prefer scoped locators under nested parents when present.
-            try:
-                child_target = execution_scope.dependency_resolver.require_workflow_version(
-                    source_locator=source_locator,
-                    workflow_id=target_workflow_id,
-                    version_id=target_version_id,
-                )
-            except Exception:
-                # Fall through to exact path suffix match by scanning common nested prefixes.
-                child_target = None
-                for candidate in (
+            # Plan 01 freezes nested body workflow_call as root/workflow_call:{container}::{node}.
+            locator_candidates: list[str] = []
+            if container_id:
+                locator_candidates.append(f"root/workflow_call:{container_id}::{node_id}")
+            locator_candidates.extend(
+                (
+                    f"root/workflow_call:{node_id}",
                     f"root/node:{node_id}/workflow_call",
-                    source_locator,
-                ):
-                    try:
-                        child_target = execution_scope.dependency_resolver.require_workflow_version(
-                            source_locator=candidate,
-                            workflow_id=target_workflow_id,
-                            version_id=target_version_id,
-                        )
-                        source_locator = candidate
-                        break
-                    except Exception:
-                        continue
-                if child_target is None:
-                    raise RuntimeError(
-                        f"DAG workflow_call node {node_id}: child workflow not in frozen closure"
+                )
+            )
+            if container_id:
+                locator_candidates.append(
+                    f"root/node:{container_id}/body/node:{node_id}/workflow_call"
+                )
+            child_target = None
+            source_locator = locator_candidates[0]
+            for candidate in locator_candidates:
+                try:
+                    child_target = execution_scope.dependency_resolver.require_workflow_version(
+                        source_locator=candidate,
+                        workflow_id=target_workflow_id,
+                        version_id=target_version_id,
                     )
+                    source_locator = candidate
+                    break
+                except Exception:
+                    continue
+            if child_target is None:
+                raise RuntimeError(
+                    f"DAG workflow_call node {node_id}: child workflow not in frozen closure"
+                )
 
             published_input = getattr(child_target, "parsed_published_input", None)
             if published_input is None:
@@ -439,14 +448,15 @@ def build_workflow_call_node(
             }
 
             # Build child tools exclusively from frozen closure / parent map.
+            # Even when parent already provided the tool object, still prove the child
+            # frozen locator via require_tool whenever a locator can be built.
             child_tool_names = AssistantConfigService._collect_workflow_tool_names(  # noqa: SLF001
                 getattr(published_input, "nodes", []) or []
             )
             child_tool_map: dict[str, Any] = dict(tool_map)
             for tool_name in child_tool_names:
-                if tool_name in child_tool_map:
-                    continue
                 tool_obj = None
+                proven = False
                 for locator in (
                     f"{source_locator}/node:tool_0/tool:{tool_name}",
                     f"{source_locator}/tool:{tool_name}",
@@ -459,10 +469,15 @@ def build_workflow_call_node(
                             tool_name=tool_name,
                         )
                         tool_obj = getattr(target, "tool_object_or_record", target)
+                        proven = True
                         break
                     except Exception:
                         continue
-                if tool_obj is None:
+                if not proven:
+                    if tool_name in child_tool_map:
+                        # Parent map hit without a buildable frozen locator proof —
+                        # keep parent object only when no require_tool candidate matched.
+                        continue
                     raise RuntimeError(
                         f"DAG workflow_call node {node_id}: child tool not in frozen closure: {tool_name}"
                     )

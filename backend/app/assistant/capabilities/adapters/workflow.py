@@ -460,7 +460,9 @@ class WorkflowCapabilityAdapter:
             _emit("capability.failed", safe_status="failed", metrics=metrics)
             return result
 
-        if ports.cancellation.is_cancelled():
+        # Only pure read/compute/none may be rewritten to cancelled after success.
+        side_effect = str(getattr(descriptor.behavior, "side_effect", "") or "")
+        if ports.cancellation.is_cancelled() and side_effect in {"read", "compute", "none"}:
             result = cancelled_result(
                 metrics=_metrics(),
                 call_id=call_id,

@@ -20,6 +20,7 @@ def build_kr_node(
     tool_map: dict[str, Any],
     db_bind: Any,
     execution_scope: Any | None = None,
+    container_node_id: str | None = None,
 ) -> Callable[[WorkflowState], dict]:
     def kr_node(state: WorkflowState) -> dict:
         metadata = state.get("metadata", {})
@@ -28,6 +29,12 @@ def build_kr_node(
         sys_vars = state.get("sys_vars", {}) or {}
         locale = sys_vars.get("locale")
         env_vars = state.get("env_vars", {}) or {}
+        container_id = str(
+            container_node_id
+            or node_cfg.get("__container_node_id")
+            or node_cfg.get("container_node_id")
+            or ""
+        ).strip() or None
 
         query_template = node_cfg.get("query", "{{start.user_input}}")
         if not isinstance(query_template, str):
@@ -51,10 +58,18 @@ def build_kr_node(
 
         kb_tool = tool_map.get("kb_search")
         if not kb_tool and execution_scope is not None:
-            for locator in (
-                f"root/node:{node_id}/tool:kb_search",
-                "root/tool:kb_search",
-            ):
+            locator_candidates: list[str] = []
+            if container_id:
+                locator_candidates.append(
+                    f"root/node:{container_id}/body/node:{node_id}/tool:kb_search"
+                )
+            locator_candidates.extend(
+                (
+                    f"root/node:{node_id}/tool:kb_search",
+                    "root/tool:kb_search",
+                )
+            )
+            for locator in locator_candidates:
                 try:
                     target = execution_scope.dependency_resolver.require_tool(
                         source_locator=locator,

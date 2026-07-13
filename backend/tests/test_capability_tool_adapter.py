@@ -531,6 +531,40 @@ def test_cancellation_after_pure_read_returns_cancelled() -> None:
     assert [e.event_type for e in sink.events] == ["capability.started", "capability.cancelled"]
 
 
+def test_cancellation_after_write_success_keeps_completed() -> None:
+    """Write/draft/unknown success must not be rewritten to cancelled after invoke."""
+    from app.assistant.capabilities.adapters.tool import ToolCapabilityAdapter
+    from app.assistant.domain.json_schema import binding_schema_digest, normalize_binding_schema
+
+    tool = _FakeTool(result={"ok": True})
+    out_schema = normalize_binding_schema(
+        {"type": "object", "properties": {"ok": {"type": "boolean"}}, "additionalProperties": False},
+        require_object_root=True,
+    )
+    desc = _descriptor(
+        output_schema=out_schema,
+        output_schema_digest=binding_schema_digest(out_schema),
+        behavior=_behavior(side_effect="write_local", parallel_safe=False),
+    )
+    req = _request(tool, {}, descriptor=desc)
+    ports, cancel, sink = _ports(cancelled=False)
+
+    original_invoke = ToolCapabilityAdapter._invoke_tool
+
+    def _invoke_and_cancel(self, **kwargs):  # noqa: ANN001
+        out = original_invoke(self, **kwargs)
+        cancel.cancelled = True
+        return out
+
+    with patch.object(ToolCapabilityAdapter, "_invoke_tool", _invoke_and_cancel):
+        result = ToolCapabilityAdapter().execute(req, ports=ports)
+
+    assert result.status == "completed"
+    assert tool.calls
+    assert result.structured_output == {"ok": True}
+    assert [e.event_type for e in sink.events] == ["capability.started", "capability.completed"]
+
+
 def test_output_schema_mismatch_is_invalid_output() -> None:
     from app.assistant.capabilities.adapters.tool import ToolCapabilityAdapter
     from app.assistant.domain.json_schema import binding_schema_digest, normalize_binding_schema

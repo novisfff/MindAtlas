@@ -664,7 +664,8 @@ class LangGraphEngine:
                 try:
                     tool = self._get_tool(name, source_locator=locator)
                 except Exception:
-                    # Try alternate root node locator patterns used by Plan 01 freezes.
+                    # Try alternate root node locator patterns used by Plan 01 freezes,
+                    # including nested body tools under iteration/loop containers.
                     found = None
                     for candidate in (
                         f"root/node:tool_0/tool:{name}",
@@ -676,25 +677,66 @@ class LangGraphEngine:
                         except Exception:
                             continue
                     if found is None:
-                        # Last attempt: scan skill workflow nodes for matching tool_name.
-                        for node in getattr(skill, "workflow_nodes", None) or []:
-                            cfg = getattr(node, "config", None) or {}
-                            if not isinstance(cfg, dict):
-                                continue
-                            node_tool = str(cfg.get("tool_name", cfg.get("toolName", "")) or "").strip()
-                            if node_tool != name:
-                                continue
-                            node_id = str(getattr(node, "node_id", "") or "").strip()
-                            if not node_id:
-                                continue
-                            try:
-                                found = self._get_tool(
-                                    name,
-                                    source_locator=f"root/node:{node_id}/tool:{name}",
-                                )
-                                break
-                            except Exception:
-                                continue
+                        # Scan skill workflow nodes (and nested container bodies) for
+                        # matching tool_name / toolNames and try body-aware locators.
+                        def _scan_nodes(nodes: Any, *, container_id: str | None = None) -> Any:
+                            for node in nodes or []:
+                                cfg = getattr(node, "config", None) or {}
+                                if not isinstance(cfg, dict):
+                                    # dict-shaped nodes from published input
+                                    if isinstance(node, dict):
+                                        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+                                    else:
+                                        continue
+                                node_id = str(
+                                    getattr(node, "node_id", None)
+                                    or (node.get("node_id") if isinstance(node, dict) else None)
+                                    or (node.get("nodeId") if isinstance(node, dict) else None)
+                                    or ""
+                                ).strip()
+                                node_type = str(
+                                    getattr(node, "node_type", None)
+                                    or (node.get("node_type") if isinstance(node, dict) else None)
+                                    or (node.get("nodeType") if isinstance(node, dict) else None)
+                                    or ""
+                                ).strip()
+                                candidates: list[str] = []
+                                node_tool = str(cfg.get("tool_name", cfg.get("toolName", "")) or "").strip()
+                                raw_tool_names = cfg.get("toolNames", cfg.get("tool_names"))
+                                name_matches = node_tool == name
+                                if not name_matches and isinstance(raw_tool_names, list):
+                                    name_matches = any(
+                                        isinstance(item, str) and item.strip() == name
+                                        for item in raw_tool_names
+                                    )
+                                if name == "kb_search" and (
+                                    node_type == "knowledge_retrieval"
+                                    or (
+                                        node_type == "agent"
+                                        and bool(cfg.get("knowledgeEnabled", cfg.get("knowledge_enabled")))
+                                    )
+                                ):
+                                    name_matches = True
+                                if name_matches and node_id:
+                                    if container_id:
+                                        candidates.append(
+                                            f"root/node:{container_id}/body/node:{node_id}/tool:{name}"
+                                        )
+                                    candidates.append(f"root/node:{node_id}/tool:{name}")
+                                for candidate in candidates:
+                                    try:
+                                        return self._get_tool(name, source_locator=candidate)
+                                    except Exception:
+                                        continue
+                                if node_type in {"iteration", "loop"} and node_id:
+                                    body_nodes = cfg.get("bodyNodes", cfg.get("body_nodes"))
+                                    if isinstance(body_nodes, list):
+                                        nested = _scan_nodes(body_nodes, container_id=node_id)
+                                        if nested is not None:
+                                            return nested
+                            return None
+
+                        found = _scan_nodes(getattr(skill, "workflow_nodes", None) or [])
                     if found is None:
                         raise
                     tool = found

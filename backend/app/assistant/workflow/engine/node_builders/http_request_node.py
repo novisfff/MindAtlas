@@ -6,6 +6,7 @@ from typing import Any, Callable
 from app.assistant.workflow.engine.runtime_helpers import (
     emit,
     get_start_inputs,
+    logger,
     resolve_node_template_vars,
 )
 from app.assistant.workflow.engine.state import NodeOutput, WorkflowState
@@ -55,12 +56,35 @@ def _normalize_kv_rows(
     return rows
 
 
+def _redact_headers_for_diagnostics(headers: Any) -> Any:
+    if not isinstance(headers, dict):
+        return headers
+    redacted: dict[str, Any] = {}
+    for key, value in headers.items():
+        key_text = str(key or "")
+        if key_text.lower() in {
+            "authorization",
+            "proxy-authorization",
+            "x-api-key",
+            "api-key",
+            "cookie",
+            "set-cookie",
+        }:
+            redacted[key_text] = "[redacted]"
+        else:
+            redacted[key_text] = value
+    return redacted
+
+
 def build_http_request_node(
     node_id: str,
     node_cfg: dict,
     execution_scope: Any | None = None,
 ) -> Callable[[WorkflowState], dict]:
-    _ = execution_scope
+    safe_diagnostics = bool(
+        execution_scope is not None and getattr(execution_scope, "safe_diagnostics", False)
+    )
+
     def http_request_node(state: WorkflowState) -> dict:
         metadata = state.get("metadata", {})
         node_outputs = dict(state.get("node_outputs", {}))
@@ -177,17 +201,44 @@ def build_http_request_node(
             )
         except Exception as exc:
             emit(metadata, "on_node_end", node_id=node_id, status="error")
+            if safe_diagnostics:
+                logger.error(
+                    "capability_safe_execution stage=http_request_node node_id=%s exc_class=%s",
+                    node_id,
+                    type(exc).__name__,
+                )
+                raise RuntimeError(f"DAG http_request node {node_id} failed: http_request failed") from None
             raise RuntimeError(f"DAG http_request node {node_id} failed: {exc}") from exc
 
+        response_headers = result.headers
+        body_value = result.body
+        response_value = result.response
+        error_message = result.error_message
+        if safe_diagnostics:
+            response_headers = _redact_headers_for_diagnostics(response_headers)
+            # Avoid retaining potentially sensitive response body under capability scope.
+            body_value = "" if body_value else body_value
+            if isinstance(response_value, dict):
+                response_value = {
+                    **response_value,
+                    "body": "" if "body" in response_value else response_value.get("body"),
+                    "headers": _redact_headers_for_diagnostics(response_value.get("headers")),
+                }
+            if isinstance(error_message, str) and error_message:
+                error_message = "http_request failed"
+
         payload = {
-            "body": result.body,
+            "body": body_value,
             "status_code": result.status_code,
-            "headers": result.headers,
+            "headers": response_headers,
             "ok": result.ok,
-            "error_message": result.error_message,
-            "response": result.response,
+            "error_message": error_message,
+            "response": response_value,
         }
-        text_output = result.body if result.body else json.dumps(payload, ensure_ascii=False)
+        if safe_diagnostics:
+            text_output = "http_request completed"
+        else:
+            text_output = result.body if result.body else json.dumps(payload, ensure_ascii=False)
         node_out: NodeOutput = {
             "status": "ok",
             "text": text_output,

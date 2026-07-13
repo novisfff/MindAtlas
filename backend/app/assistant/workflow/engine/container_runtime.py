@@ -402,24 +402,51 @@ def execute_container_body(
             "env_specs": env_specs_local,
         }
 
+        # Body builders need the container id so capability-scope locators match
+        # Plan 01 freezes: root/node:{container}/body/node:{child}/...
+        cfg["__container_node_id"] = container_node_id
+
         if node_type == "llm":
             node_fn = engine_runtime._build_dag_llm_node(
                 current, cfg, llm, node_llms=scoped_node_llms, execution_scope=execution_scope
             )
         elif node_type == "agent":
-            node_fn = engine_runtime._build_dag_agent_node(
-                current,
-                cfg,
-                llm,
-                tool_map,
-                db_bind,
-                node_llms=scoped_node_llms,
-                execution_scope=execution_scope,
-            )
+            try:
+                node_fn = engine_runtime._build_dag_agent_node(
+                    current,
+                    cfg,
+                    llm,
+                    tool_map,
+                    db_bind,
+                    node_llms=scoped_node_llms,
+                    execution_scope=execution_scope,
+                    container_node_id=container_node_id,
+                )
+            except TypeError:
+                node_fn = engine_runtime._build_dag_agent_node(
+                    current,
+                    cfg,
+                    llm,
+                    tool_map,
+                    db_bind,
+                    node_llms=scoped_node_llms,
+                    execution_scope=execution_scope,
+                )
         elif node_type == "tool":
-            node_fn = engine_runtime._build_dag_tool_node(
-                current, cfg, tool_map, args_llm, db_bind, execution_scope=execution_scope
-            )
+            try:
+                node_fn = engine_runtime._build_dag_tool_node(
+                    current,
+                    cfg,
+                    tool_map,
+                    args_llm,
+                    db_bind,
+                    execution_scope=execution_scope,
+                    container_node_id=container_node_id,
+                )
+            except TypeError:
+                node_fn = engine_runtime._build_dag_tool_node(
+                    current, cfg, tool_map, args_llm, db_bind, execution_scope=execution_scope
+                )
         elif node_type == "if_else":
             node_fn = engine_runtime._build_if_else_node(current, cfg)
         elif node_type == "parameter_extractor":
@@ -427,9 +454,19 @@ def execute_container_body(
                 current, cfg, llm, node_llms=scoped_node_llms, execution_scope=execution_scope
             )
         elif node_type == "knowledge_retrieval":
-            node_fn = engine_runtime._build_kr_node(
-                current, cfg, tool_map, db_bind, execution_scope=execution_scope
-            )
+            try:
+                node_fn = engine_runtime._build_kr_node(
+                    current,
+                    cfg,
+                    tool_map,
+                    db_bind,
+                    execution_scope=execution_scope,
+                    container_node_id=container_node_id,
+                )
+            except TypeError:
+                node_fn = engine_runtime._build_kr_node(
+                    current, cfg, tool_map, db_bind, execution_scope=execution_scope
+                )
         elif node_type == "code_executor":
             node_fn = engine_runtime._build_code_executor_node(
                 current, cfg, execution_scope=execution_scope
@@ -445,15 +482,27 @@ def execute_container_body(
                 current, cfg, execution_scope=execution_scope
             )
         elif node_type == "workflow_call":
-            node_fn = engine_runtime._build_workflow_call_node(
-                current,
-                cfg,
-                llm,
-                args_llm,
-                tool_map,
-                db_bind,
-                execution_scope=execution_scope,
-            )
+            try:
+                node_fn = engine_runtime._build_workflow_call_node(
+                    current,
+                    cfg,
+                    llm,
+                    args_llm,
+                    tool_map,
+                    db_bind,
+                    execution_scope=execution_scope,
+                    container_node_id=container_node_id,
+                )
+            except TypeError:
+                node_fn = engine_runtime._build_workflow_call_node(
+                    current,
+                    cfg,
+                    llm,
+                    args_llm,
+                    tool_map,
+                    db_bind,
+                    execution_scope=execution_scope,
+                )
         elif node_type == "start":
             node_fn = _build_container_start_node(container_input, container_ctx)
         else:

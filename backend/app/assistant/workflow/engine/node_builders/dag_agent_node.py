@@ -19,6 +19,7 @@ from app.assistant.workflow.engine.runtime_helpers import (
     cfg_string_list,
     emit,
     get_start_inputs,
+    logger,
     render_memory_injection_block,
     resolve_node_template_vars,
     resolve_start_memory_mode,
@@ -101,8 +102,8 @@ def build_dag_agent_node(
     db_bind: Any,
     node_llms: dict[str, ChatOpenAI] | None = None,
     execution_scope: Any | None = None,
+    container_node_id: str | None = None,
 ) -> Callable[[WorkflowState], dict]:
-    _ = execution_scope
     def agent_node(state: WorkflowState) -> dict:
         metadata = state.get("metadata", {})
         node_outputs = dict(state.get("node_outputs", {}))
@@ -113,6 +114,18 @@ def build_dag_agent_node(
         runtime_node_llms = state.get("node_llms", {}) or {}
         if not isinstance(runtime_node_llms, dict):
             runtime_node_llms = {}
+        safe_diagnostics = bool(
+            execution_scope is not None and getattr(execution_scope, "safe_diagnostics", False)
+        )
+        allow_ambient_memory = True
+        if execution_scope is not None:
+            allow_ambient_memory = bool(getattr(execution_scope, "allow_ambient_memory", False))
+        container_id = str(
+            container_node_id
+            or node_cfg.get("__container_node_id")
+            or node_cfg.get("container_node_id")
+            or ""
+        ).strip() or None
 
         llm_for_node = runtime_node_llms.get(node_id)
         if llm_for_node is None and node_llms is not None:
@@ -133,9 +146,42 @@ def build_dag_agent_node(
 
         bound_tools: list[Any] = []
         tool_runners: dict[str, Callable[..., Any]] = {}
+        effective_tool_map: dict[str, Any] = dict(tool_map)
         for tool_name in configured_tool_names:
-            tool = tool_map.get(tool_name)
+            tool = effective_tool_map.get(tool_name)
+            if tool is None and execution_scope is not None:
+                locator_candidates: list[str] = []
+                if container_id:
+                    locator_candidates.append(
+                        f"root/node:{container_id}/body/node:{node_id}/tool:{tool_name}"
+                    )
+                locator_candidates.extend(
+                    (
+                        f"root/node:{node_id}/tool:{tool_name}",
+                        f"root/tool:{tool_name}",
+                    )
+                )
+                for locator in locator_candidates:
+                    try:
+                        target = execution_scope.dependency_resolver.require_tool(
+                            source_locator=locator,
+                            tool_name=tool_name,
+                        )
+                        tool = getattr(target, "tool_object_or_record", target)
+                        break
+                    except Exception:
+                        continue
             if tool is None:
+                if execution_scope is not None:
+                    if safe_diagnostics:
+                        logger.error(
+                            "capability_safe_execution stage=dag_agent_tool_resolve node_id=%s tool=%s",
+                            node_id,
+                            tool_name,
+                        )
+                    raise RuntimeError(
+                        f"DAG agent node {node_id}: tool not found under capability scope"
+                    ) from None
                 raise RuntimeError(
                     f"DAG agent node {node_id} references unavailable tool: {tool_name}"
                 )
@@ -143,14 +189,51 @@ def build_dag_agent_node(
             tool_runners[tool_name] = engine_runtime._wrap_tool_with_db(tool, db_bind)
 
         if knowledge_cfg["enabled"]:
-            kb_tool, kb_runner = _build_agent_kb_tool(
-                node_id=node_id,
-                tool_map=tool_map,
-                db_bind=db_bind,
-                knowledge_mode=knowledge_cfg["mode"],
-                knowledge_top_k=knowledge_cfg["top_k"],
-                locale=locale,
-            )
+            # Under capability scope, resolve kb_search from frozen locators when missing.
+            if effective_tool_map.get("kb_search") is None and execution_scope is not None:
+                locator_candidates = []
+                if container_id:
+                    locator_candidates.append(
+                        f"root/node:{container_id}/body/node:{node_id}/tool:kb_search"
+                    )
+                locator_candidates.extend(
+                    (
+                        f"root/node:{node_id}/tool:kb_search",
+                        "root/tool:kb_search",
+                    )
+                )
+                for locator in locator_candidates:
+                    try:
+                        target = execution_scope.dependency_resolver.require_tool(
+                            source_locator=locator,
+                            tool_name="kb_search",
+                        )
+                        effective_tool_map["kb_search"] = getattr(
+                            target, "tool_object_or_record", target
+                        )
+                        break
+                    except Exception:
+                        continue
+            try:
+                kb_tool, kb_runner = _build_agent_kb_tool(
+                    node_id=node_id,
+                    tool_map=effective_tool_map,
+                    db_bind=db_bind,
+                    knowledge_mode=knowledge_cfg["mode"],
+                    knowledge_top_k=knowledge_cfg["top_k"],
+                    locale=locale,
+                )
+            except Exception as exc:
+                if execution_scope is not None and safe_diagnostics:
+                    logger.error(
+                        "capability_safe_execution stage=dag_agent_kb_resolve node_id=%s exc_class=%s",
+                        node_id,
+                        type(exc).__name__,
+                    )
+                    raise RuntimeError(
+                        f"DAG agent node {node_id}: knowledge tool unavailable under capability scope"
+                    ) from None
+                raise
             bound_tools.append(kb_tool)
             tool_runners["kb_search"] = kb_runner
 
@@ -182,12 +265,15 @@ def build_dag_agent_node(
             {"memory_mode": state.get("memory_mode")},
             default_mode="auto",
         )
+        # Capability scope with ambient memory disabled: never inject L0/memory.
+        if not allow_ambient_memory:
+            memory_mode = "off"
         memory_context = state.get("memory_context") if isinstance(state.get("memory_context"), dict) else {}
-        l0_messages = _normalize_l0_messages(memory_context)
+        l0_messages = _normalize_l0_messages(memory_context) if allow_ambient_memory else []
 
         today = date.today()
         memory_block = ""
-        if memory_mode == "auto":
+        if memory_mode == "auto" and allow_ambient_memory:
             settings = get_settings()
             memory_block = render_memory_injection_block(
                 memory_context=memory_context,
@@ -246,10 +332,24 @@ def build_dag_agent_node(
             )
         )
         if result.stopped_by == "invalid_tool":
+            if safe_diagnostics:
+                logger.error(
+                    "capability_safe_execution stage=dag_agent_invalid_tool node_id=%s",
+                    node_id,
+                )
+                raise RuntimeError(
+                    f"DAG agent node {node_id} requested unavailable or non-whitelisted tool"
+                ) from None
             raise RuntimeError(
                 f"DAG agent node {node_id} requested unavailable or non-whitelisted tool: {result.error_message or ''}".rstrip()
             )
         if result.stopped_by == "tool_error":
+            if safe_diagnostics:
+                logger.error(
+                    "capability_safe_execution stage=dag_agent_tool_error node_id=%s",
+                    node_id,
+                )
+                raise RuntimeError(f"DAG agent node {node_id} tool call failed") from None
             raise RuntimeError(
                 f"DAG agent node {node_id} tool call failed: {result.error_message or 'unknown error'}"
             )

@@ -25,6 +25,7 @@ def build_dag_tool_node(
     args_llm: ChatOpenAI,
     db_bind: Any,
     execution_scope: Any | None = None,
+    container_node_id: str | None = None,
 ) -> Callable[[WorkflowState], dict]:
     def dag_tool_node(state: WorkflowState) -> dict:
         metadata = state.get("metadata", {})
@@ -35,23 +36,47 @@ def build_dag_tool_node(
         env_vars = state.get("env_vars", {}) or {}
         tool_name = node_cfg.get("tool_name", "")
         tool_call_id = f"tool_{uuid.uuid4().hex[:8]}"
+        container_id = str(
+            container_node_id
+            or node_cfg.get("__container_node_id")
+            or node_cfg.get("container_node_id")
+            or ""
+        ).strip() or None
 
         tool = tool_map.get(tool_name)
         if not tool and execution_scope is not None:
             # Exact closure only — never Registry name fallback under Capability scope.
-            locator = f"root/node:{node_id}/tool:{tool_name}"
-            try:
-                target = execution_scope.dependency_resolver.require_tool(
-                    source_locator=locator,
-                    tool_name=str(tool_name or ""),
+            # Plan 01 freezes body tools as root/node:{container}/body/node:{child}/tool:{name}.
+            locator_candidates: list[str] = []
+            if container_id:
+                locator_candidates.append(
+                    f"root/node:{container_id}/body/node:{node_id}/tool:{tool_name}"
                 )
-                tool = getattr(target, "tool_object_or_record", target)
-            except Exception as exc:
+            locator_candidates.extend(
+                (
+                    f"root/node:{node_id}/tool:{tool_name}",
+                    f"root/tool:{tool_name}",
+                )
+            )
+            last_exc: BaseException | None = None
+            for locator in locator_candidates:
+                try:
+                    target = execution_scope.dependency_resolver.require_tool(
+                        source_locator=locator,
+                        tool_name=str(tool_name or ""),
+                    )
+                    tool = getattr(target, "tool_object_or_record", target)
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+            if not tool:
                 if getattr(execution_scope, "safe_diagnostics", False):
                     logger.error(
                         "capability_safe_execution stage=tool_node_resolve node_id=%s exc_class=%s",
                         node_id,
-                        type(exc).__name__,
+                        type(last_exc).__name__ if last_exc is not None else "LookupError",
                     )
                 raise RuntimeError(
                     f"DAG tool node {node_id}: tool not found under capability scope"

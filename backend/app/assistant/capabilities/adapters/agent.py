@@ -465,7 +465,10 @@ class AgentCapabilityAdapter:
             _emit("capability.failed", safe_status="failed", metrics=metrics)
             return result
 
-        if ports.cancellation.is_cancelled():
+        # Only pure read/compute/none may be rewritten to cancelled after success.
+        # Side-effecting agent work (write/draft/unknown) keeps completed.
+        side_effect = str(getattr(descriptor.behavior, "side_effect", "") or "")
+        if ports.cancellation.is_cancelled() and side_effect in {"read", "compute", "none"}:
             result = cancelled_result(
                 metrics=_metrics(),
                 call_id=call_id,
@@ -719,18 +722,8 @@ class AgentCapabilityAdapter:
                 )
             ) from None
 
-        if ports.cancellation.is_cancelled():
-            raise CapabilityDomainError(
-                CapabilityError(
-                    error_type="cancelled",
-                    safe_code="cancelled",
-                    safe_message="cancelled",
-                    retry_disposition="never",
-                    target_identity=target_identity,
-                    call_id=call_id,
-                )
-            )
-
+        # Post-success cancel is handled by execute() with side_effect awareness so
+        # write/draft/unknown successes are not rewritten to cancelled.
         return self._normalize_engine_result(
             engine_result,
             output_schema=descriptor.output_schema,

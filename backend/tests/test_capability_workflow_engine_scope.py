@@ -294,3 +294,233 @@ def test_scope_absent_from_serializable_state_keys() -> None:
     annotations = getattr(state_mod.WorkflowState, "__annotations__", {})
     assert "execution_scope" not in annotations
     assert "dependency_resolver" not in annotations
+
+
+def test_body_tool_resolves_container_frozen_locator(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Body tool under iteration must resolve root/node:{container}/body/node:{child}/tool:{name}."""
+    from app.assistant.workflow.engine.node_builders.tool_node import build_dag_tool_node
+
+    tool_obj = SimpleNamespace(name="search_entries")
+    body_locator = "root/node:iter_0/body/node:tool_body/tool:search_entries"
+    resolver = _FakeResolver(
+        tools={body_locator: tool_obj},
+        workflows={},
+        models={},
+        tool_calls=[],
+        workflow_calls=[],
+        model_calls=[],
+    )
+    scope = _scope(resolver)
+
+    # Avoid real tool execution; only assert resolve path.
+    monkeypatch.setattr(
+        "app.assistant.workflow.engine.engine._wrap_tool_with_db",
+        lambda tool, _db: (lambda **_kwargs: {"ok": True}),
+    )
+    monkeypatch.setattr(
+        "app.assistant.workflow.engine.engine._coerce_tool_args",
+        lambda _tool, args: dict(args or {}),
+    )
+    monkeypatch.setattr(
+        "app.assistant.workflow.engine.engine._resolve_tool_output_param_names",
+        lambda *_a, **_k: [],
+    )
+
+    node = build_dag_tool_node(
+        "tool_body",
+        {
+            "tool_name": "search_entries",
+            "input_bindings": {},
+            "__container_node_id": "iter_0",
+        },
+        tool_map={},
+        args_llm=SimpleNamespace(),
+        db_bind=None,
+        execution_scope=scope,
+        container_node_id="iter_0",
+    )
+    result = node(
+        {
+            "metadata": {},
+            "node_outputs": {},
+            "sys_vars": {},
+            "env_vars": {},
+        }
+    )
+    assert "tool_body" in result["node_outputs"]
+    assert resolver.tool_calls
+    assert resolver.tool_calls[0][0] == body_locator
+    assert resolver.tool_calls[0][1] == "search_entries"
+
+
+def test_nested_workflow_call_resolves_container_locator() -> None:
+    """Nested workflow_call under container must try root/workflow_call:{container}::{node}."""
+    from app.assistant.workflow.engine.node_builders.workflow_call_node import (
+        build_workflow_call_node,
+    )
+
+    child_wf = uuid4()
+    child_ver = uuid4()
+    locator = f"root/workflow_call:iter_0::call_body"
+    published = SimpleNamespace(
+        nodes=[],
+        edges=[],
+    )
+    # Minimal contract surface via workflow_contract_from_input is exercised later;
+    # force require_workflow_version hit and fail on missing published contract fields.
+    resolver = _FakeResolver(
+        tools={},
+        workflows={
+            locator: SimpleNamespace(parsed_published_input=None),
+        },
+        models={},
+        tool_calls=[],
+        workflow_calls=[],
+        model_calls=[],
+    )
+    scope = _scope(resolver)
+    node = build_workflow_call_node(
+        "call_body",
+        {
+            "target_workflow_id": str(child_wf),
+            "target_published_version_id": str(child_ver),
+            "binding_mode": "pinned",
+            "input_bindings": {"user_input": "x"},
+            "__container_node_id": "iter_0",
+        },
+        llm=SimpleNamespace(),
+        args_llm=SimpleNamespace(),
+        tool_map={},
+        db_bind=None,
+        execution_scope=scope,
+        container_node_id="iter_0",
+    )
+    with pytest.raises(RuntimeError, match="published input missing"):
+        node(
+            {
+                "metadata": {},
+                "node_outputs": {},
+                "sys_vars": {},
+                "env_vars": {},
+                "memory_context": {},
+            }
+        )
+    assert resolver.workflow_calls
+    assert resolver.workflow_calls[0][0] == locator
+
+
+def test_http_request_safe_diagnostics_hides_exception_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.assistant.workflow.engine.node_builders.http_request_node import (
+        build_http_request_node,
+    )
+
+    resolver = _FakeResolver(tools={}, workflows={}, models={}, tool_calls=[], workflow_calls=[], model_calls=[])
+    scope = _scope(resolver)
+
+    def _boom(**_kwargs):  # noqa: ANN001
+        raise ConnectionError("secret host 10.0.0.5 refused token=abc")
+
+    monkeypatch.setattr(
+        "app.assistant.workflow.engine.node_builders.http_request_node.execute_http_request",
+        _boom,
+    )
+    node = build_http_request_node(
+        "http_0",
+        {"method": "GET", "url": "https://example.invalid/x"},
+        execution_scope=scope,
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+        node({"metadata": {}, "node_outputs": {}, "sys_vars": {}, "env_vars": {}})
+    message = str(exc_info.value)
+    assert "http_request failed" in message
+    assert "10.0.0.5" not in message
+    assert "token=abc" not in message
+
+
+def test_dag_agent_resolves_body_tool_and_skips_ambient_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.assistant.workflow.engine.node_builders.dag_agent_node import build_dag_agent_node
+    from app.assistant.workflow.engine.agent_execution_core import AgentExecutionResult
+
+    tool_obj = SimpleNamespace(name="search_entries")
+    body_locator = "root/node:iter_0/body/node:agent_body/tool:search_entries"
+    resolver = _FakeResolver(
+        tools={body_locator: tool_obj},
+        workflows={},
+        models={},
+        tool_calls=[],
+        workflow_calls=[],
+        model_calls=[],
+    )
+    scope = _scope(resolver)
+
+    captured: dict[str, Any] = {}
+
+    def _run(request):  # noqa: ANN001
+        captured["recent_dialogue_injection"] = request.recent_dialogue_injection
+        captured["conversation_messages"] = list(request.conversation_messages)
+        captured["bound_tools"] = list(request.bound_tools)
+        return AgentExecutionResult(
+            final_text="ok",
+            round_count=1,
+            used_tools=[],
+            stopped_by="final_answer",
+        )
+
+    monkeypatch.setattr(
+        "app.assistant.workflow.engine.node_builders.dag_agent_node.run_agent_execution",
+        _run,
+    )
+    monkeypatch.setattr(
+        "app.assistant.workflow.engine.engine._wrap_tool_with_db",
+        lambda tool, _db: (lambda **_kwargs: "ok"),
+    )
+
+    node = build_dag_agent_node(
+        "agent_body",
+        {
+            "tool_names": ["search_entries"],
+            "system_prompt": "do it",
+            "user_input": "hello",
+            "__container_node_id": "iter_0",
+        },
+        llm=SimpleNamespace(),
+        tool_map={},
+        db_bind=None,
+        execution_scope=scope,
+        container_node_id="iter_0",
+    )
+    result = node(
+        {
+            "metadata": {},
+            "node_outputs": {},
+            "sys_vars": {},
+            "env_vars": {},
+            "memory_mode": "auto",
+            "memory_context": {
+                "l0_messages": [{"role": "user", "content": "secret prior"}],
+                "l1_text": "should not inject",
+                "l2_facts": ["secret fact"],
+            },
+            "stream_output_enabled": False,
+            "output_stream_source_node_id": "",
+        }
+    )
+    assert result["node_outputs"]["agent_body"]["text"] == "ok"
+    assert resolver.tool_calls
+    assert resolver.tool_calls[0][0] == body_locator
+    assert captured["recent_dialogue_injection"] == "none"
+    # Ambient L0 must not be injected into conversation under capability scope.
+    roles = [m.get("role") for m in captured["conversation_messages"] if isinstance(m, dict)]
+    assert "assistant" not in roles or all(
+        (m.get("content") != "secret prior")
+        for m in captured["conversation_messages"]
+        if isinstance(m, dict)
+    )
+    assert all(
+        "secret prior" not in str(m.get("content", ""))
+        for m in captured["conversation_messages"]
+        if isinstance(m, dict)
+    )
+    assert captured["bound_tools"]

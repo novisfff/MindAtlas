@@ -300,8 +300,11 @@ class ToolCapabilityAdapter:
             _emit("capability.failed", safe_status="failed", metrics=metrics)
             return result
 
-        # Cooperative cancellation after pure/read invocation.
-        if ports.cancellation.is_cancelled():
+        # Cooperative cancellation after pure/read/compute invocation only.
+        # Side-effecting success (write/draft/control/unknown) must not be rewritten
+        # to cancelled — the effect already landed.
+        side_effect = str(getattr(descriptor.behavior, "side_effect", "") or "")
+        if ports.cancellation.is_cancelled() and side_effect in {"read", "compute", "none"}:
             result = cancelled_result(
                 metrics=_metrics(),
                 call_id=call_id,
