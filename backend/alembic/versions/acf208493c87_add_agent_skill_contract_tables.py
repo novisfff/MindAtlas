@@ -28,6 +28,69 @@ _DOWNGRADE_BLOCKED = (
     "before downgrade"
 )
 
+# Derived origins may be discarded on downgrade; administrator/non-derived origins block.
+# Package versions: block api/import (legacy allowed).
+# Profile versions: allow bootstrap/legacy; block administrator origin api.
+PACKAGE_VERSION_DOWNGRADE_ALLOWED_ORIGINS = frozenset({"legacy"})
+PACKAGE_VERSION_DOWNGRADE_BLOCKED_ORIGINS = frozenset({"api", "import"})
+PROFILE_VERSION_DOWNGRADE_ALLOWED_ORIGINS = frozenset({"bootstrap", "legacy"})
+PROFILE_VERSION_DOWNGRADE_BLOCKED_ORIGINS = frozenset({"api"})
+
+# Resolved binding snapshots must carry these digests equal to row columns.
+RESOLVED_BINDING_REQUIRED_SNAPSHOT_DIGEST_KEYS = (
+    "resolutionDigest",
+    "dependencyClosureDigest",
+    "bindingContractDigest",
+)
+
+
+def package_version_origin_blocks_downgrade(origin: str) -> bool:
+    """True when a skill package version origin is non-derived administrator data."""
+    return origin in PACKAGE_VERSION_DOWNGRADE_BLOCKED_ORIGINS
+
+
+def profile_version_origin_blocks_downgrade(origin: str) -> bool:
+    """True when a Main Agent Profile version origin is non-derived administrator data.
+
+    Pure derived history (bootstrap, legacy) may be discarded; block api.
+    """
+    return origin not in PROFILE_VERSION_DOWNGRADE_ALLOWED_ORIGINS
+
+
+def resolved_snapshot_digest_mismatch(
+    snapshot: dict | None,
+    *,
+    resolution_digest: str | None,
+    dependency_closure_digest: str | None,
+    binding_contract_digest: str | None,
+    input_schema_digest: str | None,
+    output_schema_digest: str | None,
+) -> bool:
+    """True when a resolved binding snapshot fails required digest equality.
+
+    For resolved bindings, resolutionDigest / dependencyClosureDigest /
+    bindingContractDigest keys must exist and equal row columns (not only when
+    present). Input/output schema digests keep pairing semantics.
+    """
+    if snapshot is None:
+        return True
+    if snapshot.get("inputSchemaDigest") != input_schema_digest:
+        return True
+    if snapshot.get("outputSchemaDigest") != output_schema_digest:
+        return True
+    required = {
+        "resolutionDigest": resolution_digest,
+        "dependencyClosureDigest": dependency_closure_digest,
+        "bindingContractDigest": binding_contract_digest,
+    }
+    for key, expected in required.items():
+        if key not in snapshot:
+            return True
+        if snapshot.get(key) != expected:
+            return True
+    return False
+
+
 _IMMUTABLE_TABLES = (
     "assistant_skill_package_alias",
     "assistant_skill_version",
@@ -1310,22 +1373,20 @@ def _create_binding_closure_guard() -> None:
 
                 snap := rec.resolution_snapshot::jsonb;
 
-                IF (snap->>'inputSchemaDigest') IS DISTINCT FROM rec.input_schema_digest
+                -- Resolved bindings require digest keys to exist and equal columns
+                -- (not only when present). Input/output pairing stays required.
+                IF (NOT (snap ? 'inputSchemaDigest'))
+                   OR (NOT (snap ? 'outputSchemaDigest'))
+                   OR (NOT (snap ? 'resolutionDigest'))
+                   OR (NOT (snap ? 'dependencyClosureDigest'))
+                   OR (NOT (snap ? 'bindingContractDigest'))
+                   OR (snap->>'inputSchemaDigest') IS DISTINCT FROM rec.input_schema_digest
                    OR (snap->>'outputSchemaDigest') IS DISTINCT FROM rec.output_schema_digest
-                   OR (
-                        snap ? 'resolutionDigest'
-                        AND (snap->>'resolutionDigest') IS DISTINCT FROM rec.resolution_digest
-                   )
-                   OR (
-                        snap ? 'dependencyClosureDigest'
-                        AND (snap->>'dependencyClosureDigest')
-                            IS DISTINCT FROM rec.dependency_closure_digest
-                   )
-                   OR (
-                        snap ? 'bindingContractDigest'
-                        AND (snap->>'bindingContractDigest')
-                            IS DISTINCT FROM rec.binding_contract_digest
-                   )
+                   OR (snap->>'resolutionDigest') IS DISTINCT FROM rec.resolution_digest
+                   OR (snap->>'dependencyClosureDigest')
+                        IS DISTINCT FROM rec.dependency_closure_digest
+                   OR (snap->>'bindingContractDigest')
+                        IS DISTINCT FROM rec.binding_contract_digest
                 THEN
                     RAISE EXCEPTION
                         'MINDATLAS_PLAN01_CLOSURE: snapshot digests must equal binding columns'
@@ -1598,6 +1659,7 @@ def downgrade() -> None:
     if package_native and int(package_native) > 0:
         raise RuntimeError(_DOWNGRADE_BLOCKED)
 
+    # Non-derived administrator origins only (legacy package history is discardable).
     package_origin = conn.execute(
         sa.text(
             "SELECT COUNT(*) FROM assistant_skill_version "
@@ -1616,12 +1678,12 @@ def downgrade() -> None:
     if profile_native and int(profile_native) > 0:
         raise RuntimeError(_DOWNGRADE_BLOCKED)
 
-    # Non-derived administrator origin: anything other than bootstrap (and
-    # shadow packages already blocked above). api/legacy profile versions block.
+    # Non-derived administrator origin only: allow pure derived bootstrap/legacy;
+    # block api (and any future non-allowed origin).
     profile_origin = conn.execute(
         sa.text(
             "SELECT COUNT(*) FROM assistant_main_agent_profile_version "
-            "WHERE origin NOT IN ('bootstrap')"
+            "WHERE origin NOT IN ('bootstrap','legacy')"
         )
     ).scalar()
     if profile_origin and int(profile_origin) > 0:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import unittest
 import uuid
+from pathlib import Path
 
 from sqlalchemy.exc import IntegrityError
 
@@ -31,9 +33,30 @@ DIGEST_C = "c" * 64
 DIGEST_D = "d" * 64
 DIGEST_E = "e" * 64
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_MIGRATION_PATH = (
+    _REPO_ROOT
+    / "backend"
+    / "alembic"
+    / "versions"
+    / "acf208493c87_add_agent_skill_contract_tables.py"
+)
+
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _load_plan01_migration():
+    """Load the Plan 01 migration module by path (alembic versions are not a package)."""
+    spec = importlib.util.spec_from_file_location(
+        "acf208493c87_add_agent_skill_contract_tables",
+        _MIGRATION_PATH,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class AgentSkillModelContractTests(unittest.TestCase):
@@ -685,11 +708,129 @@ class AgentSkillModelContractTests(unittest.TestCase):
           bindings, dependencies, main-agent profile versions
         - deferred ownership/source guards for draft/published/source_draft pointers
         - deferred version-resource/blob sha256+byte_size equality + unreferenced blob guard
-        - deferred binding closure index completeness trigger
+        - deferred binding closure index completeness trigger (required digest keys)
         - revision guard triggers for AssistantTool / AiModel / AiCredential
-        - downgrade preflight blocking native/cutover/import data
+        - full PG execution of downgrade preflight (native/cutover, api/import package
+          origins, profile api origin; bootstrap/legacy profile origins allowed)
         """
         self.assertTrue(True)
+
+    def test_downgrade_origin_preflight_predicates(self) -> None:
+        """Pure helpers: package blocks api/import; profile allows bootstrap+legacy."""
+        migration = _load_plan01_migration()
+
+        self.assertEqual(
+            migration.PACKAGE_VERSION_DOWNGRADE_ALLOWED_ORIGINS, frozenset({"legacy"})
+        )
+        self.assertEqual(
+            migration.PACKAGE_VERSION_DOWNGRADE_BLOCKED_ORIGINS, frozenset({"api", "import"})
+        )
+        self.assertEqual(
+            migration.PROFILE_VERSION_DOWNGRADE_ALLOWED_ORIGINS,
+            frozenset({"bootstrap", "legacy"}),
+        )
+        self.assertEqual(migration.PROFILE_VERSION_DOWNGRADE_BLOCKED_ORIGINS, frozenset({"api"}))
+
+        self.assertFalse(migration.package_version_origin_blocks_downgrade("legacy"))
+        self.assertTrue(migration.package_version_origin_blocks_downgrade("api"))
+        self.assertTrue(migration.package_version_origin_blocks_downgrade("import"))
+
+        self.assertFalse(migration.profile_version_origin_blocks_downgrade("bootstrap"))
+        self.assertFalse(migration.profile_version_origin_blocks_downgrade("legacy"))
+        self.assertTrue(migration.profile_version_origin_blocks_downgrade("api"))
+        self.assertTrue(migration.profile_version_origin_blocks_downgrade("unknown"))
+
+        # Migration SQL must encode the corrected profile allow-set (not bootstrap alone).
+        migration_src = _MIGRATION_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            "WHERE origin NOT IN ('bootstrap','legacy')",
+            migration_src,
+        )
+        self.assertNotIn(
+            "WHERE origin NOT IN ('bootstrap')",
+            migration_src,
+        )
+
+    def test_resolved_snapshot_digest_keys_required(self) -> None:
+        """Resolved bindings require digest keys present and equal; drafts unrestricted."""
+        migration = _load_plan01_migration()
+
+        self.assertEqual(
+            migration.RESOLVED_BINDING_REQUIRED_SNAPSHOT_DIGEST_KEYS,
+            (
+                "resolutionDigest",
+                "dependencyClosureDigest",
+                "bindingContractDigest",
+            ),
+        )
+
+        complete = {
+            "inputSchemaDigest": DIGEST_A,
+            "outputSchemaDigest": DIGEST_B,
+            "resolutionDigest": DIGEST_C,
+            "dependencyClosureDigest": DIGEST_D,
+            "bindingContractDigest": DIGEST_E,
+        }
+        self.assertFalse(
+            migration.resolved_snapshot_digest_mismatch(
+                complete,
+                resolution_digest=DIGEST_C,
+                dependency_closure_digest=DIGEST_D,
+                binding_contract_digest=DIGEST_E,
+                input_schema_digest=DIGEST_A,
+                output_schema_digest=DIGEST_B,
+            )
+        )
+
+        # Optional-key regression: missing required digest keys must mismatch.
+        missing_keys = {
+            "inputSchemaDigest": DIGEST_A,
+            "outputSchemaDigest": DIGEST_B,
+        }
+        self.assertTrue(
+            migration.resolved_snapshot_digest_mismatch(
+                missing_keys,
+                resolution_digest=DIGEST_C,
+                dependency_closure_digest=DIGEST_D,
+                binding_contract_digest=DIGEST_E,
+                input_schema_digest=DIGEST_A,
+                output_schema_digest=DIGEST_B,
+            )
+        )
+
+        wrong_value = dict(complete)
+        wrong_value["resolutionDigest"] = DIGEST_A
+        self.assertTrue(
+            migration.resolved_snapshot_digest_mismatch(
+                wrong_value,
+                resolution_digest=DIGEST_C,
+                dependency_closure_digest=DIGEST_D,
+                binding_contract_digest=DIGEST_E,
+                input_schema_digest=DIGEST_A,
+                output_schema_digest=DIGEST_B,
+            )
+        )
+
+        self.assertTrue(
+            migration.resolved_snapshot_digest_mismatch(
+                None,
+                resolution_digest=DIGEST_C,
+                dependency_closure_digest=DIGEST_D,
+                binding_contract_digest=DIGEST_E,
+                input_schema_digest=DIGEST_A,
+                output_schema_digest=DIGEST_B,
+            )
+        )
+
+        # Migration SQL must require keys, not optional `snap ? key AND ...` only.
+        migration_src = _MIGRATION_PATH.read_text(encoding="utf-8")
+        self.assertIn("NOT (snap ? 'resolutionDigest')", migration_src)
+        self.assertIn("NOT (snap ? 'dependencyClosureDigest')", migration_src)
+        self.assertIn("NOT (snap ? 'bindingContractDigest')", migration_src)
+        self.assertNotIn(
+            "snap ? 'resolutionDigest'\n                        AND (snap->>'resolutionDigest')",
+            migration_src,
+        )
 
     # ------------------------------------------------------------------ helpers
 
