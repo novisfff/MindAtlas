@@ -1,18 +1,18 @@
 """Core Provider Agent Loop — direct answer and single-call sequential dispatch.
 
-Plan 03 Task 3: rebuild tools before every Provider round, assemble one assistant
-message, verify classification freshness before planning/dispatch, pair every
-Tool Call, and never emit provisional tool-call prose as final text.
+Plan 03 Tasks 3–4: rebuild tools before every Provider round, assemble one
+assistant message via the stream assembler, soft-finalize with tools disabled
+on the reserved last round after Tool use, verify classification freshness
+before planning/dispatch, pair every Tool Call, and never emit provisional
+tool-call prose as final text.
 
-Does not implement parallel sibling scheduling, soft finalization reservation
-beyond basic multi-round completion, waiting/resume, or live OpenAI adapters.
+Does not implement parallel sibling scheduling, waiting/resume, or live OpenAI
+adapters (later tasks).
 """
 
 from __future__ import annotations
 
-import json
 import time
-from collections.abc import Sequence
 from typing import Any
 
 from app.assistant.capabilities.contracts import (
@@ -20,44 +20,48 @@ from app.assistant.capabilities.contracts import (
     CapabilityResult,
 )
 from app.assistant.domain.contracts import (
-    ModelRef,
     ResolvedRunManifestRevision,
     validate_manifest_child_link,
 )
-from app.assistant.provider_loop.aliases import lookup_tool_by_alias
+from app.assistant.provider_loop.aliases import (
+    OPENAI_CHAT_PROVIDER_PROTOCOL,
+    build_provider_tool_surface,
+    lookup_tool_by_alias,
+)
 from app.assistant.provider_loop.contracts import (
     ProviderAdapter,
     ProviderDispatchRequest,
     ProviderDispatchResult,
     ProviderExecutionScope,
+    ProviderGenerationOptions,
     ProviderLoopPorts,
     ProviderLoopRequest,
     ProviderLoopResult,
     ProviderRoundRequest,
-    ProviderRoundResult,
-    ProviderRoundTerminal,
-    ProviderTextDelta,
-    ProviderToolCallDelta,
-    ProviderToolDefinition,
+    ProviderToolChoice,
     ProviderToolSurface,
     ProviderUsage,
-    ProviderUsageSnapshot,
     SafeProviderError,
     ToolSurfaceResolution,
     aggregate_provider_usage,
     compute_scope_digest,
 )
 from app.assistant.provider_loop.messages import (
-    ProviderAssistantMessage,
     ProviderMessage,
+    ProviderRuntimeInstructionMessage,
     ProviderToolCall,
     ProviderToolCallRecord,
     ProviderToolMessage,
     ProviderToolResultEnvelope,
-    digest_arguments,
     digest_provider_message,
     project_tool_result_envelope,
     validate_provider_transcript,
+)
+from app.assistant.provider_loop.streaming import (
+    DefaultFinalizationInstructionProvider,
+    FinalizationInstructionProvider,
+    assemble_provider_round,
+    is_finalization_round,
 )
 
 
@@ -92,6 +96,8 @@ class ProviderLoopError(Exception):
 def run_provider_agent_loop(
     request: ProviderLoopRequest,
     ports: ProviderLoopPorts,
+    *,
+    finalization_instructions: FinalizationInstructionProvider | None = None,
 ) -> ProviderLoopResult:
     """Run the provider-neutral agent loop until completion, failure, or cancel."""
     if not isinstance(request, ProviderLoopRequest):
@@ -99,11 +105,14 @@ def run_provider_agent_loop(
     if not isinstance(ports, ProviderLoopPorts):
         raise TypeError("ports must be a ProviderLoopPorts")
 
+    instruction_provider = finalization_instructions or DefaultFinalizationInstructionProvider()
     messages: list[ProviderMessage] = list(request.initial_messages)
     tool_call_records: list[ProviderToolCallRecord] = []
     current_manifest = request.manifest
     accumulated_usage = ProviderUsage()
     round_count = 0
+    prior_tool_call_count = 0
+    finalization_instruction_appended = False
 
     try:
         _validate_loop_identity(request=request, provider=ports.provider)
@@ -154,39 +163,108 @@ def run_provider_agent_loop(
             _validate_loop_identity(request=request, provider=ports.provider)
             validate_provider_transcript(tuple(messages))
 
-            # Resolve tools immediately before the Provider request.
-            try:
-                resolution = ports.tools_provider.resolve(
-                    current_manifest,
-                    scope=request.execution_scope,
-                    locale=request.locale,
-                )
-            except ProviderLoopError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - map to safe protocol error
-                raise ProviderLoopError(
-                    stop_reason="protocol_error",
-                    error=SafeProviderError(
-                        semantic_code="tools_provider_failed",
-                        safe_summary="tools provider failed before provider round",
-                        retry_disposition="never",
-                    ),
-                    messages=tuple(messages),
-                    tool_calls=tuple(tool_call_records),
-                    manifest=current_manifest,
-                    usage=accumulated_usage,
-                    round_count=round_count,
-                ) from exc
-
-            resolution = _require_tool_surface_resolution(resolution)
-            _validate_alias_revision_lineage(
-                previous=current_manifest,
-                next_manifest=resolution.manifest,
-            )
-            current_manifest = resolution.manifest
-            surface = resolution.surface
-
             round_index = round_count
+            finalization = is_finalization_round(
+                round_index=round_index,
+                max_rounds=request.max_rounds,
+                prior_tool_call_count=prior_tool_call_count,
+            )
+
+            if finalization:
+                # Reserved tools-disabled finalization: empty surface, no tools_provider.
+                surface = _empty_finalization_surface(
+                    manifest=current_manifest,
+                    provider_protocol=ports.provider.provider_protocol,
+                    scope=request.execution_scope,
+                )
+                if not finalization_instruction_appended:
+                    instruction = instruction_provider.build(locale=request.locale)
+                    if not isinstance(instruction, ProviderRuntimeInstructionMessage):
+                        raise ProviderLoopError(
+                            stop_reason="protocol_error",
+                            error=SafeProviderError(
+                                semantic_code="finalization_instruction_invalid",
+                                safe_summary="finalization instruction must be a runtime message",
+                                retry_disposition="never",
+                            ),
+                            messages=tuple(messages),
+                            tool_calls=tuple(tool_call_records),
+                            manifest=current_manifest,
+                            usage=accumulated_usage,
+                            round_count=round_count,
+                        )
+                    messages.append(instruction)
+                    finalization_instruction_appended = True
+                generation = ProviderGenerationOptions(
+                    max_output_tokens=request.generation.max_output_tokens,
+                    temperature=request.generation.temperature,
+                    tool_choice=ProviderToolChoice(mode="none"),
+                    request_parallel_tool_calls=request.generation.request_parallel_tool_calls,
+                )
+                tools_enabled = False
+                _emit(
+                    ports,
+                    "finalization.started",
+                    {
+                        "roundIndex": round_index,
+                        "manifestRevision": current_manifest.revision,
+                        "manifestDigest": current_manifest.manifest_digest,
+                        "priorToolCallCount": prior_tool_call_count,
+                    },
+                )
+            else:
+                try:
+                    resolution = ports.tools_provider.resolve(
+                        current_manifest,
+                        scope=request.execution_scope,
+                        locale=request.locale,
+                    )
+                except ProviderLoopError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - map to safe protocol error
+                    raise ProviderLoopError(
+                        stop_reason="protocol_error",
+                        error=SafeProviderError(
+                            semantic_code="tools_provider_failed",
+                            safe_summary="tools provider failed before provider round",
+                            retry_disposition="never",
+                        ),
+                        messages=tuple(messages),
+                        tool_calls=tuple(tool_call_records),
+                        manifest=current_manifest,
+                        usage=accumulated_usage,
+                        round_count=round_count,
+                    ) from exc
+
+                resolution = _require_tool_surface_resolution(resolution)
+                _validate_alias_revision_lineage(
+                    previous=current_manifest,
+                    next_manifest=resolution.manifest,
+                )
+                current_manifest = resolution.manifest
+                surface = resolution.surface
+                generation = request.generation
+                tools_enabled = True
+
+                # max_rounds=1 with a nonempty tool surface is illegal.
+                if request.max_rounds == 1 and surface.tools:
+                    raise ProviderLoopError(
+                        stop_reason="protocol_error",
+                        error=SafeProviderError(
+                            semantic_code="max_rounds_surface_conflict",
+                            safe_summary=(
+                                "nonempty tool surface requires max_rounds >= 2 "
+                                "so a finalization round can be reserved"
+                            ),
+                            retry_disposition="never",
+                        ),
+                        messages=tuple(messages),
+                        tool_calls=tuple(tool_call_records),
+                        manifest=current_manifest,
+                        usage=accumulated_usage,
+                        round_count=round_count,
+                    )
+
             round_count += 1
 
             _emit(
@@ -198,7 +276,8 @@ def run_provider_agent_loop(
                     "manifestDigest": current_manifest.manifest_digest,
                     "surfaceDigest": surface.surface_digest,
                     "toolCount": len(surface.tools),
-                    "toolsEnabled": True,
+                    "toolsEnabled": tools_enabled,
+                    "finalizationRound": finalization,
                 },
             )
 
@@ -206,10 +285,10 @@ def run_provider_agent_loop(
                 round_index=round_index,
                 messages=tuple(messages),
                 tool_surface=surface,
-                tools_enabled=True,
-                finalization_round=False,
+                tools_enabled=tools_enabled,
+                finalization_round=finalization,
                 model_ref=request.model_ref,
-                generation=request.generation,
+                generation=generation,
             )
 
             try:
@@ -222,11 +301,16 @@ def run_provider_agent_loop(
             except ProviderLoopError:
                 raise
             except Exception as exc:  # noqa: BLE001 - sanitize provider failures
+                stop = "max_rounds_hard_stop" if finalization else "provider_error"
                 raise ProviderLoopError(
-                    stop_reason="provider_error",
+                    stop_reason=stop,
                     error=SafeProviderError(
-                        semantic_code="provider_error",
-                        safe_summary="provider round failed",
+                        semantic_code=stop,
+                        safe_summary=(
+                            "finalization provider round failed"
+                            if finalization
+                            else "provider round failed"
+                        ),
                         adapter_key=ports.provider.adapter_key,
                         adapter_revision=ports.provider.adapter_revision,
                         retry_disposition="never",
@@ -245,10 +329,11 @@ def run_provider_agent_loop(
                     round_index=round_index,
                 )
             except ValueError as exc:
+                stop = "max_rounds_hard_stop" if finalization else "protocol_error"
                 raise ProviderLoopError(
-                    stop_reason="protocol_error",
+                    stop_reason=stop,
                     error=SafeProviderError(
-                        semantic_code="protocol_error",
+                        semantic_code=stop if finalization else "protocol_error",
                         safe_summary=str(exc) or "provider stream protocol error",
                         adapter_key=ports.provider.adapter_key,
                         adapter_revision=ports.provider.adapter_revision,
@@ -276,17 +361,18 @@ def run_provider_agent_loop(
                     "toolCallCount": len(assistant.tool_calls),
                     "finishReason": round_result.finish_reason,
                     "surfaceDigest": surface.surface_digest,
+                    "finalizationRound": finalization,
                 },
             )
 
             if not assistant.tool_calls:
                 final_text = assistant.content
                 if final_text is None or not str(final_text).strip():
-                    # Discard empty direct answer; seal transcript (already paired).
+                    stop = "max_rounds_hard_stop" if finalization else "protocol_error"
                     raise ProviderLoopError(
-                        stop_reason="protocol_error",
+                        stop_reason=stop,
                         error=SafeProviderError(
-                            semantic_code="empty_response",
+                            semantic_code="empty_response" if not finalization else stop,
                             safe_summary="provider returned empty assistant content",
                             adapter_key=ports.provider.adapter_key,
                             adapter_revision=ports.provider.adapter_revision,
@@ -300,6 +386,7 @@ def run_provider_agent_loop(
                     )
 
                 # Replay buffered final text only after successful assembly.
+                # Runtime finalization instructions never appear here.
                 for index, chunk in enumerate(_chunk_final_text(final_text)):
                     _emit(
                         ports,
@@ -312,13 +399,16 @@ def run_provider_agent_loop(
                     )
 
                 validate_provider_transcript(tuple(messages))
+                stop_reason = (
+                    "max_rounds_soft_finalized" if finalization else "natural_completion"
+                )
                 result = ProviderLoopResult(
                     status="completed",
                     final_text=final_text,
                     messages=tuple(messages),
                     tool_calls=tuple(tool_call_records),
                     round_count=round_count,
-                    stop_reason="natural_completion",
+                    stop_reason=stop_reason,
                     manifest=current_manifest,
                     continuation=None,
                     usage=accumulated_usage,
@@ -329,13 +419,32 @@ def run_provider_agent_loop(
                     "loop.completed",
                     {
                         "roundCount": round_count,
-                        "stopReason": "natural_completion",
+                        "stopReason": stop_reason,
                         "toolCallCount": len(tool_call_records),
                     },
                 )
                 return result
 
+            if finalization:
+                # Tools-disabled finalization must never execute Tool Calls.
+                raise ProviderLoopError(
+                    stop_reason="max_rounds_hard_stop",
+                    error=SafeProviderError(
+                        semantic_code="max_rounds_hard_stop",
+                        safe_summary="finalization round returned tool calls",
+                        adapter_key=ports.provider.adapter_key,
+                        adapter_revision=ports.provider.adapter_revision,
+                        retry_disposition="never",
+                    ),
+                    messages=tuple(messages),
+                    tool_calls=tuple(tool_call_records),
+                    manifest=current_manifest,
+                    usage=accumulated_usage,
+                    round_count=round_count,
+                )
+
             # Tool-call path: provisional prose is retained in history only.
+            prior_tool_call_count += len(assistant.tool_calls)
             for call in assistant.tool_calls:
                 _emit(
                     ports,
@@ -578,154 +687,25 @@ def run_provider_agent_loop(
 
 
 # ---------------------------------------------------------------------------
-# Round assembly (Task 3 minimal; Task 4 expands streaming edge cases)
-# ---------------------------------------------------------------------------
-
-
-def assemble_provider_round(
-    *,
-    events: Sequence[Any],
-    surface: ProviderToolSurface,
-    round_index: int,
-) -> ProviderRoundResult:
-    """Assemble one normalized assistant message from contiguous stream events."""
-    if not events:
-        raise ValueError("provider stream was empty")
-
-    text_parts: list[str] = []
-    # call_index -> mutable builder
-    builders: dict[int, dict[str, Any]] = {}
-    usage: ProviderUsage | None = None
-    finish_reason: str | None = None
-    saw_terminal = False
-    warnings: list[str] = []
-
-    for index, event in enumerate(events):
-        if saw_terminal:
-            raise ValueError("stream event after terminal")
-        if getattr(event, "sequence", None) != index:
-            raise ValueError("stream event sequences must be contiguous from zero")
-
-        if isinstance(event, ProviderTextDelta):
-            text_parts.append(event.delta)
-            continue
-
-        if isinstance(event, ProviderToolCallDelta):
-            builder = builders.setdefault(
-                event.call_index,
-                {
-                    "call_id": None,
-                    "provider_alias": "",
-                    "arguments": "",
-                },
-            )
-            if event.call_id is not None:
-                if builder["call_id"] is None:
-                    builder["call_id"] = event.call_id
-                elif builder["call_id"] != event.call_id:
-                    raise ValueError("tool call id changed mid-stream")
-            if event.provider_alias_delta:
-                builder["provider_alias"] += event.provider_alias_delta
-            if event.arguments_delta:
-                builder["arguments"] += event.arguments_delta
-            continue
-
-        if isinstance(event, ProviderUsageSnapshot):
-            usage = event.usage
-            continue
-
-        if isinstance(event, ProviderRoundTerminal):
-            saw_terminal = True
-            finish_reason = event.finish_reason
-            continue
-
-        raise ValueError(f"unsupported stream event type {type(event)!r}")
-
-    if not saw_terminal:
-        raise ValueError("provider stream missing terminal event")
-
-    content = "".join(text_parts) if text_parts else None
-    if content == "":
-        content = None
-
-    if not builders:
-        return ProviderRoundResult(
-            assistant_message=ProviderAssistantMessage(content=content, tool_calls=()),
-            finish_reason=finish_reason,
-            usage=usage,
-            compatibility_warnings=tuple(warnings),
-        )
-
-    # Build tool calls in provider order (contiguous indexes from 0).
-    indexes = sorted(builders)
-    if indexes != list(range(len(indexes))):
-        raise ValueError("tool call indexes must be contiguous from zero")
-
-    seen_ids: set[str] = set()
-    tool_calls: list[ProviderToolCall] = []
-    for call_index in indexes:
-        builder = builders[call_index]
-        call_id = builder["call_id"]
-        if not call_id:
-            # Task 3: require provider-stable IDs; synthesis is Task 4/adapter.
-            raise ValueError("tool call missing call_id")
-        if call_id in seen_ids:
-            raise ValueError(f"duplicate tool call_id {call_id!r}")
-        seen_ids.add(call_id)
-
-        provider_alias = builder["provider_alias"]
-        if not provider_alias:
-            raise ValueError("tool call missing provider alias")
-        try:
-            definition = lookup_tool_by_alias(surface, provider_alias)
-        except KeyError as exc:
-            raise ValueError(f"unknown provider alias: {provider_alias!r}") from exc
-
-        raw_args = builder["arguments"]
-        try:
-            parsed = json.loads(raw_args) if raw_args else {}
-        except json.JSONDecodeError as exc:
-            raise ValueError("tool call arguments are not valid JSON") from exc
-        if not isinstance(parsed, dict):
-            raise ValueError("tool call arguments must be a JSON object")
-
-        tool_calls.append(
-            ProviderToolCall(
-                call_id=call_id,
-                call_index=call_index,
-                provider_alias=definition.provider_alias,
-                domain_key=definition.domain_key,
-                arguments=parsed,
-                arguments_digest=digest_arguments(parsed),
-                binding_contract_digest=definition.binding.ref.binding_contract_digest,
-                descriptor_digest=definition.descriptor.descriptor_digest,
-                behavior_digest=definition.descriptor.behavior.behavior_digest,
-                classification_revision=definition.descriptor.behavior.classification.revision,
-                classification_ruleset_digest=(
-                    definition.descriptor.behavior.classification.ruleset_digest
-                ),
-                manifest_revision=surface.manifest_revision,
-                manifest_digest=surface.manifest_digest,
-                surface_digest=surface.surface_digest,
-            )
-        )
-
-    # Cross-transcript uniqueness is enforced by validate_provider_transcript later.
-    assistant = ProviderAssistantMessage(
-        content=content,
-        tool_calls=tuple(tool_calls),
-    )
-    return ProviderRoundResult(
-        assistant_message=assistant,
-        finish_reason=finish_reason,
-        usage=usage,
-        compatibility_warnings=tuple(warnings),
-    )
-
-
-# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _empty_finalization_surface(
+    *,
+    manifest: ResolvedRunManifestRevision,
+    provider_protocol: str,
+    scope: ProviderExecutionScope,
+) -> ProviderToolSurface:
+    """Canonical empty Tool surface tied to the current Manifest for finalization."""
+    protocol = provider_protocol or OPENAI_CHAT_PROVIDER_PROTOCOL
+    resolution = build_provider_tool_surface(
+        manifest=manifest,
+        provider_protocol=protocol,
+        visible=[],
+        scope=scope,
+    )
+    return resolution.surface
 
 
 class _ClassificationDrift(Exception):
@@ -1411,5 +1391,6 @@ def _result_from_loop_error(
 __all__ = [
     "ProviderLoopError",
     "assemble_provider_round",
+    "is_finalization_round",
     "run_provider_agent_loop",
 ]

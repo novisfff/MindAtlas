@@ -3,6 +3,7 @@
 Task 1: frozen contracts, messages, digests, and pure transcript validators.
 Task 2: deterministic Domain Key ↔ Provider alias mapping and frozen surfaces.
 Task 3: scripted provider + core direct/single-call agent loop.
+Task 4: stream assembly, event ordering, and soft finalization.
 """
 
 from __future__ import annotations
@@ -66,7 +67,7 @@ from app.assistant.provider_loop.contracts import (
 )
 from app.assistant.provider_loop.loop import (
     ProviderLoopError,
-    assemble_provider_round,
+    is_finalization_round,
     run_provider_agent_loop,
 )
 from app.assistant.provider_loop.messages import (
@@ -94,11 +95,22 @@ from app.assistant.provider_loop.scripted_provider import (
     text_then_terminal,
     tool_call_then_terminal,
 )
+from app.assistant.provider_loop.streaming import (
+    ARGUMENTS_BYTE_LIMIT,
+    IDENTITY_BYTE_LIMIT,
+    DefaultFinalizationInstructionProvider,
+    ProviderRoundAssembler,
+    assemble_provider_round,
+    is_safe_request_id,
+)
 
 __all__ = [
+    "ARGUMENTS_BYTE_LIMIT",
     "CancellationPort",
     "CurrentCapabilityDescriptorVerifier",
     "DEFAULT_RESERVED_CONTROL_ALIASES",
+    "DefaultFinalizationInstructionProvider",
+    "IDENTITY_BYTE_LIMIT",
     "OPENAI_CHAT_PROVIDER_PROTOCOL",
     "ProviderAdapter",
     "ProviderAssistantMessage",
@@ -115,6 +127,7 @@ __all__ = [
     "ProviderLoopResult",
     "ProviderLoopResumeRequest",
     "ProviderMessage",
+    "ProviderRoundAssembler",
     "ProviderRoundRequest",
     "ProviderRoundResult",
     "ProviderRoundTerminal",
@@ -159,6 +172,8 @@ __all__ = [
     "forward_alias_map",
     "generated_alias_candidate",
     "identity_digest_prefix",
+    "is_finalization_round",
+    "is_safe_request_id",
     "is_valid_provider_alias",
     "lookup_tool_by_alias",
     "make_cancelled_envelope",
