@@ -714,6 +714,134 @@ def validate_manifest_child_link(
         raise ValueError("child run_id must match parent run_id")
 
 
+def _same_provider_alias(
+    left: ResolvedProviderAliasRef,
+    right: ResolvedProviderAliasRef,
+) -> bool:
+    return (
+        left.provider_protocol == right.provider_protocol
+        and left.domain_key == right.domain_key
+        and left.provider_alias == right.provider_alias
+        and left.binding_contract_digest == right.binding_contract_digest
+    )
+
+
+def _casefold_ascii(value: str) -> str:
+    return value.encode("utf-8").decode("ascii").casefold()
+
+
+def append_provider_aliases(
+    current: ResolvedRunManifestRevision,
+    *,
+    aliases: tuple[ResolvedProviderAliasRef, ...],
+) -> ResolvedRunManifestRevision:
+    """Append provider alias refs without mutating existing parent aliases.
+
+    Plan 03 final validation lives here. The v1 Manifest shape is unchanged:
+    empty aliases remain an explicit empty tuple in the canonical payload.
+    """
+    if not isinstance(aliases, tuple):
+        raise TypeError("aliases must be a tuple of ResolvedProviderAliasRef")
+
+    existing = list(current.provider_aliases)
+    existing_by_identity = {
+        (item.provider_protocol, item.domain_key): item for item in existing
+    }
+    # Case-folded alias occupancy per protocol (ASCII only).
+    occupied_aliases: dict[tuple[str, str], ResolvedProviderAliasRef] = {
+        (item.provider_protocol, _casefold_ascii(item.provider_alias)): item
+        for item in existing
+    }
+    # Domain key + binding identity occupancy per protocol.
+    occupied_bindings: dict[tuple[str, str], ResolvedProviderAliasRef] = {
+        (item.provider_protocol, item.domain_key): item for item in existing
+    }
+
+    additions: list[ResolvedProviderAliasRef] = []
+    for alias in aliases:
+        if not isinstance(alias, ResolvedProviderAliasRef):
+            raise TypeError("aliases must contain ResolvedProviderAliasRef values")
+        if not alias.provider_alias or not alias.domain_key or not alias.provider_protocol:
+            raise ValueError("provider alias fields must be non-empty")
+        if not alias.binding_contract_digest:
+            raise ValueError("binding_contract_digest must be non-empty")
+
+        identity = (alias.provider_protocol, alias.domain_key)
+        prior = existing_by_identity.get(identity)
+        if prior is not None:
+            if not _same_provider_alias(prior, alias):
+                raise ValueError(
+                    f"provider alias conflict for domain key {alias.domain_key!r}: "
+                    "existing aliases cannot change or map to a different binding"
+                )
+            # Identical existing alias is a no-op for this input item.
+            continue
+
+        # Same domain key may also appear under a different identity lookup path
+        # if protocol differs; still forbid conflicting binding versions for the
+        # same (protocol, domain_key) once present.
+        prior_binding = occupied_bindings.get(identity)
+        if prior_binding is not None and not _same_provider_alias(prior_binding, alias):
+            raise ValueError(
+                f"domain key {alias.domain_key!r} already bound to a different "
+                "binding/version under this provider protocol"
+            )
+
+        folded = (alias.provider_protocol, _casefold_ascii(alias.provider_alias))
+        collision = occupied_aliases.get(folded)
+        if collision is not None and not _same_provider_alias(collision, alias):
+            raise ValueError(
+                f"provider alias case-fold collision for {alias.provider_alias!r}"
+            )
+
+        additions.append(alias)
+        existing_by_identity[identity] = alias
+        occupied_aliases[folded] = alias
+        occupied_bindings[identity] = alias
+
+    if not additions:
+        # Reapplying the identical (or already-present) alias set is idempotent.
+        return current
+
+    merged = tuple(
+        sorted(
+            (*current.provider_aliases, *additions),
+            key=lambda item: (
+                item.provider_protocol,
+                item.domain_key,
+                item.provider_alias,
+            ),
+        )
+    )
+    revision = current.revision + 1
+    parent_digest = current.manifest_digest
+    manifest_digest = compute_manifest_digest(
+        run_id=current.run_id,
+        revision=revision,
+        parent_digest=parent_digest,
+        main_agent=current.main_agent,
+        active_skills=current.active_skills,
+        capabilities=current.capabilities,
+        provider=current.provider,
+        model=current.model,
+        provider_aliases=merged,
+        effective_policy_digest=current.effective_policy_digest,
+    )
+    return ResolvedRunManifestRevision(
+        run_id=current.run_id,
+        revision=revision,
+        parent_digest=parent_digest,
+        main_agent=current.main_agent,
+        active_skills=current.active_skills,
+        capabilities=current.capabilities,
+        provider=current.provider,
+        model=current.model,
+        provider_aliases=merged,
+        effective_policy_digest=current.effective_policy_digest,
+        manifest_digest=manifest_digest,
+    )
+
+
 __all__ = [
     "AgentLoopStatus",
     "BindingResolutionStatus",
@@ -744,6 +872,7 @@ __all__ = [
     "StoredSkillResource",
     "ToolParamContract",
     "VersionSource",
+    "append_provider_aliases",
     "append_skill_activation",
     "build_manifest_digest_payload",
     "compute_manifest_digest",
