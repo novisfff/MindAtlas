@@ -3,6 +3,10 @@
 Adapters receive an already resolved, validated, and authorized target and produce
 one normalized ``CapabilityResult``. They never authorize, allocate Provider
 aliases, or re-resolve by name/latest.
+
+Runtime composition (``build_capability_runtime`` / adapter registry) lives in
+``app.assistant.capabilities.runtime`` so adapters stay free of Gateway/policy
+imports.
 """
 
 from __future__ import annotations
