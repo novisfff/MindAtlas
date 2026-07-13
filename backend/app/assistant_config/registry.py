@@ -601,18 +601,73 @@ class ToolRegistry(_BaseRegistry):
             ))
         return results
 
+    @classmethod
+    def list_runtime_system_tool_names(cls) -> tuple[str, ...]:
+        """Sorted allowlist of code-native runtime Tools (``_EXPORTS``-backed).
+
+        Includes internal tools (e.g. ``kb_search``) and all ``openclaw_*`` tools.
+        This is the sole exhaustiveness source for classification/resolution tests.
+        """
+        from app.assistant import tools as assistant_tools
+
+        exports = getattr(assistant_tools, "_EXPORTS", None) or {}
+        return tuple(sorted(str(name) for name in exports.keys()))
+
+    @classmethod
+    def get_runtime_system_tool_definition(
+        cls,
+        tool_name: str,
+        *,
+        locale: str | None = None,
+    ) -> SystemToolFullDefinition | None:
+        """Return a full definition for an allowlisted runtime system Tool, if present."""
+        normalized = str(tool_name or "").strip()
+        if not normalized or normalized not in cls.list_runtime_system_tool_names():
+            return None
+        tool_obj = cls.resolve_system_tool(normalized)
+        if tool_obj is None:
+            return None
+        description = (
+            getattr(tool_obj, "description", None)
+            or getattr(tool_obj, "__doc__", "")
+            or ""
+        ).strip()
+        display = cls.get_system_tool_display(normalized, locale=locale)
+        input_params, doc_returns, json_schema = cls._extract_tool_params(tool_obj)
+        output_params = cls._extract_system_tool_output_params(normalized)
+        returns = cls._format_output_contract(output_params) or doc_returns
+        return SystemToolFullDefinition(
+            name=normalized,
+            description=description,
+            display_name=display.display_name,
+            display_description=display.display_description,
+            input_params=input_params,
+            output_params=output_params,
+            returns=returns,
+            json_schema=json_schema,
+        )
+
     @staticmethod
     def resolve_system_tool(tool_name: str) -> Any | None:
+        """Resolve an allowlisted code-native system Tool only.
+
+        Arbitrary module attributes outside ``_EXPORTS`` are never resolvable.
+        """
         from app.assistant import tools as assistant_tools
-        return getattr(assistant_tools, tool_name, None)
+
+        normalized = str(tool_name or "").strip()
+        if not normalized:
+            return None
+        exports = getattr(assistant_tools, "_EXPORTS", None) or {}
+        if normalized not in exports:
+            return None
+        return getattr(assistant_tools, normalized, None)
 
     @classmethod
     def has_system_tool(cls, tool_name: str) -> bool:
         normalized = str(tool_name or "").strip()
         if not normalized:
             return False
-        if normalized in cls.INTERNAL_TOOL_NAMES:
-            return True
         return cls.resolve_system_tool(normalized) is not None
 
     def list_db_tools(self, include_disabled: bool = False) -> list[AssistantTool]:
