@@ -662,6 +662,8 @@ def test_revision_guards_tool_model_credential(engine: Engine) -> None:
                 {"id": model_id},
             )
         assert "MINDATLAS_PLAN01_REVISION" in _err_text(exc_info.value)
+
+    with engine.begin() as conn:
         conn.execute(
             text(
                 "UPDATE ai_model SET name = 'gpt-rev-2', runtime_revision = 2 WHERE id = :id"
@@ -677,6 +679,8 @@ def test_revision_guards_tool_model_credential(engine: Engine) -> None:
                 {"id": cred_id},
             )
         assert "MINDATLAS_PLAN01_REVISION" in _err_text(exc_info.value)
+
+    with engine.begin() as conn:
         conn.execute(
             text(
                 "UPDATE ai_credential SET base_url = 'https://api.example.com/v2', "
@@ -1137,44 +1141,36 @@ def test_two_session_sequence_conflict(engine: Engine) -> None:
         )
         try:
             with eng.connect() as conn:
+                # SET in autocommit-like fashion: commit the autobegin first.
                 conn.execute(text("SET lock_timeout = '5s'"))
                 conn.execute(text("SET statement_timeout = '10s'"))
-                trans = conn.begin()
+                conn.commit()
                 try:
                     if not start.wait(timeout=10):
                         raise TimeoutError("race start signal timed out")
-                    conn.execute(
-                        insert_sql,
-                        {
-                            "id": uuid.uuid4(),
-                            "pkg": package_id,
-                            "seq": 2,
-                            "vname": vname,
-                            "skill_md": "---\nname: x\ndescription: y\n---\n",
-                            "frontmatter": '{"name":"x","description":"y"}',
-                            "resource_index": "[]",
-                            "d1": _DIGEST_A,
-                            "d2": _DIGEST_B,
-                            "d3": _DIGEST_C,
-                            "d4": content_digest,
-                        },
-                    )
-                    trans.commit()
+                    with conn.begin():
+                        conn.execute(
+                            insert_sql,
+                            {
+                                "id": uuid.uuid4(),
+                                "pkg": package_id,
+                                "seq": 2,
+                                "vname": vname,
+                                "skill_md": "---\nname: x\ndescription: y\n---\n",
+                                "frontmatter": '{"name":"x","description":"y"}',
+                                "resource_index": "[]",
+                                "d1": _DIGEST_A,
+                                "d2": _DIGEST_B,
+                                "d3": _DIGEST_C,
+                                "d4": content_digest,
+                            },
+                        )
                     return "committed"
                 except (IntegrityError, DBAPIError):
-                    try:
-                        trans.rollback()
-                    except Exception:
-                        pass
                     return "failed"
-                except Exception:
-                    try:
-                        trans.rollback()
-                    except Exception:
-                        pass
-                    raise
         finally:
             eng.dispose()
+
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         futs = [
