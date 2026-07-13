@@ -17,7 +17,7 @@ jobs:
         working-directory: backend
     env:
       # Required by settings/crypto for many integration tests; 32-byte base64 test key.
-      AI_PROVIDER_FERNET_KEY: "dGVzdC1mZXJuZXQta2V5LTMyYnl0ZXMhMTIzNDU2"
+      AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -73,7 +73,7 @@ jobs:
       DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_migration
       MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_migration
       # Minimal app config required by settings import during alembic env.
-      AI_PROVIDER_FERNET_KEY: "dGVzdC1mZXJuZXQta2V5LTMyYnl0ZXMhMTIzNDU2"
+      AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
     steps:
       - name: Checkout
         uses: actions/checkout@v5

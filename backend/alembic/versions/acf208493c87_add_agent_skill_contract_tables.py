@@ -670,19 +670,19 @@ def upgrade() -> None:
         unique=False,
     )
     op.create_index(
-        "ix_assistant_skill_capability_binding_resolved_tool_id",
+        "ix_as_skill_cap_bind_res_tool",
         "assistant_skill_capability_binding",
         ["resolved_tool_id"],
         unique=False,
     )
     op.create_index(
-        "ix_assistant_skill_capability_binding_resolved_workflow_version_id",
+        "ix_as_skill_cap_bind_res_wf_ver",
         "assistant_skill_capability_binding",
         ["resolved_workflow_version_id"],
         unique=False,
     )
     op.create_index(
-        "ix_assistant_skill_capability_binding_resolved_agent_version_id",
+        "ix_as_skill_cap_bind_res_agent_ver",
         "assistant_skill_capability_binding",
         ["resolved_agent_version_id"],
         unique=False,
@@ -817,25 +817,25 @@ def upgrade() -> None:
         unique=False,
     )
     op.create_index(
-        "ix_assistant_skill_capability_dependency_resolved_tool_id",
+        "ix_as_skill_cap_dep_res_tool",
         "assistant_skill_capability_dependency",
         ["resolved_tool_id"],
         unique=False,
     )
     op.create_index(
-        "ix_assistant_skill_capability_dependency_resolved_workflow_version_id",
+        "ix_as_skill_cap_dep_res_wf_ver",
         "assistant_skill_capability_dependency",
         ["resolved_workflow_version_id"],
         unique=False,
     )
     op.create_index(
-        "ix_assistant_skill_capability_dependency_resolved_agent_version_id",
+        "ix_as_skill_cap_dep_res_agent_ver",
         "assistant_skill_capability_dependency",
         ["resolved_agent_version_id"],
         unique=False,
     )
     op.create_index(
-        "ix_assistant_skill_capability_dependency_resolved_model_id",
+        "ix_as_skill_cap_dep_res_model",
         "assistant_skill_capability_dependency",
         ["resolved_model_id"],
         unique=False,
