@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.assistant.domain.contracts import ResolvedSkillRef
+from app.assistant.domain.contracts import ResolvedSkillRef, StoredSkillResource
 from app.assistant.domain.digests import sha256_bytes
 from app.assistant.skills.contracts import (
     ParsedSkillPackage,
@@ -22,6 +22,7 @@ from app.assistant.skills.contracts import (
     normalize_skill_lookup_name,
     validate_canonical_skill_name,
 )
+from app.assistant.skills.package_io import export_skill_package
 from app.assistant.skills.models import (
     AssistantMainAgentProfile,
     AssistantMainAgentProfileVersion,
@@ -171,6 +172,134 @@ class AgentSkillService:
             raise self._translate_integrity_error(exc) from exc
 
         return self.get_package(package.id)
+
+    def import_package(
+        self,
+        parsed: ParsedSkillPackage,
+        *,
+        actor_id: UUID | None,
+        origin: str,
+    ) -> SkillPackageDetail:
+        """Create-only import of a parsed package as a disabled native draft.
+
+        Never merges, replaces, enables, or auto-publishes. Conflicting
+        canonical names or aliases return ``40995``. ``actor_id`` is accepted
+        for audit callers but is never mixed into content digests (no column
+        yet; origin alone records the import channel on the draft version).
+        """
+        if origin != "import":
+            raise ApiException(
+                status_code=422,
+                code=42292,
+                message=f"import origin must be 'import', got {origin!r}",
+            )
+        # actor_id is intentionally unused in Plan 01 persistence; keep the
+        # parameter so API layers can pass it without inventing digest fields.
+        _ = actor_id
+
+        try:
+            canonical = validate_canonical_skill_name(parsed.canonical_name)
+        except ValueError as exc:
+            raise ApiException(status_code=422, code=42290, message=str(exc)) from exc
+
+        if is_reserved_skill_lookup_name(canonical):
+            raise ApiException(
+                status_code=409,
+                code=40995,
+                message=f"canonical skill name {canonical!r} is reserved",
+            )
+
+        # Pre-flight create-only conflicts → reserved 40995 (not create's 40990/40991).
+        self._assert_import_namespace_free(
+            canonical_name=canonical,
+            legacy_aliases=list(parsed.manifest.legacy_aliases)
+            if parsed.manifest
+            else [],
+        )
+
+        try:
+            package = AssistantSkillPackage(
+                canonical_name=canonical,
+                display_name=_display_name_for(parsed),
+                description=parsed.frontmatter.description,
+                migration_state="native",
+                catalog_enabled=False,
+                is_system=False,
+            )
+            self.db.add(package)
+            self.db.flush()
+
+            self._reserve_aliases(
+                package_id=package.id,
+                canonical_name=canonical,
+                legacy_aliases=list(parsed.manifest.legacy_aliases)
+                if parsed.manifest
+                else [],
+            )
+            self.db.flush()
+
+            version = self._insert_draft_version(
+                package=package,
+                parsed=parsed,
+                version_name="draft-1",
+                origin="import",
+                sequence_no=1,
+            )
+            package.draft_version_id = version.id
+            package.display_name = _display_name_for(parsed)
+            package.description = parsed.frontmatter.description
+            # Never auto-publish or enable catalog on import.
+            package.published_version_id = None
+            package.catalog_enabled = False
+            self.db.commit()
+        except ApiException as exc:
+            self.db.rollback()
+            raise self._as_import_conflict(exc) from exc
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise self._as_import_conflict(self._translate_integrity_error(exc)) from exc
+
+        return self.get_package(package.id)
+
+    def export_version(
+        self,
+        *,
+        package_id: UUID,
+        version_id: UUID,
+    ) -> bytes:
+        """Export one owned immutable version as a deterministic ZIP.
+
+        Never resolves the aggregate's current/latest pointer implicitly.
+        """
+        package = self._get_package_or_404(package_id)
+        version = (
+            self.db.query(AssistantSkillVersion)
+            .filter(
+                AssistantSkillVersion.id == version_id,
+                AssistantSkillVersion.skill_package_id == package.id,
+            )
+            .one_or_none()
+        )
+        if version is None:
+            raise ApiException(
+                status_code=404,
+                code=40491,
+                message=f"Skill version not found: {version_id}",
+            )
+
+        skill_md = (version.skill_md or "").encode("utf-8")
+        mindatlas_yaml = (
+            version.mindatlas_yaml.encode("utf-8")
+            if version.mindatlas_yaml is not None
+            else None
+        )
+        resources = self._load_stored_resources(version_id=version.id)
+        return export_skill_package(
+            package.canonical_name,
+            skill_md=skill_md,
+            mindatlas_yaml=mindatlas_yaml,
+            resources=resources,
+        )
 
     def save_draft(self, command: SaveSkillDraftCommand) -> SkillVersionSummary:
         parsed = command.parsed
@@ -1041,6 +1170,125 @@ class AgentSkillService:
             created_at=package.created_at,
             updated_at=package.updated_at,
         )
+
+    def _assert_import_namespace_free(
+        self,
+        *,
+        canonical_name: str,
+        legacy_aliases: list[str],
+    ) -> None:
+        """Raise 40995 when any import name/alias is already reserved."""
+        candidates: list[tuple[str, str]] = [(canonical_name, "canonical")]
+        seen = {normalize_skill_lookup_name(canonical_name)}
+        for raw in legacy_aliases:
+            try:
+                normalized = normalize_skill_lookup_name(raw)
+            except (TypeError, ValueError) as exc:
+                raise ApiException(
+                    status_code=422, code=42291, message=str(exc)
+                ) from exc
+            if is_reserved_skill_lookup_name(raw):
+                raise ApiException(
+                    status_code=409,
+                    code=40995,
+                    message=f"alias {raw!r} is reserved",
+                )
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            candidates.append((raw, "legacy"))
+
+        # Canonical package table.
+        existing_pkg = (
+            self.db.query(AssistantSkillPackage)
+            .filter(AssistantSkillPackage.canonical_name == canonical_name)
+            .one_or_none()
+        )
+        if existing_pkg is not None:
+            raise ApiException(
+                status_code=409,
+                code=40995,
+                message=f"create-only import conflict: canonical name {canonical_name!r} exists",
+            )
+
+        for raw, _kind in candidates:
+            try:
+                normalized = normalize_skill_lookup_name(raw)
+            except (TypeError, ValueError) as exc:
+                raise ApiException(
+                    status_code=422, code=42291, message=str(exc)
+                ) from exc
+            conflict = (
+                self.db.query(AssistantSkillPackageAlias)
+                .filter(AssistantSkillPackageAlias.normalized_alias == normalized)
+                .one_or_none()
+            )
+            if conflict is not None:
+                raise ApiException(
+                    status_code=409,
+                    code=40995,
+                    message=(
+                        f"create-only import conflict: name/alias {raw!r} already reserved"
+                    ),
+                )
+
+    def _as_import_conflict(self, exc: ApiException) -> ApiException:
+        """Map name/alias reservation failures onto create-only 40995."""
+        if exc.code in {40990, 40991, 40995}:
+            return ApiException(
+                status_code=409,
+                code=40995,
+                message=exc.message
+                if exc.code == 40995
+                else f"create-only import conflict: {exc.message}",
+            )
+        return exc
+
+    def _load_stored_resources(
+        self, *, version_id: UUID
+    ) -> tuple[StoredSkillResource, ...]:
+        rows = (
+            self.db.query(AssistantSkillVersionResource, AssistantSkillResourceBlob)
+            .join(
+                AssistantSkillResourceBlob,
+                AssistantSkillResourceBlob.id == AssistantSkillVersionResource.blob_id,
+            )
+            .filter(AssistantSkillVersionResource.skill_version_id == version_id)
+            .order_by(AssistantSkillVersionResource.path.asc())
+            .all()
+        )
+        resources: list[StoredSkillResource] = []
+        for resource, blob in rows:
+            content = bytes(blob.content)
+            if blob.byte_size != resource.byte_size or blob.sha256 != resource.sha256:
+                raise ApiException(
+                    status_code=409,
+                    code=40993,
+                    message="resource blob metadata mismatch",
+                )
+            if len(content) != blob.byte_size:
+                raise ApiException(
+                    status_code=409,
+                    code=40993,
+                    message="resource blob size mismatch",
+                )
+            if sha256_bytes(content) != blob.sha256:
+                raise ApiException(
+                    status_code=409,
+                    code=40993,
+                    message="resource blob content digest mismatch",
+                )
+            resources.append(
+                StoredSkillResource(
+                    path=resource.path,
+                    resource_kind=resource.resource_kind,  # type: ignore[arg-type]
+                    media_type=resource.media_type,
+                    byte_size=resource.byte_size,
+                    sha256=resource.sha256,
+                    content=content,
+                )
+            )
+        return tuple(resources)
 
     def _translate_integrity_error(self, exc: IntegrityError) -> ApiException:
         msg = str(getattr(exc, "orig", exc)).lower()

@@ -15,6 +15,7 @@ from app.assistant.skills.contracts import (
 )
 from app.assistant.skills.package_io import (
     detect_media_type,
+    export_skill_package,
     parse_skill_directory_files,
     parse_skill_zip,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "SkillPolicyContract",
     "SkillRoutingContract",
     "detect_media_type",
+    "export_skill_package",
     "normalize_skill_lookup_name",
     "parse_skill_directory_files",
     "parse_skill_zip",

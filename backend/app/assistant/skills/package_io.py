@@ -5,7 +5,7 @@ import posixpath
 import re
 import stat
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, BinaryIO
 from urllib.parse import unquote, urlparse
 
@@ -18,7 +18,11 @@ from yaml.reader import Reader
 from yaml.resolver import Resolver
 from yaml.scanner import Scanner
 
-from app.assistant.domain.contracts import ParsedSkillResource, SkillResourceIndexEntry
+from app.assistant.domain.contracts import (
+    ParsedSkillResource,
+    SkillResourceIndexEntry,
+    StoredSkillResource,
+)
 from app.assistant.domain.digests import sha256_bytes, sha256_canonical_json
 from app.assistant.skills.contracts import (
     AgentSkillFrontmatter,
@@ -689,12 +693,92 @@ def parse_skill_zip(
         return parse_skill_directory_files(files, expected_root_name=root_name)
 
 
+# ---------------------------------------------------------------------------
+# Deterministic ZIP export
+# ---------------------------------------------------------------------------
+
+# Fixed DOS epoch used by every exported ZipInfo (host clocks never leak).
+_EXPORT_ZIP_DATE_TIME = (1980, 1, 1, 0, 0, 0)
+# Unix regular file, mode 0644, non-executable — encoded in the high 16 bits.
+_EXPORT_EXTERNAL_ATTR = (stat.S_IFREG | 0o644) << 16
+# create_system=3 marks Unix attributes; create/extract_version=20 is ZIP 2.0.
+_EXPORT_CREATE_SYSTEM = 3
+_EXPORT_ZIP_VERSION = 20
+
+
+def export_skill_package(
+    package_name: str,
+    *,
+    skill_md: bytes,
+    mindatlas_yaml: bytes | None,
+    resources: Sequence[StoredSkillResource],
+) -> bytes:
+    """Write a byte-for-byte deterministic Agent Skills ZIP.
+
+    Every entry uses ``ZIP_STORED``, fixed 1980-01-01 timestamps, and
+    non-executable regular-file permissions. Paths are sorted; host
+    filesystem metadata and input order never affect the output bytes.
+    """
+    try:
+        canonical = validate_canonical_skill_name(package_name)
+    except ValueError as exc:
+        raise ValueError(f"invalid export package_name: {exc}") from exc
+    if not isinstance(skill_md, (bytes, bytearray)) or not skill_md:
+        raise ValueError("skill_md must be non-empty bytes")
+    skill_md_bytes = bytes(skill_md)
+    mindatlas_bytes = bytes(mindatlas_yaml) if mindatlas_yaml is not None else None
+
+    # Build (archive_path, content) pairs; sort by UTF-8 path bytes for stability.
+    entries: list[tuple[str, bytes]] = [
+        (f"{canonical}/SKILL.md", skill_md_bytes),
+    ]
+    if mindatlas_bytes is not None:
+        entries.append((f"{canonical}/mindatlas.yaml", mindatlas_bytes))
+
+    seen_paths: set[str] = set()
+    for resource in resources:
+        if not isinstance(resource, StoredSkillResource):
+            raise TypeError("resources must be StoredSkillResource values")
+        path = normalize_package_path(resource.path, field="export resource path")
+        if path in {"SKILL.md", "mindatlas.yaml"}:
+            raise ValueError(f"resource path collides with package root file: {path}")
+        if path in seen_paths:
+            raise ValueError(f"duplicate export resource path: {path}")
+        content = bytes(resource.content)
+        if resource.byte_size != len(content):
+            raise ValueError(
+                f"resource {path!r} byte_size {resource.byte_size} != len(content) {len(content)}"
+            )
+        if resource.sha256 != sha256_bytes(content):
+            raise ValueError(f"resource {path!r} sha256 does not match content")
+        seen_paths.add(path)
+        entries.append((f"{canonical}/{path}", content))
+
+    entries.sort(key=lambda item: item[0].encode("utf-8"))
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for archive_path, content in entries:
+            info = zipfile.ZipInfo(filename=archive_path, date_time=_EXPORT_ZIP_DATE_TIME)
+            info.compress_type = zipfile.ZIP_STORED
+            info.create_system = _EXPORT_CREATE_SYSTEM
+            info.create_version = _EXPORT_ZIP_VERSION
+            info.extract_version = _EXPORT_ZIP_VERSION
+            info.external_attr = _EXPORT_EXTERNAL_ATTR
+            info.flag_bits = 0
+            info.internal_attr = 0
+            # ZIP_STORED: CRC/size still filled by writestr from content.
+            zf.writestr(info, content, compress_type=zipfile.ZIP_STORED)
+    return buf.getvalue()
+
+
 __all__ = [
     "MAX_ENTRIES",
     "MAX_TOTAL_UNCOMPRESSED_BYTES",
     "MAX_ZIP_UPLOAD_BYTES",
     "StrictSafeLoader",
     "detect_media_type",
+    "export_skill_package",
     "load_strict_yaml",
     "normalize_package_path",
     "parse_skill_directory_files",

@@ -182,6 +182,20 @@ class SkillResourceIndexEntry(FrozenContract):
     sha256: str
 
 
+class StoredSkillResource(FrozenContract):
+    """Explicitly loaded resource bytes for export/retrieval ports.
+
+    Never present in ordinary list/detail DTOs.
+    """
+
+    path: str
+    resource_kind: Literal["scripts", "references", "assets", "other"]
+    media_type: str
+    byte_size: int
+    sha256: str
+    content: bytes
+
+
 class ResolvedCapabilityDependency(FrozenContract):
     ordinal: int
     dependency_path: str
@@ -708,6 +722,7 @@ __all__ = [
     "SkillPackageMigrationState",
     "SkillResourceIndexEntry",
     "SkillVersionConflictError",
+    "StoredSkillResource",
     "ToolParamContract",
     "VersionSource",
     "append_skill_activation",
