@@ -219,6 +219,40 @@ def collect_workflow_model_usages(
     return usages
 
 
+def collect_workflow_kb_embedding_usages(
+    workflow_nodes: Sequence[Any] | list[Any],
+    *,
+    path_prefix: str = "root",
+) -> list[str]:
+    """Return ordered paths for knowledge_retrieval / agent-node knowledge paths.
+
+    Each path freezes the default LightRAG embedding model at publish time:
+    ``{prefix}/node:{node_id}/kb/model``.
+    """
+    usages: list[str] = []
+
+    def _walk(nodes: Iterable[Any], prefix: str) -> None:
+        for node in nodes or []:
+            node_id, node_type, cfg = _node_fields(node)
+            node_path = f"{prefix}/node:{node_id}" if node_id else prefix
+
+            if node_type == "knowledge_retrieval":
+                usages.append(f"{node_path}/kb/model")
+
+            if node_type == "agent" and isinstance(cfg, dict):
+                knowledge_enabled = cfg.get("knowledgeEnabled", cfg.get("knowledge_enabled"))
+                if isinstance(knowledge_enabled, bool) and knowledge_enabled:
+                    usages.append(f"{node_path}/kb/model")
+
+            if node_type in {"iteration", "loop"} and isinstance(cfg, dict):
+                body_nodes = cfg.get("bodyNodes", cfg.get("body_nodes"))
+                if isinstance(body_nodes, list):
+                    _walk(body_nodes, f"{node_path}/body")
+
+    _walk(workflow_nodes, path_prefix)
+    return usages
+
+
 def collect_workflow_tool_usages(
     workflow_nodes: Sequence[Any] | list[Any],
     *,
@@ -267,6 +301,7 @@ __all__ = [
     "cfg_get",
     "collect_workflow_call_references",
     "collect_workflow_custom_model_ids",
+    "collect_workflow_kb_embedding_usages",
     "collect_workflow_model_usages",
     "collect_workflow_tool_names",
     "collect_workflow_tool_usages",

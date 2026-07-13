@@ -118,6 +118,8 @@ def _minimal_workflow_snapshot(
     model_source: str = "default",
     model_id: UUID | None = None,
     nested_calls: list[dict[str, Any]] | None = None,
+    knowledge_retrieval: bool = False,
+    agent_knowledge_enabled: bool = False,
 ) -> dict[str, Any]:
     nodes: list[dict[str, Any]] = [
         {
@@ -149,6 +151,53 @@ def _minimal_workflow_snapshot(
                 "position_x": 100 + index * 40,
                 "position_y": 0,
                 "config": {"tool_name": tool_name},
+            }
+        )
+        edges.append(
+            {
+                "edge_id": f"e_{prev}_{node_id}",
+                "source_node_id": prev,
+                "target_node_id": node_id,
+            }
+        )
+        prev = node_id
+
+    if knowledge_retrieval:
+        node_id = "kr_1"
+        nodes.append(
+            {
+                "node_id": node_id,
+                "node_type": "knowledge_retrieval",
+                "label": "KB",
+                "position_x": 160,
+                "position_y": 40,
+                "config": {"query": "{{start.user_input}}"},
+            }
+        )
+        edges.append(
+            {
+                "edge_id": f"e_{prev}_{node_id}",
+                "source_node_id": prev,
+                "target_node_id": node_id,
+            }
+        )
+        prev = node_id
+
+    if agent_knowledge_enabled:
+        node_id = "agent_kb"
+        nodes.append(
+            {
+                "node_id": node_id,
+                "node_type": "agent",
+                "label": "Agent KB",
+                "position_x": 200,
+                "position_y": 60,
+                "config": {
+                    "model_source": model_source,
+                    "model_id": str(model_id) if model_id else None,
+                    "tool_names": [],
+                    "knowledge_enabled": True,
+                },
             }
         )
         edges.append(
@@ -222,13 +271,16 @@ def create_published_workflow(
     model_source: str = "default",
     model_id: UUID | None = None,
     nested_calls: list[dict[str, Any]] | None = None,
+    knowledge_retrieval: bool = False,
+    agent_knowledge_enabled: bool = False,
     snapshot: dict[str, Any] | None = None,
+    is_system: bool = False,
 ) -> tuple[AssistantWorkflow, AssistantWorkflowVersion]:
     workflow = AssistantWorkflow(
         name=name or f"wf_{uuid4().hex[:8]}",
         description="test workflow",
         enabled=True,
-        is_system=False,
+        is_system=is_system,
     )
     db.add(workflow)
     db.flush()
@@ -237,6 +289,8 @@ def create_published_workflow(
         model_source=model_source,
         model_id=model_id,
         nested_calls=nested_calls,
+        knowledge_retrieval=knowledge_retrieval,
+        agent_knowledge_enabled=agent_knowledge_enabled,
     )
     version = AssistantWorkflowVersion(
         workflow_id=workflow.id,

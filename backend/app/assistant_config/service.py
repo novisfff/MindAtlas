@@ -5322,6 +5322,11 @@ class AssistantConfigService:
         )
 
     def delete_workflow_version(self, workflow_id: UUID, version_id: UUID) -> DeleteVersionResponse:
+        from app.assistant.skills.resolution import (
+            find_skill_refs_for_workflow_version,
+            skill_reference_conflict,
+        )
+
         workflow = self.get_workflow(workflow_id)
         if workflow.is_system:
             self._raise_system_workflow_readonly()
@@ -5335,6 +5340,15 @@ class AssistantConfigService:
         )
         if version is None:
             raise ApiException(status_code=404, code=40434, message=f"Workflow version not found: {version_id}")
+
+        skill_refs = find_skill_refs_for_workflow_version(self.db, version.id)
+        if skill_refs:
+            package_id, skill_version_id = skill_refs[0]
+            raise skill_reference_conflict(
+                package_id=package_id,
+                version_id=skill_version_id,
+                message="Workflow version is referenced by a published skill binding/dependency",
+            )
 
         pinned_refs = self._workflow_call_referrers_for_workflow_version(version.id)
         if pinned_refs:
@@ -5415,9 +5429,19 @@ class AssistantConfigService:
         )
 
     def delete_workflow(self, workflow_id: UUID, *, confirm_rebind_system_behaviors: bool = False) -> None:
+        from app.assistant.skills.resolution import find_skill_refs_for_workflow, skill_reference_conflict
+
         workflow = self.get_workflow(workflow_id)
         if workflow.is_system:
             self._raise_system_workflow_readonly()
+        skill_refs = find_skill_refs_for_workflow(self.db, workflow.id)
+        if skill_refs:
+            package_id, skill_version_id = skill_refs[0]
+            raise skill_reference_conflict(
+                package_id=package_id,
+                version_id=skill_version_id,
+                message="Workflow is referenced by a published skill binding/dependency",
+            )
         workflow_call_refs = self._workflow_call_referrers_for_workflow(workflow.id)
         if workflow_call_refs:
             raise ApiException(
@@ -5776,6 +5800,11 @@ class AssistantConfigService:
         )
 
     def delete_agent_profile_version(self, agent_profile_id: UUID, version_id: UUID) -> DeleteVersionResponse:
+        from app.assistant.skills.resolution import (
+            find_skill_refs_for_agent_version,
+            skill_reference_conflict,
+        )
+
         profile = self.get_agent_profile(agent_profile_id)
         if profile.is_system:
             self._raise_system_agent_readonly()
@@ -5789,6 +5818,15 @@ class AssistantConfigService:
         )
         if version is None:
             raise ApiException(status_code=404, code=40435, message=f"Agent version not found: {version_id}")
+
+        skill_refs = find_skill_refs_for_agent_version(self.db, version.id)
+        if skill_refs:
+            package_id, skill_version_id = skill_refs[0]
+            raise skill_reference_conflict(
+                package_id=package_id,
+                version_id=skill_version_id,
+                message="Agent version is referenced by a published skill binding/dependency",
+            )
 
         protected_ids = self._get_agent_protected_version_ids(profile)
         if version.id in protected_ids:
@@ -5854,9 +5892,19 @@ class AssistantConfigService:
         )
 
     def delete_agent_profile(self, agent_profile_id: UUID, *, confirm_rebind_system_behaviors: bool = False) -> None:
+        from app.assistant.skills.resolution import find_skill_refs_for_agent, skill_reference_conflict
+
         profile = self.get_agent_profile(agent_profile_id)
         if profile.is_system:
             self._raise_system_agent_readonly()
+        skill_refs = find_skill_refs_for_agent(self.db, profile.id)
+        if skill_refs:
+            package_id, skill_version_id = skill_refs[0]
+            raise skill_reference_conflict(
+                package_id=package_id,
+                version_id=skill_version_id,
+                message="Agent profile is referenced by a published skill binding/dependency",
+            )
         if profile.skills:
             skill_names = ", ".join(sorted(s.name for s in profile.skills))
             raise ApiException(

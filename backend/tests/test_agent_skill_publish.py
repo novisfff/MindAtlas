@@ -920,6 +920,159 @@ class ProtectedHistoryTests(unittest.TestCase):
         self.assertIn(v1.id, remaining)
         self.assertIn(v2.id, remaining)
 
+    def test_delete_skill_referenced_workflow_version_returns_40994(self) -> None:
+        from tests.agent_skill_test_support import (
+            create_default_model_binding,
+            create_published_workflow,
+        )
+        from app.assistant.skills.package_io import parse_skill_directory_files
+        from app.assistant.skills.schemas import (
+            CreateSkillPackageCommand,
+            PublishSkillVersionCommand,
+        )
+        from app.assistant_config.models import AssistantWorkflowVersion
+        from app.assistant_config.service import AssistantConfigService
+        from app.common.exceptions import ApiException
+
+        create_default_model_binding(self.db)
+        workflow, v1 = create_published_workflow(
+            self.db, name="delete_protect_wf", tool_names=["search_entries"]
+        )
+        v2 = AssistantWorkflowVersion(
+            workflow_id=workflow.id,
+            sequence_no=2,
+            version_name="v2",
+            version_source="publish",
+            snapshot=v1.snapshot,
+        )
+        self.db.add(v2)
+        self.db.flush()
+        workflow.published_version_id = v1.id
+        self.db.commit()
+
+        caps = "  - type: workflow\n    key: delete_protect_wf\n"
+        parsed = parse_skill_directory_files(
+            {
+                "SKILL.md": _minimal_skill_md("delete-protect-skill"),
+                "mindatlas.yaml": _mindatlas_yaml(caps),
+            },
+            expected_root_name=None,
+        )
+        package = self.svc.create_native_package(
+            CreateSkillPackageCommand(parsed=parsed, version_name="draft-1")
+        )
+        published = self.svc.publish(
+            package.id,
+            PublishSkillVersionCommand(draft_version_id=package.draft_version.id),  # type: ignore[union-attr]
+        )
+        workflow.published_version_id = v2.id
+        self.db.commit()
+
+        cfg = AssistantConfigService(self.db)
+        with self.assertRaises(ApiException) as ctx:
+            cfg.delete_workflow_version(workflow.id, v1.id)
+        self.assertEqual(ctx.exception.code, 40994)
+        details = ctx.exception.details or {}
+        self.assertEqual(details.get("skillPackageId"), str(package.id))
+        self.assertEqual(details.get("skillVersionId"), str(published.id))
+
+        with self.assertRaises(ApiException) as ctx2:
+            cfg.delete_workflow(workflow.id)
+        self.assertEqual(ctx2.exception.code, 40994)
+        self.assertEqual((ctx2.exception.details or {}).get("skillPackageId"), str(package.id))
+
+    def test_dependency_only_v1_survives_keep_only_after_v2_advance(self) -> None:
+        from tests.agent_skill_test_support import (
+            create_default_model_binding,
+            create_published_workflow,
+        )
+        from app.assistant.domain.digests import sha256_canonical_json
+        from app.assistant.skills.package_io import parse_skill_directory_files
+        from app.assistant.skills.schemas import (
+            CreateSkillPackageCommand,
+            PublishSkillVersionCommand,
+        )
+        from app.assistant.skills.models import AssistantSkillCapabilityDependency
+        from app.assistant_config.models import AssistantWorkflowVersion
+        from app.assistant_config.service import AssistantConfigService
+
+        create_default_model_binding(self.db)
+        nested, nested_v1 = create_published_workflow(
+            self.db,
+            name="dep_only_nested",
+            tool_names=["search_entries"],
+        )
+        nested_v2 = AssistantWorkflowVersion(
+            workflow_id=nested.id,
+            sequence_no=2,
+            version_name="v2",
+            version_source="publish",
+            snapshot=nested_v1.snapshot,
+        )
+        self.db.add(nested_v2)
+        self.db.flush()
+        nested.published_version_id = nested_v1.id
+        parent, _ = create_published_workflow(
+            self.db,
+            name="dep_only_parent",
+            nested_calls=[
+                {
+                    "target_workflow_id": str(nested.id),
+                    "binding_mode": "pinned",
+                    "target_published_version_id": str(nested_v1.id),
+                }
+            ],
+        )
+        self.db.commit()
+
+        caps = "  - type: workflow\n    key: dep_only_parent\n"
+        parsed = parse_skill_directory_files(
+            {
+                "SKILL.md": _minimal_skill_md("dep-only-skill"),
+                "mindatlas.yaml": _mindatlas_yaml(caps),
+            },
+            expected_root_name=None,
+        )
+        package = self.svc.create_native_package(
+            CreateSkillPackageCommand(parsed=parsed, version_name="draft-1")
+        )
+        published = self.svc.publish(
+            package.id,
+            PublishSkillVersionCommand(draft_version_id=package.draft_version.id),  # type: ignore[union-attr]
+        )
+        nested_dep = (
+            self.db.query(AssistantSkillCapabilityDependency)
+            .filter(
+                AssistantSkillCapabilityDependency.resolved_workflow_version_id
+                == nested_v1.id
+            )
+            .one()
+        )
+        frozen_digest = nested_dep.dependency_digest
+        nested.published_version_id = nested_v2.id
+        self.db.commit()
+
+        cfg = AssistantConfigService(self.db)
+        cfg._keep_only_workflow_version(nested, nested_v2.id)
+        self.db.commit()
+
+        remaining = {
+            row.id
+            for row in self.db.query(AssistantWorkflowVersion)
+            .filter(AssistantWorkflowVersion.workflow_id == nested.id)
+            .all()
+        }
+        self.assertEqual(nested.published_version_id, nested_v2.id)
+        self.assertIn(nested_v1.id, remaining)
+        self.assertIn(nested_v2.id, remaining)
+        self.db.refresh(nested_dep)
+        self.assertEqual(nested_dep.dependency_digest, frozen_digest)
+        self.assertEqual(
+            nested_dep.resolution_snapshot.get("snapshotDigest"),
+            sha256_canonical_json(nested_v1.snapshot),
+        )
+        self.assertEqual(published.skill_package_id, package.id)
+
     def test_delete_referenced_tool_returns_40994(self) -> None:
         from tests.agent_skill_test_support import create_remote_tool
         from app.assistant.skills.package_io import parse_skill_directory_files

@@ -49,6 +49,7 @@ from app.assistant_config.workflow_contracts import (
 )
 from app.assistant_config.workflow_references import (
     collect_workflow_call_references,
+    collect_workflow_kb_embedding_usages,
     collect_workflow_model_usages,
     collect_workflow_tool_usages,
 )
@@ -154,6 +155,42 @@ def system_tool_schemas(tool_name: str) -> tuple[dict[str, JsonValue], dict[str,
         item.name: item for item in ToolRegistry.list_system_tool_definitions()
     }
     definition = definitions.get(tool_name)
+    if definition is None and tool_name in ToolRegistry.INTERNAL_TOOL_NAMES:
+        # Internal tools (e.g. kb_search) are hidden from public catalog listings
+        # but remain code-native freeze targets for workflow KB paths.
+        tool_obj = ToolRegistry.resolve_system_tool(tool_name)
+        if tool_obj is None:
+            raise _publish_error(
+                f"system tool not found: {tool_name}",
+                details={"capabilityKey": tool_name, "capabilityType": "tool"},
+            )
+        input_params, _doc_returns, _json_schema = ToolRegistry._extract_tool_params(tool_obj)
+        output_params = ToolRegistry._extract_system_tool_output_params(tool_name)
+        input_schema = tool_params_to_binding_schema(
+            [
+                ToolParamContract(
+                    name=p.name,
+                    description=p.description,
+                    param_type=p.param_type,  # type: ignore[arg-type]
+                    required=bool(p.required),
+                )
+                for p in input_params
+            ],
+            require_object_root=True,
+        )
+        output_schema = tool_params_to_binding_schema(
+            [
+                ToolParamContract(
+                    name=p.name,
+                    description=p.description,
+                    param_type=p.param_type,  # type: ignore[arg-type]
+                    required=False,
+                )
+                for p in output_params
+            ],
+            require_object_root=True,
+        )
+        return input_schema, output_schema
     if definition is None:
         raise _publish_error(
             f"system tool not found: {tool_name}",
@@ -1103,6 +1140,21 @@ class CapabilityReferenceResolver:
                 )
             )
 
+        for path in collect_workflow_kb_embedding_usages(
+            workflow_input.nodes, path_prefix=path_prefix
+        ):
+            self._count_node()
+            self._count_ref()
+            deps.append(
+                self._freeze_model_dependency(
+                    path=path,
+                    model_source="default",
+                    model_id=None,
+                    expected_type="embedding",
+                    component="lightrag",
+                )
+            )
+
         for call in collect_workflow_call_references(workflow_input.nodes):
             self._count_node()
             self._count_ref()
@@ -1145,6 +1197,27 @@ class CapabilityReferenceResolver:
             nested_path = f"{path_prefix}/workflow_call:{call.source_node_id}"
             nested_snapshot = nested_version.snapshot
             nested_digest = sha256_canonical_json(nested_snapshot)
+            try:
+                nested_input = self._workflow_input_from_snapshot(nested_snapshot)
+                nested_contract = workflow_contract_from_input(nested_input)
+            except (WorkflowContractError, Exception) as exc:
+                raise _publish_error(
+                    "nested workflow_call contract derivation failed",
+                    details={
+                        "targetWorkflowId": str(call.target_workflow_id),
+                        "targetVersionId": str(nested_version.id),
+                        "reason": str(exc),
+                        "path": nested_path,
+                    },
+                ) from exc
+            nested_input_schema = normalize_binding_schema(
+                nested_contract.input_schema, require_object_root=True
+            )
+            nested_output_schema = normalize_binding_schema(
+                nested_contract.output_schema, require_object_root=False
+            )
+            nested_input_digest = binding_schema_digest(nested_input_schema)
+            nested_output_digest = binding_schema_digest(nested_output_schema)
             target_identity = f"workflow:{call.target_workflow_id}"
             resolution_digest = _target_resolution_digest(
                 capability_type="workflow",
@@ -1152,8 +1225,8 @@ class CapabilityReferenceResolver:
                 target_id=call.target_workflow_id,
                 target_version_id=nested_version.id,
                 target_revision=None,
-                input_schema_digest=sha256_canonical_json({"type": "object"}),
-                output_schema_digest=sha256_canonical_json({"type": "object"}),
+                input_schema_digest=nested_input_digest,
+                output_schema_digest=nested_output_digest,
                 executable_revision=str(nested_version.id),
                 config_digest=nested_digest,
             )
@@ -1164,17 +1237,22 @@ class CapabilityReferenceResolver:
                     dependency_type="workflow",
                     target_identity=target_identity,
                     resolved_workflow_version_id=nested_version.id,
+                    input_schema=nested_input_schema,
+                    output_schema=nested_output_schema,
                     resolution_snapshot={
                         "schemaVersion": 1,
                         "targetIdentity": target_identity,
                         "targetId": str(call.target_workflow_id),
                         "targetVersionId": str(nested_version.id),
                         "snapshotDigest": nested_digest,
+                        "inputSchema": nested_input_schema,
+                        "outputSchema": nested_output_schema,
+                        "inputSchemaDigest": nested_input_digest,
+                        "outputSchemaDigest": nested_output_digest,
                     },
                     resolution_digest=resolution_digest,
                 )
             )
-            nested_input = self._workflow_input_from_snapshot(nested_snapshot)
             nested_deps = self._collect_workflow_closure(
                 workflow_input=nested_input,
                 path_prefix=nested_path,
@@ -1717,6 +1795,88 @@ def find_skill_refs_for_agent_version(
     return list({(r[0], r[1]) for r in list(rows) + list(dep_rows)})
 
 
+def find_skill_refs_for_workflow(db: Session, workflow_id: UUID) -> list[tuple[UUID, UUID]]:
+    """Return skill package/version IDs that freeze any published version of a workflow."""
+    version_ids = [
+        row[0]
+        for row in db.query(AssistantWorkflowVersion.id)
+        .filter(AssistantWorkflowVersion.workflow_id == workflow_id)
+        .all()
+    ]
+    if not version_ids:
+        return []
+    rows = (
+        db.query(
+            AssistantSkillVersion.skill_package_id,
+            AssistantSkillCapabilityBinding.skill_version_id,
+        )
+        .join(
+            AssistantSkillCapabilityBinding,
+            AssistantSkillCapabilityBinding.skill_version_id == AssistantSkillVersion.id,
+        )
+        .filter(AssistantSkillCapabilityBinding.resolved_workflow_version_id.in_(version_ids))
+        .all()
+    )
+    dep_rows = (
+        db.query(
+            AssistantSkillVersion.skill_package_id,
+            AssistantSkillCapabilityBinding.skill_version_id,
+        )
+        .join(
+            AssistantSkillCapabilityBinding,
+            AssistantSkillCapabilityBinding.skill_version_id == AssistantSkillVersion.id,
+        )
+        .join(
+            AssistantSkillCapabilityDependency,
+            AssistantSkillCapabilityDependency.binding_id == AssistantSkillCapabilityBinding.id,
+        )
+        .filter(AssistantSkillCapabilityDependency.resolved_workflow_version_id.in_(version_ids))
+        .all()
+    )
+    return list({(r[0], r[1]) for r in list(rows) + list(dep_rows)})
+
+
+def find_skill_refs_for_agent(db: Session, agent_profile_id: UUID) -> list[tuple[UUID, UUID]]:
+    """Return skill package/version IDs that freeze any published version of an agent."""
+    version_ids = [
+        row[0]
+        for row in db.query(AssistantAgentProfileVersion.id)
+        .filter(AssistantAgentProfileVersion.agent_profile_id == agent_profile_id)
+        .all()
+    ]
+    if not version_ids:
+        return []
+    rows = (
+        db.query(
+            AssistantSkillVersion.skill_package_id,
+            AssistantSkillCapabilityBinding.skill_version_id,
+        )
+        .join(
+            AssistantSkillCapabilityBinding,
+            AssistantSkillCapabilityBinding.skill_version_id == AssistantSkillVersion.id,
+        )
+        .filter(AssistantSkillCapabilityBinding.resolved_agent_version_id.in_(version_ids))
+        .all()
+    )
+    dep_rows = (
+        db.query(
+            AssistantSkillVersion.skill_package_id,
+            AssistantSkillCapabilityBinding.skill_version_id,
+        )
+        .join(
+            AssistantSkillCapabilityBinding,
+            AssistantSkillCapabilityBinding.skill_version_id == AssistantSkillVersion.id,
+        )
+        .join(
+            AssistantSkillCapabilityDependency,
+            AssistantSkillCapabilityDependency.binding_id == AssistantSkillCapabilityBinding.id,
+        )
+        .filter(AssistantSkillCapabilityDependency.resolved_agent_version_id.in_(version_ids))
+        .all()
+    )
+    return list({(r[0], r[1]) for r in list(rows) + list(dep_rows)})
+
+
 __all__ = [
     "CapabilityReferenceResolver",
     "REMOTE_TOOL_OUTPUT_SCHEMA_RAW_STRING",
@@ -1725,9 +1885,11 @@ __all__ = [
     "compute_system_tool_contract_set_digest",
     "credential_runtime_sensitive_payload",
     "execution_sensitive_changed",
+    "find_skill_refs_for_agent",
     "find_skill_refs_for_agent_version",
     "find_skill_refs_for_model",
     "find_skill_refs_for_tool",
+    "find_skill_refs_for_workflow",
     "find_skill_refs_for_workflow_version",
     "model_runtime_sensitive_payload",
     "reconstruct_binding_snapshot",
