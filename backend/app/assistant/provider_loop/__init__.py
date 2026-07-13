@@ -1,10 +1,24 @@
 """Provider Agent Loop package (Plan 03).
 
 Task 1: frozen contracts, messages, digests, and pure transcript validators.
+Task 2: deterministic Domain Key ↔ Provider alias mapping and frozen surfaces.
 """
 
 from __future__ import annotations
 
+from app.assistant.provider_loop.aliases import (
+    DEFAULT_RESERVED_CONTROL_ALIASES,
+    OPENAI_CHAT_PROVIDER_PROTOCOL,
+    allocate_provider_aliases,
+    build_provider_tool_surface,
+    forward_alias_map,
+    generated_alias_candidate,
+    identity_digest_prefix,
+    is_valid_provider_alias,
+    lookup_tool_by_alias,
+    reverse_alias_map,
+    sanitize_domain_key_for_alias,
+)
 from app.assistant.provider_loop.contracts import (
     CancellationPort,
     CurrentCapabilityDescriptorVerifier,
@@ -71,6 +85,8 @@ from app.assistant.provider_loop.messages import (
 __all__ = [
     "CancellationPort",
     "CurrentCapabilityDescriptorVerifier",
+    "DEFAULT_RESERVED_CONTROL_ALIASES",
+    "OPENAI_CHAT_PROVIDER_PROTOCOL",
     "ProviderAdapter",
     "ProviderAssistantMessage",
     "ProviderAuthorizationEvidenceFactory",
@@ -112,7 +128,9 @@ __all__ = [
     "ToolSurfaceResolution",
     "ToolsProvider",
     "aggregate_provider_usage",
+    "allocate_provider_aliases",
     "assert_not_serializable_port",
+    "build_provider_tool_surface",
     "compute_alias_map_digest",
     "compute_scope_digest",
     "compute_surface_digest",
@@ -120,11 +138,18 @@ __all__ = [
     "digest_arguments",
     "digest_provider_message",
     "digest_provider_transcript",
+    "forward_alias_map",
+    "generated_alias_candidate",
+    "identity_digest_prefix",
+    "is_valid_provider_alias",
+    "lookup_tool_by_alias",
     "make_cancelled_envelope",
     "parse_provider_stream_event",
     "project_tool_result_envelope",
     "project_waiting_resolution_message",
     "recompute_continuation_identity",
+    "reverse_alias_map",
+    "sanitize_domain_key_for_alias",
     "seal_cancelled_continuation",
     "validate_provider_transcript",
 ]

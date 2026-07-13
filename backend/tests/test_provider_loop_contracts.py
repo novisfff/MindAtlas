@@ -1131,3 +1131,69 @@ def test_safe_provider_error_shape() -> None:
     assert err.semantic_code == "protocol_error"
     with pytest.raises(ValidationError):
         SafeProviderError(semantic_code="", safe_summary="x")
+
+
+def test_build_provider_tool_surface_appends_aliases_and_freezes_maps() -> None:
+    """Task 2 extension: surface builder integrates append-only aliases + digests."""
+    from app.assistant.provider_loop.aliases import (
+        OPENAI_CHAT_PROVIDER_PROTOCOL,
+        build_provider_tool_surface,
+        forward_alias_map,
+        reverse_alias_map,
+    )
+
+    manifest = _manifest()
+    empty_digest = manifest.manifest_digest
+    assert manifest.provider_aliases == ()
+
+    resolved = _resolved_binding(capability_key="skill.inject")
+    frozen = project_frozen_capability_binding(
+        resolved=resolved,
+        provenance=FrozenBindingProvenance(
+            origin="test",
+            binding_row_id=None,
+            owner_version_id=None,
+            source_snapshot_digest=DIGEST_D,
+        ),
+    )
+    descriptor = _descriptor(resolved)
+    resolution = build_provider_tool_surface(
+        manifest=manifest,
+        provider_protocol=OPENAI_CHAT_PROVIDER_PROTOCOL,
+        visible=((frozen, descriptor),),
+    )
+    assert resolution.manifest.revision == 2
+    assert resolution.manifest.parent_digest == empty_digest
+    assert len(resolution.manifest.provider_aliases) == 1
+    assert resolution.manifest.provider_aliases[0].provider_alias == "skill_inject"
+    assert resolution.manifest.provider_aliases[0].domain_key == "skill.inject"
+    assert forward_alias_map(resolution.surface) == {"skill_inject": "skill.inject"}
+    reverse = reverse_alias_map(resolution.surface)
+    assert reverse["skill_inject"] == (
+        "skill.inject",
+        resolved.binding_contract_digest,
+    )
+    # Digest dependency DAG: binding -> alias -> manifest -> alias map -> surface.
+    assert resolution.surface.manifest_digest == resolution.manifest.manifest_digest
+    assert empty_digest != resolution.manifest.manifest_digest
+    ToolSurfaceResolution(
+        manifest=resolution.manifest,
+        surface=resolution.surface,
+    )
+
+
+def test_empty_surface_preserves_plan01_empty_alias_digest() -> None:
+    from app.assistant.provider_loop.aliases import (
+        OPENAI_CHAT_PROVIDER_PROTOCOL,
+        build_provider_tool_surface,
+    )
+
+    manifest = _manifest()
+    resolution = build_provider_tool_surface(
+        manifest=manifest,
+        provider_protocol=OPENAI_CHAT_PROVIDER_PROTOCOL,
+        visible=(),
+    )
+    assert resolution.manifest.manifest_digest == manifest.manifest_digest
+    assert resolution.manifest.provider_aliases == ()
+    assert resolution.surface.tools == ()
