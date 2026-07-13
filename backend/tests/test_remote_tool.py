@@ -244,13 +244,14 @@ class RemoteToolTests(unittest.TestCase):
         req = captured["req"]
         self.assertEqual(req.data.decode("utf-8"), '{"payload": {"a": 1}}')
 
-    def test_do_request_http_error_includes_body(self):
+    def test_do_request_http_error_is_secret_safe(self):
+        secret_body = b"oops-api_key=sk-live-LEAKED"
         err = HTTPError(
             url="https://api.example.com/endpoint",
             code=400,
             msg="Bad Request",
             hdrs=None,
-            fp=io.BytesIO(b"oops"),
+            fp=io.BytesIO(secret_body),
         )
 
         class _ErrorOpener:
@@ -258,20 +259,57 @@ class RemoteToolTests(unittest.TestCase):
                 raise err
 
         with patch.object(remote_tool, "build_opener", return_value=_ErrorOpener()):
-            with self.assertRaises(RuntimeError) as ctx:
-                remote_tool.RemoteTool._do_request(remote_tool.Request("https://api.example.com"), timeout=1)
-        self.assertIn("HTTP 400", str(ctx.exception))
-        self.assertIn("oops", str(ctx.exception))
+            with self.assertRaises(remote_tool.RemoteToolRequestError) as ctx:
+                remote_tool.RemoteTool._do_request(
+                    remote_tool.Request("https://api.example.com"),
+                    timeout=1,
+                    safe_endpoint_host="api.example.com",
+                )
+        exc = ctx.exception
+        self.assertEqual(exc.category, "http")
+        self.assertEqual(exc.http_status, 400)
+        # Compatibility string and structured fields must not include the body.
+        self.assertNotIn("oops", str(exc))
+        self.assertNotIn("sk-live-LEAKED", str(exc))
+        self.assertNotIn("oops", repr(exc))
+        self.assertNotIn("sk-live-LEAKED", repr(exc))
+        self.assertIn("HTTP", str(exc))
 
     def test_do_request_url_error(self):
         class _ErrorOpener:
             def open(self, req, timeout=0):
-                raise URLError("down")
+                raise URLError("down-secret-reason")
 
         with patch.object(remote_tool, "build_opener", return_value=_ErrorOpener()):
-            with self.assertRaises(RuntimeError) as ctx:
-                remote_tool.RemoteTool._do_request(remote_tool.Request("https://api.example.com"), timeout=1)
-        self.assertIn("Connection failed", str(ctx.exception))
+            with self.assertRaises(remote_tool.RemoteToolRequestError) as ctx:
+                remote_tool.RemoteTool._do_request(
+                    remote_tool.Request("https://api.example.com"),
+                    timeout=1,
+                    safe_endpoint_host="api.example.com",
+                )
+        exc = ctx.exception
+        self.assertEqual(exc.category, "connection")
+        self.assertTrue(exc.is_connection)
+        self.assertNotIn("down-secret-reason", str(exc))
+        self.assertNotIn("down-secret-reason", repr(exc))
+        self.assertIn("connection", str(exc).lower())
+
+    def test_do_request_timeout_maps_to_timeout_category(self):
+        class _ErrorOpener:
+            def open(self, req, timeout=0):
+                raise URLError(TimeoutError("secret-timeout-detail"))
+
+        with patch.object(remote_tool, "build_opener", return_value=_ErrorOpener()):
+            with self.assertRaises(remote_tool.RemoteToolRequestError) as ctx:
+                remote_tool.RemoteTool._do_request(
+                    remote_tool.Request("https://api.example.com"),
+                    timeout=1,
+                    safe_endpoint_host="api.example.com",
+                )
+        exc = ctx.exception
+        self.assertEqual(exc.category, "timeout")
+        self.assertTrue(exc.is_timeout)
+        self.assertNotIn("secret-timeout-detail", str(exc))
 
     # --- IPv6-mapped IPv4 SSRF bypass tests ---
 
