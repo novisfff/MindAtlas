@@ -575,7 +575,7 @@ def test_duplicate_capability_key_with_different_resolution_is_rejected() -> Non
         skill=_skill(canonical_name="alpha-skill"),
         capabilities=(_capability(capability_key="shared", binding_contract_digest=DIGEST_2),),
     )
-    with pytest.raises(ValueError, match="capability_key"):
+    with pytest.raises(ValueError, match="capability"):
         append_skill_activation(
             first,
             skill=_skill(
@@ -590,10 +590,51 @@ def test_duplicate_capability_key_with_different_resolution_is_rejected() -> Non
                     target_identity=f"agent:{AGENT_ID}",
                     target_id=AGENT_ID,
                     target_version_id=AGENT_VERSION_ID,
-                    capability_type="agent",
+                    capability_type="tool",
                 ),
             ),
         )
+
+
+def test_same_capability_key_different_types_can_coexist() -> None:
+    base = create_base_run_manifest(
+        run_id=RUN_ID,
+        main_agent=_main_agent(),
+        provider=None,
+        model=None,
+        effective_policy_digest=None,
+    )
+    first = append_skill_activation(
+        base,
+        skill=_skill(canonical_name="alpha-skill"),
+        capabilities=(
+            _capability(
+                capability_key="review",
+                capability_type="tool",
+                binding_contract_digest=DIGEST_2,
+            ),
+        ),
+    )
+    second = append_skill_activation(
+        first,
+        skill=_skill(
+            package_id=PACKAGE_ID_B,
+            version_id=SKILL_VERSION_ID_C,
+            canonical_name="beta-skill",
+        ),
+        capabilities=(
+            _capability(
+                capability_key="review",
+                capability_type="workflow",
+                binding_contract_digest=DIGEST_9,
+                target_identity=f"workflow:{WORKFLOW_ID}",
+                target_id=WORKFLOW_ID,
+                target_version_id=WORKFLOW_VERSION_ID,
+            ),
+        ),
+    )
+    keys = {(c.capability_type, c.capability_key) for c in second.capabilities}
+    assert keys == {("tool", "review"), ("workflow", "review")}
 
 
 def test_reordering_inputs_cannot_create_nondeterministic_manifest() -> None:

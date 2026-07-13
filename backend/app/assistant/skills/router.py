@@ -284,6 +284,12 @@ def _files_from_json_request(
                 code=42292,
                 message=f"invalid base64 content for resource {path!r}",
             ) from exc
+        if path in files:
+            raise ApiException(
+                status_code=422,
+                code=42292,
+                message=f"duplicate resource path: {path}",
+            )
         files[path] = content
     return files
 

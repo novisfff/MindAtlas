@@ -446,6 +446,10 @@ def _build_package(
         kind = classify_resource_kind(path)
         if path in {"SKILL.md", "mindatlas.yaml"}:
             continue
+        if len(content) == 0:
+            raise ValueError(
+                f"empty resource file is not allowed: {path} (byte_size must be > 0)"
+            )
         media_type = detect_media_type(path, content)
         digest = sha256_bytes(content)
         resources_list.append(

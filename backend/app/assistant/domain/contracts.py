@@ -495,7 +495,10 @@ def build_manifest_digest_payload(
 ) -> dict[str, JsonValue]:
     ordered_skills = tuple(sorted(active_skills, key=lambda item: item.canonical_name))
     ordered_capabilities = tuple(
-        sorted(capabilities, key=lambda item: item.capability_key)
+        sorted(
+            capabilities,
+            key=lambda item: (item.capability_type, item.capability_key),
+        )
     )
     ordered_aliases = tuple(
         sorted(
@@ -621,25 +624,38 @@ def append_skill_activation(
             )
         # Same skill version: require provided capabilities to be identical or empty.
         if capabilities:
-            existing_caps = {item.capability_key: item for item in current.capabilities}
+            existing_caps = {
+                (item.capability_type, item.capability_key): item
+                for item in current.capabilities
+            }
             for capability in capabilities:
-                prior = existing_caps.get(capability.capability_key)
+                cap_id = (capability.capability_type, capability.capability_key)
+                prior = existing_caps.get(cap_id)
                 if prior is None:
                     raise ValueError(
-                        f"reactivation cannot introduce capability_key {capability.capability_key!r}"
+                        f"reactivation cannot introduce capability "
+                        f"{capability.capability_type}/{capability.capability_key!r}"
                     )
                 if not _same_capability(prior, capability):
                     raise ValueError(
-                        f"capability_key conflict for {capability.capability_key!r}"
+                        f"capability conflict for "
+                        f"{capability.capability_type}/{capability.capability_key!r}"
                     )
         return current
 
-    existing_caps = {item.capability_key: item for item in current.capabilities}
+    existing_caps = {
+        (item.capability_type, item.capability_key): item
+        for item in current.capabilities
+    }
     for capability in capabilities:
-        prior = existing_caps.get(capability.capability_key)
+        cap_id = (capability.capability_type, capability.capability_key)
+        prior = existing_caps.get(cap_id)
         if prior is not None and not _same_capability(prior, capability):
-            raise ValueError(f"capability_key conflict for {capability.capability_key!r}")
-        existing_caps[capability.capability_key] = capability
+            raise ValueError(
+                f"capability conflict for "
+                f"{capability.capability_type}/{capability.capability_key!r}"
+            )
+        existing_caps[cap_id] = capability
 
     merged_skills = tuple(
         sorted(
@@ -648,7 +664,10 @@ def append_skill_activation(
         )
     )
     merged_capabilities = tuple(
-        sorted(existing_caps.values(), key=lambda item: item.capability_key)
+        sorted(
+            existing_caps.values(),
+            key=lambda item: (item.capability_type, item.capability_key),
+        )
     )
     revision = current.revision + 1
     parent_digest = current.manifest_digest

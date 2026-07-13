@@ -1,0 +1,12 @@
+# Local development overrides for deploy/docker-compose.yml.
+# Compose auto-merges this file when present next to docker-compose.yml.
+# Production deploys should set APP_ENV/APP_BUILD_REVISION in the environment
+# or .env and may omit this override.
+services:
+  api:
+    build:
+      args:
+        APP_BUILD_REVISION: ${APP_BUILD_REVISION:-development}
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      APP_BUILD_REVISION: ${APP_BUILD_REVISION:-development}

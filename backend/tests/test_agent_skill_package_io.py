@@ -1092,3 +1092,10 @@ routing:
     assert len(pkg.manifest.routing.conflict_rules) == 3
     assert pkg.manifest.routing.conflict_rules[0].kind == "excludes"
     assert pkg.manifest.routing.conflict_rules[2].group == "review-family"
+
+
+def test_empty_resource_file_is_rejected() -> None:
+    with pytest.raises(ValueError, match="empty resource"):
+        parse_skill_directory_files(
+            _files(resources={"references/empty.md": b""}, include_mindatlas=False)
+        )

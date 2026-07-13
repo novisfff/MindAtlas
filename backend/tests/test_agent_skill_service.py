@@ -822,6 +822,45 @@ class AgentSkillServiceLifecycleTests(unittest.TestCase):
         assert reloaded is not None
         self.assertEqual(reloaded.migration_state, "native")
 
+    def test_shadow_package_stays_shadow_on_legacy_origin_save(self) -> None:
+        from app.assistant.skills.models import (
+            AssistantSkillPackage,
+            AssistantSkillPackageAlias,
+        )
+        from app.assistant.skills.schemas import SaveSkillDraftCommand
+
+        pkg = AssistantSkillPackage(
+            canonical_name="shadow-legacy-pack",
+            display_name="Shadow Legacy",
+            description="legacy shadow",
+            migration_state="shadow",
+            catalog_enabled=False,
+            is_system=False,
+        )
+        self.db.add(pkg)
+        self.db.flush()
+        self.db.add(
+            AssistantSkillPackageAlias(
+                skill_package_id=pkg.id,
+                alias="shadow-legacy-pack",
+                normalized_alias="shadow-legacy-pack",
+                alias_type="canonical",
+            )
+        )
+        self.db.commit()
+
+        self.svc.save_draft(
+            SaveSkillDraftCommand(
+                package_id=pkg.id,
+                parsed=_parse(name="shadow-legacy-pack", include_mindatlas=False),
+                version_name="legacy-draft",
+                origin="legacy",
+            )
+        )
+        reloaded = self.db.get(AssistantSkillPackage, pkg.id)
+        assert reloaded is not None
+        self.assertEqual(reloaded.migration_state, "shadow")
+
     def test_package_and_version_not_found_codes(self) -> None:
         from app.common.exceptions import ApiException
 

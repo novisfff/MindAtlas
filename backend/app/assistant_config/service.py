@@ -4722,8 +4722,40 @@ class AssistantConfigService:
         skill = self.get_skill(id)
         if skill.is_system:
             raise ApiException(status_code=400, code=40022, message="System skill cannot be deleted")
+        self._retire_shadow_packages_for_legacy_skill(skill)
         self.db.delete(skill)
         self.db.commit()
+
+    def _retire_shadow_packages_for_legacy_skill(self, skill: AssistantSkill) -> None:
+        """Retire shadow packages tied to a legacy skill so package names can be reclaimed.
+
+        Clears the current published pointer (history rows stay), renames the package
+        to a retired unique canonical name, and detaches ``legacy_skill_id``.
+
+        Alias rows are append-only/immutable under Plan 01 PG guards, so they are
+        left in place as historical tombstones. The package rename frees
+        ``assistant_skill_package.canonical_name`` uniqueness for a future package.
+        """
+        from uuid import uuid4
+
+        from app.assistant.skills.models import AssistantSkillPackage
+
+        packages = (
+            self.db.query(AssistantSkillPackage)
+            .filter(AssistantSkillPackage.legacy_skill_id == skill.id)
+            .all()
+        )
+        for package in packages:
+            if package.published_version_id is not None:
+                package.published_version_id = None
+            # Free the package-table canonical name for future reclaim.
+            old_name = package.canonical_name or "skill"
+            token = uuid4().hex[:12]
+            prefix = f"retired-{token}-"
+            max_old = max(1, 64 - len(prefix))
+            package.canonical_name = f"{prefix}{old_name[:max_old]}"
+            package.catalog_enabled = False
+            package.legacy_skill_id = None
 
     def reset_all_system_skills(self, confirm: bool, *, commit: bool = True) -> dict:
         """重置所有系统技能到默认配置，并清理已下线的系统技能"""
@@ -4793,6 +4825,7 @@ class AssistantConfigService:
             except IntegrityError as exc:
                 self.db.rollback()
                 raise ApiException(status_code=409, code=40923, message="Reset all skills failed") from exc
+            self._best_effort_shadow_sync_all()
 
         return {
             "resetCount": reset_count,

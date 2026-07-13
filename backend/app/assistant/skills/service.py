@@ -324,8 +324,8 @@ class AgentSkillService:
                     ),
                 )
 
-            # shadow -> native on first administrator/native edit; never reverse.
-            if package.migration_state == "shadow":
+            # shadow -> native only on administrator/api edit; legacy origin keeps shadow.
+            if package.migration_state == "shadow" and origin == "api":
                 package.migration_state = "native"
 
             # Append any new legacy aliases (append-only; never rewrite).
@@ -1292,13 +1292,7 @@ class AgentSkillService:
 
     def _translate_integrity_error(self, exc: IntegrityError) -> ApiException:
         msg = str(getattr(exc, "orig", exc)).lower()
-        if "canonical_name" in msg or "assistant_skill_package" in msg and "unique" in msg:
-            if "normalized_alias" in msg or "alias" in msg:
-                return ApiException(
-                    status_code=409,
-                    code=40991,
-                    message="skill alias namespace conflict",
-                )
+        if "canonical_name" in msg and "unique" in msg:
             return ApiException(
                 status_code=409,
                 code=40990,
@@ -1309,6 +1303,13 @@ class AgentSkillService:
                 status_code=409,
                 code=40991,
                 message="skill alias namespace conflict",
+            )
+        if "assistant_skill_package" in msg and "unique" in msg:
+            # Non-canonical package uniqueness (e.g. legacy_skill_id) — not 40990.
+            return ApiException(
+                status_code=409,
+                code=40993,
+                message="skill package uniqueness conflict",
             )
         if "sequence" in msg or "uq_assistant_skill_version_seq" in msg:
             return ApiException(
