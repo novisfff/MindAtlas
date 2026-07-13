@@ -1,11 +1,13 @@
-"""OpenClaw shared Capability Runtime bridge characterization (Plan 02 Task 8)."""
+"""OpenClaw shared Capability Runtime bridge characterization (Plan 02 Tasks 8–9)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
@@ -14,7 +16,7 @@ os.environ.setdefault(
     "AI_PROVIDER_FERNET_KEY",
     "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ=",
 )
-os.environ.setdefault("APP_BUILD_REVISION", "plan02-task8-local")
+os.environ.setdefault("APP_BUILD_REVISION", "plan02-task9-local")
 os.environ.setdefault("APP_ENV", "test")
 
 bootstrap_backend_imports()
@@ -23,21 +25,116 @@ reset_caches()
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.common.exceptions import register_exception_handlers  # noqa: E402
-from app.config import get_settings  # noqa: E402
+from app.assistant.capabilities.classification import (  # noqa: E402
+    CLASSIFICATION_CONTRACT_REVISION,
+    CLASSIFICATION_RULESET_DIGEST,
+)
+from app.assistant.capabilities.policy import (  # noqa: E402
+    OPENCLAW_CUSTOM_SOURCE_EFFECT_CEILINGS,
+    OPENCLAW_SYSTEM_ITEM_EFFECT_CEILINGS,
+    AuthorizationEvidenceVerificationError,
+    lattice_prefix_through,
+)
+from app.common.exceptions import ApiException, register_exception_handlers  # noqa: E402
+from app.config import Settings, get_settings  # noqa: E402
 from app.database import get_db  # noqa: E402
 from app.openclaw_integration.capability_adapter import (  # noqa: E402
     OpenClawAuthenticationProof,
+    OpenClawAuthorizationEvidenceVerifier,
     OpenClawRuntimeModeSelector,
+    freeze_openclaw_capability_call,
     translate_capability_error,
+    _select_effect_ceiling,
 )
+from app.openclaw_integration.models import OpenClawCapabilityItem  # noqa: E402
+from app.openclaw_integration.registry import list_openclaw_system_item_definitions  # noqa: E402
 from app.openclaw_integration.router import runtime_router, settings_router  # noqa: E402
+from app.openclaw_integration.service import (  # noqa: E402
+    OpenClawIntegrationService,
+    OpenClawRuntimeAuditContext,
+)
 from app.system_settings.initialization_service import SystemInitializationService  # noqa: E402
 from app.system_settings.schemas import InitializeSystemRequest  # noqa: E402
 from tests._db import make_session  # noqa: E402
 
 FIXTURE_PATH = (
     Path(__file__).resolve().parent / "fixtures" / "openclaw_runtime_error_contract.json"
+)
+
+# System-tool parity fixtures that can be dual-run safely with mocked runners.
+# Runner payloads use native tool field names (snake_case) that the OpenClaw
+# response adapters normalize into public camelCase envelopes.
+_TOOL_PARITY_FIXTURES: tuple[dict[str, Any], ...] = (
+    {
+        "capability_key": "search_entries",
+        "payload": {"query": "parity"},
+        "runner_result": {"total": 0, "items": []},
+        "expected_result": {"total": 0, "items": []},
+        "needs_lightrag": False,
+    },
+    {
+        "capability_key": "get_entry",
+        "payload": {"entryId": "00000000-0000-4000-8000-000000000001"},
+        "runner_result": {
+            "id": "00000000-0000-4000-8000-000000000001",
+            "title": "parity-entry",
+            "summary": "s",
+            "content": "c",
+            "type_code": "KNOWLEDGE",
+            "type": "Knowledge",
+            "tags": [],
+            "time_mode": "NONE",
+            "time_at": None,
+            "time_from": None,
+            "time_to": None,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        },
+        "expected_result_keys": ("id", "title", "entryTypeCode", "entryTypeName"),
+        "needs_lightrag": False,
+    },
+    {
+        "capability_key": "create_relation",
+        "payload": {
+            "sourceEntryId": "00000000-0000-4000-8000-000000000001",
+            "targetEntryId": "00000000-0000-4000-8000-000000000002",
+            "relationType": "related_to",
+            "description": "parity",
+        },
+        "runner_result": {
+            "id": "00000000-0000-4000-8000-000000000099",
+            "source_entry_id": "00000000-0000-4000-8000-000000000001",
+            "source_entry_title": "Source",
+            "target_entry_id": "00000000-0000-4000-8000-000000000002",
+            "target_entry_title": "Target",
+            "relation_type_code": "related_to",
+            "relation_type_name": "Related",
+            "description": "parity",
+        },
+        "expected_result_keys": (
+            "id",
+            "sourceEntryId",
+            "targetEntryId",
+            "relationTypeCode",
+        ),
+        "needs_lightrag": False,
+    },
+    {
+        "capability_key": "query_knowledge_graph",
+        "payload": {"query": "parity graph", "mode": "hybrid", "topK": 5},
+        "runner_result": {
+            "answer": "ok",
+            "sources": [],
+            "metadata": {
+                "mode": "hybrid",
+                "topK": 5,
+                "latencyMs": 1,
+                "cacheHit": False,
+            },
+        },
+        "expected_result_keys": ("answer", "sources", "metadata"),
+        "needs_lightrag": True,
+    },
 )
 
 
@@ -111,6 +208,63 @@ class OpenClawSharedCapabilityRuntimeTests(unittest.TestCase):
             "X-OpenClaw-Tool": "tool-1",
         }
 
+    def _audit(self) -> OpenClawRuntimeAuditContext:
+        return OpenClawRuntimeAuditContext(
+            source="unit-test",
+            channel="cli",
+            session="session-1",
+            tool="tool-1",
+        )
+
+    def _execute_mode(
+        self,
+        *,
+        mode: str,
+        capability_key: str,
+        payload: dict[str, Any],
+        runner_result: Any,
+        needs_lightrag: bool = False,
+    ) -> tuple[dict[str, Any], int]:
+        """Run one isolated mode branch through the service worker path."""
+        service = OpenClawIntegrationService(self.db)
+        calls = {"n": 0}
+
+        def fake_runner(**kwargs):  # noqa: ANN003
+            calls["n"] += 1
+            return runner_result
+
+        patches = [
+            patch(
+                "app.assistant.workflow.engine.runtime_helpers.wrap_tool_with_db",
+                return_value=fake_runner,
+            ),
+            patch(
+                "app.assistant.capabilities.adapters.tool.wrap_tool_with_db",
+                return_value=fake_runner,
+            ),
+        ]
+        if needs_lightrag:
+            patches.append(
+                patch(
+                    "app.openclaw_integration.service.resolve_runtime_knowledge_graph_config",
+                    return_value=type("Cfg", (), {"enabled": True, "configured": True})(),
+                )
+            )
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            response = service.execute_capability_in_worker(
+                capability_key=capability_key,
+                raw_payload=payload,
+                audit_context=self._audit(),
+                preferred_locale="zh",
+                selected_mode=mode,
+                auth_proof=OpenClawAuthenticationProof(principal_id="openclaw"),
+            )
+        return response.model_dump(by_alias=True), calls["n"]
+
     def test_error_contract_fixture_covers_runtime_auth_and_execute_codes(self) -> None:
         fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
         codes = {row["code"] for row in fixture["runtimeAuthAndExecute"]}
@@ -124,6 +278,35 @@ class OpenClawSharedCapabilityRuntimeTests(unittest.TestCase):
         # Injected selector freeze: changing process settings after snapshot is out of band;
         # snapshot_mode reads cached settings, so a second call equals first for process life.
         self.assertEqual(selector.snapshot_mode(), mode)
+
+    def test_settings_default_mode_is_legacy_and_invalid_rejected(self) -> None:
+        # Field default is process-independent evidence of the release default.
+        field = Settings.model_fields["openclaw_capability_runtime_mode"]
+        self.assertEqual(field.default, "legacy")
+        settings = Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            AI_PROVIDER_FERNET_KEY=os.environ["AI_PROVIDER_FERNET_KEY"],
+            APP_BUILD_REVISION="plan02-task9-local",
+            APP_ENV="test",
+            OPENCLAW_CAPABILITY_RUNTIME_MODE="legacy",
+        )
+        self.assertEqual(settings.openclaw_capability_runtime_mode, "legacy")
+        with self.assertRaises(Exception):
+            Settings(
+                _env_file=None,  # type: ignore[call-arg]
+                AI_PROVIDER_FERNET_KEY=os.environ["AI_PROVIDER_FERNET_KEY"],
+                APP_BUILD_REVISION="plan02-task9-local",
+                APP_ENV="test",
+                OPENCLAW_CAPABILITY_RUNTIME_MODE="auto",
+            )
+        with self.assertRaises(Exception):
+            Settings(
+                _env_file=None,  # type: ignore[call-arg]
+                AI_PROVIDER_FERNET_KEY=os.environ["AI_PROVIDER_FERNET_KEY"],
+                APP_BUILD_REVISION="plan02-task9-local",
+                APP_ENV="test",
+                OPENCLAW_CAPABILITY_RUNTIME_MODE="true",
+            )
 
     def test_auth_and_disabled_integration_codes(self) -> None:
         self._initialize_system()
@@ -271,6 +454,653 @@ class OpenClawSharedCapabilityRuntimeTests(unittest.TestCase):
         self.assertNotIn("Bearer", rendered)
         self.assertNotIn("secret", rendered.lower())
         self.assertTrue(proof.authenticated)
+
+    # ------------------------------------------------------------------
+    # Task 9 Step 1: deterministic parity matrix (isolated mode runs)
+    # ------------------------------------------------------------------
+
+    def test_tool_parity_matrix_legacy_vs_shared(self) -> None:
+        """Compare public envelopes for system tools across isolated mode runs.
+
+        Never dual-dispatches the same non-idempotent real target: both branches
+        use the same mocked runner fixture and run sequentially per mode.
+        """
+        self._initialize_system()
+        self._rotate_and_enable()
+
+        for fixture in _TOOL_PARITY_FIXTURES:
+            with self.subTest(capability_key=fixture["capability_key"]):
+                legacy_body, legacy_calls = self._execute_mode(
+                    mode="legacy",
+                    capability_key=fixture["capability_key"],
+                    payload=fixture["payload"],
+                    runner_result=fixture["runner_result"],
+                    needs_lightrag=bool(fixture.get("needs_lightrag")),
+                )
+                shared_body, shared_calls = self._execute_mode(
+                    mode="shared",
+                    capability_key=fixture["capability_key"],
+                    payload=fixture["payload"],
+                    runner_result=fixture["runner_result"],
+                    needs_lightrag=bool(fixture.get("needs_lightrag")),
+                )
+                self.assertEqual(legacy_calls, 1, fixture["capability_key"])
+                self.assertEqual(shared_calls, 1, fixture["capability_key"])
+                self.assertEqual(legacy_body["capabilityKey"], shared_body["capabilityKey"])
+                self.assertEqual(legacy_body["toolName"], shared_body["toolName"])
+                if "expected_result" in fixture:
+                    self.assertEqual(legacy_body["result"], fixture["expected_result"])
+                    self.assertEqual(shared_body["result"], fixture["expected_result"])
+                else:
+                    for key in fixture["expected_result_keys"]:
+                        self.assertEqual(
+                            legacy_body["result"].get(key),
+                            shared_body["result"].get(key),
+                            f"{fixture['capability_key']}:{key}",
+                        )
+
+    def test_invalid_input_parity_legacy_vs_shared(self) -> None:
+        self._initialize_system()
+        self._rotate_and_enable()
+        service = OpenClawIntegrationService(self.db)
+
+        def _run(mode: str) -> ApiException:
+            with self.assertRaises(ApiException) as ctx:
+                service.execute_capability_in_worker(
+                    capability_key="search_entries",
+                    raw_payload={"limit": "not-a-number"},
+                    audit_context=self._audit(),
+                    preferred_locale="zh",
+                    selected_mode=mode,
+                    auth_proof=OpenClawAuthenticationProof(principal_id="openclaw"),
+                )
+            return ctx.exception
+
+        legacy_exc = _run("legacy")
+        shared_exc = _run("shared")
+        self.assertEqual(legacy_exc.status_code, shared_exc.status_code)
+        self.assertEqual(legacy_exc.code, shared_exc.code)
+        self.assertEqual(legacy_exc.status_code, 422)
+        self.assertEqual(legacy_exc.code, 42261)
+
+    # ------------------------------------------------------------------
+    # Task 9 Step 2: mode freezing (no branch fallback)
+    # ------------------------------------------------------------------
+
+    def test_mode_freeze_legacy_ignores_process_flip_to_shared(self) -> None:
+        self._initialize_system()
+        self._rotate_and_enable()
+        service = OpenClawIntegrationService(self.db)
+        calls = {"legacy": 0, "shared": 0}
+
+        def fake_runner(**kwargs):  # noqa: ANN003
+            calls["legacy"] += 1
+            return {"total": 0, "items": []}
+
+        def boom_shared(*args, **kwargs):  # noqa: ANN002, ANN003
+            calls["shared"] += 1
+            raise AssertionError("shared path must not run when mode frozen to legacy")
+
+        with patch(
+            "app.assistant.workflow.engine.runtime_helpers.wrap_tool_with_db",
+            return_value=fake_runner,
+        ), patch(
+            "app.assistant.capabilities.adapters.tool.wrap_tool_with_db",
+            return_value=fake_runner,
+        ), patch(
+            "app.openclaw_integration.service.execute_shared_capability",
+            side_effect=boom_shared,
+        ), patch.object(
+            get_settings(),
+            "openclaw_capability_runtime_mode",
+            "shared",
+        ):
+            response = service.execute_capability_in_worker(
+                capability_key="search_entries",
+                raw_payload={"query": "freeze-legacy"},
+                audit_context=self._audit(),
+                preferred_locale="zh",
+                selected_mode="legacy",
+                auth_proof=OpenClawAuthenticationProof(principal_id="openclaw"),
+            )
+        self.assertEqual(response.capability_key, "search_entries")
+        self.assertEqual(calls["legacy"], 1)
+        self.assertEqual(calls["shared"], 0)
+
+    def test_mode_freeze_shared_ignores_process_flip_to_legacy(self) -> None:
+        self._initialize_system()
+        self._rotate_and_enable()
+        service = OpenClawIntegrationService(self.db)
+        calls = {"legacy_tool": 0, "shared": 0}
+
+        def boom_legacy(**kwargs):  # noqa: ANN003
+            calls["legacy_tool"] += 1
+            raise AssertionError("legacy tool path must not run when mode frozen to shared")
+
+        def fake_shared_runner(**kwargs):  # noqa: ANN003
+            calls["shared"] += 1
+            return {"total": 0, "items": []}
+
+        with patch(
+            "app.assistant.workflow.engine.runtime_helpers.wrap_tool_with_db",
+            side_effect=boom_legacy,
+        ), patch(
+            "app.assistant.capabilities.adapters.tool.wrap_tool_with_db",
+            return_value=fake_shared_runner,
+        ), patch.object(
+            get_settings(),
+            "openclaw_capability_runtime_mode",
+            "legacy",
+        ):
+            response = service.execute_capability_in_worker(
+                capability_key="search_entries",
+                raw_payload={"query": "freeze-shared"},
+                audit_context=self._audit(),
+                preferred_locale="zh",
+                selected_mode="shared",
+                auth_proof=OpenClawAuthenticationProof(principal_id="openclaw"),
+            )
+        self.assertEqual(response.capability_key, "search_entries")
+        self.assertEqual(calls["shared"], 1)
+        self.assertEqual(calls["legacy_tool"], 0)
+
+    def test_shared_failure_does_not_fallback_to_legacy(self) -> None:
+        self._initialize_system()
+        self._rotate_and_enable()
+        service = OpenClawIntegrationService(self.db)
+        legacy_calls = {"n": 0}
+
+        def boom_shared(*args, **kwargs):  # noqa: ANN002, ANN003
+            raise ApiException(status_code=409, code=40961, message="shared preflight failed")
+
+        def legacy_runner(**kwargs):  # noqa: ANN003
+            legacy_calls["n"] += 1
+            return {"total": 0, "items": []}
+
+        with patch(
+            "app.openclaw_integration.service.execute_shared_capability",
+            side_effect=boom_shared,
+        ), patch(
+            "app.assistant.workflow.engine.runtime_helpers.wrap_tool_with_db",
+            return_value=legacy_runner,
+        ), patch(
+            "app.assistant.capabilities.adapters.tool.wrap_tool_with_db",
+            return_value=legacy_runner,
+        ):
+            with self.assertRaises(ApiException) as ctx:
+                service.execute_capability_in_worker(
+                    capability_key="search_entries",
+                    raw_payload={"query": "no-fallback"},
+                    audit_context=self._audit(),
+                    preferred_locale="zh",
+                    selected_mode="shared",
+                    auth_proof=OpenClawAuthenticationProof(principal_id="openclaw"),
+                )
+        self.assertEqual(ctx.exception.code, 40961)
+        self.assertEqual(legacy_calls["n"], 0)
+
+    def test_shared_output_validation_failure_does_not_retry_legacy(self) -> None:
+        self._initialize_system()
+        self._rotate_and_enable()
+        service = OpenClawIntegrationService(self.db)
+        legacy_calls = {"n": 0}
+
+        def bad_runner(**kwargs):  # noqa: ANN003
+            # Missing required total/items → external output schema fails after success.
+            return {"unexpected": True}
+
+        def legacy_runner(**kwargs):  # noqa: ANN003
+            legacy_calls["n"] += 1
+            return {"total": 0, "items": []}
+
+        with patch(
+            "app.assistant.capabilities.adapters.tool.wrap_tool_with_db",
+            return_value=bad_runner,
+        ), patch(
+            "app.assistant.workflow.engine.runtime_helpers.wrap_tool_with_db",
+            return_value=legacy_runner,
+        ):
+            with self.assertRaises(ApiException) as ctx:
+                service.execute_capability_in_worker(
+                    capability_key="search_entries",
+                    raw_payload={"query": "bad-output"},
+                    audit_context=self._audit(),
+                    preferred_locale="zh",
+                    selected_mode="shared",
+                    auth_proof=OpenClawAuthenticationProof(principal_id="openclaw"),
+                )
+        self.assertIn(ctx.exception.code, {42261, 40961})
+        self.assertEqual(legacy_calls["n"], 0)
+
+    def test_request_cancellation_before_dispatch(self) -> None:
+        self._initialize_system()
+        self._rotate_and_enable()
+        service = OpenClawIntegrationService(self.db)
+
+        class Cancelled:
+            def is_cancelled(self) -> bool:
+                return True
+
+            def raise_if_cancelled(self) -> None:
+                from app.assistant.capabilities.contracts import CapabilityError
+
+                raise CapabilityError(
+                    error_type="cancelled",
+                    safe_code="cancelled",
+                    safe_message="cancelled",
+                    retry_disposition="never",
+                )
+
+        # Cancellation is honored on the shared gateway path only.
+        with self.assertRaises(ApiException) as ctx:
+            service.execute_capability_in_worker(
+                capability_key="search_entries",
+                raw_payload={"query": "cancel"},
+                audit_context=self._audit(),
+                preferred_locale="zh",
+                selected_mode="shared",
+                auth_proof=OpenClawAuthenticationProof(principal_id="openclaw"),
+                cancellation=Cancelled(),
+            )
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.code, 40961)
+
+    # ------------------------------------------------------------------
+    # Task 9 Step 3: availability / version race semantics
+    # ------------------------------------------------------------------
+
+    def test_catalog_disable_before_admission_denies_shared(self) -> None:
+        """Re-verification before admission detects prior catalog disable."""
+        self._initialize_system()
+        self._rotate_and_enable()
+        service = OpenClawIntegrationService(self.db)
+        item = (
+            self.db.query(OpenClawCapabilityItem)
+            .filter(OpenClawCapabilityItem.capability_key == "search_entries")
+            .one()
+        )
+        frozen = freeze_openclaw_capability_call(
+            service,
+            item=item,
+            selected_mode="shared",
+            call_id="call-catalog-disable",
+        )
+        ceiling = _select_effect_ceiling(item)
+        from app.assistant.capabilities.contracts import (
+            CapabilityAuthorizationEvidence,
+            CapabilityAvailability,
+            CapabilityBehavior,
+            CapabilityDescriptor,
+            CapabilityExecutionContext,
+            CapabilityOwnerRef,
+            CapabilityPrincipal,
+            CapabilityTimeoutPolicy,
+            ClassificationContractRef,
+        )
+        from app.assistant.capabilities.policy import grant_source_digest_for_ceiling
+        from app.assistant.domain.contracts import CapabilityCompletionContract
+        from app.assistant.domain.json_schema import binding_schema_digest
+
+        grant = grant_source_digest_for_ceiling(
+            ceiling, exposure_digest=frozen.catalog_item_revision_digest
+        )
+        verifier = OpenClawAuthorizationEvidenceVerifier(
+            expected_call_id=frozen.call_id,
+            selected_mode="shared",
+            frozen_call=frozen,
+            auth_proof=OpenClawAuthenticationProof(principal_id="openclaw"),
+            ceiling=ceiling,
+            grant_source_digest=grant,
+            service=service,
+            locale="zh",
+        )
+        # Disable after freeze, before admission.
+        item.enabled = False
+        self.db.flush()
+
+        in_schema = frozen.binding.resolved.input_schema
+        out_schema = frozen.binding.resolved.output_schema
+        descriptor = CapabilityDescriptor(
+            capability_key=item.capability_key,
+            capability_type="tool",
+            target_identity=f"system-tool:{item.capability_key}",
+            target_id=None,
+            target_version_id=None,
+            target_revision=None,
+            resolution_digest=frozen.binding.resolved.resolution_digest,
+            binding_contract_digest=frozen.binding.resolved.binding_contract_digest,
+            dependency_closure_digest=frozen.binding.resolved.dependency_closure_digest,
+            display_name=item.capability_key,
+            description="parity",
+            input_schema=in_schema,
+            output_schema=out_schema,
+            input_schema_digest=binding_schema_digest(in_schema),
+            output_schema_digest=binding_schema_digest(out_schema),
+            descriptor_digest="a" * 64,
+            executable_revision="plan02-task9-local",
+            behavior=CapabilityBehavior(
+                classification=ClassificationContractRef(
+                    schema_version=1,
+                    revision=CLASSIFICATION_CONTRACT_REVISION,
+                    ruleset_digest=CLASSIFICATION_RULESET_DIGEST,
+                ),
+                side_effect="read",
+                parallel_safe=True,
+                interrupt_mode="none",
+                timeout_policy=CapabilityTimeoutPolicy(
+                    mode="cooperative",
+                    timeout_seconds=None,
+                    cancellation_supported=True,
+                ),
+                behavior_digest="b" * 64,
+            ),
+            availability=CapabilityAvailability(status="available", reason_code=None),
+            completion=CapabilityCompletionContract(
+                terminal_output=True,
+                needs_followup=False,
+                followup_hint=None,
+            ),
+        )
+        evidence = CapabilityAuthorizationEvidence(
+            issuer="openclaw_bridge",
+            call_id=frozen.call_id,
+            principal=CapabilityPrincipal(
+                principal_type="openclaw_installation",
+                principal_id="openclaw",
+                authenticated=True,
+            ),
+            entrypoint="openclaw",
+            owner=CapabilityOwnerRef(
+                owner_kind="openclaw_catalog",
+                owner_id=str(item.id),
+                owner_version_id=None,
+            ),
+            capability_key=item.capability_key,
+            resolution_digest=frozen.binding.resolved.resolution_digest,
+            binding_contract_digest=frozen.binding.resolved.binding_contract_digest,
+            dependency_closure_digest=frozen.binding.resolved.dependency_closure_digest,
+            allowed_side_effects=ceiling.allowed_side_effects,
+            grant_source_digest=grant,
+            evidence_digest=frozen.catalog_evidence_digest,
+        )
+        context = CapabilityExecutionContext(
+            call_id=frozen.call_id,
+            locale="zh",
+            request_source="unit-test",
+            request_channel="cli",
+            request_session="session-1",
+            request_tool="tool-1",
+            nesting_depth=0,
+        )
+        with self.assertRaises(AuthorizationEvidenceVerificationError) as ctx:
+            verifier.verify(descriptor=descriptor, evidence=evidence, context=context)
+        self.assertEqual(str(ctx.exception), "catalog_item_not_exposed")
+
+    def test_catalog_disable_after_admission_does_not_replay(self) -> None:
+        """Once admitted, a later disable affects future calls only (no cancel/replay)."""
+        self._initialize_system()
+        self._rotate_and_enable()
+        service = OpenClawIntegrationService(self.db)
+        calls = {"n": 0}
+
+        def fake_runner(**kwargs):  # noqa: ANN003
+            calls["n"] += 1
+            # Mutate catalog mid-flight after the target has been invoked.
+            item = (
+                self.db.query(OpenClawCapabilityItem)
+                .filter(OpenClawCapabilityItem.capability_key == "search_entries")
+                .one()
+            )
+            item.enabled = False
+            self.db.flush()
+            return {"total": 1, "items": []}
+
+        with patch(
+            "app.assistant.capabilities.adapters.tool.wrap_tool_with_db",
+            return_value=fake_runner,
+        ), patch(
+            "app.assistant.workflow.engine.runtime_helpers.wrap_tool_with_db",
+            return_value=fake_runner,
+        ):
+            response = service.execute_capability_in_worker(
+                capability_key="search_entries",
+                raw_payload={"query": "admitted"},
+                audit_context=self._audit(),
+                preferred_locale="zh",
+                selected_mode="shared",
+                auth_proof=OpenClawAuthenticationProof(principal_id="openclaw"),
+            )
+        self.assertEqual(response.result["total"], 1)
+        self.assertEqual(calls["n"], 1)
+
+        # Future call sees disable and does not re-invoke target.
+        with patch(
+            "app.assistant.capabilities.adapters.tool.wrap_tool_with_db",
+            return_value=fake_runner,
+        ), patch(
+            "app.assistant.workflow.engine.runtime_helpers.wrap_tool_with_db",
+            return_value=fake_runner,
+        ):
+            with self.assertRaises(ApiException) as ctx:
+                service.execute_capability_in_worker(
+                    capability_key="search_entries",
+                    raw_payload={"query": "after-disable"},
+                    audit_context=self._audit(),
+                    preferred_locale="zh",
+                    selected_mode="shared",
+                    auth_proof=OpenClawAuthenticationProof(principal_id="openclaw"),
+                )
+        self.assertEqual(ctx.exception.code, 40362)
+        self.assertEqual(calls["n"], 1)
+
+    def test_build_revision_drift_fails_closed_on_shared(self) -> None:
+        """Frozen system-tool binding fails closed when APP_BUILD_REVISION drifts."""
+        # Pin a known build revision for this case so full-suite ordering cannot
+        # leave a different APP_BUILD_REVISION from another module's setdefault.
+        os.environ["APP_BUILD_REVISION"] = "plan02-task9-local"
+        get_settings.cache_clear()
+        self._initialize_system()
+        self._rotate_and_enable()
+        service = OpenClawIntegrationService(self.db)
+        item = (
+            self.db.query(OpenClawCapabilityItem)
+            .filter(OpenClawCapabilityItem.capability_key == "search_entries")
+            .one()
+        )
+        # Freeze under the current build revision.
+        frozen = freeze_openclaw_capability_call(
+            service,
+            item=item,
+            selected_mode="shared",
+            call_id="call-build-drift",
+        )
+        original_revision = frozen.binding.resolved.executable_revision
+        self.assertTrue(original_revision)
+        self.assertNotEqual(original_revision, "drifted-build-revision")
+
+        # Drift process build revision, then re-resolve the frozen binding surface.
+        from app.assistant.capabilities.errors import CapabilityDomainError
+        from app.assistant.capabilities.registry import CapabilityRegistry
+
+        with patch.dict(os.environ, {"APP_BUILD_REVISION": "drifted-build-revision"}):
+            get_settings.cache_clear()
+            with self.assertRaises(CapabilityDomainError) as ctx:
+                CapabilityRegistry(self.db).resolve_surface(frozen.binding)
+        self.assertEqual(ctx.exception.error.error_type, "version_drift")
+        self.assertEqual(ctx.exception.error.safe_code, "build_revision_drift")
+        get_settings.cache_clear()
+        # Restore local pin for subsequent tests in this module.
+        os.environ["APP_BUILD_REVISION"] = "plan02-task9-local"
+
+    # ------------------------------------------------------------------
+    # Task 9 Step 4: system item coverage + ceilings + code_executor
+    # ------------------------------------------------------------------
+
+    def test_system_items_match_effect_ceilings_and_parity_table(self) -> None:
+        definitions = list_openclaw_system_item_definitions(locale="en")
+        definition_keys = {item.key for item in definitions}
+        ceiling_keys = set(OPENCLAW_SYSTEM_ITEM_EFFECT_CEILINGS)
+        parity_keys = {row["capability_key"] for row in _TOOL_PARITY_FIXTURES}
+        workflow_system_keys = {
+            item.key for item in definitions if item.source_type == "workflow"
+        }
+
+        self.assertEqual(definition_keys, ceiling_keys)
+        # Every tool system item must appear in the shared parity table.
+        tool_keys = {item.key for item in definitions if item.source_type == "tool"}
+        self.assertTrue(tool_keys.issubset(parity_keys | definition_keys))
+        self.assertEqual(tool_keys, parity_keys)
+        # Workflow system items are classified independently; they remain inventory-covered.
+        self.assertEqual(
+            workflow_system_keys,
+            {"submit_context_capture", "generate_periodic_review"},
+        )
+        for key, ceiling in OPENCLAW_SYSTEM_ITEM_EFFECT_CEILINGS.items():
+            self.assertEqual(ceiling.revision, "plan02-v1", key)
+            self.assertNotIn("unknown", ceiling.allowed_side_effects)
+            self.assertNotIn("durable", ceiling.allowed_interrupt_modes)
+            self.assertEqual(len(ceiling.ceiling_digest), 64, key)
+
+    def test_classifier_and_ceiling_are_independent(self) -> None:
+        """Ceiling rows are static grants; classifier output is not stored in them."""
+        for key, ceiling in OPENCLAW_SYSTEM_ITEM_EFFECT_CEILINGS.items():
+            # Ceiling is a lattice prefix, not a single classified value.
+            self.assertGreaterEqual(len(ceiling.allowed_side_effects), 1, key)
+            # Independent of classifier digest.
+            self.assertNotEqual(ceiling.ceiling_digest, CLASSIFICATION_RULESET_DIGEST, key)
+        self.assertEqual(CLASSIFICATION_CONTRACT_REVISION, "plan02-v1")
+        self.assertEqual(len(CLASSIFICATION_RULESET_DIGEST), 64)
+
+    def test_negative_ceiling_rows(self) -> None:
+        # Effect above ceiling
+        read_ceiling = OPENCLAW_SYSTEM_ITEM_EFFECT_CEILINGS["search_entries"]
+        self.assertNotIn("write_local", read_ceiling.allowed_side_effects)
+        # Missing ceiling key
+        self.assertIsNone(OPENCLAW_SYSTEM_ITEM_EFFECT_CEILINGS.get("not_a_real_item"))
+        # Missing custom inventory type
+        self.assertIsNone(OPENCLAW_CUSTOM_SOURCE_EFFECT_CEILINGS.get("skill"))
+        # Unknown classification never granted
+        for ceiling in OPENCLAW_SYSTEM_ITEM_EFFECT_CEILINGS.values():
+            self.assertNotIn("unknown", ceiling.allowed_side_effects)
+        # Unapproved durable interrupt never granted; tool custom source rejects legacy_blocking
+        tool_ceiling = OPENCLAW_CUSTOM_SOURCE_EFFECT_CEILINGS["tool"]
+        self.assertNotIn("legacy_blocking", tool_ceiling.allowed_interrupt_modes)
+        self.assertNotIn("durable", tool_ceiling.allowed_interrupt_modes)
+        # Workflow may allow legacy_blocking but not durable
+        workflow_ceiling = OPENCLAW_CUSTOM_SOURCE_EFFECT_CEILINGS["workflow"]
+        self.assertIn("legacy_blocking", workflow_ceiling.allowed_interrupt_modes)
+        self.assertNotIn("durable", workflow_ceiling.allowed_interrupt_modes)
+        # Lattice helper remains strict
+        self.assertEqual(lattice_prefix_through("read")[-1], "read")
+
+    def test_code_executor_system_workflows_are_legacy_only_or_unavailable_in_shared(self) -> None:
+        """Plan 02 v1: code_executor closures classify unknown; shared preflight fails.
+
+        Only submit_context_capture carries code_executor nodes among system
+        OpenClaw workflows. generate_periodic_review classifies shared-ready
+        (read) and is covered by the integration suite with mocked engines.
+        """
+        self._initialize_system()
+        self._rotate_and_enable()
+        service = OpenClawIntegrationService(self.db)
+
+        from app.assistant.capabilities.runtime import build_capability_runtime
+        from app.openclaw_integration.capability_adapter import freeze_openclaw_capability_call
+
+        item = (
+            self.db.query(OpenClawCapabilityItem)
+            .filter(OpenClawCapabilityItem.capability_key == "submit_context_capture")
+            .one()
+        )
+        frozen = freeze_openclaw_capability_call(
+            service,
+            item=item,
+            selected_mode="shared",
+            call_id="call-code-executor",
+        )
+        descriptor = build_capability_runtime(
+            db=self.db, evidence_verifiers={}, locale="zh"
+        ).describe(frozen.binding)
+        self.assertEqual(descriptor.behavior.side_effect, "unknown")
+
+        with self.assertRaises(ApiException) as shared_ctx:
+            service.execute_capability_in_worker(
+                capability_key="submit_context_capture",
+                raw_payload={"context": "remember this for parity"},
+                audit_context=self._audit(),
+                preferred_locale="zh",
+                selected_mode="shared",
+                auth_proof=OpenClawAuthenticationProof(principal_id="openclaw"),
+            )
+        self.assertEqual(shared_ctx.exception.status_code, 409)
+        self.assertEqual(shared_ctx.exception.code, 40961)
+
+        # Periodic review has no code_executor; classification is not unknown.
+        review_item = (
+            self.db.query(OpenClawCapabilityItem)
+            .filter(OpenClawCapabilityItem.capability_key == "generate_periodic_review")
+            .one()
+        )
+        review_frozen = freeze_openclaw_capability_call(
+            service,
+            item=review_item,
+            selected_mode="shared",
+            call_id="call-review",
+        )
+        review_desc = build_capability_runtime(
+            db=self.db, evidence_verifiers={}, locale="zh"
+        ).describe(review_frozen.binding)
+        self.assertNotEqual(review_desc.behavior.side_effect, "unknown")
+
+    def test_missing_system_ceiling_raises_invalid_source(self) -> None:
+        self._initialize_system()
+        self._rotate_and_enable()
+        item = (
+            self.db.query(OpenClawCapabilityItem)
+            .filter(OpenClawCapabilityItem.capability_key == "search_entries")
+            .one()
+        )
+        # Synthesize a system item with an unknown default key.
+        item.system_default_key = "brand_new_unclassified_item"
+        item.is_system_item = True
+        self.db.flush()
+        with self.assertRaises(ApiException) as ctx:
+            _select_effect_ceiling(item)
+        self.assertEqual(ctx.exception.code, 42262)
+
+    def test_router_snapshots_mode_before_worker(self) -> None:
+        """HTTP path freezes mode at request acceptance; worker uses that snapshot."""
+        from app.openclaw_integration.runtime_worker import OpenClawCapabilityWorkerRequest
+
+        self._initialize_system()
+        secret = self._rotate_and_enable()
+        captured: dict[str, Any] = {}
+
+        async def fake_worker(req: OpenClawCapabilityWorkerRequest, **kwargs):  # noqa: ANN003
+            captured["mode"] = req.selected_mode
+            from app.openclaw_integration.schemas import OpenClawCapabilityExecuteResponse
+
+            return OpenClawCapabilityExecuteResponse(
+                capability_key="search_entries",
+                tool_name="mindatlas_search_entries",
+                result={"total": 0, "items": []},
+            )
+
+        with patch(
+            "app.openclaw_integration.router.execute_openclaw_capability_in_worker",
+            side_effect=fake_worker,
+        ), patch.object(
+            get_settings(),
+            "openclaw_capability_runtime_mode",
+            self.mode if self.mode in {"legacy", "shared"} else "legacy",
+        ):
+            response = self.client.post(
+                "/api/integrations/openclaw/capabilities/search_entries/execute",
+                headers=self._auth_headers(secret),
+                json={"query": "router-freeze"},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn(captured["mode"], {"legacy", "shared"})
 
 
 if __name__ == "__main__":
