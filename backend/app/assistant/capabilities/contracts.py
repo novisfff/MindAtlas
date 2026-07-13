@@ -315,6 +315,35 @@ class FrozenBindingProvenance(FrozenContract):
         return _require_digest(value, field_name="source_snapshot_digest")
 
 
+def _verify_resolved_binding_digests(resolved: ResolvedCapabilityBinding) -> None:
+    """Recompute binding digests from the snapshot body; reject stale matching pairs."""
+    snapshot = resolved.resolution_snapshot
+    if not isinstance(snapshot, Mapping):
+        raise ValueError("resolution_snapshot must be a mapping")
+
+    expected_digest = _require_digest(
+        resolved.binding_contract_digest,
+        field_name="binding_contract_digest",
+    )
+    stored_digest = snapshot.get("bindingContractDigest")
+    if not isinstance(stored_digest, str) or not _DIGEST_RE.fullmatch(stored_digest):
+        raise ValueError(
+            "resolution_snapshot bindingContractDigest must be a lowercase 64-character SHA-256 hex digest"
+        )
+
+    # Canonical digest verification: payload without bindingContractDigest must match.
+    payload_for_digest = {
+        key: value for key, value in snapshot.items() if key != "bindingContractDigest"
+    }
+    recomputed = sha256_canonical_json(payload_for_digest)  # type: ignore[arg-type]
+    if recomputed != expected_digest:
+        raise ValueError("binding_contract_digest does not match resolution_snapshot payload")
+    if stored_digest != expected_digest:
+        raise ValueError("resolution_snapshot bindingContractDigest mismatch")
+    if snapshot.get("dependencyClosureDigest") != resolved.dependency_closure_digest:
+        raise ValueError("dependency_closure_digest does not match resolution_snapshot")
+
+
 class FrozenCapabilityBinding(FrozenContract):
     provenance: FrozenBindingProvenance
     ref: ResolvedCapabilityRef
@@ -354,12 +383,7 @@ class FrozenCapabilityBinding(FrozenContract):
                 "ResolvedCapabilityRef does not match ResolvedCapabilityBinding: "
                 + ", ".join(mismatches)
             )
-        snapshot = resolved.resolution_snapshot
-        if not isinstance(snapshot, Mapping):
-            raise ValueError("resolution_snapshot must be a mapping")
-        stored_digest = snapshot.get("bindingContractDigest")
-        if stored_digest != resolved.binding_contract_digest:
-            raise ValueError("resolution_snapshot bindingContractDigest mismatch")
+        _verify_resolved_binding_digests(resolved)
         return self
 
     @property
@@ -425,22 +449,7 @@ def project_frozen_capability_binding(
         raise TypeError("provenance must be a FrozenBindingProvenance")
 
     material = _deepcopy_resolved_binding(resolved)
-    snapshot = material.resolution_snapshot
-    if not isinstance(snapshot, Mapping):
-        raise ValueError("resolved.resolution_snapshot must be a mapping")
-
-    # Canonical digest verification: payload without bindingContractDigest must match.
-    payload_for_digest = {
-        key: value for key, value in snapshot.items() if key != "bindingContractDigest"
-    }
-    recomputed = sha256_canonical_json(payload_for_digest)  # type: ignore[arg-type]
-    if recomputed != material.binding_contract_digest:
-        raise ValueError("binding_contract_digest does not match resolution_snapshot payload")
-    if snapshot.get("dependencyClosureDigest") != material.dependency_closure_digest:
-        raise ValueError("dependency_closure_digest does not match resolution_snapshot")
-    if snapshot.get("bindingContractDigest") != material.binding_contract_digest:
-        raise ValueError("resolution_snapshot bindingContractDigest mismatch")
-
+    # Digest recompute runs in FrozenCapabilityBinding validation (shared path).
     if ref is None:
         ref = ResolvedCapabilityRef(
             capability_type=material.capability_type,

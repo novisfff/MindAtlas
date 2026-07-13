@@ -700,6 +700,78 @@ def test_plan01_binding_projects_without_field_substitution() -> None:
     assert frozen.resolved.input_schema_digest == source_snapshot["inputSchemaDigest"]
 
 
+def test_direct_frozen_binding_rejects_tampered_snapshot_with_stale_digests() -> None:
+    """Direct construction must recompute the canonical digest, not just compare fields.
+
+    A tampered resolution_snapshot body with a still-matching stored digest pair
+    (resolved.binding_contract_digest == snapshot.bindingContractDigest) must be rejected.
+    """
+    from app.assistant.capabilities.contracts import (
+        FrozenCapabilityBinding,
+        ResolvedCapabilityBinding,
+        ResolvedCapabilityRef,
+    )
+    from app.assistant.domain.contracts import CapabilityCompletionContract
+
+    honest = _resolved_binding()
+    stale_digest = honest.binding_contract_digest
+    assert honest.resolution_snapshot["bindingContractDigest"] == stale_digest
+
+    tampered_snapshot = copy.deepcopy(honest.resolution_snapshot)
+    # Body change that would yield a different canonical digest if recomputed.
+    tampered_snapshot["executableRevision"] = "tampered-revision"
+    # Keep the stale digest pair mutually consistent so field-equality alone would pass.
+    tampered_snapshot["bindingContractDigest"] = stale_digest
+
+    tampered = ResolvedCapabilityBinding(
+        capability_type=honest.capability_type,
+        capability_key=honest.capability_key,
+        target_identity=honest.target_identity,
+        target_id=honest.target_id,
+        target_version_id=honest.target_version_id,
+        resolved_tool_id=honest.resolved_tool_id,
+        resolved_workflow_version_id=honest.resolved_workflow_version_id,
+        resolved_agent_version_id=honest.resolved_agent_version_id,
+        resolved_revision=honest.resolved_revision,
+        input_schema=copy.deepcopy(honest.input_schema),
+        output_schema=copy.deepcopy(honest.output_schema),
+        input_schema_digest=honest.input_schema_digest,
+        output_schema_digest=honest.output_schema_digest,
+        completion=CapabilityCompletionContract(
+            terminal_output=honest.completion.terminal_output,
+            needs_followup=honest.completion.needs_followup,
+            followup_hint=honest.completion.followup_hint,
+        ),
+        config_digest=honest.config_digest,
+        executable_revision=honest.executable_revision,
+        resolution_digest=honest.resolution_digest,
+        resolution_snapshot=tampered_snapshot,
+        dependencies=(),
+        dependency_closure_digest=honest.dependency_closure_digest,
+        binding_contract_digest=stale_digest,
+    )
+    ref = ResolvedCapabilityRef(
+        capability_type=tampered.capability_type,
+        capability_key=tampered.capability_key,
+        target_identity=tampered.target_identity,
+        target_id=tampered.target_id,
+        target_version_id=tampered.target_version_id,
+        target_revision=tampered.resolved_revision,
+        input_schema_digest=tampered.input_schema_digest,
+        output_schema_digest=tampered.output_schema_digest,
+        resolution_digest=tampered.resolution_digest,
+        dependency_closure_digest=tampered.dependency_closure_digest,
+        binding_contract_digest=tampered.binding_contract_digest,
+    )
+
+    with pytest.raises(ValidationError):
+        FrozenCapabilityBinding(
+            provenance=_provenance(),
+            ref=ref,
+            resolved=tampered,
+        )
+
+
 def test_non_json_and_runtime_objects_rejected_from_frozen_values() -> None:
     from app.assistant.capabilities.contracts import (
         CapabilityDescriptor,
