@@ -368,26 +368,84 @@ def _system_tool_param_contracts() -> list[tuple[str, tuple[ToolParamContract, .
     return rows
 
 
+# Checked-in golden digests for every system tool's project-owned param conversion.
+# Bare registry arrays currently map to items:{} (no items_type in registry grammar).
+SYSTEM_TOOL_GOLDEN_DIGESTS: dict[str, tuple[str, str]] = {
+    "search_entries": (
+        "85893d44714794565728ecd5ed3553f9f2a18d566b903b7f22a50e01f0e23a17",
+        "cd4fe913641c2a8b46c4c19b0f32e6db828decb1770fd679223a0faf855693f4",
+    ),
+    "search_similar_entries": (
+        "0570532888bdf14818f29b6d806d88033c376249b071e22f17ca2d99f2fd5f58",
+        "aeb6462823a38e601f4aa9f0005a0bb139e7c35ca971d6a294dba1a79a128aa3",
+    ),
+    "get_entry_detail": (
+        "af89ea1dc96e41c7fdf916768c2ca46ca14b580ef53fff1040098c0bddde89c7",
+        "0d20ad4d75d04f1fe9ffd366b89d77f0bce8de00088bc714bb44a8392b7e7f5d",
+    ),
+    "create_entry": (
+        "b77249cf8ba259c0b5482a4886f64c3877e306e0f97663e572ebb7d07e566091",
+        "e468374fea087a54ad782602c8cf15e387e1d06977198fc0c3d870349249adba",
+    ),
+    "update_entry": (
+        "d20d33f63ee93b6110399908ea3ae2d009021c1d4e3b9fb2484e92268ca1f8ed",
+        "306386d6bcde8e793a9c6bf9af755b379313cccbee1fcf905ba0f6f2a27b13f6",
+    ),
+    "create_relation": (
+        "61717edf33ae9570fb644c64dc1d1e91e0f4fb6f016e9f72567be96d24ebc389",
+        "f609b84310293c2fe4bb57a53fa257ba5c5ebd964e7bb6f5d811b3d55ff244ec",
+    ),
+    "query_knowledge_graph": (
+        "e5e366e05faddde4c4263b8c738ce7ad86408f0018bf41da2ced53b37399059e",
+        "bf89bb7480489f550e86ee7a3cbb446c53fc1ff3a4eb1a274cff757ace9efaab",
+    ),
+    "generate_weekly_report": (
+        "30552b314371c3ffb2c170398bb463ec3c68e1f37bdb279b90ce6c2479ab2bb6",
+        "6ec9f4f024ea7f6a690c1105b23f75fdc61d58a5aee7305abbd77d1a80eba544",
+    ),
+    "generate_monthly_report": (
+        "c74660565952e1fceb3bbb7f1fc2927fd9093c9647ed710747808a24f2964c77",
+        "7c97201c36ec7992d2f3ab744ae8017ec87f503d011756c8b422449dc70f462a",
+    ),
+    "get_statistics": (
+        "e23292601e9b7bc5964b6fb0a10871d437f22b8f4f344600ebfbe4ed3397e0dd",
+        "5b2980329943609c470e2c3b0ea24c6a8023a28d55f7684da03b0398a6c78af8",
+    ),
+    "get_entries_by_time_range": (
+        "1c8e61f1dd484fcc322daf51376037f5e0b0125d12470c394b2ea773156aa56e",
+        "ec3b2e203ac6701a30d623afe86557a63c3e383f7b90af0570c994dc3939670f",
+    ),
+    "analyze_activity": (
+        "0ea9099f90b11dc418164b39cbe3c322d990af52f18918795df50801fb64d72e",
+        "3c5f9062d724572f5c8835f8cdb65956037dc78a2cdfc0d93095c6031a346d3c",
+    ),
+    "get_tag_statistics": (
+        "af5258f38ff5f7865cbbd47a69205b7fb58d944c5d564b6e9952fa884f358ce7",
+        "c2e053fe69a306605f05052f90a53d6d3b88fb41609b43a63b857e56ef6328fb",
+    ),
+    "list_entry_types": (
+        "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
+        "812e3362f15aac9078bbc23563f087f3da3dd528877853c152881b82e2db88df",
+    ),
+    "list_tags": (
+        "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
+        "67820ecd5b4f768386ea77e7742d0bda76fb3e025eaeb30592bbf099c093ee57",
+    ),
+    "kb_relation_recommendations": (
+        "755e5ba2490952d8b0eb0d28e7c193ce9e37c2c6adfc1aeea5b33aa7daf08d1a",
+        "e9c8b281dd439f3b047021b5200c0166390101c9f56b3e9ca31bb1894ba3891e",
+    ),
+}
+
+SYSTEM_TOOL_CONTRACT_SET_DIGEST = (
+    "4f5d489af8a500ab4b991b29d9e4ffa1ee75dbe1dfa76f4869ede655f4bb60bf"
+)
+
+
 def test_system_tool_golden_schemas_and_contract_set_digest_are_stable() -> None:
     rows = _system_tool_param_contracts()
-    assert [name for name, _, _ in rows] == [
-        "search_entries",
-        "search_similar_entries",
-        "get_entry_detail",
-        "create_entry",
-        "update_entry",
-        "create_relation",
-        "query_knowledge_graph",
-        "generate_weekly_report",
-        "generate_monthly_report",
-        "get_statistics",
-        "get_entries_by_time_range",
-        "analyze_activity",
-        "get_tag_statistics",
-        "list_entry_types",
-        "list_tags",
-        "kb_relation_recommendations",
-    ]
+    expected_names = list(SYSTEM_TOOL_GOLDEN_DIGESTS.keys())
+    assert [name for name, _, _ in rows] == expected_names
 
     ordered: list[tuple[str, str, str]] = []
     for name, inputs, outputs in rows:
@@ -397,6 +455,11 @@ def test_system_tool_golden_schemas_and_contract_set_digest_are_stable() -> None
         output_digest = binding_schema_digest(output_schema)
         ordered.append((name, input_digest, output_digest))
 
+        # Pin every tool's input/output digests to checked-in fixed hex vectors.
+        expected_input, expected_output = SYSTEM_TOOL_GOLDEN_DIGESTS[name]
+        assert input_digest == expected_input
+        assert output_digest == expected_output
+
         # Golden shape: object root, no defaults/examples, deterministic property order.
         assert input_schema["type"] == "object"
         assert output_schema["type"] == "object"
@@ -405,13 +468,20 @@ def test_system_tool_golden_schemas_and_contract_set_digest_are_stable() -> None
             input_schema.get("properties", {}).keys()
         )
 
+        # Bare array params from the registry freeze as items:{} (no items_type field).
+        for prop in input_schema.get("properties", {}).values():
+            if isinstance(prop, dict) and prop.get("type") == "array":
+                assert prop.get("items") == {}
+        for prop in output_schema.get("properties", {}).values():
+            if isinstance(prop, dict) and prop.get("type") == "array":
+                assert prop.get("items") == {}
+
         # Re-running publish-time conversion is byte-identical.
         again = tool_params_to_binding_schema(inputs, require_object_root=True)
         assert canonical_json_bytes(again) == canonical_json_bytes(input_schema)
 
     set_digest = system_tool_contract_set_digest(ordered)
-    assert len(set_digest) == 64
-    # Pin the ordered set digest after the conversion contract is fixed.
+    assert set_digest == SYSTEM_TOOL_CONTRACT_SET_DIGEST
     assert set_digest == system_tool_contract_set_digest(list(ordered))
     assert set_digest == sha256_canonical_json(
         [

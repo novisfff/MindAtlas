@@ -18,6 +18,9 @@ from app.assistant.domain.contracts import (  # noqa: E402
     CapabilityCallStatus,
     CapabilityType,
     DeclaredSideEffect,
+    MAX_CAPABILITY_CLASSIFIED_NODES,
+    MAX_CAPABILITY_CLOSURE_DEPTH,
+    MAX_CAPABILITY_CLOSURE_REFS,
     MainAgentMigrationState,
     ModelRef,
     ProviderRef,
@@ -151,6 +154,8 @@ def _skill(
     sequence: int = 1,
     content_digest: str = DIGEST_B,
     version_digest: str = DIGEST_C,
+    requested_name_normalized: str | None = None,
+    resolved_via_alias_id: UUID | None = None,
 ) -> ResolvedSkillRef:
     return ResolvedSkillRef(
         package_id=package_id,
@@ -159,8 +164,8 @@ def _skill(
         sequence=sequence,
         content_digest=content_digest,
         version_digest=version_digest,
-        requested_name_normalized=None,
-        resolved_via_alias_id=None,
+        requested_name_normalized=requested_name_normalized,
+        resolved_via_alias_id=resolved_via_alias_id,
     )
 
 
@@ -221,6 +226,12 @@ def test_domain_vocabulary_literals_are_exact() -> None:
         "unknown",
         "needs_reconciliation",
     )
+
+
+def test_closure_bound_constants_are_locked() -> None:
+    assert MAX_CAPABILITY_CLOSURE_DEPTH == 16
+    assert MAX_CAPABILITY_CLOSURE_REFS == 256
+    assert MAX_CAPABILITY_CLASSIFIED_NODES == 4096
 
 
 def test_vocabulary_rejects_unknown_values() -> None:
@@ -456,6 +467,39 @@ def test_reactivation_of_same_skill_version_is_idempotent() -> None:
     assert len(again.active_skills) == 1
 
 
+def test_reactivation_same_version_via_different_alias_is_idempotent() -> None:
+    base = create_base_run_manifest(
+        run_id=RUN_ID,
+        main_agent=_main_agent(),
+        provider=None,
+        model=None,
+        effective_policy_digest=None,
+    )
+    caps = (_capability(),)
+    first = append_skill_activation(
+        base,
+        skill=_skill(
+            requested_name_normalized="weekly-review",
+            resolved_via_alias_id=None,
+        ),
+        capabilities=caps,
+    )
+    again = append_skill_activation(
+        first,
+        skill=_skill(
+            requested_name_normalized="Weekly Review Alias",
+            resolved_via_alias_id=ALIAS_ID,
+        ),
+        capabilities=caps,
+    )
+    assert again is first
+    assert again.revision == 2
+    assert len(again.active_skills) == 1
+    # Provenance from the first activation is preserved; alias differences are ignored.
+    assert again.active_skills[0].requested_name_normalized == "weekly-review"
+    assert again.active_skills[0].resolved_via_alias_id is None
+
+
 def test_same_canonical_name_different_version_raises_conflict() -> None:
     base = create_base_run_manifest(
         run_id=RUN_ID,
@@ -479,6 +523,42 @@ def test_same_canonical_name_different_version_raises_conflict() -> None:
                 version_digest=DIGEST_9,
             ),
             capabilities=(_capability(capability_key="cap-b"),),
+        )
+
+
+def test_same_canonical_name_different_version_id_only_raises_conflict() -> None:
+    base = create_base_run_manifest(
+        run_id=RUN_ID,
+        main_agent=_main_agent(),
+        provider=None,
+        model=None,
+        effective_policy_digest=None,
+    )
+    first = append_skill_activation(
+        base,
+        skill=_skill(
+            version_id=SKILL_VERSION_ID,
+            canonical_name="weekly-review",
+            sequence=1,
+            content_digest=DIGEST_B,
+            version_digest=DIGEST_C,
+        ),
+        capabilities=(_capability(capability_key="cap-a"),),
+    )
+    # Same package/sequence/digests except a different version_id is still a conflict.
+    with pytest.raises(SkillVersionConflictError):
+        append_skill_activation(
+            first,
+            skill=_skill(
+                version_id=SKILL_VERSION_ID_B,
+                canonical_name="weekly-review",
+                sequence=1,
+                content_digest=DIGEST_B,
+                version_digest=DIGEST_C,
+                requested_name_normalized="via-alias",
+                resolved_via_alias_id=ALIAS_ID,
+            ),
+            capabilities=(),
         )
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict
 
 from app.assistant.domain.digests import JsonValue, sha256_canonical_json
 from app.common.schemas import to_camel
@@ -574,6 +574,8 @@ def create_base_run_manifest(
 
 
 def _same_skill_version(left: ResolvedSkillRef, right: ResolvedSkillRef) -> bool:
+    # Version identity only. requested_name_normalized / resolved_via_alias_id are
+    # resolution provenance and must not affect same-version idempotency.
     return (
         left.package_id == right.package_id
         and left.version_id == right.version_id
@@ -581,8 +583,6 @@ def _same_skill_version(left: ResolvedSkillRef, right: ResolvedSkillRef) -> bool
         and left.sequence == right.sequence
         and left.content_digest == right.content_digest
         and left.version_digest == right.version_digest
-        and left.requested_name_normalized == right.requested_name_normalized
-        and left.resolved_via_alias_id == right.resolved_via_alias_id
     )
 
 
