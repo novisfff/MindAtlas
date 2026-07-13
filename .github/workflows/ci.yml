@@ -15,6 +15,9 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    env:
+      # Required by settings/crypto for many integration tests; 32-byte base64 test key.
+      AI_PROVIDER_FERNET_KEY: "dGVzdC1mZXJuZXQta2V5LTMyYnl0ZXMhMTIzNDU2"
     steps:
       - name: Checkout
         uses: actions/checkout@v5
