@@ -45,6 +45,40 @@ _DIGEST_D = "d" * 64
 _DIGEST_E = "e" * 64
 
 
+def _resolved_binding_snapshot(
+    *,
+    input_digest: str,
+    output_digest: str,
+    resolution_digest: str | None = None,
+    dependency_closure_digest: str | None = None,
+    binding_contract_digest: str | None = None,
+    dependency_closure: list | None = None,
+    omit_digest_keys: bool = False,
+) -> str:
+    """Build a JSON snapshot that satisfies the row-level schema-pair CHECK.
+
+    The deferred closure guard still validates digest key presence/equality.
+    """
+    import json
+
+    snap: dict = {
+        "inputSchema": {"type": "object"},
+        "outputSchema": {"type": "object"},
+        "inputSchemaDigest": input_digest,
+        "outputSchemaDigest": output_digest,
+        "dependencyClosure": dependency_closure or [],
+    }
+    if not omit_digest_keys:
+        snap["resolutionDigest"] = resolution_digest or input_digest
+        snap["dependencyClosureDigest"] = dependency_closure_digest or output_digest
+        snap["bindingContractDigest"] = binding_contract_digest or output_digest
+        # nested path also accepted by trigger
+        snap["target"] = {"resolutionDigest": snap["resolutionDigest"]}
+    return json.dumps(snap, separators=(",", ":"))
+
+
+
+
 def _as_sqlalchemy_url(url: str) -> str:
     if url.startswith("postgresql://") and "+psycopg2" not in url:
         return url.replace("postgresql://", "postgresql+psycopg2://", 1)
@@ -768,12 +802,10 @@ def test_binding_closure_deferred_guard_rejects_missing_digest_keys(engine: Engi
     binding_id = uuid.uuid4()
     # Snapshot omits required digest keys (resolutionDigest / dependencyClosureDigest /
     # bindingContractDigest). Guard is DEFERRABLE INITIALLY DEFERRED → assert on commit.
-    bad_snapshot = (
-        '{"inputSchemaDigest":"'
-        + _DIGEST_A
-        + '","outputSchemaDigest":"'
-        + _DIGEST_B
-        + '","dependencyClosure":[]}'
+    bad_snapshot = _resolved_binding_snapshot(
+        input_digest=_DIGEST_A,
+        output_digest=_DIGEST_B,
+        omit_digest_keys=True,
     )
     with engine.connect() as conn:
         trans = conn.begin()
@@ -824,17 +856,19 @@ def test_binding_closure_rejects_dependency_index_mismatch(engine: Engine) -> No
 
     binding_id = uuid.uuid4()
     # Complete digest keys but index claims a dependency that is not inserted.
-    snap = (
-        "{"
-        f'"inputSchemaDigest":"{_DIGEST_A}",'
-        f'"outputSchemaDigest":"{_DIGEST_B}",'
-        f'"resolutionDigest":"{_DIGEST_D}",'
-        f'"dependencyClosureDigest":"{_DIGEST_E}",'
-        f'"bindingContractDigest":"{_DIGEST_E}",'
-        '"dependencyClosure":['
-        f'{{"ordinal":0,"path":"tool:search_entries","dependencyDigest":"{_DIGEST_C}"}}'
-        "]"
-        "}"
+    snap = _resolved_binding_snapshot(
+        input_digest=_DIGEST_A,
+        output_digest=_DIGEST_B,
+        resolution_digest=_DIGEST_D,
+        dependency_closure_digest=_DIGEST_E,
+        binding_contract_digest=_DIGEST_E,
+        dependency_closure=[
+            {
+                "ordinal": 0,
+                "path": "tool:search_entries",
+                "dependencyDigest": _DIGEST_C,
+            }
+        ],
     )
     with engine.connect() as conn:
         trans = conn.begin()
@@ -1064,11 +1098,11 @@ def test_downgrade_succeeds_for_derived_shadow_only(engine: Engine) -> None:
 def test_two_session_sequence_conflict(engine: Engine) -> None:
     """Prove package/sequence uniqueness under concurrent writers.
 
-    A single-threaded "two connection" pattern deadlocks on PostgreSQL: the second
-    INSERT waits for the first transaction's unique-index lock, but the first commit
-    never runs until that INSERT returns. Use threads so both writers race for real.
+    Inserts must race in real concurrent transactions. A single-threaded dual
+    connection pattern deadlocks on PostgreSQL unique-index waits.
     """
     import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     suffix = uuid.uuid4().hex[:8]
     with engine.begin() as conn:
@@ -1078,8 +1112,6 @@ def test_two_session_sequence_conflict(engine: Engine) -> None:
             origin="legacy",
             sequence_no=1,
         )
-        # Keep lock waits bounded if a future change reintroduces blocking races.
-        conn.execute(text("SET lock_timeout = '5s'"))
 
     insert_sql = text(
         """
@@ -1097,22 +1129,20 @@ def test_two_session_sequence_conflict(engine: Engine) -> None:
         )
         """
     )
+    start = threading.Event()
 
-    barrier = threading.Barrier(2, timeout=10)
-    outcomes: list[str] = []
-    errors: list[BaseException] = []
-    lock = threading.Lock()
-
-    def worker(vname: str, content_digest: str) -> None:
+    def worker(vname: str, content_digest: str) -> str:
         eng = create_engine(
             _as_sqlalchemy_url(_POSTGRES_URL), future=True, pool_pre_ping=True
         )
         try:
             with eng.connect() as conn:
                 conn.execute(text("SET lock_timeout = '5s'"))
+                conn.execute(text("SET statement_timeout = '10s'"))
                 trans = conn.begin()
                 try:
-                    barrier.wait()
+                    if not start.wait(timeout=10):
+                        raise TimeoutError("race start signal timed out")
                     conn.execute(
                         insert_sql,
                         {
@@ -1130,29 +1160,33 @@ def test_two_session_sequence_conflict(engine: Engine) -> None:
                         },
                     )
                     trans.commit()
-                    with lock:
-                        outcomes.append("committed")
-                except BaseException as exc:  # noqa: BLE001 — collect race outcomes
+                    return "committed"
+                except (IntegrityError, DBAPIError):
                     try:
                         trans.rollback()
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         pass
-                    with lock:
-                        errors.append(exc)
-                        outcomes.append("failed")
+                    return "failed"
+                except Exception:
+                    try:
+                        trans.rollback()
+                    except Exception:
+                        pass
+                    raise
         finally:
             eng.dispose()
 
-    t1 = threading.Thread(target=worker, args=("draft-2a", "1" * 64), daemon=True)
-    t2 = threading.Thread(target=worker, args=("draft-2b", "2" * 64), daemon=True)
-    t1.start()
-    t2.start()
-    t1.join(timeout=20)
-    t2.join(timeout=20)
-    assert not t1.is_alive() and not t2.is_alive(), "two-session sequence race hung"
-    assert outcomes.count("committed") == 1, outcomes
-    assert outcomes.count("failed") == 1, outcomes
-    assert any(isinstance(e, (IntegrityError, DBAPIError)) for e in errors), errors
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futs = [
+            pool.submit(worker, "draft-2a", "1" * 64),
+            pool.submit(worker, "draft-2b", "2" * 64),
+        ]
+        # release both workers together
+        start.set()
+        results = [f.result(timeout=20) for f in as_completed(futs, timeout=25)]
+
+    assert results.count("committed") == 1, results
+    assert results.count("failed") == 1, results
 
     with engine.connect() as conn:
         count = conn.execute(
@@ -1163,3 +1197,4 @@ def test_two_session_sequence_conflict(engine: Engine) -> None:
             {"pkg": package_id},
         ).scalar_one()
     assert int(count) == 1
+

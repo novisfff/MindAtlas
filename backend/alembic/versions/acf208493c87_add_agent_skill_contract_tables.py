@@ -1534,8 +1534,8 @@ def _create_revision_guards() -> None:
                 OR NEW.kind IS DISTINCT FROM OLD.kind
                 OR NEW.endpoint_url IS DISTINCT FROM OLD.endpoint_url
                 OR NEW.http_method IS DISTINCT FROM OLD.http_method
-                OR NEW.headers IS DISTINCT FROM OLD.headers
-                OR NEW.query_params IS DISTINCT FROM OLD.query_params
+                OR (NEW.headers::jsonb) IS DISTINCT FROM (OLD.headers::jsonb)
+                OR (NEW.query_params::jsonb) IS DISTINCT FROM (OLD.query_params::jsonb)
                 OR NEW.body_type IS DISTINCT FROM OLD.body_type
                 OR NEW.body_content IS DISTINCT FROM OLD.body_content
                 OR NEW.auth_type IS DISTINCT FROM OLD.auth_type
@@ -1544,7 +1544,7 @@ def _create_revision_guards() -> None:
                 OR NEW.api_key_encrypted IS DISTINCT FROM OLD.api_key_encrypted
                 OR NEW.timeout_seconds IS DISTINCT FROM OLD.timeout_seconds
                 OR NEW.payload_wrapper IS DISTINCT FROM OLD.payload_wrapper
-                OR NEW.input_params IS DISTINCT FROM OLD.input_params
+                OR (NEW.input_params::jsonb) IS DISTINCT FROM (OLD.input_params::jsonb)
             );
             rev_delta := NEW.config_revision - OLD.config_revision;
 
