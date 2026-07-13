@@ -23,6 +23,8 @@ from app.assistant.skills.contracts import (
     validate_canonical_skill_name,
 )
 from app.assistant.skills.models import (
+    AssistantMainAgentProfile,
+    AssistantMainAgentProfileVersion,
     AssistantSkillCapabilityBinding,
     AssistantSkillCapabilityDependency,
     AssistantSkillPackage,
@@ -39,7 +41,15 @@ from app.assistant.skills.resolution import (
 )
 from app.assistant.skills.schemas import (
     CreateSkillPackageCommand,
+    DEFAULT_MAIN_AGENT_DISPLAY_NAME,
+    DEFAULT_MAIN_AGENT_PROFILE_KEY,
+    MainAgentProfileSnapshotV1,
+    MainAgentProfileSummary,
+    MainAgentProfileVersionDetail,
+    MainAgentProfileVersionSummary,
+    PublishMainAgentProfileCommand,
     PublishSkillVersionCommand,
+    SaveMainAgentProfileDraftCommand,
     SaveSkillDraftCommand,
     SkillPackageAliasSummary,
     SkillPackageDetail,
@@ -47,6 +57,7 @@ from app.assistant.skills.schemas import (
     SkillResourceMetadata,
     SkillVersionDetail,
     SkillVersionSummary,
+    default_main_agent_profile_snapshot,
 )
 from app.common.exceptions import ApiException
 
@@ -1070,7 +1081,393 @@ class AgentSkillService:
         )
 
 
+class MainAgentProfileService:
+    """Append-only Main Agent Profile aggregate service (Plan 01 Task 6).
+
+    Does not activate runtime, build prompts, resolve providers, or replace
+    ``general_chat`` routing. ``runtime_enabled`` remains false throughout Plan 01.
+    """
+
+    def __init__(self, db: Session) -> None:
+        self.db = db
+
+    # ------------------------------------------------------------------
+    # Bootstrap / reads
+    # ------------------------------------------------------------------
+
+    def ensure_default(self) -> MainAgentProfileSummary:
+        """Create the default bootstrap profile if missing; idempotent thereafter."""
+        existing = self._find_default()
+        if existing is not None:
+            return self._profile_summary(existing)
+
+        snapshot = default_main_agent_profile_snapshot()
+        payload = snapshot.normalized_payload()
+        digest = snapshot.content_digest()
+
+        try:
+            profile = AssistantMainAgentProfile(
+                profile_key=DEFAULT_MAIN_AGENT_PROFILE_KEY,
+                display_name=DEFAULT_MAIN_AGENT_DISPLAY_NAME,
+                is_default=True,
+                migration_state="bootstrap",
+                runtime_enabled=False,
+            )
+            self.db.add(profile)
+            self.db.flush()
+
+            version = AssistantMainAgentProfileVersion(
+                profile_id=profile.id,
+                sequence_no=1,
+                version_name="bootstrap-1",
+                version_source="save",
+                origin="bootstrap",
+                source_draft_version_id=None,
+                snapshot=payload,
+                content_digest=digest,
+                source_ref=None,
+            )
+            self.db.add(version)
+            self.db.flush()
+            profile.draft_version_id = version.id
+            # Plan 01: never enable runtime.
+            profile.runtime_enabled = False
+            self.db.commit()
+        except ApiException:
+            self.db.rollback()
+            raise
+        except IntegrityError as exc:
+            self.db.rollback()
+            # Concurrent ensure_default: unique is_default / profile_key.
+            raced = self._find_default()
+            if raced is not None:
+                return self._profile_summary(raced)
+            raise self._translate_integrity_error(exc) from exc
+
+        return self.get_default()
+
+    def get_default(self) -> MainAgentProfileSummary:
+        profile = self._find_default()
+        if profile is None:
+            raise ApiException(
+                status_code=404,
+                code=40493,
+                message="default main agent profile not found",
+            )
+        return self._profile_summary(profile)
+
+    def list_versions(self, profile_id: UUID) -> list[MainAgentProfileVersionSummary]:
+        profile = self._get_profile_or_404(profile_id)
+        versions = (
+            self.db.query(AssistantMainAgentProfileVersion)
+            .filter(AssistantMainAgentProfileVersion.profile_id == profile.id)
+            .order_by(AssistantMainAgentProfileVersion.sequence_no.asc())
+            .all()
+        )
+        return [self._version_summary(row) for row in versions]
+
+    def get_version(
+        self, profile_id: UUID, version_id: UUID
+    ) -> MainAgentProfileVersionDetail:
+        profile = self._get_profile_or_404(profile_id)
+        version = (
+            self.db.query(AssistantMainAgentProfileVersion)
+            .filter(
+                AssistantMainAgentProfileVersion.id == version_id,
+                AssistantMainAgentProfileVersion.profile_id == profile.id,
+            )
+            .one_or_none()
+        )
+        if version is None:
+            raise ApiException(
+                status_code=404,
+                code=40493,
+                message=f"main agent profile version not found: {version_id}",
+            )
+        return MainAgentProfileVersionDetail(
+            **self._version_summary(version).model_dump(),
+            snapshot=dict(version.snapshot or {}),
+            source_ref=dict(version.source_ref) if version.source_ref else None,
+        )
+
+    # ------------------------------------------------------------------
+    # Draft / publish
+    # ------------------------------------------------------------------
+
+    def save_draft(
+        self,
+        profile_id: UUID,
+        command: SaveMainAgentProfileDraftCommand,
+    ) -> MainAgentProfileVersionSummary:
+        try:
+            snapshot = self._validate_snapshot(command.snapshot)
+            payload = snapshot.normalized_payload()
+            digest = snapshot.content_digest()
+            version_name = command.version_name or "draft"
+            origin = command.origin
+            source_ref = command.source_ref
+
+            profile = self._lock_profile(profile_id)
+
+            # bootstrap|shadow -> native on first administrator/native edit.
+            if profile.migration_state in {"bootstrap", "shadow"} and origin in {
+                "api",
+                "legacy",
+            }:
+                # Bootstrap origin is only used by ensure_default.
+                if origin == "api" or origin == "legacy":
+                    profile.migration_state = "native"
+
+            existing = (
+                self.db.query(AssistantMainAgentProfileVersion)
+                .filter(
+                    AssistantMainAgentProfileVersion.profile_id == profile.id,
+                    AssistantMainAgentProfileVersion.version_source == "save",
+                    AssistantMainAgentProfileVersion.content_digest == digest,
+                )
+                .one_or_none()
+            )
+            if existing is not None:
+                profile.draft_version_id = existing.id
+                profile.runtime_enabled = False
+                self.db.commit()
+                return self._version_summary(existing)
+
+            next_seq = self._next_sequence(profile.id)
+            version = AssistantMainAgentProfileVersion(
+                profile_id=profile.id,
+                sequence_no=next_seq,
+                version_name=version_name,
+                version_source="save",
+                origin=origin,
+                source_draft_version_id=None,
+                snapshot=payload,
+                content_digest=digest,
+                source_ref=source_ref,
+            )
+            self.db.add(version)
+            self.db.flush()
+            profile.draft_version_id = version.id
+            profile.runtime_enabled = False
+            self.db.commit()
+            return self._version_summary(version)
+        except ApiException:
+            self.db.rollback()
+            raise
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise self._translate_integrity_error(exc) from exc
+
+    def publish(
+        self,
+        profile_id: UUID,
+        command: PublishMainAgentProfileCommand,
+    ) -> MainAgentProfileVersionSummary:
+        """Create an immutable publish version from an owned draft.
+
+        Always inserts a new ``version_source=publish`` row. Drafts are never
+        mutated. ``runtime_enabled`` remains false throughout Plan 01.
+        """
+        try:
+            profile = self._lock_profile(profile_id)
+            draft = (
+                self.db.query(AssistantMainAgentProfileVersion)
+                .filter(
+                    AssistantMainAgentProfileVersion.id == command.draft_version_id,
+                    AssistantMainAgentProfileVersion.profile_id == profile.id,
+                    AssistantMainAgentProfileVersion.version_source == "save",
+                )
+                .one_or_none()
+            )
+            if draft is None:
+                raise ApiException(
+                    status_code=404,
+                    code=40493,
+                    message=(
+                        f"owned draft version not found: {command.draft_version_id}"
+                    ),
+                )
+
+            # Re-validate the whole snapshot inside the transaction.
+            snapshot = self._validate_snapshot(draft.snapshot)
+            # Plan 01: non-empty control keys cannot be published (no resolver yet).
+            # Empty keys are intentionally allowed for bootstrap/defaults.
+            if snapshot.control_capability_keys:
+                raise ApiException(
+                    status_code=422,
+                    code=42294,
+                    message=(
+                        "controlCapabilityKeys cannot be published until each key "
+                        "can be resolved; Plan 01 only allows empty control keys"
+                    ),
+                )
+
+            payload = snapshot.normalized_payload()
+            digest = snapshot.content_digest()
+            if digest != draft.content_digest:
+                raise ApiException(
+                    status_code=409,
+                    code=40993,
+                    message="draft content digest mismatch during publish validation",
+                )
+
+            sequence_no = self._next_sequence(profile.id)
+            publish_version = AssistantMainAgentProfileVersion(
+                profile_id=profile.id,
+                sequence_no=sequence_no,
+                version_name=f"publish-{sequence_no}",
+                version_source="publish",
+                origin=draft.origin,
+                source_draft_version_id=draft.id,
+                snapshot=payload,
+                content_digest=digest,
+                source_ref=dict(draft.source_ref) if draft.source_ref else None,
+            )
+            self.db.add(publish_version)
+            self.db.flush()
+
+            profile.published_version_id = publish_version.id
+            profile.runtime_enabled = False
+            self.db.commit()
+            return self._version_summary(publish_version)
+        except ApiException:
+            self.db.rollback()
+            raise
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise self._translate_integrity_error(exc) from exc
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    def _validate_snapshot(
+        self, snapshot: MainAgentProfileSnapshotV1 | dict[str, Any]
+    ) -> MainAgentProfileSnapshotV1:
+        try:
+            if isinstance(snapshot, MainAgentProfileSnapshotV1):
+                # Re-parse through model_validate to enforce invariants on copies.
+                return MainAgentProfileSnapshotV1.model_validate(
+                    snapshot.model_dump(by_alias=True)
+                )
+            return MainAgentProfileSnapshotV1.model_validate(snapshot)
+        except Exception as exc:  # pydantic ValidationError + ValueError
+            raise ApiException(
+                status_code=422,
+                code=42294,
+                message=f"invalid main agent profile snapshot: {exc}",
+            ) from exc
+
+    def _find_default(self) -> AssistantMainAgentProfile | None:
+        return (
+            self.db.query(AssistantMainAgentProfile)
+            .filter(AssistantMainAgentProfile.is_default.is_(True))
+            .one_or_none()
+        )
+
+    def _get_profile_or_404(self, profile_id: UUID) -> AssistantMainAgentProfile:
+        profile = self.db.get(AssistantMainAgentProfile, profile_id)
+        if profile is None:
+            raise ApiException(
+                status_code=404,
+                code=40493,
+                message=f"main agent profile not found: {profile_id}",
+            )
+        return profile
+
+    def _lock_profile(self, profile_id: UUID) -> AssistantMainAgentProfile:
+        profile = (
+            self.db.query(AssistantMainAgentProfile)
+            .filter(AssistantMainAgentProfile.id == profile_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if profile is None:
+            raise ApiException(
+                status_code=404,
+                code=40493,
+                message=f"main agent profile not found: {profile_id}",
+            )
+        return profile
+
+    def _next_sequence(self, profile_id: UUID) -> int:
+        current = (
+            self.db.query(func.max(AssistantMainAgentProfileVersion.sequence_no))
+            .filter(AssistantMainAgentProfileVersion.profile_id == profile_id)
+            .scalar()
+        )
+        return int(current or 0) + 1
+
+    def _version_summary(
+        self, version: AssistantMainAgentProfileVersion
+    ) -> MainAgentProfileVersionSummary:
+        return MainAgentProfileVersionSummary(
+            id=version.id,
+            profile_id=version.profile_id,
+            sequence_no=version.sequence_no,
+            version_name=version.version_name,
+            version_source=version.version_source,  # type: ignore[arg-type]
+            origin=version.origin,
+            content_digest=version.content_digest,
+            source_draft_version_id=version.source_draft_version_id,
+            created_at=version.created_at,
+        )
+
+    def _profile_summary(
+        self, profile: AssistantMainAgentProfile
+    ) -> MainAgentProfileSummary:
+        draft = None
+        if profile.draft_version_id is not None:
+            draft_row = self.db.get(
+                AssistantMainAgentProfileVersion, profile.draft_version_id
+            )
+            if draft_row is not None:
+                draft = self._version_summary(draft_row)
+        published = None
+        if profile.published_version_id is not None:
+            pub_row = self.db.get(
+                AssistantMainAgentProfileVersion, profile.published_version_id
+            )
+            if pub_row is not None:
+                published = self._version_summary(pub_row)
+        return MainAgentProfileSummary(
+            id=profile.id,
+            profile_key=profile.profile_key,
+            display_name=profile.display_name,
+            is_default=bool(profile.is_default),
+            migration_state=profile.migration_state,  # type: ignore[arg-type]
+            runtime_enabled=bool(profile.runtime_enabled),
+            draft_version=draft,
+            published_version=published,
+            legacy_skill_id=profile.legacy_skill_id,
+            legacy_source_digest=profile.legacy_source_digest,
+            created_at=profile.created_at,
+            updated_at=profile.updated_at,
+        )
+
+    def _translate_integrity_error(self, exc: IntegrityError) -> ApiException:
+        msg = str(getattr(exc, "orig", exc)).lower()
+        if "is_default" in msg or "profile_key" in msg or "uq_assistant_main_agent" in msg:
+            return ApiException(
+                status_code=409,
+                code=40992,
+                message="main agent profile concurrency conflict; retry",
+            )
+        if "sequence" in msg or "content_digest" in msg or "draft_content" in msg:
+            return ApiException(
+                status_code=409,
+                code=40992,
+                message="main agent profile version conflict; retry",
+            )
+        return ApiException(
+            status_code=409,
+            code=40992,
+            message="main agent profile constraint violation",
+        )
+
+
 __all__ = [
     "MAX_PACKAGE_DISTINCT_BLOB_BYTES",
     "AgentSkillService",
+    "MainAgentProfileService",
 ]
