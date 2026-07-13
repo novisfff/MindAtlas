@@ -212,6 +212,21 @@ def _legacy_alias_if_valid(name: str) -> str | None:
     return name
 
 
+def _yaml_scalar(value: str) -> str:
+    """Quote a YAML scalar safely for SKILL.md frontmatter single-line fields."""
+    dumped = yaml.safe_dump(
+        value,
+        allow_unicode=True,
+        default_style='"',
+        default_flow_style=True,
+        width=10_000,
+    ).strip()
+    # safe_dump may emit a trailing newline document end; keep one scalar token.
+    if dumped.endswith("\n..."):
+        dumped = dumped[: -len("\n...")]
+    return dumped.rstrip("\n")
+
+
 def _description_for_skill(skill: AssistantSkill, canonical: str) -> str:
     base = (skill.description or "").strip()
     if not base:
@@ -415,7 +430,7 @@ def render_legacy_skill_package(
     skill_md = (
         f"---\n"
         f"name: {canonical}\n"
-        f"description: {description}\n"
+        f"description: {_yaml_scalar(description)}\n"
         f"---\n\n"
         f"# {canonical}\n\n"
         f"{description}\n"
@@ -823,28 +838,16 @@ class LegacySkillShadowAdapter:
             )
 
         if not target_ref.target_name:
-            # Create nothing publishable; still attempt no false publish.
-            if package is None:
-                return LegacySyncItem(
-                    status="draft_unresolved",
-                    legacy_skill_id=skill.id,
-                    diagnostics=[
-                        LegacySyncDiagnostic(
-                            reason_code="target_missing",
-                            legacy_skill_id=skill.id,
-                            message="legacy skill target row missing",
-                        )
-                    ],
-                )
+            # Without a target name we cannot render a draft; report failed/target_missing.
             return LegacySyncItem(
-                status="draft_unresolved",
+                status="failed",
                 legacy_skill_id=skill.id,
-                shadow_package_id=package.id,
+                shadow_package_id=package.id if package else None,
                 diagnostics=[
                     LegacySyncDiagnostic(
                         reason_code="target_missing",
                         legacy_skill_id=skill.id,
-                        shadow_package_id=package.id,
+                        shadow_package_id=package.id if package else None,
                         message="legacy skill target row missing",
                     )
                 ],
@@ -1062,6 +1065,21 @@ class LegacySkillShadowAdapter:
                         reason_code="main_agent_missing",
                         legacy_skill_id=skill.id,
                         message="default main agent profile missing after ensure_default",
+                    )
+                ],
+            )
+
+        # Mirror package rule: once admin/native (or cutover) owns the profile,
+        # automatic bridge stops and never overwrites.
+        if profile.migration_state in {"native", "cutover"}:
+            return LegacySyncItem(
+                status="unchanged",
+                legacy_skill_id=skill.id,
+                diagnostics=[
+                    LegacySyncDiagnostic(
+                        reason_code="shadow_sync_stopped_native",
+                        legacy_skill_id=skill.id,
+                        message=f"main agent migration_state={profile.migration_state}",
                     )
                 ],
             )

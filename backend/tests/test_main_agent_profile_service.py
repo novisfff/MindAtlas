@@ -463,6 +463,61 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
             refreshed2.draft_version.id, bootstrap_draft_id  # type: ignore[union-attr]
         )
 
+    def test_legacy_origin_promotes_bootstrap_to_shadow_not_native(self) -> None:
+        """Shadow/migration-owned saves must not steal native ownership."""
+        from app.assistant.skills.schemas import (
+            MainAgentProfileSnapshotV1,
+            SaveMainAgentProfileDraftCommand,
+        )
+
+        profile = self.svc.ensure_default()
+        self.assertEqual(profile.migration_state, "bootstrap")
+
+        legacy_snap = MainAgentProfileSnapshotV1.model_validate(
+            _valid_snapshot_dict(basePrompt="legacy bridge prompt")
+        )
+        draft = self.svc.save_draft(
+            profile.id,
+            SaveMainAgentProfileDraftCommand(
+                snapshot=legacy_snap,
+                version_name="legacy-general-chat",
+                origin="legacy",
+                source_ref={"legacySkillName": "general_chat"},
+            ),
+        )
+        self.assertEqual(draft.origin, "legacy")
+        refreshed = self.svc.get_default()
+        self.assertEqual(refreshed.migration_state, "shadow")
+        self.assertEqual(refreshed.draft_version.id, draft.id)  # type: ignore[union-attr]
+
+        # Second legacy save stays shadow.
+        again = self.svc.save_draft(
+            profile.id,
+            SaveMainAgentProfileDraftCommand(
+                snapshot=MainAgentProfileSnapshotV1.model_validate(
+                    _valid_snapshot_dict(basePrompt="legacy bridge prompt v2")
+                ),
+                origin="legacy",
+            ),
+        )
+        refreshed2 = self.svc.get_default()
+        self.assertEqual(refreshed2.migration_state, "shadow")
+        self.assertEqual(refreshed2.draft_version.id, again.id)  # type: ignore[union-attr]
+
+        # Only api origin promotes to native.
+        admin = self.svc.save_draft(
+            profile.id,
+            SaveMainAgentProfileDraftCommand(
+                snapshot=MainAgentProfileSnapshotV1.model_validate(
+                    _valid_snapshot_dict(basePrompt="admin takes over")
+                ),
+                origin="api",
+            ),
+        )
+        refreshed3 = self.svc.get_default()
+        self.assertEqual(refreshed3.migration_state, "native")
+        self.assertEqual(refreshed3.draft_version.id, admin.id)  # type: ignore[union-attr]
+
     def test_save_changed_drafts_append_sequence(self) -> None:
         from app.assistant.skills.schemas import (
             MainAgentProfileSnapshotV1,

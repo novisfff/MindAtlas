@@ -626,6 +626,124 @@ class GeneralChatBridgeTests(unittest.TestCase):
         # Old publish row retained.
         self.assertIsNotNone(self.db.get(AssistantMainAgentProfileVersion, first_pub))
 
+    def test_bridge_keeps_migration_state_shadow(self) -> None:
+        """Legacy general_chat bridge must not promote Main Agent to native."""
+        from app.assistant.skills.legacy_adapter import LegacySkillShadowAdapter
+        from app.assistant.skills.models import AssistantMainAgentProfile
+
+        skill = self._seed_general_chat()
+        adapter = LegacySkillShadowAdapter()
+        item = adapter.sync_one(self.db, skill.id)
+        self.assertIn(item.status, {"published", "unchanged"})
+
+        profile = (
+            self.db.query(AssistantMainAgentProfile)
+            .filter(AssistantMainAgentProfile.is_default.is_(True))
+            .one()
+        )
+        self.assertEqual(profile.migration_state, "shadow")
+        self.assertEqual(profile.legacy_skill_id, skill.id)
+
+        # Re-bridge remains shadow (never native promotion via legacy origin).
+        again = adapter.sync_one(self.db, skill.id)
+        self.assertEqual(again.status, "unchanged")
+        self.db.refresh(profile)
+        self.assertEqual(profile.migration_state, "shadow")
+
+    def test_bridge_stops_after_admin_native_save(self) -> None:
+        """Once admin owns the Main Agent profile, shadow bridge must not overwrite."""
+        from app.assistant.skills.legacy_adapter import LegacySkillShadowAdapter
+        from app.assistant.skills.models import (
+            AssistantMainAgentProfile,
+            AssistantMainAgentProfileVersion,
+        )
+        from app.assistant.skills.schemas import (
+            MainAgentProfileSnapshotV1,
+            PublishMainAgentProfileCommand,
+            SaveMainAgentProfileDraftCommand,
+            default_main_agent_profile_snapshot,
+        )
+        from app.assistant.skills.service import MainAgentProfileService
+        from app.assistant_config.models import AssistantAgentProfileVersion
+
+        skill = self._seed_general_chat()
+        adapter = LegacySkillShadowAdapter()
+        first = adapter.sync_one(self.db, skill.id)
+        self.assertEqual(first.status, "published")
+
+        profile = (
+            self.db.query(AssistantMainAgentProfile)
+            .filter(AssistantMainAgentProfile.is_default.is_(True))
+            .one()
+        )
+        shadow_pub_id = profile.published_version_id
+        shadow_digest = profile.legacy_source_digest
+        self.assertEqual(profile.migration_state, "shadow")
+
+        # Admin takes ownership via native save + publish.
+        svc = MainAgentProfileService(self.db)
+        admin_snap = MainAgentProfileSnapshotV1.model_validate(
+            default_main_agent_profile_snapshot()
+            .model_dump(by_alias=True)
+            | {"basePrompt": "admin owned main agent prompt"}
+        )
+        draft = svc.save_draft(
+            profile.id,
+            SaveMainAgentProfileDraftCommand(
+                snapshot=admin_snap,
+                version_name="admin-native",
+                origin="api",
+            ),
+        )
+        refreshed = svc.get_default()
+        self.assertEqual(refreshed.migration_state, "native")
+        svc.publish(
+            profile.id,
+            PublishMainAgentProfileCommand(draft_version_id=draft.id),
+        )
+        self.db.refresh(profile)
+        admin_pub_id = profile.published_version_id
+        self.assertNotEqual(admin_pub_id, shadow_pub_id)
+        self.assertEqual(profile.migration_state, "native")
+
+        # Change published agent so bridge would otherwise append a new version.
+        agent = skill.agent_profile
+        assert agent is not None
+        current = self.db.get(AssistantAgentProfileVersion, agent.published_version_id)
+        assert current is not None
+        new_snap = dict(current.snapshot or {})
+        new_snap["system_prompt"] = (new_snap.get("system_prompt") or "") + "\nBridge should ignore."
+        new_version = AssistantAgentProfileVersion(
+            agent_profile_id=agent.id,
+            sequence_no=int(current.sequence_no) + 1,
+            version_name="v-bridge-ignored",
+            version_source="publish",
+            snapshot=new_snap,
+        )
+        self.db.add(new_version)
+        self.db.flush()
+        agent.published_version_id = new_version.id
+        self.db.commit()
+
+        stopped = adapter.sync_one(self.db, skill.id)
+        self.assertEqual(stopped.status, "unchanged")
+        reason_codes = [d.reason_code for d in stopped.diagnostics]
+        self.assertIn("shadow_sync_stopped_native", reason_codes)
+
+        self.db.refresh(profile)
+        self.assertEqual(profile.migration_state, "native")
+        self.assertEqual(profile.published_version_id, admin_pub_id)
+        # Admin publish content must not be overwritten by bridge.
+        published = self.db.get(AssistantMainAgentProfileVersion, admin_pub_id)
+        assert published is not None
+        self.assertEqual(
+            (published.snapshot or {}).get("basePrompt"),
+            "admin owned main agent prompt",
+        )
+        # legacy_source_digest may still hold the pre-native bridge digest; bridge
+        # must not advance it after native ownership.
+        self.assertEqual(profile.legacy_source_digest, shadow_digest)
+
 
 class BootstrapHookInvarianceTests(unittest.TestCase):
     def setUp(self) -> None:

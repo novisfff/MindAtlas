@@ -1209,13 +1209,15 @@ class MainAgentProfileService:
 
             profile = self._lock_profile(profile_id)
 
-            # bootstrap|shadow -> native on first administrator/native edit.
-            if profile.migration_state in {"bootstrap", "shadow"} and origin in {
-                "api",
-                "legacy",
-            }:
-                # Bootstrap origin is only used by ensure_default.
-                if origin == "api" or origin == "legacy":
+            # Migration ownership:
+            # - origin=legacy keeps/sets migration_state=shadow (bootstrap→shadow)
+            # - origin=api promotes bootstrap|shadow → native (administrator ownership)
+            # - never demote native/cutover via either path
+            if origin == "legacy":
+                if profile.migration_state == "bootstrap":
+                    profile.migration_state = "shadow"
+            elif origin == "api":
+                if profile.migration_state in {"bootstrap", "shadow"}:
                     profile.migration_state = "native"
 
             existing = (

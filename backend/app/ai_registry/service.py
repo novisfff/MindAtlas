@@ -107,7 +107,8 @@ class AiCredentialService:
             cred.api_key_hint = api_key_hint(api_key)
 
         after = credential_runtime_sensitive_payload(cred)
-        if before != after:
+        runtime_sensitive_changed = before != after
+        if runtime_sensitive_changed:
             cred.runtime_revision = int(cred.runtime_revision or 1) + 1
 
         try:
@@ -116,6 +117,14 @@ class AiCredentialService:
             self.db.rollback()
             raise ApiException(status_code=409, code=40900, message="Update failed due to constraint violation") from exc
         self.db.refresh(cred)
+        # Credential repair (base URL / API key) may unblock shadow publication.
+        if runtime_sensitive_changed:
+            try:
+                from app.assistant.skills.legacy_adapter import best_effort_sync_all
+
+                best_effort_sync_all(self.db)
+            except Exception:
+                pass
         return cred
 
     def delete(self, id: UUID) -> None:
@@ -292,7 +301,8 @@ class AiModelService:
         if model_type is not None:
             m.model_type = model_type
         after = model_runtime_sensitive_payload(m)
-        if before != after:
+        runtime_sensitive_changed = before != after
+        if runtime_sensitive_changed:
             m.runtime_revision = int(m.runtime_revision or 1) + 1
         try:
             self.db.commit()
@@ -300,6 +310,14 @@ class AiModelService:
             self.db.rollback()
             raise ApiException(status_code=409, code=40900, message="Update failed due to constraint violation") from exc
         self.db.refresh(m)
+        # Model repair (name / type) may unblock shadow publication.
+        if runtime_sensitive_changed:
+            try:
+                from app.assistant.skills.legacy_adapter import best_effort_sync_all
+
+                best_effort_sync_all(self.db)
+            except Exception:
+                pass
         return m
 
     def delete(self, id: UUID, *, confirm_bound_bindings: bool = False) -> None:
