@@ -208,18 +208,20 @@ class _ActivatingResolver:
         handle: object
         if encrypted:
             try:
-                handle = {
-                    "api_key": decrypt_api_key(str(encrypted)),
-                    "base_url": base_url,
-                    "model_name": entry.model_name,
-                }
-            except Exception:
-                # Tests may use non-Fernet placeholders; still hand out a stable handle.
-                handle = {
-                    "api_key": str(encrypted),
-                    "base_url": base_url,
-                    "model_name": entry.model_name,
-                }
+                api_key = decrypt_api_key(str(encrypted))
+            except Exception as exc:
+                # Fail closed: never hand ciphertext out as an api_key.
+                raise _domain_error(
+                    error_type="unavailable",
+                    safe_code="credential_decrypt_failed",
+                    safe_message="credential activation failed",
+                    target_identity=entry.target_identity,
+                ) from exc
+            handle = {
+                "api_key": api_key,
+                "base_url": base_url,
+                "model_name": entry.model_name,
+            }
         else:
             handle = {
                 "api_key": None,
@@ -268,6 +270,49 @@ class FrozenExecutionClosure:
                 safe_code="policy_denied",
                 safe_message="capability policy denied activation",
             )
+        # Require a real allow decision identity; forged empty shells must not activate.
+        if not str(getattr(decision, "call_id", "") or "").strip():
+            raise _domain_error(
+                error_type="unauthorized",
+                safe_code="policy_decision_identity_missing",
+                safe_message="capability policy decision identity missing",
+            )
+        if not str(getattr(decision, "decision_digest", "") or "").strip():
+            raise _domain_error(
+                error_type="unauthorized",
+                safe_code="policy_decision_digest_missing",
+                safe_message="capability policy decision digest missing",
+            )
+        if getattr(decision, "dispatch_permit", None) is None:
+            raise _domain_error(
+                error_type="unauthorized",
+                safe_code="policy_dispatch_permit_missing",
+                safe_message="capability policy dispatch permit missing",
+            )
+        # When the decision (or nested evidence) carries closure digests, bind them.
+        for attr, expected, code in (
+            (
+                "binding_contract_digest",
+                self.binding_contract_digest,
+                "policy_binding_contract_mismatch",
+            ),
+            (
+                "dependency_closure_digest",
+                self.dependency_closure_digest,
+                "policy_dependency_closure_mismatch",
+            ),
+        ):
+            carried = getattr(decision, attr, None)
+            if carried is None:
+                evidence = getattr(decision, "evidence", None)
+                if evidence is not None:
+                    carried = getattr(evidence, attr, None)
+            if carried is not None and str(carried) != expected:
+                raise _domain_error(
+                    error_type="unauthorized",
+                    safe_code=code,
+                    safe_message="capability policy decision does not match closure",
+                )
         return _ActivatingResolver(
             tools_by_locator=self.tools_by_locator,
             workflows_by_locator=self.workflows_by_locator,
@@ -437,6 +482,24 @@ def _verify_remote_tool_dep(
     )
 
 
+def _owned_workflow_id_from_dep(dep: ResolvedCapabilityDependency) -> UUID | None:
+    """Extract expected workflow aggregate id from frozen identity / snapshot."""
+    frozen_snap = dep.resolution_snapshot if isinstance(dep.resolution_snapshot, dict) else {}
+    raw = frozen_snap.get("targetId")
+    if raw is not None:
+        try:
+            return UUID(str(raw))
+        except (TypeError, ValueError):
+            pass
+    identity = dep.target_identity or ""
+    if identity.startswith("workflow:"):
+        try:
+            return UUID(identity.split(":", 1)[1])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def _verify_workflow_dep(
     db: Session,
     dep: ResolvedCapabilityDependency,
@@ -448,11 +511,15 @@ def _verify_workflow_dep(
             safe_message="workflow version missing",
             target_identity=dep.target_identity,
         )
-    version = (
-        db.query(AssistantWorkflowVersion)
-        .filter(AssistantWorkflowVersion.id == dep.resolved_workflow_version_id)
-        .one_or_none()
+    owned_workflow_id = _owned_workflow_id_from_dep(dep)
+    version_query = db.query(AssistantWorkflowVersion).filter(
+        AssistantWorkflowVersion.id == dep.resolved_workflow_version_id
     )
+    if owned_workflow_id is not None:
+        version_query = version_query.filter(
+            AssistantWorkflowVersion.workflow_id == owned_workflow_id
+        )
+    version = version_query.one_or_none()
     if version is None or not isinstance(version.snapshot, dict):
         raise _domain_error(
             error_type="version_drift",
@@ -480,13 +547,31 @@ def _verify_workflow_dep(
             safe_message="workflow identity mismatch",
             target_identity=dep.target_identity,
         )
+    if owned_workflow_id is not None and workflow.id != owned_workflow_id:
+        raise _domain_error(
+            error_type="version_drift",
+            safe_code="workflow_ownership_mismatch",
+            safe_message="workflow version ownership mismatch",
+            target_identity=dep.target_identity,
+        )
+    if not bool(workflow.enabled):
+        raise _domain_error(
+            error_type="unavailable",
+            safe_code="workflow_disabled",
+            safe_message="dependency workflow disabled",
+            target_identity=dep.target_identity,
+        )
     snapshot_digest = sha256_canonical_json(version.snapshot)
-    # Prefer frozen snapshot digest when present in resolution_snapshot.
+    # Fail closed: frozen snapshot/config digests must match the exact owned version row.
     frozen_snap = dep.resolution_snapshot if isinstance(dep.resolution_snapshot, dict) else {}
     frozen_digest = frozen_snap.get("snapshotDigest") or frozen_snap.get("configDigest")
     if frozen_digest is not None and str(frozen_digest) != snapshot_digest:
-        # Nested freeze may store different keys; still require version ownership match.
-        pass
+        raise _domain_error(
+            error_type="version_drift",
+            safe_code="workflow_snapshot_drift",
+            safe_message="workflow snapshot digest drift",
+            target_identity=dep.target_identity,
+        )
     from app.assistant_config.schemas import WorkflowInput
 
     parsed = WorkflowInput.model_validate(
@@ -506,6 +591,99 @@ def _verify_workflow_dep(
         snapshot_digest=snapshot_digest,
         parsed_published_input=parsed,
     )
+
+
+def _owned_agent_id_from_dep(dep: ResolvedCapabilityDependency) -> UUID | None:
+    frozen_snap = dep.resolution_snapshot if isinstance(dep.resolution_snapshot, dict) else {}
+    raw = frozen_snap.get("targetId")
+    if raw is not None:
+        try:
+            return UUID(str(raw))
+        except (TypeError, ValueError):
+            pass
+    identity = dep.target_identity or ""
+    if identity.startswith("agent:"):
+        try:
+            return UUID(identity.split(":", 1)[1])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _verify_agent_dep(
+    db: Session,
+    dep: ResolvedCapabilityDependency,
+) -> None:
+    """Preflight nested agent deps: exact owned version + optional snapshot digest."""
+    from app.assistant_config.models import AssistantAgentProfile, AssistantAgentProfileVersion
+
+    if dep.resolved_agent_version_id is None:
+        raise _domain_error(
+            error_type="not_found",
+            safe_code="agent_version_missing",
+            safe_message="agent version missing",
+            target_identity=dep.target_identity,
+        )
+    owned_agent_id = _owned_agent_id_from_dep(dep)
+    version_query = db.query(AssistantAgentProfileVersion).filter(
+        AssistantAgentProfileVersion.id == dep.resolved_agent_version_id
+    )
+    if owned_agent_id is not None:
+        version_query = version_query.filter(
+            AssistantAgentProfileVersion.agent_profile_id == owned_agent_id
+        )
+    version = version_query.one_or_none()
+    if version is None or not isinstance(version.snapshot, dict):
+        raise _domain_error(
+            error_type="version_drift",
+            safe_code="agent_version_missing",
+            safe_message="agent version missing",
+            target_identity=dep.target_identity,
+        )
+    agent = (
+        db.query(AssistantAgentProfile)
+        .filter(AssistantAgentProfile.id == version.agent_profile_id)
+        .one_or_none()
+    )
+    if agent is None:
+        raise _domain_error(
+            error_type="not_found",
+            safe_code="agent_missing",
+            safe_message="agent missing",
+            target_identity=dep.target_identity,
+        )
+    expected_identity = f"agent:{agent.id}"
+    if dep.target_identity != expected_identity:
+        raise _domain_error(
+            error_type="version_drift",
+            safe_code="agent_identity_mismatch",
+            safe_message="agent identity mismatch",
+            target_identity=dep.target_identity,
+        )
+    if owned_agent_id is not None and agent.id != owned_agent_id:
+        raise _domain_error(
+            error_type="version_drift",
+            safe_code="agent_ownership_mismatch",
+            safe_message="agent version ownership mismatch",
+            target_identity=dep.target_identity,
+        )
+    if not bool(agent.enabled):
+        raise _domain_error(
+            error_type="unavailable",
+            safe_code="agent_disabled",
+            safe_message="dependency agent disabled",
+            target_identity=dep.target_identity,
+        )
+    snapshot_digest = sha256_canonical_json(version.snapshot)
+    frozen_snap = dep.resolution_snapshot if isinstance(dep.resolution_snapshot, dict) else {}
+    frozen_digest = frozen_snap.get("snapshotDigest") or frozen_snap.get("configDigest")
+    if frozen_digest is not None and str(frozen_digest) != snapshot_digest:
+        raise _domain_error(
+            error_type="version_drift",
+            safe_code="agent_snapshot_drift",
+            safe_message="agent snapshot digest drift",
+            target_identity=dep.target_identity,
+        )
 
 
 def _verify_model_dep(
@@ -682,15 +860,9 @@ def build_frozen_execution_closure(
         elif dep.dependency_type == "workflow":
             workflows[path] = _verify_workflow_dep(db, dep)
         elif dep.dependency_type == "agent":
-            # Nested agents are not activated via the Workflow engine Protocol in Task 2;
-            # presence is still verified by identity existence when a version id is present.
-            if dep.resolved_agent_version_id is None:
-                raise _domain_error(
-                    error_type="not_found",
-                    safe_code="agent_version_missing",
-                    safe_message="agent version missing",
-                    target_identity=dep.target_identity,
-                )
+            # Nested agents are not activated via the Workflow engine Protocol in Task 2,
+            # but must still be preflighted against the exact owned version + digests.
+            _verify_agent_dep(db, dep)
         elif dep.dependency_type == "model":
             models[path] = _verify_model_dep(db, dep)
         else:

@@ -202,9 +202,12 @@ def test_workflow_engine_scope_protocol_exports() -> None:
     assert scope.safe_diagnostics is True
 
 
-def test_agent_closure_preflight_and_exact_tool_lookup(db) -> None:
+def test_agent_closure_preflight_and_exact_tool_lookup(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from app.assistant.capabilities.registry import CapabilityRegistry
     from app.assistant.capabilities.errors import CapabilityDomainError
+    from app.ai_provider import crypto as crypto_mod
 
     frozen = _freeze_agent_with_tools(db)
     surface = CapabilityRegistry(db).resolve_surface(frozen)
@@ -247,6 +250,9 @@ def test_agent_closure_preflight_and_exact_tool_lookup(db) -> None:
         closure.bind_authorized(decision=deny)
     assert denied.value.error.error_type == "unauthorized"
 
+    # Fixtures use non-Fernet placeholders; activation still requires decrypt success.
+    monkeypatch.setattr(crypto_mod, "decrypt_api_key", lambda _token: "test-decrypted-key")
+
     decision = _allow_decision(
         binding_contract_digest=frozen.resolved.binding_contract_digest,
         dependency_closure_digest=frozen.resolved.dependency_closure_digest,
@@ -271,6 +277,10 @@ def test_agent_closure_preflight_and_exact_tool_lookup(db) -> None:
     )
     assert model_cfg.verified.model_id == model_dep.resolved_model_id
     assert model_cfg.client_or_credential_handle is not None
+    handle = model_cfg.client_or_credential_handle
+    assert isinstance(handle, dict)
+    assert handle.get("api_key") == "test-decrypted-key"
+    assert handle.get("api_key") != "enc-test-key-not-secret-material"
 
 
 def test_undeclared_tool_lookup_fails_without_registry_fallback(db, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -420,3 +430,185 @@ def test_legacy_execution_scope_none_is_documented() -> None:
     # Additive optional parameter may or may not be present yet; either is OK for Task 2
     # as long as the Protocol/scope module exists and default-less construction still works.
     assert "self" in sig.parameters
+
+
+def test_nested_workflow_mutated_snapshot_fails_preflight(db) -> None:
+    """Same nested version id with mutated snapshot must fail closed on digest mismatch."""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from app.assistant.capabilities.errors import CapabilityDomainError
+    from app.assistant.capabilities.execution_closure import build_frozen_execution_closure
+    from app.assistant_config.models import AssistantWorkflowVersion
+
+    frozen, _nested_id, nested_version_id = _freeze_workflow_with_nested(db)
+    version = db.get(AssistantWorkflowVersion, nested_version_id)
+    assert version is not None
+    mutated = dict(version.snapshot)
+    # Keep structure parseable but change content so snapshotDigest drifts.
+    mutated["viewport"] = {"x": 99, "y": 99, "zoom": 2}
+    version.snapshot = mutated
+    flag_modified(version, "snapshot")
+    db.add(version)
+    db.commit()
+
+    with pytest.raises(CapabilityDomainError) as ctx:
+        build_frozen_execution_closure(
+            db,
+            binding_contract_digest=frozen.resolved.binding_contract_digest,
+            dependency_closure_digest=frozen.resolved.dependency_closure_digest,
+            dependencies=frozen.resolved.dependencies,
+        )
+    assert ctx.value.error.error_type == "version_drift"
+    assert ctx.value.error.safe_code in {
+        "workflow_snapshot_drift",
+        "config_digest_drift",
+        "version_drift",
+    }
+
+
+def test_nested_disabled_workflow_fails_preflight(db) -> None:
+    from app.assistant.capabilities.errors import CapabilityDomainError
+    from app.assistant.capabilities.execution_closure import build_frozen_execution_closure
+    from app.assistant_config.models import AssistantWorkflow
+
+    frozen, nested_id, _nested_version_id = _freeze_workflow_with_nested(db)
+    workflow = db.get(AssistantWorkflow, nested_id)
+    assert workflow is not None
+    workflow.enabled = False
+    db.add(workflow)
+    db.commit()
+
+    with pytest.raises(CapabilityDomainError) as ctx:
+        build_frozen_execution_closure(
+            db,
+            binding_contract_digest=frozen.resolved.binding_contract_digest,
+            dependency_closure_digest=frozen.resolved.dependency_closure_digest,
+            dependencies=frozen.resolved.dependencies,
+        )
+    assert ctx.value.error.error_type == "unavailable"
+    assert "disabled" in ctx.value.error.safe_code
+
+
+def test_nested_agent_missing_version_fails_preflight(db) -> None:
+    from app.assistant.capabilities.errors import CapabilityDomainError
+    from app.assistant.capabilities.execution_closure import build_frozen_execution_closure
+    from app.assistant.domain.contracts import ResolvedCapabilityDependency
+
+    missing_version_id = uuid4()
+    agent_id = uuid4()
+    target_identity = f"agent:{agent_id}"
+    resolution_snapshot = {
+        "schemaVersion": 1,
+        "targetIdentity": target_identity,
+        "targetId": str(agent_id),
+        "targetVersionId": str(missing_version_id),
+        "snapshotDigest": "b" * 64,
+    }
+    dep = ResolvedCapabilityDependency(
+        ordinal=0,
+        dependency_path="root.nested.agent",
+        dependency_type="agent",
+        target_identity=target_identity,
+        resolved_tool_id=None,
+        resolved_workflow_version_id=None,
+        resolved_agent_version_id=missing_version_id,
+        resolved_model_id=None,
+        target_revision=None,
+        input_schema=None,
+        output_schema=None,
+        input_schema_digest=None,
+        output_schema_digest=None,
+        resolution_snapshot=resolution_snapshot,
+        resolution_digest="c" * 64,
+        dependency_digest="d" * 64,
+    )
+    with pytest.raises(CapabilityDomainError) as ctx:
+        build_frozen_execution_closure(
+            db,
+            binding_contract_digest=DIGEST_A,
+            dependency_closure_digest=DIGEST_A,
+            dependencies=(dep,),
+        )
+    assert ctx.value.error.error_type in {"not_found", "version_drift"}
+    assert "agent" in ctx.value.error.safe_code
+
+
+def test_nested_agent_wrong_version_ownership_fails_preflight(db) -> None:
+    from tests.agent_skill_test_support import create_published_agent
+    from app.assistant.capabilities.errors import CapabilityDomainError
+    from app.assistant.capabilities.execution_closure import build_frozen_execution_closure
+    from app.assistant.domain.contracts import ResolvedCapabilityDependency
+    from app.assistant.domain.digests import sha256_canonical_json
+
+    agent, version = create_published_agent(db, name="owned_agent", tools=["search_entries"])
+    other_agent, _other_version = create_published_agent(
+        db, name="other_agent", tools=["search_entries"]
+    )
+    db.commit()
+
+    # Point target identity at other_agent while version belongs to agent.
+    target_identity = f"agent:{other_agent.id}"
+    snapshot_digest = sha256_canonical_json(version.snapshot)
+    resolution_snapshot = {
+        "schemaVersion": 1,
+        "targetIdentity": target_identity,
+        "targetId": str(other_agent.id),
+        "targetVersionId": str(version.id),
+        "snapshotDigest": snapshot_digest,
+    }
+    dep = ResolvedCapabilityDependency(
+        ordinal=0,
+        dependency_path="root.nested.agent",
+        dependency_type="agent",
+        target_identity=target_identity,
+        resolved_tool_id=None,
+        resolved_workflow_version_id=None,
+        resolved_agent_version_id=version.id,
+        resolved_model_id=None,
+        target_revision=None,
+        input_schema=None,
+        output_schema=None,
+        input_schema_digest=None,
+        output_schema_digest=None,
+        resolution_snapshot=resolution_snapshot,
+        resolution_digest="c" * 64,
+        dependency_digest="d" * 64,
+    )
+    with pytest.raises(CapabilityDomainError) as ctx:
+        build_frozen_execution_closure(
+            db,
+            binding_contract_digest=DIGEST_A,
+            dependency_closure_digest=DIGEST_A,
+            dependencies=(dep,),
+        )
+    assert ctx.value.error.error_type in {"not_found", "version_drift"}
+
+
+def test_decrypt_failure_does_not_expose_ciphertext(db, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.assistant.capabilities.registry import CapabilityRegistry
+    from app.assistant.capabilities.errors import CapabilityDomainError
+    from app.ai_provider import crypto as crypto_mod
+
+    frozen = _freeze_agent_with_tools(db)
+    surface = CapabilityRegistry(db).resolve_surface(frozen)
+    model_dep = next(d for d in frozen.dependencies if d.dependency_type == "model")
+
+    def _boom(_token: str) -> str:
+        raise ValueError("fernet decrypt failed")
+
+    monkeypatch.setattr(crypto_mod, "decrypt_api_key", _boom)
+
+    decision = _allow_decision(
+        binding_contract_digest=frozen.resolved.binding_contract_digest,
+        dependency_closure_digest=frozen.resolved.dependency_closure_digest,
+    )
+    resolver = surface.execution_closure.bind_authorized(decision=decision)
+    with pytest.raises(CapabilityDomainError) as ctx:
+        resolver.require_model(
+            source_locator=model_dep.dependency_path,
+            requested_model_id=model_dep.resolved_model_id,
+        )
+    assert ctx.value.error.error_type in {"unavailable", "protocol_error"}
+    # Ciphertext placeholder from test fixtures must never surface as api_key.
+    err_text = f"{ctx.value.error.safe_code}:{ctx.value.error.safe_message}:{ctx.value}"
+    assert "enc-test-key-not-secret-material" not in err_text
