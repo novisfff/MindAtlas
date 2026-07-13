@@ -1,0 +1,27 @@
+version: 1
+display_name: 周度回顾
+legacy_aliases:
+  - weekly_review
+
+routing:
+  include_examples: []
+  exclude_examples: []
+  conflict_rules: []
+
+capabilities:
+  - type: tool
+    key: search_entries
+  - type: workflow
+    key: periodic_review__workflow
+
+policy:
+  allowed_side_effects:
+    - read
+    - compute
+  max_skill_calls: 16
+  max_same_read_calls: 3
+  requires_terminal_output: true
+  terminal_text_allowed: true
+
+provider_aliases: {}
+metadata: {}
