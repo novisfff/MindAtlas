@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import uuid
 
-from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -130,6 +130,14 @@ class AssistantTool(UuidPrimaryKeyMixin, TimestampMixin, Base):
 
     timeout_seconds = Column(Integer, nullable=True)
     payload_wrapper = Column(String(64), nullable=True)
+
+    # Execution-sensitive config revision (Plan 01). Name/description-only edits do not advance it.
+    config_revision = Column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default=text("1"),
+    )
 
 
 class AssistantSkill(UuidPrimaryKeyMixin, TimestampMixin, Base):
