@@ -14,8 +14,13 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session, joinedload
 
+from app.assistant.capabilities.classification import (
+    CapabilityClassifier,
+    assemble_capability_descriptor,
+)
 from app.assistant.capabilities.contracts import (
     CapabilityAvailability,
+    CapabilityDescriptor,
     CapabilityError,
     FrozenCapabilityBinding,
 )
@@ -26,6 +31,7 @@ from app.assistant.capabilities.ports import (
     ExecutableToolTarget,
     ExecutableWorkflowVersionTarget,
     ResolvedCapabilitySurface,
+    ResolvedCapabilityTarget,
 )
 from app.assistant.domain.digests import sha256_canonical_json
 from app.assistant.domain.json_schema import binding_schema_digest
@@ -77,11 +83,19 @@ def _workflow_input_from_snapshot(snapshot: dict[str, Any]) -> WorkflowInput:
 
 
 class CapabilityRegistry:
-    """Resolve frozen capability bindings to exact executable surfaces."""
+    """Resolve frozen capability bindings to exact executable surfaces/descriptors."""
 
-    def __init__(self, db: Session, *, locale: str | None = None) -> None:
+    def __init__(
+        self,
+        db: Session,
+        *,
+        locale: str | None = None,
+        classifier: CapabilityClassifier | None = None,
+    ) -> None:
         self.db = db
         self.locale = locale
+        # Production always uses the real classifier; tests may inject a spy.
+        self._classifier = classifier if classifier is not None else CapabilityClassifier()
 
     def resolve_surface(self, binding: FrozenCapabilityBinding) -> ResolvedCapabilitySurface:
         if not isinstance(binding, FrozenCapabilityBinding):
@@ -101,6 +115,21 @@ class CapabilityRegistry:
             safe_message="unknown capability type",
             target_identity=binding.resolved.target_identity,
         )
+
+    def resolve(self, binding: FrozenCapabilityBinding) -> ResolvedCapabilityTarget:
+        """Resolve surface, classify once, assemble descriptor + final target."""
+        surface = self.resolve_surface(binding)
+        behavior = self._classifier.classify(surface)
+        descriptor = assemble_capability_descriptor(surface, behavior)
+        return ResolvedCapabilityTarget(
+            descriptor=descriptor,
+            binding=surface.binding,
+            executable=surface.executable,
+            execution_closure=surface.execution_closure,
+        )
+
+    def describe(self, binding: FrozenCapabilityBinding) -> CapabilityDescriptor:
+        return self.resolve(binding).descriptor
 
     # ------------------------------------------------------------------
     # Tools
