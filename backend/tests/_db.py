@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 from sqlalchemy import JSON, CheckConstraint, create_engine, event
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
@@ -83,5 +85,35 @@ def make_session() -> Session:
 
     Base.metadata.create_all(engine)
 
-    SessionLocal = sessionmaker(bind=engine, future=True)
-    return SessionLocal()
+    # Rebind the process-global SessionLocal/engine so production helpers that open
+    # their own Session (runtime_config, capability adapters, workers) hit the same
+    # in-memory SQLite database as the test request Session.
+    import app.database as app_database  # noqa: E402
+
+    test_session_factory = sessionmaker(
+        bind=engine,
+        autocommit=False,
+        autoflush=False,
+        future=True,
+    )
+    app_database.engine = engine
+    app_database.SessionLocal = test_session_factory
+
+    # Modules that did `from app.database import SessionLocal` keep a stale binding.
+    # Rebind known production importers used by OpenClaw/capability paths.
+    for module_name in (
+        "app.system_settings.runtime_config_service",
+        "app.assistant.capabilities.adapters.tool",
+        "app.assistant.capabilities.adapters.workflow",
+        "app.assistant.capabilities.adapters.agent",
+        "app.assistant_config.bootstrap",
+        "app.scheduler",
+        "app.attachment.worker",
+        "app.lightrag.worker",
+        "app.assistant.service",
+    ):
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(module, "SessionLocal"):
+            setattr(module, "SessionLocal", test_session_factory)
+
+    return test_session_factory()

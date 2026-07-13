@@ -151,13 +151,6 @@ class _WorkflowContractSnapshot:
     output_summary: str
 
 
-@dataclass(frozen=True)
-class _OpenClawToolContractAdapter:
-    runtime_tool_name: str
-    prepare_request: Callable[["OpenClawIntegrationService", dict[str, Any]], tuple[dict[str, Any], dict[str, Any]]]
-    build_response: Callable[[Any], dict[str, Any]]
-
-
 def _normalize_optional_text(value: Any) -> str | None:
     if value is None:
         return None
@@ -687,120 +680,22 @@ def _resolve_openclaw_entry_type_code(service: "OpenClawIntegrationService", ent
     return row.code
 
 
-def _prepare_search_entries_request(
-    service: "OpenClawIntegrationService",
-    raw_payload: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    request = _validate_openclaw_request_model(OpenClawSearchEntriesRequest, raw_payload or {})
-    normalized_payload = request.model_dump(mode="json", by_alias=True)
-    return normalized_payload, {
-        "keyword": request.query,
-        "type_code": _resolve_openclaw_entry_type_code(service, request.entry_type),
-        "tag_names": request.tag_names,
-        "time_from": request.time_from.date().isoformat() if request.time_from else None,
-        "time_to": request.time_to.date().isoformat() if request.time_to else None,
-        "limit": request.limit,
-    }
-
-
-def _prepare_get_entry_request(
-    _service: "OpenClawIntegrationService",
-    raw_payload: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    entry_id = _extract_entry_reference_id(raw_payload or {})
-    request = _validate_openclaw_request_model(OpenClawGetEntryRequest, {"entryId": entry_id})
-    normalized_payload = request.model_dump(mode="json", by_alias=True)
-    return normalized_payload, {"entry_id": str(request.entry_id)}
-
-
-def _prepare_create_relation_request(
-    _service: "OpenClawIntegrationService",
-    raw_payload: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    request = _validate_openclaw_request_model(OpenClawCreateRelationRequest, raw_payload or {})
-    normalized_payload = request.model_dump(mode="json", by_alias=True)
-    return normalized_payload, {
-        "source_entry_id": str(request.source_entry_id),
-        "target_entry_id": str(request.target_entry_id),
-        "relation_type": request.relation_type,
-        "description": request.description,
-    }
-
-
-def _prepare_query_knowledge_graph_request(
-    _service: "OpenClawIntegrationService",
-    raw_payload: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    request = _validate_openclaw_request_model(OpenClawQueryKnowledgeGraphRequest, raw_payload or {})
-    normalized_payload = request.model_dump(mode="json", by_alias=True)
-    return normalized_payload, {
-        "query": request.query,
-        "mode": request.mode,
-        "top_k": request.top_k,
-    }
-
-
-def _build_search_entries_response(value: Any) -> dict[str, Any]:
-    payload = _load_tool_json_value(value)
-    if isinstance(payload, list):
-        items = payload
-        total = len(items)
-    elif isinstance(payload, dict):
-        items = payload.get("items", [])
-        total = payload.get("total", len(items) if isinstance(items, list) else 0)
-    else:
-        raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message="search_entries returned invalid JSON")
-    if not isinstance(items, list):
-        raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message="search_entries items must be a list")
-    return OpenClawSearchEntriesResponse(
-        total=int(total or 0),
-        items=[OpenClawEntryRecordResponse.model_validate(_build_openclaw_entry_record(item)) for item in items if isinstance(item, dict)],
-    ).model_dump(mode="json", by_alias=True)
-
-
-def _build_get_entry_response(value: Any) -> dict[str, Any]:
-    payload = _load_tool_json_value(value)
-    if not isinstance(payload, dict):
-        raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message="get_entry_detail returned invalid JSON")
-    return _build_openclaw_entry_record(payload)
-
-
-def _build_create_relation_response(value: Any) -> dict[str, Any]:
-    payload = _load_tool_json_value(value)
-    if not isinstance(payload, dict):
-        raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message="create_relation returned invalid JSON")
-    return _build_openclaw_relation_record(payload)
-
-
-def _build_query_knowledge_graph_response(value: Any) -> dict[str, Any]:
-    payload = _load_tool_json_value(value)
-    if not isinstance(payload, dict):
-        raise ApiException(status_code=422, code=OPENCLAW_INVALID_SCHEMA_ERROR_CODE, message="query_knowledge_graph returned invalid JSON")
-    return LightRagQueryResponse.model_validate(payload).model_dump(mode="json", by_alias=True)
-
-
-OPENCLAW_TOOL_CONTRACT_ADAPTERS: dict[str, _OpenClawToolContractAdapter] = {
-    "search_entries": _OpenClawToolContractAdapter(
-        runtime_tool_name="search_entries",
-        prepare_request=_prepare_search_entries_request,
-        build_response=_build_search_entries_response,
-    ),
-    "get_entry_detail": _OpenClawToolContractAdapter(
-        runtime_tool_name="get_entry_detail",
-        prepare_request=_prepare_get_entry_request,
-        build_response=_build_get_entry_response,
-    ),
-    "create_relation": _OpenClawToolContractAdapter(
-        runtime_tool_name="create_relation",
-        prepare_request=_prepare_create_relation_request,
-        build_response=_build_create_relation_response,
-    ),
-    "query_knowledge_graph": _OpenClawToolContractAdapter(
-        runtime_tool_name="query_knowledge_graph",
-        prepare_request=_prepare_query_knowledge_graph_request,
-        build_response=_build_query_knowledge_graph_response,
-    ),
-}
+# OpenClaw-only contract adapters live in capability_adapter.py (shared by legacy/shared).
+from app.openclaw_integration.capability_adapter import (  # noqa: E402
+    OPENCLAW_TOOL_CONTRACT_ADAPTERS,
+    OpenClawRuntimeModeSelector,
+    OpenClawToolContractAdapter as _OpenClawToolContractAdapter,
+    build_create_relation_response as _build_create_relation_response,
+    build_get_entry_response as _build_get_entry_response,
+    build_query_knowledge_graph_response as _build_query_knowledge_graph_response,
+    build_search_entries_response as _build_search_entries_response,
+    execute_shared_capability,
+    prepare_create_relation_request as _prepare_create_relation_request,
+    prepare_get_entry_request as _prepare_get_entry_request,
+    prepare_query_knowledge_graph_request as _prepare_query_knowledge_graph_request,
+    prepare_search_entries_request as _prepare_search_entries_request,
+    resolve_tool_contract_adapter,
+)
 
 
 class OpenClawIntegrationService:
@@ -925,10 +820,7 @@ class OpenClawIntegrationService:
 
     @staticmethod
     def _resolve_tool_contract_adapter(source_tool_name: str | None) -> _OpenClawToolContractAdapter | None:
-        canonical_name = _canonicalize_source_tool_name(source_tool_name)
-        if canonical_name is None:
-            return None
-        return OPENCLAW_TOOL_CONTRACT_ADAPTERS.get(canonical_name)
+        return resolve_tool_contract_adapter(source_tool_name)
 
     @staticmethod
     def _is_retired_source_tool_name(source_tool_name: str | None) -> bool:
@@ -2513,11 +2405,17 @@ class OpenClawIntegrationService:
     ) -> OpenClawIntegrationSettingsResponse:
         return self.reset_system_items(preferred_locale=preferred_locale)
 
-    def authorize_runtime_request(
+    def authorize_runtime_headers(
         self,
-        request: Request,
+        *,
+        authorization_header: str | None,
+        preferred_locale: str | None = None,
+        source_header: str | None = None,
+        channel_header: str | None = None,
+        session_header: str | None = None,
+        tool_header: str | None = None,
     ) -> OpenClawRuntimeAuditContext:
-        locale = self._current_locale(request.headers.get("x-mindatlas-locale"))
+        locale = self._current_locale(preferred_locale)
         payload = self._get_payload()
         if not bool(payload.get("enabled")):
             raise ApiException(
@@ -2542,7 +2440,7 @@ class OpenClawIntegrationService:
                 ),
             )
 
-        authorization = request.headers.get("authorization") or ""
+        authorization = authorization_header or ""
         scheme, _, presented_secret = authorization.partition(" ")
         if scheme.lower() != "bearer" or not presented_secret.strip():
             raise ApiException(
@@ -2567,10 +2465,23 @@ class OpenClawIntegrationService:
             )
 
         return OpenClawRuntimeAuditContext(
-            source=_normalize_optional_text(request.headers.get("x-openclaw-source")),
-            channel=_normalize_optional_text(request.headers.get("x-openclaw-channel")),
-            session=_normalize_optional_text(request.headers.get("x-openclaw-session")),
-            tool=_normalize_optional_text(request.headers.get("x-openclaw-tool")),
+            source=_normalize_optional_text(source_header),
+            channel=_normalize_optional_text(channel_header),
+            session=_normalize_optional_text(session_header),
+            tool=_normalize_optional_text(tool_header),
+        )
+
+    def authorize_runtime_request(
+        self,
+        request: Request,
+    ) -> OpenClawRuntimeAuditContext:
+        return self.authorize_runtime_headers(
+            authorization_header=request.headers.get("authorization"),
+            preferred_locale=request.headers.get("x-mindatlas-locale"),
+            source_header=request.headers.get("x-openclaw-source"),
+            channel_header=request.headers.get("x-openclaw-channel"),
+            session_header=request.headers.get("x-openclaw-session"),
+            tool_header=request.headers.get("x-openclaw-tool"),
         )
 
     def get_runtime_catalog(
@@ -2766,14 +2677,19 @@ class OpenClawIntegrationService:
         _validate_value_against_schema(output_schema, result, label="output")
         return result
 
-    async def execute_capability(
+    def execute_capability_in_worker(
         self,
         *,
         capability_key: str,
         raw_payload: dict[str, Any],
         audit_context: OpenClawRuntimeAuditContext,
         preferred_locale: str | None = None,
+        selected_mode: str,
+        auth_proof: Any,
+        cancellation: Any | None = None,
+        request_id: str | None = None,
     ) -> OpenClawCapabilityExecuteResponse:
+        """Sync execute path used inside the bounded worker Session."""
         self._ensure_system_items(preferred_locale=preferred_locale, commit=False)
         locale = self._current_locale(preferred_locale)
         item = self._ensure_capability_exposed(capability_key=capability_key, locale=locale)
@@ -2785,13 +2701,30 @@ class OpenClawIntegrationService:
                 message=availability.reason or "Capability is currently unavailable",
             )
 
-        request_id = get_request_id()
+        rid = request_id or get_request_id()
         start = time.perf_counter()
         status = "success"
+        invocation_started = False
         try:
+            if selected_mode == "shared":
+                invocation_started = True
+                return execute_shared_capability(
+                    self,
+                    item=item,
+                    raw_payload=raw_payload or {},
+                    audit_context=audit_context,
+                    selected_mode="shared",
+                    locale=locale,
+                    auth_proof=auth_proof,
+                    cancellation=cancellation,
+                )
+
+            # legacy branch — no cross-mode retry after start
             if item.source_type == "tool":
+                invocation_started = True
                 result = self._execute_tool_capability(item, raw_payload or {})
             elif item.source_type == "workflow":
+                invocation_started = True
                 result = self._execute_workflow_capability(
                     item,
                     raw_payload or {},
@@ -2799,6 +2732,7 @@ class OpenClawIntegrationService:
                     audit_context=audit_context,
                 )
             else:
+                invocation_started = True
                 result = self._execute_agent_capability(
                     item,
                     raw_payload or {},
@@ -2817,13 +2751,42 @@ class OpenClawIntegrationService:
         finally:
             duration_ms = (time.perf_counter() - start) * 1000.0
             logger.info(
-                "openclaw_capability_execution request_id=%s capability=%s tool=%s source=%s channel=%s session=%s status=%s duration_ms=%.2f",
-                request_id,
+                "openclaw_capability_execution request_id=%s capability=%s tool=%s source=%s channel=%s session=%s status=%s mode=%s invocation_started=%s duration_ms=%.2f",
+                rid,
                 item.capability_key,
                 item.tool_name,
                 audit_context.source,
                 audit_context.channel,
                 audit_context.session,
                 status,
+                selected_mode,
+                invocation_started,
                 duration_ms,
             )
+
+    async def execute_capability(
+        self,
+        *,
+        capability_key: str,
+        raw_payload: dict[str, Any],
+        audit_context: OpenClawRuntimeAuditContext,
+        preferred_locale: str | None = None,
+        selected_mode: str | None = None,
+        auth_proof: Any | None = None,
+    ) -> OpenClawCapabilityExecuteResponse:
+        """Compatibility entry used by tests that still call the service directly.
+
+        Production HTTP execute uses ``runtime_worker.execute_openclaw_capability_in_worker``.
+        """
+        from app.openclaw_integration.capability_adapter import OpenClawAuthenticationProof
+
+        mode = selected_mode or OpenClawRuntimeModeSelector().snapshot_mode()
+        proof = auth_proof or OpenClawAuthenticationProof(principal_id="openclaw")
+        return self.execute_capability_in_worker(
+            capability_key=capability_key,
+            raw_payload=raw_payload or {},
+            audit_context=audit_context,
+            preferred_locale=preferred_locale,
+            selected_mode=mode,
+            auth_proof=proof,
+        )

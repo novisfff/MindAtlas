@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Union
+from typing import Literal, Union
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -28,6 +28,14 @@ class Settings(BaseSettings):
     app_default_locale: str = Field(default="zh", alias="APP_DEFAULT_LOCALE")
     # Immutable image/git revision in staging/production. Local/test may use "development".
     app_build_revision: str = Field(default="development", alias="APP_BUILD_REVISION")
+
+    # Plan 02A temporary OpenClaw Capability Runtime mode selector.
+    # Process/deployment switch only (get_settings is cached). Requires restart.
+    # Accepts exactly "legacy" or "shared"; no aliases (new/auto/bool/empty).
+    openclaw_capability_runtime_mode: Literal["legacy", "shared"] = Field(
+        default="legacy",
+        alias="OPENCLAW_CAPABILITY_RUNTIME_MODE",
+    )
 
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
@@ -208,6 +216,20 @@ class Settings(BaseSettings):
     def normalize_log_level(cls, v: str) -> str:
         value = (v or "").strip().upper()
         return value or "INFO"
+
+    @field_validator("openclaw_capability_runtime_mode", mode="before")
+    @classmethod
+    def validate_openclaw_capability_runtime_mode(cls, v: object) -> str:
+        if not isinstance(v, str):
+            raise ValueError(
+                "OPENCLAW_CAPABILITY_RUNTIME_MODE must be exactly 'legacy' or 'shared'"
+            )
+        value = v.strip()
+        if value not in {"legacy", "shared"}:
+            raise ValueError(
+                "OPENCLAW_CAPABILITY_RUNTIME_MODE must be exactly 'legacy' or 'shared'"
+            )
+        return value
 
     def cors_origins_list(self) -> list[str]:
         value = self.cors_origins

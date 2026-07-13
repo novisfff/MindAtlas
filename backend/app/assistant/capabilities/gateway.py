@@ -439,6 +439,12 @@ class CapabilityGateway:
                 adapter_ms = max(0.0, (time.perf_counter() - adapter_t0) * 1000.0)
                 return fail(exc.error, descriptor=descriptor, adapter_ms=adapter_ms)
             except Exception as exc:
+                # Preserve already-characterized domain HTTP errors raised by system
+                # tools (e.g. missing entry 40400) for entrypoint bridges.
+                from app.common.exceptions import ApiException
+
+                if isinstance(exc, ApiException):
+                    raise
                 adapter_ms = max(0.0, (time.perf_counter() - adapter_t0) * 1000.0)
                 error = sanitize_unexpected_exception(
                     exc,
@@ -560,6 +566,10 @@ class CapabilityGateway:
         except CapabilityDomainError as exc:
             return fail(exc.error)
         except Exception as exc:
+            from app.common.exceptions import ApiException
+
+            if isinstance(exc, ApiException):
+                raise
             # Map unexpected Exception only — do not catch BaseException.
             error = sanitize_unexpected_exception(
                 exc,

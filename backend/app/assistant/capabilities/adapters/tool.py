@@ -283,6 +283,12 @@ class ToolCapabilityAdapter:
             _emit("capability.failed", safe_status="failed", metrics=metrics)
             return result
         except Exception as exc:  # unexpected — never leak str(exc)
+            # Preserve already-characterized domain HTTP errors (e.g. missing entry 40400)
+            # raised by system tools so entrypoint bridges can keep public envelopes.
+            from app.common.exceptions import ApiException
+
+            if isinstance(exc, ApiException):
+                raise
             metrics = _metrics(adapter_ms=max(0.0, (time.perf_counter() - invoke_started) * 1000.0))
             error = sanitize_unexpected_exception(
                 exc,
@@ -309,6 +315,13 @@ class ToolCapabilityAdapter:
                 raw_result,
                 output_schema=descriptor.output_schema,
             )
+            # Plan 01 system-tool binding schemas often omit null unions while tools
+            # still emit JSON null for optional fields. Drop nulls so object-root
+            # validation matches legacy OpenClaw acceptance of optional blanks.
+            if isinstance(structured, dict):
+                structured = {
+                    key: value for key, value in structured.items() if value is not None
+                }
         except (TypeError, ValueError, json.JSONDecodeError):
             metrics = _metrics()
             error = CapabilityError(

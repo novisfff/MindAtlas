@@ -209,7 +209,10 @@ def _module_titles(locale: str) -> dict[str, dict[str, str]]:
 
 @contextmanager
 def _runtime_db_session() -> Iterator[Session]:
-    db = SessionLocal()
+    # Resolve SessionLocal at call time so tests can rebind app.database.SessionLocal.
+    from app.database import SessionLocal as _session_factory
+
+    db = _session_factory()
     try:
         yield db
     finally:

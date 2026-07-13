@@ -120,6 +120,8 @@ services:
       APP_ENV: ${APP_ENV:-production}
       # Required substitution: do not default to development in this compose file.
       APP_BUILD_REVISION: ${APP_BUILD_REVISION:?Set APP_BUILD_REVISION to a deployment-immutable value}
+      # Plan 02A temporary OpenClaw Capability Runtime mode (process switch; restart to change).
+      OPENCLAW_CAPABILITY_RUNTIME_MODE: ${OPENCLAW_CAPABILITY_RUNTIME_MODE:-legacy}
       LIGHTRAG_ENABLED: "${LIGHTRAG_ENABLED:-true}"
       DOCLING_WORKER_ENABLED: "${DOCLING_WORKER_ENABLED:-true}"
       SCHEDULER_ENABLED: "${SCHEDULER_ENABLED:-true}"
