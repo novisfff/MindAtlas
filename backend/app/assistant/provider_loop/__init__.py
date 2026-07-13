@@ -2,6 +2,7 @@
 
 Task 1: frozen contracts, messages, digests, and pure transcript validators.
 Task 2: deterministic Domain Key ↔ Provider alias mapping and frozen surfaces.
+Task 3: scripted provider + core direct/single-call agent loop.
 """
 
 from __future__ import annotations
@@ -63,6 +64,11 @@ from app.assistant.provider_loop.contracts import (
     project_waiting_resolution_message,
     recompute_continuation_identity,
 )
+from app.assistant.provider_loop.loop import (
+    ProviderLoopError,
+    assemble_provider_round,
+    run_provider_agent_loop,
+)
 from app.assistant.provider_loop.messages import (
     ProviderAssistantMessage,
     ProviderMessage,
@@ -81,6 +87,13 @@ from app.assistant.provider_loop.messages import (
     seal_cancelled_continuation,
     validate_provider_transcript,
 )
+from app.assistant.provider_loop.scripted_provider import (
+    ScriptedProvider,
+    ScriptedProviderAssertionError,
+    ScriptedRoundScript,
+    text_then_terminal,
+    tool_call_then_terminal,
+)
 
 __all__ = [
     "CancellationPort",
@@ -95,6 +108,7 @@ __all__ = [
     "ProviderExecutionScope",
     "ProviderGenerationOptions",
     "ProviderLoopContinuation",
+    "ProviderLoopError",
     "ProviderLoopEventSink",
     "ProviderLoopPorts",
     "ProviderLoopRequest",
@@ -123,12 +137,16 @@ __all__ = [
     "ProviderWaitingCallState",
     "ProviderWaitingResolution",
     "SafeProviderError",
+    "ScriptedProvider",
+    "ScriptedProviderAssertionError",
+    "ScriptedRoundScript",
     "SiblingExecutionPort",
     "ToolDispatcher",
     "ToolSurfaceResolution",
     "ToolsProvider",
     "aggregate_provider_usage",
     "allocate_provider_aliases",
+    "assemble_provider_round",
     "assert_not_serializable_port",
     "build_provider_tool_surface",
     "compute_alias_map_digest",
@@ -149,7 +167,10 @@ __all__ = [
     "project_waiting_resolution_message",
     "recompute_continuation_identity",
     "reverse_alias_map",
+    "run_provider_agent_loop",
     "sanitize_domain_key_for_alias",
     "seal_cancelled_continuation",
+    "text_then_terminal",
+    "tool_call_then_terminal",
     "validate_provider_transcript",
 ]
