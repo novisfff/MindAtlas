@@ -4,6 +4,7 @@ Task 1: frozen contracts, messages, digests, and pure transcript validators.
 Task 2: deterministic Domain Key ↔ Provider alias mapping and frozen surfaces.
 Task 3: scripted provider + core direct/single-call agent loop.
 Task 4: stream assembly, event ordering, and soft finalization.
+Task 5: multi-call sibling scheduling, waiting/resume, and cancellation sealing.
 """
 
 from __future__ import annotations
@@ -66,9 +67,22 @@ from app.assistant.provider_loop.contracts import (
     recompute_continuation_identity,
 )
 from app.assistant.provider_loop.loop import (
+    ProviderAgentLoop,
     ProviderLoopError,
     is_finalization_round,
+    resume_provider_agent_loop,
     run_provider_agent_loop,
+    seal_waiting_after_cancellation,
+)
+from app.assistant.provider_loop.scheduler import (
+    DEFAULT_MAX_WORKERS,
+    BoundedIsolatedSiblingExecutor,
+    DispatcherCapabilities,
+    SequentialSiblingExecutor,
+    SiblingExecutionGroup,
+    is_parallel_eligible,
+    merge_parallel_manifests,
+    plan_sibling_execution,
 )
 from app.assistant.provider_loop.messages import (
     ProviderAssistantMessage,
@@ -106,13 +120,17 @@ from app.assistant.provider_loop.streaming import (
 
 __all__ = [
     "ARGUMENTS_BYTE_LIMIT",
+    "BoundedIsolatedSiblingExecutor",
     "CancellationPort",
     "CurrentCapabilityDescriptorVerifier",
+    "DEFAULT_MAX_WORKERS",
     "DEFAULT_RESERVED_CONTROL_ALIASES",
     "DefaultFinalizationInstructionProvider",
+    "DispatcherCapabilities",
     "IDENTITY_BYTE_LIMIT",
     "OPENAI_CHAT_PROVIDER_PROTOCOL",
     "ProviderAdapter",
+    "ProviderAgentLoop",
     "ProviderAssistantMessage",
     "ProviderAuthorizationEvidenceFactory",
     "ProviderDispatchRequest",
@@ -153,6 +171,8 @@ __all__ = [
     "ScriptedProvider",
     "ScriptedProviderAssertionError",
     "ScriptedRoundScript",
+    "SequentialSiblingExecutor",
+    "SiblingExecutionGroup",
     "SiblingExecutionPort",
     "ToolDispatcher",
     "ToolSurfaceResolution",
@@ -173,18 +193,23 @@ __all__ = [
     "generated_alias_candidate",
     "identity_digest_prefix",
     "is_finalization_round",
+    "is_parallel_eligible",
     "is_safe_request_id",
     "is_valid_provider_alias",
     "lookup_tool_by_alias",
     "make_cancelled_envelope",
+    "merge_parallel_manifests",
     "parse_provider_stream_event",
+    "plan_sibling_execution",
     "project_tool_result_envelope",
     "project_waiting_resolution_message",
     "recompute_continuation_identity",
+    "resume_provider_agent_loop",
     "reverse_alias_map",
     "run_provider_agent_loop",
     "sanitize_domain_key_for_alias",
     "seal_cancelled_continuation",
+    "seal_waiting_after_cancellation",
     "text_then_terminal",
     "tool_call_then_terminal",
     "validate_provider_transcript",
