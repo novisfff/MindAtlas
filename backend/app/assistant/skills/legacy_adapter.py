@@ -562,15 +562,57 @@ def _try_publish_package(
         ]
 
 
+def _published_matches_draft(
+    session: Session,
+    *,
+    draft_version_id: UUID | None,
+    published_version_id: UUID | None,
+) -> bool:
+    """True only when both pointers exist and their content digests match."""
+    if draft_version_id is None or published_version_id is None:
+        return False
+    draft = session.get(AssistantSkillVersion, draft_version_id)
+    published = session.get(AssistantSkillVersion, published_version_id)
+    if draft is None or published is None:
+        return False
+    return draft.content_digest == published.content_digest
+
+
+def _stamp_legacy_source_digest(
+    session: Session,
+    package: AssistantSkillPackage,
+    source_digest: str,
+) -> None:
+    package.legacy_source_digest = source_digest
+    session.commit()
+
+
+def _clear_package_published_pointer(
+    session: Session,
+    package: AssistantSkillPackage,
+) -> AssistantSkillPackage:
+    """Drop the current published pointer while keeping history rows."""
+    reloaded = session.get(AssistantSkillPackage, package.id)
+    if reloaded is None:
+        return package
+    if reloaded.published_version_id is not None:
+        reloaded.published_version_id = None
+        session.commit()
+    return reloaded
+
+
 def _materialize_shadow_draft(
     session: Session,
     *,
     skill: AssistantSkill,
     parsed: ParsedSkillPackage,
-    source_digest: str,
     package: AssistantSkillPackage | None,
 ) -> AssistantSkillPackage:
-    """Create or update a shadow package draft without promoting to native."""
+    """Create or update a shadow package draft without promoting to native.
+
+    Does not stamp ``legacy_source_digest`` — callers stamp after a successful
+    publish, or after clearing a stale published pointer on draft_unresolved.
+    """
     svc = AgentSkillService(session)
 
     if package is None:
@@ -586,7 +628,7 @@ def _materialize_shadow_draft(
             catalog_enabled=False,
             is_system=bool(skill.is_system),
             legacy_skill_id=skill.id,
-            legacy_source_digest=source_digest,
+            legacy_source_digest=None,
         )
         session.add(package)
         session.flush()
@@ -610,7 +652,6 @@ def _materialize_shadow_draft(
         return package
 
     # Existing shadow package: never promote; append or re-point draft only.
-    package.legacy_source_digest = source_digest
     package.display_name = (
         parsed.manifest.display_name
         if parsed.manifest and parsed.manifest.display_name
@@ -855,30 +896,52 @@ class LegacySkillShadowAdapter:
 
         source_digest = legacy_source_digest(skill, target_ref)
 
-        # Unchanged source: reconcile publish if needed, else unchanged.
+        # Unchanged only when source matches AND published content matches draft.
+        if (
+            package is not None
+            and package.legacy_source_digest == source_digest
+            and package.draft_version_id is not None
+            and _published_matches_draft(
+                session,
+                draft_version_id=package.draft_version_id,
+                published_version_id=package.published_version_id,
+            )
+        ):
+            return LegacySyncItem(
+                status="unchanged",
+                legacy_skill_id=skill.id,
+                shadow_package_id=package.id,
+            )
+
+        # Source digest matches but published lags draft — retry publish only.
         if (
             package is not None
             and package.legacy_source_digest == source_digest
             and package.draft_version_id is not None
         ):
-            if package.published_version_id is not None:
+            if package.published_version_id is None or not _published_matches_draft(
+                session,
+                draft_version_id=package.draft_version_id,
+                published_version_id=package.published_version_id,
+            ):
+                status, diagnostics = _try_publish_package(
+                    session,
+                    package=package,
+                    draft_version_id=package.draft_version_id,
+                    legacy_skill_id=skill.id,
+                )
+                if status == "published":
+                    package = session.get(AssistantSkillPackage, package.id) or package
+                    _stamp_legacy_source_digest(session, package, source_digest)
+                elif status == "draft_unresolved":
+                    package = _clear_package_published_pointer(session, package)
+                    _stamp_legacy_source_digest(session, package, source_digest)
                 return LegacySyncItem(
-                    status="unchanged",
+                    status=status,
                     legacy_skill_id=skill.id,
                     shadow_package_id=package.id,
+                    diagnostics=diagnostics,
                 )
-            status, diagnostics = _try_publish_package(
-                session,
-                package=package,
-                draft_version_id=package.draft_version_id,
-                legacy_skill_id=skill.id,
-            )
-            return LegacySyncItem(
-                status=status,
-                legacy_skill_id=skill.id,
-                shadow_package_id=package.id,
-                diagnostics=diagnostics,
-            )
 
         occupied = _occupied_canonical_names(session)
         if package is not None:
@@ -918,7 +981,6 @@ class LegacySkillShadowAdapter:
                 session,
                 skill=skill,
                 parsed=parsed,
-                source_digest=source_digest,
                 package=package,
             )
         except Exception as exc:  # noqa: BLE001
@@ -957,6 +1019,8 @@ class LegacySkillShadowAdapter:
             )
 
         if target_ref.published_version_id is None:
+            package = _clear_package_published_pointer(session, package)
+            _stamp_legacy_source_digest(session, package, source_digest)
             return LegacySyncItem(
                 status="draft_unresolved",
                 legacy_skill_id=skill.id,
@@ -978,6 +1042,12 @@ class LegacySkillShadowAdapter:
             draft_version_id=package.draft_version_id,
             legacy_skill_id=skill.id,
         )
+        package = session.get(AssistantSkillPackage, package.id) or package
+        if status == "published":
+            _stamp_legacy_source_digest(session, package, source_digest)
+        elif status == "draft_unresolved":
+            package = _clear_package_published_pointer(session, package)
+            _stamp_legacy_source_digest(session, package, source_digest)
         return LegacySyncItem(
             status=status,
             legacy_skill_id=skill.id,
@@ -1084,16 +1154,28 @@ class LegacySkillShadowAdapter:
                 ],
             )
 
-        # Idempotent when source digest matches and a published version exists.
+        # Idempotent only when source matches AND published content matches draft.
         if (
             profile.legacy_source_digest == bridge_digest
             and profile.published_version_id is not None
+            and profile.draft_version_id is not None
             and profile.legacy_skill_id == skill.id
         ):
-            return LegacySyncItem(
-                status="unchanged",
-                legacy_skill_id=skill.id,
+            draft_row = session.get(
+                AssistantMainAgentProfileVersion, profile.draft_version_id
             )
+            published_row = session.get(
+                AssistantMainAgentProfileVersion, profile.published_version_id
+            )
+            if (
+                draft_row is not None
+                and published_row is not None
+                and draft_row.content_digest == published_row.content_digest
+            ):
+                return LegacySyncItem(
+                    status="unchanged",
+                    legacy_skill_id=skill.id,
+                )
 
         main_snapshot = _main_agent_snapshot_from_agent(snapshot)
         try:
@@ -1106,18 +1188,14 @@ class LegacySkillShadowAdapter:
                     source_ref=source_ref,
                 ),
             )
-            # save_draft commits; re-load and stamp legacy identity.
+            # save_draft commits; re-load. Stamp digest only after publish success
+            # or after clearing a stale published pointer on draft_unresolved.
             profile = session.get(AssistantMainAgentProfile, profile.id)
             assert profile is not None
             profile.legacy_skill_id = skill.id
-            profile.legacy_source_digest = bridge_digest
             session.commit()
 
-            if (
-                profile.published_version_id is not None
-                and profile.legacy_source_digest == bridge_digest
-            ):
-                # Check whether published content already matches this draft digest.
+            if profile.published_version_id is not None:
                 published = session.get(
                     AssistantMainAgentProfileVersion, profile.published_version_id
                 )
@@ -1125,6 +1203,8 @@ class LegacySkillShadowAdapter:
                     published is not None
                     and published.content_digest == draft.content_digest
                 ):
+                    profile.legacy_source_digest = bridge_digest
+                    session.commit()
                     return LegacySyncItem(
                         status="unchanged",
                         legacy_skill_id=skill.id,
@@ -1159,6 +1239,17 @@ class LegacySkillShadowAdapter:
                 session.rollback()
             except Exception:  # noqa: BLE001
                 pass
+            # Clear stale published pointer so next sync does not report unchanged.
+            profile = session.get(AssistantMainAgentProfile, profile_summary.id)
+            if profile is not None:
+                if profile.published_version_id is not None:
+                    profile.published_version_id = None
+                profile.legacy_skill_id = skill.id
+                profile.legacy_source_digest = bridge_digest
+                try:
+                    session.commit()
+                except Exception:  # noqa: BLE001
+                    session.rollback()
             return LegacySyncItem(
                 status="draft_unresolved",
                 legacy_skill_id=skill.id,

@@ -483,6 +483,78 @@ class LegacyMirrorSyncTests(unittest.TestCase):
                 self.assertIn("reasonCode", payload)
 
 
+    def test_source_unpublishable_clears_published_pointer_and_republishes(self) -> None:
+        """Published V1 → target becomes unpublished → draft_unresolved + NULL pointer.
+
+        After the target is repaired, V2 publishes while V1 history remains.
+        A failed republish after prior success must not permanently stick on unchanged.
+        """
+        from app.assistant.skills.legacy_adapter import LegacySkillShadowAdapter
+        from app.assistant.skills.models import AssistantSkillPackage, AssistantSkillVersion
+        from app.assistant_config.models import AssistantWorkflow
+        from tests.agent_skill_test_support import create_default_model_binding
+
+        create_default_model_binding(self.db)
+        self.db.commit()
+        skill, workflow, wf_version = self._create_legacy_skill(name="republish_stuck_skill")
+        adapter = LegacySkillShadowAdapter()
+        first = adapter.sync_one(self.db, skill.id)
+        self.assertEqual(first.status, "published")
+        pkg = self.db.get(AssistantSkillPackage, first.shadow_package_id)
+        assert pkg is not None
+        v1_id = pkg.published_version_id
+        self.assertIsNotNone(v1_id)
+
+        # Make target unpublishable by clearing workflow published pointer.
+        workflow = self.db.get(AssistantWorkflow, workflow.id)
+        assert workflow is not None
+        workflow.published_version_id = None
+        self.db.commit()
+
+        # Change source so digest no longer matches (description change).
+        skill.description = "now unpublishable source revision"
+        self.db.commit()
+
+        unresolved = adapter.sync_one(self.db, skill.id)
+        self.assertEqual(unresolved.status, "draft_unresolved")
+        self.db.refresh(pkg)
+        self.assertIsNone(pkg.published_version_id)
+        # V1 history row must remain.
+        v1 = self.db.get(AssistantSkillVersion, v1_id)
+        assert v1 is not None
+        self.assertEqual(v1.version_source, "publish")
+
+        # Re-sync with cleared pointer must not report unchanged.
+        again_unresolved = adapter.sync_one(self.db, skill.id)
+        self.assertEqual(again_unresolved.status, "draft_unresolved")
+        self.assertNotEqual(again_unresolved.status, "unchanged")
+
+        # Repair target → publishes V2.
+        workflow.published_version_id = wf_version.id
+        self.db.commit()
+        repaired = adapter.sync_one(self.db, skill.id)
+        self.assertEqual(repaired.status, "published")
+        self.db.refresh(pkg)
+        self.assertIsNotNone(pkg.published_version_id)
+        self.assertNotEqual(pkg.published_version_id, v1_id)
+        publish_rows = (
+            self.db.query(AssistantSkillVersion)
+            .filter(
+                AssistantSkillVersion.skill_package_id == pkg.id,
+                AssistantSkillVersion.version_source == "publish",
+            )
+            .all()
+        )
+        self.assertEqual(len(publish_rows), 2)
+        publish_ids = {row.id for row in publish_rows}
+        self.assertIn(v1_id, publish_ids)
+        self.assertIn(pkg.published_version_id, publish_ids)
+
+        # Idempotent after success.
+        stable = adapter.sync_one(self.db, skill.id)
+        self.assertEqual(stable.status, "unchanged")
+
+
 class GeneralChatBridgeTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()
@@ -743,6 +815,7 @@ class GeneralChatBridgeTests(unittest.TestCase):
         # legacy_source_digest may still hold the pre-native bridge digest; bridge
         # must not advance it after native ownership.
         self.assertEqual(profile.legacy_source_digest, shadow_digest)
+
 
 
 class BootstrapHookInvarianceTests(unittest.TestCase):
