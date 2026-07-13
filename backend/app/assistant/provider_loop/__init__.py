@@ -5,6 +5,7 @@ Task 2: deterministic Domain Key ↔ Provider alias mapping and frozen surfaces.
 Task 3: scripted provider + core direct/single-call agent loop.
 Task 4: stream assembly, event ordering, and soft finalization.
 Task 5: multi-call sibling scheduling, waiting/resume, and cancellation sealing.
+Task 7: harmless model capability probe orchestration.
 """
 
 from __future__ import annotations
@@ -117,6 +118,18 @@ from app.assistant.provider_loop.streaming import (
     assemble_provider_round,
     is_safe_request_id,
 )
+from app.assistant.provider_loop.probe import (
+    PROBE_CONTRACT_VERSION,
+    CapabilityObservation,
+    ModelCapabilityObservations,
+    ModelCapabilityProbeEvidence,
+    ProbePolicy,
+    ProbeRunStats,
+    build_endpoint_identity,
+    build_model_config_digest,
+    compute_probe_digest,
+    run_model_capability_probe,
+)
 
 __all__ = [
     "ARGUMENTS_BYTE_LIMIT",
@@ -167,6 +180,12 @@ __all__ = [
     "ProviderUserMessage",
     "ProviderWaitingCallState",
     "ProviderWaitingResolution",
+    "PROBE_CONTRACT_VERSION",
+    "CapabilityObservation",
+    "ModelCapabilityObservations",
+    "ModelCapabilityProbeEvidence",
+    "ProbePolicy",
+    "ProbeRunStats",
     "SafeProviderError",
     "ScriptedProvider",
     "ScriptedProviderAssertionError",
@@ -181,8 +200,11 @@ __all__ = [
     "allocate_provider_aliases",
     "assemble_provider_round",
     "assert_not_serializable_port",
+    "build_endpoint_identity",
+    "build_model_config_digest",
     "build_provider_tool_surface",
     "compute_alias_map_digest",
+    "compute_probe_digest",
     "compute_scope_digest",
     "compute_surface_digest",
     "create_execution_scope",
@@ -206,6 +228,7 @@ __all__ = [
     "recompute_continuation_identity",
     "resume_provider_agent_loop",
     "reverse_alias_map",
+    "run_model_capability_probe",
     "run_provider_agent_loop",
     "sanitize_domain_key_for_alias",
     "seal_cancelled_continuation",
