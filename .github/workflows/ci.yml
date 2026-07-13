@@ -29,8 +29,89 @@ jobs:
       - name: Install backend dependencies
         run: python -m pip install -r requirements.txt pytest
 
+      - name: Verify direct PyYAML and jsonschema imports
+        run: |
+          python - <<'PY'
+          import importlib.metadata
+          import yaml
+          import jsonschema
+
+          print("PyYAML", importlib.metadata.version("PyYAML"))
+          print("jsonschema", importlib.metadata.version("jsonschema"))
+          assert yaml.__name__ == "yaml"
+          assert jsonschema.__name__ == "jsonschema"
+          PY
+
       - name: Run backend tests
         run: python -m pytest -q
+
+  agent-skill-migration:
+    name: Agent Skill PostgreSQL Migration Gate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: mindatlas
+          POSTGRES_PASSWORD: mindatlas
+          POSTGRES_DB: mindatlas_migration
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mindatlas -d mindatlas_migration"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Disposable CI database only. PRE_PLAN01_HEAD=a7b8c9d0e1f2; Plan 01=acf208493c87.
+      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_migration
+      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_migration
+      # Minimal app config required by settings import during alembic env.
+      AI_PROVIDER_FERNET_KEY: "dGVzdC1mZXJuZXQta2V5LTMyYnl0ZXMhMTIzNDU2"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements.txt pytest
+
+      - name: Verify direct PyYAML and jsonschema imports
+        run: |
+          python - <<'PY'
+          import importlib.metadata
+          import yaml
+          import jsonschema
+
+          print("PyYAML", importlib.metadata.version("PyYAML"))
+          print("jsonschema", importlib.metadata.version("jsonschema"))
+          assert yaml.__name__ == "yaml"
+          assert jsonschema.__name__ == "jsonschema"
+          PY
+
+      - name: Alembic upgrade / downgrade / upgrade gate
+        run: |
+          set -euo pipefail
+          alembic upgrade head
+          alembic downgrade a7b8c9d0e1f2
+          alembic upgrade head
+          alembic current
+          alembic heads
+
+      - name: PostgreSQL migration preservation and guard tests
+        run: python -m pytest tests/test_agent_skill_postgres_migration.py -q
+
+      - name: System tool golden digest smoke
+        run: python -m pytest tests/test_binding_json_schema.py::test_system_tool_golden_schemas_and_contract_set_digest_are_stable -q
 
   frontend:
     name: Frontend Build And Tests
