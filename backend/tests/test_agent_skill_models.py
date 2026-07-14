@@ -654,7 +654,11 @@ class AgentSkillModelContractTests(unittest.TestCase):
         self.assertEqual(cred.runtime_revision, 1)
         self.assertEqual(model.runtime_revision, 1)
 
-    def test_catalog_and_runtime_remain_disabled(self) -> None:
+    def test_catalog_and_runtime_flags_default_false_but_may_enable(self) -> None:
+        """Plan 04: disabled-only CHECKs removed; defaults remain false.
+
+        Aggregate flags may be set true (enablement is application-gated, not DB-hard).
+        """
         from app.assistant.skills.models import (  # noqa: E402
             AssistantMainAgentProfile,
             AssistantSkillPackage,
@@ -665,25 +669,33 @@ class AgentSkillModelContractTests(unittest.TestCase):
             display_name="Disabled",
             description="d",
             migration_state="native",
-            catalog_enabled=True,
             is_system=False,
         )
         self.db.add(pkg)
-        with self.assertRaises(IntegrityError):
-            self.db.commit()
-        self.db.rollback()
+        self.db.commit()
+        self.db.refresh(pkg)
+        self.assertFalse(pkg.catalog_enabled)
+
+        pkg.catalog_enabled = True
+        self.db.commit()
+        self.db.refresh(pkg)
+        self.assertTrue(pkg.catalog_enabled)
 
         profile = AssistantMainAgentProfile(
             profile_key="enabled-profile",
             display_name="P",
             is_default=False,
             migration_state="native",
-            runtime_enabled=True,
         )
         self.db.add(profile)
-        with self.assertRaises(IntegrityError):
-            self.db.commit()
-        self.db.rollback()
+        self.db.commit()
+        self.db.refresh(profile)
+        self.assertFalse(profile.runtime_enabled)
+
+        profile.runtime_enabled = True
+        self.db.commit()
+        self.db.refresh(profile)
+        self.assertTrue(profile.runtime_enabled)
 
     def test_no_orm_cascade_deletes_immutable_history(self) -> None:
         from app.assistant.skills.models import (  # noqa: E402

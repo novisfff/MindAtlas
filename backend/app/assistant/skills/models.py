@@ -113,10 +113,8 @@ class AssistantSkillPackage(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "migration_state IN ('shadow','native','cutover')",
             name="ck_assistant_skill_package_migration_state",
         ),
-        CheckConstraint(
-            "catalog_enabled = false",
-            name="ck_assistant_skill_package_catalog_disabled",
-        ),
+        # Plan 04 dropped ck_assistant_skill_package_catalog_disabled so aggregates
+        # may be enabled later; default remains false (NOT NULL + server_default).
         _nullable_sha256_check(
             "legacy_source_digest",
             name="ck_assistant_skill_package_legacy_source_digest",
@@ -720,10 +718,8 @@ class AssistantMainAgentProfile(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "migration_state IN ('bootstrap','shadow','native','cutover')",
             name="ck_assistant_main_agent_profile_migration_state",
         ),
-        CheckConstraint(
-            "runtime_enabled = false",
-            name="ck_assistant_main_agent_profile_runtime_disabled",
-        ),
+        # Plan 04 dropped ck_assistant_main_agent_profile_runtime_disabled so
+        # profiles may be enabled later; default remains false.
         _nullable_sha256_check(
             "legacy_source_digest",
             name="ck_assistant_main_agent_profile_legacy_source_digest",

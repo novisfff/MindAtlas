@@ -122,6 +122,8 @@ services:
       APP_BUILD_REVISION: ${APP_BUILD_REVISION:?Set APP_BUILD_REVISION to a deployment-immutable value}
       # Plan 03 live model capability probe (paid Provider call). Default-disabled.
       AI_MODEL_CAPABILITY_PROBE_ENABLED: ${AI_MODEL_CAPABILITY_PROBE_ENABLED:-false}
+      # Plan 04 main agent feature mode (production default off).
+      ASSISTANT_MAIN_AGENT_MODE: ${ASSISTANT_MAIN_AGENT_MODE:-off}
       LIGHTRAG_ENABLED: "${LIGHTRAG_ENABLED:-true}"
       DOCLING_WORKER_ENABLED: "${DOCLING_WORKER_ENABLED:-true}"
       SCHEDULER_ENABLED: "${SCHEDULER_ENABLED:-true}"
