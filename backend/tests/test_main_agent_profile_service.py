@@ -637,7 +637,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.code, 40493)
 
-    def test_publish_rejects_nonempty_unresolved_control_keys(self) -> None:
+    def test_publish_rejects_partial_control_keys(self) -> None:
         from app.assistant.skills.schemas import (
             MainAgentProfileSnapshotV1,
             PublishMainAgentProfileCommand,
@@ -667,6 +667,40 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
                 PublishMainAgentProfileCommand(draft_version_id=draft.id),
             )
         self.assertEqual(ctx.exception.code, 42294)
+
+    def test_publish_accepts_exact_four_control_keys(self) -> None:
+        from app.assistant.main_agent.control_capabilities import MAIN_AGENT_CONTROL_KEYS
+        from app.assistant.skills.schemas import (
+            MainAgentProfileSnapshotV1,
+            PublishMainAgentProfileCommand,
+            SaveMainAgentProfileDraftCommand,
+        )
+
+        profile = self.svc.ensure_default()
+        draft = self.svc.save_draft(
+            profile.id,
+            SaveMainAgentProfileDraftCommand(
+                snapshot=MainAgentProfileSnapshotV1.model_validate(
+                    _valid_snapshot_dict(
+                        basePrompt="plan04 controls ready",
+                        controlCapabilityKeys=list(MAIN_AGENT_CONTROL_KEYS),
+                    )
+                ),
+                origin="api",
+            ),
+        )
+        published = self.svc.publish(
+            profile.id,
+            PublishMainAgentProfileCommand(draft_version_id=draft.id),
+        )
+        self.assertEqual(published.version_source, "publish")
+        detail = self.svc.get_version(profile.id, published.id)
+        self.assertEqual(
+            tuple(detail.snapshot.get("controlCapabilityKeys") or ()),
+            MAIN_AGENT_CONTROL_KEYS,
+        )
+        # Publish never auto-enables runtime.
+        self.assertFalse(self.svc.get_default().runtime_enabled)
 
     def test_concurrent_default_creation_converges(self) -> None:
         from app.assistant.skills.models import AssistantMainAgentProfile
