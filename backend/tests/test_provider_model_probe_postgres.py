@@ -340,7 +340,7 @@ def test_pointer_ownership_and_immutability_and_checks() -> None:
                             model_config_digest, status, capabilities, probe_digest, created_at
                         ) VALUES (
                             :id, :model_id, 1, 'openai_chat_completions', '1',
-                            :d, 'weird', CAST('{"x":1}' AS jsonb), :d, now()
+                            :d, 'weird', CAST($${"x":1}$$ AS jsonb), :d, now()
                         )
                         """
                     ),
@@ -364,7 +364,7 @@ def test_pointer_ownership_and_immutability_and_checks() -> None:
                             model_config_digest, status, capabilities, probe_digest, created_at
                         ) VALUES (
                             :id, :model_id, 1, 'openai_chat_completions', '1',
-                            'not-a-digest', 'passed', CAST('{"x":1}' AS jsonb), :d, now()
+                            'not-a-digest', 'passed', CAST($${"x":1}$$ AS jsonb), :d, now()
                         )
                         """
                     ),

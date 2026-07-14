@@ -4,6 +4,7 @@ import atexit
 import sys
 import tempfile
 import uuid
+import weakref
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -18,8 +19,7 @@ from tests._bootstrap import bootstrap_backend_imports, reset_caches
 
 bootstrap_backend_imports()
 
-# Modules that may cache `from app.database import SessionLocal`. Restored even
-# if they are first imported while a temporary binding is active (see make_session).
+# Modules that may cache `from app.database import SessionLocal`.
 _SESSIONLOCAL_IMPORTER_MODULES: tuple[str, ...] = (
     "app.system_settings.runtime_config_service",
     "app.assistant.capabilities.adapters.tool",
@@ -36,10 +36,11 @@ _SESSIONLOCAL_IMPORTER_MODULES: tuple[str, ...] = (
     "app.assistant.service",
 )
 
-# Per-session restore tokens (do not rely on LIFO close order).
+# token -> binding record; insertion order = creation order (Py3.7+ dict order).
 _ACTIVE_BINDINGS: dict[str, dict[str, Any]] = {}
 _TEMP_DB_PATHS: list[Path] = []
 _ORIGINAL_APP_DATABASE: dict[str, Any] | None = None
+_CREATION_SEQ = 0
 
 
 def _cleanup_temp_dbs() -> None:
@@ -89,15 +90,6 @@ def _normalize_report_tables_for_sqlite() -> None:
                 table.constraints.discard(constraint)
 
 
-def _capture_module_sessionlocals() -> dict[str, Any]:
-    captured: dict[str, Any] = {}
-    for module_name in _SESSIONLOCAL_IMPORTER_MODULES:
-        module = sys.modules.get(module_name)
-        if module is not None and hasattr(module, "SessionLocal"):
-            captured[module_name] = getattr(module, "SessionLocal")
-    return captured
-
-
 def _install_module_sessionlocals(factory: Any) -> None:
     for module_name in _SESSIONLOCAL_IMPORTER_MODULES:
         module = sys.modules.get(module_name)
@@ -105,34 +97,73 @@ def _install_module_sessionlocals(factory: Any) -> None:
             setattr(module, "SessionLocal", factory)
 
 
-def _restore_module_sessionlocals(previous: dict[str, Any]) -> None:
-    """Restore known importers.
-
-    Modules first imported under a temporary binding are not in ``previous``;
-    force them back to the process-global ``app.database.SessionLocal``.
-    """
+def _apply_global_factory(factory: Any, engine: Any) -> None:
     import app.database as app_database  # noqa: E402
 
-    global_factory = app_database.SessionLocal
-    for module_name in _SESSIONLOCAL_IMPORTER_MODULES:
-        module = sys.modules.get(module_name)
-        if module is None or not hasattr(module, "SessionLocal"):
-            continue
-        if module_name in previous:
-            setattr(module, "SessionLocal", previous[module_name])
-        else:
-            # Late import under temporary binding — rebind to current global.
-            setattr(module, "SessionLocal", global_factory)
+    app_database.engine = engine
+    app_database.SessionLocal = factory
+    _install_module_sessionlocals(factory)
+
+
+def _latest_active_binding() -> dict[str, Any] | None:
+    """Most recently created still-active binding (creation order)."""
+    if not _ACTIVE_BINDINGS:
+        return None
+    # dict preserves insertion order; last item is newest.
+    token = next(reversed(_ACTIVE_BINDINGS))
+    return _ACTIVE_BINDINGS[token]
+
+
+def force_restore_all_session_bindings() -> None:
+    """Test finalizer: drop every temporary binding and restore process defaults.
+
+    Safe to call even when tests forget to close sessions.
+    """
+    global _CREATION_SEQ
+    import app.database as app_database  # noqa: E402
+
+    if _ORIGINAL_APP_DATABASE is None:
+        return
+
+    # Dispose/unlink every active temp engine.
+    for binding in list(_ACTIVE_BINDINGS.values()):
+        eng = binding.get("sqlalchemy_engine")
+        if eng is not None:
+            try:
+                eng.dispose()
+            except Exception:
+                pass
+        path = binding.get("tmp_path")
+        if isinstance(path, Path):
+            try:
+                path.unlink(missing_ok=True)  # type: ignore[call-arg]
+            except TypeError:
+                if path.exists():
+                    path.unlink()
+            except OSError:
+                pass
+            try:
+                _TEMP_DB_PATHS.remove(path)
+            except ValueError:
+                pass
+    _ACTIVE_BINDINGS.clear()
+    _CREATION_SEQ = 0
+
+    app_database.engine = _ORIGINAL_APP_DATABASE["engine"]
+    app_database.SessionLocal = _ORIGINAL_APP_DATABASE["SessionLocal"]
+    _install_module_sessionlocals(app_database.SessionLocal)
 
 
 def make_session() -> Session:
     """Create an isolated SQLite DB session with all models created.
 
-    Uses a unique temporary file so multiple Sessions/connections share one DB.
-    Process-global SessionLocal is rebound for capability/OpenClaw helpers and
-    always restored when the returned session is closed (or via finalizer token).
+    Uses a unique temporary file so multiple Sessions share one DB.
+    Process-global SessionLocal is rebound for capability/OpenClaw/LightRAG
+    helpers. Overlapping sessions are supported: closing one re-points globals
+    to the latest still-active binding (not always original). Callers that skip
+    ``close()`` are recovered by the autouse pytest finalizer.
     """
-    global _ORIGINAL_APP_DATABASE
+    global _ORIGINAL_APP_DATABASE, _CREATION_SEQ
     reset_caches()
 
     from app.database import Base  # noqa: E402
@@ -175,7 +206,6 @@ def make_session() -> Session:
 
     import app.database as app_database  # noqa: E402
 
-    # Remember the true process defaults once (before any test rebind).
     if _ORIGINAL_APP_DATABASE is None:
         _ORIGINAL_APP_DATABASE = {
             "engine": app_database.engine,
@@ -190,42 +220,29 @@ def make_session() -> Session:
     )
 
     token = uuid.uuid4().hex
-    previous_modules = _capture_module_sessionlocals()
-    previous_app = {
-        "engine": app_database.engine,
-        "SessionLocal": app_database.SessionLocal,
-    }
+    _CREATION_SEQ += 1
     _ACTIVE_BINDINGS[token] = {
-        "app": previous_app,
-        "modules": previous_modules,
+        "seq": _CREATION_SEQ,
         "tmp_path": tmp_path,
         "sqlalchemy_engine": engine,
+        "factory": test_session_factory,
+        "engine": engine,
     }
 
-    app_database.engine = engine
-    app_database.SessionLocal = test_session_factory
-    _install_module_sessionlocals(test_session_factory)
+    # Point globals at the newest active binding.
+    _apply_global_factory(test_session_factory, engine)
 
     session = test_session_factory()
     restored = {"done": False}
 
-    def _restore_bindings() -> None:
+    def _release_binding() -> None:
         if restored["done"]:
             return
         restored["done"] = True
         binding = _ACTIVE_BINDINGS.pop(token, None)
         if binding is None:
             return
-        # Restore app.database to the state before this session.
-        app_database.engine = binding["app"]["engine"]
-        app_database.SessionLocal = binding["app"]["SessionLocal"]
-        # If no other test sessions remain active, force absolute original defaults.
-        if not _ACTIVE_BINDINGS and _ORIGINAL_APP_DATABASE is not None:
-            app_database.engine = _ORIGINAL_APP_DATABASE["engine"]
-            app_database.SessionLocal = _ORIGINAL_APP_DATABASE["SessionLocal"]
-        _restore_module_sessionlocals(binding["modules"])
-        # Re-assert module bindings against current global for any late imports.
-        _install_module_sessionlocals(app_database.SessionLocal)
+
         eng = binding.get("sqlalchemy_engine")
         if eng is not None:
             try:
@@ -246,18 +263,29 @@ def make_session() -> Session:
             except ValueError:
                 pass
 
+        # Non-LIFO safe: re-point to latest remaining active binding, else original.
+        latest = _latest_active_binding()
+        if latest is not None:
+            _apply_global_factory(latest["factory"], latest["engine"])
+        elif _ORIGINAL_APP_DATABASE is not None:
+            _apply_global_factory(
+                _ORIGINAL_APP_DATABASE["SessionLocal"],
+                _ORIGINAL_APP_DATABASE["engine"],
+            )
+
     original_close = session.close
 
     def _close_and_restore(*args: Any, **kwargs: Any) -> None:
         try:
             return original_close(*args, **kwargs)
         finally:
-            _restore_bindings()
+            _release_binding()
 
     session.close = _close_and_restore  # type: ignore[method-assign]
-    # Helpful for debugging / explicit finalizers.
-    session._mindatlas_restore_bindings = _restore_bindings  # type: ignore[attr-defined]
+    session._mindatlas_restore_bindings = _release_binding  # type: ignore[attr-defined]
     session._mindatlas_binding_token = token  # type: ignore[attr-defined]
+    # GC fallback if a test drops the session without close().
+    weakref.finalize(session, _release_binding)
     return session
 
 

@@ -160,6 +160,7 @@ def _snap(model: AiModel, cred: AiCredential, digest: str, endpoint: dict) -> "_
         adapter_key=ADAPTER_KEY,
         adapter_revision=ADAPTER_REVISION,
         app_build_revision=APP_BUILD,
+        api_key_encrypted=str(getattr(cred, "api_key_encrypted", "") or "enc-test"),
     )
 
 
