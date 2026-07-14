@@ -15,8 +15,14 @@ from app.assistant.workflow.engine.state import NodeOutput, WorkflowState
 def build_code_executor_node(
     node_id: str,
     node_cfg: dict,
+    execution_scope: Any | None = None,
 ) -> Callable[[WorkflowState], dict]:
     def code_executor_node(state: WorkflowState) -> dict:
+        if execution_scope is not None:
+            # Plan 02 classifies code_executor as unknown; fail closed under Capability scope.
+            raise RuntimeError(
+                f"DAG code_executor node {node_id}: unavailable under capability scope"
+            )
         metadata = state.get("metadata", {})
         node_outputs = dict(state.get("node_outputs", {}))
         start_inputs = get_start_inputs(node_outputs)

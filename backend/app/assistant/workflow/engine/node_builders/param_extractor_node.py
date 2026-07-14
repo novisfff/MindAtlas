@@ -19,7 +19,9 @@ def build_param_extractor_node(
     node_cfg: dict,
     llm: ChatOpenAI,
     node_llms: dict[str, ChatOpenAI] | None = None,
+    execution_scope: Any | None = None,
 ) -> Callable[[WorkflowState], dict]:
+    _ = execution_scope
     def param_extractor_node(state: WorkflowState) -> dict:
         metadata = state.get("metadata", {})
         node_outputs = dict(state.get("node_outputs", {}))

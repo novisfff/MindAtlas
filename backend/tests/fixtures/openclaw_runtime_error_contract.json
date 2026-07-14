@@ -1,0 +1,139 @@
+{
+  "schemaVersion": 1,
+  "source": "backend/app/openclaw_integration/service.py constants + execute path review",
+  "recordedAt": "2026-07-14",
+  "plan01Head": "2d47173",
+  "alembicHead": "acf208493c87",
+  "runtimeAuthAndExecute": [
+    {
+      "code": 40161,
+      "http": 401,
+      "name": "OPENCLAW_AUTH_ERROR_CODE",
+      "when": "missing/invalid bearer"
+    },
+    {
+      "code": 40361,
+      "http": 403,
+      "name": "OPENCLAW_DISABLED_ERROR_CODE",
+      "when": "integration disabled"
+    },
+    {
+      "code": 40362,
+      "http": 403,
+      "name": "OPENCLAW_CAPABILITY_DISABLED_ERROR_CODE",
+      "when": "capability disabled"
+    },
+    {
+      "code": 40461,
+      "http": 404,
+      "name": "OPENCLAW_CAPABILITY_NOT_FOUND_ERROR_CODE",
+      "when": "capability not found"
+    },
+    {
+      "code": 40061,
+      "http": 400,
+      "name": "OPENCLAW_SECRET_REQUIRED_ERROR_CODE",
+      "when": "secret required/setup"
+    },
+    {
+      "code": 40062,
+      "http": 400,
+      "name": "OPENCLAW_INVALID_CAPABILITY_ERROR_CODE",
+      "when": "invalid capability configuration"
+    },
+    {
+      "code": 40064,
+      "http": 400,
+      "name": "UNKNOWN_ENTRY_TYPE",
+      "when": "unknown entry type in capture/search path"
+    },
+    {
+      "code": 42261,
+      "http": 422,
+      "name": "OPENCLAW_INVALID_SCHEMA_ERROR_CODE",
+      "when": "input/output schema validation"
+    },
+    {
+      "code": 42262,
+      "http": 422,
+      "name": "OPENCLAW_INVALID_SOURCE_ERROR_CODE",
+      "when": "invalid/missing source binding"
+    },
+    {
+      "code": 40961,
+      "http": 409,
+      "name": "RUNTIME_UNAVAILABLE_OR_DRIFT",
+      "when": "tool unavailable / workflow-agent published version unavailable / contract drift"
+    },
+    {
+      "code": 40965,
+      "http": 409,
+      "name": "CONFLICT_40965",
+      "when": "runtime conflict branch (catalog/source conflict)"
+    },
+    {
+      "code": 50038,
+      "http": 500,
+      "name": "SYSTEM_WORKFLOW_ITEM_INCOMPLETE",
+      "when": "system workflow item incomplete"
+    }
+  ],
+  "adminOnlyNotExecuteCompatibility": [
+    {
+      "code": 40462,
+      "http": 404,
+      "when": "admin capability item not found"
+    },
+    {
+      "code": 40971,
+      "http": 409,
+      "when": "openclaw tool name already exists"
+    },
+    {
+      "code": "40972-40973",
+      "http": 409,
+      "when": "admin catalog conflicts (if present)"
+    }
+  ],
+  "publicResponseEnvelope": {
+    "success": "boolean",
+    "code": "int application code",
+    "message": "string",
+    "data": "object|null; machine details may live under data"
+  },
+  "systemToolExports": [
+    "analyze_activity",
+    "create_entry",
+    "create_relation",
+    "generate_monthly_report",
+    "generate_weekly_report",
+    "get_entries_by_time_range",
+    "get_entry_detail",
+    "get_statistics",
+    "get_tag_statistics",
+    "kb_relation_recommendations",
+    "kb_search",
+    "list_entry_types",
+    "list_tags",
+    "openclaw_capture_entry",
+    "openclaw_create_relation",
+    "openclaw_get_entry",
+    "openclaw_query_knowledge_graph",
+    "openclaw_search_entries",
+    "query_knowledge_graph",
+    "search_entries",
+    "search_similar_entries",
+    "update_entry"
+  ],
+  "openclawCompatTools": [
+    "openclaw_capture_entry",
+    "openclaw_search_entries",
+    "openclaw_get_entry",
+    "openclaw_create_relation",
+    "openclaw_query_knowledge_graph"
+  ],
+  "notes": [
+    "OpenClaw execute is shared-only via execute_shared_capability (Plan 02B cleanup).",
+    "HTTP execute uses the bounded worker boundary; no dual-mode selector remains."
+  ]
+}

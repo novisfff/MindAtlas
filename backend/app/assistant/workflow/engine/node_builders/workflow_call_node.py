@@ -311,6 +311,8 @@ def build_workflow_call_node(
     args_llm: ChatOpenAI,
     tool_map: dict[str, Any],
     db_bind: Any,
+    execution_scope: Any | None = None,
+    container_node_id: str | None = None,
 ) -> Callable[[WorkflowState], dict]:
     def workflow_call_node(state: WorkflowState) -> dict:
         from app.assistant.workflow.engine import engine as engine_runtime
@@ -318,6 +320,10 @@ def build_workflow_call_node(
             build_initial_messages,
             build_initial_state,
             resolve_workflow_runtime_context,
+        )
+        from app.assistant.workflow.engine.runtime_dependency_resolver import (
+            MAX_CAPABILITY_NESTING_DEPTH,
+            WorkflowEngineExecutionScope,
         )
 
         target_workflow_id = AssistantConfigService._parse_uuid_value(
@@ -342,7 +348,298 @@ def build_workflow_call_node(
                 default=None,
             )
         )
+        container_id = str(
+            container_node_id
+            or node_cfg.get("__container_node_id")
+            or node_cfg.get("container_node_id")
+            or ""
+        ).strip() or None
 
+        # Capability scope: exact frozen child only; never latest / graph_snapshot / Registry.
+        if execution_scope is not None:
+            if binding_mode != "pinned" or target_version_id is None:
+                raise RuntimeError(
+                    f"DAG workflow_call node {node_id}: unpinned/dynamic child unavailable under capability scope"
+                )
+            next_depth = int(getattr(execution_scope, "nesting_depth", 0) or 0) + 1
+            if next_depth > MAX_CAPABILITY_NESTING_DEPTH:
+                raise RuntimeError(
+                    f"DAG workflow_call node {node_id}: capability nesting depth denied"
+                )
+            # Plan 01 freezes nested body workflow_call as root/workflow_call:{container}::{node}.
+            locator_candidates: list[str] = []
+            if container_id:
+                locator_candidates.append(f"root/workflow_call:{container_id}::{node_id}")
+            locator_candidates.extend(
+                (
+                    f"root/workflow_call:{node_id}",
+                    f"root/node:{node_id}/workflow_call",
+                )
+            )
+            if container_id:
+                locator_candidates.append(
+                    f"root/node:{container_id}/body/node:{node_id}/workflow_call"
+                )
+            child_target = None
+            source_locator = locator_candidates[0]
+            for candidate in locator_candidates:
+                try:
+                    child_target = execution_scope.dependency_resolver.require_workflow_version(
+                        source_locator=candidate,
+                        workflow_id=target_workflow_id,
+                        version_id=target_version_id,
+                    )
+                    source_locator = candidate
+                    break
+                except Exception:
+                    continue
+            if child_target is None:
+                raise RuntimeError(
+                    f"DAG workflow_call node {node_id}: child workflow not in frozen closure"
+                )
+
+            published_input = getattr(child_target, "parsed_published_input", None)
+            if published_input is None:
+                raise RuntimeError(
+                    f"DAG workflow_call node {node_id}: child workflow published input missing"
+                )
+            try:
+                from app.assistant_config.workflow_contracts import workflow_contract_from_input
+
+                contract = workflow_contract_from_input(published_input)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"DAG workflow_call node {node_id}: child workflow contract invalid"
+                ) from None
+
+            metadata = state.get("metadata", {}) if isinstance(state.get("metadata", {}), dict) else {}
+            runtime_stack = (
+                [str(item) for item in metadata.get("__workflow_call_stack__", [])]
+                if isinstance(metadata, dict)
+                else []
+            )
+            if str(target_workflow_id) in runtime_stack:
+                raise RuntimeError(
+                    f"DAG workflow_call node {node_id}: recursive workflow call detected"
+                )
+
+            input_payload = _resolve_workflow_call_input_payload(
+                node_cfg=node_cfg,
+                state=state,
+                contract_input_fields=contract.input_fields,
+            )
+            child_user_input = ""
+            child_structured_input: dict[str, Any] | None = None
+            if contract.input_mode == "text":
+                child_user_input = stringify(input_payload.get("user_input", ""))
+            else:
+                child_structured_input = input_payload
+
+            # Ambient memory disabled under Capability scope.
+            child_memory_context = {
+                "l0_text": "",
+                "l0_messages": [],
+                "l0_source_count": 0,
+                "l0_trimmed_chars": 0,
+                "l1_text": "",
+                "l2_text": "",
+                "l2_facts": [],
+                "workflow_call_scopes": {},
+            }
+
+            # Build child tools exclusively from Plan 01 frozen dependency paths.
+            # Plan 01 freezes child tools as:
+            #   {source_locator}/node:{childNodeId}/tool:{name}
+            # Never accept an unproven parent tool_map hit under capability scope.
+            from app.assistant_config.workflow_references import collect_workflow_tool_usages
+
+            child_tool_usages = collect_workflow_tool_usages(
+                getattr(published_input, "nodes", []) or [],
+                path_prefix=source_locator,
+            )
+            child_tool_map: dict[str, Any] = {}
+            for frozen_path, tool_name in child_tool_usages:
+                tool_obj = None
+                last_exc: BaseException | None = None
+                # Prefer exact frozen path first, then narrow candidates only.
+                for locator in (
+                    frozen_path,
+                    f"{source_locator}/tool:{tool_name}",
+                ):
+                    try:
+                        target = execution_scope.dependency_resolver.require_tool(
+                            source_locator=locator,
+                            tool_name=tool_name,
+                        )
+                        tool_obj = getattr(target, "tool_object_or_record", target)
+                        last_exc = None
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                        continue
+                if tool_obj is None:
+                    raise RuntimeError(
+                        f"DAG workflow_call node {node_id}: child tool not in frozen closure: {tool_name}"
+                    ) from last_exc
+                child_tool_map[tool_name] = tool_obj
+
+            default_headers = build_openai_compat_client_headers()
+
+            def _resolve_child_node_llm(model_id: str, runtime_key: str) -> ChatOpenAI:
+                requested = None
+                try:
+                    requested = UUID(str(model_id))
+                except Exception:
+                    requested = None
+                activated = None
+                for locator in (
+                    f"{source_locator}/node:{runtime_key}/model",
+                    f"{source_locator}/model",
+                    f"root/workflow_call:{node_id}/node:{runtime_key}/model",
+                    f"root/node:{runtime_key}/model",
+                ):
+                    try:
+                        activated = execution_scope.dependency_resolver.require_model(
+                            source_locator=locator,
+                            requested_model_id=requested,
+                        )
+                        break
+                    except Exception:
+                        continue
+                if activated is None:
+                    raise RuntimeError(
+                        f"DAG workflow_call node {node_id}: child model not in frozen closure"
+                    )
+                handle = getattr(activated, "client_or_credential_handle", None)
+                if not isinstance(handle, dict):
+                    raise RuntimeError(
+                        f"DAG workflow_call node {node_id}: child model handle invalid"
+                    )
+                return ChatOpenAI(
+                    api_key=str(handle.get("api_key") or ""),
+                    base_url=str(handle.get("base_url") or ""),
+                    model=str(
+                        handle.get("model_name")
+                        or getattr(activated, "model_name", None)
+                        or model_id
+                    ),
+                    streaming=True,
+                    default_headers=default_headers,
+                )
+
+            child_skill = _build_child_skill_definition(
+                workflow_id=str(target_workflow_id),
+                workflow_version_id=str(target_version_id),
+                workflow_name=str(target_workflow_id),
+                workflow_description="",
+                workflow_input=published_input,
+                tool_names=set(child_tool_names or []),
+            )
+            child_node_llms = resolve_workflow_node_llms_from_nodes(
+                workflow_nodes=child_skill.workflow_nodes,
+                normalize_config=engine_runtime._normalize_config,
+                normalize_container_body_nodes=engine_runtime._normalize_container_body_nodes,
+                resolve_node_custom_llm=_resolve_child_node_llm,
+            )
+            child_node_llms, workflow_node_types, output_stream_source_node_id = resolve_workflow_runtime_context(
+                skill_name=child_skill.name,
+                workflow_nodes=child_skill.workflow_nodes,
+                normalize_config=engine_runtime._normalize_config,
+                extract_single_template_reference=extract_single_template_reference,
+                resolve_workflow_node_llms=lambda: child_node_llms,
+            )
+
+            scoped_metadata = build_scoped_metadata(node_id, metadata)
+            scoped_metadata["__workflow_call_stack__"] = [*runtime_stack, str(target_workflow_id)]
+            scoped_metadata.pop("on_content_delta", None)
+
+            child_scope = WorkflowEngineExecutionScope(
+                dependency_resolver=execution_scope.dependency_resolver,
+                binding_contract_digest=execution_scope.binding_contract_digest,
+                dependency_closure_digest=execution_scope.dependency_closure_digest,
+                nesting_depth=next_depth,
+                safe_diagnostics=bool(getattr(execution_scope, "safe_diagnostics", True)),
+                allow_ambient_memory=False,
+                allow_global_graph_cache=False,
+            )
+
+            initial_state = build_initial_state(
+                pattern="workflow_dag",
+                messages=build_initial_messages(history=[], user_input=child_user_input),
+                skill_name=child_skill.name,
+                workflow_id=child_skill.workflow_id,
+                workflow_version_id=child_skill.workflow_version_id,
+                user_input=child_user_input,
+                kb_enabled=False,
+                memory_mode="off",
+                metadata=scoped_metadata,
+                sys_vars=state.get("sys_vars", {}) or {},
+                workflow_node_types=workflow_node_types,
+                node_llms=child_node_llms,
+                stream_output_enabled=False,
+                output_stream_source_node_id=output_stream_source_node_id,
+                structured_input=child_structured_input,
+                memory_context=child_memory_context,
+            )
+
+            compiled = engine_runtime.build_workflow_dag_subgraph(
+                child_skill,
+                child_skill.workflow_nodes,
+                child_skill.workflow_edges,
+                llm,
+                args_llm,
+                child_tool_map,
+                db_bind,
+                node_llms=child_node_llms,
+                execution_scope=child_scope,
+            )
+            final_state = invoke_graph_runnable(compiled, initial_state)
+
+            if not isinstance(final_state, dict):
+                raise RuntimeError(f"DAG workflow_call node {node_id}: child workflow returned invalid state")
+
+            child_node_outputs = final_state.get("node_outputs", {})
+            if not isinstance(child_node_outputs, dict):
+                child_node_outputs = {}
+            execution_trace = final_state.get("execution_trace", [])
+            if not isinstance(execution_trace, list):
+                execution_trace = []
+
+            child_output_node_id = next(
+                (
+                    str(trace_node_id)
+                    for trace_node_id in reversed(execution_trace)
+                    if workflow_node_types.get(str(trace_node_id)) == "output"
+                ),
+                "",
+            )
+            if not child_output_node_id:
+                raise RuntimeError(f"DAG workflow_call node {node_id}: child workflow did not execute an output node")
+
+            child_output = child_node_outputs.get(child_output_node_id)
+            if not isinstance(child_output, dict):
+                raise RuntimeError(f"DAG workflow_call node {node_id}: child workflow output payload is missing")
+
+            child_json_fields = child_output.get("json_fields") if isinstance(child_output.get("json_fields"), dict) else {}
+            response_value = child_json_fields.get("response", child_output.get("text", ""))
+            response_text = stringify(response_value)
+
+            node_out = NodeOutput(
+                status="ok",
+                text=response_text,
+                raw=child_output.get("raw", response_value),
+                json_fields={
+                    "response": response_value,
+                    **child_json_fields,
+                },
+            )
+            return {
+                "node_outputs": {node_id: node_out},
+                "execution_trace": [node_id],
+                "memory_context": state.get("memory_context", {}) if isinstance(state.get("memory_context"), dict) else {},
+            }
+
+        # ---------------- Legacy path (execution_scope is None) ----------------
         session_factory = sessionmaker(bind=db_bind)
         with session_factory() as session:
             config_service = AssistantConfigService(session)
@@ -510,6 +807,7 @@ def build_workflow_call_node(
                 child_tool_map,
                 db_bind,
                 node_llms=child_node_llms,
+                execution_scope=None,
             )
             final_state = invoke_graph_runnable(compiled, initial_state)
 

@@ -112,3 +112,40 @@ class UpdateModelBindingsRequest(CamelModel):
     assistant: UpdateComponentBindingRequest | None = None
     lightrag: UpdateComponentBindingRequest | None = None
     workflow_copilot: UpdateComponentBindingRequest | None = None
+
+
+# ==================== Capability Probe ====================
+
+ProbeStatus = Literal["passed", "partial", "failed"]
+PromotionOutcome = Literal["promoted", "not_requested", "config_changed"]
+
+
+class AiModelCapabilityProbeRunRequest(CamelModel):
+    """Network input only. Evidence/config digests are server-derived."""
+
+    adapter_key: str = Field(default="openai_chat_completions", min_length=1, max_length=64)
+    confirm_provider_call: bool = False
+    promote: bool = True
+
+
+class AiModelCapabilityProbeCapabilityItem(CamelModel):
+    observation: Literal["passed", "failed", "not_observed"]
+    safe_reason_code: str | None = None
+
+
+class AiModelCapabilityProbeResponse(CamelModel):
+    id: UUID
+    model_id: UUID
+    probe_contract_version: int
+    adapter_key: str
+    adapter_revision: str
+    model_config_digest: str
+    status: ProbeStatus
+    capabilities: dict[str, AiModelCapabilityProbeCapabilityItem]
+    probe_digest: str
+    safe_error_code: str | None = None
+    safe_error_summary: str | None = None
+    created_at: datetime
+    is_current: bool = False
+    is_stale_for_current_config: bool = False
+    promotion_outcome: PromotionOutcome | None = None

@@ -24,6 +24,9 @@ from app.assistant.workflow.engine.graph_runner import (
     snapshot_graph_state,
 )
 from app.assistant.workflow.engine import runtime_helpers as _rt
+from app.assistant.workflow.engine.runtime_dependency_resolver import (
+    WorkflowEngineExecutionScope,
+)
 from app.assistant.workflow.engine import snapshots as _snap
 from app.assistant.workflow.engine import stream_runtime as _stream
 from app.assistant.workflow.engine.state import AssistantState, NodeOutput, WorkflowState
@@ -198,6 +201,7 @@ def _execute_container_body(
     node_llms: dict[str, ChatOpenAI] | None = None,
     container_input: Any = "",
     container_fields: dict[str, Any] | None = None,
+    execution_scope: WorkflowEngineExecutionScope | None = None,
 ) -> dict[str, Any]:
     from app.assistant.workflow.engine.container_runtime import execute_container_body
     return execute_container_body(
@@ -212,6 +216,7 @@ def _execute_container_body(
         node_llms=node_llms,
         container_input=container_input,
         container_fields=container_fields,
+        execution_scope=execution_scope,
     )
 
 
@@ -408,7 +413,8 @@ def build_workflow_dag_subgraph(
     tool_map: dict[str, Any],
     db_bind: Any,
     node_llms: dict[str, ChatOpenAI] | None = None,
-    ) -> Any:
+    execution_scope: WorkflowEngineExecutionScope | None = None,
+) -> Any:
     """Compile a workflow DAG into a LangGraph StateGraph."""
     from langgraph.graph import END, StateGraph
     from app.assistant.workflow.engine.workflow_dag_assembler import (
@@ -445,6 +451,7 @@ def build_workflow_dag_subgraph(
         tool_map=tool_map,
         db_bind=db_bind,
         node_llms=node_llms,
+        execution_scope=execution_scope,
         build_start_node=_build_start_node,
         build_dag_llm_node=_build_dag_llm_node,
         build_dag_agent_node=_build_dag_agent_node,
@@ -570,9 +577,18 @@ def _get_or_compile_graph(
 class LangGraphEngine:
     """LangGraph 执行引擎入口。"""
 
-    def __init__(self, api_key: str, base_url: str, model: str, db: Session | None = None):
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        db: Session | None = None,
+        execution_scope: WorkflowEngineExecutionScope | None = None,
+    ):
         self.model = model
         self.db = db
+        # execution_scope=None preserves exact Legacy ToolRegistry/component lookup.
+        self.execution_scope = execution_scope
         self.llm = _build_chat_openai_client(
             api_key=api_key,
             base_url=base_url,
@@ -589,9 +605,29 @@ class LangGraphEngine:
         self._tool_cache: dict[str, Any] = {}
         self._node_llm_cache: dict[str, tuple[tuple[str, str, str], ChatOpenAI]] = {}
 
-    def _get_tool(self, tool_name: str) -> Any:
+    def _capability_scope_active(self) -> bool:
+        return self.execution_scope is not None
+
+    def _safe_diagnostics(self) -> bool:
+        scope = self.execution_scope
+        return bool(scope is not None and getattr(scope, "safe_diagnostics", False))
+
+    def _get_tool(self, tool_name: str, *, source_locator: str | None = None) -> Any:
         if tool_name in self._tool_cache:
             return self._tool_cache[tool_name]
+
+        scope = self.execution_scope
+        if scope is not None:
+            locator = source_locator or f"root/tool:{tool_name}"
+            target = scope.dependency_resolver.require_tool(
+                source_locator=locator,
+                tool_name=tool_name,
+            )
+            tool = getattr(target, "tool_object_or_record", target)
+            if tool:
+                self._tool_cache[tool_name] = tool
+            return tool
+
         from app.assistant_config.registry import ToolRegistry
         if self.db is not None:
             registry = ToolRegistry(self.db)
@@ -619,12 +655,100 @@ class LangGraphEngine:
                 tool_names.append("kb_search")
 
         tools = []
+        scope = self.execution_scope
         for name in tool_names:
-            tool = self._get_tool(name)
+            if scope is not None:
+                # Exact closure only — never ToolRegistry name fallback.
+                locator = f"root/tool:{name}"
+                # Prefer node-scoped locators when present in skill tools list only as names.
+                try:
+                    tool = self._get_tool(name, source_locator=locator)
+                except Exception:
+                    # Try alternate root node locator patterns used by Plan 01 freezes,
+                    # including nested body tools under iteration/loop containers.
+                    found = None
+                    for candidate in (
+                        f"root/node:tool_0/tool:{name}",
+                        f"root/node:{name}/tool:{name}",
+                    ):
+                        try:
+                            found = self._get_tool(name, source_locator=candidate)
+                            break
+                        except Exception:
+                            continue
+                    if found is None:
+                        # Scan skill workflow nodes (and nested container bodies) for
+                        # matching tool_name / toolNames and try body-aware locators.
+                        def _scan_nodes(nodes: Any, *, container_id: str | None = None) -> Any:
+                            for node in nodes or []:
+                                cfg = getattr(node, "config", None) or {}
+                                if not isinstance(cfg, dict):
+                                    # dict-shaped nodes from published input
+                                    if isinstance(node, dict):
+                                        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+                                    else:
+                                        continue
+                                node_id = str(
+                                    getattr(node, "node_id", None)
+                                    or (node.get("node_id") if isinstance(node, dict) else None)
+                                    or (node.get("nodeId") if isinstance(node, dict) else None)
+                                    or ""
+                                ).strip()
+                                node_type = str(
+                                    getattr(node, "node_type", None)
+                                    or (node.get("node_type") if isinstance(node, dict) else None)
+                                    or (node.get("nodeType") if isinstance(node, dict) else None)
+                                    or ""
+                                ).strip()
+                                candidates: list[str] = []
+                                node_tool = str(cfg.get("tool_name", cfg.get("toolName", "")) or "").strip()
+                                raw_tool_names = cfg.get("toolNames", cfg.get("tool_names"))
+                                name_matches = node_tool == name
+                                if not name_matches and isinstance(raw_tool_names, list):
+                                    name_matches = any(
+                                        isinstance(item, str) and item.strip() == name
+                                        for item in raw_tool_names
+                                    )
+                                if name == "kb_search" and (
+                                    node_type == "knowledge_retrieval"
+                                    or (
+                                        node_type == "agent"
+                                        and bool(cfg.get("knowledgeEnabled", cfg.get("knowledge_enabled")))
+                                    )
+                                ):
+                                    name_matches = True
+                                if name_matches and node_id:
+                                    if container_id:
+                                        candidates.append(
+                                            f"root/node:{container_id}/body/node:{node_id}/tool:{name}"
+                                        )
+                                    candidates.append(f"root/node:{node_id}/tool:{name}")
+                                for candidate in candidates:
+                                    try:
+                                        return self._get_tool(name, source_locator=candidate)
+                                    except Exception:
+                                        continue
+                                if node_type in {"iteration", "loop"} and node_id:
+                                    body_nodes = cfg.get("bodyNodes", cfg.get("body_nodes"))
+                                    if isinstance(body_nodes, list):
+                                        nested = _scan_nodes(body_nodes, container_id=node_id)
+                                        if nested is not None:
+                                            return nested
+                            return None
+
+                        found = _scan_nodes(getattr(skill, "workflow_nodes", None) or [])
+                    if found is None:
+                        raise
+                    tool = found
+            else:
+                tool = self._get_tool(name)
             if tool:
                 tools.append(tool)
             else:
-                logger.warning("LangGraph tool not found: %s", name)
+                if self._safe_diagnostics():
+                    logger.warning("LangGraph tool not found tool_name=%s", name)
+                else:
+                    logger.warning("LangGraph tool not found: %s", name)
         return tools
 
     def _build_agent_system_prompt(self, skill: SkillDefinition, tool_names: list[str], *, locale: str | None) -> str:
@@ -641,6 +765,68 @@ class LangGraphEngine:
         )
 
     def _resolve_node_custom_llm(self, model_id: str, *, node_id: str) -> ChatOpenAI:
+        scope = self.execution_scope
+        if scope is not None:
+            requested = None
+            try:
+                from uuid import UUID as _UUID
+
+                requested = _UUID(str(model_id))
+            except Exception:
+                requested = None
+            locator_candidates = [
+                f"root/node:{node_id}/model",
+                f"root/node:{node_id.split('::')[-1]}/model" if "::" in str(node_id) else "",
+                f"root/model",
+            ]
+            activated = None
+            last_exc: BaseException | None = None
+            for locator in locator_candidates:
+                if not locator:
+                    continue
+                try:
+                    activated = scope.dependency_resolver.require_model(
+                        source_locator=locator,
+                        requested_model_id=requested,
+                    )
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+            if activated is None:
+                if self._safe_diagnostics():
+                    logger.error(
+                        "capability_safe_execution stage=resolve_node_model node_id=%s exc_class=%s",
+                        node_id,
+                        type(last_exc).__name__ if last_exc else "-",
+                    )
+                raise RuntimeError(
+                    f"Workflow node {node_id} references unavailable llm model under capability scope"
+                )
+            handle = getattr(activated, "client_or_credential_handle", None)
+            if not isinstance(handle, dict):
+                raise RuntimeError(
+                    f"Workflow node {node_id} model credential handle invalid under capability scope"
+                )
+            api_key = str(handle.get("api_key") or "")
+            base_url = str(handle.get("base_url") or "")
+            model_name = str(
+                handle.get("model_name") or getattr(activated, "model_name", None) or model_id
+            )
+            cache_key = f"scope:{model_id}:{base_url}:{model_name}"
+            fingerprint = (base_url, model_name, api_key)
+            cached = self._node_llm_cache.get(cache_key)
+            if cached and cached[0] == fingerprint:
+                return cached[1]
+            node_llm = _build_chat_openai_client(
+                api_key=api_key,
+                base_url=base_url,
+                model=model_name,
+                streaming=True,
+            )
+            self._node_llm_cache[cache_key] = (fingerprint, node_llm)
+            return node_llm
+
         if self.db is None:
             raise RuntimeError(
                 f"Workflow node {node_id} requires custom model {model_id}, but DB session is unavailable"
@@ -682,6 +868,9 @@ class LangGraphEngine:
         )
 
     def _load_l1_summary(self, *, conversation_id_uuid: UUID | None) -> str:
+        scope = self.execution_scope
+        if scope is not None and not bool(getattr(scope, "allow_ambient_memory", False)):
+            return ""
         if self.db is None or conversation_id_uuid is None:
             return ""
         try:
@@ -693,10 +882,19 @@ class LangGraphEngine:
             summary = memory_service.get_l1_summary(conversation_id_uuid)
             return memory_service.truncate_summary(summary, max_chars=max_chars)
         except Exception:
-            logger.exception("assistant memory l1 load failed conversation_id=%s", conversation_id_uuid)
+            if self._safe_diagnostics():
+                logger.error(
+                    "capability_safe_execution stage=memory_l1 conversation_id=%s",
+                    conversation_id_uuid,
+                )
+            else:
+                logger.exception("assistant memory l1 load failed conversation_id=%s", conversation_id_uuid)
             return ""
 
     def _load_l2_text(self, *, conversation_id_uuid: UUID | None, skill_name: str) -> tuple[str, list[str]]:
+        scope = self.execution_scope
+        if scope is not None and not bool(getattr(scope, "allow_ambient_memory", False)):
+            return "", []
         if self.db is None or conversation_id_uuid is None:
             return "", []
         normalized_skill_name = str(skill_name or "").strip()
@@ -712,11 +910,18 @@ class LangGraphEngine:
             normalized = memory_service.normalize_l2_facts(facts, max_items=max_items)
             return memory_service.render_l2_text(normalized), normalized
         except Exception:
-            logger.exception(
-                "assistant memory l2 load failed conversation_id=%s skill=%s",
-                conversation_id_uuid,
-                normalized_skill_name,
-            )
+            if self._safe_diagnostics():
+                logger.error(
+                    "capability_safe_execution stage=memory_l2 conversation_id=%s skill=%s",
+                    conversation_id_uuid,
+                    normalized_skill_name,
+                )
+            else:
+                logger.exception(
+                    "assistant memory l2 load failed conversation_id=%s skill=%s",
+                    conversation_id_uuid,
+                    normalized_skill_name,
+                )
             return "", []
 
     def _load_runtime_memory_overrides(
@@ -724,6 +929,9 @@ class LangGraphEngine:
         *,
         raw_context: dict[str, Any],
     ) -> tuple[str | None, list[str] | None, dict[str, dict[str, Any]]]:
+        scope = self.execution_scope
+        if scope is not None and not bool(getattr(scope, "allow_ambient_memory", False)):
+            return None, None, {}
         raw_override = raw_context.get("session_memory", raw_context.get("sessionMemory"))
         if not isinstance(raw_override, dict):
             return None, None, {}
@@ -919,7 +1127,13 @@ class LangGraphEngine:
         )
 
         # 根据 pattern 编译/获取图
-        cache_key = _make_cache_key(skill, kb_enabled, self.model)
+        # Capability scope bypasses the global graph cache: the current key omits
+        # binding/dependency digests while compiled nodes capture Tool/model objects.
+        scope = self.execution_scope
+        allow_global_cache = True
+        if scope is not None:
+            allow_global_cache = bool(getattr(scope, "allow_global_graph_cache", False))
+        cache_key = _make_cache_key(skill, kb_enabled, self.model) if allow_global_cache else None
 
         pattern = skill.langgraph_pattern
         if pattern not in {"agent_loop", "workflow_dag"}:
@@ -950,10 +1164,13 @@ class LangGraphEngine:
                     sys_prompt = f"{sys_prompt}\n\n{memory_block}"
             messages[0] = SystemMessage(content=sys_prompt)
 
-            compiled = _get_or_compile_graph(
-                cache_key,
-                lambda: build_agent_subgraph(skill, self.llm, tools, db_bind),
-            )
+            if allow_global_cache and cache_key is not None:
+                compiled = _get_or_compile_graph(
+                    cache_key,
+                    lambda: build_agent_subgraph(skill, self.llm, tools, db_bind),
+                )
+            else:
+                compiled = build_agent_subgraph(skill, self.llm, tools, db_bind)
         elif pattern == "workflow_dag":
             wf_nodes = getattr(skill, "workflow_nodes", None) or []
             wf_edges = getattr(skill, "workflow_edges", None) or []
@@ -978,14 +1195,18 @@ class LangGraphEngine:
                 )
             )
 
-            compiled = _get_or_compile_graph(
-                cache_key,
-                lambda: build_workflow_dag_subgraph(
+            def _compile_workflow_dag():
+                return build_workflow_dag_subgraph(
                     skill, wf_nodes, wf_edges,
                     self.llm, self.args_llm, tool_map, db_bind,
                     node_llms=node_llms,
-                ),
-            )
+                    execution_scope=self.execution_scope,
+                )
+
+            if allow_global_cache and cache_key is not None:
+                compiled = _get_or_compile_graph(cache_key, _compile_workflow_dag)
+            else:
+                compiled = _compile_workflow_dag()
         initial_state: dict[str, Any] = _exec_plan.build_initial_state(
             pattern=pattern,
             messages=messages,
@@ -1017,6 +1238,17 @@ class LangGraphEngine:
                 cancel_checker=cancel_checker,
             )
         except Exception as e:
-            logger.error("LangGraph execution failed: skill=%s error=%s",
-                         skill.name, e, exc_info=True)
+            if self._safe_diagnostics():
+                logger.error(
+                    "capability_safe_execution stage=langgraph_execute skill=%s exc_class=%s",
+                    skill.name,
+                    type(e).__name__,
+                )
+            else:
+                logger.error(
+                    "LangGraph execution failed: skill=%s error=%s",
+                    skill.name,
+                    e,
+                    exc_info=True,
+                )
             raise

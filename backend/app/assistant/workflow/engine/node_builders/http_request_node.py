@@ -6,6 +6,7 @@ from typing import Any, Callable
 from app.assistant.workflow.engine.runtime_helpers import (
     emit,
     get_start_inputs,
+    logger,
     resolve_node_template_vars,
 )
 from app.assistant.workflow.engine.state import NodeOutput, WorkflowState
@@ -58,7 +59,12 @@ def _normalize_kv_rows(
 def build_http_request_node(
     node_id: str,
     node_cfg: dict,
+    execution_scope: Any | None = None,
 ) -> Callable[[WorkflowState], dict]:
+    safe_diagnostics = bool(
+        execution_scope is not None and getattr(execution_scope, "safe_diagnostics", False)
+    )
+
     def http_request_node(state: WorkflowState) -> dict:
         metadata = state.get("metadata", {})
         node_outputs = dict(state.get("node_outputs", {}))
@@ -175,8 +181,17 @@ def build_http_request_node(
             )
         except Exception as exc:
             emit(metadata, "on_node_end", node_id=node_id, status="error")
+            if safe_diagnostics:
+                logger.error(
+                    "capability_safe_execution stage=http_request_node node_id=%s exc_class=%s",
+                    node_id,
+                    type(exc).__name__,
+                )
+                raise RuntimeError(f"DAG http_request node {node_id} failed: http_request failed") from None
             raise RuntimeError(f"DAG http_request node {node_id} failed: {exc}") from exc
 
+        # NodeOutput must keep full bodies for downstream templates/nodes.
+        # safe_diagnostics only affects logs/events (exception path above), not runtime data.
         payload = {
             "body": result.body,
             "status_code": result.status_code,

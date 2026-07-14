@@ -127,6 +127,64 @@ class AiRegistryRuntimeTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_runtime_revision_helpers_reuse_plan01_payloads(self) -> None:
+        from app.ai_registry.runtime import (  # noqa: E402
+            credential_runtime_fields_changed,
+            invalidate_model_probe_pointers,
+            model_runtime_fields_changed,
+        )
+        from app.ai_registry.models import AiCredential, AiModel  # noqa: E402
+        from tests._db import make_session  # noqa: E402
+
+        db = make_session()
+        try:
+            cred = AiCredential(
+                name="rev-helpers",
+                base_url="https://api.example.com/v1",
+                api_key_encrypted="enc",
+                api_key_hint="****",
+                runtime_revision=1,
+            )
+            db.add(cred)
+            db.commit()
+            db.refresh(cred)
+            model = AiModel(
+                credential_id=cred.id,
+                name="gpt",
+                model_type="llm",
+                runtime_revision=1,
+                current_capability_probe_id=None,
+            )
+            db.add(model)
+            db.commit()
+            db.refresh(model)
+
+            self.assertFalse(
+                credential_runtime_fields_changed(
+                    {"base_url": cred.base_url, "api_key_encrypted": cred.api_key_encrypted},
+                    cred,
+                )
+            )
+            self.assertTrue(
+                credential_runtime_fields_changed(
+                    {"base_url": "https://other/v1", "api_key_encrypted": "enc"},
+                    cred,
+                )
+            )
+            self.assertFalse(model_runtime_fields_changed(model, model))
+            self.assertTrue(
+                model_runtime_fields_changed(
+                    {"name": "other", "model_type": "llm", "credential_id": model.credential_id},
+                    model,
+                )
+            )
+            # pointer clear helper
+            model.current_capability_probe_id = None
+            invalidate_model_probe_pointers([model])
+            self.assertIsNone(model.current_capability_probe_id)
+        finally:
+            db.close()
+
     def test_resolve_openai_compat_config_supports_workflow_copilot_component(self) -> None:
         from app.ai_registry.models import AiComponentBinding, AiCredential, AiModel  # noqa: E402
         from app.ai_registry.runtime import resolve_openai_compat_config  # noqa: E402

@@ -8,6 +8,10 @@ from sqlalchemy.orm import Session
 
 from app.common.responses import ApiResponse
 from app.database import get_db
+from app.openclaw_integration.runtime_worker import (
+    build_worker_request,
+    execute_openclaw_capability_in_worker,
+)
 from app.openclaw_integration.schemas import (
     OpenClawCapabilityItemCreateRequest,
     OpenClawCapabilityItemUpdateRequest,
@@ -135,14 +139,17 @@ async def execute_openclaw_capability(
     capability_key: str,
     request: Request,
     body: dict[str, Any],
-    db: Session = Depends(get_db),
 ) -> ApiResponse:
-    service = OpenClawIntegrationService(db)
-    audit_context = service.authorize_runtime_request(request)
-    payload = await service.execute_capability(
+    # Snapshot bounded headers/payload on the event loop; no request Session.
+    worker_request = build_worker_request(
         capability_key=capability_key,
-        raw_payload=body,
-        audit_context=audit_context,
         preferred_locale=_preferred_locale_from_request(request),
+        raw_payload=body if isinstance(body, dict) else {},
+        authorization_header=request.headers.get("authorization"),
+        source_header=request.headers.get("x-openclaw-source"),
+        channel_header=request.headers.get("x-openclaw-channel"),
+        session_header=request.headers.get("x-openclaw-session"),
+        tool_header=request.headers.get("x-openclaw-tool"),
     )
+    payload = await execute_openclaw_capability_in_worker(worker_request)
     return ApiResponse.ok(payload.model_dump(by_alias=True))

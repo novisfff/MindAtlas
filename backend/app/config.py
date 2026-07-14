@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Union
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -28,6 +27,13 @@ class Settings(BaseSettings):
     app_default_locale: str = Field(default="zh", alias="APP_DEFAULT_LOCALE")
     # Immutable image/git revision in staging/production. Local/test may use "development".
     app_build_revision: str = Field(default="development", alias="APP_BUILD_REVISION")
+
+    # Plan 03 live model capability probe (paid Provider call). Default-disabled.
+    # confirmProviderCall=true is cost acknowledgement only, not authentication.
+    ai_model_capability_probe_enabled: bool = Field(
+        default=False,
+        alias="AI_MODEL_CAPABILITY_PROBE_ENABLED",
+    )
 
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")

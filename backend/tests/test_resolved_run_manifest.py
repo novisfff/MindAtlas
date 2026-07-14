@@ -32,10 +32,12 @@ from app.assistant.domain.contracts import (  # noqa: E402
     SkillPackageMigrationState,
     SkillVersionConflictError,
     VersionSource,
+    append_provider_aliases,
     append_skill_activation,
     create_base_run_manifest,
     create_model_ref,
     create_provider_ref,
+    validate_manifest_child_link,
 )
 from app.assistant.domain.digests import (  # noqa: E402
     canonical_json_bytes,
@@ -994,3 +996,291 @@ def test_skill_ref_supports_alias_resolution_fields() -> None:
     assert skill.resolved_via_alias_id == ALIAS_ID
     with pytest.raises(ValidationError):
         skill.canonical_name = "x"  # type: ignore[misc]
+
+
+def _alias(
+    *,
+    provider_protocol: str = "openai_compat",
+    domain_key: str = "tools.search",
+    provider_alias: str = "search_entries",
+    binding_contract_digest: str = DIGEST_7,
+) -> ResolvedProviderAliasRef:
+    return ResolvedProviderAliasRef(
+        provider_protocol=provider_protocol,
+        domain_key=domain_key,
+        provider_alias=provider_alias,
+        binding_contract_digest=binding_contract_digest,
+    )
+
+
+def test_plan01_empty_alias_digest_remains_byte_identical() -> None:
+    """Cross-plan fixed vector: empty aliases still participate in v1 payload."""
+    base = create_base_run_manifest(
+        run_id=RUN_ID,
+        main_agent=_main_agent(),
+        provider=None,
+        model=None,
+        effective_policy_digest=None,
+    )
+    assert base.provider_aliases == ()
+    assert base.manifest_digest == sha256_canonical_json(
+        {
+            "schemaVersion": 1,
+            "runId": str(RUN_ID),
+            "revision": 1,
+            "parentDigest": None,
+            "mainAgent": {
+                "profileId": str(PROFILE_ID),
+                "versionId": str(PROFILE_VERSION_ID),
+                "profileKey": "general_chat",
+                "sequence": 1,
+                "contentDigest": DIGEST_A,
+            },
+            "activeSkills": [],
+            "capabilities": [],
+            "provider": None,
+            "model": None,
+            "providerAliases": [],
+            "effectivePolicyDigest": None,
+        }
+    )
+
+
+def test_append_provider_aliases_creates_one_child_revision() -> None:
+    base = create_base_run_manifest(
+        run_id=RUN_ID,
+        main_agent=_main_agent(),
+        provider=None,
+        model=None,
+        effective_policy_digest=None,
+    )
+    empty_digest = base.manifest_digest
+    child = append_provider_aliases(base, aliases=(_alias(),))
+    assert child is not base
+    assert child.revision == 2
+    assert child.parent_digest == empty_digest
+    assert child.manifest_digest != empty_digest
+    assert len(child.provider_aliases) == 1
+    validate_manifest_child_link(parent=base, child=child)
+
+
+def test_append_identical_aliases_is_idempotent() -> None:
+    base = create_base_run_manifest(
+        run_id=RUN_ID,
+        main_agent=_main_agent(),
+        provider=None,
+        model=None,
+        effective_policy_digest=None,
+    )
+    first = append_provider_aliases(base, aliases=(_alias(),))
+    again = append_provider_aliases(first, aliases=(_alias(),))
+    assert again is first
+    assert again.revision == 2
+
+
+def test_existing_alias_cannot_change_or_disappear() -> None:
+    base = create_base_run_manifest(
+        run_id=RUN_ID,
+        main_agent=_main_agent(),
+        provider=None,
+        model=None,
+        effective_policy_digest=None,
+    )
+    first = append_provider_aliases(base, aliases=(_alias(provider_alias="search_entries"),))
+    with pytest.raises(ValueError, match="conflict|cannot change"):
+        append_provider_aliases(
+            first,
+            aliases=(
+                _alias(
+                    provider_alias="search_other",
+                    binding_contract_digest=DIGEST_7,
+                ),
+            ),
+        )
+    # Parent aliases remain intact after a rejected append attempt.
+    assert first.provider_aliases[0].provider_alias == "search_entries"
+    assert len(first.provider_aliases) == 1
+
+
+def test_case_folded_alias_collision_is_rejected() -> None:
+    base = create_base_run_manifest(
+        run_id=RUN_ID,
+        main_agent=_main_agent(),
+        provider=None,
+        model=None,
+        effective_policy_digest=None,
+    )
+    first = append_provider_aliases(
+        base,
+        aliases=(_alias(domain_key="a.tool", provider_alias="SearchTool"),),
+    )
+    with pytest.raises(ValueError, match="case-fold|collision"):
+        append_provider_aliases(
+            first,
+            aliases=(
+                _alias(
+                    domain_key="b.tool",
+                    provider_alias="searchtool",
+                    binding_contract_digest=DIGEST_8,
+                ),
+            ),
+        )
+
+
+def test_same_domain_key_conflicting_binding_is_rejected() -> None:
+    base = create_base_run_manifest(
+        run_id=RUN_ID,
+        main_agent=_main_agent(),
+        provider=None,
+        model=None,
+        effective_policy_digest=None,
+    )
+    first = append_provider_aliases(
+        base,
+        aliases=(_alias(domain_key="tools.search", binding_contract_digest=DIGEST_7),),
+    )
+    with pytest.raises(ValueError, match="conflict|binding"):
+        append_provider_aliases(
+            first,
+            aliases=(
+                _alias(
+                    domain_key="tools.search",
+                    provider_alias="search_entries_v2",
+                    binding_contract_digest=DIGEST_8,
+                ),
+            ),
+        )
+
+
+def test_aliases_participate_in_manifest_digest_and_input_order_is_canonical() -> None:
+    base = create_base_run_manifest(
+        run_id=RUN_ID,
+        main_agent=_main_agent(),
+        provider=None,
+        model=None,
+        effective_policy_digest=None,
+    )
+    left = append_provider_aliases(
+        base,
+        aliases=(
+            _alias(domain_key="zeta", provider_alias="zeta_tool", binding_contract_digest=DIGEST_7),
+            _alias(domain_key="alpha", provider_alias="alpha_tool", binding_contract_digest=DIGEST_8),
+        ),
+    )
+    right = append_provider_aliases(
+        base,
+        aliases=(
+            _alias(domain_key="alpha", provider_alias="alpha_tool", binding_contract_digest=DIGEST_8),
+            _alias(domain_key="zeta", provider_alias="zeta_tool", binding_contract_digest=DIGEST_7),
+        ),
+    )
+    assert left.manifest_digest == right.manifest_digest
+    assert [item.domain_key for item in left.provider_aliases] == ["alpha", "zeta"]
+    assert left.manifest_digest != base.manifest_digest
+
+
+def test_later_skill_activation_preserves_old_aliases() -> None:
+    base = create_base_run_manifest(
+        run_id=RUN_ID,
+        main_agent=_main_agent(),
+        provider=None,
+        model=None,
+        effective_policy_digest=None,
+    )
+    with_alias = append_provider_aliases(base, aliases=(_alias(),))
+    with_skill = append_skill_activation(
+        with_alias,
+        skill=_skill(),
+        capabilities=(_capability(),),
+    )
+    assert with_skill.provider_aliases == with_alias.provider_aliases
+    assert with_skill.revision == with_alias.revision + 1
+    assert with_skill.parent_digest == with_alias.manifest_digest
+
+
+def test_realiasing_on_resume_fails() -> None:
+    base = create_base_run_manifest(
+        run_id=RUN_ID,
+        main_agent=_main_agent(),
+        provider=None,
+        model=None,
+        effective_policy_digest=None,
+    )
+    frozen = append_provider_aliases(
+        base,
+        aliases=(_alias(domain_key="tools.search", provider_alias="search_entries"),),
+    )
+    # Resume must use the exact alias revision; attempting to re-alias the same
+    # domain key with a different transport name is rejected.
+    with pytest.raises(ValueError, match="conflict|cannot change"):
+        append_provider_aliases(
+            frozen,
+            aliases=(
+                _alias(
+                    domain_key="tools.search",
+                    provider_alias="search_entries_renamed",
+                    binding_contract_digest=DIGEST_7,
+                ),
+            ),
+        )
+
+
+def test_digest_dependency_direction_binding_to_alias_to_manifest() -> None:
+    """binding -> alias ref -> manifest; no reverse/self reference in payloads."""
+    binding_digest = DIGEST_2
+    alias = _alias(binding_contract_digest=binding_digest)
+    alias_payload = {
+        "providerProtocol": alias.provider_protocol,
+        "domainKey": alias.domain_key,
+        "providerAlias": alias.provider_alias,
+        "bindingContractDigest": alias.binding_contract_digest,
+    }
+    # Alias payload never contains a manifest digest.
+    assert "manifestDigest" not in alias_payload
+    assert "surfaceDigest" not in alias_payload
+    assert alias_payload["bindingContractDigest"] == binding_digest
+
+    base = create_base_run_manifest(
+        run_id=RUN_ID,
+        main_agent=_main_agent(),
+        provider=None,
+        model=None,
+        effective_policy_digest=None,
+    )
+    child = append_provider_aliases(base, aliases=(alias,))
+    # Manifest digest includes alias payload but not surface digests.
+    from app.assistant.domain.contracts import build_manifest_digest_payload
+
+    payload = build_manifest_digest_payload(
+        run_id=child.run_id,
+        revision=child.revision,
+        parent_digest=child.parent_digest,
+        main_agent=child.main_agent,
+        active_skills=child.active_skills,
+        capabilities=child.capabilities,
+        provider=child.provider,
+        model=child.model,
+        provider_aliases=child.provider_aliases,
+        effective_policy_digest=child.effective_policy_digest,
+    )
+    assert "manifestDigest" not in payload
+    assert "surfaceDigest" not in payload
+    assert "aliasMapDigest" not in payload
+    assert payload["providerAliases"][0]["bindingContractDigest"] == binding_digest
+    # alias map digest is computed after the revision exists and is not copied back.
+    alias_map_digest = sha256_canonical_json(
+        {
+            "schemaVersion": 1,
+            "providerProtocol": "openai_compat",
+            "manifestDigest": child.manifest_digest,
+            "aliases": [
+                {
+                    "domainKey": alias.domain_key,
+                    "providerAlias": alias.provider_alias,
+                    "bindingContractDigest": binding_digest,
+                }
+            ],
+        }
+    )
+    assert alias_map_digest != child.manifest_digest
+    assert alias_map_digest not in child.model_dump().values()

@@ -25,7 +25,15 @@ reset_caches()
 
 PRE_PLAN01_HEAD = "a7b8c9d0e1f2"
 PLAN01_REVISION = "acf208493c87"
+# CI upgrades to true Alembic head (may be Plan 03+). Plan 01 preservation
+# checks still apply as long as Plan 01 revision is an ancestor of head.
 DOWNGRADE_BLOCKED_TOKEN = "MINDATLAS_PLAN01_DOWNGRADE_BLOCKED_NATIVE_DATA"
+
+
+def _assert_at_or_after_plan01(rev: str | None) -> None:
+    assert rev is not None and rev != PRE_PLAN01_HEAD, (
+        f"expected alembic head at/after Plan 01 ({PLAN01_REVISION}), got {rev}"
+    )
 
 _POSTGRES_URL = os.environ.get("MINDATLAS_TEST_POSTGRES_URL", "").strip()
 
@@ -260,11 +268,13 @@ def _insert_package_and_save_version(
 
 @pytest.fixture(scope="module")
 def pg_ready() -> None:
-    """Ensure the disposable database is at Plan 01 head once per module."""
+    """Ensure the disposable database is at (or past) Plan 01 head once per module."""
     _reset_to_head()
     with _engine() as engine:
         rev = _current_revision(engine)
-        assert rev == PLAN01_REVISION, f"expected head {PLAN01_REVISION}, got {rev}"
+        assert rev is not None and rev != PRE_PLAN01_HEAD, (
+            f"expected alembic head at/after Plan 01 ({PLAN01_REVISION}), got {rev}"
+        )
 
 
 @pytest.fixture()
@@ -432,7 +442,7 @@ def test_legacy_rows_survive_parent_to_head_upgrade() -> None:
     _run_alembic("upgrade", "head")
 
     with _engine() as engine:
-        assert _current_revision(engine) == PLAN01_REVISION
+        _assert_at_or_after_plan01(_current_revision(engine))
         with engine.begin() as conn:
             row = conn.execute(
                 text(
@@ -934,8 +944,8 @@ def test_downgrade_preflight_blocks_native_data(engine: Engine) -> None:
         _run_alembic("downgrade", PRE_PLAN01_HEAD)
     assert DOWNGRADE_BLOCKED_TOKEN in _err_text(exc_info.value)
 
-    # Ensure we are still on Plan 01 head (no destructive DDL ran).
-    assert _current_revision(engine) == PLAN01_REVISION
+    # Ensure blocked downgrade did not leave pre-Plan01 (no destructive DDL ran).
+    _assert_at_or_after_plan01(_current_revision(engine))
 
     # Soft-remove native blockers so other tests / CI downgrade step can proceed.
     with engine.begin() as conn:
@@ -1091,7 +1101,7 @@ def test_downgrade_succeeds_for_derived_shadow_only(engine: Engine) -> None:
         assert _current_revision(eng) == PRE_PLAN01_HEAD
     _run_alembic("upgrade", "head")
     with _engine() as eng:
-        assert _current_revision(eng) == PLAN01_REVISION
+        _assert_at_or_after_plan01(_current_revision(eng))
 
 
 # ---------------------------------------------------------------------------

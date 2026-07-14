@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal, Mapping
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
 from app.ai_provider.crypto import decrypt_api_key
 from app.ai_registry.models import AiComponentBinding, AiCredential, AiModel
+from app.assistant.skills.resolution import (
+    credential_runtime_sensitive_payload,
+    model_runtime_sensitive_payload,
+)
 from app.common.ssrf import normalize_openai_base_url
 
 AiComponent = Literal["assistant", "lightrag", "workflow_copilot"]
@@ -22,6 +26,65 @@ class OpenAICompatConfig:
     model: str
     credential_id: UUID
     model_id: UUID
+
+
+def credential_runtime_fields_changed(
+    before: AiCredential | Mapping[str, Any],
+    after: AiCredential | Mapping[str, Any],
+) -> bool:
+    """True when Plan 01 credential execution-sensitive fields changed."""
+    return credential_runtime_sensitive_payload(before) != credential_runtime_sensitive_payload(after)
+
+
+def model_runtime_fields_changed(
+    before: AiModel | Mapping[str, Any],
+    after: AiModel | Mapping[str, Any],
+) -> bool:
+    """True when Plan 01 model execution-sensitive fields changed."""
+    return model_runtime_sensitive_payload(before) != model_runtime_sensitive_payload(after)
+
+
+def invalidate_model_probe_pointers(models: list[AiModel]) -> None:
+    """Clear current capability probe pointers for the given models (same transaction)."""
+    for model in models:
+        model.current_capability_probe_id = None
+
+
+def lock_credential(db: Session, credential_id: UUID) -> AiCredential | None:
+    return (
+        db.query(AiCredential)
+        .filter(AiCredential.id == credential_id)
+        .with_for_update()
+        .first()
+    )
+
+
+def lock_models_for_credential_sorted(db: Session, credential_id: UUID) -> list[AiModel]:
+    """Lock associated models in sorted-ID order after the credential row is locked."""
+    return (
+        db.query(AiModel)
+        .filter(AiModel.credential_id == credential_id)
+        .order_by(AiModel.id.asc())
+        .with_for_update()
+        .all()
+    )
+
+
+def lock_model_with_credential(db: Session, model_id: UUID) -> tuple[AiCredential | None, AiModel | None]:
+    """Canonical lock order for model-scoped mutations: credential then model."""
+    model = db.query(AiModel).filter(AiModel.id == model_id).first()
+    if model is None:
+        return None, None
+    cred = lock_credential(db, model.credential_id)
+    if cred is None:
+        return None, None
+    locked_model = (
+        db.query(AiModel)
+        .filter(AiModel.id == model_id)
+        .with_for_update()
+        .first()
+    )
+    return cred, locked_model
 
 
 def _resolve_config_from_model(
