@@ -1223,6 +1223,142 @@ class NoOpProviderRoundBudgetGuard:
         del result
 
 
+# ---------------------------------------------------------------------------
+# Plan 05 completion port (provider-neutral; no policy ledger types)
+# ---------------------------------------------------------------------------
+
+
+class ProviderCompletionRequest(FrozenContract):
+    """Neutral completion-guard request for a no-Tool Provider round."""
+
+    manifest_revision: int
+    manifest_digest: str
+    candidate_text: str | None
+    finalization_round: bool
+
+    @field_validator("manifest_revision")
+    @classmethod
+    def _revision(cls, value: int) -> int:
+        return _require_non_negative_int(value, field_name="manifest_revision")
+
+    @field_validator("manifest_digest")
+    @classmethod
+    def _digest(cls, value: str) -> str:
+        return _require_digest(value, field_name="manifest_digest")
+
+    @field_validator("candidate_text")
+    @classmethod
+    def _text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise TypeError("candidate_text must be a string or None")
+        if _CONTROL_RE.search(value):
+            raise ValueError("candidate_text must not contain control characters")
+        return value
+
+
+class ProviderCompletionDisposition(FrozenContract):
+    """Neutral completion-guard disposition projected to Plan 03."""
+
+    action: Literal["complete", "continue", "fail", "wait"]
+    reason_code: str
+    instruction: Any = None  # ProviderCompletionInstructionMessage | None
+    decision_digest: str
+
+    @field_validator("reason_code")
+    @classmethod
+    def _reason(cls, value: str) -> str:
+        return _require_non_empty_str(value, field_name="reason_code")
+
+    @field_validator("decision_digest")
+    @classmethod
+    def _digest(cls, value: str) -> str:
+        return _require_digest(value, field_name="decision_digest")
+
+    @model_validator(mode="after")
+    def _instruction_rules(self) -> ProviderCompletionDisposition:
+        # Lazy type check to avoid circular import with messages.
+        from app.assistant.provider_loop.messages import (
+            ProviderCompletionInstructionMessage,
+        )
+
+        if self.instruction is not None and not isinstance(
+            self.instruction, ProviderCompletionInstructionMessage
+        ):
+            raise TypeError(
+                "instruction must be ProviderCompletionInstructionMessage or None"
+            )
+        if self.action == "continue" and self.instruction is None:
+            # Default-permissive guard never continues; Main Agent adapter may.
+            # Allow continue without instruction only for protocol flexibility —
+            # Main Agent always supplies one. Loop treats missing instruction as
+            # protocol_error when action is continue.
+            pass
+        if self.action != "continue" and self.instruction is not None:
+            raise ValueError("instruction is only valid when action is continue")
+        return self
+
+
+@runtime_checkable
+class ProviderCompletionGuard(Protocol):
+    """Plan 05 additive port: gate natural completion on no-Tool rounds.
+
+    Provider Loop never imports policy ledger types. Default no-op reproduces
+    Plan 03 natural-completion byte-for-byte: nonempty candidate completes.
+    """
+
+    def evaluate(
+        self,
+        request: ProviderCompletionRequest,
+    ) -> ProviderCompletionDisposition: ...
+
+
+class NoOpProviderCompletionGuard:
+    """Default-permissive completion guard: nonempty text completes.
+
+    Empty/whitespace candidate fails with terminal_text_missing so the loop can
+    map to the existing empty_response / finalization hard-stop path without
+    changing Plan 03 vectors.
+    """
+
+    def evaluate(
+        self, request: ProviderCompletionRequest
+    ) -> ProviderCompletionDisposition:
+        text = request.candidate_text
+        nonempty = bool(text is not None and str(text).strip())
+        if nonempty:
+            # decision_digest is deterministic from action/reason only.
+            digest = sha256_canonical_json(
+                {
+                    "action": "complete",
+                    "reasonCode": "natural_completion",
+                    "blockingObligationIds": [],
+                    "instructionDigest": None,
+                }
+            )
+            return ProviderCompletionDisposition(
+                action="complete",
+                reason_code="natural_completion",
+                instruction=None,
+                decision_digest=digest,
+            )
+        digest = sha256_canonical_json(
+            {
+                "action": "fail",
+                "reasonCode": "terminal_text_missing",
+                "blockingObligationIds": [],
+                "instructionDigest": None,
+            }
+        )
+        return ProviderCompletionDisposition(
+            action="fail",
+            reason_code="terminal_text_missing",
+            instruction=None,
+            decision_digest=digest,
+        )
+
+
 class CapabilityCallReservationDecision(FrozenContract):
     """Provider-neutral reservation outcome (no policy ledger types)."""
 
@@ -1371,6 +1507,10 @@ class ProviderLoopPorts:
     # Shared dispatch guard instance passed to Gateway via tool dispatcher composition.
     # Default no-op; Main Agent binds BudgetLedgerDispatchGuard.
     dispatch_guard: Any = None
+    # Plan 05 completion guard: default reproduces Plan 03 natural completion.
+    completion_guard: ProviderCompletionGuard = field(
+        default_factory=NoOpProviderCompletionGuard
+    )
 
 
 def assert_not_serializable_port(value: Any) -> None:
@@ -1384,6 +1524,8 @@ def assert_not_serializable_port(value: Any) -> None:
         "NoOpManifestEffectLifecyclePort",
         "ProviderRoundBudgetGuard",
         "NoOpProviderRoundBudgetGuard",
+        "ProviderCompletionGuard",
+        "NoOpProviderCompletionGuard",
         "CapabilityCallReservationPort",
         "NoOpCapabilityCallReservationPort",
         "CapabilityCallOwnerResolver",
@@ -1457,10 +1599,14 @@ __all__ = [
     "NoOpCapabilityCallOwnerResolver",
     "NoOpCapabilityCallReservationPort",
     "NoOpManifestEffectLifecyclePort",
+    "NoOpProviderCompletionGuard",
     "NoOpProviderRoundBudgetGuard",
     "NoOpRoundContextProvider",
     "ProviderAdapter",
     "ProviderAuthorizationEvidenceFactory",
+    "ProviderCompletionDisposition",
+    "ProviderCompletionGuard",
+    "ProviderCompletionRequest",
     "ProviderDispatchRequest",
     "ProviderDispatchResult",
     "ProviderExecutionScope",

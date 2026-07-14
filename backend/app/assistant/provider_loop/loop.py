@@ -36,6 +36,8 @@ from app.assistant.provider_loop.contracts import (
     CapabilityCallReservationDecision,
     CapabilityCallReservationItem,
     ProviderAdapter,
+    ProviderCompletionDisposition,
+    ProviderCompletionRequest,
     ProviderDispatchRequest,
     ProviderDispatchResult,
     ProviderExecutionScope,
@@ -65,6 +67,7 @@ from app.assistant.provider_loop.contracts import (
 )
 from app.assistant.provider_loop.messages import (
     ProviderAssistantMessage,
+    ProviderCompletionInstructionMessage,
     ProviderContextUpdateMessage,
     ProviderMessage,
     ProviderRuntimeInstructionMessage,
@@ -438,64 +441,23 @@ def run_provider_agent_loop(
             )
 
             if not assistant.tool_calls:
-                final_text = assistant.content
-                if final_text is None or not str(final_text).strip():
-                    stop = "max_rounds_hard_stop" if finalization else "protocol_error"
-                    raise ProviderLoopError(
-                        stop_reason=stop,
-                        error=SafeProviderError(
-                            semantic_code="empty_response" if not finalization else stop,
-                            safe_summary="provider returned empty assistant content",
-                            adapter_key=ports.provider.adapter_key,
-                            adapter_revision=ports.provider.adapter_revision,
-                            retry_disposition="never",
-                        ),
-                        messages=tuple(messages),
-                        tool_calls=tuple(tool_call_records),
-                        manifest=current_manifest,
-                        usage=accumulated_usage,
-                        round_count=round_count,
-                    )
-
-                # Replay buffered final text only after successful assembly.
-                # Runtime finalization instructions never appear here.
-                for index, chunk in enumerate(_chunk_final_text(final_text)):
-                    _emit(
-                        ports,
-                        "final_text.delta",
-                        {
-                            "roundIndex": round_index,
-                            "sequence": index,
-                            "delta": chunk,
-                        },
-                    )
-
-                validate_provider_transcript(tuple(messages))
-                stop_reason = (
-                    "max_rounds_soft_finalized" if finalization else "natural_completion"
-                )
-                result = ProviderLoopResult(
-                    status="completed",
-                    final_text=final_text,
-                    messages=tuple(messages),
-                    tool_calls=tuple(tool_call_records),
+                # Plan 05: present no-Tool candidate to completion guard.
+                # Default no-op reproduces Plan 03 natural-completion byte-for-byte.
+                completed = _handle_no_tool_completion(
+                    ports=ports,
+                    messages=messages,
+                    tool_call_records=tool_call_records,
+                    current_manifest=current_manifest,
+                    accumulated_usage=accumulated_usage,
                     round_count=round_count,
-                    stop_reason=stop_reason,
-                    manifest=current_manifest,
-                    continuation=None,
-                    usage=accumulated_usage,
-                    error=None,
+                    round_index=round_index,
+                    finalization=finalization,
+                    final_text=assistant.content,
                 )
-                _emit(
-                    ports,
-                    "loop.completed",
-                    {
-                        "roundCount": round_count,
-                        "stopReason": stop_reason,
-                        "toolCallCount": len(tool_call_records),
-                    },
-                )
-                return result
+                if completed is not None:
+                    return completed
+                # continue: protected instruction appended; next loop iteration.
+                continue
 
             if finalization:
                 # Tools-disabled finalization must never execute Tool Calls.
@@ -1549,6 +1511,212 @@ def _apply_round_budget_after(
     except Exception:
         # Usage recording must never undo a completed Provider round.
         return
+
+
+def _evaluate_completion_guard(
+    *,
+    ports: ProviderLoopPorts,
+    current_manifest: ResolvedRunManifestRevision,
+    candidate_text: str | None,
+    finalization_round: bool,
+) -> ProviderCompletionDisposition:
+    """Invoke the provider-neutral completion guard on a no-Tool round.
+
+    Default no-op reproduces Plan 03 natural-completion behavior.
+    """
+    guard = getattr(ports, "completion_guard", None)
+    if guard is None:
+        from app.assistant.provider_loop.contracts import NoOpProviderCompletionGuard
+
+        guard = NoOpProviderCompletionGuard()
+    request = ProviderCompletionRequest(
+        manifest_revision=current_manifest.revision,
+        manifest_digest=current_manifest.manifest_digest,
+        candidate_text=candidate_text,
+        finalization_round=finalization_round,
+    )
+    disposition = guard.evaluate(request)
+    if not isinstance(disposition, ProviderCompletionDisposition):
+        raise ProviderLoopError(
+            stop_reason="protocol_error",
+            error=SafeProviderError(
+                semantic_code="completion_guard_error",
+                safe_summary="completion guard returned invalid disposition",
+                retry_disposition="never",
+            ),
+        )
+    return disposition
+
+
+def _handle_no_tool_completion(
+    *,
+    ports: ProviderLoopPorts,
+    messages: list[ProviderMessage],
+    tool_call_records: list[ProviderToolCallRecord],
+    current_manifest: ResolvedRunManifestRevision,
+    accumulated_usage: ProviderUsage,
+    round_count: int,
+    round_index: int,
+    finalization: bool,
+    final_text: str | None,
+) -> ProviderLoopResult | None:
+    """Apply completion guard on a no-Tool round.
+
+    Returns:
+    - ProviderLoopResult on complete
+    - None when action is continue (caller appends instruction and loops)
+    Raises ProviderLoopError on fail / invalid wait / empty response.
+    """
+    disposition = _evaluate_completion_guard(
+        ports=ports,
+        current_manifest=current_manifest,
+        candidate_text=final_text,
+        finalization_round=finalization,
+    )
+
+    if disposition.action == "complete":
+        text = final_text if final_text is not None else ""
+        if not str(text).strip():
+            # Guard said complete but text empty — treat as empty response.
+            stop = "max_rounds_hard_stop" if finalization else "protocol_error"
+            raise ProviderLoopError(
+                stop_reason=stop,
+                error=SafeProviderError(
+                    semantic_code="empty_response" if not finalization else stop,
+                    safe_summary="provider returned empty assistant content",
+                    adapter_key=ports.provider.adapter_key,
+                    adapter_revision=ports.provider.adapter_revision,
+                    retry_disposition="never",
+                ),
+                messages=tuple(messages),
+                tool_calls=tuple(tool_call_records),
+                manifest=current_manifest,
+                usage=accumulated_usage,
+                round_count=round_count,
+            )
+        for index, chunk in enumerate(_chunk_final_text(text)):
+            _emit(
+                ports,
+                "final_text.delta",
+                {
+                    "roundIndex": round_index,
+                    "sequence": index,
+                    "delta": chunk,
+                },
+            )
+        validate_provider_transcript(tuple(messages))
+        stop_reason = (
+            "max_rounds_soft_finalized" if finalization else "natural_completion"
+        )
+        result = ProviderLoopResult(
+            status="completed",
+            final_text=text,
+            messages=tuple(messages),
+            tool_calls=tuple(tool_call_records),
+            round_count=round_count,
+            stop_reason=stop_reason,
+            manifest=current_manifest,
+            continuation=None,
+            usage=accumulated_usage,
+            error=None,
+        )
+        _emit(
+            ports,
+            "loop.completed",
+            {
+                "roundCount": round_count,
+                "stopReason": stop_reason,
+                "toolCallCount": len(tool_call_records),
+            },
+        )
+        return result
+
+    if disposition.action == "continue":
+        instruction = disposition.instruction
+        if instruction is None or not isinstance(
+            instruction, ProviderCompletionInstructionMessage
+        ):
+            raise ProviderLoopError(
+                stop_reason="protocol_error",
+                error=SafeProviderError(
+                    semantic_code="completion_guard_error",
+                    safe_summary="continue disposition requires completion instruction",
+                    adapter_key=ports.provider.adapter_key,
+                    adapter_revision=ports.provider.adapter_revision,
+                    retry_disposition="never",
+                ),
+                messages=tuple(messages),
+                tool_calls=tuple(tool_call_records),
+                manifest=current_manifest,
+                usage=accumulated_usage,
+                round_count=round_count,
+            )
+        messages.append(instruction)
+        _emit(
+            ports,
+            "completion.continue",
+            {
+                "roundIndex": round_index,
+                "reasonCode": disposition.reason_code,
+                "decisionDigest": disposition.decision_digest,
+            },
+        )
+        return None
+
+    if disposition.action == "wait":
+        # wait requires pending approval/input + exact continuation; Plan 05
+        # production descriptors cannot produce it. Without a continuation
+        # constructed by the caller, this is a protocol error.
+        raise ProviderLoopError(
+            stop_reason="protocol_error",
+            error=SafeProviderError(
+                semantic_code="waiting_without_obligation"
+                if disposition.reason_code == "waiting_without_obligation"
+                else disposition.reason_code,
+                safe_summary=(
+                    "completion wait requires pending approval/input obligation "
+                    "and an exact continuation"
+                ),
+                adapter_key=ports.provider.adapter_key,
+                adapter_revision=ports.provider.adapter_revision,
+                retry_disposition="never",
+            ),
+            messages=tuple(messages),
+            tool_calls=tuple(tool_call_records),
+            manifest=current_manifest,
+            usage=accumulated_usage,
+            round_count=round_count,
+        )
+
+    # fail
+    reason = disposition.reason_code or "completion_guard_failed"
+    # Preserve Plan 03 empty_response semantic for default-guard empty text.
+    if reason == "terminal_text_missing" and (
+        final_text is None or not str(final_text).strip()
+    ):
+        stop = "max_rounds_hard_stop" if finalization else "protocol_error"
+        semantic = "empty_response" if not finalization else stop
+        summary = "provider returned empty assistant content"
+    else:
+        stop = "max_rounds_hard_stop" if finalization else "protocol_error"
+        # Prefer the guard reason as semantic_code for obligation failures.
+        semantic = reason
+        summary = f"completion guard denied natural completion: {reason}"
+    raise ProviderLoopError(
+        stop_reason=stop,
+        error=SafeProviderError(
+            semantic_code=semantic,
+            safe_summary=summary,
+            adapter_key=ports.provider.adapter_key,
+            adapter_revision=ports.provider.adapter_revision,
+            retry_disposition="never",
+        ),
+        messages=tuple(messages),
+        tool_calls=tuple(tool_call_records),
+        manifest=current_manifest,
+        usage=accumulated_usage,
+        round_count=round_count,
+    )
 
 
 def _build_reservation_item(
@@ -3389,50 +3557,21 @@ def _continue_after_resume(
             messages.append(assistant)
 
             if not assistant.tool_calls:
-                final_text = assistant.content
-                if final_text is None or not str(final_text).strip():
-                    stop = "max_rounds_hard_stop" if finalization else "protocol_error"
-                    raise ProviderLoopError(
-                        stop_reason=stop,
-                        error=SafeProviderError(
-                            semantic_code="empty_response" if not finalization else stop,
-                            safe_summary="provider returned empty assistant content",
-                            adapter_key=ports.provider.adapter_key,
-                            adapter_revision=ports.provider.adapter_revision,
-                            retry_disposition="never",
-                        ),
-                        messages=tuple(messages),
-                        tool_calls=tuple(tool_call_records),
-                        manifest=current_manifest,
-                        usage=accumulated_usage,
-                        round_count=round_count,
-                    )
-                for index, chunk in enumerate(_chunk_final_text(final_text)):
-                    _emit(
-                        ports,
-                        "final_text.delta",
-                        {
-                            "roundIndex": round_index,
-                            "sequence": index,
-                            "delta": chunk,
-                        },
-                    )
-                validate_provider_transcript(tuple(messages))
-                stop_reason = (
-                    "max_rounds_soft_finalized" if finalization else "natural_completion"
-                )
-                return ProviderLoopResult(
-                    status="completed",
-                    final_text=final_text,
-                    messages=tuple(messages),
-                    tool_calls=tuple(tool_call_records),
+                # Plan 05: present no-Tool candidate to completion guard.
+                completed = _handle_no_tool_completion(
+                    ports=ports,
+                    messages=messages,
+                    tool_call_records=tool_call_records,
+                    current_manifest=current_manifest,
+                    accumulated_usage=accumulated_usage,
                     round_count=round_count,
-                    stop_reason=stop_reason,
-                    manifest=current_manifest,
-                    continuation=None,
-                    usage=accumulated_usage,
-                    error=None,
+                    round_index=round_index,
+                    finalization=finalization,
+                    final_text=assistant.content,
                 )
+                if completed is not None:
+                    return completed
+                continue
 
             if finalization:
                 raise ProviderLoopError(
