@@ -340,11 +340,16 @@ def test_pointer_ownership_and_immutability_and_checks() -> None:
                             model_config_digest, status, capabilities, probe_digest, created_at
                         ) VALUES (
                             :id, :model_id, 1, 'openai_chat_completions', '1',
-                            :d, 'weird', CAST($${"x":1}$$ AS jsonb), :d, now()
+                            :d, 'weird', CAST(:caps AS jsonb), :d, now()
                         )
                         """
                     ),
-                    {"id": uuid.uuid4(), "model_id": model_a, "d": _DIGEST_A},
+                    {
+                        "id": uuid.uuid4(),
+                        "model_id": model_a,
+                        "d": _DIGEST_A,
+                        "caps": '{"x":1}',
+                    },
                 )
             conn.rollback()
 
@@ -364,11 +369,16 @@ def test_pointer_ownership_and_immutability_and_checks() -> None:
                             model_config_digest, status, capabilities, probe_digest, created_at
                         ) VALUES (
                             :id, :model_id, 1, 'openai_chat_completions', '1',
-                            'not-a-digest', 'passed', CAST($${"x":1}$$ AS jsonb), :d, now()
+                            'not-a-digest', 'passed', CAST(:caps AS jsonb), :d, now()
                         )
                         """
                     ),
-                    {"id": uuid.uuid4(), "model_id": model_a, "d": _DIGEST_A},
+                    {
+                        "id": uuid.uuid4(),
+                        "model_id": model_a,
+                        "d": _DIGEST_A,
+                        "caps": '{"x":1}',
+                    },
                 )
             conn.rollback()
 

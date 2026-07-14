@@ -53,7 +53,4 @@ def test_force_restore_cleans_unclosed_session() -> None:
     force_restore_all_session_bindings()
     assert app_database.SessionLocal is original
     # Closing after force restore must not crash.
-    try:
-        s1.close()
-    except Exception:
-        pass
+    s1.close()
