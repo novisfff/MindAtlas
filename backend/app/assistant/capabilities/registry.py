@@ -475,6 +475,14 @@ class CapabilityRegistry:
                 safe_message="workflow version missing",
                 target_identity=identity,
             )
+        # Hard boundary: production Capability Runtime executes published versions only.
+        if str(getattr(version, "version_source", "") or "") != "publish":
+            raise _domain_error(
+                error_type="version_drift",
+                safe_code="workflow_version_not_published",
+                safe_message="workflow version is not a published snapshot",
+                target_identity=identity,
+            )
 
         workflow = (
             self.db.query(AssistantWorkflow)
@@ -607,6 +615,14 @@ class CapabilityRegistry:
                 error_type="version_drift",
                 safe_code="agent_version_missing",
                 safe_message="agent version missing",
+                target_identity=identity,
+            )
+        # Hard boundary: production Capability Runtime executes published versions only.
+        if str(getattr(version, "version_source", "") or "") != "publish":
+            raise _domain_error(
+                error_type="version_drift",
+                safe_code="agent_version_not_published",
+                safe_message="agent version is not a published snapshot",
                 target_identity=identity,
             )
 

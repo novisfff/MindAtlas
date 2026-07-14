@@ -437,6 +437,55 @@ def test_http_request_safe_diagnostics_hides_exception_text(monkeypatch: pytest.
     assert "token=abc" not in message
 
 
+def test_http_request_safe_diagnostics_preserves_success_body_for_downstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Capability-scope safe_diagnostics must not wipe NodeOutput bodies.
+
+    Downstream templates (e.g. {{http_0.body}}) and json_fields consumers need the
+    real response; redaction belongs in logs/events only.
+    """
+    from app.assistant.workflow.engine.node_builders.http_request_node import (
+        build_http_request_node,
+    )
+    from app.assistant.workflow.http_request import HttpRequestResult
+
+    resolver = _FakeResolver(tools={}, workflows={}, models={}, tool_calls=[], workflow_calls=[], model_calls=[])
+    scope = _scope(resolver)
+
+    def _ok(**_kwargs):  # noqa: ANN001
+        return HttpRequestResult(
+            ok=True,
+            status_code=200,
+            headers={"Content-Type": "application/json", "Authorization": "Bearer secret"},
+            body='{"answer":42}',
+            response={
+                "body": '{"answer":42}',
+                "status_code": 200,
+                "headers": {"Authorization": "Bearer secret"},
+            },
+            error_message=None,
+        )
+
+    monkeypatch.setattr(
+        "app.assistant.workflow.engine.node_builders.http_request_node.execute_http_request",
+        _ok,
+    )
+    node = build_http_request_node(
+        "http_0",
+        {"method": "GET", "url": "https://example.invalid/x"},
+        execution_scope=scope,
+    )
+    out = node({"metadata": {}, "node_outputs": {}, "sys_vars": {}, "env_vars": {}})
+    node_out = out["node_outputs"]["http_0"]
+    assert node_out["status"] == "ok"
+    assert node_out["text"] == '{"answer":42}'
+    assert node_out["raw"]["body"] == '{"answer":42}'
+    assert node_out["json_fields"]["body"] == '{"answer":42}'
+    assert node_out["raw"]["response"]["body"] == '{"answer":42}'
+    assert "http_request completed" not in str(node_out["text"])
+
+
 def test_dag_agent_resolves_body_tool_and_skips_ambient_memory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

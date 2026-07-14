@@ -164,6 +164,7 @@ def _allow_decision(*, binding_contract_digest: str, dependency_closure_digest: 
         CapabilityOwnerRef,
         CapabilityPolicyDecision,
     )
+    from app.assistant.capabilities.policy import AtomicSingleUseDispatchPermit
 
     return CapabilityPolicyDecision(
         allowed=True,
@@ -180,7 +181,8 @@ def _allow_decision(*, binding_contract_digest: str, dependency_closure_digest: 
         granted_side_effects=("read",),
         grant_source_digest=DIGEST_A,
         decision_digest=DIGEST_A,
-        dispatch_permit=object(),
+        # Real single-use permit; forged object() must not activate credentials.
+        dispatch_permit=AtomicSingleUseDispatchPermit(),
     )
 
 

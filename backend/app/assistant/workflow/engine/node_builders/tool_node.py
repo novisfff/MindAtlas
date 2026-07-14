@@ -43,9 +43,9 @@ def build_dag_tool_node(
             or ""
         ).strip() or None
 
-        tool = tool_map.get(tool_name)
-        if not tool and execution_scope is not None:
-            # Exact closure only — never Registry name fallback under Capability scope.
+        tool = None
+        if execution_scope is not None:
+            # Exact closure only — never parent tool_map / Registry name fallback under Capability scope.
             # Plan 01 freezes body tools as root/node:{container}/body/node:{child}/tool:{name}.
             locator_candidates: list[str] = []
             if container_id:
@@ -81,6 +81,8 @@ def build_dag_tool_node(
                 raise RuntimeError(
                     f"DAG tool node {node_id}: tool not found under capability scope"
                 ) from None
+        else:
+            tool = tool_map.get(tool_name)
         if not tool:
             raise RuntimeError(f"DAG tool node {node_id}: tool not found: {tool_name}")
 

@@ -538,7 +538,10 @@ def test_secret_safety_in_validation_errors_and_public_surfaces(caplog: pytest.L
 def test_requirements_declare_jsonschema_range() -> None:
     from pathlib import Path
 
-    text = Path("backend/requirements.txt").read_text(encoding="utf-8")
+    # Resolve from this test file so the check works both from repo root and
+    # from backend/ (GitHub Backend Tests job cwd).
+    requirements = Path(__file__).resolve().parents[1] / "requirements.txt"
+    text = requirements.read_text(encoding="utf-8")
     assert re.search(r"(?m)^jsonschema>=4\.23,<5(\.0)?$", text)
 
 

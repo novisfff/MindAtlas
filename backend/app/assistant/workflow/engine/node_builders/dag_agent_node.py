@@ -146,10 +146,11 @@ def build_dag_agent_node(
 
         bound_tools: list[Any] = []
         tool_runners: dict[str, Callable[..., Any]] = {}
-        effective_tool_map: dict[str, Any] = dict(tool_map)
+        effective_tool_map: dict[str, Any] = {} if execution_scope is not None else dict(tool_map)
         for tool_name in configured_tool_names:
-            tool = effective_tool_map.get(tool_name)
-            if tool is None and execution_scope is not None:
+            tool = None
+            if execution_scope is not None:
+                # Capability scope: prove exact frozen locator; never parent map short-circuit.
                 locator_candidates: list[str] = []
                 if container_id:
                     locator_candidates.append(
@@ -171,6 +172,8 @@ def build_dag_agent_node(
                         break
                     except Exception:
                         continue
+            else:
+                tool = tool_map.get(tool_name)
             if tool is None:
                 if execution_scope is not None:
                     if safe_diagnostics:
@@ -185,6 +188,7 @@ def build_dag_agent_node(
                 raise RuntimeError(
                     f"DAG agent node {node_id} references unavailable tool: {tool_name}"
                 )
+            effective_tool_map[tool_name] = tool
             bound_tools.append(tool)
             tool_runners[tool_name] = engine_runtime._wrap_tool_with_db(tool, db_bind)
 

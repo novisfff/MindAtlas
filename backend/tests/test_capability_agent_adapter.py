@@ -133,6 +133,7 @@ def db(monkeypatch: pytest.MonkeyPatch):
 
 
 def _decision(*, call_id: str = "call-agent-1", owner_kind: str = "test"):
+    from app.assistant.capabilities.policy import AtomicSingleUseDispatchPermit
     from app.assistant.capabilities.contracts import (
         CapabilityOwnerRef,
         CapabilityPolicyDecision,
@@ -153,7 +154,7 @@ def _decision(*, call_id: str = "call-agent-1", owner_kind: str = "test"):
         granted_side_effects=("read", "write_local", "draft", "unknown"),
         grant_source_digest=DIGEST_A,
         decision_digest=DIGEST_B,
-        dispatch_permit=object(),
+        dispatch_permit=AtomicSingleUseDispatchPermit(),
     )
 
 

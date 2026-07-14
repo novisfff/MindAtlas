@@ -794,6 +794,9 @@ class OpenClawAuthorizationEvidenceVerifier:
             raise AuthorizationEvidenceVerificationError("unknown_side_effect")
         if actual not in self.ceiling.allowed_side_effects:
             raise AuthorizationEvidenceVerificationError("side_effect_above_ceiling")
+        interrupt_mode = str(getattr(descriptor.behavior, "interrupt_mode", "none") or "none")
+        if interrupt_mode not in set(self.ceiling.allowed_interrupt_modes):
+            raise AuthorizationEvidenceVerificationError("interrupt_mode_above_ceiling")
 
         with self._lock:
             if self._consumed:

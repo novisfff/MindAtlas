@@ -447,21 +447,24 @@ def build_workflow_call_node(
                 "workflow_call_scopes": {},
             }
 
-            # Build child tools exclusively from frozen closure / parent map.
-            # Even when parent already provided the tool object, still prove the child
-            # frozen locator via require_tool whenever a locator can be built.
-            child_tool_names = AssistantConfigService._collect_workflow_tool_names(  # noqa: SLF001
-                getattr(published_input, "nodes", []) or []
+            # Build child tools exclusively from Plan 01 frozen dependency paths.
+            # Plan 01 freezes child tools as:
+            #   {source_locator}/node:{childNodeId}/tool:{name}
+            # Never accept an unproven parent tool_map hit under capability scope.
+            from app.assistant_config.workflow_references import collect_workflow_tool_usages
+
+            child_tool_usages = collect_workflow_tool_usages(
+                getattr(published_input, "nodes", []) or [],
+                path_prefix=source_locator,
             )
-            child_tool_map: dict[str, Any] = dict(tool_map)
-            for tool_name in child_tool_names:
+            child_tool_map: dict[str, Any] = {}
+            for frozen_path, tool_name in child_tool_usages:
                 tool_obj = None
-                proven = False
+                last_exc: BaseException | None = None
+                # Prefer exact frozen path first, then narrow candidates only.
                 for locator in (
-                    f"{source_locator}/node:tool_0/tool:{tool_name}",
+                    frozen_path,
                     f"{source_locator}/tool:{tool_name}",
-                    f"root/workflow_call:{node_id}/tool:{tool_name}",
-                    f"root/tool:{tool_name}",
                 ):
                     try:
                         target = execution_scope.dependency_resolver.require_tool(
@@ -469,18 +472,15 @@ def build_workflow_call_node(
                             tool_name=tool_name,
                         )
                         tool_obj = getattr(target, "tool_object_or_record", target)
-                        proven = True
+                        last_exc = None
                         break
-                    except Exception:
+                    except Exception as exc:
+                        last_exc = exc
                         continue
-                if not proven:
-                    if tool_name in child_tool_map:
-                        # Parent map hit without a buildable frozen locator proof —
-                        # keep parent object only when no require_tool candidate matched.
-                        continue
+                if tool_obj is None:
                     raise RuntimeError(
                         f"DAG workflow_call node {node_id}: child tool not in frozen closure: {tool_name}"
-                    )
+                    ) from last_exc
                 child_tool_map[tool_name] = tool_obj
 
             default_headers = build_openai_compat_client_headers()

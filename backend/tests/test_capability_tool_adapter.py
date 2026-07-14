@@ -186,6 +186,7 @@ def _schema_root_is_object(schema: dict) -> bool:
 
 
 def _decision():
+    from app.assistant.capabilities.policy import AtomicSingleUseDispatchPermit
     from app.assistant.capabilities.contracts import (
         CapabilityOwnerRef,
         CapabilityPolicyDecision,
@@ -206,7 +207,7 @@ def _decision():
         granted_side_effects=("read",),
         grant_source_digest=DIGEST_A,
         decision_digest=DIGEST_B,
-        dispatch_permit=object(),
+        dispatch_permit=AtomicSingleUseDispatchPermit(),
     )
 
 

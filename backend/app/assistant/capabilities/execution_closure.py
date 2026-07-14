@@ -283,12 +283,53 @@ class FrozenExecutionClosure:
                 safe_code="policy_decision_digest_missing",
                 safe_message="capability policy decision digest missing",
             )
-        if getattr(decision, "dispatch_permit", None) is None:
+        permit = getattr(decision, "dispatch_permit", None)
+        if permit is None:
             raise _domain_error(
                 error_type="unauthorized",
                 safe_code="policy_dispatch_permit_missing",
                 safe_message="capability policy dispatch permit missing",
             )
+        # Activation requires a real single-use permit object. Gateway consumes
+        # before adapter; accept already-consumed permits. Forged
+        # `dispatch_permit=object()` lacks consume/consumed and is denied.
+        consume = getattr(permit, "consume", None)
+        already_consumed = bool(getattr(permit, "consumed", False))
+        if not already_consumed:
+            if not callable(consume):
+                raise _domain_error(
+                    error_type="unauthorized",
+                    safe_code="policy_dispatch_permit_invalid",
+                    safe_message="capability policy dispatch permit invalid",
+                )
+            call_id = str(getattr(decision, "call_id", "") or "").strip()
+            descriptor_digest = str(
+                getattr(decision, "descriptor_digest", None)
+                or getattr(getattr(decision, "descriptor", None), "descriptor_digest", None)
+                or getattr(getattr(decision, "evidence", None), "descriptor_digest", None)
+                or getattr(decision, "decision_digest", None)
+                or ""
+            ).strip()
+            if not call_id or len(descriptor_digest) != 64:
+                raise _domain_error(
+                    error_type="unauthorized",
+                    safe_code="policy_dispatch_permit_invalid",
+                    safe_message="capability policy dispatch permit cannot be consumed",
+                )
+            try:
+                consume(call_id=call_id, descriptor_digest=descriptor_digest)
+            except PermissionError as exc:
+                raise _domain_error(
+                    error_type="unauthorized",
+                    safe_code="policy_dispatch_permit_consumed",
+                    safe_message="capability policy dispatch permit already used",
+                ) from exc
+            except Exception as exc:
+                raise _domain_error(
+                    error_type="unauthorized",
+                    safe_code="policy_dispatch_permit_invalid",
+                    safe_message="capability policy dispatch permit invalid",
+                ) from exc
         # When the decision (or nested evidence) carries closure digests, bind them.
         for attr, expected, code in (
             (

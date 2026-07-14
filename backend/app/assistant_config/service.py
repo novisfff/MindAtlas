@@ -5183,6 +5183,11 @@ class AssistantConfigService:
             {AssistantAgentProfile.folder_id: folder.parent_id},
             synchronize_session=False,
         )
+        # Flush reparent updates before deleting the folder. With
+        # parent_id ON DELETE SET NULL, SQLite/Postgres apply the FK action on
+        # delete and would otherwise wipe the just-written parent pointers if
+        # the UPDATE and DELETE land in one statement batch without an intermediate flush.
+        self.db.flush()
         self.db.delete(folder)
         try:
             self.db.commit()
