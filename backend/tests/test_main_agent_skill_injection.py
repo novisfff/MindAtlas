@@ -569,3 +569,665 @@ def test_next_manifest_hook_returns_staged_child() -> None:
     child = next_manifest_from_control_effect(runtime, _Req(), result)
     assert child.revision == manifest.revision + 1
     assert child.manifest_digest == effect.proposed_manifest.manifest_digest
+
+
+# ---------------------------------------------------------------------------
+# Plan 05 Task 6 — atomic policy-state skill activation
+# ---------------------------------------------------------------------------
+
+
+def test_conflict_rules_excludes_blocks_activation() -> None:
+    from app.assistant.main_agent.manifest_runtime import (
+        SkillActivationCandidate,
+        stage_skill_injection,
+    )
+    from app.assistant.skills.contracts import SkillConflictRuleV1
+
+    manifest, _ = _manifest_with_controls()
+    c1 = SkillActivationCandidate(
+        skill=_skill_ref(),
+        capabilities=(_cap_ref("get_statistics"),),
+        instruction_char_count=10,
+        conflict_rules=(
+            SkillConflictRuleV1(kind="excludes", target_skill="other-skill"),
+        ),
+    )
+    c2 = SkillActivationCandidate(
+        skill=_skill_ref(
+            package_id=PKG_2,
+            version_id=VER_2,
+            canonical_name="other-skill",
+            content_digest=DIGEST_C,
+            version_digest=DIGEST_D,
+        ),
+        capabilities=(_cap_ref("search_entries", DIGEST_D),),
+        instruction_char_count=10,
+    )
+    result, effect, package = stage_skill_injection(
+        call_id="p05-excludes",
+        current_manifest=manifest,
+        candidates=[c1, c2],
+    )
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.safe_code == "skill_conflict_excludes"
+    assert effect is None
+    assert package is None
+
+
+def test_conflict_rules_requires_missing_target() -> None:
+    from app.assistant.main_agent.manifest_runtime import (
+        SkillActivationCandidate,
+        stage_skill_injection,
+    )
+    from app.assistant.skills.contracts import SkillConflictRuleV1
+
+    manifest, _ = _manifest_with_controls()
+    candidate = SkillActivationCandidate(
+        skill=_skill_ref(),
+        capabilities=(_cap_ref("get_statistics"),),
+        instruction_char_count=10,
+        conflict_rules=(
+            SkillConflictRuleV1(kind="requires", target_skill="missing-dep"),
+        ),
+    )
+    result, effect, package = stage_skill_injection(
+        call_id="p05-requires",
+        current_manifest=manifest,
+        candidates=[candidate],
+    )
+    assert result.status == "failed"
+    assert result.error.safe_code in {
+        "skill_conflict_requires",
+        "skill_conflict_unresolved_target",
+    }
+    assert effect is None
+    assert package is None
+
+
+def test_exclusive_group_conflict_in_same_batch() -> None:
+    from app.assistant.main_agent.manifest_runtime import (
+        SkillActivationCandidate,
+        stage_skill_injection,
+    )
+    from app.assistant.skills.contracts import SkillConflictRuleV1
+
+    manifest, _ = _manifest_with_controls()
+    rule = SkillConflictRuleV1(kind="exclusive_group", group="review-family")
+    c1 = SkillActivationCandidate(
+        skill=_skill_ref(),
+        capabilities=(_cap_ref("get_statistics"),),
+        instruction_char_count=10,
+        conflict_rules=(rule,),
+    )
+    c2 = SkillActivationCandidate(
+        skill=_skill_ref(
+            package_id=PKG_2,
+            version_id=VER_2,
+            canonical_name="other-skill",
+            content_digest=DIGEST_C,
+            version_digest=DIGEST_D,
+        ),
+        capabilities=(_cap_ref("search_entries", DIGEST_D),),
+        instruction_char_count=10,
+        conflict_rules=(rule,),
+    )
+    result, effect, package = stage_skill_injection(
+        call_id="p05-excl-group",
+        current_manifest=manifest,
+        candidates=[c1, c2],
+    )
+    assert result.status == "failed"
+    assert result.error.safe_code == "skill_conflict_exclusive_group"
+    assert package is None
+
+
+def test_compatible_same_batch_duplicate_becomes_consumer() -> None:
+    """§4.3: identical Domain Key declarations → owner + non-owning consumer."""
+    from app.assistant.main_agent.manifest_runtime import (
+        MainAgentManifestEffectLifecycle,
+        SkillActivationCandidate,
+        stage_skill_injection,
+    )
+
+    manifest, _ = _manifest_with_controls()
+    lifecycle = MainAgentManifestEffectLifecycle()
+    lifecycle.bind_current_manifest(manifest)
+    shared = _cap_ref("shared.tool", digest="1" * 64)
+    c1 = SkillActivationCandidate(
+        skill=_skill_ref(
+            package_id=PKG_1,
+            version_id=VER_1,
+            canonical_name="alpha-skill",
+            content_digest=DIGEST_B,
+            version_digest=DIGEST_C,
+        ),
+        capabilities=(shared,),
+        instruction_char_count=10,
+        max_skill_calls=4,
+        max_same_read_calls=2,
+    )
+    c2 = SkillActivationCandidate(
+        skill=_skill_ref(
+            package_id=PKG_2,
+            version_id=VER_2,
+            canonical_name="beta-skill",
+            content_digest=DIGEST_D,
+            version_digest=DIGEST_A,
+        ),
+        capabilities=(shared,),
+        instruction_char_count=10,
+        max_skill_calls=4,
+        max_same_read_calls=2,
+    )
+    result, effect, package = stage_skill_injection(
+        call_id="p05-compat-dup",
+        current_manifest=manifest,
+        candidates=[c1, c2],
+        lifecycle=lifecycle,
+    )
+    assert result.status == "completed"
+    assert package is not None
+    # Deterministic owner is alpha (lower name); beta is consumer.
+    assert package.candidate_compatible_consumers == (("shared.tool", VER_2),)
+    # Both skills still activate (Manifest membership).
+    assert set(package.activated_version_ids) == {VER_1, VER_2}
+    lifecycle.accept(
+        call_id="p05-compat-dup",
+        current_manifest=manifest,
+        proposed_manifest=effect.proposed_manifest,
+    )
+    assert lifecycle.is_skill_active(VER_1)
+    assert lifecycle.is_skill_active(VER_2)
+    assert lifecycle.compatible_consumers()["shared.tool"] == frozenset({VER_2})
+
+
+def test_incompatible_duplicate_fails_before_staging() -> None:
+    from app.assistant.main_agent.manifest_runtime import (
+        DUPLICATE_CAPABILITY_POLICY_CONFLICT,
+        MainAgentManifestEffectLifecycle,
+        SkillActivationCandidate,
+        stage_skill_injection,
+    )
+
+    manifest, _ = _manifest_with_controls()
+    lifecycle = MainAgentManifestEffectLifecycle()
+    lifecycle.bind_current_manifest(manifest)
+    c1 = SkillActivationCandidate(
+        skill=_skill_ref(),
+        capabilities=(_cap_ref("shared.tool", digest="1" * 64),),
+        instruction_char_count=10,
+        max_skill_calls=4,
+    )
+    c2 = SkillActivationCandidate(
+        skill=_skill_ref(
+            package_id=PKG_2,
+            version_id=VER_2,
+            canonical_name="other-skill",
+            content_digest=DIGEST_C,
+            version_digest=DIGEST_D,
+        ),
+        capabilities=(_cap_ref("shared.tool", digest="2" * 64),),
+        instruction_char_count=10,
+        max_skill_calls=4,
+    )
+    result, effect, package = stage_skill_injection(
+        call_id="p05-incompat-dup",
+        current_manifest=manifest,
+        candidates=[c1, c2],
+        lifecycle=lifecycle,
+    )
+    assert result.status == "failed"
+    assert result.error.safe_code == DUPLICATE_CAPABILITY_POLICY_CONFLICT
+    assert effect is None
+    assert package is None
+    assert lifecycle.peek_package("p05-incompat-dup") is None
+    assert lifecycle.is_skill_active(VER_1) is False
+
+
+def test_owner_budget_limits_commit_only_on_accept() -> None:
+    from app.assistant.main_agent.manifest_runtime import (
+        MainAgentManifestEffectLifecycle,
+        SkillActivationCandidate,
+        stage_skill_injection,
+        SkillInjectionPolicyContext,
+    )
+    from app.assistant.policy.budgets import BudgetLedger
+    from app.assistant.policy.contracts import RunBudgetLimits
+
+    manifest, _ = _manifest_with_controls()
+    run_limits = RunBudgetLimits(
+        max_provider_rounds=8,
+        max_main_agent_cycles=1,
+        max_active_skills=4,
+        max_total_capability_calls=16,
+        max_parallel_calls=4,
+        max_capability_depth=4,
+        max_agent_depth=2,
+        max_same_read_signature=3,
+        max_prompt_tokens=None,
+        max_completion_tokens=4096,
+        max_wall_time_ms=120_000,
+        max_completion_followup_rounds=2,
+    )
+    ledger = BudgetLedger.create(limits=run_limits)
+    before_revision = ledger.snapshot().revision
+    before_limits = ledger.snapshot().limits
+    before_usage = (
+        ledger.snapshot().capability_calls_started,
+        ledger.snapshot().provider_rounds_started,
+        ledger.snapshot().completion_tokens_used,
+    )
+
+    lifecycle = MainAgentManifestEffectLifecycle()
+    lifecycle.bind_current_manifest(manifest)
+    lifecycle.bind_policy_ledgers(budget_ledger=ledger)
+
+    candidate = SkillActivationCandidate(
+        skill=_skill_ref(),
+        capabilities=(_cap_ref("get_statistics"),),
+        instruction_char_count=10,
+        max_skill_calls=4,
+        max_same_read_calls=2,
+    )
+    result, effect, package = stage_skill_injection(
+        call_id="p05-owner-budget",
+        current_manifest=manifest,
+        candidates=[candidate],
+        lifecycle=lifecycle,
+        policy=SkillInjectionPolicyContext(
+            run_max_total_capability_calls=16,
+            run_max_same_read_signature=3,
+        ),
+    )
+    assert result.status == "completed"
+    assert package is not None
+    assert len(package.candidate_owner_budget_limits) == 1
+    # Pre-accept: no owner bucket visible on ledger.
+    assert ledger.snapshot().revision == before_revision
+    assert not any(
+        o.owner_version_id == VER_1 for o in ledger.snapshot().owner_limits
+    )
+    assert lifecycle.applied_owner_budget_digests() == {}
+
+    lifecycle.accept(
+        call_id="p05-owner-budget",
+        current_manifest=manifest,
+        proposed_manifest=effect.proposed_manifest,
+    )
+    assert lifecycle.is_skill_active(VER_1)
+    assert VER_1 in lifecycle.applied_owner_budget_digests()
+    assert any(o.owner_version_id == VER_1 for o in ledger.snapshot().owner_limits)
+    # Run limits/usage/provider counters unchanged by activation.
+    assert ledger.snapshot().limits == before_limits
+    assert (
+        ledger.snapshot().capability_calls_started,
+        ledger.snapshot().provider_rounds_started,
+        ledger.snapshot().completion_tokens_used,
+    ) == before_usage
+
+
+def test_discard_leaves_no_owner_bucket_or_obligation() -> None:
+    from app.assistant.main_agent.manifest_runtime import (
+        MainAgentManifestEffectLifecycle,
+        SkillActivationCandidate,
+        stage_skill_injection,
+        SkillInjectionPolicyContext,
+    )
+    from app.assistant.policy.budgets import BudgetLedger
+    from app.assistant.policy.contracts import RunBudgetLimits
+    from app.assistant.policy.obligations import ObligationLedger
+
+    manifest, _ = _manifest_with_controls()
+    run_limits = RunBudgetLimits(
+        max_provider_rounds=8,
+        max_main_agent_cycles=1,
+        max_active_skills=4,
+        max_total_capability_calls=16,
+        max_parallel_calls=4,
+        max_capability_depth=4,
+        max_agent_depth=2,
+        max_same_read_signature=3,
+        max_prompt_tokens=None,
+        max_completion_tokens=4096,
+        max_wall_time_ms=120_000,
+        max_completion_followup_rounds=2,
+    )
+    budget = BudgetLedger.create(limits=run_limits)
+    obligations = ObligationLedger.create(run_id=RUN_ID)
+    before_ob_rev = obligations.snapshot().revision
+
+    lifecycle = MainAgentManifestEffectLifecycle()
+    lifecycle.bind_current_manifest(manifest)
+    lifecycle.bind_policy_ledgers(budget_ledger=budget, obligation_ledger=obligations)
+
+    candidate = SkillActivationCandidate(
+        skill=_skill_ref(),
+        capabilities=(_cap_ref("get_statistics"),),
+        instruction_char_count=10,
+        max_skill_calls=4,
+        requires_terminal_output=True,
+        terminal_text_allowed=True,
+    )
+    result, effect, package = stage_skill_injection(
+        call_id="p05-discard",
+        current_manifest=manifest,
+        candidates=[candidate],
+        lifecycle=lifecycle,
+        policy=SkillInjectionPolicyContext(remaining_provider_slots=4),
+    )
+    assert result.status == "completed"
+    assert package is not None
+    assert package.candidate_skill_terminals == ((VER_1, True),)
+
+    lifecycle.discard(call_id="p05-discard", reason_code="manifest_lineage_error")
+    assert lifecycle.is_skill_active(VER_1) is False
+    assert lifecycle.applied_owner_budget_digests() == {}
+    assert lifecycle.applied_skill_terminals() == {}
+    assert not any(o.owner_version_id == VER_1 for o in budget.snapshot().owner_limits)
+    assert obligations.snapshot().revision == before_ob_rev
+    # Accept after discard is a no-op.
+    lifecycle.accept(
+        call_id="p05-discard",
+        current_manifest=manifest,
+        proposed_manifest=effect.proposed_manifest,
+    )
+    assert lifecycle.is_skill_active(VER_1) is False
+
+
+def test_skill_terminal_commits_on_accept() -> None:
+    from app.assistant.main_agent.manifest_runtime import (
+        MainAgentManifestEffectLifecycle,
+        SkillActivationCandidate,
+        stage_skill_injection,
+        SkillInjectionPolicyContext,
+    )
+    from app.assistant.policy.obligations import ObligationLedger
+
+    manifest, _ = _manifest_with_controls()
+    obligations = ObligationLedger.create(run_id=RUN_ID)
+    lifecycle = MainAgentManifestEffectLifecycle()
+    lifecycle.bind_current_manifest(manifest)
+    lifecycle.bind_policy_ledgers(obligation_ledger=obligations)
+
+    candidate = SkillActivationCandidate(
+        skill=_skill_ref(),
+        capabilities=(_cap_ref("get_statistics"),),
+        instruction_char_count=10,
+        max_skill_calls=4,
+        requires_terminal_output=True,
+        terminal_text_allowed=True,
+    )
+    result, effect, package = stage_skill_injection(
+        call_id="p05-terminal",
+        current_manifest=manifest,
+        candidates=[candidate],
+        lifecycle=lifecycle,
+        policy=SkillInjectionPolicyContext(remaining_provider_slots=4),
+    )
+    assert result.status == "completed"
+    assert package.candidate_skill_terminals == ((VER_1, True),)
+    # Not yet on ledger.
+    assert not any(
+        o.owner_kind == "skill_version" and o.owner_version_id == VER_1
+        for o in obligations.snapshot().obligations
+    )
+    lifecycle.accept(
+        call_id="p05-terminal",
+        current_manifest=manifest,
+        proposed_manifest=effect.proposed_manifest,
+    )
+    assert lifecycle.applied_skill_terminals()[VER_1] is True
+    assert any(
+        o.owner_kind == "skill_version"
+        and o.owner_version_id == VER_1
+        and o.status == "pending"
+        for o in obligations.snapshot().obligations
+    )
+
+
+def test_unsatisfiable_terminal_fails_before_stage() -> None:
+    from app.assistant.main_agent.manifest_runtime import (
+        SKILL_COMPLETION_UNSATISFIABLE,
+        SkillActivationCandidate,
+        stage_skill_injection,
+        SkillInjectionPolicyContext,
+    )
+
+    manifest, _ = _manifest_with_controls()
+    # Instruction-only + text forbidden + requires terminal → unsatisfiable.
+    candidate = SkillActivationCandidate(
+        skill=_skill_ref(),
+        capabilities=(),
+        instruction_char_count=10,
+        is_instruction_only=True,
+        requires_terminal_output=True,
+        terminal_text_allowed=False,
+        max_skill_calls=0,
+    )
+    result, effect, package = stage_skill_injection(
+        call_id="p05-unsat",
+        current_manifest=manifest,
+        candidates=[candidate],
+        policy=SkillInjectionPolicyContext(remaining_provider_slots=0),
+    )
+    assert result.status == "failed"
+    assert result.error.safe_code == SKILL_COMPLETION_UNSATISFIABLE
+    assert effect is None
+    assert package is None
+
+
+def test_effective_policy_digest_changes_on_activation() -> None:
+    from app.assistant.main_agent.manifest_runtime import (
+        MainAgentManifestEffectLifecycle,
+        SkillActivationCandidate,
+        stage_skill_injection,
+        SkillInjectionPolicyContext,
+    )
+
+    manifest, _ = _manifest_with_controls()
+    parent_policy = manifest.effective_policy_digest
+    lifecycle = MainAgentManifestEffectLifecycle()
+    lifecycle.bind_current_manifest(manifest)
+    candidate = SkillActivationCandidate(
+        skill=_skill_ref(),
+        capabilities=(_cap_ref("get_statistics"),),
+        instruction_char_count=10,
+        max_skill_calls=4,
+    )
+    result, effect, package = stage_skill_injection(
+        call_id="p05-policy-digest",
+        current_manifest=manifest,
+        candidates=[candidate],
+        lifecycle=lifecycle,
+        policy=SkillInjectionPolicyContext(),
+    )
+    assert result.status == "completed"
+    assert effect is not None
+    assert package is not None
+    proposed = effect.proposed_manifest
+    assert proposed.effective_policy_digest != parent_policy
+    assert package.candidate_effective_policy_digest == proposed.effective_policy_digest
+    lifecycle.accept(
+        call_id="p05-policy-digest",
+        current_manifest=manifest,
+        proposed_manifest=proposed,
+    )
+    assert lifecycle.current_manifest.effective_policy_digest == proposed.effective_policy_digest
+
+
+def test_staged_package_not_visible_on_ledgers_until_accept() -> None:
+    """Zero candidate-state visibility before accept (hard rule 10)."""
+    from app.assistant.main_agent.manifest_runtime import (
+        MainAgentManifestEffectLifecycle,
+        SkillActivationCandidate,
+        stage_skill_injection,
+        SkillInjectionPolicyContext,
+    )
+    from app.assistant.policy.budgets import BudgetLedger
+    from app.assistant.policy.contracts import RunBudgetLimits
+    from app.assistant.policy.obligations import ObligationLedger
+
+    manifest, _ = _manifest_with_controls()
+    run_limits = RunBudgetLimits(
+        max_provider_rounds=8,
+        max_main_agent_cycles=1,
+        max_active_skills=4,
+        max_total_capability_calls=16,
+        max_parallel_calls=4,
+        max_capability_depth=4,
+        max_agent_depth=2,
+        max_same_read_signature=3,
+        max_prompt_tokens=None,
+        max_completion_tokens=4096,
+        max_wall_time_ms=120_000,
+        max_completion_followup_rounds=2,
+    )
+    budget = BudgetLedger.create(limits=run_limits)
+    obligations = ObligationLedger.create(run_id=RUN_ID)
+    lifecycle = MainAgentManifestEffectLifecycle()
+    lifecycle.bind_current_manifest(manifest)
+    lifecycle.bind_policy_ledgers(budget_ledger=budget, obligation_ledger=obligations)
+
+    candidate = SkillActivationCandidate(
+        skill=_skill_ref(),
+        capabilities=(_cap_ref("get_statistics"),),
+        instruction_char_count=10,
+        max_skill_calls=4,
+        requires_terminal_output=True,
+        terminal_text_allowed=True,
+    )
+    _r, effect, package = stage_skill_injection(
+        call_id="p05-visibility",
+        current_manifest=manifest,
+        candidates=[candidate],
+        lifecycle=lifecycle,
+        policy=SkillInjectionPolicyContext(remaining_provider_slots=4),
+    )
+    assert package is not None
+    # Staged only.
+    assert lifecycle.is_skill_active(VER_1) is False
+    assert lifecycle.applied_owner_budget_digests() == {}
+    assert lifecycle.applied_skill_terminals() == {}
+    assert not any(o.owner_version_id == VER_1 for o in budget.snapshot().owner_limits)
+    assert not any(
+        o.owner_version_id == VER_1 for o in obligations.snapshot().obligations
+    )
+    # Current manifest pointer unchanged.
+    assert lifecycle.current_manifest.manifest_digest == manifest.manifest_digest
+
+
+def test_wrong_effect_digest_discards_package() -> None:
+    from app.assistant.domain.contracts import append_skill_activation
+    from app.assistant.main_agent.manifest_runtime import (
+        MainAgentManifestEffectLifecycle,
+        SkillActivationCandidate,
+        stage_skill_injection,
+    )
+
+    manifest, _ = _manifest_with_controls()
+    lifecycle = MainAgentManifestEffectLifecycle()
+    lifecycle.bind_current_manifest(manifest)
+    candidate = SkillActivationCandidate(
+        skill=_skill_ref(),
+        capabilities=(_cap_ref("get_statistics"),),
+        instruction_char_count=10,
+    )
+    result, effect, package = stage_skill_injection(
+        call_id="p05-bad-digest",
+        current_manifest=manifest,
+        candidates=[candidate],
+        lifecycle=lifecycle,
+    )
+    assert effect is not None
+    # Tamper: pass a different proposed manifest.
+    other = append_skill_activation(
+        manifest,
+        skill=_skill_ref(
+            package_id=PKG_2,
+            version_id=VER_2,
+            canonical_name="other-skill",
+            content_digest=DIGEST_C,
+            version_digest=DIGEST_D,
+        ),
+        capabilities=(_cap_ref("search_entries", DIGEST_D),),
+    )
+    with pytest.raises(ValueError, match="effect_digest mismatch|proposed_manifest mismatch"):
+        lifecycle.accept(
+            call_id="p05-bad-digest",
+            current_manifest=manifest,
+            proposed_manifest=other,
+        )
+    assert lifecycle.is_skill_active(VER_1) is False
+    assert lifecycle.peek_package("p05-bad-digest") is None
+
+
+def test_reinjection_is_noop_across_policy_state() -> None:
+    from app.assistant.main_agent.manifest_runtime import (
+        MainAgentManifestEffectLifecycle,
+        SkillActivationCandidate,
+        stage_skill_injection,
+        SkillInjectionPolicyContext,
+    )
+    from app.assistant.policy.budgets import BudgetLedger
+    from app.assistant.policy.contracts import RunBudgetLimits
+
+    manifest, _ = _manifest_with_controls()
+    run_limits = RunBudgetLimits(
+        max_provider_rounds=8,
+        max_main_agent_cycles=1,
+        max_active_skills=4,
+        max_total_capability_calls=16,
+        max_parallel_calls=4,
+        max_capability_depth=4,
+        max_agent_depth=2,
+        max_same_read_signature=3,
+        max_prompt_tokens=None,
+        max_completion_tokens=4096,
+        max_wall_time_ms=120_000,
+        max_completion_followup_rounds=2,
+    )
+    budget = BudgetLedger.create(limits=run_limits)
+    lifecycle = MainAgentManifestEffectLifecycle()
+    lifecycle.bind_current_manifest(manifest)
+    lifecycle.bind_policy_ledgers(budget_ledger=budget)
+
+    candidate = SkillActivationCandidate(
+        skill=_skill_ref(),
+        capabilities=(_cap_ref("get_statistics"),),
+        instruction_char_count=10,
+        max_skill_calls=4,
+    )
+    r1, e1, p1 = stage_skill_injection(
+        call_id="p05-re-1",
+        current_manifest=manifest,
+        candidates=[candidate],
+        lifecycle=lifecycle,
+        policy=SkillInjectionPolicyContext(),
+    )
+    assert r1.status == "completed"
+    lifecycle.accept(
+        call_id="p05-re-1",
+        current_manifest=manifest,
+        proposed_manifest=e1.proposed_manifest,
+    )
+    current = lifecycle.current_manifest
+    owners_after = list(budget.snapshot().owner_limits)
+    rev_after = budget.snapshot().revision
+    policy_after = current.effective_policy_digest
+
+    r2, e2, p2 = stage_skill_injection(
+        call_id="p05-re-2",
+        current_manifest=current,
+        candidates=[candidate],
+        lifecycle=lifecycle,
+        policy=SkillInjectionPolicyContext(),
+    )
+    assert r2.status == "completed"
+    assert r2.structured_output["status"] == "noop"
+    assert e2 is None
+    assert p2 is None
+    assert lifecycle.current_manifest.manifest_digest == current.manifest_digest
+    assert lifecycle.current_manifest.effective_policy_digest == policy_after
+    assert list(budget.snapshot().owner_limits) == owners_after
+    assert budget.snapshot().revision == rev_after
