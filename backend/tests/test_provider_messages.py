@@ -25,7 +25,9 @@ from app.assistant.capabilities.contracts import (  # noqa: E402
 )
 from app.assistant.domain.digests import sha256_canonical_json  # noqa: E402
 from app.assistant.provider_loop.messages import (  # noqa: E402
+    PROVIDER_CONTEXT_CONTENT_MAX_CHARS,
     ProviderAssistantMessage,
+    ProviderContextUpdateMessage,
     ProviderRuntimeInstructionMessage,
     ProviderSystemMessage,
     ProviderToolCall,
@@ -509,3 +511,121 @@ def test_transcript_digest_stable() -> None:
             ],
         }
     )
+
+
+def _context_message(
+    *,
+    content: str = "SKILL.md protected body",
+    locale: str = "en",
+    manifest_revision: int = 2,
+    manifest_digest: str = DIGEST_E,
+    prompt_build_digest: str = DIGEST_A,
+) -> ProviderContextUpdateMessage:
+    return ProviderContextUpdateMessage(
+        locale=locale,
+        manifest_revision=manifest_revision,
+        manifest_digest=manifest_digest,
+        prompt_build_digest=prompt_build_digest,
+        content=content,
+    )
+
+
+def test_provider_context_update_message_valid() -> None:
+    msg = _context_message()
+    assert msg.role == "runtime_context"
+    assert msg.context_type == "main_agent_manifest"
+    assert msg.content == "SKILL.md protected body"
+    payload = {
+        "role": "runtime_context",
+        "contextType": "main_agent_manifest",
+        "locale": "en",
+        "manifestRevision": 2,
+        "manifestDigest": DIGEST_E,
+        "promptBuildDigest": DIGEST_A,
+        "content": "SKILL.md protected body",
+    }
+    assert digest_provider_message(msg) == sha256_canonical_json(payload)
+
+
+def test_provider_context_update_rejects_unknown_fields_and_bounds() -> None:
+    with pytest.raises(ValidationError):
+        ProviderContextUpdateMessage.model_validate(
+            {
+                "role": "runtime_context",
+                "contextType": "main_agent_manifest",
+                "locale": "en",
+                "manifestRevision": 1,
+                "manifestDigest": DIGEST_E,
+                "promptBuildDigest": DIGEST_A,
+                "content": "ok",
+                "extra": "nope",
+            }
+        )
+    with pytest.raises(ValidationError):
+        _context_message(content="")
+    with pytest.raises(ValidationError):
+        _context_message(content="   ")
+    with pytest.raises(ValidationError):
+        _context_message(content="x" * (PROVIDER_CONTEXT_CONTENT_MAX_CHARS + 1))
+    with pytest.raises(ValidationError):
+        _context_message(locale="")
+    with pytest.raises(ValidationError):
+        _context_message(manifest_digest="not-a-digest")
+    with pytest.raises(ValidationError):
+        _context_message(prompt_build_digest="Z" * 64)
+    with pytest.raises(ValidationError):
+        _context_message(manifest_revision=-1)
+    # Control characters rejected.
+    with pytest.raises(ValidationError):
+        _context_message(content="bad\x00content")
+
+
+def test_provider_context_update_not_user_or_tool_role() -> None:
+    msg = _context_message()
+    assert msg.role not in {"user", "tool", "assistant"}
+    with pytest.raises(ValidationError):
+        ProviderUserMessage.model_validate(
+            {
+                "role": "user",
+                "context_type": "main_agent_manifest",
+                "locale": "en",
+                "manifest_revision": 1,
+                "manifest_digest": DIGEST_E,
+                "prompt_build_digest": DIGEST_A,
+                "content": "x",
+            }
+        )
+
+
+def test_context_message_does_not_close_tool_calls() -> None:
+    call = _call(call_id="c1")
+    messages = (
+        ProviderAssistantMessage(content=None, tool_calls=(call,)),
+        _context_message(),
+    )
+    with pytest.raises(ValueError, match="unpaired"):
+        validate_provider_transcript(messages)
+    # Like system/runtime_instruction, context may appear while open without closing.
+    # Pairing still requires a tool result.
+    paired = (
+        ProviderAssistantMessage(content=None, tool_calls=(call,)),
+        _context_message(),
+        ProviderToolMessage(
+            call_id="c1",
+            provider_alias="search_entries",
+            content=_completed_envelope(),
+        ),
+    )
+    validate_provider_transcript(paired)
+
+
+def test_context_message_participates_in_transcript_digest() -> None:
+    base = (
+        ProviderUserMessage(content="hi"),
+        ProviderAssistantMessage(content="yo", tool_calls=()),
+    )
+    with_ctx = base + (_context_message(content="skill body"),)
+    assert digest_provider_transcript(base) != digest_provider_transcript(with_ctx)
+    assert digest_provider_transcript(with_ctx) == digest_provider_transcript(with_ctx)
+    tampered = base + (_context_message(content="skill body TAMPERED"),)
+    assert digest_provider_transcript(with_ctx) != digest_provider_transcript(tampered)

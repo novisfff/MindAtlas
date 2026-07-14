@@ -120,6 +120,56 @@ class ProviderRuntimeInstructionMessage(FrozenContract):
         return value
 
 
+# Protected Main Agent / Skill context (Plan 04). Append-only; never user/tool/final text.
+PROVIDER_CONTEXT_CONTENT_MIN_CHARS = 1
+PROVIDER_CONTEXT_CONTENT_MAX_CHARS = 32_000
+
+
+class ProviderContextUpdateMessage(FrozenContract):
+    role: Literal["runtime_context"] = "runtime_context"
+    context_type: Literal["main_agent_manifest"] = "main_agent_manifest"
+    locale: str
+    manifest_revision: int
+    manifest_digest: str
+    prompt_build_digest: str
+    content: str
+
+    @field_validator("locale")
+    @classmethod
+    def _locale(cls, value: str) -> str:
+        return _require_non_empty_str(value, field_name="locale")
+
+    @field_validator("manifest_revision")
+    @classmethod
+    def _revision(cls, value: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("manifest_revision must be >= 0")
+        return value
+
+    @field_validator("manifest_digest", "prompt_build_digest")
+    @classmethod
+    def _digests(cls, value: str, info: Any) -> str:
+        return _require_digest(value, field_name=info.field_name)
+
+    @field_validator("content")
+    @classmethod
+    def _content(cls, value: str) -> str:
+        if not isinstance(value, str):
+            raise TypeError("content must be a string")
+        if _CONTROL_RE.search(value):
+            raise ValueError("content must not contain control characters")
+        if not value.strip():
+            raise ValueError("content must be non-empty")
+        length = len(value)
+        if length < PROVIDER_CONTEXT_CONTENT_MIN_CHARS:
+            raise ValueError("content must be non-empty")
+        if length > PROVIDER_CONTEXT_CONTENT_MAX_CHARS:
+            raise ValueError(
+                f"content must be <= {PROVIDER_CONTEXT_CONTENT_MAX_CHARS} characters"
+            )
+        return value
+
+
 class ProviderUserMessage(FrozenContract):
     role: Literal["user"] = "user"
     content: str
@@ -309,6 +359,7 @@ class ProviderToolMessage(FrozenContract):
 ProviderMessage = Annotated[
     ProviderSystemMessage
     | ProviderRuntimeInstructionMessage
+    | ProviderContextUpdateMessage
     | ProviderUserMessage
     | ProviderAssistantMessage
     | ProviderToolMessage,
@@ -446,6 +497,16 @@ def provider_message_payload(message: ProviderMessage) -> dict[str, JsonValue]:
             "role": "runtime_instruction",
             "instructionType": message.instruction_type,
             "locale": message.locale,
+            "content": message.content,
+        }
+    if isinstance(message, ProviderContextUpdateMessage):
+        return {
+            "role": "runtime_context",
+            "contextType": message.context_type,
+            "locale": message.locale,
+            "manifestRevision": message.manifest_revision,
+            "manifestDigest": message.manifest_digest,
+            "promptBuildDigest": message.prompt_build_digest,
             "content": message.content,
         }
     if isinstance(message, ProviderUserMessage):
@@ -623,6 +684,7 @@ def _open_calls_from_messages(
                 ProviderSystemMessage,
                 ProviderUserMessage,
                 ProviderRuntimeInstructionMessage,
+                ProviderContextUpdateMessage,
             ),
         ):
             raise ValueError("unexpected message while tool calls remain open")
@@ -649,6 +711,7 @@ def validate_provider_transcript(
             (
                 ProviderSystemMessage,
                 ProviderRuntimeInstructionMessage,
+                ProviderContextUpdateMessage,
                 ProviderUserMessage,
                 ProviderAssistantMessage,
                 ProviderToolMessage,
@@ -741,7 +804,10 @@ def seal_cancelled_continuation(
 
 
 __all__ = [
+    "PROVIDER_CONTEXT_CONTENT_MAX_CHARS",
+    "PROVIDER_CONTEXT_CONTENT_MIN_CHARS",
     "ProviderAssistantMessage",
+    "ProviderContextUpdateMessage",
     "ProviderMessage",
     "ProviderRuntimeInstructionMessage",
     "ProviderSystemMessage",

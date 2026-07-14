@@ -15,6 +15,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import Any, Literal
+from uuid import UUID
 
 from app.assistant.capabilities.contracts import (
     CapabilityError,
@@ -49,6 +50,7 @@ from app.assistant.provider_loop.contracts import (
     ProviderUsage,
     ProviderWaitingCallState,
     ProviderWaitingResolution,
+    RoundContextResolution,
     SafeProviderError,
     ToolSurfaceResolution,
     aggregate_provider_usage,
@@ -58,6 +60,7 @@ from app.assistant.provider_loop.contracts import (
 )
 from app.assistant.provider_loop.messages import (
     ProviderAssistantMessage,
+    ProviderContextUpdateMessage,
     ProviderMessage,
     ProviderRuntimeInstructionMessage,
     ProviderToolCall,
@@ -134,6 +137,7 @@ def run_provider_agent_loop(
     round_count = 0
     prior_tool_call_count = 0
     finalization_instruction_appended = False
+    already_applied_skill_version_ids: tuple[UUID, ...] = ()
 
     try:
         _validate_loop_identity(request=request, provider=ports.provider)
@@ -285,6 +289,19 @@ def run_provider_agent_loop(
                         usage=accumulated_usage,
                         round_count=round_count,
                     )
+
+                # After Tool surface (and any alias child), resolve protected context.
+                already_applied_skill_version_ids = _append_round_context(
+                    ports=ports,
+                    messages=messages,
+                    current_manifest=current_manifest,
+                    already_applied_skill_version_ids=already_applied_skill_version_ids,
+                    execution_scope=request.execution_scope,
+                    locale=request.locale,
+                    tool_call_records=tool_call_records,
+                    accumulated_usage=accumulated_usage,
+                    round_count=round_count,
+                )
 
             round_count += 1
 
@@ -1294,6 +1311,159 @@ def _chunk_final_text(text: str, *, size: int = 32) -> list[str]:
     if size < 1:
         raise ValueError("size must be >= 1")
     return [text[i : i + size] for i in range(0, len(text), size)] or [text]
+
+
+def _append_round_context(
+    *,
+    ports: ProviderLoopPorts,
+    messages: list[ProviderMessage],
+    current_manifest: ResolvedRunManifestRevision,
+    already_applied_skill_version_ids: tuple[UUID, ...],
+    execution_scope: ProviderExecutionScope,
+    locale: str,
+    tool_call_records: list[ProviderToolCallRecord],
+    accumulated_usage: ProviderUsage,
+    round_count: int,
+) -> tuple[UUID, ...]:
+    """Resolve protected context after Tool surface; append not-yet-applied messages.
+
+    Ordering lock: tools surface (and alias child) first, then RoundContextProvider
+    with that exact round Manifest. Returns the updated applied skill version IDs.
+    """
+    try:
+        context_resolution = ports.round_context_provider.resolve(
+            manifest=current_manifest,
+            already_applied_skill_version_ids=already_applied_skill_version_ids,
+            execution_scope=execution_scope,
+            locale=locale,
+        )
+    except ProviderLoopError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - map to safe protocol error
+        raise ProviderLoopError(
+            stop_reason="protocol_error",
+            error=SafeProviderError(
+                semantic_code="round_context_provider_failed",
+                safe_summary="round context provider failed before provider round",
+                retry_disposition="never",
+            ),
+            messages=tuple(messages),
+            tool_calls=tuple(tool_call_records),
+            manifest=current_manifest,
+            usage=accumulated_usage,
+            round_count=round_count,
+        ) from exc
+
+    if not isinstance(context_resolution, RoundContextResolution):
+        # Tolerate duck-typed resolutions that re-validate as RoundContextResolution.
+        try:
+            context_resolution = RoundContextResolution.model_validate(
+                context_resolution.model_dump()
+                if hasattr(context_resolution, "model_dump")
+                else context_resolution
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise ProviderLoopError(
+                stop_reason="protocol_error",
+                error=SafeProviderError(
+                    semantic_code="round_context_invalid",
+                    safe_summary="round context resolution is invalid",
+                    retry_disposition="never",
+                ),
+                messages=tuple(messages),
+                tool_calls=tuple(tool_call_records),
+                manifest=current_manifest,
+                usage=accumulated_usage,
+                round_count=round_count,
+            ) from exc
+
+    if context_resolution.manifest_revision != current_manifest.revision:
+        raise ProviderLoopError(
+            stop_reason="protocol_error",
+            error=SafeProviderError(
+                semantic_code="round_context_manifest_mismatch",
+                safe_summary="round context revision does not match round manifest",
+                retry_disposition="never",
+            ),
+            messages=tuple(messages),
+            tool_calls=tuple(tool_call_records),
+            manifest=current_manifest,
+            usage=accumulated_usage,
+            round_count=round_count,
+        )
+    if context_resolution.manifest_digest != current_manifest.manifest_digest:
+        raise ProviderLoopError(
+            stop_reason="protocol_error",
+            error=SafeProviderError(
+                semantic_code="round_context_manifest_mismatch",
+                safe_summary="round context digest does not match round manifest",
+                retry_disposition="never",
+            ),
+            messages=tuple(messages),
+            tool_calls=tuple(tool_call_records),
+            manifest=current_manifest,
+            usage=accumulated_usage,
+            round_count=round_count,
+        )
+
+    applied_set = set(already_applied_skill_version_ids)
+    new_applied: list[UUID] = []
+    for skill_version_id in context_resolution.applied_skill_version_ids:
+        if skill_version_id not in applied_set:
+            new_applied.append(skill_version_id)
+            applied_set.add(skill_version_id)
+
+    for message in context_resolution.messages:
+        if not isinstance(message, ProviderContextUpdateMessage):
+            raise ProviderLoopError(
+                stop_reason="protocol_error",
+                error=SafeProviderError(
+                    semantic_code="round_context_invalid",
+                    safe_summary="round context message type is invalid",
+                    retry_disposition="never",
+                ),
+                messages=tuple(messages),
+                tool_calls=tuple(tool_call_records),
+                manifest=current_manifest,
+                usage=accumulated_usage,
+                round_count=round_count,
+            )
+        if message.manifest_revision != current_manifest.revision:
+            raise ProviderLoopError(
+                stop_reason="protocol_error",
+                error=SafeProviderError(
+                    semantic_code="round_context_manifest_mismatch",
+                    safe_summary="context message revision does not match round manifest",
+                    retry_disposition="never",
+                ),
+                messages=tuple(messages),
+                tool_calls=tuple(tool_call_records),
+                manifest=current_manifest,
+                usage=accumulated_usage,
+                round_count=round_count,
+            )
+        if message.manifest_digest != current_manifest.manifest_digest:
+            raise ProviderLoopError(
+                stop_reason="protocol_error",
+                error=SafeProviderError(
+                    semantic_code="round_context_manifest_mismatch",
+                    safe_summary="context message digest does not match round manifest",
+                    retry_disposition="never",
+                ),
+                messages=tuple(messages),
+                tool_calls=tuple(tool_call_records),
+                manifest=current_manifest,
+                usage=accumulated_usage,
+                round_count=round_count,
+            )
+        messages.append(message)
+
+    if not new_applied and not context_resolution.applied_skill_version_ids:
+        return already_applied_skill_version_ids
+    if not new_applied:
+        # Provider reported already-applied IDs only; keep prior set.
+        return already_applied_skill_version_ids
+    return already_applied_skill_version_ids + tuple(new_applied)
 
 
 def _emit(ports: ProviderLoopPorts, event_type: str, payload: dict[str, Any]) -> None:
@@ -2654,6 +2824,12 @@ def _continue_after_resume(
     finalization_instruction_appended = any(
         isinstance(message, ProviderRuntimeInstructionMessage) for message in messages
     )
+    # Process-local: skills already on the resumed Manifest are treated as applied so
+    # resume does not re-inject their protected context. New activations after resume
+    # still inject once.
+    already_applied_skill_version_ids: tuple[UUID, ...] = tuple(
+        skill.version_id for skill in current_manifest.active_skills
+    )
     try:
         while True:
             if ports.cancellation.is_cancelled():
@@ -2775,6 +2951,18 @@ def _continue_after_resume(
                         usage=accumulated_usage,
                         round_count=round_count,
                     )
+
+                already_applied_skill_version_ids = _append_round_context(
+                    ports=ports,
+                    messages=messages,
+                    current_manifest=current_manifest,
+                    already_applied_skill_version_ids=already_applied_skill_version_ids,
+                    execution_scope=request.execution_scope,
+                    locale=request.locale,
+                    tool_call_records=tool_call_records,
+                    accumulated_usage=accumulated_usage,
+                    round_count=round_count,
+                )
 
             round_count += 1
             round_request = ProviderRoundRequest(

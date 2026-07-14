@@ -51,18 +51,21 @@ from app.assistant.provider_loop.aliases import (  # noqa: E402
     build_provider_tool_surface,
 )
 from app.assistant.provider_loop.contracts import (  # noqa: E402
+    NoOpRoundContextProvider,
     ProviderDispatchRequest,
     ProviderDispatchResult,
     ProviderGenerationOptions,
     ProviderLoopPorts,
     ProviderLoopRequest,
     ProviderUsage,
+    RoundContextResolution,
     ToolSurfaceResolution,
     create_execution_scope,
 )
 from app.assistant.provider_loop.loop import run_provider_agent_loop  # noqa: E402
 from app.assistant.provider_loop.messages import (  # noqa: E402
     ProviderAssistantMessage,
+    ProviderContextUpdateMessage,
     ProviderToolMessage,
     ProviderUserMessage,
 )
@@ -542,17 +545,21 @@ def _ports(
     dispatcher: RecordingDispatcher,
     cancellation: RecordingCancellation | None = None,
     events: RecordingEventSink | None = None,
+    round_context_provider=None,
 ) -> ProviderLoopPorts:
-    return ProviderLoopPorts(
-        provider=provider,
-        tools_provider=tools,
-        current_descriptors=verifier,
-        authorization_evidence=auth,
-        tool_dispatcher=dispatcher,
-        sibling_executor=SequentialSiblingExecutor(),
-        cancellation=cancellation or RecordingCancellation(),
-        events=events or RecordingEventSink(),
-    )
+    kwargs: dict[str, Any] = {
+        "provider": provider,
+        "tools_provider": tools,
+        "current_descriptors": verifier,
+        "authorization_evidence": auth,
+        "tool_dispatcher": dispatcher,
+        "sibling_executor": SequentialSiblingExecutor(),
+        "cancellation": cancellation or RecordingCancellation(),
+        "events": events or RecordingEventSink(),
+    }
+    if round_context_provider is not None:
+        kwargs["round_context_provider"] = round_context_provider
+    return ProviderLoopPorts(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -1950,3 +1957,436 @@ def test_scope_digest_tamper_fails_before_ports() -> None:
     assert result.error.semantic_code == "scope_digest_mismatch"
     assert provider.request_count == 0
     assert tools.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Plan 04 Task 2: protected round context
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RecordingRoundContextProvider:
+    """Scripted context provider that injects once per new skill version id."""
+
+    content_by_skill_version: dict[UUID, str]
+    calls: list[dict[str, Any]] = field(default_factory=list)
+    prompt_build_digest: str = DIGEST_3
+
+    def resolve(
+        self,
+        *,
+        manifest,
+        already_applied_skill_version_ids,
+        execution_scope,
+        locale,
+    ):
+        self.calls.append(
+            {
+                "manifest_revision": manifest.revision,
+                "manifest_digest": manifest.manifest_digest,
+                "already_applied": already_applied_skill_version_ids,
+                "scope_digest": execution_scope.scope_digest,
+                "locale": locale,
+                "active_skill_version_ids": tuple(
+                    skill.version_id for skill in manifest.active_skills
+                ),
+            }
+        )
+        applied = set(already_applied_skill_version_ids)
+        new_ids: list[UUID] = []
+        messages: list[ProviderContextUpdateMessage] = []
+        for skill in manifest.active_skills:
+            if skill.version_id in applied:
+                continue
+            content = self.content_by_skill_version.get(skill.version_id)
+            if content is None:
+                continue
+            new_ids.append(skill.version_id)
+            messages.append(
+                ProviderContextUpdateMessage(
+                    locale=locale,
+                    manifest_revision=manifest.revision,
+                    manifest_digest=manifest.manifest_digest,
+                    prompt_build_digest=self.prompt_build_digest,
+                    content=content,
+                )
+            )
+        return RoundContextResolution(
+            manifest_revision=manifest.revision,
+            manifest_digest=manifest.manifest_digest,
+            applied_skill_version_ids=tuple(new_ids),
+            messages=tuple(messages),
+        )
+
+
+def test_noop_round_context_is_default_and_byte_identical() -> None:
+    base = _manifest()
+    binding, descriptor = _pair("tools.search", target_id=TARGET_A)
+    resolution = _build_surface(base, [(binding, descriptor)])
+    model = _model()
+    user = ProviderUserMessage(content="hello")
+    final = "Hello from the model."
+
+    # Default ports use NoOpRoundContextProvider.
+    default_ports = ProviderLoopPorts(
+        provider=_scripted(model),
+        tools_provider=RecordingToolsProvider(resolutions=[]),
+        current_descriptors=RecordingDescriptorVerifier(current_by_binding={}),
+        authorization_evidence=RecordingAuthFactory(),
+        tool_dispatcher=RecordingDispatcher(
+            results=[], verifier=RecordingDescriptorVerifier(current_by_binding={})
+        ),
+        sibling_executor=SequentialSiblingExecutor(),
+        cancellation=RecordingCancellation(),
+        events=RecordingEventSink(),
+    )
+    assert isinstance(default_ports.round_context_provider, NoOpRoundContextProvider)
+
+    # Explicit no-op vs default: same result shape for direct answer.
+    provider_a = _scripted(model)
+    provider_a.enqueue(
+        ScriptedRoundScript(
+            expected_round_index=0,
+            expected_messages=(user,),
+            expected_surface_digest=resolution.surface.surface_digest,
+            expected_tools_enabled=True,
+            expected_finalization_round=False,
+            expected_generation=ProviderGenerationOptions(),
+            expected_tool_aliases=tuple(t.provider_alias for t in resolution.surface.tools),
+            events=text_then_terminal("Hello ", "from the model.", usage=_usage()),
+        )
+    )
+    tools_a = RecordingToolsProvider(
+        resolutions=[
+            ToolSurfaceResolution(manifest=resolution.manifest, surface=resolution.surface)
+        ]
+    )
+    verifier_a = RecordingDescriptorVerifier(
+        current_by_binding={binding.ref.binding_contract_digest: descriptor}
+    )
+    result_default = run_provider_agent_loop(
+        ProviderLoopRequest(
+            manifest=base,
+            initial_messages=(user,),
+            model_ref=model,
+            execution_scope=_scope(),
+            max_rounds=4,
+            locale="en",
+        ),
+        _ports(
+            provider=provider_a,
+            tools=tools_a,
+            verifier=verifier_a,
+            auth=RecordingAuthFactory(),
+            dispatcher=RecordingDispatcher(results=[], verifier=verifier_a),
+        ),
+    )
+    provider_b = _scripted(model)
+    provider_b.enqueue(
+        ScriptedRoundScript(
+            expected_round_index=0,
+            expected_messages=(user,),
+            expected_surface_digest=resolution.surface.surface_digest,
+            expected_tools_enabled=True,
+            expected_finalization_round=False,
+            expected_generation=ProviderGenerationOptions(),
+            expected_tool_aliases=tuple(t.provider_alias for t in resolution.surface.tools),
+            events=text_then_terminal("Hello ", "from the model.", usage=_usage()),
+        )
+    )
+    tools_b = RecordingToolsProvider(
+        resolutions=[
+            ToolSurfaceResolution(manifest=resolution.manifest, surface=resolution.surface)
+        ]
+    )
+    verifier_b = RecordingDescriptorVerifier(
+        current_by_binding={binding.ref.binding_contract_digest: descriptor}
+    )
+    result_noop = run_provider_agent_loop(
+        ProviderLoopRequest(
+            manifest=base,
+            initial_messages=(user,),
+            model_ref=model,
+            execution_scope=_scope(),
+            max_rounds=4,
+            locale="en",
+        ),
+        _ports(
+            provider=provider_b,
+            tools=tools_b,
+            verifier=verifier_b,
+            auth=RecordingAuthFactory(),
+            dispatcher=RecordingDispatcher(results=[], verifier=verifier_b),
+            round_context_provider=NoOpRoundContextProvider(),
+        ),
+    )
+    assert result_default.status == "completed"
+    assert result_default.final_text == final
+    assert result_noop.model_dump() == result_default.model_dump()
+    # No runtime_context messages under no-op.
+    assert not any(isinstance(m, ProviderContextUpdateMessage) for m in result_default.messages)
+
+
+def test_context_injected_once_after_manifest_change_before_round_two() -> None:
+    base = _manifest()
+    binding_a, desc_a = _pair("tools.search", target_id=TARGET_A)
+    binding_b, desc_b = _pair("tools.detail", target_id=TARGET_B)
+
+    res1 = _build_surface(base, [(binding_a, desc_a)])
+    child = append_skill_activation(
+        res1.manifest,
+        skill=ResolvedSkillRef(
+            package_id=SKILL_PKG,
+            version_id=SKILL_VER,
+            canonical_name="demo.skill",
+            sequence=1,
+            content_digest=DIGEST_A,
+            version_digest=DIGEST_B,
+            requested_name_normalized=None,
+            resolved_via_alias_id=None,
+        ),
+        capabilities=(binding_b.ref,),
+    )
+    res2 = build_provider_tool_surface(
+        manifest=child,
+        provider_protocol=P,
+        visible=[(binding_a, desc_a), (binding_b, desc_b)],
+        scope=_scope(),
+    )
+    model = _model()
+    user = ProviderUserMessage(content="inject then answer")
+    alias_a = res1.surface.tools[0].provider_alias
+    call_id = "call_ctx_1"
+    skill_body = "PROTECTED skill instructions for demo.skill"
+
+    order: list[str] = []
+
+    class OrderedTools(RecordingToolsProvider):
+        def resolve(self, manifest, *, scope, locale):
+            order.append("tools")
+            return super().resolve(manifest, scope=scope, locale=locale)
+
+    class OrderedCtx(RecordingRoundContextProvider):
+        def resolve(self, *, manifest, already_applied_skill_version_ids, execution_scope, locale):
+            order.append("context")
+            return super().resolve(
+                manifest=manifest,
+                already_applied_skill_version_ids=already_applied_skill_version_ids,
+                execution_scope=execution_scope,
+                locale=locale,
+            )
+
+    ordered_ctx = OrderedCtx(content_by_skill_version={SKILL_VER: skill_body})
+
+    class Flex(ScriptedProvider):
+        def stream_round(self, request, *, cancellation):
+            self.request_count += 1
+            self.seen_requests.append(request)
+            if request.round_index == 0:
+                # Round 0: base controls only — no skill context yet.
+                assert not any(
+                    isinstance(m, ProviderContextUpdateMessage) for m in request.messages
+                )
+                assert request.tool_surface.surface_digest == res1.surface.surface_digest
+                yield from tool_call_then_terminal(
+                    call_id=call_id,
+                    provider_alias=alias_a,
+                    arguments_json='{"query":"x"}',
+                )
+                return
+            assert request.round_index == 1
+            # Round 2 sees protected context exactly once, then tool result history.
+            ctx_msgs = [
+                m for m in request.messages if isinstance(m, ProviderContextUpdateMessage)
+            ]
+            assert len(ctx_msgs) == 1
+            assert ctx_msgs[0].content == skill_body
+            assert ctx_msgs[0].manifest_digest == res2.manifest.manifest_digest
+            assert ctx_msgs[0].manifest_revision == res2.manifest.revision
+            assert request.tool_surface.surface_digest == res2.surface.surface_digest
+            yield from text_then_terminal("done with context")
+
+    provider = Flex(
+        provider_protocol=P,
+        adapter_key=ADAPTER_KEY,
+        adapter_revision=ADAPTER_REVISION,
+        model_config_digest=MODEL_CONFIG,
+        expected_model_ref=model,
+    )
+    tools = OrderedTools(
+        resolutions=[
+            res1,
+            res2,
+        ]
+    )
+    verifier = RecordingDescriptorVerifier(
+        current_by_binding={
+            binding_a.ref.binding_contract_digest: desc_a,
+            binding_b.ref.binding_contract_digest: desc_b,
+        }
+    )
+    auth = RecordingAuthFactory()
+    dispatcher = RecordingDispatcher(
+        results=[
+            ProviderDispatchResult(
+                capability_result=completed_result(user_text="ok", metrics=_metrics()),
+                next_manifest=child,
+            )
+        ],
+        verifier=verifier,
+    )
+    result = run_provider_agent_loop(
+        ProviderLoopRequest(
+            manifest=base,
+            initial_messages=(user,),
+            model_ref=model,
+            execution_scope=_scope(),
+            max_rounds=4,
+            locale="zh",
+        ),
+        _ports(
+            provider=provider,
+            tools=tools,
+            verifier=verifier,
+            auth=auth,
+            dispatcher=dispatcher,
+            round_context_provider=ordered_ctx,
+        ),
+    )
+    assert result.status == "completed"
+    assert result.final_text == "done with context"
+    # Tools before context on every non-finalization round.
+    assert order == ["tools", "context", "tools", "context"]
+    # Context appended once in final transcript.
+    ctx_in_result = [
+        m for m in result.messages if isinstance(m, ProviderContextUpdateMessage)
+    ]
+    assert len(ctx_in_result) == 1
+    assert ctx_in_result[0].content == skill_body
+    # Round 0: no skills yet. Round 1: skill newly active, already_applied still empty
+    # at resolve-time; provider returns the skill id and loop records it after append.
+    assert ordered_ctx.calls[0]["already_applied"] == ()
+    assert ordered_ctx.calls[1]["already_applied"] == ()
+    assert ordered_ctx.calls[1]["active_skill_version_ids"] == (SKILL_VER,)
+    # Second resolve used exact accepted round-2 Manifest.
+    assert ordered_ctx.calls[1]["manifest_digest"] == res2.manifest.manifest_digest
+    # Pairing closed.
+    from app.assistant.provider_loop.messages import validate_provider_transcript
+
+    validate_provider_transcript(result.messages)
+
+
+def test_alias_only_revision_does_not_duplicate_skill_context() -> None:
+    base = _manifest()
+    binding_a, desc_a = _pair("tools.search", target_id=TARGET_A)
+    binding_b, desc_b = _pair("tools.detail", target_id=TARGET_B)
+    res1 = _build_surface(base, [(binding_a, desc_a)])
+    child = append_skill_activation(
+        res1.manifest,
+        skill=ResolvedSkillRef(
+            package_id=SKILL_PKG,
+            version_id=SKILL_VER,
+            canonical_name="demo.skill",
+            sequence=1,
+            content_digest=DIGEST_A,
+            version_digest=DIGEST_B,
+            requested_name_normalized=None,
+            resolved_via_alias_id=None,
+        ),
+        capabilities=(binding_b.ref,),
+    )
+    res2 = build_provider_tool_surface(
+        manifest=child,
+        provider_protocol=P,
+        visible=[(binding_a, desc_a), (binding_b, desc_b)],
+        scope=_scope(),
+    )
+    # Simulate alias-only child: same skills, new revision via append of no new aliases
+    # is identity; instead re-resolve same skill manifest for a third round surface.
+    res3 = ToolSurfaceResolution(manifest=res2.manifest, surface=res2.surface)
+
+    model = _model()
+    user = ProviderUserMessage(content="no dup")
+    alias_a = res1.surface.tools[0].provider_alias
+    skill_body = "skill once only"
+
+    ctx = RecordingRoundContextProvider(content_by_skill_version={SKILL_VER: skill_body})
+
+    class Flex(ScriptedProvider):
+        def stream_round(self, request, *, cancellation):
+            self.request_count += 1
+            self.seen_requests.append(request)
+            if request.round_index == 0:
+                yield from tool_call_then_terminal(
+                    call_id="call_alias_1",
+                    provider_alias=alias_a,
+                    arguments_json='{"query":"x"}',
+                )
+                return
+            if request.round_index == 1:
+                # Force another tool round that will re-resolve tools on same skill manifest.
+                yield from tool_call_then_terminal(
+                    call_id="call_alias_2",
+                    provider_alias=alias_a,
+                    arguments_json='{"query":"y"}',
+                )
+                return
+            ctx_msgs = [
+                m for m in request.messages if isinstance(m, ProviderContextUpdateMessage)
+            ]
+            assert len(ctx_msgs) == 1
+            yield from text_then_terminal("final")
+
+    provider = Flex(
+        provider_protocol=P,
+        adapter_key=ADAPTER_KEY,
+        adapter_revision=ADAPTER_REVISION,
+        model_config_digest=MODEL_CONFIG,
+        expected_model_ref=model,
+    )
+    tools = RecordingToolsProvider(resolutions=[res1, res2, res3])
+    verifier = RecordingDescriptorVerifier(
+        current_by_binding={
+            binding_a.ref.binding_contract_digest: desc_a,
+            binding_b.ref.binding_contract_digest: desc_b,
+        }
+    )
+    dispatcher = RecordingDispatcher(
+        results=[
+            ProviderDispatchResult(
+                capability_result=completed_result(user_text="ok1", metrics=_metrics()),
+                next_manifest=child,
+            ),
+            ProviderDispatchResult(
+                capability_result=completed_result(user_text="ok2", metrics=_metrics()),
+                next_manifest=res2.manifest,
+            ),
+        ],
+        verifier=verifier,
+    )
+    result = run_provider_agent_loop(
+        ProviderLoopRequest(
+            manifest=base,
+            initial_messages=(user,),
+            model_ref=model,
+            execution_scope=_scope(),
+            max_rounds=6,
+            locale="en",
+        ),
+        _ports(
+            provider=provider,
+            tools=tools,
+            verifier=verifier,
+            auth=RecordingAuthFactory(),
+            dispatcher=dispatcher,
+            round_context_provider=ctx,
+        ),
+    )
+    assert result.status == "completed"
+    ctx_msgs = [m for m in result.messages if isinstance(m, ProviderContextUpdateMessage)]
+    assert len(ctx_msgs) == 1
+    # Three context resolves (rounds 0,1,2 non-finalization); only round 1 injects.
+    assert len(ctx.calls) == 3
+    assert ctx.calls[0]["already_applied"] == ()
+    assert ctx.calls[1]["already_applied"] == ()  # inject happens during this call
+    assert ctx.calls[2]["already_applied"] == (SKILL_VER,)  # reinjection suppressed
