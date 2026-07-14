@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 
 from app.common.responses import ApiResponse
 from app.database import get_db
-from app.openclaw_integration.capability_adapter import OpenClawRuntimeModeSelector
 from app.openclaw_integration.runtime_worker import (
     build_worker_request,
     execute_openclaw_capability_in_worker,
@@ -141,10 +140,8 @@ async def execute_openclaw_capability(
     request: Request,
     body: dict[str, Any],
 ) -> ApiResponse:
-    # Snapshot mode + bounded headers/payload on the event loop; no request Session.
-    selected_mode = OpenClawRuntimeModeSelector().snapshot_mode()
+    # Snapshot bounded headers/payload on the event loop; no request Session.
     worker_request = build_worker_request(
-        selected_mode=selected_mode,
         capability_key=capability_key,
         preferred_locale=_preferred_locale_from_request(request),
         raw_payload=body if isinstance(body, dict) else {},

@@ -19,7 +19,7 @@ os.environ.setdefault(
 )
 os.environ.setdefault("APP_BUILD_REVISION", "plan02-task8-local")
 os.environ.setdefault("APP_ENV", "test")
-os.environ.setdefault("OPENCLAW_CAPABILITY_RUNTIME_MODE", "legacy")
+os.environ.pop("OPENCLAW_CAPABILITY_RUNTIME_MODE", None)
 
 bootstrap_backend_imports()
 reset_caches()
@@ -45,7 +45,6 @@ def test_worker_request_repr_hides_authorization() -> None:
     from app.openclaw_integration.runtime_worker import build_worker_request
 
     req = build_worker_request(
-        selected_mode="legacy",
         capability_key="search_entries",
         preferred_locale="zh",
         raw_payload={"query": "x"},
@@ -60,7 +59,7 @@ def test_worker_request_repr_hides_authorization() -> None:
     assert "super-secret-token" not in rendered
     assert "Bearer" not in rendered
     assert "super-secret-token" not in self_text
-    assert req.selected_mode == "legacy"
+    assert not hasattr(req, "selected_mode")
     assert req.capability_key == "search_entries"
 
 
@@ -71,7 +70,6 @@ def test_worker_request_bounds_payload_size() -> None:
     huge = {"blob": "x" * (1_048_576 + 10)}
     with pytest.raises(ApiException) as exc:
         build_worker_request(
-            selected_mode="shared",
             capability_key="search_entries",
             preferred_locale=None,
             raw_payload=huge,
@@ -109,7 +107,6 @@ def test_event_loop_heartbeat_during_blocking_worker() -> None:
         )
 
     req = build_worker_request(
-        selected_mode="legacy",
         capability_key="search_entries",
         preferred_locale="zh",
         raw_payload={"query": "hb"},
@@ -163,7 +160,6 @@ def test_worker_limiter_caps_concurrency() -> None:
 
     def make_req(i: int):
         return build_worker_request(
-            selected_mode="shared",
             capability_key="search_entries",
             preferred_locale=None,
             raw_payload={"query": str(i)},
@@ -217,7 +213,6 @@ def test_worker_closes_session_on_failure(db_session) -> None:
         return TrackingSession()
 
     fail_req = build_worker_request(
-        selected_mode="legacy",
         capability_key="search_entries",
         preferred_locale="zh",
         raw_payload={"query": "fail"},
@@ -250,6 +245,8 @@ def test_execute_route_has_no_request_db_dependency() -> None:
     source = inspect.getsource(oc_router.execute_openclaw_capability)
     assert "Depends(get_db)" not in source
     assert "execute_openclaw_capability_in_worker" in source
+    assert "OpenClawRuntimeModeSelector" not in source
+    assert "selected_mode" not in source
 
 
 def test_import_boundary_capabilities_do_not_import_openclaw() -> None:

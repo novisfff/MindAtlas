@@ -29,14 +29,6 @@ class Settings(BaseSettings):
     # Immutable image/git revision in staging/production. Local/test may use "development".
     app_build_revision: str = Field(default="development", alias="APP_BUILD_REVISION")
 
-    # Plan 02A temporary OpenClaw Capability Runtime mode selector.
-    # Process/deployment switch only (get_settings is cached). Requires restart.
-    # Accepts exactly "legacy" or "shared"; no aliases (new/auto/bool/empty).
-    openclaw_capability_runtime_mode: Literal["legacy", "shared"] = Field(
-        default="legacy",
-        alias="OPENCLAW_CAPABILITY_RUNTIME_MODE",
-    )
-
     # Plan 03 live model capability probe (paid Provider call). Default-disabled.
     # confirmProviderCall=true is cost acknowledgement only, not authentication.
     ai_model_capability_probe_enabled: bool = Field(
@@ -223,20 +215,6 @@ class Settings(BaseSettings):
     def normalize_log_level(cls, v: str) -> str:
         value = (v or "").strip().upper()
         return value or "INFO"
-
-    @field_validator("openclaw_capability_runtime_mode", mode="before")
-    @classmethod
-    def validate_openclaw_capability_runtime_mode(cls, v: object) -> str:
-        if not isinstance(v, str):
-            raise ValueError(
-                "OPENCLAW_CAPABILITY_RUNTIME_MODE must be exactly 'legacy' or 'shared'"
-            )
-        value = v.strip()
-        if value not in {"legacy", "shared"}:
-            raise ValueError(
-                "OPENCLAW_CAPABILITY_RUNTIME_MODE must be exactly 'legacy' or 'shared'"
-            )
-        return value
 
     def cors_origins_list(self) -> list[str]:
         value = self.cors_origins

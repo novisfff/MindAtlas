@@ -91,30 +91,8 @@ def _svc():
     return s
 
 
-RuntimeMode = Literal["legacy", "shared"]
 SourceType = Literal["tool", "workflow", "agent"]
 ToolResponseMode = Literal["json_schema", "text_field"]
-
-
-# ---------------------------------------------------------------------------
-# Runtime mode selector (process-cached Settings; request-frozen snapshot)
-# ---------------------------------------------------------------------------
-
-
-class OpenClawRuntimeModeSelector:
-    """Snapshots OPENCLAW_CAPABILITY_RUNTIME_MODE once per request."""
-
-    def snapshot_mode(self) -> RuntimeMode:
-        from app.config import get_settings
-
-        mode = get_settings().openclaw_capability_runtime_mode
-        if mode not in {"legacy", "shared"}:
-            raise ApiException(
-                status_code=500,
-                code=50000,
-                message="Invalid OpenClaw capability runtime mode configuration",
-            )
-        return mode  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +264,6 @@ def resolve_tool_contract_adapter(source_tool_name: str | None) -> OpenClawToolC
 
 class OpenClawFrozenCapabilityCall(FrozenContract):
     call_id: str
-    selected_mode: RuntimeMode
     catalog_item_id: UUID
     capability_key: str
     tool_name: str
@@ -673,7 +650,6 @@ def freeze_openclaw_capability_call(
     service: OpenClawIntegrationService,
     *,
     item: OpenClawCapabilityItem,
-    selected_mode: RuntimeMode,
     call_id: str,
 ) -> OpenClawFrozenCapabilityCall:
     external_input = _svc()._normalize_json_object_schema(
@@ -721,7 +697,6 @@ def freeze_openclaw_capability_call(
     )
     return OpenClawFrozenCapabilityCall(
         call_id=call_id,
-        selected_mode=selected_mode,
         catalog_item_id=item.id,
         capability_key=item.capability_key,
         tool_name=item.tool_name,
@@ -752,7 +727,6 @@ class OpenClawAuthorizationEvidenceVerifier:
         self,
         *,
         expected_call_id: str,
-        selected_mode: RuntimeMode,
         frozen_call: OpenClawFrozenCapabilityCall,
         auth_proof: OpenClawAuthenticationProof,
         ceiling: OpenClawEffectCeiling,
@@ -761,7 +735,6 @@ class OpenClawAuthorizationEvidenceVerifier:
         locale: str,
     ) -> None:
         self.expected_call_id = expected_call_id
-        self.selected_mode = selected_mode
         self.frozen_call = frozen_call
         self._auth_proof = auth_proof
         self.ceiling = ceiling
@@ -1025,7 +998,7 @@ class _NullEventSink:
 
 
 # ---------------------------------------------------------------------------
-# Shared-mode execute
+# Shared Capability Runtime execute
 # ---------------------------------------------------------------------------
 
 
@@ -1035,7 +1008,6 @@ def execute_shared_capability(
     item: OpenClawCapabilityItem,
     raw_payload: dict[str, Any],
     audit_context: OpenClawRuntimeAuditContext,
-    selected_mode: RuntimeMode,
     locale: str,
     auth_proof: OpenClawAuthenticationProof,
     cancellation: CancellationPort | None = None,
@@ -1044,7 +1016,6 @@ def execute_shared_capability(
     frozen = freeze_openclaw_capability_call(
         service,
         item=item,
-        selected_mode=selected_mode,
         call_id=call_id,
     )
     ceiling = _select_effect_ceiling(item)
@@ -1098,7 +1069,6 @@ def execute_shared_capability(
 
     verifier = OpenClawAuthorizationEvidenceVerifier(
         expected_call_id=call_id,
-        selected_mode=selected_mode,
         frozen_call=frozen,
         auth_proof=auth_proof,
         ceiling=ceiling,
@@ -1129,7 +1099,6 @@ __all__ = [
     "OpenClawAuthenticationProof",
     "OpenClawAuthorizationEvidenceVerifier",
     "OpenClawFrozenCapabilityCall",
-    "OpenClawRuntimeModeSelector",
     "OpenClawToolContractAdapter",
     "build_create_relation_response",
     "build_get_entry_response",

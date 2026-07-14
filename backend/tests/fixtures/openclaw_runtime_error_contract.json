@@ -132,14 +132,8 @@
     "openclaw_create_relation",
     "openclaw_query_knowledge_graph"
   ],
-  "executeBranches": [
-    "_execute_tool_capability",
-    "_execute_workflow_capability",
-    "_execute_agent_capability"
-  ],
   "notes": [
-    "execute_capability is async but currently invokes sync branches inline (event-loop blocking).",
-    "OpenClaw unit suite currently fails with missing app_setting table in sqlite fixtures (pre-existing; not Plan 01).",
-    "Non-openclaw characterization suite: 46 passed."
+    "OpenClaw execute is shared-only via execute_shared_capability (Plan 02B cleanup).",
+    "HTTP execute uses the bounded worker boundary; no dual-mode selector remains."
   ]
 }

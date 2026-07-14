@@ -680,10 +680,9 @@ def _resolve_openclaw_entry_type_code(service: "OpenClawIntegrationService", ent
     return row.code
 
 
-# OpenClaw-only contract adapters live in capability_adapter.py (shared by legacy/shared).
+# OpenClaw-only contract adapters live in capability_adapter.py (shared Capability Runtime bridge).
 from app.openclaw_integration.capability_adapter import (  # noqa: E402
     OPENCLAW_TOOL_CONTRACT_ADAPTERS,
-    OpenClawRuntimeModeSelector,
     OpenClawToolContractAdapter as _OpenClawToolContractAdapter,
     build_create_relation_response as _build_create_relation_response,
     build_get_entry_response as _build_get_entry_response,
@@ -2556,127 +2555,6 @@ class OpenClawIntegrationService:
             )
         return item
 
-    def _execute_tool_capability(self, item: OpenClawCapabilityItem, raw_payload: dict[str, Any]) -> dict[str, Any]:
-        resolved = self._resolve_tool_source(tool_id=item.tool_id, source_tool_name=item.source_tool_name)
-        if resolved is None or resolved.tool_runtime is None:
-            raise ApiException(status_code=409, code=40961, message="Bound tool is unavailable")
-        input_schema = _normalize_json_object_schema(item.input_schema_json or _EMPTY_OBJECT_SCHEMA, label="input")
-        output_schema = _normalize_json_object_schema(item.output_schema_json or _EMPTY_OBJECT_SCHEMA, label="output")
-        from app.assistant.workflow.engine.runtime_helpers import stringify, wrap_tool_with_db
-
-        runner = wrap_tool_with_db(resolved.tool_runtime, self.db.get_bind())
-        adapter = self._resolve_tool_contract_adapter(item.source_tool_name or resolved.source_tool_name)
-
-        if adapter is not None and resolved.is_system:
-            normalized_payload, tool_args = adapter.prepare_request(self, raw_payload or {})
-            _validate_value_against_schema(input_schema, normalized_payload, label="input")
-            result = runner(**tool_args)
-            payload = adapter.build_response(result)
-            _validate_value_against_schema(output_schema, payload, label="output")
-            return payload
-
-        _validate_value_against_schema(input_schema, raw_payload, label="input")
-        result = runner(**raw_payload)
-        if item.tool_response_mode == "text_field":
-            properties = output_schema.get("properties") if isinstance(output_schema.get("properties"), dict) else {}
-            field_name = next(iter(properties.keys()), "text")
-            payload = {field_name: stringify(result)}
-            _validate_value_against_schema(output_schema, payload, label="output")
-            return payload
-        payload = _normalize_result_object(result)
-        _validate_value_against_schema(output_schema, payload, label="output")
-        return payload
-
-    def _execute_workflow_capability(
-        self,
-        item: OpenClawCapabilityItem,
-        raw_payload: dict[str, Any],
-        *,
-        locale: str,
-        audit_context: OpenClawRuntimeAuditContext,
-    ) -> dict[str, Any]:
-        workflow = self.config_service.get_workflow(item.workflow_id)  # type: ignore[arg-type]
-        snapshot = self._workflow_contract_snapshot(workflow)
-        item_input_schema = _normalize_json_object_schema(item.input_schema_json or _EMPTY_OBJECT_SCHEMA, label="input")
-        item_output_schema = _normalize_json_object_schema(item.output_schema_json or _EMPTY_OBJECT_SCHEMA, label="output")
-        if _schema_compact(snapshot.input_schema) != _schema_compact(item_input_schema):
-            raise ApiException(status_code=409, code=40961, message="Workflow contract drifted from the catalog item")
-        if _schema_compact(snapshot.output_schema) != _schema_compact(item_output_schema):
-            raise ApiException(status_code=409, code=40961, message="Workflow contract drifted from the catalog item")
-        _validate_value_against_schema(item_input_schema, raw_payload, label="input")
-        workflow_input = self.config_service._get_workflow_published_input(workflow)  # noqa: SLF001
-        if workflow_input is None:
-            raise ApiException(status_code=409, code=40961, message="Workflow published version is unavailable")
-        skill = self._build_workflow_skill_definition(workflow=workflow, workflow_input=workflow_input)
-        engine = self._build_engine(skill)
-        output = "".join(
-            engine.execute(
-                skill=skill,
-                user_input="",
-                history=[],
-                runtime_context={
-                    "stream_output": False,
-                    "conversation_id": f"capability_workflow:{item.capability_key}:{uuid4().hex}",
-                    "structured_input": raw_payload,
-                    "run_id": uuid4().hex,
-                    "channel_type": "openclaw_capability",
-                    "workflow_id": str(workflow.id),
-                    "locale": locale,
-                    "request_source": audit_context.source,
-                    "request_channel": audit_context.channel,
-                    "request_session": audit_context.session,
-                    "request_tool": audit_context.tool,
-                },
-            )
-        )
-        result = _normalize_result_object(output)
-        _validate_value_against_schema(item_output_schema, result, label="output")
-        return result
-
-    def _execute_agent_capability(
-        self,
-        item: OpenClawCapabilityItem,
-        raw_payload: dict[str, Any],
-        *,
-        locale: str,
-        audit_context: OpenClawRuntimeAuditContext,
-    ) -> dict[str, Any]:
-        agent_profile = self.config_service.get_agent_profile(item.agent_profile_id)  # type: ignore[arg-type]
-        draft = self.config_service._get_agent_profile_published_draft(agent_profile)  # noqa: SLF001
-        if draft is None:
-            raise ApiException(status_code=409, code=40961, message="Agent published version is unavailable")
-        input_schema = _normalize_json_object_schema(item.input_schema_json or _EMPTY_OBJECT_SCHEMA, label="input")
-        output_schema = _normalize_json_object_schema(item.output_schema_json or _EMPTY_OBJECT_SCHEMA, label="output")
-        _validate_value_against_schema(input_schema, raw_payload, label="input")
-        skill = self._build_agent_skill_definition(
-            agent_profile=agent_profile,
-            draft=draft,
-            output_schema=output_schema,
-            locale=locale,
-        )
-        engine = self._build_engine(skill)
-        output = "".join(
-            engine.execute(
-                skill=skill,
-                user_input=json.dumps(raw_payload, ensure_ascii=False),
-                history=[],
-                runtime_context={
-                    "stream_output": False,
-                    "conversation_id": f"capability_agent:{item.capability_key}:{uuid4().hex}",
-                    "run_id": uuid4().hex,
-                    "channel_type": "openclaw_capability",
-                    "locale": locale,
-                    "request_source": audit_context.source,
-                    "request_channel": audit_context.channel,
-                    "request_session": audit_context.session,
-                    "request_tool": audit_context.tool,
-                },
-            )
-        )
-        result = _normalize_result_object(output)
-        _validate_value_against_schema(output_schema, result, label="output")
-        return result
-
     def execute_capability_in_worker(
         self,
         *,
@@ -2684,12 +2562,11 @@ class OpenClawIntegrationService:
         raw_payload: dict[str, Any],
         audit_context: OpenClawRuntimeAuditContext,
         preferred_locale: str | None = None,
-        selected_mode: str,
         auth_proof: Any,
         cancellation: Any | None = None,
         request_id: str | None = None,
     ) -> OpenClawCapabilityExecuteResponse:
-        """Sync execute path used inside the bounded worker Session."""
+        """Sync execute path used inside the bounded worker Session (shared-only)."""
         self._ensure_system_items(preferred_locale=preferred_locale, commit=False)
         locale = self._current_locale(preferred_locale)
         item = self._ensure_capability_exposed(capability_key=capability_key, locale=locale)
@@ -2706,44 +2583,15 @@ class OpenClawIntegrationService:
         status = "success"
         invocation_started = False
         try:
-            if selected_mode == "shared":
-                invocation_started = True
-                return execute_shared_capability(
-                    self,
-                    item=item,
-                    raw_payload=raw_payload or {},
-                    audit_context=audit_context,
-                    selected_mode="shared",
-                    locale=locale,
-                    auth_proof=auth_proof,
-                    cancellation=cancellation,
-                )
-
-            # legacy branch — no cross-mode retry after start
-            if item.source_type == "tool":
-                invocation_started = True
-                result = self._execute_tool_capability(item, raw_payload or {})
-            elif item.source_type == "workflow":
-                invocation_started = True
-                result = self._execute_workflow_capability(
-                    item,
-                    raw_payload or {},
-                    locale=locale,
-                    audit_context=audit_context,
-                )
-            else:
-                invocation_started = True
-                result = self._execute_agent_capability(
-                    item,
-                    raw_payload or {},
-                    locale=locale,
-                    audit_context=audit_context,
-                )
-
-            return OpenClawCapabilityExecuteResponse(
-                capability_key=item.capability_key,
-                tool_name=item.tool_name,
-                result=result,
+            invocation_started = True
+            return execute_shared_capability(
+                self,
+                item=item,
+                raw_payload=raw_payload or {},
+                audit_context=audit_context,
+                locale=locale,
+                auth_proof=auth_proof,
+                cancellation=cancellation,
             )
         except Exception:
             status = "failed"
@@ -2751,7 +2599,7 @@ class OpenClawIntegrationService:
         finally:
             duration_ms = (time.perf_counter() - start) * 1000.0
             logger.info(
-                "openclaw_capability_execution request_id=%s capability=%s tool=%s source=%s channel=%s session=%s status=%s mode=%s invocation_started=%s duration_ms=%.2f",
+                "openclaw_capability_execution request_id=%s capability=%s tool=%s source=%s channel=%s session=%s status=%s mode=shared invocation_started=%s duration_ms=%.2f",
                 rid,
                 item.capability_key,
                 item.tool_name,
@@ -2759,7 +2607,6 @@ class OpenClawIntegrationService:
                 audit_context.channel,
                 audit_context.session,
                 status,
-                selected_mode,
                 invocation_started,
                 duration_ms,
             )
@@ -2771,7 +2618,6 @@ class OpenClawIntegrationService:
         raw_payload: dict[str, Any],
         audit_context: OpenClawRuntimeAuditContext,
         preferred_locale: str | None = None,
-        selected_mode: str | None = None,
         auth_proof: Any | None = None,
     ) -> OpenClawCapabilityExecuteResponse:
         """Compatibility entry used by tests that still call the service directly.
@@ -2780,13 +2626,11 @@ class OpenClawIntegrationService:
         """
         from app.openclaw_integration.capability_adapter import OpenClawAuthenticationProof
 
-        mode = selected_mode or OpenClawRuntimeModeSelector().snapshot_mode()
         proof = auth_proof or OpenClawAuthenticationProof(principal_id="openclaw")
         return self.execute_capability_in_worker(
             capability_key=capability_key,
             raw_payload=raw_payload or {},
             audit_context=audit_context,
             preferred_locale=preferred_locale,
-            selected_mode=mode,
             auth_proof=proof,
         )

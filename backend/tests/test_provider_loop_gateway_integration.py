@@ -23,7 +23,7 @@ os.environ.setdefault(
     "AI_PROVIDER_FERNET_KEY",
     "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ=",
 )
-os.environ.setdefault("OPENCLAW_CAPABILITY_RUNTIME_MODE", "legacy")
+os.environ.pop("OPENCLAW_CAPABILITY_RUNTIME_MODE", None)
 
 DIGEST_A = "a" * 64
 RUN_ID = UUID("00000000-0000-4000-8000-000000000901")
@@ -44,7 +44,7 @@ def db_env(monkeypatch: pytest.MonkeyPatch):
     reset_caches()
     monkeypatch.setenv("APP_BUILD_REVISION", "plan03-task9-local")
     monkeypatch.setenv("APP_ENV", "test")
-    monkeypatch.setenv("OPENCLAW_CAPABILITY_RUNTIME_MODE", "legacy")
+    monkeypatch.delenv("OPENCLAW_CAPABILITY_RUNTIME_MODE", raising=False)
     monkeypatch.setenv(
         "AI_PROVIDER_FERNET_KEY",
         "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ=",

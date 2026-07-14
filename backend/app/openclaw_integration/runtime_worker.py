@@ -1,7 +1,7 @@
-"""Bounded awaited OpenClaw Capability worker boundary (Plan 02 Task 8).
+"""Bounded awaited OpenClaw Capability worker boundary (Plan 02 Task 8 / 02B shared-only).
 
 Snapshots immutable request data on the event loop, then runs authentication,
-catalog freeze, and legacy/shared dispatch inside a worker-owned Session.
+catalog freeze, and shared Capability Runtime dispatch inside a worker-owned Session.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
 import anyio
 from sqlalchemy.orm import Session
@@ -21,8 +21,6 @@ from app.common.request_context import get_request_id
 from app.openclaw_integration.schemas import OpenClawCapabilityExecuteResponse
 
 logger = logging.getLogger(__name__)
-
-RuntimeMode = Literal["legacy", "shared"]
 
 # Checked platform constant for v1 (not request-controlled).
 OPENCLAW_CAPABILITY_WORKER_LIMIT = 8
@@ -38,7 +36,6 @@ _MAX_LOCALE_CHARS = 32
 @dataclass(frozen=True)
 class OpenClawCapabilityWorkerRequest:
     request_id: str
-    selected_mode: RuntimeMode
     capability_key: str
     preferred_locale: str | None
     payload_canonical_json: bytes = field(repr=False, compare=False)
@@ -81,7 +78,6 @@ def _bound_required_header(value: str | None, *, name: str) -> str:
 
 def build_worker_request(
     *,
-    selected_mode: RuntimeMode,
     capability_key: str,
     preferred_locale: str | None,
     raw_payload: dict[str, Any],
@@ -128,7 +124,6 @@ def build_worker_request(
 
     return OpenClawCapabilityWorkerRequest(
         request_id=request_id or (get_request_id() or "-"),
-        selected_mode=selected_mode,
         capability_key=capability_key.strip(),
         preferred_locale=preferred_locale,
         payload_canonical_json=payload_bytes,
@@ -148,7 +143,6 @@ def _run_worker_sync(
 ) -> OpenClawCapabilityExecuteResponse:
     from app.openclaw_integration.capability_adapter import (
         OpenClawAuthenticationProof,
-        execute_shared_capability,
     )
     from app.openclaw_integration.service import OpenClawIntegrationService
 
@@ -185,7 +179,6 @@ def _run_worker_sync(
             raw_payload=payload,
             audit_context=audit_context,
             preferred_locale=request.preferred_locale,
-            selected_mode=request.selected_mode,
             auth_proof=auth_proof,
             cancellation=cancellation,
             request_id=request.request_id,
