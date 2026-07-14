@@ -10,7 +10,12 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+# Shared mutex for any path that enables catalog visibility. Prevents two
+# concurrent enable transactions from each observing "no other enabled package"
+# and both succeeding. Transaction-scoped on PostgreSQL; no-op elsewhere.
+_SKILL_CATALOG_ENABLE_LOCK_KEY = 2026071404
+
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -561,10 +566,108 @@ class AgentSkillService:
                     )
 
             package.published_version_id = publish_version.id
-            # Plan 01: never enable catalog.
+            # Publish never auto-enables catalog; operators use set_catalog_enabled.
             package.catalog_enabled = False
             self.db.commit()
             return self._version_summary(publish_version)
+        except ApiException:
+            self.db.rollback()
+            raise
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise self._translate_integrity_error(exc) from exc
+
+    def _acquire_catalog_enable_lock(self) -> None:
+        """Serialize catalog-enable across sessions (PostgreSQL advisory xact lock)."""
+        bind = self.db.get_bind()
+        dialect_name = getattr(getattr(bind, "dialect", None), "name", None)
+        if dialect_name != "postgresql":
+            return
+        self.db.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"),
+            {"key": _SKILL_CATALOG_ENABLE_LOCK_KEY},
+        )
+
+    def set_catalog_enabled(
+        self,
+        package_id: UUID,
+        *,
+        enabled: bool,
+        expected_published_version_id: UUID | None = None,
+        expected_version_digest: str | None = None,
+        migration_state: str | None = None,
+    ) -> SkillPackageSummary:
+        """Toggle package aggregate ``catalog_enabled`` without mutating versions.
+
+        Enabling requires a published version. Optional expected digests make the
+        operation fail closed on concurrent pointer/content drift.
+        """
+        try:
+            if enabled:
+                # All enable entrypoints share this mutex so concurrent enablers
+                # cannot both observe an empty catalog and commit.
+                self._acquire_catalog_enable_lock()
+            package = self._lock_package(package_id)
+            if enabled:
+                if package.published_version_id is None:
+                    raise ApiException(
+                        status_code=422,
+                        code=42291,
+                        message="cannot enable catalog without a published skill version",
+                    )
+                version = self.db.get(AssistantSkillVersion, package.published_version_id)
+                if version is None or version.skill_package_id != package.id:
+                    raise ApiException(
+                        status_code=422,
+                        code=42291,
+                        message="published skill version missing or unowned",
+                    )
+                if str(version.version_source) != "publish":
+                    raise ApiException(
+                        status_code=422,
+                        code=42291,
+                        message="catalog enable requires version_source=publish",
+                    )
+                if (
+                    expected_published_version_id is not None
+                    and version.id != expected_published_version_id
+                ):
+                    raise ApiException(
+                        status_code=409,
+                        code=40993,
+                        message="published skill version drifted during enable",
+                    )
+                if (
+                    expected_version_digest is not None
+                    and str(version.version_digest or "") != expected_version_digest
+                ):
+                    raise ApiException(
+                        status_code=409,
+                        code=40993,
+                        message="published skill version_digest drifted during enable",
+                    )
+            if migration_state is not None:
+                allowed = {"shadow", "native", "cutover"}
+                if migration_state not in allowed:
+                    raise ApiException(
+                        status_code=422,
+                        code=42291,
+                        message=f"invalid migration_state: {migration_state}",
+                    )
+                current = str(package.migration_state or "")
+                if current in {"native", "cutover"} and migration_state == "shadow":
+                    raise ApiException(
+                        status_code=422,
+                        code=42291,
+                        message=(
+                            f"cannot demote migration_state from {current} to "
+                            f"{migration_state}"
+                        ),
+                    )
+                package.migration_state = migration_state
+            package.catalog_enabled = bool(enabled)
+            self.db.commit()
+            return self._package_summary(package)
         except ApiException:
             self.db.rollback()
             raise
@@ -1541,17 +1644,7 @@ class MainAgentProfileService:
 
             # Re-validate the whole snapshot inside the transaction.
             snapshot = self._validate_snapshot(draft.snapshot)
-            # Plan 01: non-empty control keys cannot be published (no resolver yet).
-            # Empty keys are intentionally allowed for bootstrap/defaults.
-            if snapshot.control_capability_keys:
-                raise ApiException(
-                    status_code=422,
-                    code=42294,
-                    message=(
-                        "controlCapabilityKeys cannot be published until each key "
-                        "can be resolved; Plan 01 only allows empty control keys"
-                    ),
-                )
+            self._assert_publishable_control_keys(snapshot.control_capability_keys)
 
             payload = snapshot.normalized_payload()
             digest = snapshot.content_digest()
@@ -1578,6 +1671,7 @@ class MainAgentProfileService:
             self.db.flush()
 
             profile.published_version_id = publish_version.id
+            # Publish never auto-enables runtime; operators use set_runtime_enabled.
             profile.runtime_enabled = False
             self.db.commit()
             return self._version_summary(publish_version)
@@ -1588,9 +1682,137 @@ class MainAgentProfileService:
             self.db.rollback()
             raise self._translate_integrity_error(exc) from exc
 
+    def set_runtime_enabled(
+        self,
+        profile_id: UUID,
+        *,
+        enabled: bool,
+        expected_published_version_id: UUID | None = None,
+        expected_content_digest: str | None = None,
+        migration_state: str | None = None,
+    ) -> MainAgentProfileSummary:
+        """Toggle Profile aggregate ``runtime_enabled`` without mutating versions.
+
+        Enabling requires a published version. Optional expected digests make the
+        operation fail closed on concurrent pointer/content drift.
+        """
+        try:
+            profile = self._lock_profile(profile_id)
+            if enabled:
+                if profile.published_version_id is None:
+                    raise ApiException(
+                        status_code=422,
+                        code=42294,
+                        message="cannot enable runtime without a published profile version",
+                    )
+                version = self.db.get(
+                    AssistantMainAgentProfileVersion, profile.published_version_id
+                )
+                if version is None or version.profile_id != profile.id:
+                    raise ApiException(
+                        status_code=422,
+                        code=42294,
+                        message="published profile version missing or unowned",
+                    )
+                if str(version.version_source) != "publish":
+                    raise ApiException(
+                        status_code=422,
+                        code=42294,
+                        message="runtime enable requires version_source=publish",
+                    )
+                if (
+                    expected_published_version_id is not None
+                    and version.id != expected_published_version_id
+                ):
+                    raise ApiException(
+                        status_code=409,
+                        code=40993,
+                        message="published profile version drifted during enable",
+                    )
+                if (
+                    expected_content_digest is not None
+                    and str(version.content_digest or "") != expected_content_digest
+                ):
+                    raise ApiException(
+                        status_code=409,
+                        code=40993,
+                        message="published profile content digest drifted during enable",
+                    )
+                snapshot = self._validate_snapshot(version.snapshot)
+                self._assert_publishable_control_keys(snapshot.control_capability_keys)
+                if "assistant_chat" not in set(snapshot.supported_entrypoints):
+                    raise ApiException(
+                        status_code=422,
+                        code=42294,
+                        message="profile must support assistant_chat before runtime enable",
+                    )
+            if migration_state is not None:
+                allowed = {"bootstrap", "shadow", "native", "cutover"}
+                if migration_state not in allowed:
+                    raise ApiException(
+                        status_code=422,
+                        code=42294,
+                        message=f"invalid migration_state: {migration_state}",
+                    )
+                # Never demote cutover/native to bootstrap/shadow via this path.
+                current = str(profile.migration_state or "")
+                if current in {"native", "cutover"} and migration_state in {
+                    "bootstrap",
+                    "shadow",
+                }:
+                    raise ApiException(
+                        status_code=422,
+                        code=42294,
+                        message=(
+                            f"cannot demote migration_state from {current} to "
+                            f"{migration_state}"
+                        ),
+                    )
+                profile.migration_state = migration_state
+            profile.runtime_enabled = bool(enabled)
+            self.db.commit()
+            return self._profile_summary(profile)
+        except ApiException:
+            self.db.rollback()
+            raise
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise self._translate_integrity_error(exc) from exc
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _assert_publishable_control_keys(keys: tuple[str, ...] | list[str]) -> None:
+        """Plan 04: empty keys remain allowed; otherwise require the exact four controls."""
+        present = tuple(keys or ())
+        if not present:
+            return
+        try:
+            from app.assistant.main_agent.control_capabilities import MAIN_AGENT_CONTROL_KEYS
+        except Exception as exc:  # pragma: no cover - import guard
+            raise ApiException(
+                status_code=422,
+                code=42294,
+                message=(
+                    "controlCapabilityKeys cannot be published until Main Agent "
+                    "control resolvers are available"
+                ),
+            ) from exc
+        required = set(MAIN_AGENT_CONTROL_KEYS)
+        present_set = set(present)
+        if present_set != required:
+            missing = sorted(required - present_set)
+            extra = sorted(present_set - required)
+            raise ApiException(
+                status_code=422,
+                code=42294,
+                message=(
+                    "controlCapabilityKeys must be exactly the four Main Agent "
+                    f"controls; missing={missing} extra={extra}"
+                ),
+            )
 
     def _validate_snapshot(
         self, snapshot: MainAgentProfileSnapshotV1 | dict[str, Any]

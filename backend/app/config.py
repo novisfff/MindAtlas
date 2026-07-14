@@ -2,12 +2,24 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
+
+# Plan 04 main-agent hard ceilings. Settings may only lower these, never raise.
+ASSISTANT_MAIN_AGENT_CATALOG_TOP_K_HARD_MAX = 32
+ASSISTANT_MAIN_AGENT_MAX_ACTIVE_SKILLS_HARD_MAX = 8
+ASSISTANT_MAIN_AGENT_RESOURCE_CHUNK_BYTES_HARD_MAX = 65536
+ASSISTANT_MAIN_AGENT_RESOURCE_MAX_BYTES_PER_CALL_HARD_MAX = 262144
+ASSISTANT_MAIN_AGENT_ARTIFACT_MAX_BYTES_HARD_MAX = 1 << 20  # 1048576
+ASSISTANT_MAIN_AGENT_ARTIFACT_RUN_MAX_BYTES_HARD_MAX = 10 << 20  # 10485760
+ASSISTANT_MAIN_AGENT_INLINE_RESULT_BYTES_HARD_MAX = 65536
+
+AssistantMainAgentMode = Literal["off", "shadow", "read_only"]
 
 
 class Settings(BaseSettings):
@@ -33,6 +45,54 @@ class Settings(BaseSettings):
     ai_model_capability_probe_enabled: bool = Field(
         default=False,
         alias="AI_MODEL_CAPABILITY_PROBE_ENABLED",
+    )
+
+    # Plan 04 main agent feature mode + bounded resource ceilings (production default off).
+    assistant_main_agent_mode: AssistantMainAgentMode = Field(
+        default="off",
+        alias="ASSISTANT_MAIN_AGENT_MODE",
+    )
+    assistant_main_agent_catalog_top_k: int = Field(
+        default=8,
+        ge=1,
+        le=ASSISTANT_MAIN_AGENT_CATALOG_TOP_K_HARD_MAX,
+        alias="ASSISTANT_MAIN_AGENT_CATALOG_TOP_K",
+    )
+    assistant_main_agent_max_active_skills: int = Field(
+        default=4,
+        ge=1,
+        le=ASSISTANT_MAIN_AGENT_MAX_ACTIVE_SKILLS_HARD_MAX,
+        alias="ASSISTANT_MAIN_AGENT_MAX_ACTIVE_SKILLS",
+    )
+    assistant_main_agent_resource_chunk_bytes: int = Field(
+        default=16384,
+        ge=1024,
+        le=ASSISTANT_MAIN_AGENT_RESOURCE_CHUNK_BYTES_HARD_MAX,
+        alias="ASSISTANT_MAIN_AGENT_RESOURCE_CHUNK_BYTES",
+    )
+    assistant_main_agent_resource_max_bytes_per_call: int = Field(
+        default=65536,
+        ge=1024,
+        le=ASSISTANT_MAIN_AGENT_RESOURCE_MAX_BYTES_PER_CALL_HARD_MAX,
+        alias="ASSISTANT_MAIN_AGENT_RESOURCE_MAX_BYTES_PER_CALL",
+    )
+    assistant_main_agent_artifact_max_bytes: int = Field(
+        default=1048576,
+        ge=1024,
+        le=ASSISTANT_MAIN_AGENT_ARTIFACT_MAX_BYTES_HARD_MAX,
+        alias="ASSISTANT_MAIN_AGENT_ARTIFACT_MAX_BYTES",
+    )
+    assistant_main_agent_artifact_run_max_bytes: int = Field(
+        default=5242880,
+        ge=1024,
+        le=ASSISTANT_MAIN_AGENT_ARTIFACT_RUN_MAX_BYTES_HARD_MAX,
+        alias="ASSISTANT_MAIN_AGENT_ARTIFACT_RUN_MAX_BYTES",
+    )
+    assistant_main_agent_inline_result_bytes: int = Field(
+        default=16384,
+        ge=256,
+        le=ASSISTANT_MAIN_AGENT_INLINE_RESULT_BYTES_HARD_MAX,
+        alias="ASSISTANT_MAIN_AGENT_INLINE_RESULT_BYTES",
     )
 
     # Logging
@@ -214,6 +274,34 @@ class Settings(BaseSettings):
     def normalize_log_level(cls, v: str) -> str:
         value = (v or "").strip().upper()
         return value or "INFO"
+
+    @field_validator("assistant_main_agent_mode", mode="before")
+    @classmethod
+    def normalize_main_agent_mode(cls, v: object) -> object:
+        if isinstance(v, str):
+            return v.strip()
+        return v
+
+    @model_validator(mode="after")
+    def validate_main_agent_cross_field_bounds(self) -> Settings:
+        # Resource max per call must cover one chunk; may only lower ceilings.
+        if (
+            self.assistant_main_agent_resource_max_bytes_per_call
+            < self.assistant_main_agent_resource_chunk_bytes
+        ):
+            raise ValueError(
+                "assistant_main_agent_resource_max_bytes_per_call must be >= "
+                "assistant_main_agent_resource_chunk_bytes"
+            )
+        if (
+            self.assistant_main_agent_artifact_run_max_bytes
+            < self.assistant_main_agent_artifact_max_bytes
+        ):
+            raise ValueError(
+                "assistant_main_agent_artifact_run_max_bytes must be >= "
+                "assistant_main_agent_artifact_max_bytes"
+            )
+        return self
 
     def cors_origins_list(self) -> list[str]:
         value = self.cors_origins

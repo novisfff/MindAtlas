@@ -78,6 +78,7 @@ from app.assistant.provider_loop.contracts import (  # noqa: E402
 )
 from app.assistant.provider_loop.messages import (  # noqa: E402
     ProviderAssistantMessage,
+    ProviderContextUpdateMessage,
     ProviderRuntimeInstructionMessage,
     ProviderSystemMessage,
     ProviderToolCall,
@@ -828,6 +829,30 @@ def test_encode_messages_and_tools_no_domain_key_leak() -> None:
     assert body == json.dumps(json.loads(body), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     # Runtime instruction never encoded as user.
     assert all(item.get("role") != "user" or item.get("content") == "hi" for item in encoded)
+
+
+def test_runtime_context_maps_to_system_not_user_or_tool() -> None:
+    secret_body = "PROTECTED skill body must not be user/tool"
+    context = ProviderContextUpdateMessage(
+        locale="en",
+        manifest_revision=2,
+        manifest_digest=DIGEST_E,
+        prompt_build_digest=DIGEST_A,
+        content=secret_body,
+    )
+    encoded = encode_openai_chat_messages(
+        (
+            ProviderSystemMessage(content="sys"),
+            context,
+            ProviderUserMessage(content="hi"),
+        )
+    )
+    assert encoded[0] == {"role": "system", "content": "sys"}
+    assert encoded[1] == {"role": "system", "content": secret_body}
+    assert encoded[2] == {"role": "user", "content": "hi"}
+    assert all(item.get("role") != "tool" for item in encoded)
+    # Context is not projected as final assistant text.
+    assert all(item.get("role") != "assistant" for item in encoded)
 
 
 def test_build_request_encoding_options(fake_openai_server: FakeOpenAIServer) -> None:

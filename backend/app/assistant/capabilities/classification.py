@@ -27,6 +27,7 @@ from app.assistant.capabilities.ports import (
     ExecutableAgentVersionTarget,
     ExecutableToolTarget,
     ExecutableWorkflowVersionTarget,
+    MainAgentControlExecutable,
     ResolvedCapabilitySurface,
 )
 from app.assistant.domain.contracts import (
@@ -99,6 +100,15 @@ SYSTEM_TOOL_CLASSIFICATIONS: dict[str, tuple[SideEffectClass, bool]] = {
     "kb_search": ("read", False),
 }
 
+# Plan 04 Main Agent code-native controls (exhaustive; no unclassified control allowed).
+# Values: (side_effect, parallel_safe). Identity prefix: main-agent-control:<domain_key>
+MAIN_AGENT_CONTROL_CLASSIFICATIONS: dict[str, tuple[SideEffectClass, bool]] = {
+    "skill.search": ("read", True),
+    "skill.inject": ("none", False),
+    "skill.read_resource": ("read", True),
+    "artifact.read": ("read", True),
+}
+
 # ---------------------------------------------------------------------------
 # Declarative ruleset (digest input)
 # ---------------------------------------------------------------------------
@@ -113,6 +123,13 @@ def _system_tool_ruleset_payload() -> dict[str, Any]:
     return {
         name: {"sideEffect": side, "parallelSafe": parallel}
         for name, (side, parallel) in sorted(SYSTEM_TOOL_CLASSIFICATIONS.items())
+    }
+
+
+def _main_agent_control_ruleset_payload() -> dict[str, Any]:
+    return {
+        name: {"sideEffect": side, "parallelSafe": parallel}
+        for name, (side, parallel) in sorted(MAIN_AGENT_CONTROL_CLASSIFICATIONS.items())
     }
 
 
@@ -131,6 +148,7 @@ def build_classification_ruleset() -> dict[str, Any]:
             "unknown",
         ],
         "systemTools": _system_tool_ruleset_payload(),
+        "mainAgentControls": _main_agent_control_ruleset_payload(),
         "remoteToolDefault": {
             "sideEffect": "write_external",
             "parallelSafe": False,
@@ -486,6 +504,23 @@ def _system_tool_partial(tool_name: str) -> _PartialBehavior:
     )
 
 
+def _main_agent_control_partial(domain_key: str) -> _PartialBehavior:
+    entry = MAIN_AGENT_CONTROL_CLASSIFICATIONS.get(domain_key)
+    if entry is None:
+        return _unknown_partial()
+    side, parallel = entry
+    return _PartialBehavior(
+        side_effect=side,
+        parallel_safe=parallel,
+        interrupt_mode="none",
+        timeout_policy=CapabilityTimeoutPolicy(
+            mode="cooperative", timeout_seconds=None, cancellation_supported=True
+        ),
+        classified_nodes=1,
+        dependency_refs=0,
+    )
+
+
 def _remote_tool_partial(*, timeout_seconds: float | None = None) -> _PartialBehavior:
     return _PartialBehavior(
         side_effect="write_external",
@@ -508,6 +543,8 @@ def _tool_identity_partial(
 ) -> _PartialBehavior:
     if target_identity.startswith("system-tool:"):
         return _system_tool_partial(target_identity.split(":", 1)[1])
+    if target_identity.startswith("main-agent-control:"):
+        return _main_agent_control_partial(target_identity.split(":", 1)[1])
     if target_identity.startswith("remote-tool:"):
         return _remote_tool_partial(timeout_seconds=timeout_seconds)
     return _unknown_partial()
@@ -762,6 +799,8 @@ class CapabilityClassifier:
 
         if isinstance(executable, ExecutableToolTarget):
             partial = self._classify_tool_target(executable, deps)
+        elif isinstance(executable, MainAgentControlExecutable):
+            partial = _main_agent_control_partial(executable.capability_key)
         elif isinstance(executable, ExecutableWorkflowVersionTarget):
             partial = self._classify_workflow_root(surface, deps)
         elif isinstance(executable, ExecutableAgentVersionTarget):
@@ -784,6 +823,8 @@ class CapabilityClassifier:
         identity = executable.target_identity
         if identity.startswith("system-tool:"):
             return _system_tool_partial(identity.split(":", 1)[1])
+        if identity.startswith("main-agent-control:"):
+            return _main_agent_control_partial(identity.split(":", 1)[1])
         if identity.startswith("remote-tool:"):
             # Prefer frozen timeout from any matching remote dep, else executable record.
             timeout_seconds: float | None = None
@@ -1239,6 +1280,7 @@ __all__ = [
     "CLASSIFICATION_CONTRACT_REVISION",
     "CLASSIFICATION_RULESET",
     "CLASSIFICATION_RULESET_DIGEST",
+    "MAIN_AGENT_CONTROL_CLASSIFICATIONS",
     "SIDE_EFFECT_RANK",
     "SYSTEM_TOOL_CLASSIFICATIONS",
     "WORKFLOW_PARALLEL_SAFE_OPT_IN",

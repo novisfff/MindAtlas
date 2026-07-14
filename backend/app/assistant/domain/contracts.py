@@ -698,6 +698,104 @@ def append_skill_activation(
     )
 
 
+def append_skill_activations_batch(
+    current: ResolvedRunManifestRevision,
+    *,
+    activations: tuple[tuple[ResolvedSkillRef, tuple[ResolvedCapabilityRef, ...]], ...],
+) -> ResolvedRunManifestRevision:
+    """Append one or more Skill activations as a single Manifest child (revision +1).
+
+    Plan 04 multi-skill inject must produce exactly one lineage step so
+    validate_manifest_child_link(parent, child) succeeds for the whole batch.
+    """
+    if not activations:
+        return current
+
+    existing_by_name = {item.canonical_name: item for item in current.active_skills}
+    existing_caps = {
+        (item.capability_type, item.capability_key): item for item in current.capabilities
+    }
+    new_skills: list[ResolvedSkillRef] = []
+
+    for skill, capabilities in activations:
+        if skill.canonical_name in existing_by_name:
+            existing = existing_by_name[skill.canonical_name]
+            if not _same_skill_version(existing, skill):
+                raise SkillVersionConflictError(
+                    f"skill version conflict for canonical name {skill.canonical_name!r}"
+                )
+            if capabilities:
+                for capability in capabilities:
+                    cap_id = (capability.capability_type, capability.capability_key)
+                    prior = existing_caps.get(cap_id)
+                    if prior is None:
+                        raise ValueError(
+                            f"reactivation cannot introduce capability "
+                            f"{capability.capability_type}/{capability.capability_key!r}"
+                        )
+                    if not _same_capability(prior, capability):
+                        raise ValueError(
+                            f"capability conflict for "
+                            f"{capability.capability_type}/{capability.capability_key!r}"
+                        )
+            continue
+
+        for capability in capabilities:
+            cap_id = (capability.capability_type, capability.capability_key)
+            prior = existing_caps.get(cap_id)
+            if prior is not None and not _same_capability(prior, capability):
+                raise ValueError(
+                    f"capability conflict for "
+                    f"{capability.capability_type}/{capability.capability_key!r}"
+                )
+            existing_caps[cap_id] = capability
+        existing_by_name[skill.canonical_name] = skill
+        new_skills.append(skill)
+
+    if not new_skills:
+        return current
+
+    merged_skills = tuple(
+        sorted(
+            (*current.active_skills, *new_skills),
+            key=lambda item: item.canonical_name,
+        )
+    )
+    merged_capabilities = tuple(
+        sorted(
+            existing_caps.values(),
+            key=lambda item: (item.capability_type, item.capability_key),
+        )
+    )
+    revision = current.revision + 1
+    parent_digest = current.manifest_digest
+    manifest_digest = compute_manifest_digest(
+        run_id=current.run_id,
+        revision=revision,
+        parent_digest=parent_digest,
+        main_agent=current.main_agent,
+        active_skills=merged_skills,
+        capabilities=merged_capabilities,
+        provider=current.provider,
+        model=current.model,
+        provider_aliases=current.provider_aliases,
+        effective_policy_digest=current.effective_policy_digest,
+    )
+    return ResolvedRunManifestRevision(
+        run_id=current.run_id,
+        revision=revision,
+        parent_digest=parent_digest,
+        main_agent=current.main_agent,
+        active_skills=merged_skills,
+        capabilities=merged_capabilities,
+        provider=current.provider,
+        model=current.model,
+        provider_aliases=current.provider_aliases,
+        effective_policy_digest=current.effective_policy_digest,
+        manifest_digest=manifest_digest,
+    )
+
+
 def validate_manifest_child_link(
     *,
     parent: ResolvedRunManifestRevision,
@@ -874,6 +972,7 @@ __all__ = [
     "VersionSource",
     "append_provider_aliases",
     "append_skill_activation",
+    "append_skill_activations_batch",
     "build_manifest_digest_payload",
     "compute_manifest_digest",
     "create_base_run_manifest",

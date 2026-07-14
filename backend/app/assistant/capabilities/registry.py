@@ -30,6 +30,8 @@ from app.assistant.capabilities.ports import (
     ExecutableAgentVersionTarget,
     ExecutableToolTarget,
     ExecutableWorkflowVersionTarget,
+    MainAgentControlCallPort,
+    MainAgentControlExecutable,
     ResolvedCapabilitySurface,
     ResolvedCapabilityTarget,
 )
@@ -91,11 +93,14 @@ class CapabilityRegistry:
         *,
         locale: str | None = None,
         classifier: CapabilityClassifier | None = None,
+        main_agent_control_port: MainAgentControlCallPort | None = None,
     ) -> None:
         self.db = db
         self.locale = locale
         # Production always uses the real classifier; tests may inject a spy.
         self._classifier = classifier if classifier is not None else CapabilityClassifier()
+        # Optional generic control port (injected by Main Agent composition only).
+        self._main_agent_control_port = main_agent_control_port
 
     def resolve_surface(self, binding: FrozenCapabilityBinding) -> ResolvedCapabilitySurface:
         if not isinstance(binding, FrozenCapabilityBinding):
@@ -141,6 +146,8 @@ class CapabilityRegistry:
         identity = binding.resolved.target_identity
         if identity.startswith("system-tool:"):
             return self._resolve_system_tool_surface(binding)
+        if identity.startswith("main-agent-control:"):
+            return self._resolve_main_agent_control_surface(binding)
         if identity.startswith("remote-tool:"):
             return self._resolve_remote_tool_surface(binding)
         raise _domain_error(
@@ -148,6 +155,113 @@ class CapabilityRegistry:
             safe_code="tool_identity_unsupported",
             safe_message="unsupported tool identity",
             target_identity=identity,
+        )
+
+    def _resolve_main_agent_control_surface(
+        self, binding: FrozenCapabilityBinding
+    ) -> ResolvedCapabilitySurface:
+        """Resolve a code-native Main Agent control without ToolRegistry lookup."""
+        from app.assistant.capabilities.classification import (
+            MAIN_AGENT_CONTROL_CLASSIFICATIONS,
+        )
+        from app.assistant.capabilities.execution_closure import (
+            build_frozen_execution_closure,
+        )
+
+        identity = binding.resolved.target_identity
+        domain_key = identity.split(":", 1)[1]
+        if domain_key not in MAIN_AGENT_CONTROL_CLASSIFICATIONS:
+            raise _domain_error(
+                error_type="not_found",
+                safe_code="main_agent_control_unknown",
+                safe_message="unknown main agent control",
+                target_identity=identity,
+            )
+        if binding.resolved.capability_key != domain_key:
+            raise _domain_error(
+                error_type="protocol_error",
+                safe_code="main_agent_control_key_mismatch",
+                safe_message="control capability key mismatch",
+                target_identity=identity,
+            )
+        if binding.resolved.dependencies:
+            raise _domain_error(
+                error_type="protocol_error",
+                safe_code="main_agent_control_has_dependencies",
+                safe_message="main agent controls must have empty dependency closure",
+                target_identity=identity,
+            )
+        # Build revision pin: executable_revision is the frozen build identity.
+        try:
+            app_build = skill_resolution.require_immutable_app_build_revision()
+        except Exception as exc:
+            raise _domain_error(
+                error_type="version_drift",
+                safe_code="build_revision_drift",
+                safe_message="app build revision unavailable",
+                target_identity=identity,
+            ) from exc
+        if binding.resolved.executable_revision != app_build:
+            raise _domain_error(
+                error_type="version_drift",
+                safe_code="build_revision_drift",
+                safe_message="main agent control build revision drift",
+                target_identity=identity,
+            )
+        if self._main_agent_control_port is None:
+            raise _domain_error(
+                error_type="unavailable",
+                safe_code="main_agent_control_port_missing",
+                safe_message="main agent control port is not configured",
+                target_identity=identity,
+            )
+        # Schema digests already frozen on the binding; recompute from body for drift.
+        current_input_digest = binding_schema_digest(binding.resolved.input_schema)
+        current_output_digest = binding_schema_digest(binding.resolved.output_schema)
+        if current_input_digest != binding.resolved.input_schema_digest:
+            raise _domain_error(
+                error_type="version_drift",
+                safe_code="schema_drift",
+                safe_message="main agent control input schema drift",
+                target_identity=identity,
+            )
+        if current_output_digest != binding.resolved.output_schema_digest:
+            raise _domain_error(
+                error_type="version_drift",
+                safe_code="schema_drift",
+                safe_message="main agent control output schema drift",
+                target_identity=identity,
+            )
+
+        closure = build_frozen_execution_closure(
+            self.db,
+            binding_contract_digest=binding.resolved.binding_contract_digest,
+            dependency_closure_digest=binding.resolved.dependency_closure_digest,
+            dependencies=(),
+        )
+        display_names = {
+            "skill.search": "Skill Search",
+            "skill.inject": "Skill Inject",
+            "skill.read_resource": "Skill Read Resource",
+            "artifact.read": "Artifact Read",
+        }
+        descriptions = {
+            "skill.search": "Search the published Skill catalog for this Run",
+            "skill.inject": "Activate one or more disclosed published Skills",
+            "skill.read_resource": "Read a bounded resource chunk from an active Skill",
+            "artifact.read": "Read a bounded chunk of a Run-scoped Artifact",
+        }
+        return ResolvedCapabilitySurface(
+            binding=binding,
+            executable=MainAgentControlExecutable(
+                capability_key=domain_key,
+                target_identity=identity,
+                control_port=self._main_agent_control_port,
+            ),
+            execution_closure=closure,
+            display_name=display_names.get(domain_key, domain_key),
+            description=descriptions.get(domain_key, domain_key),
+            availability=CapabilityAvailability(status="available"),
         )
 
     def _resolve_system_tool_surface(

@@ -30,6 +30,7 @@ from app.assistant.domain.contracts import (
 from app.assistant.domain.digests import JsonValue, sha256_canonical_json
 from app.assistant.provider_loop.messages import (
     ProviderAssistantMessage,
+    ProviderContextUpdateMessage,
     ProviderMessage,
     ProviderToolCall,
     ProviderToolCallRecord,
@@ -997,6 +998,132 @@ class ToolsProvider(Protocol):
     ) -> ToolSurfaceResolution: ...
 
 
+class RoundContextResolution(FrozenContract):
+    """Protected context messages for one Provider round (Plan 04 Task 2)."""
+
+    manifest_revision: int
+    manifest_digest: str
+    applied_skill_version_ids: tuple[UUID, ...]
+    messages: tuple[ProviderContextUpdateMessage, ...]
+
+    @field_validator("manifest_revision")
+    @classmethod
+    def _revision(cls, value: int) -> int:
+        return _require_non_negative_int(value, field_name="manifest_revision")
+
+    @field_validator("manifest_digest")
+    @classmethod
+    def _manifest_digest(cls, value: str) -> str:
+        return _require_digest(value, field_name="manifest_digest")
+
+    @field_validator("applied_skill_version_ids", mode="before")
+    @classmethod
+    def _applied_ids(cls, value: Any) -> tuple[UUID, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            raise TypeError("applied_skill_version_ids must be a sequence")
+        out: list[UUID] = []
+        seen: set[UUID] = set()
+        for item in value:
+            if not isinstance(item, UUID):
+                raise TypeError("applied_skill_version_ids must contain UUID values")
+            if item in seen:
+                raise ValueError("applied_skill_version_ids must be unique")
+            seen.add(item)
+            out.append(item)
+        return tuple(out)
+
+    @field_validator("messages", mode="before")
+    @classmethod
+    def _messages(cls, value: Any) -> tuple[Any, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            raise TypeError("messages must be a sequence")
+        return tuple(value)
+
+    @model_validator(mode="after")
+    def _message_manifest_agreement(self) -> RoundContextResolution:
+        for message in self.messages:
+            if not isinstance(message, ProviderContextUpdateMessage):
+                raise TypeError("messages must contain ProviderContextUpdateMessage")
+            if message.manifest_revision != self.manifest_revision:
+                raise ValueError("context message manifest_revision must match resolution")
+            if message.manifest_digest != self.manifest_digest:
+                raise ValueError("context message manifest_digest must match resolution")
+        return self
+
+
+@runtime_checkable
+class RoundContextProvider(Protocol):
+    """Runtime port: protected Skill/Main Agent context for the next Provider round."""
+
+    def resolve(
+        self,
+        *,
+        manifest: ResolvedRunManifestRevision,
+        already_applied_skill_version_ids: tuple[UUID, ...],
+        execution_scope: ProviderExecutionScope,
+        locale: str,
+    ) -> RoundContextResolution: ...
+
+
+class NoOpRoundContextProvider:
+    """Default no-op context provider; preserves pre-Plan-04 loop behavior."""
+
+    def resolve(
+        self,
+        *,
+        manifest: ResolvedRunManifestRevision,
+        already_applied_skill_version_ids: tuple[UUID, ...],
+        execution_scope: ProviderExecutionScope,
+        locale: str,
+    ) -> RoundContextResolution:
+        del already_applied_skill_version_ids, execution_scope, locale
+        return RoundContextResolution(
+            manifest_revision=manifest.revision,
+            manifest_digest=manifest.manifest_digest,
+            applied_skill_version_ids=(),
+            messages=(),
+        )
+
+
+@runtime_checkable
+class ManifestEffectLifecyclePort(Protocol):
+    """Generic process-local Manifest-effect accept/discard boundary (Plan 04).
+
+    Plan 03 validates lineage first; only then may accept install activation.
+    Non-Main-Agent callers use the no-op implementation.
+    """
+
+    def accept(
+        self,
+        *,
+        call_id: str,
+        current_manifest: ResolvedRunManifestRevision,
+        proposed_manifest: ResolvedRunManifestRevision,
+    ) -> None: ...
+
+    def discard(self, *, call_id: str, reason_code: str) -> None: ...
+
+
+class NoOpManifestEffectLifecyclePort:
+    """Default no-op lifecycle; preserves pre-Plan-04 dispatcher/result behavior."""
+
+    def accept(
+        self,
+        *,
+        call_id: str,
+        current_manifest: ResolvedRunManifestRevision,
+        proposed_manifest: ResolvedRunManifestRevision,
+    ) -> None:
+        del call_id, current_manifest, proposed_manifest
+
+    def discard(self, *, call_id: str, reason_code: str) -> None:
+        del call_id, reason_code
+
+
 @runtime_checkable
 class CurrentCapabilityDescriptorVerifier(Protocol):
     """Runtime port only. Must never enter messages/surfaces/continuations/results."""
@@ -1073,6 +1200,12 @@ class ProviderLoopPorts:
     sibling_executor: SiblingExecutionPort
     cancellation: CancellationPort
     events: ProviderLoopEventSink
+    # Default no-op preserves byte-identical Plan 03 behavior for all callers.
+    round_context_provider: RoundContextProvider = NoOpRoundContextProvider()
+    # Default no-op lifecycle: existing dispatchers remain byte-compatible.
+    manifest_effect_lifecycle: ManifestEffectLifecyclePort = (
+        NoOpManifestEffectLifecyclePort()
+    )
 
 
 def assert_not_serializable_port(value: Any) -> None:
@@ -1080,6 +1213,10 @@ def assert_not_serializable_port(value: Any) -> None:
     forbidden_type_names = {
         "CancellationPort",
         "ToolsProvider",
+        "RoundContextProvider",
+        "NoOpRoundContextProvider",
+        "ManifestEffectLifecyclePort",
+        "NoOpManifestEffectLifecyclePort",
         "CurrentCapabilityDescriptorVerifier",
         "ProviderAuthorizationEvidenceFactory",
         "ToolDispatcher",
@@ -1141,6 +1278,9 @@ def project_waiting_resolution_message(
 __all__ = [
     "CancellationPort",
     "CurrentCapabilityDescriptorVerifier",
+    "ManifestEffectLifecyclePort",
+    "NoOpManifestEffectLifecyclePort",
+    "NoOpRoundContextProvider",
     "ProviderAdapter",
     "ProviderAuthorizationEvidenceFactory",
     "ProviderDispatchRequest",
@@ -1167,6 +1307,8 @@ __all__ = [
     "ProviderUsageSnapshot",
     "ProviderWaitingCallState",
     "ProviderWaitingResolution",
+    "RoundContextProvider",
+    "RoundContextResolution",
     "SafeProviderError",
     "SiblingExecutionPort",
     "ToolDispatcher",

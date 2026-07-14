@@ -22,6 +22,7 @@ from app.assistant.capabilities.policy import (
     AuthorizationEvidenceVerifier,
     CapabilityPolicyEngine,
 )
+from app.assistant.capabilities.ports import MainAgentControlCallPort
 from app.assistant.capabilities.registry import CapabilityRegistry
 
 
@@ -40,14 +41,22 @@ def build_capability_runtime(
     evidence_verifiers: Mapping[EvidenceVerifierKey, AuthorizationEvidenceVerifier],
     locale: str | None = None,
     classifier: CapabilityClassifier | None = None,
+    main_agent_control_port: MainAgentControlCallPort | None = None,
 ) -> CapabilityGateway:
     """Build a request/session-scoped CapabilityGateway.
 
     The Gateway and its Registry share the supplied Session. Callers (OpenClaw
     ``runtime_worker``) must create this factory *inside* the worker with a
     worker-owned Session and close both before returning to the event loop.
+    Main Agent may inject a generic control port; capabilities never import
+    ``main_agent``.
     """
-    registry = CapabilityRegistry(db, locale=locale, classifier=classifier)
+    registry = CapabilityRegistry(
+        db,
+        locale=locale,
+        classifier=classifier,
+        main_agent_control_port=main_agent_control_port,
+    )
     policy = CapabilityPolicyEngine(evidence_verifiers)
     adapters = build_adapter_registry()
     return CapabilityGateway(registry=registry, policy=policy, adapters=adapters)

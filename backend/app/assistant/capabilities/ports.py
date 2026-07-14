@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from app.assistant.capabilities.contracts import (
@@ -11,6 +11,7 @@ from app.assistant.capabilities.contracts import (
     CapabilityDescriptor,
     CapabilityExecutionContext,
     CapabilityPolicyDecision,
+    CapabilityResult,
     CapabilityRuntimeEvent,
     FrozenCapabilityBinding,
 )
@@ -120,10 +121,41 @@ class FrozenClosureRuntimeResolver(Protocol):
 
 
 @dataclass(frozen=True)
+class MainAgentControlExecutable:
+    """Marker executable for code-native Main Agent controls (no ToolRegistry)."""
+
+    capability_key: str
+    target_identity: str
+    control_port: "MainAgentControlCallPort" = field(repr=False, compare=False)
+
+
+@runtime_checkable
+class MainAgentControlCallPort(Protocol):
+    """Generic call-local control port.
+
+    Implemented by Main Agent; capabilities must not import main_agent.
+    ``take_manifest_effect`` returns a process-local pending package or None.
+    """
+
+    def execute(
+        self,
+        *,
+        call_id: str,
+        capability_key: str,
+        validated_input: dict[str, JsonValue],
+    ) -> CapabilityResult: ...
+
+    def take_manifest_effect(self, *, call_id: str) -> Any | None: ...
+
+
+@dataclass(frozen=True)
 class ResolvedCapabilitySurface:
     binding: FrozenCapabilityBinding
     executable: (
-        ExecutableToolTarget | ExecutableWorkflowVersionTarget | ExecutableAgentVersionTarget
+        ExecutableToolTarget
+        | ExecutableWorkflowVersionTarget
+        | ExecutableAgentVersionTarget
+        | MainAgentControlExecutable
     )
     execution_closure: FrozenClosureRuntimeResolver = field(repr=False, compare=False)
     display_name: str
@@ -136,7 +168,10 @@ class ResolvedCapabilityTarget:
     descriptor: CapabilityDescriptor
     binding: FrozenCapabilityBinding
     executable: (
-        ExecutableToolTarget | ExecutableWorkflowVersionTarget | ExecutableAgentVersionTarget
+        ExecutableToolTarget
+        | ExecutableWorkflowVersionTarget
+        | ExecutableAgentVersionTarget
+        | MainAgentControlExecutable
     )
     execution_closure: FrozenClosureRuntimeResolver = field(repr=False, compare=False)
 
@@ -160,6 +195,8 @@ __all__ = [
     "ExecutableToolTarget",
     "ExecutableWorkflowVersionTarget",
     "FrozenClosureRuntimeResolver",
+    "MainAgentControlCallPort",
+    "MainAgentControlExecutable",
     "ResolvedCapabilitySurface",
     "ResolvedCapabilityTarget",
     "SingleUseDispatchPermit",
