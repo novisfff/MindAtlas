@@ -5,6 +5,13 @@ admission live here. This package may import Plan 01–03 contracts; Plan 03 mus
 not import this package.
 """
 
+from app.assistant.main_agent.catalog import (
+    CatalogSearchResult,
+    CatalogSearchState,
+    SkillCatalogRecord,
+    SkillCatalogSnapshot,
+    build_catalog_snapshot,
+)
 from app.assistant.main_agent.contracts import (
     ActiveSkillInstruction,
     CatalogSummaryRecord,
@@ -22,6 +29,8 @@ from app.assistant.main_agent.prompt_builder import MainAgentPromptBuilder
 
 __all__ = [
     "ActiveSkillInstruction",
+    "CatalogSearchResult",
+    "CatalogSearchState",
     "CatalogSummaryRecord",
     "MainAgentPromptBudgetExceeded",
     "MainAgentPromptBuilder",
@@ -31,6 +40,9 @@ __all__ = [
     "PromptBuildResult",
     "PromptLayerKind",
     "PromptLayerReport",
+    "SkillCatalogRecord",
+    "SkillCatalogSnapshot",
     "SkillContextBuildResult",
     "ToolArtifactSummary",
+    "build_catalog_snapshot",
 ]
