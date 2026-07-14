@@ -124,3 +124,12 @@ ASSISTANT_MAIN_AGENT_MODE_DEFAULT=off
 ```
 
 Plan 05 implementation complete for Gate 05A (merge dark). Shadow/read_only enablement remains operator review (Gates 05B/05C).
+
+## Whole-branch review (Gate 05A)
+
+**Verdict:** APPROVED FOR MERGE-DARK (Gate 05A)
+
+**Enablement residual (before 05B/05C):**
+- Production skill.inject must rebuild/register candidate EffectiveRunPolicySnapshot,
+  update owner_materials / call_owner_resolver / tools bindings on the same accept commit.
+- Wire inject_handler/catalog into compose_main_agent_policy_runtime from service.
