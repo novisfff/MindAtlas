@@ -301,6 +301,9 @@ class MainAgentRunState:
     applied_skill_version_ids: set[UUID] = field(default_factory=set)
     final_text: str = ""
     status: str = "running"
+    # Plan 05 process-local policy bundle (None when ports were fully injected).
+    policy_runtime: Any | None = None
+    stop_reason: str | None = None
 
 
 def compute_main_agent_effective_policy_digest(
@@ -881,17 +884,32 @@ class MainAgentService:
                     )
 
             ports = self._injected_ports
+            policy_runtime = None
             if ports is None:
-                # Production composition of full Gateway ports is completed as
-                # residual inject work; without injected ports we fail closed
-                # before a Provider request so fallback can still apply.
-                return self._maybe_fallback(
-                    request=request,
-                    reason_code=ADAPTER_UNAVAILABLE_BEFORE_REQUEST,
-                    events=events,
-                    fallback=fallback,
-                    admission=admission,
-                )
+                # Plan 05 Task 8: compose frozen policy snapshot + ledgers +
+                # Gateway/scheduler/completion guards for this admitted Run.
+                try:
+                    policy_runtime, ports = self._compose_policy_ports(
+                        request=request,
+                        admission=admission,
+                        manifest=manifest,
+                        provider=provider,
+                        events=events,
+                    )
+                    if self._state is not None:
+                        self._state.policy_runtime = policy_runtime
+                except Exception:
+                    logger.exception(
+                        "main agent policy composition failed run_id=%s",
+                        request.run_id,
+                    )
+                    return self._maybe_fallback(
+                        request=request,
+                        reason_code=ADAPTER_UNAVAILABLE_BEFORE_REQUEST,
+                        events=events,
+                        fallback=fallback,
+                        admission=admission,
+                    )
 
             # Reject no-op lifecycle for Main Agent composition.
             if isinstance(
@@ -996,10 +1014,30 @@ class MainAgentService:
                 # Fail closed after Provider request started unless retry-safe and
                 # no user-visible output was emitted.
                 reason = MAIN_AGENT_FAILED
+                stop = getattr(result, "stop_reason", None) or ""
+                if stop:
+                    if self._state is not None:
+                        self._state.stop_reason = str(stop)[:64]
+                    # Map safe policy/budget/completion failures to explicit stop reasons.
+                    if any(
+                        token in str(stop)
+                        for token in (
+                            "policy",
+                            "budget",
+                            "obligation",
+                            "completion",
+                            "skill_completion",
+                            "capability_denied",
+                            "recursion",
+                            "agent_cycle",
+                        )
+                    ):
+                        reason = str(stop)[:64]
                 if (
                     result.error is not None
                     and getattr(result.error, "retry_disposition", None) == "retryable"
                     and not final_text
+                    and reason == MAIN_AGENT_FAILED
                 ):
                     reason = "provider_retry_safe_before_output"
                     return self._maybe_fallback(
@@ -1065,7 +1103,54 @@ class MainAgentService:
                 write_title=False,
             )
 
+    def _compose_policy_ports(
+        self,
+        *,
+        request: AssistantRuntimeRequest,
+        admission: AdmissionContext,
+        manifest: ResolvedRunManifestRevision,
+        provider: ProviderAdapter,
+        events: MainAgentEventAdapter,
+    ) -> tuple[Any, ProviderLoopPorts]:
+        """Compose Plan 05 policy ledgers + ProviderLoopPorts for this Run."""
+        from app.assistant.main_agent.policy_runtime import (
+            compose_main_agent_policy_runtime,
+        )
+
+        if self.db is None:
+            raise RuntimeError("adapter_unavailable_before_request")
+
+        # Emit internal policy_snapshot diagnostic after compose.
+        runtime, ports = compose_main_agent_policy_runtime(
+            db=self.db,
+            run_id=request.run_id,
+            conversation_id=request.conversation_id,
+            manifest=manifest,
+            profile_key=str(admission.main_agent_ref.profile_key),
+            profile_version_id=admission.main_agent_ref.version_id,
+            profile_content_digest=str(admission.main_agent_ref.content_digest),
+            app_build_revision=self._app_build_revision,
+            provider=provider,
+            events=events,
+            locale=request.locale or "en",
+            cancel_checker=request.cancel_checker,
+            profile_budget_fields=admission.snapshot.output_budget,
+        )
+        events.policy_snapshot(
+            run_id=request.run_id,
+            effective_policy_digest=runtime.policy_snapshot.effective_policy_digest,
+            exposure_index_digest=runtime.policy_snapshot.exposure_index.exposure_index_digest,
+            max_total_capability_calls=int(
+                runtime.run_budget_limits.max_total_capability_calls
+            ),
+            max_provider_rounds=int(runtime.run_budget_limits.max_provider_rounds),
+            max_capability_depth=int(runtime.run_budget_limits.max_capability_depth),
+            max_agent_depth=int(runtime.run_budget_limits.max_agent_depth),
+        )
+        return runtime, ports
+
     def _admission_failure_result(
+
         self,
         *,
         request: AssistantRuntimeRequest,

@@ -1055,6 +1055,73 @@ def test_sibling_frames_do_not_leak_across_parallel_calls() -> None:
     assert frames.current() == ()
 
 
+def test_threaded_sibling_frames_do_not_leak() -> None:
+    """Parallel worker threads must not see each other's frames on a shared port."""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.assistant.policy.recursion import (
+        ProcessLocalCapabilityCallFramePort,
+        build_capability_call_frame,
+    )
+
+    frames = ProcessLocalCapabilityCallFramePort()
+    parent = build_capability_call_frame(
+        call_id="parent",
+        capability_type="tool",
+        domain_key="parent.tool",
+        target_identity="tool:parent",
+        target_version_id=None,
+        binding_contract_digest=DIGEST_B,
+        owner_kind="main_agent",
+        owner_version_id=OWNER_VERSION,
+        capability_depth=1,
+        agent_depth=1,
+    )
+    barrier = threading.Barrier(2)
+    seen: dict[str, tuple[str, ...]] = {}
+    lock = threading.Lock()
+
+    def worker(call_id: str) -> None:
+        frame = build_capability_call_frame(
+            call_id=call_id,
+            capability_type="tool",
+            domain_key=f"sib.{call_id}",
+            target_identity=f"tool:{call_id}",
+            target_version_id=None,
+            binding_contract_digest=DIGEST_B,
+            owner_kind="main_agent",
+            owner_version_id=OWNER_VERSION,
+            capability_depth=2,
+            agent_depth=1,
+        )
+        with frames.push(frame):
+            barrier.wait(timeout=2.0)
+            # Hold long enough that the sibling is definitely pushed too.
+            time.sleep(0.05)
+            ids = tuple(f.call_id for f in frames.current())
+            with lock:
+                seen[call_id] = ids
+            barrier.wait(timeout=2.0)
+
+    # Owner thread establishes the shared parent stack.
+    with frames.push(parent):
+        assert [f.call_id for f in frames.current()] == ["parent"]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futs = [pool.submit(worker, "sib-a"), pool.submit(worker, "sib-b")]
+            for fut in futs:
+                fut.result(timeout=5.0)
+        # Parent stack must never observe sibling frames.
+        assert [f.call_id for f in frames.current()] == ["parent"]
+
+    assert frames.current() == ()
+    assert set(seen) == {"sib-a", "sib-b"}
+    # Each worker inherits parent + own frame only.
+    assert seen["sib-a"] == ("parent", "sib-a")
+    assert seen["sib-b"] == ("parent", "sib-b")
+
+
 def test_agent_cycle_denied_on_gateway_before_adapter() -> None:
     from app.assistant.capabilities.gateway import CapabilityGateway
     from app.assistant.capabilities.ports import CapabilityRuntimePorts

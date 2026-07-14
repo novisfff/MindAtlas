@@ -328,41 +328,74 @@ _NOOP_CALL_FRAMES = NoOpCapabilityCallFramePort()
 
 
 class ProcessLocalCapabilityCallFramePort:
-    """Thread-safe process-local stack for one admitted Run's call frames."""
+    """Sibling-isolated process-local stack for one admitted Run's call frames.
+
+    Owner-thread (the Run's admission / sequential path) uses a shared root stack.
+    Worker threads (bounded parallel siblings) snapshot the parent stack on first
+    access into a thread-local stack and never mutate the root. Sibling frames
+    therefore never leak into each other under ThreadPoolExecutor dispatch.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._stack: list[CapabilityCallFrame] = []
+        self._root_stack: list[CapabilityCallFrame] = []
+        self._owner_thread_id = threading.get_ident()
+        self._local = threading.local()
+
+    def _is_owner_thread(self) -> bool:
+        return threading.get_ident() == self._owner_thread_id
+
+    def _stack(self) -> list[CapabilityCallFrame]:
+        if self._is_owner_thread():
+            return self._root_stack
+        stack = getattr(self._local, "stack", None)
+        if stack is None:
+            # First access on a sibling worker: inherit the parent (root) snapshot.
+            with self._lock:
+                stack = list(self._root_stack)
+            self._local.stack = stack
+        return stack
 
     def current(self) -> tuple[CapabilityCallFrame, ...]:
-        with self._lock:
-            return tuple(self._stack)
+        if self._is_owner_thread():
+            with self._lock:
+                return tuple(self._root_stack)
+        return tuple(self._stack())
 
     @contextmanager
     def push(self, frame: CapabilityCallFrame) -> Iterator[None]:
         if not isinstance(frame, CapabilityCallFrame):
             raise TypeError("frame must be CapabilityCallFrame")
-        with self._lock:
-            self._stack.append(frame)
+        if self._is_owner_thread():
+            with self._lock:
+                self._root_stack.append(frame)
+            try:
+                yield
+            finally:
+                with self._lock:
+                    self._pop_frame(self._root_stack, frame)
+            return
+
+        stack = self._stack()
+        stack.append(frame)
         try:
             yield
         finally:
-            with self._lock:
-                if not self._stack:
-                    return
-                # Pop exact frame by identity (call_id + frame_digest) for safety.
-                for index in range(len(self._stack) - 1, -1, -1):
-                    top = self._stack[index]
-                    if (
-                        top.call_id == frame.call_id
-                        and top.frame_digest == frame.frame_digest
-                    ):
-                        del self._stack[index]
-                        break
-                else:
-                    # Fall back to LIFO pop when identity missing (should not happen).
-                    if self._stack and self._stack[-1].call_id == frame.call_id:
-                        self._stack.pop()
+            self._pop_frame(stack, frame)
+
+    @staticmethod
+    def _pop_frame(stack: list[CapabilityCallFrame], frame: CapabilityCallFrame) -> None:
+        if not stack:
+            return
+        # Pop exact frame by identity (call_id + frame_digest) for safety.
+        for index in range(len(stack) - 1, -1, -1):
+            top = stack[index]
+            if top.call_id == frame.call_id and top.frame_digest == frame.frame_digest:
+                del stack[index]
+                return
+        # Fall back to LIFO pop when identity missing (should not happen).
+        if stack and stack[-1].call_id == frame.call_id:
+            stack.pop()
 
 
 def resolve_frame_port(ports: Any) -> CapabilityCallFramePort:
