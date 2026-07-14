@@ -116,6 +116,11 @@ class MainAgentControlRuntime:
                 self._taken_effects.add(call_id)
             return effect
 
+    def peek_manifest_effect(self, *, call_id: str) -> PendingManifestEffect | None:
+        """Non-destructive read for dispatch next_manifest resolution."""
+        with self._lock:
+            return self._pending_effects.get(call_id)
+
     def discard_pending(self, *, call_id: str) -> None:
         with self._lock:
             self._pending_effects.pop(call_id, None)

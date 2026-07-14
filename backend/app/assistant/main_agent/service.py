@@ -966,6 +966,19 @@ class MainAgentService:
 
             fallback.mark_provider_request()
             result: ProviderLoopResult = self._loop.start(loop_request, ports=ports)
+            # Any capability dispatch that actually started blocks automatic Legacy
+            # fallback under §4.3 (read completions still count as started dispatches).
+            tool_records = getattr(result, "tool_calls", None) or ()
+            for record in tool_records:
+                side = None
+                try:
+                    # Prefer descriptor-level side effect if present on the record.
+                    side = getattr(record, "side_effect", None) or getattr(
+                        getattr(record, "call", None), "side_effect", None
+                    )
+                except Exception:
+                    side = None
+                fallback.mark_capability_dispatch(side_effect=side if isinstance(side, str) else "read")
             final_text = (result.final_text or "").strip()
 
             if result.status == "cancelled":

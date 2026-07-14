@@ -447,3 +447,125 @@ def test_instruction_budget_counts_existing_active_skills() -> None:
     assert package2 is None
     assert lifecycle.is_skill_active(VER_2) is False
     assert lifecycle.is_skill_active(VER_1) is True
+
+
+def test_batch_multi_skill_inject_is_single_revision_step() -> None:
+    """N skills in one inject produce parent.revision+1, not +N."""
+    from app.assistant.domain.contracts import validate_manifest_child_link
+    from app.assistant.main_agent.manifest_runtime import (
+        MainAgentManifestEffectLifecycle,
+        SkillActivationCandidate,
+        stage_skill_injection,
+    )
+
+    manifest, _ = _manifest_with_controls()
+    lifecycle = MainAgentManifestEffectLifecycle()
+    lifecycle.bind_current_manifest(manifest)
+
+    candidates = [
+        SkillActivationCandidate(
+            skill=_skill_ref(
+                package_id=PKG_1,
+                version_id=VER_1,
+                canonical_name="alpha-skill",
+                content_digest=DIGEST_B,
+                version_digest=DIGEST_C,
+            ),
+            capabilities=(_cap_ref("get_statistics", DIGEST_C),),
+            instruction_char_count=100,
+        ),
+        SkillActivationCandidate(
+            skill=_skill_ref(
+                package_id=PKG_2,
+                version_id=VER_2,
+                canonical_name="beta-skill",
+                content_digest=DIGEST_D,
+                version_digest=DIGEST_A,
+            ),
+            capabilities=(_cap_ref("search_entries", DIGEST_D),),
+            instruction_char_count=100,
+        ),
+    ]
+    result, effect, package = stage_skill_injection(
+        call_id="batch-1",
+        current_manifest=manifest,
+        candidates=candidates,
+        lifecycle=lifecycle,
+    )
+    assert result.status == "completed"
+    assert effect is not None
+    assert package is not None
+    proposed = effect.proposed_manifest
+    assert proposed.revision == manifest.revision + 1
+    validate_manifest_child_link(parent=manifest, child=proposed)
+    assert {s.canonical_name for s in proposed.active_skills} == {
+        "alpha-skill",
+        "beta-skill",
+    }
+
+    lifecycle.accept(
+        call_id="batch-1",
+        current_manifest=manifest,
+        proposed_manifest=proposed,
+    )
+    assert lifecycle.is_skill_active(VER_1)
+    assert lifecycle.is_skill_active(VER_2)
+
+
+def test_next_manifest_hook_returns_staged_child() -> None:
+    from app.assistant.main_agent.control_runtime import MainAgentControlRuntime
+    from app.assistant.main_agent.dispatch_hooks import next_manifest_from_control_effect
+    from app.assistant.main_agent.manifest_runtime import (
+        MainAgentManifestEffectLifecycle,
+        SkillActivationCandidate,
+        stage_skill_injection,
+    )
+    from app.assistant.provider_loop.contracts import (
+        ProviderDispatchRequest,
+        ProviderExecutionScope,
+        ProviderToolCall,
+    )
+    from app.assistant.capabilities.contracts import CapabilityResult, completed_result
+
+    manifest, _ = _manifest_with_controls()
+    lifecycle = MainAgentManifestEffectLifecycle()
+    lifecycle.bind_current_manifest(manifest)
+
+    def inject_handler(call_id, validated_input, current):
+        del validated_input
+        res, effect, _package = stage_skill_injection(
+            call_id=call_id,
+            current_manifest=current,
+            candidates=[
+                SkillActivationCandidate(
+                    skill=_skill_ref(),
+                    capabilities=(_cap_ref("get_statistics"),),
+                    instruction_char_count=10,
+                )
+            ],
+            lifecycle=lifecycle,
+        )
+        return res, effect
+
+    runtime = MainAgentControlRuntime(
+        current_manifest=manifest,
+        inject_handler=inject_handler,
+    )
+    result = runtime.execute(
+        call_id="hook-1",
+        capability_key="skill.inject",
+        validated_input={"skills": [{"canonicalName": "weekly-review"}]},
+    )
+    assert result.status == "completed"
+    effect = runtime.peek_manifest_effect(call_id="hook-1")
+    assert effect is not None
+
+    # Minimal dispatch request shape for the hook.
+    class _Req:
+        def __init__(self):
+            self.call = type("C", (), {"call_id": "hook-1"})()
+            self.current_manifest = manifest
+
+    child = next_manifest_from_control_effect(runtime, _Req(), result)
+    assert child.revision == manifest.revision + 1
+    assert child.manifest_digest == effect.proposed_manifest.manifest_digest

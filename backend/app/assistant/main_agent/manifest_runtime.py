@@ -26,6 +26,7 @@ from app.assistant.domain.contracts import (
     ResolvedSkillRef,
     SkillVersionConflictError,
     append_skill_activation,
+    append_skill_activations_batch,
 )
 from app.assistant.domain.digests import JsonValue, sha256_canonical_json
 from app.assistant.main_agent.catalog import (
@@ -89,9 +90,17 @@ class MainAgentManifestEffectLifecycle:
         self._instruction_chars_by_version: dict[UUID, int] = {}
         self._post_commit_sink: Callable[[dict[str, JsonValue]], None] | None = None
         self._event_failures: list[str] = []
+        # Optional rebind hooks for auth factory / control runtime after accept.
+        self._on_accept_hooks: list[Callable[[ResolvedRunManifestRevision], None]] = []
 
     def set_event_sink(self, sink: Callable[[dict[str, JsonValue]], None] | None) -> None:
         self._post_commit_sink = sink
+
+    def add_on_accept_hook(
+        self, hook: Callable[[ResolvedRunManifestRevision], None]
+    ) -> None:
+        """Register a callback invoked with the accepted Manifest after commit."""
+        self._on_accept_hooks.append(hook)
 
     def bind_current_manifest(
         self,
@@ -215,7 +224,17 @@ class MainAgentManifestEffectLifecycle:
             }
             package.accepted = True
             events = package.post_commit_events
+            accepted_manifest = proposed_manifest
             self._packages.pop(call_id, None)
+
+        # Rebind dependents (auth factory, control runtime) so new Skill
+        # bindings become dispatchable on the next call of this Run.
+        for hook in list(self._on_accept_hooks):
+            try:
+                hook(accepted_manifest)
+            except Exception:
+                # Hooks must not unwind an already-accepted Manifest.
+                self._event_failures.append(call_id)
 
         # Event delivery after accept cannot roll back the Manifest.
         sink = self._post_commit_sink
@@ -420,14 +439,14 @@ def stage_skill_injection(
             None,
         )
 
-    proposed = current_manifest
+    # Single lineage step for the whole batch (revision +1 only once).
     try:
-        for candidate in to_append:
-            proposed = append_skill_activation(
-                proposed,
-                skill=candidate.skill,
-                capabilities=candidate.capabilities,
-            )
+        proposed = append_skill_activations_batch(
+            current_manifest,
+            activations=tuple(
+                (candidate.skill, candidate.capabilities) for candidate in to_append
+            ),
+        )
     except SkillVersionConflictError:
         return (
             _fail(call_id, SKILL_VERSION_CONFLICT, "skill version conflict"),

@@ -410,6 +410,29 @@ class MainAgentAuthorizationEvidenceFactory:
         self._issued_call_ids: set[str] = set()
         self._verifiers: dict[str, SkillPolicyAuthorizationEvidenceVerifier] = {}
 
+    def rebind_manifest(
+        self,
+        manifest: ResolvedRunManifestRevision,
+        *,
+        skill_author_policy_by_version: Mapping[UUID, Sequence[str]] | None = None,
+        skill_content_digest_by_version: Mapping[UUID, str] | None = None,
+    ) -> None:
+        """Point membership checks at the lifecycle-accepted Manifest.
+
+        After skill.inject accept, new Skill bindings become dispatchable only
+        when the factory sees the child Manifest. Does not clear issued call IDs.
+        """
+        with self._lock:
+            self.manifest = manifest
+            if skill_author_policy_by_version is not None:
+                self.skill_author_policy_by_version.update(
+                    {k: tuple(v) for k, v in skill_author_policy_by_version.items()}
+                )
+            if skill_content_digest_by_version is not None:
+                self.skill_content_digest_by_version.update(
+                    dict(skill_content_digest_by_version)
+                )
+
     def issue(
         self,
         *,

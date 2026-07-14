@@ -1986,8 +1986,10 @@ def _execute_sequential_group(
         )
         try:
             parent_before = current_manifest
-            current_manifest = _accept_next_manifest(
-                previous=current_manifest,
+            # Validate lineage without committing loop state yet so a lifecycle
+            # failure cannot leave the loop advanced while the package is discarded.
+            accepted_child = _accept_next_manifest(
+                previous=parent_before,
                 next_manifest=work.next_manifest,
                 exposed_manifest_digest=call.manifest_digest,
                 exposed_manifest_revision=call.manifest_revision,
@@ -1998,13 +2000,47 @@ def _execute_sequential_group(
                     call_id=call.call_id,
                     reason_code="manifest_unchanged",
                 )
+                current_manifest = accepted_child
             else:
-                _lifecycle_accept(
-                    ports,
-                    call_id=call.call_id,
-                    current_manifest=parent_before,
-                    proposed_manifest=work.next_manifest,
-                )
+                try:
+                    _lifecycle_accept(
+                        ports,
+                        call_id=call.call_id,
+                        current_manifest=parent_before,
+                        proposed_manifest=work.next_manifest,
+                    )
+                except Exception as life_exc:
+                    # Keep loop Manifest at parent; package discarded.
+                    _lifecycle_discard(
+                        ports,
+                        call_id=call.call_id,
+                        reason_code="lifecycle_accept_error",
+                    )
+                    remaining = tuple(
+                        item for item in all_calls if item.call_index > call.call_index
+                    )
+                    _append_cancelled_before_start(
+                        messages=messages,
+                        tool_call_records=tool_call_records,
+                        calls=remaining,
+                        safe_message="sibling cancelled after lifecycle accept error",
+                    )
+                    validate_provider_transcript(tuple(messages))
+                    return _SiblingOutcome(
+                        kind="fatal",
+                        messages=tuple(messages),
+                        tool_call_records=tuple(tool_call_records),
+                        current_manifest=parent_before,
+                        stop_reason="protocol_error",
+                        error=SafeProviderError(
+                            semantic_code="lifecycle_accept_error",
+                            safe_summary=(
+                                str(life_exc) or "manifest effect lifecycle accept failed"
+                            ),
+                            retry_disposition="never",
+                        ),
+                    )
+                current_manifest = accepted_child
         except ValueError as exc:
             _lifecycle_discard(
                 ports,
