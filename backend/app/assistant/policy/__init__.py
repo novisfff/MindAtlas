@@ -5,6 +5,8 @@ Task 2 adds pure authorization evaluation, evidence issuance, and composite veri
 Task 3 adds the revisioned budget ledger and reservation protocol.
 Task 4 binds BudgetLedger to Gateway/scheduler ports via runtime adapters.
 Task 5 adds the Obligation Ledger and Provider Completion Guard adapter.
+Task 6 activates Skills with atomic policy/budget/obligation state.
+Task 7 adds process-local capability/agent call frames and depth/cycle guards.
 Later tasks add full Main Agent runtime composition.
 """
 
@@ -146,6 +148,28 @@ from app.assistant.policy.exposures import (
     evaluate_duplicate_capability_compatibility,
     resolve_owner_from_binding,
 )
+from app.assistant.policy.recursion import (
+    DEFAULT_MAX_AGENT_DEPTH,
+    DEFAULT_MAX_CAPABILITY_DEPTH,
+    REASON_AGENT_CYCLE,
+    REASON_AGENT_DEPTH,
+    REASON_CAPABILITY_DEPTH,
+    REASON_MAIN_AGENT_RESTART,
+    REASON_RECURSION_DENIED,
+    CapabilityCallFrame,
+    CapabilityCallFramePort,
+    NoOpCapabilityCallFramePort,
+    ProcessLocalCapabilityCallFramePort,
+    active_agent_version_ids,
+    build_capability_call_frame,
+    compute_frame_digest,
+    compute_next_depths,
+    depths_from_ports,
+    evaluate_recursion_guard,
+    is_main_agent_restart_target,
+    resolve_frame_port,
+    stack_has_agent_or_workflow,
+)
 from app.assistant.skills.contracts import SkillConflictRuleV1
 
 __all__ = [
@@ -165,10 +189,14 @@ __all__ = [
     "BudgetReservation",
     "BudgetReserveRequest",
     "COMPLETION_INSTRUCTION_MAX_CHARS",
+    "CapabilityCallFrame",
+    "CapabilityCallFramePort",
     "CapabilityExposureRef",
     "CompletionDecision",
     "CompletionObligation",
     "CompositeAuthorizationEvidenceVerifier",
+    "DEFAULT_MAX_AGENT_DEPTH",
+    "DEFAULT_MAX_CAPABILITY_DEPTH",
     "DeterministicBudgetClock",
     "DomainKeyOwnerResolver",
     "DuplicateCapabilityDeclaration",
@@ -183,6 +211,7 @@ __all__ = [
     "GlobalPolicyView",
     "MAIN_AGENT_OWNER_DEFAULT_MAX_CALLS",
     "ManifestExposureIndex",
+    "NoOpCapabilityCallFramePort",
     "ObligationDecision",
     "ObligationEvidenceEdge",
     "ObligationLedger",
@@ -194,6 +223,12 @@ __all__ = [
     "OwnerSignatureUsage",
     "OwnerUsage",
     "PLAN05_RELEASE_GATE_SIDE_EFFECTS",
+    "ProcessLocalCapabilityCallFramePort",
+    "REASON_AGENT_CYCLE",
+    "REASON_AGENT_DEPTH",
+    "REASON_CAPABILITY_DEPTH",
+    "REASON_MAIN_AGENT_RESTART",
+    "REASON_RECURSION_DENIED",
     "RunBudgetLimits",
     "SignatureUsage",
     "SkillConflictError",
@@ -270,4 +305,14 @@ __all__ = [
     "resolve_target_skill",
     "serialize_ledger_state",
     "serialize_obligation_ledger_state",
+    "active_agent_version_ids",
+    "build_capability_call_frame",
+    "compute_frame_digest",
+    "compute_next_depths",
+    "depths_from_ports",
+    "evaluate_recursion_guard",
+    "is_main_agent_restart_target",
+    "resolve_frame_port",
+    "stack_has_agent_or_workflow",
+
 ]

@@ -1719,6 +1719,38 @@ def _handle_no_tool_completion(
     )
 
 
+def _depths_from_frame_port(
+    ports: ProviderLoopPorts,
+    *,
+    capability_type: str,
+) -> tuple[int, int]:
+    """Capability/agent depths from optional process-local frame stack.
+
+    Mirrors policy.recursion.compute_next_depths without importing policy
+    (provider_loop must stay free of policy ledger/frame types).
+    """
+    port = getattr(ports, "call_frames", None)
+    stack: tuple[Any, ...] = ()
+    if port is not None:
+        try:
+            current = port.current()
+            if isinstance(current, tuple):
+                stack = current
+            elif current is not None:
+                stack = tuple(current)
+        except Exception:
+            stack = ()
+    capability_depth = len(stack) + 1
+    agent_frames = sum(
+        1 for frame in stack if getattr(frame, "capability_type", None) == "agent"
+    )
+    if capability_type == "agent":
+        agent_depth = agent_frames + 1
+    else:
+        agent_depth = max(1, agent_frames)
+    return capability_depth, agent_depth
+
+
 def _build_reservation_item(
     *,
     ports: ProviderLoopPorts,
@@ -1730,6 +1762,10 @@ def _build_reservation_item(
         descriptor=descriptor,
     )
     side_effect = getattr(getattr(descriptor, "behavior", None), "side_effect", "read")
+    capability_type = str(getattr(descriptor, "capability_type", None) or "tool")
+    capability_depth, agent_depth = _depths_from_frame_port(
+        ports, capability_type=capability_type
+    )
     return CapabilityCallReservationItem(
         call_id=call.call_id,
         owner_kind=str(owner_kind),
@@ -1738,8 +1774,8 @@ def _build_reservation_item(
         side_effect=str(side_effect),
         arguments_digest=call.arguments_digest,
         binding_contract_digest=call.binding_contract_digest,
-        capability_depth=1,
-        agent_depth=1,
+        capability_depth=capability_depth,
+        agent_depth=agent_depth,
     )
 
 

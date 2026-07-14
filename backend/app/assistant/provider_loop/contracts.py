@@ -1507,6 +1507,9 @@ class ProviderLoopPorts:
     # Shared dispatch guard instance passed to Gateway via tool dispatcher composition.
     # Default no-op; Main Agent binds BudgetLedgerDispatchGuard.
     dispatch_guard: Any = None
+    # Plan 05 additive: process-local call frame stack (opaque; no policy types).
+    # When present, reservation uses real capability/agent depths from the stack.
+    call_frames: Any = None
     # Plan 05 completion guard: default reproduces Plan 03 natural completion.
     completion_guard: ProviderCompletionGuard = field(
         default_factory=NoOpProviderCompletionGuard

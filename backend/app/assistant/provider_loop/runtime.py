@@ -528,6 +528,8 @@ class GatewayToolDispatcher:
     trust_exposed_for_override: bool = False
     # Plan 05 additive: shared CapabilityDispatchGuard (BudgetLedger-backed or no-op).
     dispatch_guard: Any | None = None
+    # Plan 05 additive: shared process-local call frame port (optional).
+    call_frames: Any | None = None
     dispatch_calls: list[dict[str, Any]] = field(default_factory=list)
     gateway_ids: list[int] = field(default_factory=list)
     session_ids: list[str] = field(default_factory=list)
@@ -714,6 +716,8 @@ class GatewayToolDispatcher:
             }
             if self.dispatch_guard is not None:
                 ports_kwargs["dispatch_guard"] = self.dispatch_guard
+            if self.call_frames is not None:
+                ports_kwargs["call_frames"] = self.call_frames
             ports = CapabilityRuntimePorts(**ports_kwargs)
             with self._lock:
                 self.adapter_invocations.append(call.call_id)
