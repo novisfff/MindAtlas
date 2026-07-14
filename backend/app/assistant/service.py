@@ -352,6 +352,8 @@ class AssistantService:
         yield from self.stream_run(conversation.id, run_id=run.id, after_seq=0)
 
     def stream_run(self, conversation_id: UUID, *, run_id: UUID, after_seq: int = 0) -> Iterator[bytes]:
+        from app.assistant.main_agent.events import is_internal_event, strip_visibility_marker
+
         bind = self.db.bind or self.db.get_bind()
         read_session_factory = sessionmaker(bind=bind, future=True)
         with read_session_factory() as read_db:
@@ -371,9 +373,13 @@ class AssistantService:
                     events = read_svc.list_events_after(run_id=run_id, after_seq=last_seq, limit=200)
                     for event in events:
                         payload = dict(event.payload or {})
-                        payload["seq"] = int(event.seq)
+                        # Advance cursor for internal rows but do not yield them.
                         last_seq = int(event.seq)
-                        yield self._sse(event.event_name, payload)
+                        if is_internal_event(payload):
+                            continue
+                        public_payload = strip_visibility_marker(payload)
+                        public_payload["seq"] = int(event.seq)
+                        yield self._sse(event.event_name, public_payload)
 
                     current = read_svc.get_run(conversation_id=conversation_id, run_id=run_id)
                 if current is None:
@@ -560,8 +566,18 @@ class AssistantService:
             _update_run_status(status=RUN_STATUS_RUNNING)
             _append_event("run_status", {"status": RUN_STATUS_RUNNING})
 
-            agent_db = SessionLocal()
-            try:
+            # Runtime selection once at Run start (Plan 04 §14.1).
+            # off / shadow production: Legacy only — never construct MainAgentService.
+            # read_only: admit Main Agent; safe pre-output fallback may use Legacy.
+            settings = get_settings()
+            main_agent_mode = str(getattr(settings, "assistant_main_agent_mode", "off") or "off")
+            used_main_agent = False
+            skip_l2 = False
+            skip_l1 = False
+            skip_title = False
+
+            def _run_legacy_generate(agent_db: Session) -> None:
+                nonlocal pending_chars, checkpoint_force_requested
                 for delta in self._generate_response(
                     conversation.id,
                     message_id=assistant_msg.id,
@@ -595,6 +611,104 @@ class AssistantService:
                             checkpoint_force_requested = False
                             force_checkpoint = True
                     _persist_checkpoint(force=force_checkpoint)
+
+            agent_db = SessionLocal()
+            try:
+                if main_agent_mode == "read_only":
+                    from app.assistant.main_agent.events import MainAgentEventAdapter
+                    from app.assistant.main_agent.service import (
+                        AssistantRuntimeRequest,
+                        MainAgentService,
+                        chunk_text,
+                        should_construct_main_agent,
+                    )
+                    from app.assistant.memory_service import AssistantMemoryService
+
+                    if should_construct_main_agent(
+                        mode=main_agent_mode, execution_kind="production"
+                    ):
+                        ma_events = MainAgentEventAdapter(_append_event)
+                        l1_text = ""
+                        l0_msgs: tuple = ()
+                        try:
+                            with SessionLocal() as mem_db:
+                                l1_text = AssistantMemoryService(mem_db).get_l1_summary(
+                                    conversation.id
+                                ) or ""
+                            # L0 window is best-effort; empty history is valid.
+                            history_rows = self._build_llm_messages(
+                                conversation.id, db=agent_db, locale=resolved_locale
+                            )
+                            # Drop the current user turn from history if present.
+                            if history_rows and history_rows[-1].get("role") == "user":
+                                history_rows = history_rows[:-1]
+                            l0_msgs = tuple(history_rows[-12:])
+                        except Exception:
+                            logger.debug(
+                                "main agent memory snapshot failed run_id=%s",
+                                run_id,
+                                exc_info=True,
+                            )
+
+                        ma_service = MainAgentService(
+                            agent_db,
+                            event_adapter=ma_events,
+                        )
+                        ma_result = ma_service.run(
+                            AssistantRuntimeRequest(
+                                run_id=run_id,
+                                conversation_id=conversation.id,
+                                user_text=str(user_msg.content or ""),
+                                locale=resolved_locale,
+                                stream_output=stream_output,
+                                l1_summary=l1_text,
+                                l0_messages=l0_msgs,
+                                execution_kind="production",
+                                cancel_checker=_cancel_checker,
+                            )
+                        )
+                        if ma_result.fallback_to_legacy:
+                            logger.info(
+                                "main agent fallback to legacy run_id=%s reason=%s",
+                                run_id,
+                                ma_result.reason_code,
+                            )
+                            _run_legacy_generate(agent_db)
+                        elif ma_result.status == "cancelled":
+                            raise AssistantRunCancelled()
+                        elif ma_result.status == "failed":
+                            raise RuntimeError(
+                                f"main_agent_failed:{ma_result.reason_code or 'unknown'}"
+                            )
+                        else:
+                            used_main_agent = True
+                            # New path: L2 always zero; L1/title only on successful MA completion.
+                            skip_l2 = True
+                            skip_l1 = not bool(ma_result.write_l1)
+                            skip_title = not bool(ma_result.write_title)
+                            final_text = ma_result.final_text or ""
+                            if final_text and ma_result.write_message:
+                                for chunk in chunk_text(final_text):
+                                    ensure_not_cancelled(_cancel_checker)
+                                    with state_lock:
+                                        content_parts.append(chunk)
+                                        pending_chars += len(chunk)
+                                    _append_event("content_delta", {"delta": chunk})
+                                with state_lock:
+                                    if ma_result.skill_summaries:
+                                        assistant_msg.skill_calls = list(
+                                            ma_result.skill_summaries
+                                        )
+                                    if ma_result.tool_summaries:
+                                        assistant_msg.tool_calls = list(
+                                            ma_result.tool_summaries
+                                        )
+                            _persist_checkpoint(force=True)
+                    else:
+                        _run_legacy_generate(agent_db)
+                else:
+                    # off / shadow: Legacy production path only.
+                    _run_legacy_generate(agent_db)
             finally:
                 try:
                     agent_db.close()
@@ -602,7 +716,7 @@ class AssistantService:
                     pass
 
             _persist_checkpoint(force=True)
-            if not conversation.title:
+            if not skip_title and not conversation.title:
                 title = self._generate_title(user_msg.content or "", assistant_msg.content or "", locale=locale)
                 if title:
                     conversation.title = title
@@ -613,19 +727,27 @@ class AssistantService:
             _append_event("run_status", {"status": RUN_STATUS_COMPLETED})
             _append_event("message_end", {"finishReason": "stop"})
             _update_checkpoint(checkpoint_seq=latest_event_seq)
-            self._update_l1_summary_after_run(
-                conversation_id=conversation.id,
-                run_id=run_id,
-                user_text=str(user_msg.content or ""),
-                assistant_text=str(assistant_msg.content or ""),
-            )
-            self._update_l2_memory_after_run(
-                conversation_id=conversation.id,
-                run_id=run_id,
-                skill_name=self._resolve_selected_skill_for_l2(event_adapter.skill_calls_data),
-                user_text=str(user_msg.content or ""),
-                assistant_text=str(assistant_msg.content or ""),
-            )
+            if not skip_l1:
+                self._update_l1_summary_after_run(
+                    conversation_id=conversation.id,
+                    run_id=run_id,
+                    user_text=str(user_msg.content or ""),
+                    assistant_text=str(assistant_msg.content or ""),
+                )
+            if not skip_l2:
+                self._update_l2_memory_after_run(
+                    conversation_id=conversation.id,
+                    run_id=run_id,
+                    skill_name=self._resolve_selected_skill_for_l2(event_adapter.skill_calls_data),
+                    user_text=str(user_msg.content or ""),
+                    assistant_text=str(assistant_msg.content or ""),
+                )
+            if used_main_agent:
+                logger.info(
+                    "main agent run completed run_id=%s l1=%s l2=0",
+                    run_id,
+                    not skip_l1,
+                )
         except AssistantRunCancelled:
             logger.info("assistant background run cancelled run_id=%s", run_id)
             _persist_checkpoint(force=True)

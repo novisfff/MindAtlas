@@ -25,15 +25,38 @@ from app.assistant.main_agent.contracts import (
     SkillContextBuildResult,
     ToolArtifactSummary,
 )
+from app.assistant.main_agent.events import MainAgentEventAdapter, is_internal_event
+from app.assistant.main_agent.model_eligibility import (
+    ModelEligibilityError,
+    ModelEligibilityReport,
+    evaluate_probe_eligibility,
+)
 from app.assistant.main_agent.prompt_builder import MainAgentPromptBuilder
+from app.assistant.main_agent.service import (
+    AssistantRuntimeRequest,
+    AssistantRuntimeResult,
+    MainAgentAdmissionError,
+    MainAgentFallbackState,
+    MainAgentService,
+    select_runtime_for_mode,
+    should_construct_main_agent,
+)
 
 __all__ = [
     "ActiveSkillInstruction",
+    "AssistantRuntimeRequest",
+    "AssistantRuntimeResult",
     "CatalogSearchResult",
     "CatalogSearchState",
     "CatalogSummaryRecord",
+    "MainAgentAdmissionError",
+    "MainAgentEventAdapter",
+    "MainAgentFallbackState",
     "MainAgentPromptBudgetExceeded",
     "MainAgentPromptBuilder",
+    "MainAgentService",
+    "ModelEligibilityError",
+    "ModelEligibilityReport",
     "PromptBudgetCaps",
     "PromptBudgetLimits",
     "PromptBuildReport",
@@ -45,4 +68,8 @@ __all__ = [
     "SkillContextBuildResult",
     "ToolArtifactSummary",
     "build_catalog_snapshot",
+    "evaluate_probe_eligibility",
+    "is_internal_event",
+    "select_runtime_for_mode",
+    "should_construct_main_agent",
 ]
