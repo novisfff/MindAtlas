@@ -1090,6 +1090,41 @@ class NoOpRoundContextProvider:
 
 
 @runtime_checkable
+class ManifestEffectLifecyclePort(Protocol):
+    """Generic process-local Manifest-effect accept/discard boundary (Plan 04).
+
+    Plan 03 validates lineage first; only then may accept install activation.
+    Non-Main-Agent callers use the no-op implementation.
+    """
+
+    def accept(
+        self,
+        *,
+        call_id: str,
+        current_manifest: ResolvedRunManifestRevision,
+        proposed_manifest: ResolvedRunManifestRevision,
+    ) -> None: ...
+
+    def discard(self, *, call_id: str, reason_code: str) -> None: ...
+
+
+class NoOpManifestEffectLifecyclePort:
+    """Default no-op lifecycle; preserves pre-Plan-04 dispatcher/result behavior."""
+
+    def accept(
+        self,
+        *,
+        call_id: str,
+        current_manifest: ResolvedRunManifestRevision,
+        proposed_manifest: ResolvedRunManifestRevision,
+    ) -> None:
+        del call_id, current_manifest, proposed_manifest
+
+    def discard(self, *, call_id: str, reason_code: str) -> None:
+        del call_id, reason_code
+
+
+@runtime_checkable
 class CurrentCapabilityDescriptorVerifier(Protocol):
     """Runtime port only. Must never enter messages/surfaces/continuations/results."""
 
@@ -1167,6 +1202,10 @@ class ProviderLoopPorts:
     events: ProviderLoopEventSink
     # Default no-op preserves byte-identical Plan 03 behavior for all callers.
     round_context_provider: RoundContextProvider = NoOpRoundContextProvider()
+    # Default no-op lifecycle: existing dispatchers remain byte-compatible.
+    manifest_effect_lifecycle: ManifestEffectLifecyclePort = (
+        NoOpManifestEffectLifecyclePort()
+    )
 
 
 def assert_not_serializable_port(value: Any) -> None:
@@ -1176,6 +1215,8 @@ def assert_not_serializable_port(value: Any) -> None:
         "ToolsProvider",
         "RoundContextProvider",
         "NoOpRoundContextProvider",
+        "ManifestEffectLifecyclePort",
+        "NoOpManifestEffectLifecyclePort",
         "CurrentCapabilityDescriptorVerifier",
         "ProviderAuthorizationEvidenceFactory",
         "ToolDispatcher",
@@ -1237,6 +1278,8 @@ def project_waiting_resolution_message(
 __all__ = [
     "CancellationPort",
     "CurrentCapabilityDescriptorVerifier",
+    "ManifestEffectLifecyclePort",
+    "NoOpManifestEffectLifecyclePort",
     "NoOpRoundContextProvider",
     "ProviderAdapter",
     "ProviderAuthorizationEvidenceFactory",

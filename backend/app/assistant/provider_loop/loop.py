@@ -1307,6 +1307,36 @@ def _accept_next_manifest(
     return next_manifest
 
 
+def _lifecycle_accept(
+    ports: ProviderLoopPorts,
+    *,
+    call_id: str,
+    current_manifest: ResolvedRunManifestRevision,
+    proposed_manifest: ResolvedRunManifestRevision,
+) -> None:
+    """Invoke Manifest-effect lifecycle after lineage acceptance (Plan 04)."""
+    lifecycle = getattr(ports, "manifest_effect_lifecycle", None)
+    if lifecycle is None:
+        return
+    lifecycle.accept(
+        call_id=call_id,
+        current_manifest=current_manifest,
+        proposed_manifest=proposed_manifest,
+    )
+
+
+def _lifecycle_discard(
+    ports: ProviderLoopPorts,
+    *,
+    call_id: str,
+    reason_code: str,
+) -> None:
+    lifecycle = getattr(ports, "manifest_effect_lifecycle", None)
+    if lifecycle is None:
+        return
+    lifecycle.discard(call_id=call_id, reason_code=reason_code)
+
+
 def _chunk_final_text(text: str, *, size: int = 32) -> list[str]:
     if size < 1:
         raise ValueError("size must be >= 1")
@@ -1955,13 +1985,32 @@ def _execute_sequential_group(
             )
         )
         try:
+            parent_before = current_manifest
             current_manifest = _accept_next_manifest(
                 previous=current_manifest,
                 next_manifest=work.next_manifest,
                 exposed_manifest_digest=call.manifest_digest,
                 exposed_manifest_revision=call.manifest_revision,
             )
+            if work.next_manifest.manifest_digest == parent_before.manifest_digest:
+                _lifecycle_discard(
+                    ports,
+                    call_id=call.call_id,
+                    reason_code="manifest_unchanged",
+                )
+            else:
+                _lifecycle_accept(
+                    ports,
+                    call_id=call.call_id,
+                    current_manifest=parent_before,
+                    proposed_manifest=work.next_manifest,
+                )
         except ValueError as exc:
+            _lifecycle_discard(
+                ports,
+                call_id=call.call_id,
+                reason_code="manifest_lineage_error",
+            )
             remaining = tuple(item for item in all_calls if item.call_index > call.call_index)
             _append_cancelled_before_start(
                 messages=messages,
