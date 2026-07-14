@@ -33,6 +33,8 @@ from app.assistant.provider_loop.aliases import (
     lookup_tool_by_alias,
 )
 from app.assistant.provider_loop.contracts import (
+    CapabilityCallReservationDecision,
+    CapabilityCallReservationItem,
     ProviderAdapter,
     ProviderDispatchRequest,
     ProviderDispatchResult,
@@ -43,7 +45,10 @@ from app.assistant.provider_loop.contracts import (
     ProviderLoopRequest,
     ProviderLoopResult,
     ProviderLoopResumeRequest,
+    ProviderRoundBudgetDeniedError,
+    ProviderRoundBudgetGuard,
     ProviderRoundRequest,
+    ProviderRoundResult,
     ProviderToolChoice,
     ProviderToolDefinition,
     ProviderToolSurface,
@@ -329,6 +334,32 @@ def run_provider_agent_loop(
                 generation=generation,
             )
 
+            # Plan 05: round budget guard immediately before Provider I/O.
+            # Caps max_output_tokens by remaining completion budget when present.
+            # Denial blocks the next round without undoing prior completed work.
+            try:
+                guarded_generation = _apply_round_budget_before(
+                    ports=ports,
+                    round_request=round_request,
+                )
+            except ProviderLoopError as budget_err:
+                budget_err.messages = tuple(messages)
+                budget_err.tool_calls = tuple(tool_call_records)
+                budget_err.manifest = current_manifest
+                budget_err.usage = accumulated_usage
+                budget_err.round_count = round_count
+                raise
+            if guarded_generation is not generation:
+                round_request = ProviderRoundRequest(
+                    round_index=round_index,
+                    messages=tuple(messages),
+                    tool_surface=surface,
+                    tools_enabled=tools_enabled,
+                    finalization_round=finalization,
+                    model_ref=request.model_ref,
+                    generation=guarded_generation,
+                )
+
             try:
                 events = list(
                     ports.provider.stream_round(
@@ -383,6 +414,9 @@ def run_provider_agent_loop(
                     usage=accumulated_usage,
                     round_count=round_count,
                 ) from exc
+
+            # Report usage to the round budget guard after assembly (even on later failure).
+            _apply_round_budget_after(ports=ports, round_result=round_result)
 
             assistant = round_result.assistant_message
             accumulated_usage = aggregate_provider_usage(
@@ -968,20 +1002,19 @@ def _dispatch_one(
     scope: ProviderExecutionScope,
 ) -> tuple[ProviderToolMessage, ResolvedRunManifestRevision, str]:
     """Pre-dispatch verify, issue evidence, dispatch once. Returns message/manifest/status."""
-    # Pre-dispatch freshness (dispatcher-side equality is also required by fakes).
-    try:
-        ports.current_descriptors.require_current(
-            binding=definition.binding,
-            exposed_descriptor=definition.descriptor,
-            scope=scope,
-        )
-    except Exception as exc:  # noqa: BLE001
-        error = CapabilityError(
-            error_type="version_drift",
-            safe_code="classification_changed",
-            safe_message="capability classification changed before dispatch",
-            retry_disposition="never",
+
+    def _fatal_before_start(
+        *,
+        error: CapabilityError,
+        safe_code: str,
+        safe_summary: str,
+        cause: BaseException | None = None,
+    ) -> _FatalCapability:
+        # Reservation already held by scheduler; release before pairing the deny.
+        _release_unstarted_via_ports(
+            ports=ports,
             call_id=call.call_id,
+            reason_code=safe_code,
         )
         msg = ProviderToolMessage(
             call_id=call.call_id,
@@ -996,11 +1029,35 @@ def _dispatch_one(
                 error=error,
             ),
         )
-        raise _FatalCapability(
+        err = _FatalCapability(
             tool_message=msg,
+            safe_code=safe_code,
+            safe_summary=safe_summary,
+        )
+        if cause is not None:
+            raise err from cause
+        raise err
+
+    # Pre-dispatch freshness (dispatcher-side equality is also required by fakes).
+    try:
+        ports.current_descriptors.require_current(
+            binding=definition.binding,
+            exposed_descriptor=definition.descriptor,
+            scope=scope,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _fatal_before_start(
+            error=CapabilityError(
+                error_type="version_drift",
+                safe_code="classification_changed",
+                safe_message="capability classification changed before dispatch",
+                retry_disposition="never",
+                call_id=call.call_id,
+            ),
             safe_code="classification_changed",
             safe_summary="capability classification changed before dispatch",
-        ) from exc
+            cause=exc,
+        )
 
     try:
         authorization = ports.authorization_evidence.issue(
@@ -1010,83 +1067,42 @@ def _dispatch_one(
             scope=scope,
         )
     except Exception as exc:  # noqa: BLE001
-        error = CapabilityError(
-            error_type="unauthorized",
-            safe_code="authorization_evidence_failed",
-            safe_message="authorization evidence factory failed",
-            retry_disposition="never",
-            call_id=call.call_id,
-        )
-        msg = ProviderToolMessage(
-            call_id=call.call_id,
-            provider_alias=call.provider_alias,
-            content=ProviderToolResultEnvelope(
-                status="blocked",
-                domain_key=call.domain_key,
-                user_text=None,
-                structured_output=None,
-                terminal_output=False,
-                needs_followup=False,
-                error=error,
+        _fatal_before_start(
+            error=CapabilityError(
+                error_type="unauthorized",
+                safe_code="authorization_evidence_failed",
+                safe_message="authorization evidence factory failed",
+                retry_disposition="never",
+                call_id=call.call_id,
             ),
-        )
-        raise _FatalCapability(
-            tool_message=msg,
             safe_code="authorization_evidence_failed",
             safe_summary="authorization evidence factory failed",
-        ) from exc
+            cause=exc,
+        )
 
     # Reject evidence issued for the wrong scope/call when fields are present.
     if getattr(authorization, "call_id", None) not in {None, call.call_id}:
-        error = CapabilityError(
-            error_type="unauthorized",
-            safe_code="authorization_scope_mismatch",
-            safe_message="authorization evidence call_id mismatch",
-            retry_disposition="never",
-            call_id=call.call_id,
-        )
-        msg = ProviderToolMessage(
-            call_id=call.call_id,
-            provider_alias=call.provider_alias,
-            content=ProviderToolResultEnvelope(
-                status="blocked",
-                domain_key=call.domain_key,
-                user_text=None,
-                structured_output=None,
-                terminal_output=False,
-                needs_followup=False,
-                error=error,
+        _fatal_before_start(
+            error=CapabilityError(
+                error_type="unauthorized",
+                safe_code="authorization_scope_mismatch",
+                safe_message="authorization evidence call_id mismatch",
+                retry_disposition="never",
+                call_id=call.call_id,
             ),
-        )
-        raise _FatalCapability(
-            tool_message=msg,
             safe_code="authorization_scope_mismatch",
             safe_summary="authorization evidence call_id mismatch",
         )
     principal = getattr(authorization, "principal", None)
     if principal is not None and getattr(principal, "principal_id", None) != scope.principal.principal_id:
-        error = CapabilityError(
-            error_type="unauthorized",
-            safe_code="authorization_scope_mismatch",
-            safe_message="authorization evidence principal mismatch",
-            retry_disposition="never",
-            call_id=call.call_id,
-        )
-        msg = ProviderToolMessage(
-            call_id=call.call_id,
-            provider_alias=call.provider_alias,
-            content=ProviderToolResultEnvelope(
-                status="blocked",
-                domain_key=call.domain_key,
-                user_text=None,
-                structured_output=None,
-                terminal_output=False,
-                needs_followup=False,
-                error=error,
+        _fatal_before_start(
+            error=CapabilityError(
+                error_type="unauthorized",
+                safe_code="authorization_scope_mismatch",
+                safe_message="authorization evidence principal mismatch",
+                retry_disposition="never",
+                call_id=call.call_id,
             ),
-        )
-        raise _FatalCapability(
-            tool_message=msg,
             safe_code="authorization_scope_mismatch",
             safe_summary="authorization evidence principal mismatch",
         )
@@ -1106,84 +1122,43 @@ def _dispatch_one(
             cancellation=ports.cancellation,
         )
     except Exception as exc:  # noqa: BLE001
-        # Unexpected dispatcher crash is fatal protocol/capability error.
-        error = CapabilityError(
-            error_type="protocol_error",
-            safe_code="dispatcher_error",
-            safe_message="tool dispatcher failed",
-            retry_disposition="never",
-            call_id=call.call_id,
-        )
-        msg = ProviderToolMessage(
-            call_id=call.call_id,
-            provider_alias=call.provider_alias,
-            content=ProviderToolResultEnvelope(
-                status="blocked",
-                domain_key=call.domain_key,
-                user_text=None,
-                structured_output=None,
-                terminal_output=False,
-                needs_followup=False,
-                error=error,
+        # Unexpected dispatcher crash: reservation may still be unstarted.
+        _fatal_before_start(
+            error=CapabilityError(
+                error_type="protocol_error",
+                safe_code="dispatcher_error",
+                safe_message="tool dispatcher failed",
+                retry_disposition="never",
+                call_id=call.call_id,
             ),
-        )
-        raise _FatalCapability(
-            tool_message=msg,
             safe_code="dispatcher_error",
             safe_summary="tool dispatcher failed",
-        ) from exc
+            cause=exc,
+        )
 
     if not isinstance(dispatch_result, ProviderDispatchResult):
-        error = CapabilityError(
-            error_type="protocol_error",
-            safe_code="dispatcher_error",
-            safe_message="tool dispatcher returned invalid result",
-            retry_disposition="never",
-            call_id=call.call_id,
-        )
-        msg = ProviderToolMessage(
-            call_id=call.call_id,
-            provider_alias=call.provider_alias,
-            content=ProviderToolResultEnvelope(
-                status="blocked",
-                domain_key=call.domain_key,
-                user_text=None,
-                structured_output=None,
-                terminal_output=False,
-                needs_followup=False,
-                error=error,
+        _fatal_before_start(
+            error=CapabilityError(
+                error_type="protocol_error",
+                safe_code="dispatcher_error",
+                safe_message="tool dispatcher returned invalid result",
+                retry_disposition="never",
+                call_id=call.call_id,
             ),
-        )
-        raise _FatalCapability(
-            tool_message=msg,
             safe_code="dispatcher_error",
             safe_summary="tool dispatcher returned invalid result",
         )
 
     capability_result = dispatch_result.capability_result
     if not isinstance(capability_result, CapabilityResult):
-        error = CapabilityError(
-            error_type="protocol_error",
-            safe_code="dispatcher_error",
-            safe_message="tool dispatcher returned invalid capability result",
-            retry_disposition="never",
-            call_id=call.call_id,
-        )
-        msg = ProviderToolMessage(
-            call_id=call.call_id,
-            provider_alias=call.provider_alias,
-            content=ProviderToolResultEnvelope(
-                status="blocked",
-                domain_key=call.domain_key,
-                user_text=None,
-                structured_output=None,
-                terminal_output=False,
-                needs_followup=False,
-                error=error,
+        _fatal_before_start(
+            error=CapabilityError(
+                error_type="protocol_error",
+                safe_code="dispatcher_error",
+                safe_message="tool dispatcher returned invalid capability result",
+                retry_disposition="never",
+                call_id=call.call_id,
             ),
-        )
-        raise _FatalCapability(
-            tool_message=msg,
             safe_code="dispatcher_error",
             safe_summary="tool dispatcher returned invalid capability result",
         )
@@ -1501,6 +1476,201 @@ def _emit(ports: ProviderLoopPorts, event_type: str, payload: dict[str, Any]) ->
         ports.events.emit(event_type, payload)  # type: ignore[arg-type]
     except Exception:
         # Event sink failures must never duplicate Provider/Capability work.
+        return
+
+
+def _resolve_round_budget_guard(ports: ProviderLoopPorts) -> ProviderRoundBudgetGuard | None:
+    return getattr(ports, "round_budget_guard", None)
+
+
+def _apply_round_budget_before(
+    *,
+    ports: ProviderLoopPorts,
+    round_request: ProviderRoundRequest,
+) -> ProviderGenerationOptions:
+    """Invoke optional round budget guard immediately before Provider I/O.
+
+    Raises ProviderLoopError on denial. Default no-op returns request.generation.
+    Does not reset Plan 03 round_count; only caps generation options.
+    """
+    guard = _resolve_round_budget_guard(ports)
+    if guard is None:
+        return round_request.generation
+    try:
+        generation = guard.before_round(round_request)
+    except ProviderLoopError:
+        raise
+    except ProviderRoundBudgetDeniedError as exc:
+        raise ProviderLoopError(
+            stop_reason="max_rounds_hard_stop"
+            if round_request.finalization_round
+            else "protocol_error",
+            error=SafeProviderError(
+                semantic_code=exc.reason_code,
+                safe_summary="provider round budget denied before I/O",
+                retry_disposition="never",
+            ),
+            round_count=round_request.round_index + 1,
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise ProviderLoopError(
+            stop_reason="protocol_error",
+            error=SafeProviderError(
+                semantic_code="budget_guard_error",
+                safe_summary="provider round budget guard failed before I/O",
+                retry_disposition="never",
+            ),
+            round_count=round_request.round_index + 1,
+        ) from exc
+    if not isinstance(generation, ProviderGenerationOptions):
+        raise ProviderLoopError(
+            stop_reason="protocol_error",
+            error=SafeProviderError(
+                semantic_code="budget_guard_error",
+                safe_summary="provider round budget guard returned invalid generation options",
+                retry_disposition="never",
+            ),
+            round_count=round_request.round_index + 1,
+        )
+    return generation
+
+
+def _apply_round_budget_after(
+    *,
+    ports: ProviderLoopPorts,
+    round_result: ProviderRoundResult,
+) -> None:
+    """Report Provider usage after round assembly. Failures are contained."""
+    guard = _resolve_round_budget_guard(ports)
+    if guard is None:
+        return
+    try:
+        guard.after_round(round_result)
+    except Exception:
+        # Usage recording must never undo a completed Provider round.
+        return
+
+
+def _build_reservation_item(
+    *,
+    ports: ProviderLoopPorts,
+    call: ProviderToolCall,
+    descriptor: Any,
+) -> CapabilityCallReservationItem:
+    owner_kind, owner_version_id = ports.call_owner_resolver.resolve_owner(
+        call=call,
+        descriptor=descriptor,
+    )
+    side_effect = getattr(getattr(descriptor, "behavior", None), "side_effect", "read")
+    return CapabilityCallReservationItem(
+        call_id=call.call_id,
+        owner_kind=str(owner_kind),
+        owner_version_id=owner_version_id,
+        domain_key=call.domain_key,
+        side_effect=str(side_effect),
+        arguments_digest=call.arguments_digest,
+        binding_contract_digest=call.binding_contract_digest,
+        capability_depth=1,
+        agent_depth=1,
+    )
+
+
+def _blocked_budget_message(
+    call: ProviderToolCall,
+    *,
+    reason_code: str,
+    safe_message: str = "capability call budget denied",
+) -> ProviderToolMessage:
+    # Map budget deny to blocked envelope with stable budget reason as safe_code.
+    # CapabilityError has no budget_exhausted type; use unauthorized + budget code.
+    code = reason_code if reason_code and len(reason_code) <= 64 else "budget_exhausted"
+    # safe_code cannot contain whitespace; reason codes from ledger are already clean.
+    error = CapabilityError(
+        error_type="unauthorized",
+        safe_code=code.replace(" ", "_")[:64],
+        safe_message=safe_message,
+        retry_disposition="never",
+        call_id=call.call_id,
+    )
+    return ProviderToolMessage(
+        call_id=call.call_id,
+        provider_alias=call.provider_alias,
+        content=ProviderToolResultEnvelope(
+            status="blocked",
+            domain_key=call.domain_key,
+            user_text=None,
+            structured_output=None,
+            terminal_output=False,
+            needs_followup=False,
+            error=error,
+        ),
+    )
+
+
+def _reserve_one_call(
+    *,
+    ports: ProviderLoopPorts,
+    call: ProviderToolCall,
+    definition: ProviderToolDefinition,
+) -> CapabilityCallReservationDecision:
+    item = _build_reservation_item(
+        ports=ports,
+        call=call,
+        descriptor=definition.descriptor,
+    )
+    try:
+        return ports.call_reservation.reserve_one(item)
+    except Exception:
+        return CapabilityCallReservationDecision(
+            allowed=False,
+            reason_code="budget_reservation_error",
+            reserved_call_ids=(),
+        )
+
+
+def _reserve_batch_calls(
+    *,
+    ports: ProviderLoopPorts,
+    group_calls: tuple[ProviderToolCall, ...],
+    surface: ProviderToolSurface,
+) -> CapabilityCallReservationDecision:
+    items: list[CapabilityCallReservationItem] = []
+    for call in group_calls:
+        definition = lookup_tool_by_alias(surface, call.provider_alias)
+        items.append(
+            _build_reservation_item(
+                ports=ports,
+                call=call,
+                descriptor=definition.descriptor,
+            )
+        )
+    try:
+        return ports.call_reservation.reserve_batch(items)
+    except Exception:
+        return CapabilityCallReservationDecision(
+            allowed=False,
+            reason_code="budget_reservation_error",
+            reserved_call_ids=(),
+        )
+
+
+def _release_unstarted_via_ports(
+    *,
+    ports: ProviderLoopPorts,
+    call_id: str,
+    reason_code: str,
+) -> None:
+    """Best-effort release of a reserved-but-unstarted call via shared dispatch guard."""
+    guard = getattr(ports, "dispatch_guard", None)
+    if guard is None:
+        # GatewayToolDispatcher may hold the guard when ports.dispatch_guard is unset.
+        dispatcher = getattr(ports, "tool_dispatcher", None)
+        guard = getattr(dispatcher, "dispatch_guard", None) if dispatcher is not None else None
+    if guard is None:
+        return
+    try:
+        guard.release_unstarted(call_id=call_id, reason_code=reason_code)
+    except Exception:
         return
 
 
@@ -1908,6 +2078,47 @@ def _execute_sequential_group(
             )
 
         definition = lookup_tool_by_alias(surface, call.provider_alias)
+
+        # Plan 05: sequential reserve_one before evidence/dispatch.
+        reservation = _reserve_one_call(
+            ports=ports, call=call, definition=definition
+        )
+        if not reservation.allowed:
+            blocked_msg = _blocked_budget_message(
+                call,
+                reason_code=reservation.reason_code,
+                safe_message="capability call budget denied before start",
+            )
+            messages.append(blocked_msg)
+            tool_call_records.append(
+                ProviderToolCallRecord(
+                    call=call,
+                    status="blocked",
+                    result_message_digest=digest_provider_message(blocked_msg),
+                    safe_duration_ms=None,
+                )
+            )
+            remaining = tuple(item for item in all_calls if item.call_index > call.call_index)
+            _append_cancelled_before_start(
+                messages=messages,
+                tool_call_records=tool_call_records,
+                calls=remaining,
+                safe_message="sibling cancelled before start after budget denial",
+            )
+            validate_provider_transcript(tuple(messages))
+            return _SiblingOutcome(
+                kind="fatal",
+                messages=tuple(messages),
+                tool_call_records=tuple(tool_call_records),
+                current_manifest=current_manifest,
+                stop_reason="capability_error",
+                error=SafeProviderError(
+                    semantic_code=reservation.reason_code,
+                    safe_summary="capability call budget denied before start",
+                    retry_disposition="never",
+                ),
+            )
+
         work = _run_dispatch_item(
             ports=ports,
             item=_CallWorkItem(
@@ -2349,6 +2560,33 @@ def _execute_parallel_group(
     accumulated_usage: ProviderUsage,
     max_workers: int,
 ) -> _SiblingOutcome:
+    # Plan 05: reserve eligible parallel batches all-or-none under one ledger lock.
+    # On batch denial, replan the group sequentially in Provider order so every
+    # original Tool Call still receives a paired terminal result.
+    batch_decision = _reserve_batch_calls(
+        ports=ports,
+        group_calls=group_calls,
+        surface=surface,
+    )
+    if not batch_decision.allowed:
+        return _execute_sequential_group(
+            ports=ports,
+            surface=surface,
+            assistant=assistant,
+            all_calls=all_calls,
+            group_calls=group_calls,
+            messages=messages,
+            tool_call_records=tool_call_records,
+            current_manifest=current_manifest,
+            scope=scope,
+            model_ref=model_ref,
+            locale=locale,
+            max_rounds=max_rounds,
+            provider_rounds_used=provider_rounds_used,
+            prior_tool_call_count=prior_tool_call_count,
+            accumulated_usage=accumulated_usage,
+        )
+
     del assistant, model_ref, locale, max_rounds, provider_rounds_used
     del prior_tool_call_count, accumulated_usage
     parent_manifest = current_manifest
@@ -2372,6 +2610,13 @@ def _execute_parallel_group(
         )
     except Exception as exc:  # noqa: BLE001
         # Infrastructure failure before honest per-call results: block first, cancel rest.
+        # Release all batch-reserved calls that never reached mark_started.
+        for reserved_call in group_calls:
+            _release_unstarted_via_ports(
+                ports=ports,
+                call_id=reserved_call.call_id,
+                reason_code="executor_error",
+            )
         first = group_calls[0]
         error = CapabilityError(
             error_type="protocol_error",
@@ -3060,6 +3305,28 @@ def _continue_after_resume(
                 generation=generation,
             )
             try:
+                guarded_generation = _apply_round_budget_before(
+                    ports=ports,
+                    round_request=round_request,
+                )
+            except ProviderLoopError as budget_err:
+                budget_err.messages = tuple(messages)
+                budget_err.tool_calls = tuple(tool_call_records)
+                budget_err.manifest = current_manifest
+                budget_err.usage = accumulated_usage
+                budget_err.round_count = round_count
+                raise
+            if guarded_generation is not generation:
+                round_request = ProviderRoundRequest(
+                    round_index=round_index,
+                    messages=tuple(messages),
+                    tool_surface=surface,
+                    tools_enabled=tools_enabled,
+                    finalization_round=finalization,
+                    model_ref=request.model_ref,
+                    generation=guarded_generation,
+                )
+            try:
                 events = list(
                     ports.provider.stream_round(
                         round_request,
@@ -3111,6 +3378,8 @@ def _continue_after_resume(
                     usage=accumulated_usage,
                     round_count=round_count,
                 ) from exc
+
+            _apply_round_budget_after(ports=ports, round_result=round_result)
 
             assistant = round_result.assistant_message
             accumulated_usage = aggregate_provider_usage(

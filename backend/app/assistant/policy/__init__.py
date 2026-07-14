@@ -3,7 +3,8 @@
 Task 1 freezes exposure/conflict/budget/effective-policy contracts.
 Task 2 adds pure authorization evaluation, evidence issuance, and composite verifier.
 Task 3 adds the revisioned budget ledger and reservation protocol.
-Later tasks add obligations and runtime integration.
+Task 4 binds BudgetLedger to Gateway/scheduler ports via runtime adapters.
+Later tasks add obligations and full Main Agent runtime composition.
 """
 
 from app.assistant.policy.budgets import (
@@ -90,6 +91,13 @@ from app.assistant.policy.evidence import (
     evidence_safe_repr,
     issue_skill_policy_evidence,
 )
+from app.assistant.policy.runtime import (
+    BudgetLedgerDispatchGuard,
+    BudgetLedgerReservationPort,
+    BudgetLedgerRoundGuard,
+    DomainKeyOwnerResolver,
+    FixedOwnerResolver,
+)
 from app.assistant.policy.exposures import (
     DuplicateCapabilityDeclaration,
     ExistingExposureCompatibilityView,
@@ -115,12 +123,16 @@ __all__ = [
     "AuthorizationProposal",
     "BudgetDecision",
     "BudgetLedger",
+    "BudgetLedgerDispatchGuard",
+    "BudgetLedgerReservationPort",
+    "BudgetLedgerRoundGuard",
     "BudgetLedgerState",
     "BudgetReservation",
     "BudgetReserveRequest",
     "CapabilityExposureRef",
     "CompositeAuthorizationEvidenceVerifier",
     "DeterministicBudgetClock",
+    "DomainKeyOwnerResolver",
     "DuplicateCapabilityDeclaration",
     "EMPTY_POLICY_DIGEST",
     "EffectiveCapabilityGrant",
@@ -129,6 +141,7 @@ __all__ = [
     "ExposureBindingInput",
     "ExposureBuildError",
     "ExposureOwnerIdentity",
+    "FixedOwnerResolver",
     "GlobalPolicyView",
     "MAIN_AGENT_OWNER_DEFAULT_MAX_CALLS",
     "ManifestExposureIndex",

@@ -526,6 +526,8 @@ class GatewayToolDispatcher:
         Callable[[ProviderDispatchRequest], CapabilityResult | None] | None
     ) = None
     trust_exposed_for_override: bool = False
+    # Plan 05 additive: shared CapabilityDispatchGuard (BudgetLedger-backed or no-op).
+    dispatch_guard: Any | None = None
     dispatch_calls: list[dict[str, Any]] = field(default_factory=list)
     gateway_ids: list[int] = field(default_factory=list)
     session_ids: list[str] = field(default_factory=list)
@@ -583,6 +585,25 @@ class GatewayToolDispatcher:
                         "scope_digest": request.execution_scope.scope_digest,
                     }
                 )
+            def _release_unstarted(reason_code: str) -> None:
+                guard = self.dispatch_guard
+                if guard is None:
+                    return
+                try:
+                    guard.release_unstarted(call_id=call.call_id, reason_code=reason_code)
+                except Exception:
+                    # Release failures must not mask the primary deny result.
+                    return
+
+            def _finish_started(status: str) -> None:
+                guard = self.dispatch_guard
+                if guard is None:
+                    return
+                try:
+                    guard.finish(call_id=call.call_id, status=status)
+                except Exception:
+                    return
+
             current = gateway.describe(binding)
             if self.result_override is not None:
                 override = self.result_override(request)
@@ -593,6 +614,7 @@ class GatewayToolDispatcher:
                             exposed=exposed, current=current
                         )
                     ):
+                        _release_unstarted("classification_changed")
                         result = CapabilityResult(
                             status="failed",
                             user_text=None,
@@ -620,6 +642,17 @@ class GatewayToolDispatcher:
                             capability_result=result,
                             next_manifest=request.current_manifest,
                         )
+                    # Override path bypasses Gateway adapter start; still account honestly.
+                    # Treat override as a virtual start+finish so reserved budget is consumed.
+                    try:
+                        if self.dispatch_guard is not None:
+                            self.dispatch_guard.mark_started(
+                                call_id=call.call_id,
+                                validated_arguments_digest=call.arguments_digest,
+                            )
+                            _finish_started(override.status)
+                    except Exception:
+                        _release_unstarted("override_guard_error")
                     next_manifest = request.current_manifest
                     if self.next_manifest_hook is not None:
                         next_manifest = self.next_manifest_hook(request, override)
@@ -632,6 +665,7 @@ class GatewayToolDispatcher:
                 # Fail closed without adapter execution. Return a blocked CapabilityResult
                 # so the loop pairs the call; do not raise after evidence was already
                 # issued by the loop (loop issues evidence before dispatch).
+                _release_unstarted("classification_changed")
                 result = CapabilityResult(
                     status="failed",
                     user_text=None,
@@ -674,10 +708,13 @@ class GatewayToolDispatcher:
                 context=context,
                 authorization=request.authorization,
             )
-            ports = CapabilityRuntimePorts(
-                cancellation=_CancellationBridge(cancellation),
-                events=_NullCapabilityEventSink(),  # type: ignore[arg-type]
-            )
+            ports_kwargs: dict[str, Any] = {
+                "cancellation": _CancellationBridge(cancellation),
+                "events": _NullCapabilityEventSink(),  # type: ignore[arg-type]
+            }
+            if self.dispatch_guard is not None:
+                ports_kwargs["dispatch_guard"] = self.dispatch_guard
+            ports = CapabilityRuntimePorts(**ports_kwargs)
             with self._lock:
                 self.adapter_invocations.append(call.call_id)
             result = gateway.execute(execution_request, ports=ports)

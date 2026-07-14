@@ -38,15 +38,19 @@ from app.assistant.capabilities.json_schema import (
 from app.assistant.capabilities.policy import CapabilityPolicyEngine
 from app.assistant.capabilities.ports import (
     CapabilityAdapterRequest,
+    CapabilityDispatchGuard,
     CapabilityRuntimePorts,
+    NoOpCapabilityDispatchGuard,
     ResolvedCapabilityTarget,
 )
 from app.assistant.capabilities.registry import CapabilityRegistry
-from app.assistant.domain.digests import JsonValue, canonical_json_bytes
+from app.assistant.domain.digests import JsonValue, canonical_json_bytes, sha256_canonical_json
 
 logger = logging.getLogger(__name__)
 
 CapabilityType = Literal["tool", "workflow", "agent"]
+
+_NOOP_DISPATCH_GUARD: CapabilityDispatchGuard = NoOpCapabilityDispatchGuard()
 
 
 def _json_byte_size(value: Any) -> int:
@@ -67,6 +71,14 @@ def _schema_root_is_object(schema: Any) -> bool:
     if isinstance(raw, list):
         return "object" in raw
     return False
+
+
+def _resolve_dispatch_guard(ports: CapabilityRuntimePorts | Any) -> CapabilityDispatchGuard:
+    """Resolve optional dispatch_guard; tolerate SimpleNamespace/legacy ports."""
+    guard = getattr(ports, "dispatch_guard", None)
+    if guard is None:
+        return _NOOP_DISPATCH_GUARD
+    return guard  # type: ignore[return-value]
 
 
 class CapabilityGateway:
@@ -123,8 +135,11 @@ class CapabilityGateway:
         capability_type: CapabilityType = request.binding.resolved.capability_type  # type: ignore[assignment]
         input_bytes = _json_byte_size(request.input)
         adapter_started = False
+        budget_started = False
+        reserved_active = True  # assume reserved until release/start; no-op is fine
         resolved: ResolvedCapabilityTarget | None = None
         terminal_emitted = False
+        dispatch_guard = _resolve_dispatch_guard(ports)
 
         def metrics(
             *,
@@ -202,13 +217,48 @@ class CapabilityGateway:
                     stage="event_sink",
                 )
 
+        def release_if_unstarted(reason_code: str) -> None:
+            nonlocal reserved_active
+            if not reserved_active or budget_started:
+                return
+            try:
+                dispatch_guard.release_unstarted(call_id=call_id, reason_code=reason_code)
+            except Exception as exc:
+                sanitize_unexpected_exception(
+                    exc,
+                    call_id=call_id,
+                    target_identity=target_identity,
+                    stage="dispatch_guard_release",
+                )
+            reserved_active = False
+
+        def finish_if_started(status: str) -> None:
+            nonlocal budget_started
+            if not budget_started:
+                return
+            try:
+                dispatch_guard.finish(call_id=call_id, status=status)
+            except Exception as exc:
+                sanitize_unexpected_exception(
+                    exc,
+                    call_id=call_id,
+                    target_identity=target_identity,
+                    stage="dispatch_guard_finish",
+                )
+            budget_started = False
+
         def fail(
             error: CapabilityError,
             *,
             descriptor: CapabilityDescriptor | None = None,
             output: Any | None = None,
             adapter_ms: float | None = None,
+            reason_code: str | None = None,
         ) -> CapabilityResult:
+            if budget_started:
+                finish_if_started(error.error_type)
+            else:
+                release_if_unstarted(reason_code or error.safe_code or error.error_type)
             result = failed_result(error=error, metrics=metrics(output=output, adapter_ms=adapter_ms))
             if not terminal_emitted:
                 emit_safe(
@@ -223,7 +273,12 @@ class CapabilityGateway:
             *,
             descriptor: CapabilityDescriptor | None = None,
             adapter_ms: float | None = None,
+            reason_code: str = "cancelled",
         ) -> CapabilityResult:
+            if budget_started:
+                finish_if_started("cancelled")
+            else:
+                release_if_unstarted(reason_code)
             result = cancelled_result(
                 metrics=metrics(adapter_ms=adapter_ms),
                 call_id=call_id,
@@ -243,13 +298,13 @@ class CapabilityGateway:
         try:
             # 1) cancel before resolution
             if ports.cancellation.is_cancelled():
-                return cancel_result()
+                return cancel_result(reason_code="cancelled_before_start")
 
             # 2) resolve exact root/closure (binding digests verified on construction)
             try:
                 resolved = self._registry.resolve(request.binding)
             except CapabilityDomainError as exc:
-                return fail(exc.error)
+                return fail(exc.error, reason_code=exc.error.safe_code)
             except Exception as exc:
                 error = sanitize_unexpected_exception(
                     exc,
@@ -257,7 +312,7 @@ class CapabilityGateway:
                     target_identity=target_identity,
                     stage="resolve",
                 )
-                return fail(error)
+                return fail(error, reason_code=error.safe_code)
 
             descriptor = resolved.descriptor
             target_identity = descriptor.target_identity
@@ -291,6 +346,7 @@ class CapabilityGateway:
                         call_id=call_id,
                     ),
                     descriptor=descriptor,
+                    reason_code=descriptor.availability.reason_code or status,
                 )
 
             # 3) input schema validation
@@ -315,7 +371,7 @@ class CapabilityGateway:
                     call_id=call_id,
                     validation_issues=exc.error.validation_issues,
                 )
-                return fail(error, descriptor=descriptor)
+                return fail(error, descriptor=descriptor, reason_code="invalid_input")
             except Exception as exc:
                 error = sanitize_unexpected_exception(
                     exc,
@@ -323,7 +379,7 @@ class CapabilityGateway:
                     target_identity=target_identity,
                     stage="input_schema",
                 )
-                return fail(error, descriptor=descriptor)
+                return fail(error, descriptor=descriptor, reason_code=error.safe_code)
 
             validated_input: dict[str, JsonValue] = dict(request.input)  # type: ignore[arg-type]
 
@@ -341,7 +397,7 @@ class CapabilityGateway:
                     target_identity=target_identity,
                     stage="policy",
                 )
-                return fail(error, descriptor=descriptor)
+                return fail(error, descriptor=descriptor, reason_code=error.safe_code)
 
             try:
                 emit_safe(
@@ -363,11 +419,12 @@ class CapabilityGateway:
                         call_id=call_id,
                     ),
                     descriptor=descriptor,
+                    reason_code=decision.reason_code,
                 )
 
             # 5) cancel again before permit consume / adapter
             if ports.cancellation.is_cancelled():
-                return cancel_result(descriptor=descriptor)
+                return cancel_result(descriptor=descriptor, reason_code="cancelled_before_start")
 
             # 6) atomically consume one dispatch permit
             permit = decision.dispatch_permit
@@ -382,6 +439,7 @@ class CapabilityGateway:
                         call_id=call_id,
                     ),
                     descriptor=descriptor,
+                    reason_code="dispatch_permit_missing",
                 )
             try:
                 permit.consume(
@@ -399,6 +457,7 @@ class CapabilityGateway:
                         call_id=call_id,
                     ),
                     descriptor=descriptor,
+                    reason_code="dispatch_permit_consumed",
                 )
             except Exception as exc:
                 error = sanitize_unexpected_exception(
@@ -407,7 +466,7 @@ class CapabilityGateway:
                     target_identity=target_identity,
                     stage="dispatch_permit",
                 )
-                return fail(error, descriptor=descriptor)
+                return fail(error, descriptor=descriptor, reason_code=error.safe_code)
 
             # 7) exactly one adapter by descriptor type — no fallback
             adapter = self._adapters.get(capability_type)
@@ -422,7 +481,47 @@ class CapabilityGateway:
                         call_id=call_id,
                     ),
                     descriptor=descriptor,
+                    reason_code="adapter_missing",
                 )
+
+            # 7b) Plan 05: mark_started only after all validation/evidence/permit
+            # and the final pre-adapter cancellation check (step 5 above).
+            # Digest of validated input must match the frozen Provider arguments
+            # digest reserved earlier. Do not add another is_cancelled() probe here
+            # so Plan 02 cancel-check ordinals remain stable for existing tests.
+            validated_arguments_digest = sha256_canonical_json(validated_input)  # type: ignore[arg-type]
+            try:
+                dispatch_guard.mark_started(
+                    call_id=call_id,
+                    validated_arguments_digest=validated_arguments_digest,
+                )
+            except CapabilityDomainError as exc:
+                # mark_started deny releases unstarted reservation inside ledger.
+                reserved_active = False
+                return fail(
+                    exc.error,
+                    descriptor=descriptor,
+                    reason_code=exc.error.safe_code,
+                )
+            except Exception as exc:
+                reserved_active = False
+                try:
+                    dispatch_guard.release_unstarted(
+                        call_id=call_id,
+                        reason_code="dispatch_guard_error",
+                    )
+                except Exception:
+                    pass
+                error = sanitize_unexpected_exception(
+                    exc,
+                    call_id=call_id,
+                    target_identity=target_identity,
+                    stage="dispatch_guard_start",
+                )
+                return fail(error, descriptor=descriptor, reason_code=error.safe_code)
+
+            budget_started = True
+            reserved_active = False
 
             adapter_request = CapabilityAdapterRequest(
                 target=resolved,
@@ -444,6 +543,8 @@ class CapabilityGateway:
                 from app.common.exceptions import ApiException
 
                 if isinstance(exc, ApiException):
+                    # Still finish budget accounting for a started call.
+                    finish_if_started("execution_failed")
                     raise
                 adapter_ms = max(0.0, (time.perf_counter() - adapter_t0) * 1000.0)
                 error = sanitize_unexpected_exception(
@@ -527,6 +628,9 @@ class CapabilityGateway:
                 metrics=recomputed,
             )
 
+            # Finish budget accounting for every started call (success/fail/cancel/wait).
+            finish_if_started(final.status)
+
             # Terminal event: adapters may have already emitted; only emit if missing.
             if not terminal_emitted:
                 if final.status == "completed":
@@ -564,11 +668,15 @@ class CapabilityGateway:
             return final
 
         except CapabilityDomainError as exc:
-            return fail(exc.error)
+            return fail(exc.error, reason_code=exc.error.safe_code)
         except Exception as exc:
             from app.common.exceptions import ApiException
 
             if isinstance(exc, ApiException):
+                if budget_started:
+                    finish_if_started("execution_failed")
+                elif reserved_active:
+                    release_if_unstarted("execution_failed")
                 raise
             # Map unexpected Exception only — do not catch BaseException.
             error = sanitize_unexpected_exception(
@@ -579,7 +687,7 @@ class CapabilityGateway:
             )
             # If adapter already started, still return non-retryable safe failure.
             _ = adapter_started  # retained for future reconciliation diagnostics
-            return fail(error)
+            return fail(error, reason_code=error.safe_code)
 
 
 __all__ = ["CapabilityGateway"]

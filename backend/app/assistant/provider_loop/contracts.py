@@ -7,7 +7,7 @@ tasks and must never enter messages, surfaces, continuations, or results.
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 from uuid import UUID
 
@@ -1190,6 +1190,158 @@ class ProviderAdapter(Protocol):
     ) -> Iterator[ProviderStreamEvent]: ...
 
 
+@runtime_checkable
+class ProviderRoundBudgetGuard(Protocol):
+    """Plan 05 additive port: Provider round/token accounting around Provider I/O.
+
+    Invoked immediately before network I/O and after round assembly.
+    Provider Loop never imports policy ledger types; Main Agent adapter closes
+    over its own BudgetLedger. Default no-op preserves Plan 03 behavior.
+    """
+
+    def before_round(self, request: ProviderRoundRequest) -> ProviderGenerationOptions: ...
+
+    def after_round(self, result: ProviderRoundResult) -> None: ...
+
+
+class ProviderRoundBudgetDeniedError(Exception):
+    """Raised by a round budget guard to block Provider I/O without policy types."""
+
+    def __init__(self, *, reason_code: str, dimension: str | None = None) -> None:
+        self.reason_code = reason_code
+        self.dimension = dimension
+        super().__init__(reason_code)
+
+
+class NoOpProviderRoundBudgetGuard:
+    """Default no-op round budget guard; returns request generation unchanged."""
+
+    def before_round(self, request: ProviderRoundRequest) -> ProviderGenerationOptions:
+        return request.generation
+
+    def after_round(self, result: ProviderRoundResult) -> None:
+        del result
+
+
+class CapabilityCallReservationDecision(FrozenContract):
+    """Provider-neutral reservation outcome (no policy ledger types)."""
+
+    allowed: bool
+    reason_code: str
+    reserved_call_ids: tuple[str, ...] = ()
+    dimension: str | None = None
+
+    @field_validator("reason_code")
+    @classmethod
+    def _reason(cls, value: str) -> str:
+        return _require_non_empty_str(value, field_name="reason_code")
+
+    @field_validator("reserved_call_ids", mode="before")
+    @classmethod
+    def _ids(cls, value: Any) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            raise TypeError("reserved_call_ids must be a sequence")
+        return tuple(str(item) for item in value)
+
+
+class CapabilityCallReservationItem(FrozenContract):
+    """One call identity for scheduler reservation (owner fields are opaque strings/UUIDs)."""
+
+    call_id: str
+    owner_kind: str
+    owner_version_id: UUID
+    domain_key: str
+    side_effect: str
+    arguments_digest: str
+    binding_contract_digest: str
+    capability_depth: int = 1
+    agent_depth: int = 1
+
+    @field_validator(
+        "call_id",
+        "owner_kind",
+        "domain_key",
+        "side_effect",
+    )
+    @classmethod
+    def _non_empty(cls, value: str, info: Any) -> str:
+        return _require_non_empty_str(value, field_name=info.field_name)
+
+    @field_validator("arguments_digest", "binding_contract_digest")
+    @classmethod
+    def _digests(cls, value: str, info: Any) -> str:
+        return _require_digest(value, field_name=info.field_name)
+
+    @field_validator("capability_depth", "agent_depth")
+    @classmethod
+    def _depth(cls, value: int, info: Any) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1")
+        return value
+
+
+@runtime_checkable
+class CapabilityCallReservationPort(Protocol):
+    """Plan 05 additive port: scheduler-owned single/batch reservation.
+
+    Scheduler owns reservation because it knows sibling groups. Default no-op
+    always allows so Plan 03 non-Main-Agent callers remain unchanged.
+    """
+
+    def reserve_one(self, item: CapabilityCallReservationItem) -> CapabilityCallReservationDecision: ...
+
+    def reserve_batch(
+        self, items: Sequence[CapabilityCallReservationItem]
+    ) -> CapabilityCallReservationDecision: ...
+
+
+class NoOpCapabilityCallReservationPort:
+    """Default no-op reservation port; always allows without tracking."""
+
+    def reserve_one(self, item: CapabilityCallReservationItem) -> CapabilityCallReservationDecision:
+        return CapabilityCallReservationDecision(
+            allowed=True,
+            reason_code="allowed",
+            reserved_call_ids=(item.call_id,),
+        )
+
+    def reserve_batch(
+        self, items: Sequence[CapabilityCallReservationItem]
+    ) -> CapabilityCallReservationDecision:
+        return CapabilityCallReservationDecision(
+            allowed=True,
+            reason_code="allowed",
+            reserved_call_ids=tuple(item.call_id for item in items),
+        )
+
+
+@runtime_checkable
+class CapabilityCallOwnerResolver(Protocol):
+    """Resolve opaque owner identity for a reserved call (Main Agent only)."""
+
+    def resolve_owner(
+        self,
+        *,
+        call: Any,
+        descriptor: CapabilityDescriptor,
+    ) -> tuple[str, UUID]: ...
+
+
+class NoOpCapabilityCallOwnerResolver:
+    """Default owner resolver: main_agent with zero UUID (unused by no-op reservation)."""
+
+    def resolve_owner(
+        self,
+        *,
+        call: Any,
+        descriptor: CapabilityDescriptor,
+    ) -> tuple[str, UUID]:
+        del call, descriptor
+        return "main_agent", UUID(int=0)
+
+
 @dataclass(frozen=True)
 class ProviderLoopPorts:
     provider: ProviderAdapter
@@ -1206,6 +1358,19 @@ class ProviderLoopPorts:
     manifest_effect_lifecycle: ManifestEffectLifecyclePort = (
         NoOpManifestEffectLifecyclePort()
     )
+    # Plan 05 additive no-op defaults: non-Main-Agent callers stay compatible.
+    round_budget_guard: ProviderRoundBudgetGuard = field(
+        default_factory=NoOpProviderRoundBudgetGuard
+    )
+    call_reservation: CapabilityCallReservationPort = field(
+        default_factory=NoOpCapabilityCallReservationPort
+    )
+    call_owner_resolver: CapabilityCallOwnerResolver = field(
+        default_factory=NoOpCapabilityCallOwnerResolver
+    )
+    # Shared dispatch guard instance passed to Gateway via tool dispatcher composition.
+    # Default no-op; Main Agent binds BudgetLedgerDispatchGuard.
+    dispatch_guard: Any = None
 
 
 def assert_not_serializable_port(value: Any) -> None:
@@ -1217,6 +1382,12 @@ def assert_not_serializable_port(value: Any) -> None:
         "NoOpRoundContextProvider",
         "ManifestEffectLifecyclePort",
         "NoOpManifestEffectLifecyclePort",
+        "ProviderRoundBudgetGuard",
+        "NoOpProviderRoundBudgetGuard",
+        "CapabilityCallReservationPort",
+        "NoOpCapabilityCallReservationPort",
+        "CapabilityCallOwnerResolver",
+        "NoOpCapabilityCallOwnerResolver",
         "CurrentCapabilityDescriptorVerifier",
         "ProviderAuthorizationEvidenceFactory",
         "ToolDispatcher",
@@ -1277,9 +1448,16 @@ def project_waiting_resolution_message(
 
 __all__ = [
     "CancellationPort",
+    "CapabilityCallOwnerResolver",
+    "CapabilityCallReservationDecision",
+    "CapabilityCallReservationItem",
+    "CapabilityCallReservationPort",
     "CurrentCapabilityDescriptorVerifier",
     "ManifestEffectLifecyclePort",
+    "NoOpCapabilityCallOwnerResolver",
+    "NoOpCapabilityCallReservationPort",
     "NoOpManifestEffectLifecyclePort",
+    "NoOpProviderRoundBudgetGuard",
     "NoOpRoundContextProvider",
     "ProviderAdapter",
     "ProviderAuthorizationEvidenceFactory",
@@ -1293,6 +1471,8 @@ __all__ = [
     "ProviderLoopRequest",
     "ProviderLoopResult",
     "ProviderLoopResumeRequest",
+    "ProviderRoundBudgetDeniedError",
+    "ProviderRoundBudgetGuard",
     "ProviderRoundRequest",
     "ProviderRoundResult",
     "ProviderRoundTerminal",
