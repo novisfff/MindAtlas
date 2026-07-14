@@ -34,7 +34,6 @@ from app.assistant.main_agent.authorization import (
     MAIN_AGENT_READ_ONLY_EFFECT_CEILING,
     MAIN_AGENT_READ_ONLY_EFFECT_CEILING_DIGEST,
 )
-from app.assistant.policy.contracts import AUTHORIZATION_REASON_CODES
 from app.assistant.main_agent.control_capabilities import (
     MAIN_AGENT_CONTROL_KEYS,
     build_all_main_agent_control_bindings,
@@ -138,10 +137,28 @@ FALLBACK_SAFE_REASONS = frozenset(
 # stop_reason or SafeProviderError.semantic_code after Provider request start.
 # Exact membership promotes them onto AssistantRuntimeResult.reason_code;
 # unknown codes fail closed to MAIN_AGENT_FAILED.
+#
+# §5.4 codes are inlined (not imported from app.assistant.policy.contracts) to
+# avoid a circular import: policy.contracts → main_agent.authorization →
+# main_agent.__init__ → main_agent.service → policy.contracts.
 _STABLE_FAILED_REASON_CODES: frozenset[str] = frozenset(
     {
         # Plan 05 §5.4 pure authorization deny codes (exclude "allowed").
-        *(code for code in AUTHORIZATION_REASON_CODES if code != "allowed"),
+        "scope_mismatch",
+        "manifest_surface_mismatch",
+        "exposure_missing",
+        "exposure_ambiguous",
+        "owner_mismatch",
+        "principal_unauthenticated",
+        "principal_not_allowed",
+        "entrypoint_not_allowed",
+        "global_policy_denied",
+        "owner_capability_not_declared",
+        "owner_side_effect_denied",
+        "release_gate_denied",
+        "target_unavailable",
+        "version_or_digest_drift",
+        "recursion_denied",
         # Recursion / cycle denials.
         "agent_cycle_denied",
         "main_agent_restart_denied",
