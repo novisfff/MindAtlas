@@ -1008,9 +1008,11 @@ class MainAgentService:
                 )
 
             # Buffer provisional tool-round text: only terminal final_text is user output.
+            # Do NOT emit content_delta here — the outer Assistant Run path owns
+            # Message checkpoint + single bounded content_delta stream so SSE and
+            # Message content stay ordered and non-duplicated.
             if final_text:
                 fallback.mark_user_output()
-                events.content_delta(final_text)
                 self._state.final_text = final_text
 
             return AssistantRuntimeResult(

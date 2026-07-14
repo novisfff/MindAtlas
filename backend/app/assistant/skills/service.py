@@ -10,7 +10,12 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+# Shared mutex for any path that enables catalog visibility. Prevents two
+# concurrent enable transactions from each observing "no other enabled package"
+# and both succeeding. Transaction-scoped on PostgreSQL; no-op elsewhere.
+_SKILL_CATALOG_ENABLE_LOCK_KEY = 2026071404
+
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -572,6 +577,17 @@ class AgentSkillService:
             self.db.rollback()
             raise self._translate_integrity_error(exc) from exc
 
+    def _acquire_catalog_enable_lock(self) -> None:
+        """Serialize catalog-enable across sessions (PostgreSQL advisory xact lock)."""
+        bind = self.db.get_bind()
+        dialect_name = getattr(getattr(bind, "dialect", None), "name", None)
+        if dialect_name != "postgresql":
+            return
+        self.db.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"),
+            {"key": _SKILL_CATALOG_ENABLE_LOCK_KEY},
+        )
+
     def set_catalog_enabled(
         self,
         package_id: UUID,
@@ -587,6 +603,10 @@ class AgentSkillService:
         operation fail closed on concurrent pointer/content drift.
         """
         try:
+            if enabled:
+                # All enable entrypoints share this mutex so concurrent enablers
+                # cannot both observe an empty catalog and commit.
+                self._acquire_catalog_enable_lock()
             package = self._lock_package(package_id)
             if enabled:
                 if package.published_version_id is None:

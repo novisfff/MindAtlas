@@ -376,3 +376,74 @@ def test_staged_package_cannot_authorize_resource_without_accept() -> None:
     # Staged only — current manifest membership still empty.
     assert is_skill_version_active(manifest, VER_1) is False
     assert lifecycle.is_skill_active(VER_1) is False
+
+
+def test_instruction_budget_counts_existing_active_skills() -> None:
+    """Existing active skill chars + new candidate must not exceed budget before stage."""
+    from app.assistant.main_agent.manifest_runtime import (
+        SKILL_CONTEXT_BUDGET_EXCEEDED,
+        MainAgentManifestEffectLifecycle,
+        SkillActivationCandidate,
+        stage_skill_injection,
+    )
+
+    manifest, _ = _manifest_with_controls()
+    lifecycle = MainAgentManifestEffectLifecycle()
+    lifecycle.bind_current_manifest(manifest)
+
+    r1, effect1, package1 = stage_skill_injection(
+        call_id="b1",
+        current_manifest=manifest,
+        candidates=[
+            SkillActivationCandidate(
+                skill=_skill_ref(
+                    package_id=PKG_1,
+                    version_id=VER_1,
+                    canonical_name="alpha-skill",
+                    content_digest=DIGEST_B,
+                    version_digest=DIGEST_C,
+                ),
+                capabilities=(_cap_ref("get_statistics", DIGEST_C),),
+                instruction_char_count=20_000,
+            )
+        ],
+        max_active_instruction_chars=24_000,
+        lifecycle=lifecycle,
+    )
+    assert r1.status == "completed"
+    assert package1 is not None
+    lifecycle.accept(
+        call_id="b1",
+        current_manifest=manifest,
+        proposed_manifest=effect1.proposed_manifest,
+    )
+    assert lifecycle.accepted_instruction_chars == 20_000
+    current = lifecycle.current_manifest
+    assert current is not None
+
+    r2, effect2, package2 = stage_skill_injection(
+        call_id="b2",
+        current_manifest=current,
+        candidates=[
+            SkillActivationCandidate(
+                skill=_skill_ref(
+                    package_id=PKG_2,
+                    version_id=VER_2,
+                    canonical_name="beta-skill",
+                    content_digest=DIGEST_D,
+                    version_digest=DIGEST_A,
+                ),
+                capabilities=(_cap_ref("search_entries", DIGEST_D),),
+                instruction_char_count=20_000,
+            )
+        ],
+        max_active_instruction_chars=24_000,
+        lifecycle=lifecycle,
+    )
+    assert r2.status == "failed"
+    assert r2.error is not None
+    assert r2.error.safe_code == SKILL_CONTEXT_BUDGET_EXCEEDED
+    assert effect2 is None
+    assert package2 is None
+    assert lifecycle.is_skill_active(VER_2) is False
+    assert lifecycle.is_skill_active(VER_1) is True

@@ -33,6 +33,7 @@ PromptLayerKind = Literal[
     "manifest_identity",
     "catalog_summary",
     "memory_context",
+    "l0_history",
     "current_user",
     "tool_artifact_summary",
 ]

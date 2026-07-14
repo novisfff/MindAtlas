@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 from uuid import UUID
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.assistant.main_agent.control_capabilities import MAIN_AGENT_CONTROL_KEYS
@@ -457,8 +458,16 @@ def enable_rollout(
         )
 
     # Single-transaction enable: never leave package cutover without profile runtime.
-    # Lock package then profile (UUID-independent fixed order by resource kind).
+    # Shared advisory lock + row locks serialize concurrent catalog enables.
     try:
+        bind = db.get_bind()
+        dialect_name = getattr(getattr(bind, "dialect", None), "name", None)
+        if dialect_name == "postgresql":
+            # Must match AgentSkillService._SKILL_CATALOG_ENABLE_LOCK_KEY.
+            db.execute(
+                text("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": 2026071404},
+            )
         package = (
             db.query(AssistantSkillPackage)
             .filter(AssistantSkillPackage.id == package.id)

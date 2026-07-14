@@ -71,6 +71,10 @@ class PendingSkillActivationPackage:
     post_commit_events: tuple[dict[str, JsonValue], ...] = ()
     accepted: bool = False
     discarded: bool = False
+    # Total instruction chars after acceptance (existing + newly activated).
+    resulting_instruction_chars: int = 0
+    # Chars contributed by this package's newly activated skills only.
+    activated_instruction_chars: int = 0
 
 
 class MainAgentManifestEffectLifecycle:
@@ -81,16 +85,54 @@ class MainAgentManifestEffectLifecycle:
         self._packages: dict[str, PendingSkillActivationPackage] = {}
         self._current_manifest: ResolvedRunManifestRevision | None = None
         self._accepted_version_ids: set[UUID] = set()
+        self._accepted_instruction_chars: int = 0
+        self._instruction_chars_by_version: dict[UUID, int] = {}
         self._post_commit_sink: Callable[[dict[str, JsonValue]], None] | None = None
         self._event_failures: list[str] = []
 
     def set_event_sink(self, sink: Callable[[dict[str, JsonValue]], None] | None) -> None:
         self._post_commit_sink = sink
 
-    def bind_current_manifest(self, manifest: ResolvedRunManifestRevision) -> None:
+    def bind_current_manifest(
+        self,
+        manifest: ResolvedRunManifestRevision,
+        *,
+        instruction_chars_by_version: dict[UUID, int] | None = None,
+    ) -> None:
         with self._lock:
             self._current_manifest = manifest
             self._accepted_version_ids = {item.version_id for item in manifest.active_skills}
+            if instruction_chars_by_version is not None:
+                self._instruction_chars_by_version = {
+                    vid: max(0, int(n))
+                    for vid, n in instruction_chars_by_version.items()
+                    if vid in self._accepted_version_ids
+                }
+            else:
+                # Drop counts for skills no longer active; keep known counts.
+                self._instruction_chars_by_version = {
+                    vid: n
+                    for vid, n in self._instruction_chars_by_version.items()
+                    if vid in self._accepted_version_ids
+                }
+            self._accepted_instruction_chars = sum(
+                self._instruction_chars_by_version.values()
+            )
+
+    @property
+    def accepted_instruction_chars(self) -> int:
+        with self._lock:
+            return int(self._accepted_instruction_chars)
+
+    def note_instruction_chars(self, version_id: UUID, char_count: int) -> None:
+        """Record instruction size for an accepted/active skill version."""
+        with self._lock:
+            if version_id not in self._accepted_version_ids:
+                return
+            self._instruction_chars_by_version[version_id] = max(0, int(char_count))
+            self._accepted_instruction_chars = sum(
+                self._instruction_chars_by_version.values()
+            )
 
     @property
     def current_manifest(self) -> ResolvedRunManifestRevision | None:
@@ -155,6 +197,21 @@ class MainAgentManifestEffectLifecycle:
             self._current_manifest = proposed_manifest
             self._accepted_version_ids = {
                 item.version_id for item in proposed_manifest.active_skills
+            }
+            # Update instruction occupancy from the accepted package when known.
+            if package.resulting_instruction_chars > 0:
+                self._accepted_instruction_chars = int(
+                    package.resulting_instruction_chars
+                )
+            elif package.activated_instruction_chars > 0:
+                self._accepted_instruction_chars += int(
+                    package.activated_instruction_chars
+                )
+            # Drop counts for skills no longer active.
+            self._instruction_chars_by_version = {
+                vid: n
+                for vid, n in self._instruction_chars_by_version.items()
+                if vid in self._accepted_version_ids
             }
             package.accepted = True
             events = package.post_commit_events
@@ -350,10 +407,13 @@ def stage_skill_injection(
             None,
             None,
         )
-    # Instruction budget across existing + new (existing count unknown here → sum new only
-    # against remaining budget is handled by caller supplying max for remaining).
-    new_chars = sum(c.instruction_char_count for c in to_append)
-    if new_chars > max_active_instruction_chars:
+    # Enforce full aggregate instruction budget BEFORE staging so acceptance cannot
+    # leave an over-budget active Manifest. Existing active skills still count.
+    existing_chars = 0
+    if lifecycle is not None:
+        existing_chars = int(lifecycle.accepted_instruction_chars)
+    new_chars = sum(max(0, int(c.instruction_char_count)) for c in to_append)
+    if existing_chars + new_chars > max_active_instruction_chars:
         return (
             _fail(call_id, SKILL_CONTEXT_BUDGET_EXCEEDED, "skill context budget exceeded"),
             None,
@@ -426,6 +486,8 @@ def stage_skill_injection(
         activated_version_ids=tuple(c.skill.version_id for c in to_append),
         noop_version_ids=tuple(s.version_id for s in noop),
         post_commit_events=effect.post_commit_events,
+        resulting_instruction_chars=existing_chars + new_chars,
+        activated_instruction_chars=new_chars,
     )
     if lifecycle is not None:
         lifecycle.stage(package)

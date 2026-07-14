@@ -456,7 +456,9 @@ def test_main_agent_service_happy_path_scripted_loop() -> None:
     assert result.write_l2 is False
     assert result.write_message is True
     assert any(name == "runtime_selected" for name, _ in events)
-    assert any(name == "content_delta" for name, _ in events)
+    # content_delta is owned by the outer Assistant Run path (single stream);
+    # MainAgentService only returns final_text for the outer loop to emit once.
+    assert not any(name == "content_delta" for name, _ in events)
 
 
 def test_main_agent_service_shadow_evaluation_discards_writes() -> None:

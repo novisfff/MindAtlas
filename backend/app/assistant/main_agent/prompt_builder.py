@@ -732,18 +732,78 @@ class MainAgentPromptBuilder:
         )
         # L1 only in protected system layers. L0 keeps original user/assistant roles
         # and is appended after the system message (plan §6.1–6.2).
-        memory_content, memory_layer, l1_truncated = _render_l1_only(
-            l1_summary=l1_snapshot,
-            max_history_chars=budgets.max_history_chars,
-        )
+        # Shared max_history_chars budget across L1 (system) + L0 (role-preserving
+        # history). Plan order: drop oldest L0 pairs first, then truncate L1.
+        history_budget = budgets.max_history_chars
         history_msgs, _ = _prepare_l0_history(
             history=history,
             current_user_message=current_user_message,
-            max_history_chars=budgets.max_history_chars,
+            max_history_chars=history_budget,
             l0_turns=l0_turns,
         )
-        history_msgs, omitted_l0 = _trim_l0_to_budget(
-            history_msgs, max_history_chars=budgets.max_history_chars
+        l1_text = _safe_text((l1_snapshot or "").strip())
+        omitted_l0 = 0
+        l1_truncated = False
+
+        def _l0_chars(msgs: list[dict[str, str]]) -> int:
+            return sum(len(m["content"]) for m in msgs)
+
+        def _l1_body(text: str) -> str:
+            return _section("L1_SUMMARY", text) if text else _section("MEMORY_CONTEXT", "empty")
+
+        # Fit L1+L0 into shared budget: remove oldest L0 pairs first.
+        while history_msgs and (
+            len(_l1_body(l1_text)) + _l0_chars(history_msgs) > history_budget
+        ):
+            pairs = _pair_l0_messages(history_msgs)
+            if not pairs:
+                break
+            pairs.pop(0)
+            omitted_l0 += 1
+            history_msgs = [msg for pair in pairs for msg in pair]
+
+        # Then truncate L1 if still over shared budget.
+        if len(_l1_body(l1_text)) + _l0_chars(history_msgs) > history_budget and l1_text:
+            marker = L1_TRUNCATION_MARKER
+            lo, hi = 0, len(l1_text)
+            best = ""
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                candidate = l1_text[:mid] + marker
+                if len(_l1_body(candidate)) + _l0_chars(history_msgs) <= history_budget:
+                    best = candidate
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            if best:
+                l1_text = best
+                l1_truncated = True
+            else:
+                l1_text = ""
+                l1_truncated = True
+
+        # If still over (pathological), drop remaining L0.
+        if len(_l1_body(l1_text)) + _l0_chars(history_msgs) > history_budget and history_msgs:
+            omitted_l0 += len(_pair_l0_messages(history_msgs))
+            history_msgs = []
+
+        memory_content = _l1_body(l1_text)
+        memory_reasons: list[str] = []
+        if omitted_l0:
+            memory_reasons.append("l0_oldest_pairs_removed")
+        if l1_truncated:
+            memory_reasons.append("l1_tail_truncated")
+        memory_layer = PromptLayerReport(
+            layer_kind="memory_context",
+            source_ids=("l1", "l0"),
+            source_digests=(
+                sha256_bytes(l1_text.encode("utf-8")) if l1_text else sha256_bytes(b""),
+            ),
+            included_char_count=len(memory_content) + _l0_chars(history_msgs),
+            included_byte_count=_utf8_len(memory_content)
+            + sum(_utf8_len(m["content"]) for m in history_msgs),
+            omitted_record_count=omitted_l0,
+            truncation_reason_codes=tuple(memory_reasons),
         )
         tool_content, tool_layer = _render_tool_artifact_summaries(
             tool_artifact_summaries,
@@ -754,8 +814,6 @@ class MainAgentPromptBuilder:
         reason_codes.extend(catalog_layer.truncation_reason_codes)
         reason_codes.extend(memory_layer.truncation_reason_codes)
         reason_codes.extend(tool_layer.truncation_reason_codes)
-        if omitted_l0:
-            reason_codes.append("l0_oldest_pairs_removed")
 
         def _system_body(*, cat: str, mem: str, tools: str) -> str:
             # System layers 1–3 + catalog + manifest + L1 + tool summaries only.
@@ -765,7 +823,7 @@ class MainAgentPromptBuilder:
             )
 
         def _history_chars() -> int:
-            return sum(len(m["content"]) for m in history_msgs)
+            return _l0_chars(history_msgs)
 
         system_body = _system_body(
             cat=catalog_content,
@@ -805,14 +863,41 @@ class MainAgentPromptBuilder:
                 omitted_l0 += 1
                 history_msgs = [msg for pair in pairs for msg in pair]
             reason_codes.append("l0_oldest_pairs_removed")
+            # Refresh memory layer counts after L0 trim.
+            memory_layer = PromptLayerReport(
+                layer_kind="memory_context",
+                source_ids=("l1", "l0"),
+                source_digests=memory_layer.source_digests,
+                included_char_count=len(memory_content) + _history_chars(),
+                included_byte_count=_utf8_len(memory_content)
+                + sum(_utf8_len(m["content"]) for m in history_msgs),
+                omitted_record_count=omitted_l0,
+                truncation_reason_codes=tuple(
+                    _dedupe_reasons(
+                        list(memory_layer.truncation_reason_codes)
+                        + ["l0_oldest_pairs_removed"]
+                    )
+                ),
+            )
 
         if total_with_user(system_body) > budgets.max_total_protected_chars:
-            memory_content, memory_layer, flag = _render_l1_only(
-                l1_summary="",
-                max_history_chars=budgets.max_history_chars,
-            )
-            l1_truncated = True or flag
+            memory_content = _section("MEMORY_CONTEXT", "empty")
+            l1_truncated = True
             reason_codes.append("l1_tail_truncated")
+            memory_layer = PromptLayerReport(
+                layer_kind="memory_context",
+                source_ids=("l1", "l0"),
+                source_digests=(sha256_bytes(b""),),
+                included_char_count=len(memory_content) + _history_chars(),
+                included_byte_count=_utf8_len(memory_content)
+                + sum(_utf8_len(m["content"]) for m in history_msgs),
+                omitted_record_count=omitted_l0,
+                truncation_reason_codes=tuple(
+                    _dedupe_reasons(
+                        list(memory_layer.truncation_reason_codes) + ["l1_tail_truncated"]
+                    )
+                ),
+            )
             system_body = _system_body(
                 cat=catalog_content,
                 mem=memory_content,
@@ -861,11 +946,36 @@ class MainAgentPromptBuilder:
             included_char_count=len(user_text),
             included_byte_count=_utf8_len(user_text),
         )
+        # Explicit L0 history layer so totals include retained dialogue chars.
+        l0_layer = PromptLayerReport(
+            layer_kind="l0_history",
+            source_ids=("l0",),
+            source_digests=(),
+            included_char_count=_history_chars(),
+            included_byte_count=sum(_utf8_len(m["content"]) for m in history_msgs),
+            omitted_record_count=omitted_l0,
+            truncation_reason_codes=(
+                ("l0_oldest_pairs_removed",) if omitted_l0 else ()
+            ),
+        )
+        # memory_layer reports L1-only size to avoid double-counting L0.
+        memory_layer = PromptLayerReport(
+            layer_kind="memory_context",
+            source_ids=("l1",),
+            source_digests=memory_layer.source_digests,
+            included_char_count=len(memory_content),
+            included_byte_count=_utf8_len(memory_content),
+            omitted_record_count=0,
+            truncation_reason_codes=tuple(
+                r for r in memory_layer.truncation_reason_codes if r != "l0_oldest_pairs_removed"
+            ),
+        )
         layers = (
             *platform_layers,
             catalog_layer,
             manifest_layer,
             memory_layer,
+            l0_layer,
             user_layer,
             tool_layer,
         )
