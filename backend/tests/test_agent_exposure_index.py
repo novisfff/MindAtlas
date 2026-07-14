@@ -46,6 +46,7 @@ from app.assistant.policy.contracts import (  # noqa: E402
     compute_exposure_digest,
     compute_exposure_index_digest,
 )
+from app.assistant.policy.conflicts import SkillConflictIdentity  # noqa: E402
 from app.assistant.policy.exposures import (  # noqa: E402
     DuplicateCapabilityDeclaration,
     ExistingExposureCompatibilityView,
@@ -58,6 +59,7 @@ from app.assistant.policy.exposures import (  # noqa: E402
     evaluate_duplicate_capability_compatibility,
     resolve_owner_from_binding,
 )
+from app.assistant.skills.contracts import SkillConflictRuleV1  # noqa: E402
 from app.assistant.skills.resolution import build_binding_snapshot  # noqa: E402
 
 RUN_ID = UUID("00000000-0000-4000-8000-000000000001")
@@ -668,6 +670,8 @@ def _existing_view(binding: FrozenCapabilityBinding, **overrides: Any) -> Existi
         "conflict_rules": (),
         "owner_version_id": SKILL_VERSION_ID,
         "compatible_consumer_version_ids": (),
+        "owner_canonical_name": "weekly-review",
+        "owner_aliases": (),
     }
     payload.update(overrides)
     return ExistingExposureCompatibilityView(**payload)
@@ -700,6 +704,7 @@ def _candidate(binding: FrozenCapabilityBinding, **overrides: Any) -> DuplicateC
         "conflict_rules": (),
         "candidate_skill_version_id": SKILL_VERSION_ID_B,
         "candidate_canonical_name": "other-skill",
+        "candidate_aliases": (),
     }
     payload.update(overrides)
     return DuplicateCapabilityDeclaration(**payload)
@@ -792,3 +797,177 @@ def test_manifest_exposure_index_rejects_unsorted() -> None:
         exposures=(exp_z, exp_a),
     )
     assert [item.domain_key for item in index.exposures] == ["a.tool", "z.tool"]
+
+
+def test_candidate_excludes_existing_owner_is_conflict() -> None:
+    binding = _frozen_binding(capability_key="biz.lookup")
+    existing = _existing_view(binding, owner_canonical_name="weekly-review")
+    candidate = _candidate(
+        binding,
+        candidate_canonical_name="other-skill",
+        conflict_rules=(
+            SkillConflictRuleV1(kind="excludes", target_skill="weekly-review"),
+        ),
+    )
+    with pytest.raises(ExposureBuildError) as exc:
+        evaluate_duplicate_capability_compatibility(existing=existing, candidate=candidate)
+    assert exc.value.reason_code == "duplicate_capability_policy_conflict"
+
+
+def test_existing_excludes_candidate_is_conflict() -> None:
+    binding = _frozen_binding(capability_key="biz.lookup")
+    existing = _existing_view(
+        binding,
+        owner_canonical_name="weekly-review",
+        conflict_rules=(
+            SkillConflictRuleV1(kind="excludes", target_skill="other-skill"),
+        ),
+    )
+    candidate = _candidate(binding, candidate_canonical_name="other-skill")
+    with pytest.raises(ExposureBuildError) as exc:
+        evaluate_duplicate_capability_compatibility(existing=existing, candidate=candidate)
+    assert exc.value.reason_code == "duplicate_capability_policy_conflict"
+
+
+def test_alias_resolved_excludes_is_conflict() -> None:
+    binding = _frozen_binding(capability_key="biz.lookup")
+    existing = _existing_view(
+        binding,
+        owner_canonical_name="weekly-review",
+        owner_aliases=("weekly",),
+    )
+    candidate = _candidate(
+        binding,
+        candidate_canonical_name="other-skill",
+        conflict_rules=(
+            # Author used alias form; catalog resolves to weekly-review.
+            SkillConflictRuleV1(kind="excludes", target_skill="weekly"),
+        ),
+    )
+    catalog = (
+        SkillConflictIdentity(
+            canonical_name="weekly-review",
+            version_id=SKILL_VERSION_ID,
+            aliases=("weekly",),
+        ),
+        SkillConflictIdentity(
+            canonical_name="other-skill",
+            version_id=SKILL_VERSION_ID_B,
+        ),
+    )
+    with pytest.raises(ExposureBuildError) as exc:
+        evaluate_duplicate_capability_compatibility(
+            existing=existing,
+            candidate=candidate,
+            catalog_skills=catalog,
+        )
+    assert exc.value.reason_code == "duplicate_capability_policy_conflict"
+
+
+def test_exclusive_group_strip_clash_is_conflict() -> None:
+    binding = _frozen_binding(capability_key="biz.lookup")
+    existing = _existing_view(
+        binding,
+        owner_canonical_name="weekly-review",
+        conflict_rules=(
+            SkillConflictRuleV1(kind="exclusive_group", group="  review-family  "),
+        ),
+    )
+    candidate = _candidate(
+        binding,
+        candidate_canonical_name="other-skill",
+        conflict_rules=(
+            SkillConflictRuleV1(kind="exclusive_group", group="review-family"),
+        ),
+    )
+    with pytest.raises(ExposureBuildError) as exc:
+        evaluate_duplicate_capability_compatibility(existing=existing, candidate=candidate)
+    assert exc.value.reason_code == "duplicate_capability_policy_conflict"
+
+
+def test_invalid_skill_owner_id_uuid_raises_exposure_build_error() -> None:
+    binding = _frozen_binding(capability_key="biz.lookup")
+    base = create_base_run_manifest(
+        run_id=RUN_ID,
+        main_agent=_main_agent(),
+        provider=None,
+        model=None,
+        effective_policy_digest=None,
+    )
+    child = append_skill_activation(
+        current=base,
+        skill=_skill(),
+        capabilities=(binding.ref,),
+    )
+    skill_binding = _frozen_binding(
+        capability_key="biz.lookup",
+        origin="skill_version",
+        owner_version_id=SKILL_VERSION_ID,
+        resolved=binding.resolved,
+    )
+    with pytest.raises(ExposureBuildError) as exc:
+        build_manifest_exposure_index_from_inputs(
+            manifest=child,
+            binding_inputs=(
+                ExposureBindingInput(
+                    binding=skill_binding,
+                    descriptor=_descriptor_for(skill_binding),
+                    owner=ExposureOwnerIdentity(
+                        owner_kind="skill_version",
+                        owner_id="not-a-uuid",
+                        owner_version_id=SKILL_VERSION_ID,
+                    ),
+                ),
+            ),
+            profile_key="general_chat",
+        )
+    assert exc.value.reason_code == "owner_mismatch"
+
+
+def test_exposure_index_source_mutation_isolation() -> None:
+    """Mutating source lists/dicts after build must not alter digests or frozen fields."""
+    binding_a = _frozen_binding(capability_key="a.tool")
+    binding_z = _frozen_binding(capability_key="z.tool")
+    consumers = [SKILL_VERSION_ID_B]
+    exp_a = build_capability_exposure_ref(
+        domain_key="a.tool",
+        resolved_ref=binding_a.ref,
+        binding_contract_digest=binding_a.ref.binding_contract_digest,
+        descriptor_digest=DIGEST_C,
+        owner_kind="skill_version",
+        owner_id=str(PACKAGE_ID),
+        owner_version_id=SKILL_VERSION_ID,
+        compatible_consumer_version_ids=consumers,
+    )
+    exp_z = build_capability_exposure_ref(
+        domain_key="z.tool",
+        resolved_ref=binding_z.ref,
+        binding_contract_digest=binding_z.ref.binding_contract_digest,
+        descriptor_digest=DIGEST_C,
+        owner_kind="main_agent",
+        owner_id="general_chat",
+        owner_version_id=PROFILE_VERSION_ID,
+    )
+    source_exposures = [exp_z, exp_a]
+    digest_before = compute_exposure_index_digest(
+        manifest_revision=1,
+        manifest_digest=DIGEST_A,
+        exposures=source_exposures,
+    )
+    index = build_manifest_exposure_index(
+        manifest_revision=1,
+        manifest_digest=DIGEST_A,
+        exposures=source_exposures,
+    )
+    # Mutate source list and consumer list after build.
+    source_exposures.clear()
+    source_exposures.append(exp_a)
+    consumers.append(SKILL_VERSION_ID_C)
+    assert index.exposure_index_digest == digest_before
+    assert [item.domain_key for item in index.exposures] == ["a.tool", "z.tool"]
+    assert index.exposures[0].compatible_consumer_version_ids == (SKILL_VERSION_ID_B,)
+    assert index.exposure_index_digest == compute_exposure_index_digest(
+        manifest_revision=1,
+        manifest_digest=DIGEST_A,
+        exposures=index.exposures,
+    )

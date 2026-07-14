@@ -77,6 +77,12 @@ _PROFILE_OUTPUT_BUDGET_FIELDS: tuple[tuple[str, str], ...] = (
     ("max_completion_followup_rounds", "max_completion_followup_rounds"),
 )
 
+# Profile context_budget field → RunBudgetLimits field mapping.
+# max_active_skills lives on ContextBudgetV1, not OutputBudgetV1 (Plan 05 §6.1).
+_PROFILE_CONTEXT_BUDGET_FIELDS: tuple[tuple[str, str], ...] = (
+    ("max_active_skills", "max_active_skills"),
+)
+
 # Entrypoint/global policy digests for the immutable assistant_chat / Plan 05 gate.
 ASSISTANT_CHAT_ENTRYPOINT_POLICY_REVISION: Literal["plan05-v1"] = "plan05-v1"
 PLAN05_RELEASE_GATE_SIDE_EFFECTS: tuple[str, ...] = ("none", "compute", "read")
@@ -929,10 +935,33 @@ def _min_positive(
     return result
 
 
+def _extract_profile_budget_fields(
+    source: Any,
+    field_pairs: Sequence[tuple[str, str]],
+) -> dict[str, int | None]:
+    """Pull known budget fields from a Mapping or FrozenContract-like object."""
+    out: dict[str, int | None] = {}
+    if source is None:
+        return out
+    if isinstance(source, Mapping):
+        mapping = source
+        for profile_field, limit_field in field_pairs:
+            raw = mapping.get(profile_field, mapping.get(_to_camel(profile_field)))
+            if raw is not None:
+                out[limit_field] = _as_optional_int(raw)
+        return out
+    for profile_field, limit_field in field_pairs:
+        raw = getattr(source, profile_field, None)
+        if raw is not None:
+            out[limit_field] = _as_optional_int(raw)
+    return out
+
+
 def normalize_run_budget_limits(
     *,
     operator_limits: Mapping[str, int | None] | None = None,
     profile_output_budget: Any | None = None,
+    profile_context_budget: Any | None = None,
     hard_ceilings: Mapping[str, int | None] | None = None,
     entrypoint_defaults: Mapping[str, int | None] | None = None,
 ) -> RunBudgetLimits:
@@ -941,29 +970,28 @@ def normalize_run_budget_limits(
     Resolution per field: min(hard ceiling, entrypoint default, optional operator
     lower-only, optional Profile field). Missing Profile fields use entrypoint defaults.
     Skills never supply Run limits.
+
+    Profile sources:
+    - ``profile_output_budget`` (OutputBudgetV1 / mapping): provider/capability/wall-time
+      fields listed in ``_PROFILE_OUTPUT_BUDGET_FIELDS``.
+    - ``profile_context_budget`` (ContextBudgetV1 / mapping): ``max_active_skills``
+      (Plan 05 §6.1 — lives on contextBudget, not outputBudget).
     """
     hard = dict(hard_ceilings or ASSISTANT_CHAT_RUN_BUDGET_HARD_CEILINGS)
     defaults = dict(entrypoint_defaults or ASSISTANT_CHAT_RUN_BUDGET_DEFAULTS)
     operator = dict(operator_limits or {})
 
     profile_map: dict[str, int | None] = {}
-    if profile_output_budget is not None:
-        if isinstance(profile_output_budget, Mapping):
-            source = profile_output_budget
-        else:
-            # Support OutputBudgetV1 FrozenContract via attribute access.
-            source = {
-                field: getattr(profile_output_budget, field, None)
-                for _, field in _PROFILE_OUTPUT_BUDGET_FIELDS
-            }
-        for profile_field, limit_field in _PROFILE_OUTPUT_BUDGET_FIELDS:
-            raw = None
-            if isinstance(source, Mapping):
-                raw = source.get(profile_field, source.get(_to_camel(profile_field)))
-            else:
-                raw = getattr(source, profile_field, None)
-            if raw is not None:
-                profile_map[limit_field] = _as_optional_int(raw)
+    profile_map.update(
+        _extract_profile_budget_fields(
+            profile_output_budget, _PROFILE_OUTPUT_BUDGET_FIELDS
+        )
+    )
+    profile_map.update(
+        _extract_profile_budget_fields(
+            profile_context_budget, _PROFILE_CONTEXT_BUDGET_FIELDS
+        )
+    )
 
     def resolve(field: str) -> int | None:
         return _min_positive(

@@ -563,3 +563,76 @@ def test_principal_is_local_assistant_service() -> None:
             authenticated=True,
             tenant="x",  # type: ignore[call-arg]
         )
+
+
+def test_profile_context_budget_lowers_max_active_skills() -> None:
+    """max_active_skills is resolved from Profile contextBudget, not outputBudget."""
+    lowered = normalize_run_budget_limits(
+        profile_context_budget={"max_active_skills": 2},
+    )
+    assert lowered.max_active_skills == 2
+    # Other limits remain entrypoint defaults when only context budget is supplied.
+    assert lowered.max_provider_rounds == 8
+
+    # Profile may not raise above hard ceiling — clamp then min with default.
+    raised = normalize_run_budget_limits(
+        profile_context_budget={"max_active_skills": 100},
+    )
+    assert raised.max_active_skills == 4  # min(8 hard, 4 default, 8 clamped profile)
+
+    # Attribute-style ContextBudgetV1-like source is accepted.
+    class _Ctx:
+        max_active_skills = 1
+
+    attr_lowered = normalize_run_budget_limits(profile_context_budget=_Ctx())
+    assert attr_lowered.max_active_skills == 1
+
+    # outputBudget alone cannot set max_active_skills.
+    output_only = normalize_run_budget_limits(
+        profile_output_budget={"max_active_skills": 1, "max_provider_rounds": 5},
+    )
+    assert output_only.max_active_skills == 4
+    assert output_only.max_provider_rounds == 5
+
+
+def test_run_budget_and_snapshot_source_mutation_isolation() -> None:
+    """Mutating operator/profile source maps after build must not alter digests."""
+    operator = {"max_provider_rounds": 3, "max_active_skills": 2}
+    context = {"max_active_skills": 1}
+    limits = normalize_run_budget_limits(
+        operator_limits=operator,
+        profile_context_budget=context,
+    )
+    assert limits.max_active_skills == 1
+    assert limits.max_provider_rounds == 3
+
+    operator["max_provider_rounds"] = 99
+    operator["max_active_skills"] = 99
+    context["max_active_skills"] = 99
+    assert limits.max_active_skills == 1
+    assert limits.max_provider_rounds == 3
+
+    owner_refs = [
+        build_owner_policy_ref(
+            owner_kind="main_agent",
+            owner_id="general_chat",
+            owner_version_id=PROFILE_VERSION_ID,
+            content_or_policy_digest=DIGEST_A,
+        )
+    ]
+    snap = build_effective_run_policy_snapshot(
+        app_build_revision="test-build",
+        run_id=RUN_ID,
+        principal=LOCAL_ASSISTANT_PRINCIPAL,
+        main_agent_profile_version_id=PROFILE_VERSION_ID,
+        main_agent_profile_digest=DIGEST_A,
+        exposure_index=_empty_exposure_index(),
+        owner_policy_refs=owner_refs,
+        run_budget_limits=limits,
+    )
+    digest_before = snap.effective_policy_digest
+    # Mutate the source list of owner refs after snapshot construction.
+    owner_refs.clear()
+    assert snap.effective_policy_digest == digest_before
+    assert len(snap.owner_policy_refs) == 1
+    assert snap.run_budget_limits.max_active_skills == 1

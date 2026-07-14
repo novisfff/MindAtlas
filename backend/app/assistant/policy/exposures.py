@@ -20,6 +20,11 @@ from app.assistant.domain.contracts import (
     ResolvedRunManifestRevision,
     ResolvedSkillRef,
 )
+from app.assistant.policy.conflicts import (
+    SkillConflictIdentity,
+    SkillConflictParticipant,
+    evaluate_skill_conflicts,
+)
 from app.assistant.policy.contracts import (
     CapabilityExposureRef,
     ManifestExposureIndex,
@@ -93,6 +98,8 @@ class DuplicateCapabilityDeclaration:
     conflict_rules: tuple[SkillConflictRuleV1, ...]
     candidate_skill_version_id: UUID
     candidate_canonical_name: str
+    # Optional catalog aliases for the candidate (resolved via conflicts.py).
+    candidate_aliases: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +131,9 @@ class ExistingExposureCompatibilityView:
     conflict_rules: tuple[SkillConflictRuleV1, ...]
     owner_version_id: UUID
     compatible_consumer_version_ids: tuple[UUID, ...]
+    # Canonical owner skill identity for coexistence / conflict evaluation.
+    owner_canonical_name: str = ""
+    owner_aliases: tuple[str, ...] = ()
 
 
 def resolve_owner_from_binding(
@@ -279,16 +289,21 @@ def build_manifest_exposure_index_from_inputs(
                 f"binding ref drift for domain key {domain_key!r}",
             )
         # Re-derive owner and compare to declared owner (fail closed on mismatch).
+        skill_package_id: UUID | None = None
+        if item.owner.owner_kind == "skill_version":
+            try:
+                skill_package_id = UUID(item.owner.owner_id)
+            except (TypeError, ValueError) as exc:
+                raise ExposureBuildError(
+                    "owner_mismatch",
+                    f"skill owner_id is not a valid UUID for domain key {domain_key!r}",
+                ) from exc
         derived = resolve_owner_from_binding(
             item.binding,
             profile_key=profile_key,
             profile_version_id=profile_version_id,
             skill_package_id_by_version=package_map,
-            skill_package_id=(
-                UUID(item.owner.owner_id)
-                if item.owner.owner_kind == "skill_version"
-                else None
-            ),
+            skill_package_id=skill_package_id,
         )
         if (
             derived.owner_kind != item.owner.owner_kind
@@ -305,7 +320,9 @@ def build_manifest_exposure_index_from_inputs(
                     "owner_mismatch",
                     f"skill owner version {item.owner.owner_version_id} not active",
                 )
-            if package_map.get(item.owner.owner_version_id) != UUID(item.owner.owner_id):
+            if skill_package_id is not None and package_map.get(
+                item.owner.owner_version_id
+            ) != skill_package_id:
                 # Prefer package map from Manifest when available.
                 if item.owner.owner_version_id in package_map:
                     raise ExposureBuildError(
@@ -385,6 +402,7 @@ def evaluate_duplicate_capability_compatibility(
     *,
     existing: ExistingExposureCompatibilityView,
     candidate: DuplicateCapabilityDeclaration,
+    catalog_skills: Sequence[SkillConflictIdentity] | None = None,
 ) -> tuple[Literal["compatible", "conflict"], tuple[UUID, ...]]:
     """Strict duplicate Domain Key compatibility (Plan 05 §4.3).
 
@@ -466,13 +484,11 @@ def evaluate_duplicate_capability_compatibility(
             "grant does not admit classified side effect",
         )
 
-    # 4. Conflict rules must permit coexistence (no mutual excludes / exclusive_group clash).
+    # 4. Conflict rules must permit coexistence (symmetric excludes / exclusive_group).
     if not _conflict_rules_permit_coexistence(
-        existing_rules=existing.conflict_rules,
-        candidate_rules=candidate.conflict_rules,
-        existing_version_id=existing.owner_version_id,
-        candidate_version_id=candidate.candidate_skill_version_id,
-        candidate_name=candidate.candidate_canonical_name,
+        existing=existing,
+        candidate=candidate,
+        catalog_skills=catalog_skills,
     ):
         raise ExposureBuildError(
             "duplicate_capability_policy_conflict",
@@ -491,43 +507,78 @@ def evaluate_duplicate_capability_compatibility(
     return "compatible", ordered
 
 
+def _coexistence_relevant_rules(
+    rules: Sequence[SkillConflictRuleV1],
+) -> tuple[SkillConflictRuleV1, ...]:
+    """Keep only excludes / exclusive_group for duplicate-owner coexistence.
+
+    ``requires`` is an activation-graph constraint evaluated by the full skill
+    conflict pass; it is not a pairwise Domain-Key coexistence veto by itself.
+    """
+    return tuple(rule for rule in rules if rule.kind in {"excludes", "exclusive_group"})
+
+
 def _conflict_rules_permit_coexistence(
     *,
-    existing_rules: Sequence[SkillConflictRuleV1],
-    candidate_rules: Sequence[SkillConflictRuleV1],
-    existing_version_id: UUID,
-    candidate_version_id: UUID,
-    candidate_name: str,
+    existing: ExistingExposureCompatibilityView,
+    candidate: DuplicateCapabilityDeclaration,
+    catalog_skills: Sequence[SkillConflictIdentity] | None = None,
 ) -> bool:
-    """Lightweight coexistence check for duplicate Domain Key activation.
+    """Symmetric coexistence check via the shared conflict evaluator.
 
-    Full skill-activation conflict evaluation lives in conflicts.py. Here we only
-    reject obvious exclusive_group collisions and self-excluding pairs that would
-    make two owners of the same Domain Key impossible to activate together.
+    Reuses ``evaluate_skill_conflicts`` so excludes are bidirectional, names
+    resolve through the same catalog alias→canonical path, and exclusive_group
+    uses the same strip semantics as ``conflicts.py``.
     """
-    del existing_version_id  # reserved for future catalog-resolved identity checks
-    existing_groups = {
-        rule.group for rule in existing_rules if rule.kind == "exclusive_group" and rule.group
-    }
-    candidate_groups = {
-        rule.group for rule in candidate_rules if rule.kind == "exclusive_group" and rule.group
-    }
-    if existing_groups & candidate_groups:
-        return False
-
-    # excludes targeting the other skill (by canonical name) forbids coexistence.
-    for rule in existing_rules:
-        if rule.kind == "excludes" and rule.target_skill == candidate_name:
+    existing_name = (existing.owner_canonical_name or "").strip()
+    candidate_name = (candidate.candidate_canonical_name or "").strip()
+    if not existing_name or not candidate_name:
+        # Without both identities we cannot resolve excludes/aliases safely.
+        # Fall back to exclusive_group strip-normalized clash only.
+        existing_groups = {
+            rule.group.strip()
+            for rule in existing.conflict_rules
+            if rule.kind == "exclusive_group" and rule.group and rule.group.strip()
+        }
+        candidate_groups = {
+            rule.group.strip()
+            for rule in candidate.conflict_rules
+            if rule.kind == "exclusive_group" and rule.group and rule.group.strip()
+        }
+        if existing_groups & candidate_groups:
             return False
-    for rule in candidate_rules:
-        if rule.kind == "excludes" and rule.target_skill is not None:
-            # Without catalog resolution of the existing owner's name, only reject
-            # when the candidate excludes itself (invalid) — full name resolution
-            # is performed by evaluate_skill_conflicts.
-            if rule.target_skill == candidate_name:
-                return False
-    del candidate_version_id
-    return True
+        # Without owner names, cannot evaluate excludes either direction.
+        return True
+
+    existing_identity = SkillConflictIdentity(
+        canonical_name=existing_name,
+        version_id=existing.owner_version_id,
+        aliases=tuple(existing.owner_aliases),
+    )
+    candidate_identity = SkillConflictIdentity(
+        canonical_name=candidate_name,
+        version_id=candidate.candidate_skill_version_id,
+        aliases=tuple(candidate.candidate_aliases),
+    )
+    active = SkillConflictParticipant(
+        identity=existing_identity,
+        conflict_rules=_coexistence_relevant_rules(existing.conflict_rules),
+        role="active",
+    )
+    cand = SkillConflictParticipant(
+        identity=candidate_identity,
+        conflict_rules=_coexistence_relevant_rules(candidate.conflict_rules),
+        role="candidate",
+    )
+    catalog = catalog_skills
+    if catalog is None:
+        catalog = (existing_identity, candidate_identity)
+    result = evaluate_skill_conflicts(
+        active=(active,),
+        candidates=(cand,),
+        catalog_skills=catalog,
+    )
+    return result.allowed
 
 
 def append_compatible_consumer(
