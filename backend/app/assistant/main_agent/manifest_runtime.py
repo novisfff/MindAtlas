@@ -41,6 +41,7 @@ from app.assistant.main_agent.catalog import (
 )
 from app.assistant.main_agent.control_runtime import PendingManifestEffect
 from app.assistant.main_agent.control_capabilities import MAIN_AGENT_CONTROL_KEYS
+from app.assistant.policy.budgets import pure_add_owner_limits
 from app.assistant.policy.conflicts import (
     SkillConflictIdentity,
     SkillConflictParticipant,
@@ -50,9 +51,17 @@ from app.assistant.policy.contracts import (
     OwnerBudgetLimits,
     normalize_owner_budget_limits,
 )
+from app.assistant.policy.exposures import (
+    DuplicateCapabilityDeclaration,
+    ExistingExposureCompatibilityView,
+    ExposureBuildError,
+    evaluate_duplicate_capability_compatibility,
+)
 from app.assistant.policy.obligations import (
     SkillTerminalSatisfiabilityView,
+    build_skill_terminal_obligation,
     evaluate_skill_terminal_satisfiability,
+    pure_create_obligation,
 )
 from app.assistant.skills.contracts import SkillConflictRuleV1
 
@@ -362,7 +371,82 @@ class MainAgentManifestEffectLifecycle:
                     self._packages.pop(call_id, None)
                     raise ValueError("effective_policy_digest mismatch")
 
-            # Failure-atomic: mutate only after all comparisons succeed.
+            # Recompute and verify package_digest (stage-time integrity seal).
+            expected_pkg_digest = _package_digest(
+                call_id=call_id,
+                activated_version_ids=package.activated_version_ids,
+                owner_budget_digests=tuple(
+                    o.owner_budget_digest for o in package.candidate_owner_budget_limits
+                ),
+                skill_terminal_ids=tuple(
+                    vid for vid, _ in package.candidate_skill_terminals
+                ),
+                compatible_consumers=package.candidate_compatible_consumers,
+                effective_policy_digest=package.candidate_effective_policy_digest
+                or proposed_manifest.effective_policy_digest,
+            )
+            if package.package_digest is None:
+                package.discarded = True
+                self._packages.pop(call_id, None)
+                raise ValueError("package_digest missing")
+            if package.package_digest != expected_pkg_digest:
+                package.discarded = True
+                self._packages.pop(call_id, None)
+                raise ValueError("package_digest mismatch")
+            # Also recheck activation_payload seal when present.
+            payload_digest = effect.activation_payload.get("packageDigest")
+            if payload_digest is not None and payload_digest != expected_pkg_digest:
+                package.discarded = True
+                self._packages.pop(call_id, None)
+                raise ValueError("package_digest mismatch")
+
+            # Pure preflight + ledger apply BEFORE any Manifest mutation (all-or-nothing).
+            # Fail-closed: owner-limit/terminal denials discard the package and
+            # raise so we never leave Manifest advanced without buckets/terminals.
+            budget_snapshot = None
+            obligation_snapshot = None
+            skill_terminal_map_snapshot: dict[str, bool] | None = None
+            applied_owner_before = dict(self._applied_owner_budget_digests)
+            applied_terminals_before = dict(self._applied_skill_terminals)
+            try:
+                self._preflight_policy_applies_locked(package)
+                # Snapshot ledger state so a mid-apply race can be fully rewound.
+                if self._budget_ledger is not None:
+                    budget_snapshot = self._budget_ledger.snapshot()
+                if self._obligation_ledger is not None:
+                    obligation_snapshot = self._obligation_ledger.snapshot()
+                    skill_terminal_map_snapshot = dict(
+                        getattr(
+                            self._obligation_ledger,
+                            "_skill_terminal_text_allowed",
+                            {},
+                        )
+                    )
+                for owner_limits in package.candidate_owner_budget_limits:
+                    self._apply_owner_limits_locked(owner_limits, fail_closed=True)
+                for skill_version_id, terminal_text_allowed in package.candidate_skill_terminals:
+                    self._apply_skill_terminal_locked(
+                        skill_version_id=skill_version_id,
+                        terminal_text_allowed=terminal_text_allowed,
+                        fail_closed=True,
+                    )
+            except Exception:
+                # Rewind any partial ledger applies; leave Manifest untouched.
+                if budget_snapshot is not None and self._budget_ledger is not None:
+                    self._budget_ledger._state = budget_snapshot  # noqa: SLF001
+                if obligation_snapshot is not None and self._obligation_ledger is not None:
+                    self._obligation_ledger._state = obligation_snapshot  # noqa: SLF001
+                    if skill_terminal_map_snapshot is not None:
+                        self._obligation_ledger._skill_terminal_text_allowed = (  # noqa: SLF001
+                            skill_terminal_map_snapshot
+                        )
+                self._applied_owner_budget_digests = applied_owner_before
+                self._applied_skill_terminals = applied_terminals_before
+                package.discarded = True
+                self._packages.pop(call_id, None)
+                raise
+
+            # All pure checks + ledger applies succeeded — advance Manifest.
             self._current_manifest = proposed_manifest
             self._accepted_version_ids = {
                 item.version_id for item in proposed_manifest.active_skills
@@ -389,16 +473,7 @@ class MainAgentManifestEffectLifecycle:
                 )
                 if snap is not None:
                     self._policy_snapshot = snap
-            # Commit owner budget limits (never mutates Run limits/usage).
-            for owner_limits in package.candidate_owner_budget_limits:
-                self._apply_owner_limits_locked(owner_limits)
-            # Commit skill terminal obligations.
-            for skill_version_id, terminal_text_allowed in package.candidate_skill_terminals:
-                self._apply_skill_terminal_locked(
-                    skill_version_id=skill_version_id,
-                    terminal_text_allowed=terminal_text_allowed,
-                )
-            # Commit compatible consumers.
+            # Commit compatible consumers (local lifecycle state only).
             for domain_key, consumer_id in package.candidate_compatible_consumers:
                 self._compatible_consumers.setdefault(domain_key, set()).add(consumer_id)
 
@@ -425,26 +500,86 @@ class MainAgentManifestEffectLifecycle:
                 except Exception:
                     self._event_failures.append(call_id)
 
-    def _apply_owner_limits_locked(self, owner_limits: OwnerBudgetLimits) -> None:
+    def _preflight_policy_applies_locked(
+        self, package: PendingSkillActivationPackage
+    ) -> None:
+        """Pure-preflight owner limits + skill terminals without mutating ledgers.
+
+        Raises ValueError on deny so accept discards the package fail-closed
+        before Manifest mutation.
+        """
+        budget = self._budget_ledger
+        if budget is not None and package.candidate_owner_budget_limits:
+            # Walk pure states sequentially so multi-owner packages stay consistent.
+            state = budget.snapshot()
+            for owner_limits in package.candidate_owner_budget_limits:
+                state, decision = pure_add_owner_limits(state, owner_limits)
+                if getattr(decision, "allowed", True) is False:
+                    raise ValueError(
+                        f"owner_limits_denied:{owner_limits.owner_version_id}:"
+                        f"{getattr(decision, 'reason_code', 'denied')}"
+                    )
+
+        obligations = self._obligation_ledger
+        if obligations is not None and package.candidate_skill_terminals:
+            run_id = getattr(obligations, "_run_id", None)
+            if run_id is None:
+                raise ValueError("skill_terminal_error:run_id_required")
+            state = obligations.snapshot()
+            for skill_version_id, _terminal_text_allowed in package.candidate_skill_terminals:
+                obligation = build_skill_terminal_obligation(
+                    run_id=run_id,
+                    skill_version_id=skill_version_id,
+                    revision=state.revision + 1,
+                )
+                state, decision = pure_create_obligation(state, obligation)
+                if getattr(decision, "allowed", True) is False:
+                    raise ValueError(
+                        f"skill_terminal_denied:{skill_version_id}:"
+                        f"{getattr(decision, 'reason_code', 'denied')}"
+                    )
+
+    def _apply_owner_limits_locked(
+        self,
+        owner_limits: OwnerBudgetLimits,
+        *,
+        fail_closed: bool = False,
+    ) -> None:
         """Apply one owner bucket under the lifecycle lock.
 
-        Failures after Manifest mutation are recorded but do not rewind the
-        Manifest (events already post-commit). Caller must stage only limits
-        that pure_add_owner_limits would accept.
+        When fail_closed=True (accept path after pure preflight), denials/errors
+        raise so the package is not treated as accepted with partial residue.
+        Local applied digests are recorded only after a successful apply.
         """
-        self._applied_owner_budget_digests[owner_limits.owner_version_id] = (
-            owner_limits.owner_budget_digest
-        )
         ledger = self._budget_ledger
         if ledger is None:
+            self._applied_owner_budget_digests[owner_limits.owner_version_id] = (
+                owner_limits.owner_budget_digest
+            )
             return
         try:
             decision = ledger.add_owner_limits(owner_limits)
             if getattr(decision, "allowed", True) is False:
-                self._event_failures.append(
-                    f"owner_limits_denied:{owner_limits.owner_version_id}"
+                msg = (
+                    f"owner_limits_denied:{owner_limits.owner_version_id}:"
+                    f"{getattr(decision, 'reason_code', 'denied')}"
                 )
+                if fail_closed:
+                    raise ValueError(msg)
+                self._event_failures.append(msg)
+                return
+            self._applied_owner_budget_digests[owner_limits.owner_version_id] = (
+                owner_limits.owner_budget_digest
+            )
+        except ValueError:
+            if fail_closed:
+                raise
+            self._event_failures.append(
+                f"owner_limits_error:{owner_limits.owner_version_id}"
+            )
         except Exception:
+            if fail_closed:
+                raise
             self._event_failures.append(
                 f"owner_limits_error:{owner_limits.owner_version_id}"
             )
@@ -454,17 +589,34 @@ class MainAgentManifestEffectLifecycle:
         *,
         skill_version_id: UUID,
         terminal_text_allowed: bool,
+        fail_closed: bool = False,
     ) -> None:
-        self._applied_skill_terminals[skill_version_id] = bool(terminal_text_allowed)
         ledger = self._obligation_ledger
         if ledger is None:
+            self._applied_skill_terminals[skill_version_id] = bool(terminal_text_allowed)
             return
         try:
-            ledger.create_skill_terminal(
+            decision = ledger.create_skill_terminal(
                 skill_version_id=skill_version_id,
                 terminal_text_allowed=bool(terminal_text_allowed),
             )
+            if getattr(decision, "allowed", True) is False:
+                msg = (
+                    f"skill_terminal_denied:{skill_version_id}:"
+                    f"{getattr(decision, 'reason_code', 'denied')}"
+                )
+                if fail_closed:
+                    raise ValueError(msg)
+                self._event_failures.append(msg)
+                return
+            self._applied_skill_terminals[skill_version_id] = bool(terminal_text_allowed)
+        except ValueError:
+            if fail_closed:
+                raise
+            self._event_failures.append(f"skill_terminal_error:{skill_version_id}")
         except Exception:
+            if fail_closed:
+                raise
             self._event_failures.append(f"skill_terminal_error:{skill_version_id}")
 
     def discard(self, *, call_id: str, reason_code: str) -> None:
@@ -651,19 +803,253 @@ def _evaluate_candidate_conflicts(
     return result.reason_code or "skill_conflict_invalid_rule"
 
 
-def _capability_identity_tuple(cap: ResolvedCapabilityRef) -> tuple[Any, ...]:
-    return (
-        cap.capability_type,
-        cap.capability_key,
-        cap.target_identity,
-        cap.target_id,
-        cap.target_version_id,
-        cap.target_revision,
-        cap.input_schema_digest,
-        cap.output_schema_digest,
-        cap.resolution_digest,
-        cap.dependency_closure_digest,
-        cap.binding_contract_digest,
+def _view_for_domain(
+    candidate: SkillActivationCandidate, domain_key: str
+) -> CandidateExposureView | None:
+    for view in candidate.exposure_views:
+        if view.domain_key == domain_key:
+            return view
+    return None
+
+
+def _binding_for_domain(
+    candidate: SkillActivationCandidate, domain_key: str
+) -> FrozenCapabilityBinding | None:
+    for binding in candidate.frozen_bindings:
+        if binding.ref.capability_key == domain_key:
+            return binding
+    return None
+
+
+def _resolve_skill_policy_ints(
+    candidate: SkillActivationCandidate, domain_key: str
+) -> tuple[int, int, bool, bool]:
+    """Concrete skill-policy fields for §4.3, preferring top-level then exposure view.
+
+    Unset max_* defaults to 0 (matches normalize_owner_budget_limits for skill
+    owners). requires_terminal_output / terminal_text_allowed fall back to the
+    candidate dataclass defaults when neither top-level nor view supplies them.
+    """
+    view = _view_for_domain(candidate, domain_key)
+    max_skill_calls = candidate.max_skill_calls
+    if max_skill_calls is None and view is not None:
+        max_skill_calls = view.max_skill_calls
+    if max_skill_calls is None:
+        max_skill_calls = 0
+
+    max_same_read_calls = candidate.max_same_read_calls
+    if max_same_read_calls is None and view is not None:
+        max_same_read_calls = view.max_same_read_calls
+    if max_same_read_calls is None:
+        max_same_read_calls = 0
+
+    # requires_terminal_output is bool on the candidate (default False).
+    requires_terminal = bool(candidate.requires_terminal_output)
+    if view is not None and view.requires_terminal_output is not None:
+        # Explicit per-exposure view wins when present.
+        requires_terminal = bool(view.requires_terminal_output)
+
+    terminal_text = bool(candidate.terminal_text_allowed)
+    if view is not None and view.terminal_text_allowed is not None:
+        terminal_text = bool(view.terminal_text_allowed)
+
+    return int(max_skill_calls), int(max_same_read_calls), requires_terminal, terminal_text
+
+
+def _descriptor_fields_for_cap(
+    candidate: SkillActivationCandidate,
+    cap: ResolvedCapabilityRef,
+    domain_key: str,
+) -> dict[str, Any]:
+    """Build shared descriptor/side-effect/timeout fields for §4.3 views.
+
+    Prefer CandidateExposureView digests, then frozen binding resolved fields,
+    then stable pure-stage defaults so two candidates with identical refs and
+    top-level policy compare equal when richer inputs are absent.
+    """
+    view = _view_for_domain(candidate, domain_key)
+    binding = _binding_for_domain(candidate, domain_key)
+
+    descriptor_digest = ""
+    if view is not None and view.descriptor_digest:
+        descriptor_digest = view.descriptor_digest
+
+    side_effect: str = "read"
+    executable_revision = ""
+    timeout_mode = "none"
+    timeout_seconds: float | None = None
+    interrupt_mode = "none"
+    parallel_safe = True
+    terminal_output = False
+    needs_followup = True
+    followup_hint: str | None = None
+
+    if binding is not None:
+        resolved = binding.resolved
+        if resolved.executable_revision:
+            executable_revision = str(resolved.executable_revision)
+        completion = resolved.completion
+        terminal_output = bool(completion.terminal_output)
+        needs_followup = bool(completion.needs_followup)
+        followup_hint = completion.followup_hint
+
+    return {
+        "binding_contract_digest": (
+            view.binding_contract_digest
+            if view is not None and view.binding_contract_digest
+            else cap.binding_contract_digest
+        ),
+        "descriptor_digest": descriptor_digest,
+        "side_effect": side_effect,
+        "input_schema_digest": cap.input_schema_digest,
+        "output_schema_digest": cap.output_schema_digest,
+        "dependency_closure_digest": cap.dependency_closure_digest,
+        "resolution_digest": cap.resolution_digest,
+        "executable_revision": executable_revision,
+        "timeout_mode": timeout_mode,
+        "timeout_seconds": timeout_seconds,
+        "interrupt_mode": interrupt_mode,
+        "parallel_safe": parallel_safe,
+        "terminal_output": terminal_output,
+        "needs_followup": needs_followup,
+        "followup_hint": followup_hint,
+    }
+
+
+def _declaration_from_candidate(
+    candidate: SkillActivationCandidate,
+    cap: ResolvedCapabilityRef,
+    domain_key: str,
+) -> DuplicateCapabilityDeclaration:
+    max_calls, max_same, req_term, term_text = _resolve_skill_policy_ints(
+        candidate, domain_key
+    )
+    fields = _descriptor_fields_for_cap(candidate, cap, domain_key)
+    return DuplicateCapabilityDeclaration(
+        domain_key=domain_key,
+        resolved_ref=cap,
+        binding_contract_digest=fields["binding_contract_digest"],
+        descriptor_digest=fields["descriptor_digest"],
+        side_effect=fields["side_effect"],  # type: ignore[arg-type]
+        input_schema_digest=fields["input_schema_digest"],
+        output_schema_digest=fields["output_schema_digest"],
+        dependency_closure_digest=fields["dependency_closure_digest"],
+        resolution_digest=fields["resolution_digest"],
+        executable_revision=fields["executable_revision"],
+        timeout_mode=fields["timeout_mode"],
+        timeout_seconds=fields["timeout_seconds"],
+        interrupt_mode=fields["interrupt_mode"],
+        parallel_safe=fields["parallel_safe"],
+        terminal_output=fields["terminal_output"],
+        needs_followup=fields["needs_followup"],
+        followup_hint=fields["followup_hint"],
+        max_skill_calls=max_calls,
+        max_same_read_calls=max_same,
+        requires_terminal_output=req_term,
+        terminal_text_allowed=term_text,
+        grant_admits_side_effect=True,
+        conflict_rules=_normalize_conflict_rules(candidate.conflict_rules),
+        candidate_skill_version_id=candidate.skill.version_id,
+        candidate_canonical_name=candidate.skill.canonical_name,
+        candidate_aliases=tuple(candidate.aliases),
+    )
+
+
+def _existing_view_from_owner_candidate(
+    owner: SkillActivationCandidate,
+    cap: ResolvedCapabilityRef,
+    domain_key: str,
+    *,
+    consumers: Sequence[UUID] = (),
+) -> ExistingExposureCompatibilityView:
+    max_calls, max_same, req_term, term_text = _resolve_skill_policy_ints(
+        owner, domain_key
+    )
+    fields = _descriptor_fields_for_cap(owner, cap, domain_key)
+    return ExistingExposureCompatibilityView(
+        domain_key=domain_key,
+        resolved_ref=cap,
+        binding_contract_digest=fields["binding_contract_digest"],
+        descriptor_digest=fields["descriptor_digest"],
+        side_effect=fields["side_effect"],  # type: ignore[arg-type]
+        input_schema_digest=fields["input_schema_digest"],
+        output_schema_digest=fields["output_schema_digest"],
+        dependency_closure_digest=fields["dependency_closure_digest"],
+        resolution_digest=fields["resolution_digest"],
+        executable_revision=fields["executable_revision"],
+        timeout_mode=fields["timeout_mode"],
+        timeout_seconds=fields["timeout_seconds"],
+        interrupt_mode=fields["interrupt_mode"],
+        parallel_safe=fields["parallel_safe"],
+        terminal_output=fields["terminal_output"],
+        needs_followup=fields["needs_followup"],
+        followup_hint=fields["followup_hint"],
+        max_skill_calls=max_calls,
+        max_same_read_calls=max_same,
+        requires_terminal_output=req_term,
+        terminal_text_allowed=term_text,
+        grant_admits_side_effect=True,
+        conflict_rules=_normalize_conflict_rules(owner.conflict_rules),
+        owner_version_id=owner.skill.version_id,
+        compatible_consumer_version_ids=tuple(consumers),
+        owner_canonical_name=owner.skill.canonical_name,
+        owner_aliases=tuple(owner.aliases),
+    )
+
+
+def _existing_view_from_manifest_cap(
+    *,
+    existing_cap: ResolvedCapabilityRef,
+    domain_key: str,
+    view: CandidateExposureView | None,
+    owner_version_id: UUID,
+    owner_canonical_name: str,
+    owner_aliases: tuple[str, ...],
+    conflict_rules: tuple[SkillConflictRuleV1, ...],
+    consumers: Sequence[UUID] = (),
+) -> ExistingExposureCompatibilityView:
+    """Build an ExistingExposureCompatibilityView for an already-active exposure.
+
+    Skill-policy fields come from the policy-supplied CandidateExposureView when
+    present. Missing skill-policy fields stay None so Task 1's evaluator rejects
+    skill re-declaration of main-agent/unknown-policy exposures fail-closed.
+    """
+    return ExistingExposureCompatibilityView(
+        domain_key=domain_key,
+        resolved_ref=existing_cap,
+        binding_contract_digest=(
+            view.binding_contract_digest
+            if view is not None and view.binding_contract_digest
+            else existing_cap.binding_contract_digest
+        ),
+        descriptor_digest=view.descriptor_digest if view is not None else "",
+        side_effect="read",
+        input_schema_digest=existing_cap.input_schema_digest,
+        output_schema_digest=existing_cap.output_schema_digest,
+        dependency_closure_digest=existing_cap.dependency_closure_digest,
+        resolution_digest=existing_cap.resolution_digest,
+        executable_revision="",
+        timeout_mode="none",
+        timeout_seconds=None,
+        interrupt_mode="none",
+        parallel_safe=True,
+        terminal_output=False,
+        needs_followup=True,
+        followup_hint=None,
+        max_skill_calls=view.max_skill_calls if view is not None else None,
+        max_same_read_calls=view.max_same_read_calls if view is not None else None,
+        requires_terminal_output=(
+            view.requires_terminal_output if view is not None else None
+        ),
+        terminal_text_allowed=(
+            view.terminal_text_allowed if view is not None else None
+        ),
+        grant_admits_side_effect=True,
+        conflict_rules=conflict_rules,
+        owner_version_id=owner_version_id,
+        compatible_consumer_version_ids=tuple(consumers),
+        owner_canonical_name=owner_canonical_name,
+        owner_aliases=owner_aliases,
     )
 
 
@@ -673,30 +1059,37 @@ def _evaluate_business_duplicates(
     to_append: Sequence[SkillActivationCandidate],
     policy: SkillInjectionPolicyContext | None,
 ) -> tuple[str | None, tuple[tuple[str, UUID], ...]]:
-    """§4.3 strict duplicate compatibility.
+    """§4.3 strict duplicate compatibility via Task 1 evaluator.
 
     Returns (reason_code_or_None, compatible_consumer_pairs).
     Base-control collisions are already rejected by ownership map.
+    Builds proper ExistingExposureCompatibilityView / DuplicateCapabilityDeclaration
+    from candidate top-level policy fields (max_skill_calls, max_same_read_calls,
+    requires_terminal_output, terminal_text_allowed), optional exposure_views,
+    frozen_bindings, and conflict_rules — never identity-only.
     """
-    # Index existing Manifest capabilities.
     existing_caps = {
         cap.capability_key: cap for cap in current_manifest.capabilities
     }
-    # Existing owner version per domain key (skill owners only when known).
-    existing_owner_by_key: dict[str, UUID | None] = {
-        cap.capability_key: None for cap in current_manifest.capabilities
-    }
-    for key in MAIN_AGENT_CONTROL_KEYS:
-        existing_owner_by_key.setdefault(key, None)
-
-    # Policy-provided exposure views for richer checks.
     existing_views: dict[str, CandidateExposureView] = {}
     if policy is not None:
         for view in policy.existing_exposures:
             existing_views[view.domain_key] = view
 
-    # Same-batch ownership: first owner by deterministic (name, version_id) order
-    # for each Domain Key claimed by multiple candidates.
+    # Optional active skill conflict/alias context for coexistence checks.
+    active_rules_map: dict[UUID, tuple[SkillConflictRuleV1, ...]] = {}
+    active_aliases_map: dict[UUID, tuple[str, ...]] = {}
+    if policy is not None:
+        active_rules_map = {
+            vid: _normalize_conflict_rules(rules)
+            for vid, rules in policy.active_conflict_rules
+        }
+        active_aliases_map = {vid: aliases for vid, aliases in policy.active_aliases}
+
+    catalog_skills: Sequence[SkillConflictIdentity] | None = None
+    if policy is not None and policy.catalog_skills:
+        catalog_skills = policy.catalog_skills
+
     claims: dict[str, list[SkillActivationCandidate]] = {}
     for candidate in to_append:
         for cap in candidate.capabilities:
@@ -705,19 +1098,46 @@ def _evaluate_business_duplicates(
     consumers: list[tuple[str, UUID]] = []
 
     for domain_key, claimants in claims.items():
-        # Base control: unconditional (already handled, but belt-and-suspenders).
         if domain_key in MAIN_AGENT_CONTROL_KEYS:
             return SKILL_CAPABILITY_CONFLICT, ()
 
         existing_cap = existing_caps.get(domain_key)
-        # Deterministic owner among same-batch claimants.
         ordered = sorted(
             claimants,
             key=lambda c: (c.skill.canonical_name, c.skill.version_id.bytes),
         )
-        # Existing active owner wins; otherwise lowest name/version.
+
         if existing_cap is not None:
-            # Every claimant must be §4.3-compatible with the existing capability.
+            # Existing active owner wins; every claimant must be §4.3-compatible.
+            view = existing_views.get(domain_key)
+            # Owner identity is not on the Manifest capability; use a stable
+            # sentinel unless policy.existing_exposures / active rules supply it.
+            # Task 1 still evaluates full field/policy parity fail-closed.
+            owner_version_id = UUID(int=0)
+            owner_name = ""
+            owner_aliases: tuple[str, ...] = ()
+            owner_rules: tuple[SkillConflictRuleV1, ...] = ()
+            # When exactly one active skill and rules are known for it, use that
+            # identity for coexistence evaluation (best-effort pure-stage mapping).
+            if len(current_manifest.active_skills) == 1:
+                sole = current_manifest.active_skills[0]
+                owner_version_id = sole.version_id
+                owner_name = sole.canonical_name
+                owner_aliases = active_aliases_map.get(sole.version_id, ())
+                owner_rules = active_rules_map.get(sole.version_id, ())
+
+            existing_view = _existing_view_from_manifest_cap(
+                existing_cap=existing_cap,
+                domain_key=domain_key,
+                view=view,
+                owner_version_id=owner_version_id,
+                owner_canonical_name=owner_name,
+                owner_aliases=owner_aliases,
+                conflict_rules=owner_rules,
+                consumers=(),
+            )
+            # Seed running consumer list so sequential claimants append correctly.
+            running_consumers: list[UUID] = []
             for candidate in ordered:
                 match = next(
                     (c for c in candidate.capabilities if c.capability_key == domain_key),
@@ -725,53 +1145,57 @@ def _evaluate_business_duplicates(
                 )
                 if match is None:
                     continue
-                if _capability_identity_tuple(match) != _capability_identity_tuple(
-                    existing_cap
-                ):
-                    return DUPLICATE_CAPABILITY_POLICY_CONFLICT, ()
-                # Policy fields must match when both sides declare them.
-                view = existing_views.get(domain_key)
-                cand_view = next(
-                    (v for v in candidate.exposure_views if v.domain_key == domain_key),
-                    None,
-                )
-                if view is not None and cand_view is not None:
-                    if (
-                        view.max_skill_calls is not None
-                        and cand_view.max_skill_calls is not None
-                        and view.max_skill_calls != cand_view.max_skill_calls
-                    ):
+                declaration = _declaration_from_candidate(candidate, match, domain_key)
+                try:
+                    _status, updated = evaluate_duplicate_capability_compatibility(
+                        existing=ExistingExposureCompatibilityView(
+                            domain_key=existing_view.domain_key,
+                            resolved_ref=existing_view.resolved_ref,
+                            binding_contract_digest=existing_view.binding_contract_digest,
+                            descriptor_digest=existing_view.descriptor_digest,
+                            side_effect=existing_view.side_effect,
+                            input_schema_digest=existing_view.input_schema_digest,
+                            output_schema_digest=existing_view.output_schema_digest,
+                            dependency_closure_digest=existing_view.dependency_closure_digest,
+                            resolution_digest=existing_view.resolution_digest,
+                            executable_revision=existing_view.executable_revision,
+                            timeout_mode=existing_view.timeout_mode,
+                            timeout_seconds=existing_view.timeout_seconds,
+                            interrupt_mode=existing_view.interrupt_mode,
+                            parallel_safe=existing_view.parallel_safe,
+                            terminal_output=existing_view.terminal_output,
+                            needs_followup=existing_view.needs_followup,
+                            followup_hint=existing_view.followup_hint,
+                            max_skill_calls=existing_view.max_skill_calls,
+                            max_same_read_calls=existing_view.max_same_read_calls,
+                            requires_terminal_output=existing_view.requires_terminal_output,
+                            terminal_text_allowed=existing_view.terminal_text_allowed,
+                            grant_admits_side_effect=existing_view.grant_admits_side_effect,
+                            conflict_rules=existing_view.conflict_rules,
+                            owner_version_id=existing_view.owner_version_id,
+                            compatible_consumer_version_ids=tuple(running_consumers),
+                            owner_canonical_name=existing_view.owner_canonical_name,
+                            owner_aliases=existing_view.owner_aliases,
+                        ),
+                        candidate=declaration,
+                        catalog_skills=catalog_skills,
+                    )
+                except ExposureBuildError as exc:
+                    if exc.reason_code == DUPLICATE_CAPABILITY_POLICY_CONFLICT:
                         return DUPLICATE_CAPABILITY_POLICY_CONFLICT, ()
-                    if (
-                        view.max_same_read_calls is not None
-                        and cand_view.max_same_read_calls is not None
-                        and view.max_same_read_calls != cand_view.max_same_read_calls
-                    ):
-                        return DUPLICATE_CAPABILITY_POLICY_CONFLICT, ()
-                    if (
-                        view.requires_terminal_output is not None
-                        and cand_view.requires_terminal_output is not None
-                        and view.requires_terminal_output
-                        != cand_view.requires_terminal_output
-                    ):
-                        return DUPLICATE_CAPABILITY_POLICY_CONFLICT, ()
-                    if (
-                        view.terminal_text_allowed is not None
-                        and cand_view.terminal_text_allowed is not None
-                        and view.terminal_text_allowed != cand_view.terminal_text_allowed
-                    ):
-                        return DUPLICATE_CAPABILITY_POLICY_CONFLICT, ()
-                # Compatible non-owning consumer.
+                    return exc.reason_code or DUPLICATE_CAPABILITY_POLICY_CONFLICT, ()
+                running_consumers = list(updated)
                 consumers.append((domain_key, candidate.skill.version_id))
             continue
 
-        # No existing owner: first ordered claimant owns; rest must be compatible.
+        # No existing Manifest owner: first ordered claimant owns; rest must match.
         if len(ordered) == 1:
             continue
         owner = ordered[0]
         owner_cap = next(
             c for c in owner.capabilities if c.capability_key == domain_key
         )
+        running_consumers: list[UUID] = []
         for consumer_candidate in ordered[1:]:
             consumer_cap = next(
                 (
@@ -783,40 +1207,28 @@ def _evaluate_business_duplicates(
             )
             if consumer_cap is None:
                 continue
-            if _capability_identity_tuple(consumer_cap) != _capability_identity_tuple(
-                owner_cap
-            ):
-                return DUPLICATE_CAPABILITY_POLICY_CONFLICT, ()
-            # Policy field parity when both declare exposure views.
-            owner_view = next(
-                (v for v in owner.exposure_views if v.domain_key == domain_key),
-                None,
+            existing_view = _existing_view_from_owner_candidate(
+                owner,
+                owner_cap,
+                domain_key,
+                consumers=running_consumers,
             )
-            consumer_view = next(
-                (
-                    v
-                    for v in consumer_candidate.exposure_views
-                    if v.domain_key == domain_key
-                ),
-                None,
+            declaration = _declaration_from_candidate(
+                consumer_candidate, consumer_cap, domain_key
             )
-            if owner_view is not None and consumer_view is not None:
-                if (
-                    owner_view.max_skill_calls is not None
-                    and consumer_view.max_skill_calls is not None
-                    and owner_view.max_skill_calls != consumer_view.max_skill_calls
-                ):
+            try:
+                _status, updated = evaluate_duplicate_capability_compatibility(
+                    existing=existing_view,
+                    candidate=declaration,
+                    catalog_skills=catalog_skills,
+                )
+            except ExposureBuildError as exc:
+                if exc.reason_code == DUPLICATE_CAPABILITY_POLICY_CONFLICT:
                     return DUPLICATE_CAPABILITY_POLICY_CONFLICT, ()
-                if (
-                    owner_view.max_same_read_calls is not None
-                    and consumer_view.max_same_read_calls is not None
-                    and owner_view.max_same_read_calls
-                    != consumer_view.max_same_read_calls
-                ):
-                    return DUPLICATE_CAPABILITY_POLICY_CONFLICT, ()
+                return exc.reason_code or DUPLICATE_CAPABILITY_POLICY_CONFLICT, ()
+            running_consumers = list(updated)
             consumers.append((domain_key, consumer_candidate.skill.version_id))
 
-    # Deduplicate consumer pairs.
     unique = sorted(set(consumers), key=lambda x: (x[0], x[1].bytes))
     return None, tuple(unique)
 

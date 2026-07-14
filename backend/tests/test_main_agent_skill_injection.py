@@ -1231,3 +1231,231 @@ def test_reinjection_is_noop_across_policy_state() -> None:
     assert lifecycle.current_manifest.effective_policy_digest == policy_after
     assert list(budget.snapshot().owner_limits) == owners_after
     assert budget.snapshot().revision == rev_after
+
+
+def test_duplicate_max_skill_calls_mismatch_fails_pre_stage() -> None:
+    """Identical capability refs with max_skill_calls 4 vs 8 → pre-stage fail."""
+    from app.assistant.main_agent.manifest_runtime import (
+        DUPLICATE_CAPABILITY_POLICY_CONFLICT,
+        MainAgentManifestEffectLifecycle,
+        SkillActivationCandidate,
+        stage_skill_injection,
+    )
+
+    manifest, _ = _manifest_with_controls()
+    lifecycle = MainAgentManifestEffectLifecycle()
+    lifecycle.bind_current_manifest(manifest)
+    shared = _cap_ref("shared.tool", digest="1" * 64)
+    c1 = SkillActivationCandidate(
+        skill=_skill_ref(
+            package_id=PKG_1,
+            version_id=VER_1,
+            canonical_name="alpha-skill",
+            content_digest=DIGEST_B,
+            version_digest=DIGEST_C,
+        ),
+        capabilities=(shared,),
+        instruction_char_count=10,
+        max_skill_calls=4,
+        max_same_read_calls=2,
+    )
+    c2 = SkillActivationCandidate(
+        skill=_skill_ref(
+            package_id=PKG_2,
+            version_id=VER_2,
+            canonical_name="beta-skill",
+            content_digest=DIGEST_D,
+            version_digest=DIGEST_A,
+        ),
+        capabilities=(shared,),
+        instruction_char_count=10,
+        max_skill_calls=8,  # policy mismatch vs owner
+        max_same_read_calls=2,
+    )
+    result, effect, package = stage_skill_injection(
+        call_id="p05-max-calls-mismatch",
+        current_manifest=manifest,
+        candidates=[c1, c2],
+        lifecycle=lifecycle,
+    )
+    assert result.status == "failed"
+    assert result.error.safe_code == DUPLICATE_CAPABILITY_POLICY_CONFLICT
+    assert effect is None
+    assert package is None
+    assert lifecycle.peek_package("p05-max-calls-mismatch") is None
+    assert lifecycle.is_skill_active(VER_1) is False
+    assert lifecycle.is_skill_active(VER_2) is False
+
+
+def test_duplicate_terminal_policy_mismatch_fails_pre_stage() -> None:
+    """Same-batch path must consult requires_terminal_output / terminal_text_allowed."""
+    from app.assistant.main_agent.manifest_runtime import (
+        DUPLICATE_CAPABILITY_POLICY_CONFLICT,
+        SkillActivationCandidate,
+        stage_skill_injection,
+    )
+
+    manifest, _ = _manifest_with_controls()
+    shared = _cap_ref("shared.tool", digest="1" * 64)
+    c1 = SkillActivationCandidate(
+        skill=_skill_ref(
+            package_id=PKG_1,
+            version_id=VER_1,
+            canonical_name="alpha-skill",
+            content_digest=DIGEST_B,
+            version_digest=DIGEST_C,
+        ),
+        capabilities=(shared,),
+        instruction_char_count=10,
+        max_skill_calls=4,
+        max_same_read_calls=2,
+        requires_terminal_output=True,
+        terminal_text_allowed=True,
+    )
+    c2 = SkillActivationCandidate(
+        skill=_skill_ref(
+            package_id=PKG_2,
+            version_id=VER_2,
+            canonical_name="beta-skill",
+            content_digest=DIGEST_D,
+            version_digest=DIGEST_A,
+        ),
+        capabilities=(shared,),
+        instruction_char_count=10,
+        max_skill_calls=4,
+        max_same_read_calls=2,
+        requires_terminal_output=False,  # mismatch
+        terminal_text_allowed=True,
+    )
+    result, effect, package = stage_skill_injection(
+        call_id="p05-terminal-policy-mismatch",
+        current_manifest=manifest,
+        candidates=[c1, c2],
+    )
+    assert result.status == "failed"
+    assert result.error.safe_code == DUPLICATE_CAPABILITY_POLICY_CONFLICT
+    assert effect is None
+    assert package is None
+
+
+def test_accept_validates_package_digest() -> None:
+    """Accept recomputes package_digest and rejects tampered packages."""
+    from app.assistant.main_agent.manifest_runtime import (
+        MainAgentManifestEffectLifecycle,
+        SkillActivationCandidate,
+        stage_skill_injection,
+        SkillInjectionPolicyContext,
+    )
+
+    manifest, _ = _manifest_with_controls()
+    lifecycle = MainAgentManifestEffectLifecycle()
+    lifecycle.bind_current_manifest(manifest)
+    candidate = SkillActivationCandidate(
+        skill=_skill_ref(),
+        capabilities=(_cap_ref("get_statistics"),),
+        instruction_char_count=10,
+        max_skill_calls=4,
+    )
+    result, effect, package = stage_skill_injection(
+        call_id="p05-pkg-digest",
+        current_manifest=manifest,
+        candidates=[candidate],
+        lifecycle=lifecycle,
+        policy=SkillInjectionPolicyContext(),
+    )
+    assert result.status == "completed"
+    assert package is not None
+    assert package.package_digest is not None
+    # Tamper staged package digest.
+    package.package_digest = "0" * 64
+    with pytest.raises(ValueError, match="package_digest"):
+        lifecycle.accept(
+            call_id="p05-pkg-digest",
+            current_manifest=manifest,
+            proposed_manifest=effect.proposed_manifest,
+        )
+    # Fail-closed: package discarded, Manifest unchanged.
+    assert lifecycle.peek_package("p05-pkg-digest") is None
+    assert lifecycle.is_skill_active(VER_1) is False
+    assert lifecycle.current_manifest.manifest_digest == manifest.manifest_digest
+
+
+def test_accept_owner_limit_denial_is_fail_closed() -> None:
+    """Owner-limit denial before Manifest advance: no partial commit."""
+    from app.assistant.main_agent.manifest_runtime import (
+        MainAgentManifestEffectLifecycle,
+        SkillActivationCandidate,
+        stage_skill_injection,
+        SkillInjectionPolicyContext,
+    )
+    from app.assistant.policy.budgets import BudgetLedger
+    from app.assistant.policy.contracts import RunBudgetLimits, build_owner_budget_limits
+
+    manifest, _ = _manifest_with_controls()
+    # max_active_skills=1 so a second owner bucket is denied at accept.
+    run_limits = RunBudgetLimits(
+        max_provider_rounds=8,
+        max_main_agent_cycles=1,
+        max_active_skills=1,
+        max_total_capability_calls=16,
+        max_parallel_calls=4,
+        max_capability_depth=4,
+        max_agent_depth=2,
+        max_same_read_signature=3,
+        max_prompt_tokens=None,
+        max_completion_tokens=4096,
+        max_wall_time_ms=120_000,
+        max_completion_followup_rounds=2,
+    )
+    ledger = BudgetLedger.create(limits=run_limits)
+    # Pre-seed one skill owner so the candidate's add_owner_limits hits the cap.
+    seeded = build_owner_budget_limits(
+        owner_kind="skill_version",
+        owner_version_id=VER_2,
+        max_calls=2,
+        max_same_read_signature=1,
+    )
+    decision = ledger.add_owner_limits(seeded)
+    assert decision.allowed is True
+    before_revision = ledger.snapshot().revision
+    before_owners = list(ledger.snapshot().owner_limits)
+
+    lifecycle = MainAgentManifestEffectLifecycle()
+    lifecycle.bind_current_manifest(manifest)
+    lifecycle.bind_policy_ledgers(budget_ledger=ledger)
+
+    candidate = SkillActivationCandidate(
+        skill=_skill_ref(),
+        capabilities=(_cap_ref("get_statistics"),),
+        instruction_char_count=10,
+        max_skill_calls=4,
+        max_same_read_calls=2,
+    )
+    # Stage with a policy that still allows staging (stage uses its own Run caps).
+    result, effect, package = stage_skill_injection(
+        call_id="p05-owner-deny",
+        current_manifest=manifest,
+        candidates=[candidate],
+        lifecycle=lifecycle,
+        policy=SkillInjectionPolicyContext(
+            run_max_total_capability_calls=16,
+            run_max_same_read_signature=3,
+            run_max_active_skills=4,  # staging budget map allows it
+        ),
+    )
+    assert result.status == "completed"
+    assert package is not None
+
+    with pytest.raises(ValueError, match="owner_limits_denied"):
+        lifecycle.accept(
+            call_id="p05-owner-deny",
+            current_manifest=manifest,
+            proposed_manifest=effect.proposed_manifest,
+        )
+    # Fail-closed: Manifest not advanced; ledger rewound to pre-accept.
+    assert lifecycle.is_skill_active(VER_1) is False
+    assert lifecycle.current_manifest.manifest_digest == manifest.manifest_digest
+    assert lifecycle.applied_owner_budget_digests() == {}
+    assert ledger.snapshot().revision == before_revision
+    assert list(ledger.snapshot().owner_limits) == before_owners
+    assert lifecycle.peek_package("p05-owner-deny") is None
