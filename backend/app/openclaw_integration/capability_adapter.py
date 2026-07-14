@@ -777,17 +777,55 @@ class OpenClawAuthorizationEvidenceVerifier:
         ):
             raise AuthorizationEvidenceVerificationError("dependency_closure_digest_mismatch")
 
-        # Re-read catalog exposure (short check). Does not re-resolve latest target.
+        # Re-read catalog exposure from the current DB state (not identity-map cache).
         item = self._service._get_catalog_item_by_capability_key(  # noqa: SLF001
             self.frozen_call.capability_key
         )
         if item is None or item.id != self.frozen_call.catalog_item_id:
             raise AuthorizationEvidenceVerificationError("catalog_item_missing")
+        try:
+            self._service.db.refresh(item)
+        except Exception:
+            item = (
+                self._service.db.query(type(item))
+                .filter(type(item).id == item.id)
+                .populate_existing()
+                .one_or_none()
+            )
+            if item is None or item.id != self.frozen_call.catalog_item_id:
+                raise AuthorizationEvidenceVerificationError("catalog_item_missing")
         retired, _reason = self._service._retired_catalog_item_state(item, locale=self._locale)  # noqa: SLF001
         if retired or not bool(item.enabled):
             raise AuthorizationEvidenceVerificationError("catalog_item_not_exposed")
         if _source_binding_digest(item) != self.frozen_call.source_binding_digest:
             raise AuthorizationEvidenceVerificationError("source_binding_mismatch")
+        # Full catalog revision must still match the request-frozen digest.
+        # Recompute with the same external schemas used at freeze time so we
+        # detect enabled/response-mode/source/updated_at drift. Schema body
+        # drift is detected via live row compact compare against freeze inputs.
+        current_revision = _catalog_item_revision_digest(
+            item,
+            external_input=self.frozen_call.external_input_schema,
+            external_output=self.frozen_call.external_output_schema,
+        )
+        if current_revision != self.frozen_call.catalog_item_revision_digest:
+            raise AuthorizationEvidenceVerificationError("catalog_item_revision_mismatch")
+        # Detect live schema body changes that share the same freeze-time external
+        # snapshot only if the stored JSON differs from what freeze normalized.
+        try:
+            live_input_raw = item.input_schema_json or _svc()._EMPTY_OBJECT_SCHEMA
+            live_output_raw = item.output_schema_json or _svc()._EMPTY_OBJECT_SCHEMA
+            live_input = _svc()._normalize_json_object_schema(live_input_raw, label="input")
+            live_output = _svc()._normalize_json_object_schema(live_output_raw, label="output")
+            if _external_schema_digest(live_input) != self.frozen_call.external_input_schema_digest:
+                raise AuthorizationEvidenceVerificationError("catalog_item_revision_mismatch")
+            if _external_schema_digest(live_output) != self.frozen_call.external_output_schema_digest:
+                raise AuthorizationEvidenceVerificationError("catalog_item_revision_mismatch")
+        except AuthorizationEvidenceVerificationError:
+            raise
+        except Exception:
+            # Normalization failure on live schemas is treat as exposure drift.
+            raise AuthorizationEvidenceVerificationError("catalog_item_revision_mismatch")
 
         actual = descriptor.behavior.side_effect
         if actual == "unknown":

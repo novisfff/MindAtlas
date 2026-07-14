@@ -102,22 +102,64 @@ def _err_text(exc: BaseException) -> str:
 
 
 def _reset_to_plan01_parent() -> None:
-    """Bring disposable DB to Plan 01 head (parent of probe migration)."""
+    """Bring disposable DB to Plan 01 head (parent of probe migration).
+
+    Must use a real Alembic downgrade (or fresh upgrade from parent), never
+    ``stamp`` while leaving child schema columns in place — that makes the next
+    ``upgrade head`` try to ADD COLUMN current_capability_probe_id again.
+    """
     _configure_database_env(_POSTGRES_URL)
-    # Clear probe rows if present so downgrade can succeed, then stamp/upgrade.
+    engine = create_engine(_as_sqlalchemy_url(_POSTGRES_URL), future=True)
     try:
-        with create_engine(_as_sqlalchemy_url(_POSTGRES_URL), future=True).connect() as conn:
-            conn.execute(text("DROP TABLE IF EXISTS ai_model_capability_probe CASCADE"))
-            # pointer column may remain if mid-state; ignore
-            conn.commit()
-    except Exception:
-        pass
-    try:
-        _run_alembic("stamp", PLAN01_HEAD)
-    except Exception:
+        # Clear probe rows so Plan 03 downgrade preflight allows rollback.
+        with engine.begin() as conn:
+            # Pointer first (FK), then table if present.
+            try:
+                conn.execute(text("UPDATE ai_model SET current_capability_probe_id = NULL"))
+            except Exception:
+                pass
+            try:
+                conn.execute(text("DELETE FROM ai_model_capability_probe"))
+            except Exception:
+                pass
+        # Prefer real downgrade of the child revision when present.
+        try:
+            current = _current_revision(engine)
+        except Exception:
+            current = None
+        if current == PLAN03_PROBE_REVISION:
+            _run_alembic("downgrade", PLAN01_HEAD)
+        elif current != PLAN01_HEAD:
+            # Unknown/mid state: stamp only after forcing schema via drop+upgrade path.
+            with engine.begin() as conn:
+                conn.execute(text("DROP TABLE IF EXISTS ai_model_capability_probe CASCADE"))
+                # Drop child column if present so upgrade can re-add it cleanly.
+                conn.execute(
+                    text(
+                        "ALTER TABLE ai_model DROP COLUMN IF EXISTS current_capability_probe_id"
+                    )
+                )
+            _run_alembic("stamp", PLAN01_HEAD)
+        # Ensure we are exactly on Plan 01 parent schema.
         _run_alembic("upgrade", PLAN01_HEAD)
-    # Ensure parent schema exists.
-    _run_alembic("upgrade", PLAN01_HEAD)
+        assert _current_revision(engine) == PLAN01_HEAD, (
+            f"expected Plan 01 parent {PLAN01_HEAD}, got {_current_revision(engine)}"
+        )
+        with engine.connect() as conn:
+            cols = {
+                r[0]
+                for r in conn.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'ai_model'"
+                    )
+                ).fetchall()
+            }
+            assert "current_capability_probe_id" not in cols, (
+                "Plan 01 parent schema must not retain probe pointer column"
+            )
+    finally:
+        engine.dispose()
 
 
 def _insert_credential_model(conn, *, name: str, model_name: str) -> tuple[uuid.UUID, uuid.UUID]:

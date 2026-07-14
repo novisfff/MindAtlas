@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 from uuid import UUID
 from urllib.error import HTTPError, URLError
@@ -484,6 +484,10 @@ class _ProbeConfigSnapshot:
     adapter_key: str
     adapter_revision: str
     app_build_revision: str
+    # Ciphertext frozen with the same lock as base_url. Never re-query the live
+    # credential row for the key after unlock — that can pair a new secret with
+    # an old endpoint (or vice versa) across concurrent credential updates.
+    api_key_encrypted: str = field(repr=False, compare=False)
 
 
 class AiModelCapabilityProbeService:
@@ -668,13 +672,9 @@ class AiModelCapabilityProbeService:
                     message="Provider base URL failed SSRF validation",
                 ) from exc
 
+            # Decrypt only the ciphertext frozen with the endpoint under the same lock.
             try:
-                api_key = decrypt_api_key(
-                    self.db.query(AiCredential)
-                    .filter(AiCredential.id == snapshot.credential_id)
-                    .one()
-                    .api_key_encrypted
-                )
+                api_key = decrypt_api_key(snapshot.api_key_encrypted)
             except Exception as exc:
                 raise ApiException(
                     status_code=500,
@@ -799,6 +799,14 @@ class AiModelCapabilityProbeService:
             adapter_revision=self._adapter_revision,
             app_build_revision=self._app_build_revision,
         )
+        encrypted = str(getattr(cred, "api_key_encrypted", "") or "").strip()
+        if not encrypted:
+            self.db.rollback()
+            raise ApiException(
+                status_code=500,
+                code=50002,
+                message="Failed to decrypt API key",
+            )
         snapshot = _ProbeConfigSnapshot(
             model_id=model.id,
             model_name=model.name,
@@ -812,6 +820,7 @@ class AiModelCapabilityProbeService:
             adapter_key=adapter_key,
             adapter_revision=self._adapter_revision,
             app_build_revision=self._app_build_revision,
+            api_key_encrypted=encrypted,
         )
         # Release the short snapshot transaction before Provider I/O.
         self.db.commit()

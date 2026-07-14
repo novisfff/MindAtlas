@@ -78,6 +78,7 @@ def _real_snap(model, cred):
         adapter_key=ADAPTER_KEY,
         adapter_revision=ADAPTER_REVISION,
         app_build_revision=APP_BUILD,
+        api_key_encrypted=str(getattr(cred, "api_key_encrypted", "") or "enc-test"),
     ), digest
 
 
@@ -456,6 +457,68 @@ class CapabilityProbeApiTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.json()["code"], 40083)
         self.assertEqual(decrypt_calls, [])
+
+    def test_live_probe_decrypts_snapshot_key_not_live_credential_row(self) -> None:
+        """Endpoint and secret must come from the same locked snapshot.
+
+        After unlock, concurrent credential rotation must not pair a new API key
+        with the old base_url (or vice versa).
+        """
+        from app.ai_provider.crypto import encrypt_api_key
+
+        old_encrypted = encrypt_api_key("sk-old-key-should-be-used")
+        new_encrypted = encrypt_api_key("sk-new-key-must-not-be-used")
+        self.cred.api_key_encrypted = old_encrypted
+        self.db.commit()
+
+        snap, _digest = _real_snap(self.model, self.cred)
+        # Snapshot freezes old ciphertext + old endpoint.
+        self.assertEqual(snap.api_key_encrypted, old_encrypted)
+
+        # Concurrent rotation after snapshot.
+        self.cred.api_key_encrypted = new_encrypted
+        self.cred.base_url = "https://new-provider.example/v1"
+        self.db.commit()
+
+        seen: dict[str, str] = {}
+
+        def runner(*, snapshot, api_key):  # noqa: ANN001
+            seen["base_url"] = snapshot.base_url
+            seen["api_key"] = api_key
+            return _evidence(digest=snapshot.model_config_digest)
+
+        def track_decrypt(token: str) -> str:
+            # decrypt_api_key is called with the ciphertext string.
+            from app.ai_provider.crypto import decrypt_api_key as real
+
+            return real(token)
+
+        with patch("app.ai_registry.service.decrypt_api_key", side_effect=track_decrypt):
+            svc = AiModelCapabilityProbeService(
+                self.db,
+                enabled=True,
+                provider_runner=runner,
+                app_build_revision=APP_BUILD,
+                adapter_revision=ADAPTER_REVISION,
+            )
+            with patch.object(
+                AiModelCapabilityProbeService,
+                "_snapshot_locked_config",
+                return_value=snap,
+            ), patch("app.ai_registry.service.validate_url_ssrf", return_value=None):
+                result = svc.run_live_probe(
+                    self.model.id,
+                    adapter_key=ADAPTER_KEY,
+                    confirm_provider_call=True,
+                    promote=True,
+                )
+
+        # Provider call used the frozen endpoint + frozen key, never the rotated key.
+        self.assertEqual(seen["base_url"], snap.base_url)
+        self.assertEqual(seen["api_key"], "sk-old-key-should-be-used")
+        self.assertNotIn("sk-new-key-must-not-be-used", seen["api_key"])
+        # Persist path may mark config_changed due to rotation after unlock.
+        self.assertIn(result.promotion_outcome, ("promoted", "config_changed", "not_requested", "failed_status"))
 
     def test_get_history_bounds_markers_and_safe_fields(self) -> None:
         svc = AiModelCapabilityProbeService(

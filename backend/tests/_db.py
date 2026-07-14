@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import sys
 import tempfile
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -17,8 +18,8 @@ from tests._bootstrap import bootstrap_backend_imports, reset_caches
 
 bootstrap_backend_imports()
 
-# Modules that may cache `from app.database import SessionLocal` and open their
-# own Sessions (capability adapters / OpenClaw worker / runtime config).
+# Modules that may cache `from app.database import SessionLocal`. Restored even
+# if they are first imported while a temporary binding is active (see make_session).
 _SESSIONLOCAL_IMPORTER_MODULES: tuple[str, ...] = (
     "app.system_settings.runtime_config_service",
     "app.assistant.capabilities.adapters.tool",
@@ -30,12 +31,15 @@ _SESSIONLOCAL_IMPORTER_MODULES: tuple[str, ...] = (
     "app.scheduler",
     "app.attachment.worker",
     "app.lightrag.worker",
+    "app.lightrag.manager",
+    "app.lightrag.documents",
     "app.assistant.service",
 )
 
-# Stack of previous bindings for nested make_session calls.
-_SESSION_BINDING_STACK: list[dict[str, Any]] = []
+# Per-session restore tokens (do not rely on LIFO close order).
+_ACTIVE_BINDINGS: dict[str, dict[str, Any]] = {}
 _TEMP_DB_PATHS: list[Path] = []
+_ORIGINAL_APP_DATABASE: dict[str, Any] | None = None
 
 
 def _cleanup_temp_dbs() -> None:
@@ -43,7 +47,6 @@ def _cleanup_temp_dbs() -> None:
         try:
             path.unlink(missing_ok=True)  # type: ignore[arg-type]
         except TypeError:
-            # Python <3.8 style
             if path.exists():
                 path.unlink()
         except OSError:
@@ -86,17 +89,52 @@ def _normalize_report_tables_for_sqlite() -> None:
                 table.constraints.discard(constraint)
 
 
+def _capture_module_sessionlocals() -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+    for module_name in _SESSIONLOCAL_IMPORTER_MODULES:
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(module, "SessionLocal"):
+            captured[module_name] = getattr(module, "SessionLocal")
+    return captured
+
+
+def _install_module_sessionlocals(factory: Any) -> None:
+    for module_name in _SESSIONLOCAL_IMPORTER_MODULES:
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(module, "SessionLocal"):
+            setattr(module, "SessionLocal", factory)
+
+
+def _restore_module_sessionlocals(previous: dict[str, Any]) -> None:
+    """Restore known importers.
+
+    Modules first imported under a temporary binding are not in ``previous``;
+    force them back to the process-global ``app.database.SessionLocal``.
+    """
+    import app.database as app_database  # noqa: E402
+
+    global_factory = app_database.SessionLocal
+    for module_name in _SESSIONLOCAL_IMPORTER_MODULES:
+        module = sys.modules.get(module_name)
+        if module is None or not hasattr(module, "SessionLocal"):
+            continue
+        if module_name in previous:
+            setattr(module, "SessionLocal", previous[module_name])
+        else:
+            # Late import under temporary binding — rebind to current global.
+            setattr(module, "SessionLocal", global_factory)
+
+
 def make_session() -> Session:
     """Create an isolated SQLite DB session with all models created.
 
-    Uses a unique temporary file (not ``:memory:`` + StaticPool) so multiple
-    Sessions/connections — including capability adapters and OpenClaw workers
-    that open their own SessionLocal — share one real database without the
-    single-connection identity-map races that break ordinary unit tests.
+    Uses a unique temporary file so multiple Sessions/connections share one DB.
+    Process-global SessionLocal is rebound for capability/OpenClaw helpers and
+    always restored when the returned session is closed (or via finalizer token).
     """
+    global _ORIGINAL_APP_DATABASE
     reset_caches()
 
-    # Import models to register tables on Base.metadata before create_all().
     from app.database import Base  # noqa: E402
 
     import app.ai_provider.models  # noqa: F401,E402
@@ -137,38 +175,36 @@ def make_session() -> Session:
 
     import app.database as app_database  # noqa: E402
 
+    # Remember the true process defaults once (before any test rebind).
+    if _ORIGINAL_APP_DATABASE is None:
+        _ORIGINAL_APP_DATABASE = {
+            "engine": app_database.engine,
+            "SessionLocal": app_database.SessionLocal,
+        }
+
     test_session_factory = sessionmaker(
         bind=engine,
         autocommit=False,
-        autoflush=True,  # match production SessionLocal; quota/FK paths rely on autoflush
+        autoflush=True,
         future=True,
     )
 
-    previous_module_bindings: dict[str, Any] = {}
-    for module_name in _SESSIONLOCAL_IMPORTER_MODULES:
-        module = sys.modules.get(module_name)
-        if module is not None and hasattr(module, "SessionLocal"):
-            previous_module_bindings[module_name] = getattr(module, "SessionLocal")
+    token = uuid.uuid4().hex
+    previous_modules = _capture_module_sessionlocals()
+    previous_app = {
+        "engine": app_database.engine,
+        "SessionLocal": app_database.SessionLocal,
+    }
+    _ACTIVE_BINDINGS[token] = {
+        "app": previous_app,
+        "modules": previous_modules,
+        "tmp_path": tmp_path,
+        "sqlalchemy_engine": engine,
+    }
 
-    _SESSION_BINDING_STACK.append(
-        {
-            "engine": app_database.engine,
-            "SessionLocal": app_database.SessionLocal,
-            "modules": previous_module_bindings,
-            "tmp_path": tmp_path,
-            "sqlalchemy_engine": engine,
-        }
-    )
-
-    # Point process-global factory + known importers at this isolated DB so
-    # capability/OpenClaw workers that open their own Session see the same data.
-    # File-backed SQLite (not :memory:+StaticPool) allows concurrent Sessions.
     app_database.engine = engine
     app_database.SessionLocal = test_session_factory
-    for module_name in _SESSIONLOCAL_IMPORTER_MODULES:
-        module = sys.modules.get(module_name)
-        if module is not None and hasattr(module, "SessionLocal"):
-            setattr(module, "SessionLocal", test_session_factory)
+    _install_module_sessionlocals(test_session_factory)
 
     session = test_session_factory()
     restored = {"done": False}
@@ -177,24 +213,26 @@ def make_session() -> Session:
         if restored["done"]:
             return
         restored["done"] = True
-        if not _SESSION_BINDING_STACK:
+        binding = _ACTIVE_BINDINGS.pop(token, None)
+        if binding is None:
             return
-        previous = _SESSION_BINDING_STACK.pop()
-        if previous.get("engine") is not None:
-            app_database.engine = previous["engine"]
-        if previous.get("SessionLocal") is not None:
-            app_database.SessionLocal = previous["SessionLocal"]
-        for module_name, old_factory in previous["modules"].items():
-            module = sys.modules.get(module_name)
-            if module is not None and hasattr(module, "SessionLocal"):
-                setattr(module, "SessionLocal", old_factory)
-        eng = previous.get("sqlalchemy_engine")
+        # Restore app.database to the state before this session.
+        app_database.engine = binding["app"]["engine"]
+        app_database.SessionLocal = binding["app"]["SessionLocal"]
+        # If no other test sessions remain active, force absolute original defaults.
+        if not _ACTIVE_BINDINGS and _ORIGINAL_APP_DATABASE is not None:
+            app_database.engine = _ORIGINAL_APP_DATABASE["engine"]
+            app_database.SessionLocal = _ORIGINAL_APP_DATABASE["SessionLocal"]
+        _restore_module_sessionlocals(binding["modules"])
+        # Re-assert module bindings against current global for any late imports.
+        _install_module_sessionlocals(app_database.SessionLocal)
+        eng = binding.get("sqlalchemy_engine")
         if eng is not None:
             try:
                 eng.dispose()
             except Exception:
                 pass
-        path = previous.get("tmp_path")
+        path = binding.get("tmp_path")
         if isinstance(path, Path):
             try:
                 path.unlink(missing_ok=True)  # type: ignore[call-arg]
@@ -217,6 +255,9 @@ def make_session() -> Session:
             _restore_bindings()
 
     session.close = _close_and_restore  # type: ignore[method-assign]
+    # Helpful for debugging / explicit finalizers.
+    session._mindatlas_restore_bindings = _restore_bindings  # type: ignore[attr-defined]
+    session._mindatlas_binding_token = token  # type: ignore[attr-defined]
     return session
 
 
