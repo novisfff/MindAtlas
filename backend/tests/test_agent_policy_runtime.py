@@ -569,6 +569,51 @@ def test_evidence_replay_denied() -> None:
         factory.issue(call=call, binding=binding, descriptor=descriptor, scope=scope)
 
 
+def test_policy_deny_auth_reason_codes_preserved_on_tool_result() -> None:
+    """I1: pure policy deny via auth factory surfaces stable reason on Tool Result.
+
+    AuthorizationEvidenceVerificationError(decision.reason_code) must map to
+    blocked Tool Result safe_code=<policy code>, not authorization_evidence_failed.
+    """
+    from app.assistant.capabilities.policy import AuthorizationEvidenceVerificationError
+    from app.assistant.provider_loop.loop import (
+        _stable_auth_evidence_reason_code,
+    )
+
+    # Allowlisted Plan 05 §5.4 policy deny codes are preserved.
+    for code in (
+        "exposure_missing",
+        "global_policy_denied",
+        "owner_side_effect_denied",
+        "principal_not_allowed",
+        "recursion_denied",
+        "policy_denied",
+    ):
+        assert _stable_auth_evidence_reason_code(code) == code
+
+    # Evidence verification codes from MainAgentAuthorizationEvidenceFactory.
+    assert _stable_auth_evidence_reason_code("call_id_replay") == "call_id_replay"
+    assert (
+        _stable_auth_evidence_reason_code("scope_identity_mismatch")
+        == "scope_identity_mismatch"
+    )
+
+    # Unknown / non-allowlisted codes collapse safely (no exception text leakage).
+    assert (
+        _stable_auth_evidence_reason_code("secret_internal_detail")
+        == "authorization_evidence_failed"
+    )
+    assert (
+        _stable_auth_evidence_reason_code("has spaces")
+        == "authorization_evidence_failed"
+    )
+    assert _stable_auth_evidence_reason_code("") == "authorization_evidence_failed"
+    assert _stable_auth_evidence_reason_code(None) == "authorization_evidence_failed"
+    # reason_code attribute shape on the exception itself.
+    exc = AuthorizationEvidenceVerificationError("exposure_missing")
+    assert _stable_auth_evidence_reason_code(exc.reason_code) == "exposure_missing"
+
+
 def test_owner_forgery_rejected_by_evaluator() -> None:
     from app.assistant.policy.contracts import (
         build_effective_run_policy_snapshot,

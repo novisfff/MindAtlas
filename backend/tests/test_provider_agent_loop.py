@@ -1683,6 +1683,112 @@ def test_authorization_factory_failure_blocks_without_dispatch() -> None:
     assert result.tool_calls[0].status == "blocked"
 
 
+def test_policy_deny_preserves_stable_reason_code_on_tool_result() -> None:
+    """Plan 05 §11.3: pure policy deny via auth factory keeps stable reason codes.
+
+    AuthorizationEvidenceVerificationError(reason_code) must surface on the
+    blocked Tool Result as safe_code=<policy code>, not collapse to
+    authorization_evidence_failed.
+    """
+    from app.assistant.capabilities.policy import AuthorizationEvidenceVerificationError
+
+    base = _manifest()
+    binding, descriptor = _pair("tools.search", target_id=TARGET_A)
+    res = _build_surface(base, [(binding, descriptor)])
+    model = _model()
+    user = ProviderUserMessage(content="x")
+    alias = res.surface.tools[0].provider_alias
+
+    class Flex(ScriptedProvider):
+        def stream_round(self, request, *, cancellation):
+            self.request_count += 1
+            yield from tool_call_then_terminal(
+                call_id="c_policy",
+                provider_alias=alias,
+                arguments_json='{"query":"x"}',
+            )
+
+    provider = Flex(
+        provider_protocol=P,
+        adapter_key=ADAPTER_KEY,
+        adapter_revision=ADAPTER_REVISION,
+        model_config_digest=MODEL_CONFIG,
+        expected_model_ref=model,
+    )
+    tools = RecordingToolsProvider(resolutions=[res])
+    verifier = RecordingDescriptorVerifier(
+        current_by_binding={binding.ref.binding_contract_digest: descriptor}
+    )
+    auth = RecordingAuthFactory(
+        fail_with=AuthorizationEvidenceVerificationError("exposure_missing")
+    )
+    dispatcher = RecordingDispatcher(results=[], verifier=verifier)
+    result = run_provider_agent_loop(
+        ProviderLoopRequest(
+            manifest=base,
+            initial_messages=(user,),
+            model_ref=model,
+            execution_scope=_scope(),
+            max_rounds=4,
+            locale="en",
+        ),
+        _ports(
+            provider=provider,
+            tools=tools,
+            verifier=verifier,
+            auth=auth,
+            dispatcher=dispatcher,
+        ),
+    )
+    assert result.status == "failed"
+    assert result.stop_reason == "capability_error"
+    assert result.error is not None
+    assert result.error.semantic_code == "exposure_missing"
+    assert result.error.semantic_code != "authorization_evidence_failed"
+    assert dispatcher.requests == []
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].status == "blocked"
+    tool_msg = result.messages[-1]
+    assert isinstance(tool_msg, ProviderToolMessage)
+    assert tool_msg.content.status == "blocked"
+    assert tool_msg.content.error is not None
+    assert tool_msg.content.error.safe_code == "exposure_missing"
+    assert tool_msg.content.error.safe_code != "authorization_evidence_failed"
+
+    # Unknown / non-allowlisted reason codes still collapse safely (no leakage).
+    res_unknown = _build_surface(base, [(binding, descriptor)])
+    tools_unknown = RecordingToolsProvider(resolutions=[res_unknown])
+    auth_unknown = RecordingAuthFactory(
+        fail_with=AuthorizationEvidenceVerificationError("secret_internal_detail_xyz")
+    )
+    result_unknown = run_provider_agent_loop(
+        ProviderLoopRequest(
+            manifest=base,
+            initial_messages=(user,),
+            model_ref=model,
+            execution_scope=_scope(),
+            max_rounds=4,
+            locale="en",
+        ),
+        _ports(
+            provider=provider,
+            tools=tools_unknown,
+            verifier=verifier,
+            auth=auth_unknown,
+            dispatcher=RecordingDispatcher(results=[], verifier=verifier),
+        ),
+    )
+    assert result_unknown.status == "failed"
+    assert result_unknown.error is not None
+    assert result_unknown.error.semantic_code == "authorization_evidence_failed"
+    unknown_msg = result_unknown.messages[-1]
+    assert isinstance(unknown_msg, ProviderToolMessage)
+    assert unknown_msg.content.error is not None
+    assert unknown_msg.content.error.safe_code == "authorization_evidence_failed"
+    assert "secret_internal" not in unknown_msg.content.error.safe_code
+    assert "secret_internal" not in (unknown_msg.content.error.safe_message or "")
+
+
 def test_authorization_wrong_scope_blocks() -> None:
     base = _manifest()
     binding, descriptor = _pair("tools.search", target_id=TARGET_A)

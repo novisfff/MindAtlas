@@ -22,6 +22,7 @@ from app.assistant.capabilities.contracts import (
     CapabilityResult,
     ContinuationRef,
 )
+from app.assistant.capabilities.policy import AuthorizationEvidenceVerificationError
 from app.assistant.domain.contracts import (
     ModelRef,
     ResolvedRunManifestRevision,
@@ -95,6 +96,103 @@ from app.assistant.provider_loop.streaming import (
     assemble_provider_round,
     is_finalization_round,
 )
+
+
+# Stable reason codes that AuthorizationEvidenceVerificationError may carry from
+# pure policy deny / evidence verification. Unknown codes collapse to
+# authorization_evidence_failed so exception text never leaks onto Tool Results.
+# Kept local (no policy package import) to preserve the provider_loop boundary.
+_AUTH_EVIDENCE_STABLE_REASON_CODES: frozenset[str] = frozenset(
+    {
+        # Plan 05 §5.4 authorization deny codes (pure policy).
+        "scope_mismatch",
+        "manifest_surface_mismatch",
+        "exposure_missing",
+        "exposure_ambiguous",
+        "owner_mismatch",
+        "principal_unauthenticated",
+        "principal_not_allowed",
+        "entrypoint_not_allowed",
+        "global_policy_denied",
+        "owner_capability_not_declared",
+        "owner_side_effect_denied",
+        "release_gate_denied",
+        "target_unavailable",
+        "version_or_digest_drift",
+        "recursion_denied",
+        # Evidence/factory verification codes raised by main_agent.authorization.
+        "author_policy_missing",
+        "binding_contract_digest_mismatch",
+        "binding_not_in_manifest",
+        "call_id_mismatch",
+        "call_id_replay",
+        "capability_key_mismatch",
+        "conversation_id_mismatch",
+        "decision_not_allowed",
+        "dependency_closure_digest_mismatch",
+        "empty_granted_side_effects",
+        "evidence_already_consumed",
+        "evidence_digest_mismatch",
+        "evidence_grant_mismatch",
+        "grant_derivation_failed",
+        "granted_side_effects_mismatch",
+        "grant_source_digest_mismatch",
+        "interrupt_mode_above_ceiling",
+        "issuer_entrypoint_mismatch",
+        "missing_grant_source_digest",
+        "owner_id_mismatch",
+        "owner_kind_mismatch",
+        "owner_version_mismatch",
+        "owner_version_missing",
+        "principal_mismatch",
+        "resolution_digest_mismatch",
+        "run_id_mismatch",
+        "scope_identity_mismatch",
+        "side_effect_above_ceiling",
+        "unauthenticated_principal",
+        "unknown_issuer_entrypoint",
+        "unknown_side_effect",
+        "verifier_not_found",
+        # Generic / gateway-aligned policy deny surface.
+        "policy_denied",
+        "capability_denied",
+        # Budget / completion codes that may surface via auth factory.
+        "budget_exhausted_total_calls",
+        "budget_exhausted_owner_calls",
+        "budget_exhausted_parallel",
+        "budget_exhausted_read_signature",
+        "budget_exhausted_owner_read_signature",
+        "budget_exhausted_deadline",
+        "budget_exhausted_provider_rounds",
+        "budget_exhausted_completion_tokens",
+        "budget_exhausted_prompt_tokens",
+        "budget_exhausted_capability_depth",
+        "budget_exhausted_agent_depth",
+        "budget_exhausted_main_agent_cycles",
+        "budget_exhausted_completion_followups",
+        "budget_exhausted_active_skills",
+        "skill_completion_unsatisfiable",
+        "policy_state_protocol_error",
+    }
+)
+
+
+def _stable_auth_evidence_reason_code(reason_code: str | None) -> str:
+    """Map AuthorizationEvidenceVerificationError.reason_code to a Tool Result safe_code.
+
+    Allowlisted policy/budget/completion/evidence codes are preserved; everything
+    else collapses to authorization_evidence_failed (no exception text leakage).
+    """
+    if not isinstance(reason_code, str):
+        return "authorization_evidence_failed"
+    code = reason_code.strip()
+    if not code or len(code) > 64:
+        return "authorization_evidence_failed"
+    if any(ch.isspace() for ch in code):
+        return "authorization_evidence_failed"
+    if code in _AUTH_EVIDENCE_STABLE_REASON_CODES:
+        return code
+    return "authorization_evidence_failed"
 
 
 class ProviderLoopError(Exception):
@@ -1027,6 +1125,27 @@ def _dispatch_one(
             binding=definition.binding,
             descriptor=definition.descriptor,
             scope=scope,
+        )
+    except AuthorizationEvidenceVerificationError as exc:
+        # Pure policy deny / evidence reject: preserve allowlisted reason codes
+        # (Plan 05 §11.3 blocked/<stable code>) instead of collapsing all denials
+        # to authorization_evidence_failed.
+        safe_code = _stable_auth_evidence_reason_code(getattr(exc, "reason_code", None))
+        if safe_code == "authorization_evidence_failed":
+            safe_summary = "authorization evidence factory failed"
+        else:
+            safe_summary = "capability authorization denied"
+        _fatal_before_start(
+            error=CapabilityError(
+                error_type="unauthorized",
+                safe_code=safe_code,
+                safe_message=safe_summary,
+                retry_disposition="never",
+                call_id=call.call_id,
+            ),
+            safe_code=safe_code,
+            safe_summary=safe_summary,
+            cause=exc,
         )
     except Exception as exc:  # noqa: BLE001
         _fatal_before_start(

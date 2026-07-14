@@ -1015,12 +1015,25 @@ class MainAgentService:
                 # no user-visible output was emitted.
                 reason = MAIN_AGENT_FAILED
                 stop = getattr(result, "stop_reason", None) or ""
-                if stop:
+                # When stop_reason is coarse capability_error, prefer the stable
+                # semantic_code from the SafeProviderError (policy/budget/auth codes).
+                semantic = None
+                if result.error is not None:
+                    semantic = getattr(result.error, "semantic_code", None)
+                effective_stop = str(stop)
+                if (
+                    effective_stop in {"", "capability_error"}
+                    and isinstance(semantic, str)
+                    and semantic
+                    and semantic != "capability_error"
+                ):
+                    effective_stop = semantic
+                if effective_stop:
                     if self._state is not None:
-                        self._state.stop_reason = str(stop)[:64]
+                        self._state.stop_reason = effective_stop[:64]
                     # Map safe policy/budget/completion failures to explicit stop reasons.
                     if any(
-                        token in str(stop)
+                        token in effective_stop
                         for token in (
                             "policy",
                             "budget",
@@ -1030,9 +1043,23 @@ class MainAgentService:
                             "capability_denied",
                             "recursion",
                             "agent_cycle",
+                            "exposure_missing",
+                            "exposure_ambiguous",
+                            "global_policy",
+                            "owner_side_effect",
+                            "owner_capability",
+                            "release_gate",
+                            "entrypoint_not_allowed",
+                            "principal_not_allowed",
+                            "principal_unauthenticated",
+                            "manifest_surface",
+                            "scope_mismatch",
+                            "version_or_digest",
+                            "target_unavailable",
+                            "policy_denied",
                         )
                     ):
-                        reason = str(stop)[:64]
+                        reason = effective_stop[:64]
                 if (
                     result.error is not None
                     and getattr(result.error, "retry_disposition", None) == "retryable"
