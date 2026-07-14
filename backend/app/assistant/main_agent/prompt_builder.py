@@ -441,14 +441,14 @@ def _truncate_l1_to_fit(
     return "", True
 
 
-def _render_memory_context(
+def _prepare_l0_history(
     *,
-    l1_summary: str,
     history: Sequence[Mapping[str, Any]] | None,
     current_user_message: str,
     max_history_chars: int,
     l0_turns: int = DEFAULT_L0_TURNS,
-) -> tuple[str, list[dict[str, str]], PromptLayerReport, int, bool]:
+) -> tuple[list[dict[str, str]], int]:
+    """Load bounded L0 history as role-preserving messages (never system)."""
     l0 = build_l0_window(
         list(history) if history is not None else [],
         current_user_message,
@@ -462,47 +462,73 @@ def _render_memory_context(
         if role not in {"user", "assistant"} or not content:
             continue
         history_msgs.append({"role": role, "content": content})
+    return history_msgs, 0
 
+
+def _render_l1_only(
+    *,
+    l1_summary: str,
+    max_history_chars: int,
+) -> tuple[str, PromptLayerReport, bool]:
+    """Render L1 into protected system layers only (not L0 dialogue)."""
     l1 = _safe_text((l1_summary or "").strip())
     l1_truncated = False
-    omitted_pairs = 0
-    content = _compose_memory(l1, history_msgs)
-
-    if len(content) > max_history_chars and history_msgs:
-        pairs = _pair_l0_messages(history_msgs)
-        while pairs and len(content) > max_history_chars:
-            pairs.pop(0)
-            omitted_pairs += 1
-            history_msgs = [msg for pair in pairs for msg in pair]
-            content = _compose_memory(l1, history_msgs)
-
+    content = _section("L1_SUMMARY", l1) if l1 else _section("MEMORY_CONTEXT", "empty")
     if len(content) > max_history_chars and l1:
-        l1, l1_truncated = _truncate_l1_to_fit(
-            l1, history_msgs, max_history_chars=max_history_chars
-        )
-        content = _compose_memory(l1, history_msgs)
-
-    if len(content) > max_history_chars and history_msgs:
-        omitted_pairs += len(_pair_l0_messages(history_msgs))
-        history_msgs = []
-        content = _compose_memory(l1, history_msgs)
-
+        # Fit L1 alone into the memory budget.
+        marker = L1_TRUNCATION_MARKER
+        lo, hi = 0, len(l1)
+        best = ""
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            candidate = l1[:mid] + marker
+            body = _section("L1_SUMMARY", candidate)
+            if len(body) <= max_history_chars:
+                best = candidate
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        if best:
+            l1 = best
+            l1_truncated = True
+            content = _section("L1_SUMMARY", l1)
+        else:
+            l1 = ""
+            l1_truncated = True
+            content = _section("MEMORY_CONTEXT", "empty")
     reasons: list[str] = []
-    if omitted_pairs:
-        reasons.append("l0_oldest_pairs_removed")
     if l1_truncated:
         reasons.append("l1_tail_truncated")
-
     report = PromptLayerReport(
         layer_kind="memory_context",
-        source_ids=("l1", "l0"),
+        source_ids=("l1",),
         source_digests=(sha256_bytes(l1.encode("utf-8")) if l1 else sha256_bytes(b""),),
         included_char_count=len(content),
         included_byte_count=_utf8_len(content),
-        omitted_record_count=omitted_pairs,
+        omitted_record_count=0,
         truncation_reason_codes=tuple(reasons),
     )
-    return content, history_msgs, report, omitted_pairs, l1_truncated
+    return content, report, l1_truncated
+
+
+def _trim_l0_to_budget(
+    history_msgs: list[dict[str, str]],
+    *,
+    max_history_chars: int,
+) -> tuple[list[dict[str, str]], int]:
+    """Trim oldest L0 pairs so sum of message contents fits the history budget."""
+    if not history_msgs:
+        return history_msgs, 0
+    omitted = 0
+    total = sum(len(m["content"]) for m in history_msgs)
+    if total <= max_history_chars:
+        return history_msgs, 0
+    pairs = _pair_l0_messages(history_msgs)
+    while pairs and total > max_history_chars:
+        removed = pairs.pop(0)
+        omitted += 1
+        total -= sum(len(m["content"]) for m in removed)
+    return [msg for pair in pairs for msg in pair], omitted
 
 
 def _render_memory_from_prepared(
@@ -704,14 +730,20 @@ class MainAgentPromptBuilder:
             catalog_records,
             max_chars=budgets.max_initial_catalog_chars,
         )
-        memory_content, history_msgs, memory_layer, omitted_l0, l1_truncated = (
-            _render_memory_context(
-                l1_summary=l1_snapshot,
-                history=history,
-                current_user_message=current_user_message,
-                max_history_chars=budgets.max_history_chars,
-                l0_turns=l0_turns,
-            )
+        # L1 only in protected system layers. L0 keeps original user/assistant roles
+        # and is appended after the system message (plan §6.1–6.2).
+        memory_content, memory_layer, l1_truncated = _render_l1_only(
+            l1_summary=l1_snapshot,
+            max_history_chars=budgets.max_history_chars,
+        )
+        history_msgs, _ = _prepare_l0_history(
+            history=history,
+            current_user_message=current_user_message,
+            max_history_chars=budgets.max_history_chars,
+            l0_turns=l0_turns,
+        )
+        history_msgs, omitted_l0 = _trim_l0_to_budget(
+            history_msgs, max_history_chars=budgets.max_history_chars
         )
         tool_content, tool_layer = _render_tool_artifact_summaries(
             tool_artifact_summaries,
@@ -722,18 +754,25 @@ class MainAgentPromptBuilder:
         reason_codes.extend(catalog_layer.truncation_reason_codes)
         reason_codes.extend(memory_layer.truncation_reason_codes)
         reason_codes.extend(tool_layer.truncation_reason_codes)
+        if omitted_l0:
+            reason_codes.append("l0_oldest_pairs_removed")
 
         def _system_body(*, cat: str, mem: str, tools: str) -> str:
+            # System layers 1–3 + catalog + manifest + L1 + tool summaries only.
+            # Never embed L0 dialogue here.
             return LINE_BREAK.join(
                 (platform_content, cat, manifest_content, mem, tools)
             )
+
+        def _history_chars() -> int:
+            return sum(len(m["content"]) for m in history_msgs)
 
         system_body = _system_body(
             cat=catalog_content,
             mem=memory_content,
             tools=tool_content,
         )
-        total_with_user = lambda body: len(body) + len(user_text)
+        total_with_user = lambda body: len(body) + len(user_text) + _history_chars()
 
         # Deterministic optional reduction for total budget:
         # catalog → oldest L0 pairs → L1 → tool summaries → fail mandatory.
@@ -765,30 +804,13 @@ class MainAgentPromptBuilder:
                 pairs.pop(0)
                 omitted_l0 += 1
                 history_msgs = [msg for pair in pairs for msg in pair]
-                memory_content, history_msgs, memory_layer, pair_delta, l1_truncated = (
-                    _render_memory_from_prepared(
-                        l1_summary=l1_snapshot,
-                        history_msgs=history_msgs,
-                        max_history_chars=budgets.max_history_chars,
-                    )
-                )
-                omitted_l0 += pair_delta
-                system_body = _system_body(
-                    cat=catalog_content,
-                    mem=memory_content,
-                    tools=tool_content,
-                )
             reason_codes.append("l0_oldest_pairs_removed")
 
         if total_with_user(system_body) > budgets.max_total_protected_chars:
-            memory_content, history_msgs, memory_layer, pair_delta, flag = (
-                _render_memory_from_prepared(
-                    l1_summary="",
-                    history_msgs=history_msgs,
-                    max_history_chars=budgets.max_history_chars,
-                )
+            memory_content, memory_layer, flag = _render_l1_only(
+                l1_summary="",
+                max_history_chars=budgets.max_history_chars,
             )
-            omitted_l0 += pair_delta
             l1_truncated = True or flag
             reason_codes.append("l1_tail_truncated")
             system_body = _system_body(
@@ -954,11 +976,21 @@ class MainAgentPromptBuilder:
             key=lambda s: (s.canonical_name, str(s.version_id)),
         )
 
+        # Aggregate instruction budget covers ALL active skill bodies, not only
+        # the not-yet-applied pending batch. Already-applied skills still occupy
+        # context from prior protected messages.
+        applied_body_chars = 0
+        for skill in skills:
+            if not isinstance(skill, ActiveSkillInstruction):
+                continue
+            if skill.version_id in applied:
+                applied_body_chars += len(_skill_instruction_block(skill))
+
         blocks: list[str] = []
         source_ids: list[str] = []
         source_digests: list[str] = []
         applied_ids: list[UUID] = []
-        total_skill_chars = 0
+        total_skill_chars = applied_body_chars
         for skill in pending_sorted:
             block = _skill_instruction_block(skill)
             if len(block) > budgets.max_single_skill_instruction_chars:

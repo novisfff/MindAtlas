@@ -219,14 +219,13 @@ def test_initial_messages_layer_order_and_roles() -> None:
     assert any(isinstance(m, ProviderAssistantMessage) for m in messages[1:-1])
 
     system = messages[0].content
-    # Layer markers in locked order.
+    # Layer markers in locked order (L0 is NOT in system — role-preserving history).
     idx_platform = system.index("PLATFORM SAFETY")
     idx_profile = system.index("[PROFILE_BASE]")
     idx_entry = system.index("[ENTRYPOINT_POLICY]")
     idx_catalog = system.index("[CATALOG_SUMMARY]")
     idx_manifest = system.index("[MANIFEST_IDENTITY]")
     idx_l1 = system.index("[L1_SUMMARY]")
-    idx_l0 = system.index("[L0_HISTORY]")
     idx_tools = system.index("[TOOL_ARTIFACT_SUMMARY]")
     assert (
         idx_platform
@@ -235,9 +234,12 @@ def test_initial_messages_layer_order_and_roles() -> None:
         < idx_catalog
         < idx_manifest
         < idx_l1
-        < idx_l0
         < idx_tools
     )
+    assert "[L0_HISTORY]" not in system
+    # Historical user text must not be elevated into system.
+    assert "你好" not in system
+    assert "你好，有什么可以帮忙？" not in system
     assert "local-assistant" in system
     assert "entrypoint=assistant_chat" in system
     assert "weekly-review" in system
@@ -662,6 +664,74 @@ def test_aggregate_active_skill_budget() -> None:
             manifest=manifest,
             locale="en",
             skills=instructions,
+            caps=PromptBudgetCaps(
+                max_single_skill_instruction_chars=2000,
+                max_active_skill_instruction_chars=1000,
+            ),
+        )
+    assert exc.value.reason_code == ACTIVE_SKILL_BUDGET_EXCEEDED
+
+
+def test_multi_round_skill_budget_counts_already_applied() -> None:
+    """Already-applied skills still consume the aggregate instruction budget."""
+    base = _manifest(with_skill=False)
+    skill_a = ResolvedSkillRef(
+        package_id=PACKAGE_ID,
+        version_id=SKILL_VERSION_ID,
+        canonical_name="alpha-skill",
+        sequence=1,
+        content_digest=DIGEST_B,
+        version_digest=DIGEST_C,
+        requested_name_normalized=None,
+        resolved_via_alias_id=None,
+    )
+    skill_b = ResolvedSkillRef(
+        package_id=PACKAGE_ID_B,
+        version_id=SKILL_VERSION_ID_B,
+        canonical_name="beta-skill",
+        sequence=1,
+        content_digest=DIGEST_D,
+        version_digest=DIGEST_E,
+        requested_name_normalized=None,
+        resolved_via_alias_id=None,
+    )
+    # Round 1: only A active and applied.
+    m1 = append_skill_activation(base, skill=skill_a, capabilities=())
+    instr_a = _skill_instruction(
+        package_id=PACKAGE_ID,
+        version_id=SKILL_VERSION_ID,
+        canonical_name="alpha-skill",
+        content_digest=DIGEST_B,
+        version_digest=DIGEST_C,
+        instructions="A" * 700,
+    )
+    r1 = _builder().build_skill_context_messages(
+        manifest=m1,
+        locale="en",
+        skills=(instr_a,),
+        caps=PromptBudgetCaps(
+            max_single_skill_instruction_chars=2000,
+            max_active_skill_instruction_chars=1000,
+        ),
+    )
+    assert r1.messages
+
+    # Round 2: A already applied, B newly pending — must still count A.
+    m2 = append_skill_activation(m1, skill=skill_b, capabilities=())
+    instr_b = _skill_instruction(
+        package_id=PACKAGE_ID_B,
+        version_id=SKILL_VERSION_ID_B,
+        canonical_name="beta-skill",
+        content_digest=DIGEST_D,
+        version_digest=DIGEST_E,
+        instructions="B" * 700,
+    )
+    with pytest.raises(MainAgentPromptBudgetExceeded) as exc:
+        _builder().build_skill_context_messages(
+            manifest=m2,
+            locale="en",
+            skills=(instr_a, instr_b),
+            already_applied_skill_version_ids=(SKILL_VERSION_ID,),
             caps=PromptBudgetCaps(
                 max_single_skill_instruction_chars=2000,
                 max_active_skill_instruction_chars=1000,

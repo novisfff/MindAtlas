@@ -688,13 +688,12 @@ class AssistantService:
                             skip_title = not bool(ma_result.write_title)
                             final_text = ma_result.final_text or ""
                             if final_text and ma_result.write_message:
-                                for chunk in chunk_text(final_text):
-                                    ensure_not_cancelled(_cancel_checker)
-                                    with state_lock:
-                                        content_parts.append(chunk)
-                                        pending_chars += len(chunk)
-                                    _append_event("content_delta", {"delta": chunk})
+                                # MainAgentService already emitted safe content_delta
+                                # events via its event adapter. Only update the
+                                # Message body here — do not re-stream deltas.
                                 with state_lock:
+                                    content_parts.append(final_text)
+                                    pending_chars += len(final_text)
                                     if ma_result.skill_summaries:
                                         assistant_msg.skill_calls = list(
                                             ma_result.skill_summaries

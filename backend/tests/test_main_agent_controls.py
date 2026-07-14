@@ -17,6 +17,26 @@ SOURCE_DIGEST = "a" * 64
 BUILD = "plan04-dev"
 
 
+@pytest.fixture(autouse=True)
+def _pin_build_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin build revision for all control binding materialization tests."""
+    monkeypatch.setenv("APP_BUILD_REVISION", BUILD)
+    try:
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+    except Exception:
+        pass
+    yield
+    try:
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+    except Exception:
+        pass
+
+
+
 def test_additive_provenance_enums_accept_main_agent() -> None:
     from app.assistant.capabilities.contracts import (
         CapabilityOwnerRef,

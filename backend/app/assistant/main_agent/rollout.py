@@ -456,41 +456,91 @@ def enable_rollout(
             steps=steps + ["dry_run_no_flag_writes"],
         )
 
-    skill_svc = AgentSkillService(db)
-    profile_svc = MainAgentProfileService(db)
+    # Single-transaction enable: never leave package cutover without profile runtime.
+    # Lock package then profile (UUID-independent fixed order by resource kind).
+    try:
+        package = (
+            db.query(AssistantSkillPackage)
+            .filter(AssistantSkillPackage.id == package.id)
+            .with_for_update()
+            .one()
+        )
+        profile = (
+            db.query(AssistantMainAgentProfile)
+            .filter(AssistantMainAgentProfile.id == profile.id)
+            .with_for_update()
+            .one()
+        )
 
-    skill_svc.set_catalog_enabled(
-        package.id,
-        enabled=True,
-        expected_published_version_id=expected.package_version_id,
-        expected_version_digest=expected.package_version_digest,
-        migration_state="cutover",
-    )
-    steps.append("package_catalog_enabled_cutover")
+        # Re-validate under locks before any write.
+        if package.published_version_id != expected.package_version_id:
+            raise RolloutError(
+                "package_version_drift",
+                "published skill version drifted under lock",
+            )
+        pkg_version = db.get(AssistantSkillVersion, package.published_version_id)
+        if (
+            pkg_version is None
+            or str(pkg_version.version_digest or "") != expected.package_version_digest
+            or str(pkg_version.version_source) != "publish"
+        ):
+            raise RolloutError(
+                "package_version_invalid",
+                "published skill version missing, not publish, or digest drift",
+            )
+        if profile.published_version_id is None:
+            raise RolloutError(
+                "profile_unpublished",
+                "profile has no published version under lock",
+            )
+        prof_version = db.get(
+            AssistantMainAgentProfileVersion, profile.published_version_id
+        )
+        if (
+            prof_version is None
+            or str(prof_version.content_digest or "") != expected.profile_content_digest
+            or str(prof_version.version_source) != "publish"
+        ):
+            raise RolloutError(
+                "profile_version_invalid",
+                "published profile version missing, not publish, or digest drift",
+            )
 
-    profile_svc.set_runtime_enabled(
-        profile.id,
-        enabled=True,
-        expected_published_version_id=expected.profile_version_id
-        if profile.published_version_id == expected.profile_version_id
-        else profile.published_version_id,
-        expected_content_digest=expected.profile_content_digest,
-        migration_state="cutover",
-    )
-    steps.append("profile_runtime_enabled_cutover")
+        others = _other_catalog_enabled(db, package.id)
+        if others:
+            raise RolloutError(
+                "other_packages_catalog_enabled",
+                f"other catalog-enabled packages present: {others}",
+            )
 
-    # Re-read and enforce single-package catalog visibility.
+        package.catalog_enabled = True
+        package.migration_state = "cutover"
+        profile.runtime_enabled = True
+        if str(profile.migration_state or "") != "cutover":
+            profile.migration_state = "cutover"
+        db.flush()
+        # Final visibility check before commit.
+        others = _other_catalog_enabled(db, package.id)
+        if others:
+            raise RolloutError(
+                "other_packages_catalog_enabled",
+                f"other catalog-enabled packages present after write: {others}",
+            )
+        db.commit()
+        steps.append("atomic_package_and_profile_cutover")
+    except RolloutError:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise RolloutError(
+            "enable_transaction_failed",
+            f"atomic enable failed: {type(exc).__name__}",
+        ) from exc
+
     package = _package_by_id(db, package.id)
     profile = _default_profile(db)
     others = _other_catalog_enabled(db, package.id)
-    if others:
-        # Fail closed: disable what we just enabled to avoid multi-package exposure.
-        skill_svc.set_catalog_enabled(package.id, enabled=False)
-        profile_svc.set_runtime_enabled(profile.id, enabled=False)
-        raise RolloutError(
-            "other_packages_catalog_enabled",
-            f"rolled back: other catalog-enabled packages present: {others}",
-        )
 
     return RolloutReport(
         operation="enable",

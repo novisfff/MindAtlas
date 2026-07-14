@@ -130,10 +130,21 @@ def _reset_to_plan01_parent() -> None:
         if current == PLAN03_PROBE_REVISION:
             _run_alembic("downgrade", PLAN01_HEAD)
         elif current != PLAN01_HEAD:
-            # Unknown/mid state: stamp only after forcing schema via drop+upgrade path.
+            # Unknown/mid state (e.g. Plan 04 head): force parent schema by
+            # dropping probe objects including FK/trigger, then stamp/upgrade.
             with engine.begin() as conn:
+                # Drop trigger/function that depend on the pointer column first.
+                conn.execute(text("DROP TRIGGER IF EXISTS trg_ai_model_probe_pointer_guard ON ai_model"))
+                conn.execute(text("DROP FUNCTION IF EXISTS mindatlas_ai_model_probe_pointer_guard() CASCADE"))
+                # Drop FK then column so DependentObjectsStillExist cannot fire.
+                conn.execute(
+                    text(
+                        "ALTER TABLE ai_model DROP CONSTRAINT IF EXISTS "
+                        "fk_ai_model_current_capability_probe_id"
+                    )
+                )
+                conn.execute(text("DROP INDEX IF EXISTS idx_ai_model_current_capability_probe_id"))
                 conn.execute(text("DROP TABLE IF EXISTS ai_model_capability_probe CASCADE"))
-                # Drop child column if present so upgrade can re-add it cleanly.
                 conn.execute(
                     text(
                         "ALTER TABLE ai_model DROP COLUMN IF EXISTS current_capability_probe_id"
