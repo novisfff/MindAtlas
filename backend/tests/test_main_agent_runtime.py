@@ -53,6 +53,7 @@ from app.assistant.provider_loop.contracts import (  # noqa: E402
     ProviderLoopPorts,
     ProviderLoopResult,
     ProviderUsage,
+    SafeProviderError,
 )
 from app.assistant.provider_loop.scheduler import SequentialSiblingExecutor  # noqa: E402
 from app.assistant.skills.schemas import (  # noqa: E402
@@ -459,6 +460,85 @@ def test_main_agent_service_happy_path_scripted_loop() -> None:
     # content_delta is owned by the outer Assistant Run path (single stream);
     # MainAgentService only returns final_text for the outer loop to emit once.
     assert not any(name == "content_delta" for name, _ in events)
+
+
+def test_owner_mismatch_promotes_stop_reason_and_failed_reason_code() -> None:
+    """Pure §5.4 code owner_mismatch must promote onto Run reason_code + stop_reason.
+
+    ProviderLoopResult only allows coarse failed stop reasons (capability_error);
+    the stable pure policy code arrives via SafeProviderError.semantic_code and must
+    become both MainAgentRunState.stop_reason and AssistantRuntimeResult.reason_code
+    instead of collapsing to MAIN_AGENT_FAILED.
+    """
+    from app.assistant.main_agent.service import MAIN_AGENT_FAILED
+
+    admission = _admission(mode="read_only")
+    bindings_manifest = build_base_manifest_with_controls(
+        run_id=RUN_ID,
+        main_agent=admission.main_agent_ref,
+        provider=admission.provider_ref,
+        model=admission.model_ref,
+        effective_policy_digest=admission.effective_policy_digest,
+        control_bindings=__import__(
+            "app.assistant.main_agent.control_capabilities",
+            fromlist=["build_all_main_agent_control_bindings"],
+        ).build_all_main_agent_control_bindings(
+            owner_version_id=PROFILE_VERSION_ID,
+            source_snapshot_digest=DIGEST_A,
+            app_build_revision="plan04-dev",
+        ),
+    )
+    loop_result = ProviderLoopResult(
+        status="failed",
+        final_text=None,
+        messages=(),
+        tool_calls=(),
+        round_count=1,
+        stop_reason="capability_error",
+        manifest=bindings_manifest,
+        continuation=None,
+        usage=ProviderUsage(input_tokens=1, output_tokens=0, total_tokens=1),
+        error=SafeProviderError(
+            semantic_code="owner_mismatch",
+            safe_summary="policy denied",
+            retry_disposition="never",
+        ),
+    )
+    ports = ProviderLoopPorts(
+        provider=_FakeProvider(),
+        tools_provider=_FakeTools(),
+        current_descriptors=_FakeDescriptors(),
+        authorization_evidence=_FakeAuth(),
+        tool_dispatcher=_FakeDispatcher(),
+        sibling_executor=SequentialSiblingExecutor(),
+        cancellation=type("C", (), {"is_cancelled": lambda self: False})(),
+        events=MainAgentEventAdapter(lambda *_a, **_k: None),
+        round_context_provider=NoOpRoundContextProvider(),
+        manifest_effect_lifecycle=_FakeLifecycle(),
+    )
+    service = MainAgentService(
+        db=None,  # type: ignore[arg-type]
+        admission=admission,
+        provider=_FakeProvider(),
+        ports=ports,
+        loop=_FakeLoop(loop_result),  # type: ignore[arg-type]
+        app_build_revision="plan04-dev",
+        allow_injected_provider=True,
+    )
+    result = service.run(
+        AssistantRuntimeRequest(
+            run_id=RUN_ID,
+            conversation_id=CONV_ID,
+            user_text="hi",
+            locale="en",
+            execution_kind="production",
+        )
+    )
+    assert result.status == "failed"
+    assert result.reason_code == "owner_mismatch"
+    assert result.reason_code != MAIN_AGENT_FAILED
+    assert service.state is not None
+    assert service.state.stop_reason == "owner_mismatch"
 
 
 def test_main_agent_service_shadow_evaluation_discards_writes() -> None:

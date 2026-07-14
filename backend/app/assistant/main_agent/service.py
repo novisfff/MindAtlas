@@ -34,6 +34,7 @@ from app.assistant.main_agent.authorization import (
     MAIN_AGENT_READ_ONLY_EFFECT_CEILING,
     MAIN_AGENT_READ_ONLY_EFFECT_CEILING_DIGEST,
 )
+from app.assistant.policy.contracts import AUTHORIZATION_REASON_CODES
 from app.assistant.main_agent.control_capabilities import (
     MAIN_AGENT_CONTROL_KEYS,
     build_all_main_agent_control_bindings,
@@ -130,6 +131,56 @@ FALLBACK_SAFE_REASONS = frozenset(
         CONTROL_UNSUPPORTED,
         ENTRYPOINT_UNSUPPORTED,
         "provider_retry_safe_before_output",
+    }
+)
+
+# Stable policy / budget / completion / recursion codes that may surface as
+# stop_reason or SafeProviderError.semantic_code after Provider request start.
+# Exact membership promotes them onto AssistantRuntimeResult.reason_code;
+# unknown codes fail closed to MAIN_AGENT_FAILED.
+_STABLE_FAILED_REASON_CODES: frozenset[str] = frozenset(
+    {
+        # Plan 05 §5.4 pure authorization deny codes (exclude "allowed").
+        *(code for code in AUTHORIZATION_REASON_CODES if code != "allowed"),
+        # Recursion / cycle denials.
+        "agent_cycle_denied",
+        "main_agent_restart_denied",
+        # Generic / gateway-aligned policy deny surface.
+        "policy_denied",
+        "capability_denied",
+        # Budget exhaustion family.
+        "budget_exhausted",
+        "budget_exhausted_total_calls",
+        "budget_exhausted_owner_calls",
+        "budget_exhausted_parallel",
+        "budget_exhausted_read_signature",
+        "budget_exhausted_owner_read_signature",
+        "budget_exhausted_deadline",
+        "budget_exhausted_provider_rounds",
+        "budget_exhausted_completion_tokens",
+        "budget_exhausted_prompt_tokens",
+        "budget_exhausted_capability_depth",
+        "budget_exhausted_agent_depth",
+        "budget_exhausted_main_agent_cycles",
+        "budget_exhausted_completion_followups",
+        "budget_exhausted_active_skills",
+        "budget_exhausted_with_obligations",
+        # Completion / obligation codes.
+        "skill_completion_unsatisfiable",
+        "completion_followup_limit",
+        "obligations_pending_at_finalization",
+        "pending_obligation",
+        "terminal_text_missing",
+        "skill_terminal_output_pending",
+        "capability_followup_pending",
+        "artifact_pending",
+        "approval_pending",
+        "user_input_pending",
+        "reconciliation_pending",
+        "waiting_without_obligation",
+        "completion_evidence_invalid",
+        "policy_state_protocol_error",
+        "obligation_state_protocol_error",
     }
 )
 
@@ -1031,34 +1082,10 @@ class MainAgentService:
                 if effective_stop:
                     if self._state is not None:
                         self._state.stop_reason = effective_stop[:64]
-                    # Map safe policy/budget/completion failures to explicit stop reasons.
-                    if any(
-                        token in effective_stop
-                        for token in (
-                            "policy",
-                            "budget",
-                            "obligation",
-                            "completion",
-                            "skill_completion",
-                            "capability_denied",
-                            "recursion",
-                            "agent_cycle",
-                            "exposure_missing",
-                            "exposure_ambiguous",
-                            "global_policy",
-                            "owner_side_effect",
-                            "owner_capability",
-                            "release_gate",
-                            "entrypoint_not_allowed",
-                            "principal_not_allowed",
-                            "principal_unauthenticated",
-                            "manifest_surface",
-                            "scope_mismatch",
-                            "version_or_digest",
-                            "target_unavailable",
-                            "policy_denied",
-                        )
-                    ):
+                    # Prefer exact membership against known policy/budget/completion
+                    # stable codes (includes pure §5.4 denials like owner_mismatch).
+                    # Unknown codes fail closed to MAIN_AGENT_FAILED.
+                    if effective_stop in _STABLE_FAILED_REASON_CODES:
                         reason = effective_stop[:64]
                 if (
                     result.error is not None
