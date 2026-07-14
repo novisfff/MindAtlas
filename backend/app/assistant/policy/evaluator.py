@@ -132,11 +132,17 @@ def derive_effective_capability_grant(
     binding_contract_digest: str,
     entrypoint_policy_digest: str = ASSISTANT_CHAT_ENTRYPOINT_POLICY_DIGEST,
     global_policy_digest: str,
+    global_policy: GlobalPolicyView | None = None,
+    denied_side_effects: frozenset[str] | Sequence[str] | None = None,
     platform_ceiling_digest: str = MAIN_AGENT_READ_ONLY_EFFECT_CEILING_DIGEST,
     platform_ceiling_revision: str = MAIN_AGENT_CEILING_REVISION,
     release_gate: Sequence[str] = PLAN05_RELEASE_GATE_SIDE_EFFECTS,
 ) -> EffectiveCapabilityGrant | None:
     """Derive an independent grant for the exact owner/binding.
+
+    Lattice = platform prefix ∩ entrypoint/release gate ∩ published Profile
+    global policy (denied side-effect classes) ∩ owner declaration.
+    ``grant_source_digest`` reflects the post-intersection grant.
 
     Returns None when the intersection is empty (caller maps to a deny code).
     Never reads descriptor.behavior.
@@ -169,6 +175,18 @@ def derive_effective_capability_grant(
             ceiling_effects=platform_prefix,
             candidate=author_with_none,
         )
+
+    # Published Profile global policy ∩ candidate (Plan §5.3).
+    denied: frozenset[str]
+    if denied_side_effects is not None:
+        denied = frozenset(denied_side_effects)
+    elif global_policy is not None:
+        denied = frozenset(global_policy.denied_side_effects)
+    else:
+        denied = frozenset()
+    if denied:
+        candidate = tuple(effect for effect in candidate if effect not in denied)
+
     if not candidate:
         return None
     return build_effective_capability_grant(
@@ -345,15 +363,10 @@ def evaluate_authorization(
             exposure_digest=exposure.exposure_digest,
         )
 
-    # 9) global_policy_denied
+    # 9) global_policy_denied — named capability-key denials + digest match only.
+    # Descriptor side-effect membership is inspected only after grant freeze.
     gp = global_policy or GlobalPolicyView(policy_digest=global_digest)
     if proposal.capability_key in gp.denied_capability_keys:
-        return _deny(
-            "global_policy_denied",
-            owner_policy_digest=owner.policy_digest,
-            exposure_digest=exposure.exposure_digest,
-        )
-    if proposal.descriptor_side_effect in gp.denied_side_effects:
         return _deny(
             "global_policy_denied",
             owner_policy_digest=owner.policy_digest,
@@ -395,23 +408,45 @@ def evaluate_authorization(
         )
 
     # --- Independent grant derivation (before descriptor membership tests) ---
+    # Platform ∩ entrypoint ∩ release gate ∩ published global policy ∩ owner.
     grant = derive_effective_capability_grant(
         owner=owner,
         capability_key=proposal.capability_key,
         binding_contract_digest=proposal.binding_contract_digest,
         entrypoint_policy_digest=entrypoint_digest,
         global_policy_digest=global_digest,
+        global_policy=gp,
     )
     if grant is None:
+        # Empty intersection after global/owner clipping. Prefer global code
+        # when every platform class is globally denied; else owner denial.
+        if set(MAIN_AGENT_READ_ONLY_EFFECT_CEILING.allowed_side_effects) <= set(
+            gp.denied_side_effects
+        ):
+            return _deny(
+                "global_policy_denied",
+                owner_policy_digest=owner.policy_digest,
+                exposure_digest=exposure.exposure_digest,
+            )
         return _deny(
             "owner_side_effect_denied",
             owner_policy_digest=owner.policy_digest,
             exposure_digest=exposure.exposure_digest,
         )
 
-    # 11) owner_side_effect_denied — descriptor effect not in frozen grant
+    # 11) Descriptor membership against the frozen grant.
+    # If effect ∉ grant and effect ∈ global denied classes → global_policy_denied;
+    # else if effect ∉ grant → owner_side_effect_denied.
     actual = proposal.descriptor_side_effect
     if actual == "unknown" or actual not in grant.allowed_side_effects:
+        if actual != "unknown" and actual in gp.denied_side_effects:
+            return _deny(
+                "global_policy_denied",
+                owner_policy_digest=owner.policy_digest,
+                exposure_digest=exposure.exposure_digest,
+                allowed_side_effects=grant.allowed_side_effects,
+                grant_source_digest=grant.grant_source_digest,
+            )
         return _deny(
             "owner_side_effect_denied",
             owner_policy_digest=owner.policy_digest,

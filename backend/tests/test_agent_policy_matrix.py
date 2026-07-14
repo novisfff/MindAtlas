@@ -1096,6 +1096,117 @@ def test_global_policy_denied_named_key() -> None:
     assert decision.reason_code == "global_policy_denied"
 
 
+def test_global_deny_compute_shrinks_grant_allowed_side_effects() -> None:
+    """Global deny of ``compute`` shrinks the frozen grant lattice."""
+    snap, binding, exposure, owners, material = _main_agent_fixture()
+    gp = GlobalPolicyView(
+        policy_digest=snap.global_policy_digest,
+        denied_side_effects=frozenset({"compute"}),
+    )
+    grant = derive_effective_capability_grant(
+        owner=material,
+        capability_key=binding.ref.capability_key,
+        binding_contract_digest=binding.ref.binding_contract_digest,
+        entrypoint_policy_digest=snap.entrypoint_policy_digest,
+        global_policy_digest=snap.global_policy_digest,
+        global_policy=gp,
+    )
+    assert grant is not None
+    assert "compute" not in grant.allowed_side_effects
+    assert grant.allowed_side_effects == ("none", "read")
+    # Digest must reflect the post-intersection grant (differs from unclipped).
+    unclipped = derive_effective_capability_grant(
+        owner=material,
+        capability_key=binding.ref.capability_key,
+        binding_contract_digest=binding.ref.binding_contract_digest,
+        entrypoint_policy_digest=snap.entrypoint_policy_digest,
+        global_policy_digest=snap.global_policy_digest,
+    )
+    assert unclipped is not None
+    assert unclipped.allowed_side_effects == ("none", "compute", "read")
+    assert grant.grant_source_digest != unclipped.grant_source_digest
+    # Allowed decision carries the shrunk grant.
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(binding=binding, exposure=exposure, side_effect="read"),
+        owner_materials=owners,
+        global_policy=gp,
+    )
+    assert decision.allowed is True
+    assert decision.allowed_side_effects == ("none", "read")
+    assert decision.grant_source_digest == grant.grant_source_digest
+
+
+def test_grant_derivation_does_not_use_descriptor_side_effect() -> None:
+    """Grant derivation never takes descriptor side effect as an input."""
+    snap, binding, exposure, owners, material = _main_agent_fixture()
+    # Signature / kwargs of derive_effective_capability_grant exclude descriptor.
+    import inspect
+
+    sig = inspect.signature(derive_effective_capability_grant)
+    assert "descriptor" not in sig.parameters
+    assert "descriptor_side_effect" not in sig.parameters
+    assert "side_effect" not in sig.parameters
+    # Same grant regardless of any later descriptor membership test input.
+    grant = derive_effective_capability_grant(
+        owner=material,
+        capability_key=binding.ref.capability_key,
+        binding_contract_digest=binding.ref.binding_contract_digest,
+        entrypoint_policy_digest=snap.entrypoint_policy_digest,
+        global_policy_digest=snap.global_policy_digest,
+        global_policy=GlobalPolicyView(
+            policy_digest=snap.global_policy_digest,
+            denied_side_effects=frozenset({"compute"}),
+        ),
+    )
+    assert grant is not None
+    assert grant.allowed_side_effects == ("none", "read")
+    # evaluate with different descriptor effects still freezes the same grant.
+    for effect in ("none", "read", "compute", "write_local"):
+        decision = evaluate_authorization(
+            snapshot=snap,
+            proposal=_proposal(binding=binding, exposure=exposure, side_effect=effect),
+            owner_materials=owners,
+            global_policy=GlobalPolicyView(
+                policy_digest=snap.global_policy_digest,
+                denied_side_effects=frozenset({"compute"}),
+            ),
+        )
+        if decision.grant_source_digest is not None:
+            assert decision.allowed_side_effects == ("none", "read")
+            assert decision.grant_source_digest == grant.grant_source_digest
+
+
+def test_descriptor_effect_denied_by_global_after_grant_freeze() -> None:
+    """Descriptor effect denied by global policy after grant freeze → global_policy_denied."""
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    gp = GlobalPolicyView(
+        policy_digest=snap.global_policy_digest,
+        denied_side_effects=frozenset({"compute"}),
+    )
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(binding=binding, exposure=exposure, side_effect="compute"),
+        owner_materials=owners,
+        global_policy=gp,
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "global_policy_denied"
+    # Grant was derived (with compute removed) and carried for audit.
+    assert decision.grant_source_digest is not None
+    assert "compute" not in decision.allowed_side_effects
+    assert decision.allowed_side_effects == ("none", "read")
+    # Non-globally-denied out-of-grant effect still maps to owner_side_effect_denied.
+    decision_w = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(binding=binding, exposure=exposure, side_effect="write_local"),
+        owner_materials=owners,
+        global_policy=gp,
+    )
+    assert decision_w.allowed is False
+    assert decision_w.reason_code == "owner_side_effect_denied"
+
+
 def test_owner_capability_not_declared_instruction_only() -> None:
     snap, binding, exposure, owners, _ = _skill_fixture(
         is_instruction_only=True,

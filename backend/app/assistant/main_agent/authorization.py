@@ -272,8 +272,6 @@ class SkillPolicyAuthorizationEvidenceVerifier:
         expected_conversation_id: UUID | None = None,
         ceiling: MainAgentEffectCeiling = MAIN_AGENT_READ_ONLY_EFFECT_CEILING,
         allowed_side_effects: tuple[SideEffectClass, ...] | None = None,
-        expected_decision_digest: str | None = None,
-        expected_effective_policy_digest: str | None = None,
         copy_descriptor_effect: bool = False,
         omit_grant_source_digest: bool = False,
     ) -> None:
@@ -294,8 +292,6 @@ class SkillPolicyAuthorizationEvidenceVerifier:
             if allowed_side_effects is not None
             else ceiling.allowed_side_effects
         )
-        self.expected_decision_digest = expected_decision_digest
-        self.expected_effective_policy_digest = expected_effective_policy_digest
         # Test-only traps: production always leaves these False.
         self.copy_descriptor_effect = copy_descriptor_effect
         self.omit_grant_source_digest = omit_grant_source_digest
@@ -573,8 +569,6 @@ class MainAgentAuthorizationEvidenceFactory:
             expected_conversation_id=scope.conversation_id,
             ceiling=self.ceiling,
             allowed_side_effects=tuple(decision.allowed_side_effects),
-            expected_decision_digest=decision.decision_digest,
-            expected_effective_policy_digest=decision.effective_policy_digest,
         )
         with self._lock:
             self._verifiers[call.call_id] = verifier
