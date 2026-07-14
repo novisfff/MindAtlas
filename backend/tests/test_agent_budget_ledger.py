@@ -363,10 +363,13 @@ def test_arguments_digest_mismatch_blocks_start() -> None:
     d = ledger.mark_started("m1", _ARGS_TWO)
     assert not d.allowed
     assert d.reason_code == REASON_ARGUMENTS_DIGEST_MISMATCH
-    # Still reserved, not started
+    # Failure before start releases the reservation (Plan §7.3 step 8)
     res = next(r for r in ledger.snapshot().reservations if r.call_id == "m1")
-    assert res.state == "reserved"
+    assert res.state == "released"
+    assert d.reservation is not None
+    assert d.reservation.state == "released"
     assert ledger.snapshot().capability_calls_started == 0
+    assert ledger.snapshot().denial_count == 1
 
 
 def test_policy_input_denial_before_start_records_metric_without_allowance() -> None:
@@ -750,11 +753,14 @@ def test_monotonic_deadline_not_extended_by_utc_rollback_or_advance() -> None:
     assert not d.allowed
     assert d.reason_code == REASON_DEADLINE
 
-    # UTC still in the past relative to original start — still denied
+    # UTC still in the past relative to original start — still denied and released
     clock.set_utc(datetime(2026, 7, 14, 11, 0, 0, tzinfo=timezone.utc))
     d2 = ledger.mark_started("t1", _ARGS_EMPTY)
     assert not d2.allowed
     assert d2.reason_code == REASON_DEADLINE
+    res = next(r for r in ledger.snapshot().reservations if r.call_id == "t1")
+    assert res.state == "released"
+    assert ledger.snapshot().capability_calls_started == 0
 
 
 def test_deadline_checked_on_provider_round_and_followup() -> None:
@@ -849,7 +855,11 @@ def test_cancellation_blocks_reserve_and_start() -> None:
     d2 = ledger.mark_started("c1", _ARGS_EMPTY)
     assert not d2.allowed
     assert d2.reason_code == REASON_CANCELLED
-    # Release still works for cleanup
+    # Cancel-before-start releases the reservation
+    res = next(r for r in ledger.snapshot().reservations if r.call_id == "c1")
+    assert res.state == "released"
+    assert ledger.snapshot().capability_calls_started == 0
+    # Idempotent release still works for cleanup
     assert ledger.release_unstarted("c1").allowed
 
 
@@ -1122,6 +1132,34 @@ def test_projected_active_reservations_count_toward_totals() -> None:
     d = ledger.reserve_one(_req("pr3"))
     assert not d.allowed
     assert d.reason_code == REASON_TOTAL_CALLS
+
+
+def test_started_in_flight_not_double_counted_in_total_capacity() -> None:
+    """In-flight started work is already in capability_calls_started; do not re-add it.
+
+    Under the double-count bug, started=2 + active(started)=2 + n=1 would deny total
+    even though remaining legal capacity is 1. Parallel still correctly counts started.
+    """
+    limits = _limits(max_total_capability_calls=3, max_parallel_calls=3)
+    ledger = _ledger(limits=limits)
+    # Leave N=2 calls in started (unfinished); remaining total capacity is 1.
+    for i in range(2):
+        assert ledger.reserve_one(
+            _req(f"live{i}", side_effect="compute", arguments_digest=_digest_hex(f"l{i}"))
+        ).allowed
+        assert ledger.mark_started(f"live{i}", _digest_hex(f"l{i}")).allowed
+    assert ledger.snapshot().capability_calls_started == 2
+    d = ledger.reserve_one(
+        _req("more", side_effect="compute", arguments_digest=_digest_hex("more"))
+    )
+    assert d.allowed, d.reason_code
+    assert ledger.snapshot().capability_calls_started == 2  # not consumed until start
+    # Fill remaining parallel/total slot is held reserved; next must deny.
+    d2 = ledger.reserve_one(
+        _req("overflow", side_effect="compute", arguments_digest=_digest_hex("ov"))
+    )
+    assert not d2.allowed
+    assert d2.reason_code in {REASON_TOTAL_CALLS, REASON_PARALLEL}
 
 
 def test_main_agent_owner_default_capped_by_run() -> None:

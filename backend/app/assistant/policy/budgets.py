@@ -1165,6 +1165,71 @@ def _deny(
     return new_state, decision
 
 
+def _deny_and_release_reserved(
+    state: BudgetLedgerState,
+    *,
+    reservation: BudgetReservation,
+    reason_code: str,
+    dimension: str | None,
+) -> tuple[BudgetLedgerState, BudgetDecision]:
+    """Deny mark_started and release the unstarted reservation (Plan §7.3 step 8)."""
+    if reservation.state != "reserved":
+        raise ValueError(
+            f"expected reserved reservation for release-on-deny, got {reservation.state!r}"
+        )
+    released = build_reservation(
+        call_id=reservation.call_id,
+        owner_kind=reservation.owner_kind,
+        owner_version_id=reservation.owner_version_id,
+        domain_key=reservation.domain_key,
+        side_effect=reservation.side_effect,
+        arguments_digest=reservation.arguments_digest,
+        read_signature=reservation.read_signature,
+        state="released",
+    )
+    reservations = _replace_reservation(state.reservations, released)
+    new_state = _rebuild_state(
+        revision=state.revision + 1,
+        limits=state.limits,
+        owner_limits=state.owner_limits,
+        provider_rounds_started=state.provider_rounds_started,
+        main_agent_cycles_started=state.main_agent_cycles_started,
+        capability_calls_started=state.capability_calls_started,
+        completion_followups_started=state.completion_followups_started,
+        prompt_tokens_used=state.prompt_tokens_used,
+        completion_tokens_used=state.completion_tokens_used,
+        owner_calls_started=state.owner_calls_started,
+        global_read_signatures=state.global_read_signatures,
+        owner_read_signatures=state.owner_read_signatures,
+        reservations=reservations,
+        denial_count=state.denial_count + 1,
+        started_at_utc=state.started_at_utc,
+        deadline_at_utc=state.deadline_at_utc,
+    )
+    event = _safe_event(
+        BUDGET_EVENT_DENIED,
+        reason_code=reason_code,
+        state=new_state,
+        call_id=reservation.call_id,
+        owner_kind=reservation.owner_kind,
+        owner_version_id=reservation.owner_version_id,
+        reservation_digest=released.reservation_digest,
+        dimension=dimension,
+        extra={"releasedOnDeny": True},
+    )
+    decision = BudgetDecision(
+        allowed=False,
+        reason_code=reason_code,
+        dimension=dimension,
+        reservation=released,
+        reservations=(released,),
+        ledger_revision=new_state.revision,
+        ledger_digest=new_state.ledger_digest,
+        event=event,
+    )
+    return new_state, decision
+
+
 def _check_deadline_live(*, mono_now_ms: int, mono_deadline_ms: int) -> str | None:
     if mono_now_ms >= mono_deadline_ms:
         return REASON_DEADLINE
@@ -1175,14 +1240,21 @@ def _projected_capacity_ok(
     state: BudgetLedgerState,
     requests: Sequence[BudgetReserveRequest],
 ) -> tuple[str | None, str | None]:
-    """Return (reason_code, dimension) if batch cannot be reserved; else (None, None)."""
+    """Return (reason_code, dimension) if batch cannot be reserved; else (None, None).
+
+    Parallel concurrency counts active ``reserved|started`` work. Total / owner /
+    signature capacity projects ``consumed_started + reserved_only + batch`` so
+    in-flight ``started`` calls (already counted in started totals) are not
+    double-counted.
+    """
     limits = state.limits
     active = _active_reservations(state)
     active_count = len(active)
+    reserved_only = _active_reserved_count(state, only_reserved=True)
     n = len(requests)
     if active_count + n > limits.max_parallel_calls:
         return REASON_PARALLEL, "max_parallel_calls"
-    if state.capability_calls_started + active_count + n > limits.max_total_capability_calls:
+    if state.capability_calls_started + reserved_only + n > limits.max_total_capability_calls:
         return REASON_TOTAL_CALLS, "max_total_capability_calls"
 
     # Per-request projected owner / signature load within the batch.
@@ -1217,13 +1289,14 @@ def _projected_capacity_ok(
             owner_kind=req.owner_kind,
             owner_version_id=req.owner_version_id,
         )
-        owner_active = _active_reserved_count(
+        owner_reserved = _active_reserved_count(
             state,
             owner_kind=req.owner_kind,
             owner_version_id=req.owner_version_id,
+            only_reserved=True,
         )
         batch_extra = batch_owner_reserved.get(owner_key, 0)
-        if owner_started + owner_active + batch_extra + 1 > owner_limit.max_calls:
+        if owner_started + owner_reserved + batch_extra + 1 > owner_limit.max_calls:
             return REASON_OWNER_CALLS, "owner_max_calls"
         batch_owner_reserved[owner_key] = batch_extra + 1
 
@@ -1233,9 +1306,11 @@ def _projected_capacity_ok(
                 arguments_digest=req.arguments_digest,
             )
             g_started = _global_sig_count(state, sig)
-            g_active = _active_reserved_count(state, read_signature=sig)
+            g_reserved = _active_reserved_count(
+                state, read_signature=sig, only_reserved=True
+            )
             g_batch = batch_global_sig.get(sig, 0)
-            if g_started + g_active + g_batch + 1 > limits.max_same_read_signature:
+            if g_started + g_reserved + g_batch + 1 > limits.max_same_read_signature:
                 return REASON_READ_SIGNATURE, "max_same_read_signature"
             batch_global_sig[sig] = g_batch + 1
 
@@ -1245,16 +1320,17 @@ def _projected_capacity_ok(
                 owner_version_id=req.owner_version_id,
                 read_signature=sig,
             )
-            o_active = _active_reserved_count(
+            o_reserved = _active_reserved_count(
                 state,
                 owner_kind=req.owner_kind,
                 owner_version_id=req.owner_version_id,
                 read_signature=sig,
+                only_reserved=True,
             )
             o_key = (req.owner_kind, req.owner_version_id, sig)
             o_batch = batch_owner_sig.get(o_key, 0)
             if (
-                o_started + o_active + o_batch + 1
+                o_started + o_reserved + o_batch + 1
                 > owner_limit.max_same_read_signature
             ):
                 return REASON_OWNER_READ_SIGNATURE, "owner_max_same_read_signature"
@@ -1418,36 +1494,32 @@ def pure_mark_started(
             owner_version_id=existing.owner_version_id,
         )
     if cancelled:
-        return _deny(
+        return _deny_and_release_reserved(
             state,
+            reservation=existing,
             reason_code=REASON_CANCELLED,
             dimension="cancellation",
-            call_id=call_id,
-            owner_kind=existing.owner_kind,
-            owner_version_id=existing.owner_version_id,
         )
     deadline_reason = _check_deadline_live(
         mono_now_ms=mono_now_ms, mono_deadline_ms=mono_deadline_ms
     )
     if deadline_reason is not None:
-        return _deny(
+        return _deny_and_release_reserved(
             state,
+            reservation=existing,
             reason_code=deadline_reason,
             dimension="max_wall_time_ms",
-            call_id=call_id,
         )
 
     args_digest = _require_digest(
         validated_arguments_digest, field_name="validated_arguments_digest"
     )
     if args_digest != existing.arguments_digest:
-        return _deny(
+        return _deny_and_release_reserved(
             state,
+            reservation=existing,
             reason_code=REASON_ARGUMENTS_DIGEST_MISMATCH,
             dimension="arguments_digest",
-            call_id=call_id,
-            owner_kind=existing.owner_kind,
-            owner_version_id=existing.owner_version_id,
         )
 
     started = build_reservation(
