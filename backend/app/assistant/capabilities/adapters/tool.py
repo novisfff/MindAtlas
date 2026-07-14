@@ -33,6 +33,7 @@ from app.assistant.capabilities.ports import (
     CapabilityAdapterRequest,
     CapabilityRuntimePorts,
     ExecutableToolTarget,
+    MainAgentControlExecutable,
 )
 from app.assistant.domain.digests import JsonValue, canonical_json_bytes
 from app.assistant.workflow.engine.runtime_helpers import wrap_tool_with_db
@@ -211,7 +212,7 @@ class ToolCapabilityAdapter:
             _emit("capability.failed", safe_status="failed", metrics=result.metrics)
             return result
 
-        if not isinstance(executable, ExecutableToolTarget):
+        if not isinstance(executable, (ExecutableToolTarget, MainAgentControlExecutable)):
             error = CapabilityError(
                 error_type="protocol_error",
                 safe_code="executable_type_mismatch",
@@ -271,6 +272,66 @@ class ToolCapabilityAdapter:
 
         _emit("capability.started", safe_status="started")
         invoke_started = time.perf_counter()
+
+        # Main Agent controls return a full CapabilityResult from the control port.
+        if isinstance(executable, MainAgentControlExecutable):
+            try:
+                control_result = executable.control_port.execute(
+                    call_id=call_id,
+                    capability_key=executable.capability_key,
+                    validated_input=dict(request.validated_input),
+                )
+            except CapabilityDomainError as exc:
+                metrics = _metrics(
+                    adapter_ms=max(0.0, (time.perf_counter() - invoke_started) * 1000.0)
+                )
+                result = failed_result(error=exc.error, metrics=metrics)
+                _emit("capability.failed", safe_status="failed", metrics=metrics)
+                return result
+            except Exception as exc:
+                metrics = _metrics(
+                    adapter_ms=max(0.0, (time.perf_counter() - invoke_started) * 1000.0)
+                )
+                error = sanitize_unexpected_exception(
+                    exc,
+                    call_id=call_id,
+                    target_identity=target_identity,
+                    stage="main_agent_control_invoke",
+                )
+                result = failed_result(error=error, metrics=metrics)
+                _emit("capability.failed", safe_status="failed", metrics=metrics)
+                return result
+            if not isinstance(control_result, CapabilityResult):
+                metrics = _metrics(
+                    adapter_ms=max(0.0, (time.perf_counter() - invoke_started) * 1000.0)
+                )
+                error = CapabilityError(
+                    error_type="protocol_error",
+                    safe_code="control_result_invalid",
+                    safe_message="main agent control returned invalid result",
+                    retry_disposition="never",
+                    target_identity=target_identity,
+                    call_id=call_id,
+                )
+                result = failed_result(error=error, metrics=metrics)
+                _emit("capability.failed", safe_status="failed", metrics=metrics)
+                return result
+            # Attach adapter duration metrics if the control left them empty-ish.
+            if control_result.metrics is None or control_result.metrics.adapter_duration_ms is None:
+                adapter_ms = max(0.0, (time.perf_counter() - invoke_started) * 1000.0)
+                metrics = _metrics(
+                    output=control_result.structured_output,
+                    adapter_ms=adapter_ms,
+                )
+                control_result = control_result.model_copy(update={"metrics": metrics})
+            status = control_result.status
+            if status == "completed":
+                _emit("capability.completed", safe_status="completed", metrics=control_result.metrics)
+            elif status == "cancelled":
+                _emit("capability.cancelled", safe_status="cancelled", metrics=control_result.metrics)
+            else:
+                _emit("capability.failed", safe_status=status, metrics=control_result.metrics)
+            return control_result
 
         try:
             raw_result = self._invoke_tool(

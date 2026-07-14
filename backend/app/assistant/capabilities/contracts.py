@@ -304,7 +304,8 @@ class CapabilityDescriptor(FrozenContract):
 
 
 class FrozenBindingProvenance(FrozenContract):
-    origin: Literal["skill_version", "openclaw_request", "test"]
+    # Additive Plan 04 value ``main_agent_profile``; existing serialized values unchanged.
+    origin: Literal["skill_version", "openclaw_request", "test", "main_agent_profile"]
     binding_row_id: UUID | None
     owner_version_id: UUID | None
     source_snapshot_digest: str
@@ -484,7 +485,8 @@ class CapabilityPrincipal(FrozenContract):
 
 
 class CapabilityOwnerRef(FrozenContract):
-    owner_kind: Literal["skill_version", "openclaw_catalog", "system", "test"]
+    # Additive Plan 04 value ``main_agent``; existing serialized values unchanged.
+    owner_kind: Literal["skill_version", "openclaw_catalog", "system", "test", "main_agent"]
     owner_id: str
     owner_version_id: UUID | None
 
