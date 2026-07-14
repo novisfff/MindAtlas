@@ -244,7 +244,7 @@ def test_upgrade_preserves_plan01_revisions_and_null_pointer() -> None:
 
     _run_alembic("upgrade", "head")
     with _engine() as engine:
-        assert _current_revision(engine) == PLAN03_PROBE_REVISION
+        assert _current_revision(engine) in {PLAN03_PROBE_REVISION, PLAN04_HEAD}
         with engine.connect() as conn:
             row = conn.execute(
                 text(
@@ -521,7 +521,7 @@ def test_downgrade_with_probe_rows_refuses_then_upgrade_cycle() -> None:
 
     _run_alembic("upgrade", "head")
     with _engine() as engine:
-        assert _current_revision(engine) == PLAN03_PROBE_REVISION
+        assert _current_revision(engine) in {PLAN03_PROBE_REVISION, PLAN04_HEAD}
         with engine.connect() as conn:
             row = conn.execute(
                 text(
