@@ -25,6 +25,7 @@ reset_caches()
 
 PLAN01_HEAD = "acf208493c87"
 PLAN03_PROBE_REVISION = "b666b11a5faa"
+PLAN04_HEAD = "9ed6f561a381"
 DOWNGRADE_BLOCKED_TOKEN = "MINDATLAS_PLAN03_DOWNGRADE_BLOCKED_PROBE_DATA"
 
 _POSTGRES_URL = os.environ.get("MINDATLAS_TEST_POSTGRES_URL", "").strip()
@@ -111,46 +112,37 @@ def _reset_to_plan01_parent() -> None:
     _configure_database_env(_POSTGRES_URL)
     engine = create_engine(_as_sqlalchemy_url(_POSTGRES_URL), future=True)
     try:
-        # Clear probe rows so Plan 03 downgrade preflight allows rollback.
-        with engine.begin() as conn:
-            # Pointer first (FK), then table if present.
-            try:
-                conn.execute(text("UPDATE ai_model SET current_capability_probe_id = NULL"))
-            except Exception:
-                pass
-            try:
-                conn.execute(text("DELETE FROM ai_model_capability_probe"))
-            except Exception:
-                pass
-        # Prefer real downgrade of the child revision when present.
         try:
             current = _current_revision(engine)
         except Exception:
             current = None
-        if current == PLAN03_PROBE_REVISION:
+
+        if current in {PLAN03_PROBE_REVISION, PLAN04_HEAD}:
+            # Satisfy both descendant downgrade guards, then let Alembic restore
+            # every intermediate schema object in revision order. Hand-written
+            # DDL + stamp leaves Plan 04's dropped CHECK constraints missing.
+            with engine.begin() as conn:
+                conn.execute(
+                    text("UPDATE ai_model SET current_capability_probe_id = NULL")
+                )
+                conn.execute(text("DELETE FROM ai_model_capability_probe"))
+                if current == PLAN04_HEAD:
+                    conn.execute(
+                        text(
+                            "UPDATE assistant_skill_package "
+                            "SET catalog_enabled = false"
+                        )
+                    )
+                    conn.execute(
+                        text(
+                            "UPDATE assistant_main_agent_profile "
+                            "SET runtime_enabled = false"
+                        )
+                    )
             _run_alembic("downgrade", PLAN01_HEAD)
         elif current != PLAN01_HEAD:
-            # Unknown/mid state (e.g. Plan 04 head): force parent schema by
-            # dropping probe objects including FK/trigger, then stamp/upgrade.
-            with engine.begin() as conn:
-                # Drop trigger/function that depend on the pointer column first.
-                conn.execute(text("DROP TRIGGER IF EXISTS trg_ai_model_probe_pointer_guard ON ai_model"))
-                conn.execute(text("DROP FUNCTION IF EXISTS mindatlas_ai_model_probe_pointer_guard() CASCADE"))
-                # Drop FK then column so DependentObjectsStillExist cannot fire.
-                conn.execute(
-                    text(
-                        "ALTER TABLE ai_model DROP CONSTRAINT IF EXISTS "
-                        "fk_ai_model_current_capability_probe_id"
-                    )
-                )
-                conn.execute(text("DROP INDEX IF EXISTS idx_ai_model_current_capability_probe_id"))
-                conn.execute(text("DROP TABLE IF EXISTS ai_model_capability_probe CASCADE"))
-                conn.execute(
-                    text(
-                        "ALTER TABLE ai_model DROP COLUMN IF EXISTS current_capability_probe_id"
-                    )
-                )
-            _run_alembic("stamp", PLAN01_HEAD)
+            # The guarded test only supports its parent and known descendants.
+            raise AssertionError(f"unsupported migration state: {current}")
         # Ensure we are exactly on Plan 01 parent schema.
         _run_alembic("upgrade", PLAN01_HEAD)
         assert _current_revision(engine) == PLAN01_HEAD, (
