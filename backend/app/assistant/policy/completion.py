@@ -204,18 +204,6 @@ def evaluate_completion(
             working,
         )
 
-    def _text_ok(o: CompletionObligation) -> bool:
-        if o.obligation_type == "required_followup":
-            return True
-        if o.obligation_type == "terminal_output":
-            if o.owner_kind == "main_agent":
-                return True
-            if o.owner_kind == "skill_version":
-                return bool((skill_terminal_text_allowed or {}).get(o.owner_id, False))
-        return False
-
-    non_text = [o for o in blocking if not _text_ok(o)]
-
     if finalization_round:
         return (
             build_completion_decision(
@@ -227,13 +215,14 @@ def evaluate_completion(
         )
 
     if not can_continue or not followup_budget_remaining:
+        # followup_budget_remaining gates completion-followup slots; can_continue
+        # is the broader provider/run budget signal. Prefer the more specific
+        # followup-limit reason when that budget is exhausted.
         reason = (
             REASON_COMPLETION_FOLLOWUP_LIMIT
             if not followup_budget_remaining
             else REASON_BUDGET_EXHAUSTED_WITH_OBLIGATIONS
         )
-        if non_text and followup_budget_remaining:
-            reason = REASON_BUDGET_EXHAUSTED_WITH_OBLIGATIONS
         return (
             build_completion_decision(
                 action="fail",
@@ -266,6 +255,11 @@ class ObligationLedgerCompletionGuard:
 
     Closes over thread-safe ledgers. Provider Loop never sees ledger types.
     Optional budget hooks report whether provider/followup budget remains.
+
+    Budget hooks run *outside* the obligation lock. On continue, text evidence is
+    installed first; the followup counter is only committed after the budget hook
+    succeeds (or is absent). Budget raise/deny yields a coherent fail disposition
+    without a consumed followup slot.
     """
 
     obligation_ledger: ObligationLedger
@@ -277,18 +271,25 @@ class ObligationLedgerCompletionGuard:
     def evaluate(
         self, request: ProviderCompletionRequest
     ) -> ProviderCompletionDisposition:
-        with self.obligation_ledger._lock:  # noqa: SLF001 — intentional CAS boundary
-            state = self.obligation_ledger._state  # noqa: SLF001
-            skill_map = dict(self.obligation_ledger._skill_terminal_text_allowed)  # noqa: SLF001
+        ledger = self.obligation_ledger
+
+        # Phase 1 — under lock: evaluate + prepare candidate states; install only
+        # text evidence. Do not advance followup counter or call budget hooks here.
+        with ledger._lock:  # noqa: SLF001 — multi-step pure eval needs atomicity
+            state = ledger.snapshot()
+            skill_map = ledger.skill_terminal_text_allowed_map()
+            base_revision = state.revision
 
             followup_remaining = (
                 state.followup_rounds_started < self.max_completion_followup_rounds
             )
             can_continue = True
             if self.can_continue_fn is not None:
+                # External can_continue under lock is acceptable for a pure
+                # predicate; budget mutations stay outside.
                 can_continue = bool(self.can_continue_fn())
 
-            decision, new_state = evaluate_completion(
+            decision, text_state = evaluate_completion(
                 state,
                 candidate_text=request.candidate_text,
                 finalization_round=request.finalization_round,
@@ -298,15 +299,18 @@ class ObligationLedgerCompletionGuard:
                 apply_text=True,
             )
 
-            if new_state is not state:
-                if new_state.revision < state.revision:
-                    raise RuntimeError("obligation ledger revision went backwards")
-                self.obligation_ledger._state = new_state  # noqa: SLF001
+            if text_state is not state:
+                if not ledger.commit_state(base_revision, text_state):
+                    raise RuntimeError("obligation ledger CAS lost race on text evidence")
 
-            instruction = None
+            continue_prep: tuple[
+                CompletionDecision,
+                ObligationLedgerState,
+                list,
+            ] | None = None
             if decision.action == "continue":
                 follow_state, follow_decision = pure_start_completion_followup(
-                    self.obligation_ledger._state,  # noqa: SLF001
+                    text_state,
                     max_completion_followup_rounds=self.max_completion_followup_rounds,
                 )
                 if not follow_decision.allowed:
@@ -316,27 +320,103 @@ class ObligationLedgerCompletionGuard:
                         blocking_obligation_ids=decision.blocking_obligation_ids,
                     )
                 else:
-                    self.obligation_ledger._state = follow_state  # noqa: SLF001
-                    if self.budget_start_followup_fn is not None:
-                        self.budget_start_followup_fn()
                     pre_blocking = [
                         o
-                        for o in new_state.obligations
+                        for o in text_state.obligations
                         if o.obligation_id in decision.blocking_obligation_ids
                     ]
-                    instruction = build_completion_instruction(
-                        obligations=pre_blocking,
-                        locale=self.locale,
-                        manifest_revision=request.manifest_revision,
-                        manifest_digest=request.manifest_digest,
-                        guard_state_digest=self.obligation_ledger._state.ledger_digest,  # noqa: SLF001
-                    )
+                    continue_prep = (decision, follow_state, pre_blocking)
 
+            if continue_prep is None:
+                return ProviderCompletionDisposition(
+                    action=decision.action,
+                    reason_code=decision.reason_code,
+                    instruction=None,
+                    decision_digest=decision.decision_digest,
+                )
+
+            cont_decision, follow_state, pre_blocking = continue_prep
+            blocking_ids = cont_decision.blocking_obligation_ids
+            text_revision = text_state.revision
+            text_digest = text_state.ledger_digest
+
+        # Phase 2 — outside lock: budget hook. Never hold obligation lock while
+        # calling external budget code.
+        budget_failed = False
+        budget_exc: BaseException | None = None
+        if self.budget_start_followup_fn is not None:
+            try:
+                self.budget_start_followup_fn()
+            except BaseException as exc:  # noqa: BLE001 — map to coherent fail
+                budget_failed = True
+                budget_exc = exc
+
+        # Phase 3 — under lock: commit followup on success, or leave text-only
+        # state and fail cleanly on budget deny/raise.
+        with ledger._lock:  # noqa: SLF001
+            current = ledger.snapshot()
+            # If another writer raced past our text install, refuse partial followup.
+            if (
+                current.revision != text_revision
+                or current.ledger_digest != text_digest
+            ):
+                # Coherent fail: text evidence stays if still present; no followup.
+                fail = build_completion_decision(
+                    action="fail",
+                    reason_code=REASON_BUDGET_EXHAUSTED_WITH_OBLIGATIONS,
+                    blocking_obligation_ids=blocking_ids,
+                )
+                return ProviderCompletionDisposition(
+                    action=fail.action,
+                    reason_code=fail.reason_code,
+                    instruction=None,
+                    decision_digest=fail.decision_digest,
+                )
+
+            if budget_failed:
+                # Text evidence already installed; followup counter NOT advanced.
+                # Prefer budget-exhausted when the external budget denied/raised.
+                fail = build_completion_decision(
+                    action="fail",
+                    reason_code=REASON_BUDGET_EXHAUSTED_WITH_OBLIGATIONS,
+                    blocking_obligation_ids=blocking_ids,
+                )
+                # Re-raise cancellation / system exits after mapping ordinary
+                # exceptions to a coherent fail disposition.
+                if isinstance(budget_exc, (KeyboardInterrupt, SystemExit)):
+                    raise budget_exc
+                return ProviderCompletionDisposition(
+                    action=fail.action,
+                    reason_code=fail.reason_code,
+                    instruction=None,
+                    decision_digest=fail.decision_digest,
+                )
+
+            # Budget ok (or no budget hook): commit followup counter.
+            if not ledger.commit_state(text_revision, follow_state):
+                fail = build_completion_decision(
+                    action="fail",
+                    reason_code=REASON_BUDGET_EXHAUSTED_WITH_OBLIGATIONS,
+                    blocking_obligation_ids=blocking_ids,
+                )
+                return ProviderCompletionDisposition(
+                    action=fail.action,
+                    reason_code=fail.reason_code,
+                    instruction=None,
+                    decision_digest=fail.decision_digest,
+                )
+            instruction = build_completion_instruction(
+                obligations=pre_blocking,
+                locale=self.locale,
+                manifest_revision=request.manifest_revision,
+                manifest_digest=request.manifest_digest,
+                guard_state_digest=follow_state.ledger_digest,
+            )
             return ProviderCompletionDisposition(
-                action=decision.action,
-                reason_code=decision.reason_code,
+                action=cont_decision.action,
+                reason_code=cont_decision.reason_code,
                 instruction=instruction,
-                decision_digest=decision.decision_digest,
+                decision_digest=cont_decision.decision_digest,
             )
 
 

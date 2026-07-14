@@ -1222,6 +1222,9 @@ def pure_apply_capability_result_evidence(
     - terminal_output=true + completed + nonempty output satisfies the execution
       owner's matching terminal_output obligation (and optional compatible consumers).
     - needs_followup=true on a completed result creates a required_followup obligation.
+    - Multi-step apply is atomic: any deny returns the original state unchanged
+      (same invariant as pure_create / pure_resolve). Compatible-consumer targets
+      are validated before any owner/consumer resolution mutates working state.
     """
     if result_status != "completed":
         return state, ObligationDecision(
@@ -1235,6 +1238,7 @@ def pure_apply_capability_result_evidence(
             event=None,
         )
 
+    original = state
     working = state
     last_decision = ObligationDecision(
         allowed=True,
@@ -1256,6 +1260,48 @@ def pure_apply_capability_result_evidence(
             needs_followup=needs_followup,
             output_digest=output_digest,
         )
+
+        # Validate all compatible-consumer targets (and digests) BEFORE any
+        # owner resolution so a deny cannot leave the owner satisfied while
+        # consumers remain pending.
+        validated_consumers: list[CompletionObligation] = []
+        if target_consumer_obligation_ids:
+            if (
+                binding_contract_digest is None
+                or completion_contract_digest is None
+            ):
+                return _deny(
+                    original,
+                    reason_code=REASON_EVIDENCE_INVALID,
+                    obligation_id=None,
+                )
+            compat_set = {str(v) for v in compatible_consumer_version_ids}
+            for target_id in target_consumer_obligation_ids:
+                target = _find_obligation(original, target_id)
+                if target is None or target.status != "pending":
+                    return _deny(
+                        original,
+                        reason_code=REASON_EVIDENCE_INVALID,
+                        obligation_id=target_id,
+                    )
+                if target.obligation_type != "terminal_output":
+                    return _deny(
+                        original,
+                        reason_code=REASON_EVIDENCE_INVALID,
+                        obligation_id=target_id,
+                    )
+                # Consumer must appear in exposure's compatible_consumer_version_ids.
+                if (
+                    target.owner_version_id is None
+                    or str(target.owner_version_id) not in compat_set
+                ):
+                    return _deny(
+                        original,
+                        reason_code=REASON_OWNER_MISMATCH,
+                        obligation_id=target_id,
+                    )
+                validated_consumers.append(target)
+
         # Satisfy owner's matching terminal_output.
         for obligation in list(working.obligations):
             if obligation.status != "pending":
@@ -1286,67 +1332,41 @@ def pure_apply_capability_result_evidence(
                 evidence_edge=edge,
             )
             if not last_decision.allowed:
-                return working, last_decision
-
-        # Compatible consumer edges (strict). Non-empty targets always validate.
-        if target_consumer_obligation_ids:
-            if (
-                binding_contract_digest is None
-                or completion_contract_digest is None
-            ):
                 return _deny(
-                    working,
-                    reason_code=REASON_EVIDENCE_INVALID,
-                    obligation_id=None,
+                    original,
+                    reason_code=last_decision.reason_code,
+                    obligation_id=obligation.obligation_id,
                 )
-            compat_set = {str(v) for v in compatible_consumer_version_ids}
-            for target_id in target_consumer_obligation_ids:
-                target = _find_obligation(working, target_id)
-                if target is None or target.status != "pending":
-                    return _deny(
-                        working,
-                        reason_code=REASON_EVIDENCE_INVALID,
-                        obligation_id=target_id,
-                    )
-                if target.obligation_type != "terminal_output":
-                    return _deny(
-                        working,
-                        reason_code=REASON_EVIDENCE_INVALID,
-                        obligation_id=target_id,
-                    )
-                # Consumer must appear in exposure's compatible_consumer_version_ids.
-                if (
-                    target.owner_version_id is None
-                    or str(target.owner_version_id) not in compat_set
-                ):
-                    return _deny(
-                        working,
-                        reason_code=REASON_OWNER_MISMATCH,
-                        obligation_id=target_id,
-                    )
-                predicate = compute_predicate_digest(
-                    evidence_kind="compatible_consumer",
-                    obligation_type="terminal_output",
-                    owner_kind=target.owner_kind,
-                    binding_contract_digest=binding_contract_digest,
-                    completion_contract_digest=completion_contract_digest,
-                )
-                edge = ObligationEvidenceEdge(
+
+        # Compatible consumer edges (already validated against original state).
+        for target in validated_consumers:
+            predicate = compute_predicate_digest(
+                evidence_kind="compatible_consumer",
+                obligation_type="terminal_output",
+                owner_kind=target.owner_kind,
+                binding_contract_digest=binding_contract_digest,
+                completion_contract_digest=completion_contract_digest,
+            )
+            edge = ObligationEvidenceEdge(
+                obligation_id=target.obligation_id,
+                evidence_kind="compatible_consumer",
+                source_owner_version_id=owner_version_id,
+                source_call_id=call_id,
+                evidence_digest=evidence_digest,
+                predicate_digest=predicate,
+            )
+            working, last_decision = pure_resolve_obligation(
+                working,
+                obligation_id=target.obligation_id,
+                status="satisfied",
+                evidence_edge=edge,
+            )
+            if not last_decision.allowed:
+                return _deny(
+                    original,
+                    reason_code=last_decision.reason_code,
                     obligation_id=target.obligation_id,
-                    evidence_kind="compatible_consumer",
-                    source_owner_version_id=owner_version_id,
-                    source_call_id=call_id,
-                    evidence_digest=evidence_digest,
-                    predicate_digest=predicate,
                 )
-                working, last_decision = pure_resolve_obligation(
-                    working,
-                    obligation_id=target.obligation_id,
-                    status="satisfied",
-                    evidence_edge=edge,
-                )
-                if not last_decision.allowed:
-                    return working, last_decision
 
     if needs_followup:
         followup = build_required_followup_obligation(
@@ -1359,7 +1379,11 @@ def pure_apply_capability_result_evidence(
         )
         working, last_decision = pure_create_obligation(working, followup)
         if not last_decision.allowed:
-            return working, last_decision
+            return _deny(
+                original,
+                reason_code=last_decision.reason_code,
+                obligation_id=followup.obligation_id,
+            )
 
     return working, last_decision
 
@@ -1469,6 +1493,34 @@ class ObligationLedger:
                 raise ValueError(
                     "new_state.revision must equal expected_revision + 1"
                 )
+            expected_digest = compute_obligation_ledger_digest(
+                revision=new_state.revision,
+                obligations=new_state.obligations,
+                evidence_edges=new_state.evidence_edges,
+                followup_rounds_started=new_state.followup_rounds_started,
+            )
+            if expected_digest != new_state.ledger_digest:
+                raise ValueError("new_state.ledger_digest is inconsistent")
+            self._state = new_state
+            return True
+
+    def commit_state(
+        self,
+        expected_revision: int,
+        new_state: ObligationLedgerState,
+    ) -> bool:
+        """Install a pure multi-step transition if revision still matches.
+
+        Unlike ``compare_and_swap`` (strict +1), allows any monotonic revision
+        bump produced by sequential pure resolves (e.g. text evidence).
+        """
+        with self._lock:
+            if self._state.revision != expected_revision:
+                return False
+            if new_state is self._state:
+                return True
+            if new_state.revision < expected_revision:
+                raise RuntimeError(REASON_PROTOCOL_ERROR)
             expected_digest = compute_obligation_ledger_digest(
                 revision=new_state.revision,
                 obligations=new_state.obligations,

@@ -421,6 +421,87 @@ def test_unrelated_owner_rejection() -> None:
     )
     assert not decision.allowed
     assert decision.reason_code == REASON_OWNER_MISMATCH
+    # Atomic deny: no partial owner resolution, no evidence edges, same revision.
+    assert state2.revision == state.revision
+    assert state2.ledger_digest == state.ledger_digest
+    assert state2.evidence_edges == ()
+    assert all(o.status == "pending" for o in state2.obligations)
+
+
+def test_denied_compatible_consumer_leaves_owner_pending() -> None:
+    """Regression I1: deny compatible-consumer must not partially satisfy owner."""
+    state = create_initial_obligation_ledger_state()
+    owner_ob = build_skill_terminal_obligation(
+        run_id=RUN_ID, skill_version_id=SKILL_A, revision=1
+    )
+    consumer_ob = build_skill_terminal_obligation(
+        run_id=RUN_ID, skill_version_id=SKILL_COMPAT, revision=1
+    )
+    state, _ = pure_create_obligation(state, owner_ob)
+    state, _ = pure_create_obligation(state, consumer_ob)
+    owner_id = [
+        o.obligation_id for o in state.obligations if o.owner_version_id == SKILL_A
+    ][0]
+    consumer_id = [
+        o.obligation_id
+        for o in state.obligations
+        if o.owner_version_id == SKILL_COMPAT
+    ][0]
+    before_revision = state.revision
+    before_digest = state.ledger_digest
+
+    # Missing digests: deny before any mutation.
+    denied_state, decision = pure_apply_capability_result_evidence(
+        state,
+        call_id="c-deny-digests",
+        result_status="completed",
+        terminal_output=True,
+        needs_followup=False,
+        output_digest=_DIGEST_A,
+        owner_kind="skill_version",
+        owner_id=str(SKILL_A),
+        owner_version_id=SKILL_A,
+        run_id=RUN_ID,
+        compatible_consumer_version_ids=(SKILL_COMPAT,),
+        binding_contract_digest=None,
+        completion_contract_digest=None,
+        target_consumer_obligation_ids=(consumer_id,),
+    )
+    assert not decision.allowed
+    assert decision.reason_code == REASON_EVIDENCE_INVALID
+    assert denied_state.revision == before_revision
+    assert denied_state.ledger_digest == before_digest
+    assert denied_state.evidence_edges == ()
+    statuses = {o.obligation_id: o.status for o in denied_state.obligations}
+    assert statuses[owner_id] == "pending"
+    assert statuses[consumer_id] == "pending"
+
+    # Owner-mismatch consumer: same atomic invariant via facade.
+    ledger = ObligationLedger(
+        state, run_id=RUN_ID, create_main_agent_terminal=False
+    )
+    snap_before = ledger.snapshot()
+    decision = ledger.apply_capability_result(
+        call_id="c-deny-mismatch",
+        result_status="completed",
+        terminal_output=True,
+        needs_followup=False,
+        output_digest=_DIGEST_A,
+        owner_kind="skill_version",
+        owner_id=str(SKILL_A),
+        owner_version_id=SKILL_A,
+        compatible_consumer_version_ids=(),  # consumer not listed
+        binding_contract_digest=_DIGEST_B,
+        completion_contract_digest=_DIGEST_C,
+        target_consumer_obligation_ids=(consumer_id,),
+    )
+    assert not decision.allowed
+    assert decision.reason_code == REASON_OWNER_MISMATCH
+    snap_after = ledger.snapshot()
+    assert snap_after.revision == snap_before.revision
+    assert snap_after.ledger_digest == snap_before.ledger_digest
+    assert snap_after.evidence_edges == ()
+    assert all(o.status == "pending" for o in snap_after.obligations)
 
 
 def test_terminal_never_reopens() -> None:

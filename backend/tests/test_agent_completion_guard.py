@@ -454,6 +454,44 @@ def test_budget_followup_fn_invoked_on_continue() -> None:
     assert calls == [1]
 
 
+def test_budget_followup_fn_raise_leaves_coherent_ledger() -> None:
+    """Regression I2: budget raise must not consume followup after text apply."""
+    ledger = ObligationLedger.create(run_id=RUN_ID)
+    ledger.create_skill_terminal(
+        skill_version_id=SKILL_A,
+        terminal_text_allowed=False,
+    )
+    before = ledger.snapshot()
+    assert before.followup_rounds_started == 0
+
+    def _budget_raises() -> None:
+        raise RuntimeError("budget denied")
+
+    guard = ObligationLedgerCompletionGuard(
+        obligation_ledger=ledger,
+        locale="en",
+        max_completion_followup_rounds=2,
+        budget_start_followup_fn=_budget_raises,
+    )
+    d = guard.evaluate(_req(text="need more"))
+    assert d.action == "fail"
+    assert d.reason_code == REASON_BUDGET_EXHAUSTED_WITH_OBLIGATIONS
+    assert d.instruction is None
+
+    after = ledger.snapshot()
+    # Followup counter must not advance on budget failure.
+    assert after.followup_rounds_started == 0
+    # Text evidence may satisfy Main Agent terminal; skill terminal stays pending.
+    skill_pending = [
+        o
+        for o in after.obligations
+        if o.owner_version_id == SKILL_A and o.status == "pending"
+    ]
+    assert skill_pending
+    # No continue disposition means no partial "satisfied terminal + consumed followup".
+    assert after.followup_rounds_started == before.followup_rounds_started
+
+
 def test_direct_natural_answer_with_only_main_agent() -> None:
     ledger = ObligationLedger.create(run_id=RUN_ID)
     guard = ObligationLedgerCompletionGuard(obligation_ledger=ledger)
