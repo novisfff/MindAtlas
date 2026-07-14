@@ -1,7 +1,8 @@
-"""Plan 05 pure policy contracts: exposures, budgets, effective run policy snapshot.
+"""Plan 05 pure policy contracts: exposures, budgets, grants, decisions.
 
 Task 1 freezes the portable contract/evaluation-layer types and pure builders.
-Full authorization evaluator, budget ledger, and Gateway integration are later tasks.
+Task 2 adds EffectiveCapabilityGrant and AuthorizationDecision plus digests.
+Budget ledger and Gateway integration are later tasks.
 """
 
 from __future__ import annotations
@@ -13,10 +14,11 @@ from uuid import UUID
 
 from pydantic import field_validator, model_validator
 
-from app.assistant.capabilities.contracts import CapabilityPrincipal
+from app.assistant.capabilities.contracts import CapabilityPrincipal, SideEffectClass
 from app.assistant.domain.contracts import FrozenContract, ResolvedCapabilityRef
 from app.assistant.domain.digests import JsonValue, sha256_canonical_json
 from app.assistant.main_agent.authorization import (
+    MAIN_AGENT_CEILING_REVISION,
     MAIN_AGENT_READ_ONLY_EFFECT_CEILING,
     MAIN_AGENT_READ_ONLY_EFFECT_CEILING_DIGEST,
 )
@@ -374,6 +376,158 @@ class EffectiveRunPolicySnapshot(FrozenContract):
 
 
 # ---------------------------------------------------------------------------
+# Grant + decision contracts (Plan 05 Task 2)
+# ---------------------------------------------------------------------------
+
+
+class EffectiveCapabilityGrant(FrozenContract):
+    """Independent exact-binding grant (never built from descriptor behavior)."""
+
+    owner_kind: PolicyOwnerKind
+    owner_version_id: UUID
+    capability_key: str
+    binding_contract_digest: str
+    allowed_side_effects: tuple[SideEffectClass, ...]
+    allowed_interrupt_modes: tuple[Literal["none"], ...]
+    platform_ceiling_digest: str
+    entrypoint_policy_digest: str
+    global_policy_digest: str
+    owner_policy_digest: str
+    grant_source_digest: str
+
+    @field_validator("capability_key")
+    @classmethod
+    def _capability_key(cls, value: str) -> str:
+        return _require_non_empty_str(value, field_name="capability_key")
+
+    @field_validator(
+        "binding_contract_digest",
+        "platform_ceiling_digest",
+        "entrypoint_policy_digest",
+        "global_policy_digest",
+        "owner_policy_digest",
+        "grant_source_digest",
+    )
+    @classmethod
+    def _digests(cls, value: str, info: Any) -> str:
+        return _require_digest(value, field_name=info.field_name)
+
+    @field_validator("allowed_side_effects", mode="before")
+    @classmethod
+    def _side_effects(cls, value: Any) -> tuple[SideEffectClass, ...]:
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            raise TypeError("allowed_side_effects must be a sequence")
+        return tuple(value)
+
+    @field_validator("allowed_interrupt_modes", mode="before")
+    @classmethod
+    def _interrupt_modes(cls, value: Any) -> tuple[Literal["none"], ...]:
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            raise TypeError("allowed_interrupt_modes must be a sequence")
+        out = tuple(value)
+        for item in out:
+            if item != "none":
+                raise ValueError("allowed_interrupt_modes may only contain 'none'")
+        return out  # type: ignore[return-value]
+
+    @model_validator(mode="after")
+    def _nonempty_grant(self) -> EffectiveCapabilityGrant:
+        if not self.allowed_side_effects:
+            raise ValueError("allowed_side_effects must be nonempty for a grant")
+        if "unknown" in self.allowed_side_effects:
+            raise ValueError("allowed_side_effects must not contain unknown")
+        return self
+
+
+class AuthorizationDecision(FrozenContract):
+    """Pure ordered authorization decision (Plan 05 §5.4)."""
+
+    allowed: bool
+    reason_code: str
+    principal_digest: str
+    entrypoint_policy_digest: str
+    global_policy_digest: str
+    owner_policy_digest: str
+    allowed_side_effects: tuple[SideEffectClass, ...] = ()
+    grant_source_digest: str | None = None
+    exposure_digest: str
+    effective_policy_digest: str
+    decision_digest: str
+
+    @field_validator("reason_code")
+    @classmethod
+    def _reason(cls, value: str) -> str:
+        return _require_non_empty_str(value, field_name="reason_code")
+
+    @field_validator(
+        "principal_digest",
+        "entrypoint_policy_digest",
+        "global_policy_digest",
+        "owner_policy_digest",
+        "exposure_digest",
+        "effective_policy_digest",
+        "decision_digest",
+    )
+    @classmethod
+    def _digests(cls, value: str, info: Any) -> str:
+        return _require_digest(value, field_name=info.field_name)
+
+    @field_validator("grant_source_digest")
+    @classmethod
+    def _optional_grant(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_digest(value, field_name="grant_source_digest")
+
+    @field_validator("allowed_side_effects", mode="before")
+    @classmethod
+    def _side_effects(cls, value: Any) -> tuple[SideEffectClass, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            raise TypeError("allowed_side_effects must be a sequence")
+        return tuple(value)
+
+    @model_validator(mode="after")
+    def _coherence(self) -> AuthorizationDecision:
+        if self.allowed:
+            if self.reason_code != "allowed":
+                raise ValueError("allowed decision must use reason_code='allowed'")
+            if not self.allowed_side_effects:
+                raise ValueError("allowed decision requires nonempty allowed_side_effects")
+            if self.grant_source_digest is None:
+                raise ValueError("allowed decision requires grant_source_digest")
+        else:
+            if self.reason_code == "allowed":
+                raise ValueError("denied decision cannot use reason_code='allowed'")
+        return self
+
+
+# Stable ordered reason codes (Plan 05 §5.4).
+AUTHORIZATION_REASON_CODES: tuple[str, ...] = (
+    "scope_mismatch",
+    "manifest_surface_mismatch",
+    "exposure_missing",
+    "exposure_ambiguous",
+    "owner_mismatch",
+    "principal_unauthenticated",
+    "principal_not_allowed",
+    "entrypoint_not_allowed",
+    "global_policy_denied",
+    "owner_capability_not_declared",
+    "owner_side_effect_denied",
+    "release_gate_denied",
+    "target_unavailable",
+    "version_or_digest_drift",
+    "recursion_denied",
+    "allowed",
+)
+
+# Explicit empty digests for early denials (no prose/user data).
+EMPTY_POLICY_DIGEST = "0" * 64
+
+
+# ---------------------------------------------------------------------------
 # Digest payloads / builders
 # ---------------------------------------------------------------------------
 
@@ -469,6 +623,236 @@ def build_owner_policy_ref(
         owner_id=owner_id,
         owner_version_id=owner_version_id,
         policy_digest=digest,
+    )
+
+
+def compute_principal_digest(principal: CapabilityPrincipal) -> str:
+    """Identity-only principal digest (no secrets/prose)."""
+    return sha256_canonical_json(
+        {
+            "schemaVersion": 1,
+            "kind": "capability_principal",
+            "principalType": principal.principal_type,
+            "principalId": principal.principal_id,
+            "authenticated": principal.authenticated,
+        }
+    )
+
+
+def build_grant_source_digest_payload(
+    *,
+    owner_kind: PolicyOwnerKind,
+    owner_id: str,
+    owner_version_id: UUID,
+    capability_key: str,
+    binding_contract_digest: str,
+    allowed_side_effects: Sequence[SideEffectClass],
+    allowed_interrupt_modes: Sequence[str],
+    platform_ceiling_digest: str,
+    platform_ceiling_revision: str,
+    entrypoint_policy_digest: str,
+    global_policy_digest: str,
+    owner_policy_digest: str,
+) -> dict[str, JsonValue]:
+    """Payload for grant_source_digest (excludes descriptor behavior)."""
+    return {
+        "schemaVersion": 1,
+        "kind": "effective_capability_grant_source",
+        "ownerKind": owner_kind,
+        "ownerId": owner_id,
+        "ownerVersionId": str(owner_version_id),
+        "capabilityKey": capability_key,
+        "bindingContractDigest": binding_contract_digest,
+        "allowedSideEffects": list(allowed_side_effects),
+        "allowedInterruptModes": list(allowed_interrupt_modes),
+        "platformCeilingDigest": platform_ceiling_digest,
+        "platformCeilingRevision": platform_ceiling_revision,
+        "entrypointPolicyDigest": entrypoint_policy_digest,
+        "globalPolicyDigest": global_policy_digest,
+        "ownerPolicyDigest": owner_policy_digest,
+    }
+
+
+def compute_grant_source_digest(
+    *,
+    owner_kind: PolicyOwnerKind,
+    owner_id: str,
+    owner_version_id: UUID,
+    capability_key: str,
+    binding_contract_digest: str,
+    allowed_side_effects: Sequence[SideEffectClass],
+    allowed_interrupt_modes: Sequence[str],
+    platform_ceiling_digest: str,
+    platform_ceiling_revision: str = MAIN_AGENT_CEILING_REVISION,
+    entrypoint_policy_digest: str,
+    global_policy_digest: str,
+    owner_policy_digest: str,
+) -> str:
+    return sha256_canonical_json(
+        build_grant_source_digest_payload(
+            owner_kind=owner_kind,
+            owner_id=owner_id,
+            owner_version_id=owner_version_id,
+            capability_key=capability_key,
+            binding_contract_digest=binding_contract_digest,
+            allowed_side_effects=allowed_side_effects,
+            allowed_interrupt_modes=allowed_interrupt_modes,
+            platform_ceiling_digest=platform_ceiling_digest,
+            platform_ceiling_revision=platform_ceiling_revision,
+            entrypoint_policy_digest=entrypoint_policy_digest,
+            global_policy_digest=global_policy_digest,
+            owner_policy_digest=owner_policy_digest,
+        )
+    )
+
+
+def build_effective_capability_grant(
+    *,
+    owner_kind: PolicyOwnerKind,
+    owner_id: str,
+    owner_version_id: UUID,
+    capability_key: str,
+    binding_contract_digest: str,
+    allowed_side_effects: Sequence[SideEffectClass],
+    allowed_interrupt_modes: Sequence[str] = ("none",),
+    platform_ceiling_digest: str = MAIN_AGENT_READ_ONLY_EFFECT_CEILING_DIGEST,
+    platform_ceiling_revision: str = MAIN_AGENT_CEILING_REVISION,
+    entrypoint_policy_digest: str,
+    global_policy_digest: str,
+    owner_policy_digest: str,
+    grant_source_digest: str | None = None,
+) -> EffectiveCapabilityGrant:
+    """Build a frozen EffectiveCapabilityGrant with recomputed grant_source_digest."""
+    effects = tuple(allowed_side_effects)
+    modes: tuple[Literal["none"], ...] = tuple(  # type: ignore[assignment]
+        allowed_interrupt_modes  # type: ignore[arg-type]
+    )
+    digest = grant_source_digest or compute_grant_source_digest(
+        owner_kind=owner_kind,
+        owner_id=owner_id,
+        owner_version_id=owner_version_id,
+        capability_key=capability_key,
+        binding_contract_digest=binding_contract_digest,
+        allowed_side_effects=effects,
+        allowed_interrupt_modes=modes,
+        platform_ceiling_digest=platform_ceiling_digest,
+        platform_ceiling_revision=platform_ceiling_revision,
+        entrypoint_policy_digest=entrypoint_policy_digest,
+        global_policy_digest=global_policy_digest,
+        owner_policy_digest=owner_policy_digest,
+    )
+    return EffectiveCapabilityGrant(
+        owner_kind=owner_kind,
+        owner_version_id=owner_version_id,
+        capability_key=capability_key,
+        binding_contract_digest=binding_contract_digest,
+        allowed_side_effects=effects,
+        allowed_interrupt_modes=modes,
+        platform_ceiling_digest=platform_ceiling_digest,
+        entrypoint_policy_digest=entrypoint_policy_digest,
+        global_policy_digest=global_policy_digest,
+        owner_policy_digest=owner_policy_digest,
+        grant_source_digest=digest,
+    )
+
+
+def build_authorization_decision_digest_payload(
+    *,
+    allowed: bool,
+    reason_code: str,
+    principal_digest: str,
+    entrypoint_policy_digest: str,
+    global_policy_digest: str,
+    owner_policy_digest: str,
+    allowed_side_effects: Sequence[SideEffectClass],
+    grant_source_digest: str | None,
+    exposure_digest: str,
+    effective_policy_digest: str,
+) -> dict[str, JsonValue]:
+    return {
+        "schemaVersion": 1,
+        "kind": "authorization_decision",
+        "allowed": allowed,
+        "reasonCode": reason_code,
+        "principalDigest": principal_digest,
+        "entrypointPolicyDigest": entrypoint_policy_digest,
+        "globalPolicyDigest": global_policy_digest,
+        "ownerPolicyDigest": owner_policy_digest,
+        "allowedSideEffects": list(allowed_side_effects),
+        "grantSourceDigest": grant_source_digest,
+        "exposureDigest": exposure_digest,
+        "effectivePolicyDigest": effective_policy_digest,
+    }
+
+
+def compute_authorization_decision_digest(
+    *,
+    allowed: bool,
+    reason_code: str,
+    principal_digest: str,
+    entrypoint_policy_digest: str,
+    global_policy_digest: str,
+    owner_policy_digest: str,
+    allowed_side_effects: Sequence[SideEffectClass],
+    grant_source_digest: str | None,
+    exposure_digest: str,
+    effective_policy_digest: str,
+) -> str:
+    return sha256_canonical_json(
+        build_authorization_decision_digest_payload(
+            allowed=allowed,
+            reason_code=reason_code,
+            principal_digest=principal_digest,
+            entrypoint_policy_digest=entrypoint_policy_digest,
+            global_policy_digest=global_policy_digest,
+            owner_policy_digest=owner_policy_digest,
+            allowed_side_effects=allowed_side_effects,
+            grant_source_digest=grant_source_digest,
+            exposure_digest=exposure_digest,
+            effective_policy_digest=effective_policy_digest,
+        )
+    )
+
+
+def build_authorization_decision(
+    *,
+    allowed: bool,
+    reason_code: str,
+    principal_digest: str,
+    entrypoint_policy_digest: str,
+    global_policy_digest: str,
+    owner_policy_digest: str,
+    allowed_side_effects: Sequence[SideEffectClass] = (),
+    grant_source_digest: str | None = None,
+    exposure_digest: str,
+    effective_policy_digest: str,
+    decision_digest: str | None = None,
+) -> AuthorizationDecision:
+    effects = tuple(allowed_side_effects)
+    digest = decision_digest or compute_authorization_decision_digest(
+        allowed=allowed,
+        reason_code=reason_code,
+        principal_digest=principal_digest,
+        entrypoint_policy_digest=entrypoint_policy_digest,
+        global_policy_digest=global_policy_digest,
+        owner_policy_digest=owner_policy_digest,
+        allowed_side_effects=effects,
+        grant_source_digest=grant_source_digest,
+        exposure_digest=exposure_digest,
+        effective_policy_digest=effective_policy_digest,
+    )
+    return AuthorizationDecision(
+        allowed=allowed,
+        reason_code=reason_code,
+        principal_digest=principal_digest,
+        entrypoint_policy_digest=entrypoint_policy_digest,
+        global_policy_digest=global_policy_digest,
+        owner_policy_digest=owner_policy_digest,
+        allowed_side_effects=effects,
+        grant_source_digest=grant_source_digest,
+        exposure_digest=exposure_digest,
+        effective_policy_digest=effective_policy_digest,
+        decision_digest=digest,
     )
 
 
@@ -1075,7 +1459,11 @@ __all__ = [
     "ASSISTANT_CHAT_ENTRYPOINT_POLICY_REVISION",
     "ASSISTANT_CHAT_RUN_BUDGET_DEFAULTS",
     "ASSISTANT_CHAT_RUN_BUDGET_HARD_CEILINGS",
+    "AUTHORIZATION_REASON_CODES",
+    "AuthorizationDecision",
     "CapabilityExposureRef",
+    "EMPTY_POLICY_DIGEST",
+    "EffectiveCapabilityGrant",
     "EffectiveRunPolicySnapshot",
     "MAIN_AGENT_OWNER_DEFAULT_MAX_CALLS",
     "ManifestExposureIndex",
@@ -1085,23 +1473,30 @@ __all__ = [
     "PolicyEntrypoint",
     "PolicyOwnerKind",
     "RunBudgetLimits",
+    "build_authorization_decision",
+    "build_authorization_decision_digest_payload",
     "build_capability_exposure_ref",
+    "build_effective_capability_grant",
     "build_effective_policy_digest_payload",
     "build_effective_run_policy_snapshot",
     "build_exposure_digest_payload",
     "build_exposure_index_digest_payload",
+    "build_grant_source_digest_payload",
     "build_manifest_exposure_index",
     "build_owner_budget_limits",
     "build_owner_policy_ref",
     "build_run_budget_limits_payload",
     "compute_assistant_chat_entrypoint_policy_digest",
+    "compute_authorization_decision_digest",
     "compute_default_global_policy_digest",
     "compute_effective_policy_digest",
     "compute_exposure_digest",
     "compute_exposure_index_digest",
+    "compute_grant_source_digest",
     "compute_grant_source_set_digest",
     "compute_owner_budget_digest",
     "compute_owner_policy_digest",
+    "compute_principal_digest",
     "normalize_owner_budget_limits",
     "normalize_run_budget_limits",
 ]

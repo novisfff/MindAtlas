@@ -636,3 +636,959 @@ def test_run_budget_and_snapshot_source_mutation_isolation() -> None:
     assert snap.effective_policy_digest == digest_before
     assert len(snap.owner_policy_refs) == 1
     assert snap.run_budget_limits.max_active_skills == 1
+
+
+# ---------------------------------------------------------------------------
+# Plan 05 Task 2: pure ordered authorization reason-code matrix
+# ---------------------------------------------------------------------------
+
+from app.assistant.capabilities.contracts import (  # noqa: E402
+    CapabilityAvailability,
+    CapabilityBehavior,
+    CapabilityDescriptor,
+    CapabilityOwnerRef,
+    CapabilityPrincipal,
+    CapabilityTimeoutPolicy,
+    ClassificationContractRef,
+)
+from app.assistant.domain.contracts import CapabilityCompletionContract  # noqa: E402
+from app.assistant.domain.json_schema import (  # noqa: E402
+    binding_schema_digest as _binding_schema_digest,
+    normalize_binding_schema as _normalize_binding_schema,
+)
+from app.assistant.policy.contracts import (  # noqa: E402
+    AUTHORIZATION_REASON_CODES,
+    AuthorizationDecision,
+    EffectiveCapabilityGrant,
+    build_authorization_decision,
+    build_effective_capability_grant,
+    compute_authorization_decision_digest,
+    compute_grant_source_digest,
+    compute_principal_digest,
+)
+from app.assistant.policy.evaluator import (  # noqa: E402
+    AuthorizationProposal,
+    GlobalPolicyView,
+    OwnerGrantMaterial,
+    derive_effective_capability_grant,
+    evaluate_authorization,
+    owner_material_key,
+)
+
+
+SCOPE_DIGEST = "1" * 64
+MANIFEST_DIGEST = DIGEST_A
+DESCRIPTOR_DIGEST = DIGEST_C
+CONV_ID = UUID("00000000-0000-4000-8000-000000000099")
+
+
+def _timeout():
+    return CapabilityTimeoutPolicy(
+        mode="cooperative", timeout_seconds=None, cancellation_supported=True
+    )
+
+
+def _behavior(*, side_effect: str = "read", interrupt_mode: str = "none"):
+    return CapabilityBehavior(
+        classification=ClassificationContractRef(
+            schema_version=1,
+            revision="plan02-v1",
+            ruleset_digest=DIGEST_A,
+        ),
+        side_effect=side_effect,  # type: ignore[arg-type]
+        parallel_safe=True,
+        interrupt_mode=interrupt_mode,  # type: ignore[arg-type]
+        timeout_policy=_timeout(),
+        behavior_digest=DIGEST_B,
+    )
+
+
+def _descriptor_for(
+    *,
+    capability_key: str,
+    binding_contract_digest: str,
+    resolution_digest: str,
+    dependency_closure_digest: str,
+    descriptor_digest: str = DESCRIPTOR_DIGEST,
+    side_effect: str = "read",
+    interrupt_mode: str = "none",
+    availability_status: str = "available",
+):
+    in_schema = _normalize_binding_schema({"type": "object"}, require_object_root=True)
+    out_schema = _normalize_binding_schema({"type": "object"}, require_object_root=True)
+    return CapabilityDescriptor(
+        capability_key=capability_key,
+        capability_type="tool",
+        target_identity=f"system-tool:{capability_key}",
+        target_id=None,
+        target_version_id=None,
+        target_revision=None,
+        resolution_digest=resolution_digest,
+        binding_contract_digest=binding_contract_digest,
+        dependency_closure_digest=dependency_closure_digest,
+        display_name=capability_key,
+        description="d",
+        input_schema=in_schema,
+        output_schema=out_schema,
+        input_schema_digest=_binding_schema_digest(in_schema),
+        output_schema_digest=_binding_schema_digest(out_schema),
+        descriptor_digest=descriptor_digest,
+        executable_revision="plan05-dev",
+        behavior=_behavior(side_effect=side_effect, interrupt_mode=interrupt_mode),
+        availability=CapabilityAvailability(status=availability_status),  # type: ignore[arg-type]
+        completion=CapabilityCompletionContract(terminal_output=False, needs_followup=True),
+    )
+
+
+def _main_agent_fixture(*, capability_key: str = "skill.search"):
+    """Build snapshot + exposure + owner material for a Main Agent control."""
+    resolved = _resolved_binding(capability_key)
+    binding = project_frozen_capability_binding(
+        resolved=resolved,
+        provenance=FrozenBindingProvenance(
+            origin="main_agent_profile",
+            binding_row_id=None,
+            owner_version_id=PROFILE_VERSION_ID,
+            source_snapshot_digest=DIGEST_D,
+        ),
+    )
+    exposure = build_capability_exposure_ref(
+        domain_key=capability_key,
+        resolved_ref=binding.ref,
+        binding_contract_digest=binding.ref.binding_contract_digest,
+        descriptor_digest=DESCRIPTOR_DIGEST,
+        owner_kind="main_agent",
+        owner_id="general_chat",
+        owner_version_id=PROFILE_VERSION_ID,
+    )
+    index = build_manifest_exposure_index(
+        manifest_revision=1,
+        manifest_digest=MANIFEST_DIGEST,
+        exposures=(exposure,),
+    )
+    owner_ref = build_owner_policy_ref(
+        owner_kind="main_agent",
+        owner_id="general_chat",
+        owner_version_id=PROFILE_VERSION_ID,
+        content_or_policy_digest=DIGEST_A,
+        allowed_side_effects=PLAN05_RELEASE_GATE_SIDE_EFFECTS,
+    )
+    limits = normalize_run_budget_limits()
+    snap = build_effective_run_policy_snapshot(
+        app_build_revision="development",
+        run_id=RUN_ID,
+        principal=LOCAL_ASSISTANT_PRINCIPAL,
+        main_agent_profile_version_id=PROFILE_VERSION_ID,
+        main_agent_profile_digest=DIGEST_A,
+        exposure_index=index,
+        owner_policy_refs=(owner_ref,),
+        run_budget_limits=limits,
+    )
+    material = OwnerGrantMaterial(
+        owner_kind="main_agent",
+        owner_id="general_chat",
+        owner_version_id=PROFILE_VERSION_ID,
+        policy_digest=owner_ref.policy_digest,
+        author_allowed_side_effects=("none", "compute", "read"),
+        declared_capability_keys=None,
+    )
+    owners = {owner_material_key(material): material}
+    return snap, binding, exposure, owners, material
+
+
+def _skill_fixture(
+    *,
+    capability_key: str = "skill.reader",
+    author_effects: tuple[str, ...] = ("read", "compute"),
+    is_instruction_only: bool = False,
+    package_id: UUID | None = None,
+    version_id: UUID | None = None,
+):
+    pkg = package_id or PACKAGE_ID
+    ver = version_id or SKILL_VERSION_ID
+    resolved = _resolved_binding(capability_key)
+    binding = project_frozen_capability_binding(
+        resolved=resolved,
+        provenance=FrozenBindingProvenance(
+            origin="skill_version",
+            binding_row_id=None,
+            owner_version_id=ver,
+            source_snapshot_digest=DIGEST_D,
+        ),
+    )
+    exposure = build_capability_exposure_ref(
+        domain_key=capability_key,
+        resolved_ref=binding.ref,
+        binding_contract_digest=binding.ref.binding_contract_digest,
+        descriptor_digest=DESCRIPTOR_DIGEST,
+        owner_kind="skill_version",
+        owner_id=str(pkg),
+        owner_version_id=ver,
+    )
+    index = build_manifest_exposure_index(
+        manifest_revision=1,
+        manifest_digest=MANIFEST_DIGEST,
+        exposures=(exposure,),
+    )
+    owner_ref = build_owner_policy_ref(
+        owner_kind="skill_version",
+        owner_id=str(pkg),
+        owner_version_id=ver,
+        content_or_policy_digest=DIGEST_B,
+        allowed_side_effects=author_effects,
+    )
+    limits = normalize_run_budget_limits()
+    snap = build_effective_run_policy_snapshot(
+        app_build_revision="development",
+        run_id=RUN_ID,
+        principal=LOCAL_ASSISTANT_PRINCIPAL,
+        main_agent_profile_version_id=PROFILE_VERSION_ID,
+        main_agent_profile_digest=DIGEST_A,
+        exposure_index=index,
+        owner_policy_refs=(owner_ref,),
+        run_budget_limits=limits,
+    )
+    material = OwnerGrantMaterial(
+        owner_kind="skill_version",
+        owner_id=str(pkg),
+        owner_version_id=ver,
+        policy_digest=owner_ref.policy_digest,
+        author_allowed_side_effects=author_effects,
+        declared_capability_keys=frozenset({capability_key}) if not is_instruction_only else frozenset(),
+        is_instruction_only=is_instruction_only,
+    )
+    owners = {owner_material_key(material): material}
+    return snap, binding, exposure, owners, material
+
+
+def _proposal(
+    *,
+    binding,
+    exposure,
+    side_effect: str = "read",
+    interrupt_mode: str = "none",
+    availability_status: str = "available",
+    principal=None,
+    nesting_depth: int = 0,
+    max_capability_depth: int = 4,
+    scope_digest: str = SCOPE_DIGEST,
+    expected_scope_digest: str = SCOPE_DIGEST,
+    run_id=RUN_ID,
+    expected_run_id=RUN_ID,
+    conversation_id=CONV_ID,
+    expected_conversation_id=CONV_ID,
+    manifest_digest: str = MANIFEST_DIGEST,
+    expected_manifest_digest: str = MANIFEST_DIGEST,
+    claimed_owner_kind=None,
+    claimed_owner_id=None,
+    claimed_owner_version_id=None,
+    descriptor_digest: str = DESCRIPTOR_DIGEST,
+    capability_key: str | None = None,
+    binding_contract_digest: str | None = None,
+    resolution_digest: str | None = None,
+    dependency_closure_digest: str | None = None,
+):
+    key = capability_key or binding.ref.capability_key
+    return AuthorizationProposal(
+        run_id=run_id,
+        conversation_id=conversation_id,
+        scope_digest=scope_digest,
+        expected_scope_digest=expected_scope_digest,
+        expected_run_id=expected_run_id,
+        expected_conversation_id=expected_conversation_id,
+        manifest_digest=manifest_digest,
+        expected_manifest_digest=expected_manifest_digest,
+        capability_key=key,
+        binding_contract_digest=binding_contract_digest or binding.ref.binding_contract_digest,
+        resolution_digest=resolution_digest or binding.ref.resolution_digest,
+        dependency_closure_digest=dependency_closure_digest
+        or binding.ref.dependency_closure_digest,
+        descriptor_digest=descriptor_digest,
+        descriptor_side_effect=side_effect,  # type: ignore[arg-type]
+        descriptor_interrupt_mode=interrupt_mode,
+        descriptor_availability_status=availability_status,
+        principal=principal or LOCAL_ASSISTANT_PRINCIPAL,
+        nesting_depth=nesting_depth,
+        max_capability_depth=max_capability_depth,
+        claimed_owner_kind=claimed_owner_kind if claimed_owner_kind is not None else exposure.owner_kind,
+        claimed_owner_id=claimed_owner_id if claimed_owner_id is not None else exposure.owner_id,
+        claimed_owner_version_id=(
+            claimed_owner_version_id
+            if claimed_owner_version_id is not None
+            else exposure.owner_version_id
+        ),
+    )
+
+
+def test_authorization_reason_codes_stable_order() -> None:
+    assert AUTHORIZATION_REASON_CODES == (
+        "scope_mismatch",
+        "manifest_surface_mismatch",
+        "exposure_missing",
+        "exposure_ambiguous",
+        "owner_mismatch",
+        "principal_unauthenticated",
+        "principal_not_allowed",
+        "entrypoint_not_allowed",
+        "global_policy_denied",
+        "owner_capability_not_declared",
+        "owner_side_effect_denied",
+        "release_gate_denied",
+        "target_unavailable",
+        "version_or_digest_drift",
+        "recursion_denied",
+        "allowed",
+    )
+
+
+def test_main_agent_allowed_read() -> None:
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(binding=binding, exposure=exposure, side_effect="read"),
+        owner_materials=owners,
+    )
+    assert decision.allowed is True
+    assert decision.reason_code == "allowed"
+    assert decision.allowed_side_effects == ("none", "compute", "read")
+    assert decision.grant_source_digest is not None
+    assert len(decision.decision_digest) == 64
+    assert decision.exposure_digest == exposure.exposure_digest
+
+
+def test_scope_mismatch() -> None:
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(
+            binding=binding,
+            exposure=exposure,
+            scope_digest="2" * 64,
+            expected_scope_digest=SCOPE_DIGEST,
+        ),
+        owner_materials=owners,
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "scope_mismatch"
+    assert decision.grant_source_digest is None
+    assert decision.allowed_side_effects == ()
+
+
+def test_manifest_surface_mismatch() -> None:
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(
+            binding=binding,
+            exposure=exposure,
+            manifest_digest="9" * 64,
+            expected_manifest_digest=MANIFEST_DIGEST,
+        ),
+        owner_materials=owners,
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "manifest_surface_mismatch"
+
+
+def test_exposure_missing() -> None:
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(
+            binding=binding,
+            exposure=exposure,
+            capability_key="guessed.stale.alias",
+        ),
+        owner_materials=owners,
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "exposure_missing"
+
+
+def test_exposure_ambiguous_binding_mismatch() -> None:
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(
+            binding=binding,
+            exposure=exposure,
+            binding_contract_digest="e" * 64,
+        ),
+        owner_materials=owners,
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "exposure_ambiguous"
+
+
+def test_owner_mismatch_claimed() -> None:
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(
+            binding=binding,
+            exposure=exposure,
+            claimed_owner_kind="skill_version",
+            claimed_owner_id=str(PACKAGE_ID),
+            claimed_owner_version_id=SKILL_VERSION_ID,
+        ),
+        owner_materials=owners,
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "owner_mismatch"
+
+
+def test_owner_mismatch_missing_material() -> None:
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(binding=binding, exposure=exposure),
+        owner_materials={},  # no materials
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "owner_mismatch"
+
+
+def test_principal_unauthenticated() -> None:
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    unauth = CapabilityPrincipal(
+        principal_type="service",
+        principal_id="local-assistant",
+        authenticated=False,
+    )
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(binding=binding, exposure=exposure, principal=unauth),
+        owner_materials=owners,
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "principal_unauthenticated"
+
+
+def test_principal_not_allowed() -> None:
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    other = CapabilityPrincipal(
+        principal_type="user",
+        principal_id="alice",
+        authenticated=True,
+    )
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(binding=binding, exposure=exposure, principal=other),
+        owner_materials=owners,
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "principal_not_allowed"
+
+
+def test_global_policy_denied_named_key() -> None:
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    gp = GlobalPolicyView(
+        policy_digest=snap.global_policy_digest,
+        denied_capability_keys=frozenset({"skill.search"}),
+    )
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(binding=binding, exposure=exposure),
+        owner_materials=owners,
+        global_policy=gp,
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "global_policy_denied"
+
+
+def test_owner_capability_not_declared_instruction_only() -> None:
+    snap, binding, exposure, owners, _ = _skill_fixture(
+        is_instruction_only=True,
+        author_effects=(),
+    )
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(binding=binding, exposure=exposure),
+        owner_materials=owners,
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "owner_capability_not_declared"
+
+
+def test_owner_capability_not_declared_wrong_key() -> None:
+    snap, binding, exposure, owners, material = _skill_fixture()
+    # Material declares a different key than the exposure.
+    material2 = OwnerGrantMaterial(
+        owner_kind=material.owner_kind,
+        owner_id=material.owner_id,
+        owner_version_id=material.owner_version_id,
+        policy_digest=material.policy_digest,
+        author_allowed_side_effects=material.author_allowed_side_effects,
+        declared_capability_keys=frozenset({"other.key"}),
+    )
+    owners2 = {owner_material_key(material2): material2}
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(binding=binding, exposure=exposure),
+        owner_materials=owners2,
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "owner_capability_not_declared"
+
+
+def test_owner_side_effect_denied_write() -> None:
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(binding=binding, exposure=exposure, side_effect="write_local"),
+        owner_materials=owners,
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "owner_side_effect_denied"
+    # Grant was derived; decision may carry grant fields for audit.
+    assert decision.grant_source_digest is not None
+    assert "write_local" not in decision.allowed_side_effects
+
+
+def test_owner_side_effect_denied_skill_compute_only() -> None:
+    snap, binding, exposure, owners, _ = _skill_fixture(author_effects=("compute",))
+    # Descriptor is read; skill only declared compute → still admits none via entrypoint,
+    # but read is not in author lattice ∩ platform → denied.
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(binding=binding, exposure=exposure, side_effect="read"),
+        owner_materials=owners,
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "owner_side_effect_denied"
+
+
+def test_release_gate_denied_for_draft() -> None:
+    # Build a synthetic grant path: main agent grant is platform-capped so draft
+    # is denied at owner_side_effect before release_gate. release_gate is hit only
+    # when grant somehow admits a non-gate effect. Force via skill that maps write
+    # and a descriptor write_external which is outside platform → owner_side_effect.
+    # To hit release_gate specifically, grant must contain the effect but release
+    # gate rejects it. Plan 05 platform==release gate so this path is defensive.
+    # We verify the ordered code exists and draft is never allowed.
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    for effect in ("draft", "write_local", "write_external", "unknown"):
+        decision = evaluate_authorization(
+            snapshot=snap,
+            proposal=_proposal(binding=binding, exposure=exposure, side_effect=effect),
+            owner_materials=owners,
+        )
+        assert decision.allowed is False
+        assert decision.reason_code in {
+            "owner_side_effect_denied",
+            "release_gate_denied",
+        }
+
+
+def test_target_unavailable() -> None:
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(
+            binding=binding,
+            exposure=exposure,
+            availability_status="disabled",
+        ),
+        owner_materials=owners,
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "target_unavailable"
+
+
+def test_version_or_digest_drift_descriptor() -> None:
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(
+            binding=binding,
+            exposure=exposure,
+            descriptor_digest="f" * 64,  # differs from exposure.descriptor_digest
+        ),
+        owner_materials=owners,
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "version_or_digest_drift"
+
+
+def test_version_or_digest_drift_availability() -> None:
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(
+            binding=binding,
+            exposure=exposure,
+            availability_status="version_drift",
+        ),
+        owner_materials=owners,
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "version_or_digest_drift"
+
+
+def test_recursion_denied() -> None:
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(
+            binding=binding,
+            exposure=exposure,
+            nesting_depth=99,
+            max_capability_depth=4,
+        ),
+        owner_materials=owners,
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "recursion_denied"
+
+
+def test_skill_owner_allowed_read() -> None:
+    snap, binding, exposure, owners, material = _skill_fixture(
+        author_effects=("read", "compute")
+    )
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(binding=binding, exposure=exposure, side_effect="read"),
+        owner_materials=owners,
+    )
+    assert decision.allowed is True
+    assert decision.reason_code == "allowed"
+    # none admitted via entrypoint rule + author lattice intersection.
+    assert decision.allowed_side_effects == ("none", "compute", "read")
+    assert decision.owner_policy_digest == material.policy_digest
+
+
+def test_skill_author_write_clipped_to_platform() -> None:
+    snap, binding, exposure, owners, _ = _skill_fixture(
+        author_effects=("read", "write")
+    )
+    grant = derive_effective_capability_grant(
+        owner=owners[next(iter(owners))],
+        capability_key=binding.ref.capability_key,
+        binding_contract_digest=binding.ref.binding_contract_digest,
+        entrypoint_policy_digest=snap.entrypoint_policy_digest,
+        global_policy_digest=snap.global_policy_digest,
+    )
+    assert grant is not None
+    assert "write_local" not in grant.allowed_side_effects
+    assert grant.allowed_side_effects == ("none", "read")
+    # read still allowed
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(binding=binding, exposure=exposure, side_effect="read"),
+        owner_materials=owners,
+    )
+    assert decision.allowed is True
+    # write denied
+    decision_w = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(binding=binding, exposure=exposure, side_effect="write_local"),
+        owner_materials=owners,
+    )
+    assert decision_w.allowed is False
+    assert decision_w.reason_code == "owner_side_effect_denied"
+
+
+def test_one_readonly_skill_does_not_restrict_other_owner() -> None:
+    """One read-only Skill does not globally restrict another owner."""
+    snap_a, binding_a, exposure_a, owners_a, mat_a = _skill_fixture(
+        capability_key="skill.a",
+        author_effects=("read",),
+        package_id=UUID("00000000-0000-4000-8000-0000000000a1"),
+        version_id=UUID("00000000-0000-4000-8000-0000000000a2"),
+    )
+    snap_b, binding_b, exposure_b, owners_b, mat_b = _skill_fixture(
+        capability_key="skill.b",
+        author_effects=("read", "compute"),
+        package_id=UUID("00000000-0000-4000-8000-0000000000b1"),
+        version_id=UUID("00000000-0000-4000-8000-0000000000b2"),
+    )
+    # Combined snapshot with both exposures and both owner materials.
+    index = build_manifest_exposure_index(
+        manifest_revision=1,
+        manifest_digest=MANIFEST_DIGEST,
+        exposures=(exposure_a, exposure_b),
+    )
+    owner_refs = (
+        build_owner_policy_ref(
+            owner_kind=mat_a.owner_kind,
+            owner_id=mat_a.owner_id,
+            owner_version_id=mat_a.owner_version_id,
+            content_or_policy_digest=DIGEST_B,
+            allowed_side_effects=mat_a.author_allowed_side_effects,
+        ),
+        build_owner_policy_ref(
+            owner_kind=mat_b.owner_kind,
+            owner_id=mat_b.owner_id,
+            owner_version_id=mat_b.owner_version_id,
+            content_or_policy_digest=DIGEST_B,
+            allowed_side_effects=mat_b.author_allowed_side_effects,
+        ),
+    )
+    # Rebuild materials with matching policy digests from owner_refs.
+    mat_a2 = OwnerGrantMaterial(
+        owner_kind=mat_a.owner_kind,
+        owner_id=mat_a.owner_id,
+        owner_version_id=mat_a.owner_version_id,
+        policy_digest=owner_refs[0].policy_digest,
+        author_allowed_side_effects=mat_a.author_allowed_side_effects,
+        declared_capability_keys=frozenset({"skill.a"}),
+    )
+    mat_b2 = OwnerGrantMaterial(
+        owner_kind=mat_b.owner_kind,
+        owner_id=mat_b.owner_id,
+        owner_version_id=mat_b.owner_version_id,
+        policy_digest=owner_refs[1].policy_digest,
+        author_allowed_side_effects=mat_b.author_allowed_side_effects,
+        declared_capability_keys=frozenset({"skill.b"}),
+    )
+    snap = build_effective_run_policy_snapshot(
+        app_build_revision="development",
+        run_id=RUN_ID,
+        principal=LOCAL_ASSISTANT_PRINCIPAL,
+        main_agent_profile_version_id=PROFILE_VERSION_ID,
+        main_agent_profile_digest=DIGEST_A,
+        exposure_index=index,
+        owner_policy_refs=owner_refs,
+        run_budget_limits=normalize_run_budget_limits(),
+    )
+    owners = {
+        owner_material_key(mat_a2): mat_a2,
+        owner_material_key(mat_b2): mat_b2,
+    }
+    # skill.b still gets compute even though skill.a is read-only.
+    decision_b = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(binding=binding_b, exposure=exposure_b, side_effect="compute"),
+        owner_materials=owners,
+    )
+    assert decision_b.allowed is True
+    assert "compute" in decision_b.allowed_side_effects
+    # skill.a cannot use compute (author only declared read).
+    decision_a = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(binding=binding_a, exposure=exposure_a, side_effect="compute"),
+        owner_materials=owners,
+    )
+    assert decision_a.allowed is False
+    assert decision_a.reason_code == "owner_side_effect_denied"
+
+
+def test_broad_skill_cannot_grant_other_owner() -> None:
+    """One broad Skill cannot grant another owner's capability."""
+    snap_a, binding_a, exposure_a, owners_a, mat_a = _skill_fixture(
+        capability_key="skill.broad",
+        author_effects=("read", "compute", "write"),
+        package_id=UUID("00000000-0000-4000-8000-0000000000c1"),
+        version_id=UUID("00000000-0000-4000-8000-0000000000c2"),
+    )
+    # Attempt to authorize skill.broad using a different owner's material only.
+    other = OwnerGrantMaterial(
+        owner_kind="skill_version",
+        owner_id=str(UUID("00000000-0000-4000-8000-0000000000d1")),
+        owner_version_id=UUID("00000000-0000-4000-8000-0000000000d2"),
+        policy_digest="c" * 64,
+        author_allowed_side_effects=("read", "compute", "write"),
+        declared_capability_keys=frozenset({"skill.broad"}),
+    )
+    decision = evaluate_authorization(
+        snapshot=snap_a,
+        proposal=_proposal(binding=binding_a, exposure=exposure_a),
+        owner_materials={owner_material_key(other): other},
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "owner_mismatch"
+
+
+def test_compatible_consumer_does_not_participate_in_auth() -> None:
+    """Compatible consumers are completion-evidence consumers only."""
+    snap, binding, exposure, owners, material = _skill_fixture()
+    # Append a consumer version id on the exposure; auth still uses owner only.
+    consumer_id = UUID("00000000-0000-4000-8000-0000000000ee")
+    exposure2 = build_capability_exposure_ref(
+        domain_key=exposure.domain_key,
+        resolved_ref=exposure.resolved_ref,
+        binding_contract_digest=exposure.binding_contract_digest,
+        descriptor_digest=exposure.descriptor_digest,
+        owner_kind=exposure.owner_kind,
+        owner_id=exposure.owner_id,
+        owner_version_id=exposure.owner_version_id,
+        compatible_consumer_version_ids=(consumer_id,),
+    )
+    index = build_manifest_exposure_index(
+        manifest_revision=1,
+        manifest_digest=MANIFEST_DIGEST,
+        exposures=(exposure2,),
+    )
+    snap2 = build_effective_run_policy_snapshot(
+        app_build_revision="development",
+        run_id=RUN_ID,
+        principal=LOCAL_ASSISTANT_PRINCIPAL,
+        main_agent_profile_version_id=PROFILE_VERSION_ID,
+        main_agent_profile_digest=DIGEST_A,
+        exposure_index=index,
+        owner_policy_refs=snap.owner_policy_refs,
+        run_budget_limits=snap.run_budget_limits,
+    )
+    decision = evaluate_authorization(
+        snapshot=snap2,
+        proposal=_proposal(binding=binding, exposure=exposure2, side_effect="read"),
+        owner_materials=owners,
+    )
+    assert decision.allowed is True
+    # Claiming the consumer as owner fails.
+    decision2 = evaluate_authorization(
+        snapshot=snap2,
+        proposal=_proposal(
+            binding=binding,
+            exposure=exposure2,
+            claimed_owner_kind="skill_version",
+            claimed_owner_id=str(consumer_id),
+            claimed_owner_version_id=consumer_id,
+        ),
+        owner_materials=owners,
+    )
+    assert decision2.allowed is False
+    assert decision2.reason_code == "owner_mismatch"
+
+
+def test_grant_derived_before_descriptor_and_digest_stable() -> None:
+    snap, binding, exposure, owners, material = _main_agent_fixture()
+    grant = derive_effective_capability_grant(
+        owner=material,
+        capability_key=binding.ref.capability_key,
+        binding_contract_digest=binding.ref.binding_contract_digest,
+        entrypoint_policy_digest=snap.entrypoint_policy_digest,
+        global_policy_digest=snap.global_policy_digest,
+    )
+    assert grant is not None
+    assert isinstance(grant, EffectiveCapabilityGrant)
+    # Grant does not cover descriptor side effect — rebuild is identical.
+    grant2 = derive_effective_capability_grant(
+        owner=material,
+        capability_key=binding.ref.capability_key,
+        binding_contract_digest=binding.ref.binding_contract_digest,
+        entrypoint_policy_digest=snap.entrypoint_policy_digest,
+        global_policy_digest=snap.global_policy_digest,
+    )
+    assert grant.grant_source_digest == grant2.grant_source_digest
+    # Changing owner policy digest changes grant_source.
+    material_changed = OwnerGrantMaterial(
+        owner_kind=material.owner_kind,
+        owner_id=material.owner_id,
+        owner_version_id=material.owner_version_id,
+        policy_digest="d" * 64,
+        author_allowed_side_effects=material.author_allowed_side_effects,
+    )
+    grant3 = derive_effective_capability_grant(
+        owner=material_changed,
+        capability_key=binding.ref.capability_key,
+        binding_contract_digest=binding.ref.binding_contract_digest,
+        entrypoint_policy_digest=snap.entrypoint_policy_digest,
+        global_policy_digest=snap.global_policy_digest,
+    )
+    assert grant3 is not None
+    assert grant3.grant_source_digest != grant.grant_source_digest
+
+
+def test_decision_digest_deterministic_no_prose() -> None:
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    proposal = _proposal(binding=binding, exposure=exposure)
+    d1 = evaluate_authorization(
+        snapshot=snap, proposal=proposal, owner_materials=owners
+    )
+    d2 = evaluate_authorization(
+        snapshot=snap, proposal=proposal, owner_materials=owners
+    )
+    assert d1.decision_digest == d2.decision_digest
+    assert d1 == d2
+    # Recompute digest from fields.
+    recomputed = compute_authorization_decision_digest(
+        allowed=d1.allowed,
+        reason_code=d1.reason_code,
+        principal_digest=d1.principal_digest,
+        entrypoint_policy_digest=d1.entrypoint_policy_digest,
+        global_policy_digest=d1.global_policy_digest,
+        owner_policy_digest=d1.owner_policy_digest,
+        allowed_side_effects=d1.allowed_side_effects,
+        grant_source_digest=d1.grant_source_digest,
+        exposure_digest=d1.exposure_digest,
+        effective_policy_digest=d1.effective_policy_digest,
+    )
+    assert recomputed == d1.decision_digest
+    # No prose/user data in digests or reason codes.
+    for field in (
+        d1.principal_digest,
+        d1.decision_digest,
+        d1.grant_source_digest or "",
+        d1.reason_code,
+    ):
+        assert "password" not in field.lower()
+        assert "prompt" not in field.lower()
+        assert "http" not in field.lower()
+
+
+def test_decision_and_grant_frozen_forbidden_extra() -> None:
+    snap, binding, exposure, owners, material = _main_agent_fixture()
+    decision = evaluate_authorization(
+        snapshot=snap,
+        proposal=_proposal(binding=binding, exposure=exposure),
+        owner_materials=owners,
+    )
+    with pytest.raises(ValidationError):
+        AuthorizationDecision(
+            **decision.model_dump(),
+            extra=True,  # type: ignore[call-arg]
+        )
+    grant = derive_effective_capability_grant(
+        owner=material,
+        capability_key=binding.ref.capability_key,
+        binding_contract_digest=binding.ref.binding_contract_digest,
+        entrypoint_policy_digest=snap.entrypoint_policy_digest,
+        global_policy_digest=snap.global_policy_digest,
+    )
+    assert grant is not None
+    with pytest.raises(ValidationError):
+        EffectiveCapabilityGrant(
+            **grant.model_dump(),
+            extra=True,  # type: ignore[call-arg]
+        )
+    with pytest.raises(ValidationError):
+        decision.reason_code = "x"  # type: ignore[misc]
+
+
+def test_every_side_effect_membership() -> None:
+    snap, binding, exposure, owners, _ = _main_agent_fixture()
+    expected = {
+        "none": True,
+        "compute": True,
+        "read": True,
+        "draft": False,
+        "write_local": False,
+        "write_external": False,
+        "unknown": False,
+    }
+    for effect, should_allow in expected.items():
+        decision = evaluate_authorization(
+            snapshot=snap,
+            proposal=_proposal(binding=binding, exposure=exposure, side_effect=effect),
+            owner_materials=owners,
+        )
+        assert decision.allowed is should_allow, effect
+        if not should_allow:
+            assert decision.reason_code in {
+                "owner_side_effect_denied",
+                "release_gate_denied",
+            }
+
+
+def test_principal_digest_identity_only() -> None:
+    d1 = compute_principal_digest(LOCAL_ASSISTANT_PRINCIPAL)
+    d2 = compute_principal_digest(LOCAL_ASSISTANT_PRINCIPAL)
+    assert d1 == d2
+    assert len(d1) == 64
+    other = CapabilityPrincipal(
+        principal_type="service",
+        principal_id="other",
+        authenticated=True,
+    )
+    assert compute_principal_digest(other) != d1
