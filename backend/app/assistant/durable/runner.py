@@ -331,6 +331,8 @@ class MainAgentRunExecutor:
         user_text_resolver: Callable[[Any], str] | None = None,
         memory_preparer: Callable[[Any, Any], Any] | None = None,
         finalize_memory: bool = True,
+        heartbeat_interval_sec: float | None = None,
+        lease_ttl_sec: float | None = None,
     ) -> None:
         self.provider_factory = provider_factory
         self.scripted_final_text = scripted_final_text
@@ -338,6 +340,15 @@ class MainAgentRunExecutor:
         # Optional: (db, run) -> PreparedMemorySet | None. Default empty set.
         self.memory_preparer = memory_preparer
         self.finalize_memory = finalize_memory
+        # Prefer configured worker heartbeat; never exceed lease_ttl/3.
+        interval = (
+            float(heartbeat_interval_sec)
+            if heartbeat_interval_sec is not None
+            else _DEFAULT_IO_HEARTBEAT_INTERVAL_SEC
+        )
+        if lease_ttl_sec is not None and float(lease_ttl_sec) > 0:
+            interval = min(interval, max(0.5, float(lease_ttl_sec) / 3.0))
+        self.heartbeat_interval_sec = max(0.5, interval)
 
     def execute(
         self,
@@ -794,7 +805,7 @@ class MainAgentRunExecutor:
         # External I/O outside transaction, with independent lease heartbeats.
         final_text = self.scripted_final_text or ""
         cancelled_during_io = False
-        with _LeaseHeartbeatPump(heartbeat) as pump:
+        with _LeaseHeartbeatPump(heartbeat, interval_sec=self.heartbeat_interval_sec) as pump:
             if not pump.alive:
                 return expected_revision
             if self.provider_factory is not None:

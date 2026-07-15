@@ -239,7 +239,10 @@ class AssistantWorker:
             # Skeleton remains available for tests that inject it explicitly.
             from app.assistant.durable.runner import MainAgentRunExecutor
 
-            executor = MainAgentRunExecutor()
+            executor = MainAgentRunExecutor(
+                heartbeat_interval_sec=float(cfg.heartbeat_interval_sec),
+                lease_ttl_sec=float(cfg.lease_ttl_sec),
+            )
         self.executor = executor
         self.credential_resolver = credential_resolver or NoopCredentialResolver()
         self.artifact_object_exists = artifact_object_exists

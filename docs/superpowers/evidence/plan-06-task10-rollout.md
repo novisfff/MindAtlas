@@ -1,10 +1,10 @@
 # Plan 06 Task 10 — Rollout and Exit Evidence
 
-**Recorded at (UTC):** 2026-07-15T09:31:21Z  
-**Branch:** `worktree-plan-06-durable-agent-run` / `pr-53`  
-**Worktree:** `/root/MindAtlas/.claude/worktrees/plan-06-durable-agent-run`  
-**HEAD at record:** `f068d05be5199f1fd8fdd8b13664e5170bf39558`  
-**Base main (Plan 05 merged):** `0811239df2ef47ffff32e2aed6326f3cdd15f0f0`  
+**Recorded at (UTC):** 2026-07-15T09:31:21Z
+**Branch:** `worktree-plan-06-durable-agent-run` / `pr-53`
+**Worktree:** `/root/MindAtlas/.claude/worktrees/plan-06-durable-agent-run`
+**HEAD at record:** `f068d05be5199f1fd8fdd8b13664e5170bf39558`
+**Base main (Plan 05 merged):** `0811239df2ef47ffff32e2aed6326f3cdd15f0f0`
 **Environment:** no live Docker / PostgreSQL / MinIO for full deploy demos — unit/integration + CI-gated evidence recorded honestly.
 
 ---
@@ -265,7 +265,7 @@ PLAN_07_DURABLE_INTERRUPT=disabled
 LIVE_COMPOSE_GOLDEN=not_run_ci_gated
 ```
 
-Plan 06 implementation + rollout documentation complete for merge-dark / operator enablement review. Live PG/MinIO/compose gates remain required before production `read_only`.
+Plan 06 durable foundation is merge-dark capable with mode=off; Task 6 production dual-wiring and live PG/MinIO/compose golden remain open before read_only enablement / PLAN_06_COMPLETE / operator enablement review. Live PG/MinIO/compose gates remain required before production `read_only`.
 
 ## Audit fix wave (post Task 10)
 
@@ -288,3 +288,17 @@ Addressed independent PR audit findings that were verified against the tree:
 
 Regression: `backend/tests/test_durable_audit_fixes.py` (7 passed).
 
+### Honest status (post-audit)
+
+| Area | Status |
+|---|---|
+| Schema/codec/CAS/lease/artifacts/memory primitives | Implemented + unit-tested |
+| Live cancel + I/O heartbeat + public terminal SSE | Fixed in audit wave |
+| Atomic main_agent create + initial event | Fixed (single transaction) |
+| Configured heartbeat interval for I/O pump | Fixed (worker cfg → executor) |
+| Production MainAgentService / Provider Loop dual-wiring | **Not done** — scaffold only |
+| Admission-frozen real Manifest digests | **Not done** — placeholder materialize remains |
+| Live PG two-session / SKIP LOCKED / MinIO / compose golden | **Not run** — CI/staging required |
+| `ASSISTANT_MAIN_AGENT_MODE` default | `off` (must stay off until dual-wiring + live gates) |
+
+Do **not** treat this document as `PLAN_06_READY=yes` for production read_only.

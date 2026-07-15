@@ -1,10 +1,10 @@
 # Plan 06 Task 0 Baseline (Post-Plan-05 Freeze)
 
-**Recorded at (UTC):** 2026-07-15T05:08:48Z  
-**Branch:** `worktree-plan-06-durable-agent-run`  
-**Base commit (origin/main with Plan 05 merged as PR #52):** `0811239df2ef47ffff32e2aed6326f3cdd15f0f0`  
-**Worktree:** `.claude/worktrees/plan-06-durable-agent-run`  
-**HEAD at freeze:** `0811239df2ef47ffff32e2aed6326f3cdd15f0f0`  
+**Recorded at (UTC):** 2026-07-15T05:08:48Z
+**Branch:** `worktree-plan-06-durable-agent-run`
+**Base commit (origin/main with Plan 05 merged as PR #52):** `0811239df2ef47ffff32e2aed6326f3cdd15f0f0`
+**Worktree:** `.claude/worktrees/plan-06-durable-agent-run`
+**HEAD at freeze:** `0811239df2ef47ffff32e2aed6326f3cdd15f0f0`
 **Working tree product code:** clean (only untracked local `backend/.venv` symlink → plan-05 venv; not product code)
 
 ## Environment
@@ -179,7 +179,7 @@ principal_type=service principal_id=local-assistant authenticated=True
 
 ### Portable `CapabilityCallFrame` — `app.assistant.policy.recursion.CapabilityCallFrame`
 
-Fields: `call_id`, `capability_type` (`tool|workflow|agent`), `domain_key`, `target_identity`, `target_version_id`, `binding_contract_digest`, `owner_kind` (`main_agent|skill_version`), `owner_version_id`, `capability_depth`, `agent_depth`, `frame_digest`.  
+Fields: `call_id`, `capability_type` (`tool|workflow|agent`), `domain_key`, `target_identity`, `target_version_id`, `binding_contract_digest`, `owner_kind` (`main_agent|skill_version`), `owner_version_id`, `capability_depth`, `agent_depth`, `frame_digest`.
 `model_dump` / `model_validate` round-trip verified. **Portable as-is for durable codec.**
 
 ### Complete `EffectiveCapabilityGrant` (no classifier-derived grants)
@@ -207,8 +207,8 @@ Module: `backend/app/assistant/main_agent/events.py`
 
 **Public names:** `runtime_selected`, `skill_search`, `skill_activation_end`, `manifest_revision`, `content_delta`, `run_status`, `message_end`, `fallback_selected`.
 
-**Internal names (Plan 05 allowlist + staging):**  
-`authorization_decision`, `budget_reserved`, `budget_started`, `budget_released`, `budget_denied`, `obligation_created`, `obligation_resolved`, `completion_decision`, `policy_snapshot`, `skill_activation_start`, `main_agent_diagnostic`  
+**Internal names (Plan 05 allowlist + staging):**
+`authorization_decision`, `budget_reserved`, `budget_started`, `budget_released`, `budget_denied`, `obligation_created`, `obligation_resolved`, `completion_decision`, `policy_snapshot`, `skill_activation_start`, `main_agent_diagnostic`
 (`PLAN05_INTERNAL_EVENTS` frozenset; marked `_visibility="internal"` so stream can advance cursor without yielding).
 
 Representative public payload shapes:

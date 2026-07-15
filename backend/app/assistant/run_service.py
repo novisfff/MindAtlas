@@ -71,11 +71,17 @@ class AssistantChatRunService:
         required_app_build_revision: str | None = None,
         memory_commit_status: str | None = None,
         deadline_at=None,
+        commit: bool = True,
     ) -> AssistantChatRun:
         """Create a Run with immutable ``runtime_kind``.
 
         Plan 06 Task 6: admission selects ``runtime_kind`` immediately before
         insertion. Once a ``main_agent`` row exists, Legacy fallback is forbidden.
+
+        For ``runtime_kind=main_agent``, callers should pass ``commit=False``,
+        append the initial public event on the same Session, then commit once so
+        workers never claim a Run that is still missing its initialization event
+        (Plan 06 §9 / Task 3 atomic write path).
         """
         active = self.get_active_run(conversation_id=conversation.id)
         if active is not None:
@@ -115,8 +121,11 @@ class AssistantChatRunService:
             deadline_at=deadline_at,
         )
         self.db.add(run)
-        self.db.commit()
-        self.db.refresh(run)
+        if commit:
+            self.db.commit()
+            self.db.refresh(run)
+        else:
+            self.db.flush()
         return run
 
     def append_event(
@@ -126,7 +135,13 @@ class AssistantChatRunService:
         event_name: str,
         payload: dict,
         event_key: str | None = None,
+        commit: bool = True,
     ) -> int:
+        """Append one event.
+
+        Pass ``commit=False`` when composing Main Agent create + initial event in
+        a single transaction (must not interleave with worker claim).
+        """
         run = self.db.get(AssistantChatRun, run_id)
         if run is None:
             raise ValueError(f"run not found: {run_id}")
@@ -147,7 +162,10 @@ class AssistantChatRunService:
         self.db.add(event)
         run.last_event_seq = next_seq
         run.updated_at = utcnow()
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         return next_seq
 
     def list_events_after(

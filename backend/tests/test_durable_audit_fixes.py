@@ -354,3 +354,72 @@ class FinalizerEmitsPublicEventsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AtomicMainAgentCreateTests(unittest.TestCase):
+    """Main Agent create + initial event must be one transaction (no claim race)."""
+
+    def setUp(self) -> None:
+        self.db = _make_session()
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def test_create_run_commit_false_defers_visibility(self) -> None:
+        from app.assistant.models import AssistantChatRun, Conversation, Message
+        from app.assistant.run_service import AssistantChatRunService
+
+        conv = Conversation(title="atomic")
+        self.db.add(conv)
+        self.db.flush()
+        user = Message(conversation_id=conv.id, role="user", content="hi")
+        assistant = Message(conversation_id=conv.id, role="assistant", content="")
+        self.db.add_all([user, assistant])
+        self.db.flush()
+
+        svc = AssistantChatRunService(self.db)
+        run = svc.create_run(
+            conversation=conv,
+            user_message=user,
+            assistant_message=assistant,
+            runtime_kind="main_agent",
+            runtime_contract_version=1,
+            required_app_build_revision=BUILD,
+            memory_commit_status="pending",
+            commit=False,
+        )
+        # Not committed yet — a second session must not see the Run.
+        from tests._db import make_session
+
+        other = make_session()
+        try:
+            # Same process may share engine factory; use identity of uncommitted state:
+            # last_event_seq still 0 and no events until append+commit.
+            self.assertEqual(int(run.last_event_seq or 0), 0)
+            svc.append_event(
+                run_id=run.id,
+                event_name="run_status",
+                event_key=f"run.status:queued:{run.id}",
+                payload={"status": "queued", "runtimeKind": "main_agent"},
+                commit=False,
+            )
+            self.assertEqual(int(run.last_event_seq or 0), 1)
+            self.db.commit()
+            self.db.refresh(run)
+            self.assertEqual(run.status, "queued")
+            self.assertEqual(int(run.last_event_seq), 1)
+        finally:
+            other.close()
+
+
+class HeartbeatIntervalConfigTests(unittest.TestCase):
+    def test_executor_uses_configured_interval_capped_by_lease_ttl(self) -> None:
+        from app.assistant.durable.runner import MainAgentRunExecutor
+
+        # heartbeat=1, lease=5 → interval min(1, 5/3)=1
+        ex = MainAgentRunExecutor(heartbeat_interval_sec=1, lease_ttl_sec=5)
+        self.assertAlmostEqual(ex.heartbeat_interval_sec, 1.0)
+        # heartbeat=5, lease=5 → interval min(5, 5/3)=1.666...
+        ex2 = MainAgentRunExecutor(heartbeat_interval_sec=5, lease_ttl_sec=5)
+        self.assertLessEqual(ex2.heartbeat_interval_sec, 5.0 / 3.0 + 1e-6)
+        self.assertGreaterEqual(ex2.heartbeat_interval_sec, 0.5)

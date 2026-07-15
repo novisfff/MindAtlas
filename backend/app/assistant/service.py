@@ -457,26 +457,38 @@ class AssistantService:
             self.db,
             execution_kind="production",
         )
+        is_main_agent = str(create_kwargs.get("runtime_kind") or runtime_kind) == "main_agent"
         try:
+            # Main Agent: create Run + initial public event in ONE transaction so a
+            # worker cannot claim a half-initialized queued row (Plan 06 §3/§9).
+            # Legacy keeps the historical two-step commit for compatibility.
             run = run_svc.create_run(
                 conversation=conversation,
                 user_message=user_msg,
                 assistant_message=assistant_msg,
+                commit=not is_main_agent,
                 **create_kwargs,
             )
+            run_svc.append_event(
+                run_id=run.id,
+                event_name="run_status",
+                event_key=f"run.status:queued:{run.id}",
+                payload={
+                    "status": "queued",
+                    "runtimeKind": str(run.runtime_kind or runtime_kind),
+                    **({"admissionReason": admit_reason} if admit_reason else {}),
+                },
+                commit=not is_main_agent,
+            )
+            if is_main_agent:
+                self.db.commit()
+                self.db.refresh(run)
         except ValueError as exc:
+            try:
+                self.db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
             raise ApiException(status_code=409, code=42260, message=str(exc)) from exc
-
-        run_svc.append_event(
-            run_id=run.id,
-            event_name="run_status",
-            event_key=f"run.status:queued:{run.id}",
-            payload={
-                "status": "queued",
-                "runtimeKind": str(run.runtime_kind or runtime_kind),
-                **({"admissionReason": admit_reason} if admit_reason else {}),
-            },
-        )
         # Main Agent Runs are claimed by the durable worker — never spawn the
         # Legacy daemon thread path for runtime_kind=main_agent.
         if str(run.runtime_kind or "") != "main_agent":
