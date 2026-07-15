@@ -66,6 +66,7 @@ from app.assistant.durable.checkpoints import (  # noqa: F401
     commit_started_unit,
     commit_unit_result,
     find_post_result_for_unit,
+    note_capability_adapter_result,
     resolve_retry_unit,
 )
 from app.assistant.durable.activation import DurableSkillActivationLifecycle  # noqa: F401
@@ -84,6 +85,14 @@ from app.assistant.durable.memory import (  # noqa: F401
     PreparedMemorySet,
     digest_final_content,
     normalize_facts_v2,
+)
+from app.assistant.durable.crash import (  # noqa: F401
+    CrashInjector,
+    CrashPoint,
+    TransactionRollbackInject,
+    WorkerCrash,
+    armed_crash,
+    maybe_crash,
 )
 
 __all__ = [
@@ -147,4 +156,11 @@ __all__ = [
     "PreparedMemorySet",
     "digest_final_content",
     "normalize_facts_v2",
+    "CrashInjector",
+    "CrashPoint",
+    "TransactionRollbackInject",
+    "WorkerCrash",
+    "armed_crash",
+    "maybe_crash",
+    "note_capability_adapter_result",
 ]

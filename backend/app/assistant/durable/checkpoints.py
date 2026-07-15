@@ -445,6 +445,17 @@ def _append_checkpoint_bundle(
     )
 
 
+def note_capability_adapter_result() -> None:
+    """Mark that Capability adapter I/O completed; crash inject before result CAS.
+
+    Call immediately after external Capability I/O returns and before
+    :func:`commit_unit_result`. Kill point 4 in Plan 06 Task 9.
+    """
+    from app.assistant.durable.crash import CrashPoint, maybe_crash
+
+    maybe_crash(CrashPoint.AFTER_CAPABILITY_RESULT_BEFORE_RESULT)
+
+
 def commit_prepared_unit(
     db: Session,
     *,
@@ -675,5 +686,6 @@ __all__ = [
     "commit_started_unit",
     "commit_unit_result",
     "find_post_result_for_unit",
+    "note_capability_adapter_result",
     "resolve_retry_unit",
 ]

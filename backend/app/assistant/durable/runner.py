@@ -1,4 +1,4 @@
-"""Durable Main Agent Run executor (Plan 06 Task 6).
+"""Durable Main Agent Run executor (Plan 06 Task 6 / Task 9 finalizer wiring).
 
 Replaces SkeletonRunExecutor for production/worker execution. Scripted tests
 inject a provider_factory. Full Provider/Capability loop integration reuses
@@ -9,6 +9,7 @@ Key rules:
 - Prepare → started CAS before every external I/O boundary.
 - Fresh authorization evidence after recovery; never replay credentials.
 - Uncommitted unit retry reuses logical_unit_id and does not double-charge.
+- After provider result, enter ``ready_for_memory`` and finalize memory once.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from app.assistant.durable.checkpoints import (
     resolve_retry_unit,
 )
 from app.assistant.durable.contracts import DurableExecutionUnitV1
+from app.assistant.durable.crash import CrashPoint, maybe_crash
 from app.assistant.durable.leases import ClaimedLease
 from app.assistant.durable.materialize import materialize_base_run_state
 from app.assistant.durable.reconstruction import (
@@ -71,19 +73,23 @@ def require_main_agent_run(run: Any) -> None:
         )
 
 
+def _heartbeat_guard(heartbeat: Callable[[], bool]) -> bool:
+    """Invoke lease heartbeat with optional crash inject at during_heartbeat."""
+    maybe_crash(CrashPoint.DURING_HEARTBEAT)
+    return bool(heartbeat())
+
+
 class MainAgentRunExecutor:
     """Lease-owned durable Main Agent loop executor.
 
-    For Task 6 scripted/unit coverage this executor:
     1. Applies terminal recovery decisions.
     2. Commits recovering → running when classified continue/reuse/short_circuit.
     3. Materializes base state if missing.
     4. Drives one Provider unit (prepare → started → external I/O → result).
-    5. Honors short-circuit / reuse_unit without double-charging.
+    5. Enters ready_for_memory with L0 final content and finalizes memory once.
+    6. Honors short-circuit / reuse_unit without double-charging.
 
-    Full multi-round Capability/Manifest activation production wiring reuses the
-    same Checkpoint helpers and activation lifecycle; Task 9 crash matrix
-    exercises every boundary.
+    Task 9 crash matrix exercises every boundary via :mod:`crash` inject points.
     """
 
     def __init__(
@@ -92,10 +98,15 @@ class MainAgentRunExecutor:
         provider_factory: Callable[..., Any] | None = None,
         scripted_final_text: str | None = None,
         user_text_resolver: Callable[[Any], str] | None = None,
+        memory_preparer: Callable[[Any, Any], Any] | None = None,
+        finalize_memory: bool = True,
     ) -> None:
         self.provider_factory = provider_factory
         self.scripted_final_text = scripted_final_text
         self.user_text_resolver = user_text_resolver
+        # Optional: (db, run) -> PreparedMemorySet | None. Default empty set.
+        self.memory_preparer = memory_preparer
+        self.finalize_memory = finalize_memory
 
     def execute(
         self,
@@ -112,7 +123,7 @@ class MainAgentRunExecutor:
             decision.kind,
             decision.reason_code,
         )
-        if not heartbeat():
+        if not _heartbeat_guard(heartbeat):
             logger.warning("lease lost before execute run_id=%s", claimed.run_id)
             return
 
@@ -149,7 +160,7 @@ class MainAgentRunExecutor:
                 "reuse_unit",
                 "short_circuit",
             }:
-                if not heartbeat():
+                if not _heartbeat_guard(heartbeat):
                     return
                 result = classifier.commit_recovery_complete(
                     run=run,
@@ -167,9 +178,24 @@ class MainAgentRunExecutor:
                 )
 
             if decision.short_circuit_after_result or decision.kind == "short_circuit":
-                logger.info(
-                    "short_circuit no re-execution run_id=%s", claimed.run_id
-                )
+                # Post-result short-circuit may still need memory finalization.
+                db.refresh(run)
+                if (
+                    self.finalize_memory
+                    and str(run.status) == STATUS_RUNNING
+                    and repo.is_ready_for_memory(run)
+                ):
+                    self._finalize_ready_memory(
+                        db,
+                        run=run,
+                        lease=claimed.lease,
+                        expected_revision=int(run.state_revision),
+                        heartbeat=heartbeat,
+                    )
+                else:
+                    logger.info(
+                        "short_circuit no re-execution run_id=%s", claimed.run_id
+                    )
                 return
 
             if not decision.allow_provider_io and decision.kind not in {
@@ -183,7 +209,7 @@ class MainAgentRunExecutor:
                 )
                 return
 
-            if not heartbeat():
+            if not _heartbeat_guard(heartbeat):
                 return
 
             # Materialize base state if this is a fresh claim without Checkpoint.
@@ -199,11 +225,26 @@ class MainAgentRunExecutor:
                 )
                 db.refresh(run)
 
+            # Already ready_for_memory (e.g. crash after final message): finalize only.
+            if (
+                self.finalize_memory
+                and str(run.status) == STATUS_RUNNING
+                and repo.is_ready_for_memory(run)
+            ):
+                self._finalize_ready_memory(
+                    db,
+                    run=run,
+                    lease=claimed.lease,
+                    expected_revision=int(run.state_revision),
+                    heartbeat=heartbeat,
+                )
+                return
+
             if decision.kind == "reuse_unit" and decision.inflight_unit is not None:
                 unit = decision.recovered_unit or resolve_retry_unit(
                     decision.inflight_unit
                 )
-                # If post-result already exists, short-circuit.
+                # If post-result already exists, short-circuit into memory path.
                 existing = find_post_result_for_unit(
                     db, run_id=run.id, logical_unit_id=unit.logical_unit_id
                 )
@@ -213,6 +254,17 @@ class MainAgentRunExecutor:
                         run.id,
                         unit.logical_unit_id,
                     )
+                    if self.finalize_memory:
+                        db.refresh(run)
+                        # Result may have been ready_for_completion without memory.
+                        self._enter_and_finalize_memory(
+                            db,
+                            run_id=run.id,
+                            lease=claimed.lease,
+                            expected_revision=int(run.state_revision),
+                            final_text=self.scripted_final_text or " ",
+                            heartbeat=heartbeat,
+                        )
                     return
                 expected_revision = self._drive_provider_unit(
                     db,
@@ -262,6 +314,7 @@ class MainAgentRunExecutor:
                 # fresh sessions and the worker loop closes claim sessions itself.
                 # Closing here is safe when session is not the outer test session.
                 close = getattr(db, "close", None)
+                del close  # silence unused; close path below
                 # Only close if the factory created a new object each time — detect
                 # by trying factory again and comparing identity.
                 try:
@@ -354,6 +407,8 @@ class MainAgentRunExecutor:
                 next_action_kind="continue_provider",
             )
             expected_revision = prep.state_revision
+            # Kill point 1: after reservation/prepare commit before mark_started.
+            maybe_crash(CrashPoint.AFTER_PREPARE_BEFORE_STARTED)
             started = DurableExecutionUnitV1(
                 logical_unit_id=unit.logical_unit_id,
                 kind="provider_round",
@@ -382,6 +437,8 @@ class MainAgentRunExecutor:
             )
             expected_revision = start.state_revision
             active_unit = started
+            # Kill point 2: after mark_started commit before Provider I/O.
+            maybe_crash(CrashPoint.AFTER_STARTED_BEFORE_ADAPTER_IO)
         else:
             # Reuse path: unit already prepared/started; do not re-charge if started.
             active_unit = unit
@@ -414,6 +471,7 @@ class MainAgentRunExecutor:
                 )
                 expected_revision = start.state_revision
                 active_unit = started
+                maybe_crash(CrashPoint.AFTER_STARTED_BEFORE_ADAPTER_IO)
             elif unit.state == "started" and reuse:
                 # Re-commit started with same budget revision (no new charge).
                 start = commit_started_unit(
@@ -429,19 +487,19 @@ class MainAgentRunExecutor:
                     budget_revision_number=None,
                 )
                 expected_revision = start.state_revision
+                maybe_crash(CrashPoint.AFTER_STARTED_BEFORE_ADAPTER_IO)
 
-        if not heartbeat():
+        if not _heartbeat_guard(heartbeat):
             return expected_revision
 
         # External I/O outside transaction.
         final_text = self.scripted_final_text or ""
         if self.provider_factory is not None:
             provider = self.provider_factory(run_id=run_id)
-            messages, _digest = reconstruct_provider_transcript(db, run_id=run_id)
+            _messages, _digest = reconstruct_provider_transcript(db, run_id=run_id)
+            del _messages, _digest
             # Minimal stream consume for scripted providers.
             try:
-                from app.assistant.provider_loop.contracts import ProviderRoundRequest
-
                 # Scripted providers in unit tests may not need a full request.
                 class _Cancel:
                     def is_cancelled(self) -> bool:
@@ -449,8 +507,6 @@ class MainAgentRunExecutor:
 
                 # Prefer stream_round if available.
                 if hasattr(provider, "stream_round"):
-                    # Build a minimal request-like object if needed.
-                    req = None
                     try:
                         # Many fakes ignore the request.
                         stream = provider.stream_round(None, cancellation=_Cancel())
@@ -469,7 +525,10 @@ class MainAgentRunExecutor:
                 logger.exception("provider stream failed run_id=%s", run_id)
                 raise
 
-        if not heartbeat():
+        # Kill point 3: after Provider response before result commit.
+        maybe_crash(CrashPoint.AFTER_PROVIDER_RESPONSE_BEFORE_RESULT)
+
+        if not _heartbeat_guard(heartbeat):
             return expected_revision
 
         assistant_msg = ProviderAssistantMessage(
@@ -487,7 +546,179 @@ class MainAgentRunExecutor:
             provider_messages=(assistant_msg,),
             completed_logical_unit_id=active_unit.logical_unit_id,
         )
-        return result.state_revision
+        expected_revision = result.state_revision
+
+        if self.finalize_memory:
+            expected_revision = self._enter_and_finalize_memory(
+                db,
+                run_id=run_id,
+                lease=lease,
+                expected_revision=expected_revision,
+                final_text=final_text or " ",
+                heartbeat=heartbeat,
+            )
+        return expected_revision
+
+    def _enter_and_finalize_memory(
+        self,
+        db: Any,
+        *,
+        run_id: UUID,
+        lease: LeaseToken,
+        expected_revision: int,
+        final_text: str,
+        heartbeat: Callable[[], bool],
+    ) -> int:
+        """Enter ready_for_memory with L0 final content, then apply memory once."""
+        from app.assistant.durable.memory import (
+            DurableMemoryError,
+            DurableMemoryFinalizer,
+            digest_final_content,
+        )
+
+        repo = DurableRunRepository(db)
+        run = repo.get_run(run_id)
+        if run is None:
+            return expected_revision
+
+        # Already terminal with memory outcome — idempotent.
+        if str(run.status) == "completed" and str(run.memory_commit_status or "") in {
+            "committed",
+            "failed",
+        }:
+            return int(run.state_revision)
+
+        if not _heartbeat_guard(heartbeat):
+            return expected_revision
+
+        finalizer = DurableMemoryFinalizer(db)
+
+        # If not yet in ready_for_memory, enter phase then stage L0 final content.
+        # Task 8 residual: do NOT use broad finalize_run_memory for protocol errors.
+        if not repo.is_ready_for_memory(run):
+            content = str(final_text or " ").strip() or " "
+            digest = digest_final_content(content)
+            try:
+                result = commit_unit_result(
+                    db,
+                    run_id=run_id,
+                    lease=lease,
+                    expected_revision=expected_revision,
+                    phase="ready_for_memory",
+                    next_action_kind="memory",
+                    clear_inflight=True,
+                    enter_ready_for_memory=True,
+                    completed_logical_unit_id="completion:final",
+                )
+                expected_revision = result.state_revision
+                if run.assistant_message_id is not None:
+                    try:
+                        finalizer.apply_final_l0_content(
+                            run_id=run_id,
+                            assistant_message_id=run.assistant_message_id,
+                            content=content,
+                            content_digest=digest,
+                            commit=True,
+                        )
+                    except DurableMemoryError as exc:
+                        # Protocol errors must not convert to memory_failed.
+                        logger.warning(
+                            "l0 final content apply failed run_id=%s code=%s",
+                            run_id,
+                            exc.code,
+                        )
+                        raise
+            except DurableRunConflict as exc:
+                if exc.code == "run_finalizing":
+                    db.refresh(run)
+                    expected_revision = int(run.state_revision)
+                else:
+                    raise
+
+            # Kill point 9: after final Message before memory application.
+            maybe_crash(CrashPoint.AFTER_FINAL_MESSAGE_BEFORE_MEMORY_APPLICATION)
+
+        db.refresh(run)
+        return self._finalize_ready_memory(
+            db,
+            run=run,
+            lease=lease,
+            expected_revision=int(run.state_revision),
+            heartbeat=heartbeat,
+        )
+
+    def _finalize_ready_memory(
+        self,
+        db: Any,
+        *,
+        run: Any,
+        lease: LeaseToken,
+        expected_revision: int,
+        heartbeat: Callable[[], bool],
+    ) -> int:
+        from app.assistant.durable.memory import (
+            CODE_NOT_READY,
+            CODE_POLICY_PROTOCOL,
+            DurableMemoryError,
+            DurableMemoryFinalizer,
+            PreparedMemorySet,
+        )
+
+        if not _heartbeat_guard(heartbeat):
+            return expected_revision
+
+        repo = DurableRunRepository(db)
+        db.refresh(run)
+        if str(run.status) == "completed":
+            return int(run.state_revision)
+        if not repo.is_ready_for_memory(run):
+            return expected_revision
+
+        finalizer = DurableMemoryFinalizer(db)
+
+        # Kill point 10: during memory computation before apply.
+        maybe_crash(CrashPoint.DURING_MEMORY_COMPUTATION_BEFORE_APPLY)
+
+        prepared: PreparedMemorySet | None
+        compute_error: BaseException | None = None
+        try:
+            if self.memory_preparer is not None:
+                prepared = self.memory_preparer(db, run)
+            else:
+                prepared = PreparedMemorySet(l1=None, l2=())
+        except Exception as exc:  # noqa: BLE001 — memory compute isolation
+            prepared = None
+            compute_error = exc
+
+        # Careful finalization: protocol/not_ready must not be converted to
+        # memory_failed. Only computation/provider failures use failed path.
+        try:
+            if compute_error is not None or prepared is None:
+                result = finalizer.finalize_memory_failed(
+                    run_id=run.id,
+                    expected_revision=expected_revision,
+                    lease=lease,
+                )
+                return result.state_revision
+            result = finalizer.apply_prepared_memory_and_finalize(
+                run_id=run.id,
+                expected_revision=expected_revision,
+                lease=lease,
+                prepared=prepared,
+            )
+            return result.state_revision
+        except DurableMemoryError as exc:
+            if exc.code in {CODE_NOT_READY, CODE_POLICY_PROTOCOL}:
+                raise
+            # Revision conflict / other apply failures → failed outcome without
+            # erasing L0 (finalize_memory_failed path).
+            result = finalizer.finalize_memory_failed(
+                run_id=run.id,
+                expected_revision=expected_revision,
+                lease=lease,
+                diagnostic_code=exc.code,
+            )
+            return result.state_revision
 
 
 __all__ = [

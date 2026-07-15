@@ -771,6 +771,10 @@ class DurableArtifactService:
                     META_RUN_ID: str(run_id),
                 },
             )
+            # Kill point 7: after Manifest/Artifact upload before Checkpoint/row commit.
+            from app.assistant.durable.crash import CrashPoint, maybe_crash
+
+            maybe_crash(CrashPoint.AFTER_MANIFEST_ARTIFACT_UPLOAD_BEFORE_CHECKPOINT)
         return PreparedArtifact(
             run_id=run_id,
             kind=kind_s,

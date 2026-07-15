@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.assistant.durable.checkpoints import commit_unit_result
+from app.assistant.durable.crash import CrashPoint, maybe_crash
 from app.assistant.durable.models import AssistantRunManifestRevision
 from app.assistant.durable.repository import DurableCommitResult, LeaseToken
 
@@ -158,6 +159,9 @@ class DurableSkillActivationLifecycle:
                     f"parent={parent_digest[:12]}…"
                 )
 
+            # Kill point 5: after stage/lineage acceptance before lifecycle-accept CAS.
+            maybe_crash(CrashPoint.AFTER_SKILL_LINEAGE_BEFORE_ACCEPT_COMMIT)
+
             result = commit_unit_result(
                 db,
                 run_id=run_id,
@@ -181,6 +185,8 @@ class DurableSkillActivationLifecycle:
             with self._lock:
                 self._pending.pop(cid, None)
                 self._accepted_digests.add(proposed_digest)
+            # Kill point 6: after lifecycle-accept commit before worker observes success.
+            maybe_crash(CrashPoint.AFTER_LIFECYCLE_ACCEPT_COMMIT_BEFORE_OBSERVE)
             return result
         except Exception:
             # Discard candidate on any failure (lineage, digest, CAS, cancel…).

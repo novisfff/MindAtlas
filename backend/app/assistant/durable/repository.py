@@ -486,7 +486,7 @@ class DurableRunRepository:
         - terminal -> CODE_TERMINAL_IMMUTABLE
         - already cancelling with matching revision -> idempotent no-op
         """
-        return self._commit(
+        result = self._commit(
             _TransitionPlan(
                 run_id=run_id,
                 expected_revision=expected_revision,
@@ -507,6 +507,13 @@ class DurableRunRepository:
                 set_cancel_requested=True,
             )
         )
+        # Kill point 12: after stop request commits before cancellation seal.
+        # Worker observes cancelling and must finalize; crash here leaves
+        # cancelling without cancelled terminal.
+        from app.assistant.durable.crash import CrashPoint, maybe_crash
+
+        maybe_crash(CrashPoint.AFTER_STOP_REQUEST_BEFORE_CANCELLATION_SEAL)
+        return result
 
     def finalize_cancellation(
         self,
@@ -1232,6 +1239,20 @@ class DurableRunRepository:
         # Flush so generated IDs are available for pointer updates.
         if bundle.rows:
             self.db.flush()
+
+        # Kill point 8: after Checkpoint insert before aggregate pointer advance.
+        # Raises TransactionRollbackInject; _commit rolls back the transaction.
+        from app.assistant.durable.crash import (
+            CrashPoint,
+            TransactionRollbackInject,
+            maybe_crash,
+        )
+
+        try:
+            maybe_crash(CrashPoint.AFTER_CHECKPOINT_INSERT_BEFORE_POINTER_ADVANCE)
+        except TransactionRollbackInject:
+            # Mid-transaction inject: surface so _commit rolls back.
+            raise
 
         def _set_pointer(attr: str, value: UUID | None, model_type: type) -> None:
             if value is None:
