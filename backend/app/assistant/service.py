@@ -196,6 +196,11 @@ class AssistantService:
         if existing is None:
             raise ApiException(status_code=404, code=40400, message=f"Run not found: {run_id}")
 
+        # Plan 06 Task 7: Main Agent stop is database-driven CAS via DurableRunRepository.
+        # Legacy keeps the in-process request_stop + optional run_status event path.
+        if str(existing.runtime_kind or "") == "main_agent":
+            return self._stop_main_agent_run(run=existing)
+
         existing_status = str(existing.status or "")
         was_active = existing_status in RUN_ACTIVE_STATUSES
         run = run_svc.request_stop(conversation_id=conversation_id, run_id=run_id)
@@ -213,6 +218,95 @@ class AssistantService:
             except Exception:
                 logger.exception("append cancelling run_status event failed run_id=%s", run.id)
         return self._serialize_run(run)
+
+    def _stop_main_agent_run(self, *, run: AssistantChatRun) -> dict[str, Any]:
+        """Durable stop: revision CAS, no lease required; never consults stream attachment."""
+        from app.assistant.durable.repository import (
+            CODE_RUN_FINALIZING,
+            CODE_STALE_REVISION,
+            CODE_TERMINAL_IMMUTABLE,
+            DurableRunConflict,
+            DurableRunRepository,
+            EventSpec,
+            STATUS_CANCELLING,
+            STATUS_CANCELLED,
+            TERMINAL_STATUSES,
+        )
+
+        repo = DurableRunRepository(self.db)
+        # Retry a few times on concurrent revision bumps (worker heartbeat is
+        # non-semantic and does not bump; result/recovery/stop do).
+        last_conflict: DurableRunConflict | None = None
+        for _ in range(5):
+            self.db.refresh(run)
+            status = str(run.status or "")
+            if status in TERMINAL_STATUSES:
+                # Idempotent terminal read — do not raise.
+                return self._serialize_run(run)
+
+            expected_revision = int(run.state_revision or 0)
+            events: list[EventSpec] = []
+            # Emit public run_status only when we expect a real transition into
+            # cancelling or direct cancelled. Idempotent cancelling reuses nothing.
+            if status != STATUS_CANCELLING:
+                target_hint = (
+                    STATUS_CANCELLED
+                    if status in {"queued", "waiting_approval", "waiting_input", "needs_reconciliation"}
+                    else STATUS_CANCELLING
+                )
+                events.append(
+                    EventSpec(
+                        event_key=f"run.stop:{run.id}:{expected_revision}:{target_hint}",
+                        event_name="run_status",
+                        payload={"status": target_hint, "runId": str(run.id)},
+                        visibility="public",
+                    )
+                )
+            try:
+                result = repo.request_stop(
+                    run_id=run.id,
+                    expected_revision=expected_revision,
+                    events=events,
+                )
+            except DurableRunConflict as exc:
+                last_conflict = exc
+                if exc.code == CODE_RUN_FINALIZING:
+                    raise ApiException(
+                        status_code=409,
+                        code=42270,
+                        message="run_finalizing: accepted content is committing; stop cannot cancel",
+                        details={"reasonCode": CODE_RUN_FINALIZING, "runId": str(run.id)},
+                    ) from exc
+                if exc.code == CODE_TERMINAL_IMMUTABLE:
+                    self.db.refresh(run)
+                    return self._serialize_run(run)
+                if exc.code == CODE_STALE_REVISION:
+                    continue
+                raise ApiException(
+                    status_code=409,
+                    code=42271,
+                    message=f"stop conflict: {exc.code}",
+                    details={"reasonCode": exc.code, "runId": str(run.id)},
+                ) from exc
+
+            new_status = str(result.status or "")
+            if new_status in {STATUS_CANCELLING, STATUS_CANCELLED}:
+                try:
+                    cancel_pending_human_approvals_for_run(self.db, run_id=str(run.id))
+                except Exception:
+                    logger.exception(
+                        "cancel pending approvals after durable stop failed run_id=%s",
+                        run.id,
+                    )
+            return self._serialize_run(result.run)
+
+        code = last_conflict.code if last_conflict is not None else CODE_STALE_REVISION
+        raise ApiException(
+            status_code=409,
+            code=42271,
+            message=f"stop conflict after retries: {code}",
+            details={"reasonCode": code, "runId": str(run.id)},
+        )
 
     def submit_approval_decision(
         self,
@@ -256,7 +350,14 @@ class AssistantService:
                 run = None
         if run is not None and str(run.status or "") in RUN_ACTIVE_STATUSES:
             return
-        if run_id_raw and (self._is_run_stream_attached(run_id_raw) or self._has_background_thread(run_id_raw)):
+        # Plan 06 Task 7: Main Agent execution/cancellation never consults
+        # stream-attachment or background-thread bookkeeping. Only Legacy may.
+        is_main_agent = run is not None and str(run.runtime_kind or "") == "main_agent"
+        if (
+            not is_main_agent
+            and run_id_raw
+            and (self._is_run_stream_attached(run_id_raw) or self._has_background_thread(run_id_raw))
+        ):
             return
 
         status = str(approval_payload.get("status", "") or "").strip().lower()
@@ -384,18 +485,29 @@ class AssistantService:
         yield from self.stream_run(conversation.id, run_id=run.id, after_seq=0)
 
     def stream_run(self, conversation_id: UUID, *, run_id: UUID, after_seq: int = 0) -> Iterator[bytes]:
+        """Replay committed public events after ``afterSeq``.
+
+        Plan 06 §9: transport is at-least-once; consumers dedupe by Run/seq/event
+        identity. Internal rows (column visibility or payload marker) advance the
+        server cursor but are never yielded. Disconnect closes only this reader —
+        it never cancels the Run.
+        """
         from app.assistant.main_agent.events import is_internal_event, strip_visibility_marker
 
         bind = self.db.bind or self.db.get_bind()
-        read_session_factory = sessionmaker(bind=bind, future=True)
+        read_session_factory = sessionmaker(bind=bind, future=True, expire_on_commit=False)
         with read_session_factory() as read_db:
             run = AssistantChatRunService(read_db).get_run(conversation_id=conversation_id, run_id=run_id)
             if run is None:
                 raise ApiException(status_code=404, code=40400, message=f"Run not found: {run_id}")
+            runtime_kind = str(getattr(run, "runtime_kind", None) or "legacy")
         run_key = str(run_id)
         last_seq = max(0, int(after_seq or 0))
         terminal_poll_confirmed = False
-        self._mark_run_stream_attached(run_key)
+        # Attachment bookkeeping is Legacy-only; Main Agent never consults it.
+        track_attachment = runtime_kind != "main_agent"
+        if track_attachment:
+            self._mark_run_stream_attached(run_key)
         try:
             while True:
                 # Use a fresh read session per poll so updates committed by
@@ -407,10 +519,15 @@ class AssistantService:
                         payload = dict(event.payload or {})
                         # Advance cursor for internal rows but do not yield them.
                         last_seq = int(event.seq)
-                        if is_internal_event(payload):
+                        visibility = str(getattr(event, "visibility", None) or "public").strip().lower()
+                        if visibility == "internal" or is_internal_event(payload):
                             continue
                         public_payload = strip_visibility_marker(payload)
                         public_payload["seq"] = int(event.seq)
+                        event_key = getattr(event, "event_key", None)
+                        if event_key:
+                            public_payload["eventKey"] = str(event_key)
+                        public_payload.setdefault("runId", str(run_id))
                         yield self._sse(event.event_name, public_payload)
 
                     current = read_svc.get_run(conversation_id=conversation_id, run_id=run_id)
@@ -428,10 +545,12 @@ class AssistantService:
                     terminal_poll_confirmed = False
                 time.sleep(_RUN_EVENT_POLL_SEC)
         except GeneratorExit:
+            # Disconnect closes only this reader Session — Run continues.
             logger.info("assistant run stream disconnected conversation_id=%s run_id=%s", conversation_id, run_id)
             raise
         finally:
-            self._mark_run_stream_detached(run_key)
+            if track_attachment:
+                self._mark_run_stream_detached(run_key)
 
     def _start_background_run(self, *, run_id: UUID, stream_output: bool, locale: str) -> None:
         run_key = str(run_id)

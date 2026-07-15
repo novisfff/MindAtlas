@@ -244,7 +244,10 @@ export const createChatLogic = (set: any): Omit<ChatState, 'no-op'> => ({
     set({ activeRunStatus: status }),
 
   setLastEventSeq: (seq: number) =>
-    set({ lastEventSeq: Math.max(0, Math.floor(seq || 0)) }),
+    set((state: ChatState) => ({
+      // Monotonic per active Run; at-least-once replay must not rewind the cursor.
+      lastEventSeq: Math.max(state.lastEventSeq, Math.max(0, Math.floor(seq || 0))),
+    })),
 
   clearActiveRun: () =>
     set({ activeRunId: null, activeRunStatus: null, lastEventSeq: 0 }),

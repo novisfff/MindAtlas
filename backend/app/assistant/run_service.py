@@ -11,17 +11,24 @@ from app.common.time import utcnow
 
 RUN_STATUS_QUEUED = "queued"
 RUN_STATUS_RUNNING = "running"
+RUN_STATUS_RECOVERING = "recovering"
 RUN_STATUS_WAITING_APPROVAL = "waiting_approval"
+RUN_STATUS_WAITING_INPUT = "waiting_input"
 RUN_STATUS_CANCELLING = "cancelling"
+RUN_STATUS_NEEDS_RECONCILIATION = "needs_reconciliation"
 RUN_STATUS_COMPLETED = "completed"
 RUN_STATUS_FAILED = "failed"
 RUN_STATUS_CANCELLED = "cancelled"
 
+# Align with durable active unique index (Plan 06 §4 / models).
 RUN_ACTIVE_STATUSES = {
     RUN_STATUS_QUEUED,
     RUN_STATUS_RUNNING,
+    RUN_STATUS_RECOVERING,
     RUN_STATUS_WAITING_APPROVAL,
+    RUN_STATUS_WAITING_INPUT,
     RUN_STATUS_CANCELLING,
+    RUN_STATUS_NEEDS_RECONCILIATION,
 }
 RUN_TERMINAL_STATUSES = {
     RUN_STATUS_COMPLETED,
