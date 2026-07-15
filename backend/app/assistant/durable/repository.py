@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.assistant.domain.digests import sha256_canonical_json
@@ -357,6 +357,96 @@ class DurableRunRepository:
             )
         )
 
+    def reclaim_expired_recovering(
+        self,
+        *,
+        run_id: UUID,
+        expected_revision: int,
+        worker_id: str,
+        lease_ttl: timedelta,
+        events: Sequence[EventSpec] = (),
+    ) -> DurableCommitResult:
+        """expired recovering stays recovering under a new lease (takeover reclaim).
+
+        Status remains ``recovering`` so the worker must re-validate Checkpoint/refs
+        and only then commit ``recovering -> running``.
+        """
+        return self._commit(
+            _TransitionPlan(
+                run_id=run_id,
+                expected_revision=expected_revision,
+                target_status=STATUS_RECOVERING,
+                allowed_from=frozenset({STATUS_RECOVERING}),
+                rule_name="reclaim_recovering",
+                set_lease=True,
+                lease_owner=str(worker_id).strip(),
+                lease_ttl=lease_ttl,
+                require_expired_lease=True,
+                allow_same_status=True,
+                events=tuple(events),
+                bump_recovery_count=True,
+            )
+        )
+
+    def reclaim_expired_cancelling(
+        self,
+        *,
+        run_id: UUID,
+        expected_revision: int,
+        worker_id: str,
+        lease_ttl: timedelta,
+        events: Sequence[EventSpec] = (),
+    ) -> DurableCommitResult:
+        """expired cancelling -> take lease for cancellation-only finalization.
+
+        Does not resume Provider/Capability work. Caller must finalize to cancelled.
+        """
+        return self._commit(
+            _TransitionPlan(
+                run_id=run_id,
+                expected_revision=expected_revision,
+                target_status=STATUS_CANCELLING,
+                allowed_from=frozenset({STATUS_CANCELLING}),
+                rule_name="reclaim_cancelling",
+                set_lease=True,
+                lease_owner=str(worker_id).strip(),
+                lease_ttl=lease_ttl,
+                require_expired_lease=True,
+                allow_same_status=True,
+                events=tuple(events),
+            )
+        )
+
+    def schedule_backoff(
+        self,
+        *,
+        run_id: UUID,
+        expected_revision: int,
+        lease: LeaseToken,
+        next_attempt_at: datetime,
+        events: Sequence[EventSpec] = (),
+    ) -> DurableCommitResult:
+        """Release lease and schedule the next claim after bounded backoff.
+
+        Status is preserved (running/recovering). The Run becomes claimable again
+        only when ``next_attempt_at`` has elapsed and the lease is absent/expired.
+        """
+        return self._commit(
+            _TransitionPlan(
+                run_id=run_id,
+                expected_revision=expected_revision,
+                target_status=None,
+                allowed_from=frozenset({STATUS_RUNNING, STATUS_RECOVERING}),
+                rule_name="schedule_backoff",
+                lease=lease,
+                require_lease_verify=True,
+                clear_lease=True,
+                allow_same_status=True,
+                next_attempt_at=next_attempt_at,
+                events=tuple(events),
+            )
+        )
+
     def complete_recovery(
         self,
         *,
@@ -493,7 +583,9 @@ class DurableRunRepository:
                 error_message=error_message,
                 set_ended_at=target_status in TERMINAL_STATUSES,
                 set_started_at_if_missing=True,
-                clear_lease=target_status in TERMINAL_STATUSES,
+                # needs_reconciliation is quiescent (never auto-claimed); clear lease.
+                clear_lease=target_status in TERMINAL_STATUSES
+                or target_status == STATUS_NEEDS_RECONCILIATION,
                 reject_if_ready_for_memory=False,
             )
         )
@@ -647,9 +739,11 @@ class DurableRunRepository:
     ) -> bool:
         """Extend lease without bumping ``state_revision``.
 
-        Returns False when the lease is lost (zero rows updated).
+        Uses database ``now()`` for expiry calculations. Returns False when the
+        lease is lost (zero rows updated) — callers must stop before any further
+        adapter call or semantic commit.
         """
-        now = utcnow()
+        now = self._db_now()
         expires = now + lease_ttl
         result = self.db.execute(
             update(AssistantChatRun)
@@ -679,12 +773,24 @@ class DurableRunRepository:
         self.db.commit()
         return True
 
+    def _db_now(self) -> datetime:
+        """Database-time clock for lease calculations; falls back to process UTC."""
+        try:
+            value = self.db.scalar(select(func.now()))
+            if isinstance(value, datetime):
+                if value.tzinfo is None:
+                    return value.replace(tzinfo=timezone.utc)
+                return value.astimezone(timezone.utc)
+        except Exception:
+            pass
+        return utcnow()
+
     # ------------------------------------------------------------------
     # Core transaction
     # ------------------------------------------------------------------
 
     def _commit(self, plan: _TransitionPlan) -> DurableCommitResult:
-        now = utcnow()
+        now = self._db_now()
         run = self.get_run(plan.run_id, for_update=True)
         if run is None:
             raise DurableRunConflict(CODE_RUN_NOT_FOUND, f"run not found: {plan.run_id}")

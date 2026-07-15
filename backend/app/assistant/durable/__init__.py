@@ -1,6 +1,7 @@
 """Plan 06 durable agent run package.
 
-Persistence models, CAS repository, and (later) codec/worker integration.
+Persistence models, CAS repository, codec, artifacts, leases, recovery, and
+worker registration.
 """
 
 from app.assistant.durable.models import (  # noqa: F401
@@ -35,6 +36,24 @@ from app.assistant.durable.artifacts import (  # noqa: F401
     DurableArtifactService,
     enqueue_conversation_artifact_gc,
 )
+from app.assistant.durable.worker_registry import (  # noqa: F401
+    RUNTIME_CONTRACT_VERSION,
+    WorkerCompatibility,
+    WorkerIdentity,
+    WorkerRegistry,
+    default_capability_feature_digest,
+    generate_worker_id,
+)
+from app.assistant.durable.leases import (  # noqa: F401
+    ClaimedLease,
+    RunLeaseService,
+    compute_retry_backoff,
+)
+from app.assistant.durable.recovery import (  # noqa: F401
+    CredentialSnapshot,
+    RecoveryClassifier,
+    RecoveryDecision,
+)
 
 __all__ = [
     "AssistantWorkerRegistration",
@@ -63,4 +82,16 @@ __all__ = [
     "ArtifactStorageError",
     "DurableArtifactService",
     "enqueue_conversation_artifact_gc",
+    "RUNTIME_CONTRACT_VERSION",
+    "WorkerCompatibility",
+    "WorkerIdentity",
+    "WorkerRegistry",
+    "default_capability_feature_digest",
+    "generate_worker_id",
+    "ClaimedLease",
+    "RunLeaseService",
+    "compute_retry_backoff",
+    "CredentialSnapshot",
+    "RecoveryClassifier",
+    "RecoveryDecision",
 ]

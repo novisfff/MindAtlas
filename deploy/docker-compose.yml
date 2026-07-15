@@ -231,6 +231,48 @@ services:
           memory: 4G
     restart: unless-stopped
 
+  # Durable Main Agent assistant worker (Plan 06)
+  # Same database / provider Fernet key / private MinIO Artifact bucket as the API.
+  # HEALTHCHECK validates a fresh compatible registration (not mere PID liveness).
+  assistant-worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: assistant-worker
+      args:
+        APP_BUILD_REVISION: ${APP_BUILD_REVISION:?Set APP_BUILD_REVISION to a deployment-immutable value}
+    container_name: mindatlas-assistant-worker
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-mindatlas}
+      AI_PROVIDER_FERNET_KEY: ${AI_PROVIDER_FERNET_KEY:-b98esSSrtceWc4IUOFGR-f_6I8FfnxtpjjYQZN51RCw=}
+      APP_ENV: ${APP_ENV:-production}
+      APP_BUILD_REVISION: ${APP_BUILD_REVISION:?Set APP_BUILD_REVISION to a deployment-immutable value}
+      ASSISTANT_MAIN_AGENT_MODE: ${ASSISTANT_MAIN_AGENT_MODE:-off}
+      # Private Artifact storage (never the attachment public-download bucket)
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-mindatlas}
+      MINIO_SECURE: "false"
+      ASSISTANT_ARTIFACT_BUCKET: ${ASSISTANT_ARTIFACT_BUCKET:-mindatlas-assistant-artifacts}
+      # Worker lease / registration knobs (defaults match Settings)
+      ASSISTANT_WORKER_POLL_INTERVAL_MS: ${ASSISTANT_WORKER_POLL_INTERVAL_MS:-500}
+      ASSISTANT_WORKER_LEASE_TTL_SEC: ${ASSISTANT_WORKER_LEASE_TTL_SEC:-30}
+      ASSISTANT_WORKER_HEARTBEAT_INTERVAL_SEC: ${ASSISTANT_WORKER_HEARTBEAT_INTERVAL_SEC:-5}
+      ASSISTANT_WORKER_REGISTRATION_TTL_SEC: ${ASSISTANT_WORKER_REGISTRATION_TTL_SEC:-20}
+      ASSISTANT_WORKER_STATE_PATH: /tmp/mindatlas-assistant-worker-state.json
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+    networks:
+      - mindatlas-network
+    # Image HEALTHCHECK already runs: python -m app.assistant.worker --healthcheck
+    restart: unless-stopped
+
   # Web Frontend (Nginx)
   web:
     build:
