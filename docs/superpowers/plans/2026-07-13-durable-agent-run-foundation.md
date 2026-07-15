@@ -60,8 +60,8 @@ The current pre-plan repository has these concrete anchors:
 - `AssistantConversationSkillL2Memory` is keyed by `conversation_id + skill_name`; it has no stable package ID or namespace.
 - `backend/app/common/storage.py` resolves the existing attachment bucket. `deploy/minio-init.sh` currently grants anonymous download to that bucket, so durable Provider/Artifact content must not be stored there.
 - `deploy/docker-compose.yml` has API, LightRAG worker, and Docling worker patterns but no assistant worker.
-- Current local Alembic head at plan-authoring time is `a7b8c9d0e1f2`; Plans 01/03/04 will add generated revisions before Plan 06. This document must not predict or reuse a revision ID.
-- `backend/tests/_db.py` is SQLite-only. It remains useful for pure/unit tests but cannot prove partial indexes, `SKIP LOCKED`, triggers, or concurrent CAS.
+- Post-Plan-05 sole Alembic head (Task 0 freeze) is `9ed6f561a381`. Plan 06 must generate a new child revision from that head and must not reuse or invent IDs.
+- `backend/tests/_db.py` is SQLite-only (with a JSONB→JSON compile shim). It remains useful for pure/unit tests but cannot prove partial indexes, `SKIP LOCKED`, triggers, or concurrent CAS.
 
 Task 0 records the actual post-Plan-05 paths/types. If a prerequisite renamed a contract, update this plan before implementation and use the merged type; do not create a duplicate compatibility type merely to preserve this draft's spelling.
 
@@ -613,7 +613,7 @@ This ordering removes the ambiguous “completed before memory vs memory before 
 
 ## 12. File Responsibility Map
 
-Exact post-Plan-05 paths must be confirmed in Task 0.
+Task 0 confirmed the post-Plan-05 package layout below. No path renames were required; placeholders are replaced with exact modules.
 
 Create:
 
@@ -629,35 +629,56 @@ Create:
 - `backend/app/assistant/durable/recovery.py`
 - `backend/app/assistant/durable/worker_registry.py`
 - `backend/app/assistant/worker.py`
-- generated `backend/alembic/versions/<revision>_add_durable_agent_run_foundation.py`
+- generated `backend/alembic/versions/<revision>_add_durable_agent_run_foundation.py` (parent head `9ed6f561a381`)
 - `backend/tests/postgres_helpers.py` or the merged repository-standard PostgreSQL fixture
 - focused tests named in the tasks below
 
-Modify:
+Modify (existing paths confirmed present):
 
-- `backend/app/assistant/models.py`
-- `backend/app/assistant/run_service.py`
-- `backend/app/assistant/service.py`
-- `backend/app/assistant/router.py`
+- `backend/app/assistant/models.py` (`AssistantChatRun`, `AssistantChatRunEvent`, L2 memory)
+- `backend/app/assistant/run_service.py` (app-level `last_event_seq + 1` allocation)
+- `backend/app/assistant/service.py` (`_background_run_threads`, daemon `_run_chat_background`)
+- `backend/app/assistant/router.py` (conversation-scoped Run/SSE/stop; `afterSeq`)
 - `backend/app/assistant/schemas.py`
-- exact post-Plan-05 Main Agent service/runtime files
-- exact post-Plan-05 Provider Loop integration file; do not put database imports in the pure loop package
+- Main Agent (Plan 04/05) — do not duplicate; integrate durable ownership around:
+  - `backend/app/assistant/main_agent/service.py` (`MainAgentService`, admission)
+  - `backend/app/assistant/main_agent/manifest_runtime.py` (`PendingSkillActivationPackage`)
+  - `backend/app/assistant/main_agent/authorization.py` (ceiling, grant source)
+  - `backend/app/assistant/main_agent/policy_runtime.py`
+  - `backend/app/assistant/main_agent/events.py` (public/internal event adapter)
+  - `backend/app/assistant/main_agent/control_capabilities.py` / `control_runtime.py`
+  - `backend/app/assistant/main_agent/inject_wiring.py`
+  - `backend/app/assistant/main_agent/golden_path.py` / `evaluation.py`
+- Policy (Plan 05) — reuse; do not fork durable-reduced copies:
+  - `backend/app/assistant/policy/contracts.py` (`EffectiveRunPolicySnapshot`, `EffectiveCapabilityGrant`, `RunBudgetLimits`)
+  - `backend/app/assistant/policy/budgets.py` (`BudgetLedgerState`, serialize helpers)
+  - `backend/app/assistant/policy/obligations.py` (`ObligationLedgerState`, serialize helpers)
+  - `backend/app/assistant/policy/recursion.py` (`CapabilityCallFrame`)
+  - `backend/app/assistant/policy/runtime.py` / `evaluator.py` / `completion.py` / `evidence.py`
+- Provider Loop (Plan 03) — pure package remains DB-free; durable codec/worker integrate outside it:
+  - `backend/app/assistant/provider_loop/contracts.py` (`ProviderLoopContinuation`, `ManifestEffectLifecyclePort`, resume request)
+  - `backend/app/assistant/provider_loop/messages.py` (`runtime_instruction|runtime_context|runtime_completion` discriminators)
+  - `backend/app/assistant/provider_loop/loop.py` / `runtime.py` / `scheduler.py` / `streaming.py`
+  - adapters under `backend/app/assistant/provider_loop/adapters/` only
+- Domain / capability contracts:
+  - `backend/app/assistant/domain/contracts.py` (`ResolvedRunManifestRevision` + digests)
+  - `backend/app/assistant/capabilities/contracts.py` / `gateway.py` / `policy.py` / `classification.py`
 - `backend/app/assistant/memory_service.py`
 - `backend/app/common/storage.py` only if a generic private-bucket client can be added without changing attachment semantics; otherwise keep assistant storage under `app.assistant.durable`
-- `backend/app/config.py`
+- `backend/app/config.py` (`ASSISTANT_MAIN_AGENT_MODE` default `off` + resource ceilings)
 - `backend/alembic/env.py`
-- `backend/tests/_db.py`
+- `backend/tests/_db.py` (SQLite-only unit fixture)
 - `backend/.env.example`
 - `deploy/.env.example`
-- `deploy/minio-init.sh`
-- `deploy/docker-compose.yml`
+- `deploy/minio-init.sh` (attachment bucket still has anonymous download — durable Provider/Artifact content must not use it)
+- `deploy/docker-compose.yml` (API + LightRAG + Docling workers; no assistant worker yet)
 - `backend/Dockerfile`
 - `frontend/src/features/assistant/types.ts`
-- `frontend/src/features/assistant/stores/chat-store.ts`
-- `frontend/src/features/assistant/hooks/useChat.ts`
+- `frontend/src/features/assistant/stores/chat-store.ts` (`lastEventSeq`)
+- `frontend/src/features/assistant/hooks/useChat.ts` (reconnect via `afterSeq`)
 - `.github/workflows/ci.yml`
 
-Do not create `backend/app/assistant/main_agent/*` or `provider_loop/*` duplicates if Plans 03–05 used different final paths.
+Do not create `backend/app/assistant/main_agent/*`, `provider_loop/*`, or `policy/*` duplicates. Durable code owns persistence/leases/recovery only.
 
 ---
 
@@ -666,7 +687,7 @@ Do not create `backend/app/assistant/main_agent/*` or `provider_loop/*` duplicat
 ### Task 0: Freeze the Post-Plan-05 Baseline
 
 - [ ] Record branch/commit, dirty state, Python version, locked dependency versions, one Alembic head, Plan 04/05 feature flags, evaluation dataset/result digests, and exact golden Profile/Skill/model/build refs.
-- [ ] Verify the execution environment is clean Python 3.11 with `langgraph==0.3.34`; the repository spec explicitly rejects the local mismatched 1.x environment as compatibility evidence.
+- [ ] Verify the execution environment against the repository pins (`backend/requirements.txt` pins `langgraph==0.3.34`; production target remains Python 3.11). Task 0 must record any local mismatch (e.g. Python 3.12.x and/or `langgraph` 1.x) and must **not** treat that mismatch as Plan 06 compatibility evidence.
 - [ ] Record and run full Plan 01, the exact reviewed Plan 02A revision with `PLAN_02A_READY=yes`, and full Plans 03–05 suites plus current Run/SSE/stop/memory tests. Record Plan 02B status for coordination only; do not wait for observation/cleanup.
 - [ ] Re-run Plan 05 copy-descriptor/grant-source negative vectors and prove complete `EffectiveCapabilityGrant` values are serializable without classifier-derived grants.
 - [ ] Re-run Plan 04/05 activation vectors proving `stage -> lineage -> accept`, zero residue on discard, base/active/same-batch Domain Key handling, and no rollback of a started `skill.inject` charge.

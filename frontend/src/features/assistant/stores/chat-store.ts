@@ -234,17 +234,26 @@ export const createChatLogic = (set: any): Omit<ChatState, 'no-op'> => ({
     set({ activeWorkflowSteps: steps }),
 
   setActiveRun: (runId: string | null, status: string | null = null, lastEventSeq = 0) =>
-    set({
-      activeRunId: runId,
-      activeRunStatus: status,
-      lastEventSeq: Math.max(0, Math.floor(lastEventSeq || 0)),
+    set((state: ChatState) => {
+      const nextSeq = Math.max(0, Math.floor(lastEventSeq || 0))
+      // Monotonic cursor for the same Run: re-attach must not rewind lastEventSeq.
+      // Switching to a different Run (or clearing) may reset the cursor.
+      const sameRun = runId != null && runId === state.activeRunId
+      return {
+        activeRunId: runId,
+        activeRunStatus: status,
+        lastEventSeq: sameRun ? Math.max(state.lastEventSeq, nextSeq) : nextSeq,
+      }
     }),
 
   setActiveRunStatus: (status: string | null) =>
     set({ activeRunStatus: status }),
 
   setLastEventSeq: (seq: number) =>
-    set({ lastEventSeq: Math.max(0, Math.floor(seq || 0)) }),
+    set((state: ChatState) => ({
+      // Monotonic per active Run; at-least-once replay must not rewind the cursor.
+      lastEventSeq: Math.max(state.lastEventSeq, Math.max(0, Math.floor(seq || 0))),
+    })),
 
   clearActiveRun: () =>
     set({ activeRunId: null, activeRunStatus: null, lastEventSeq: 0 }),

@@ -11,17 +11,24 @@ from app.common.time import utcnow
 
 RUN_STATUS_QUEUED = "queued"
 RUN_STATUS_RUNNING = "running"
+RUN_STATUS_RECOVERING = "recovering"
 RUN_STATUS_WAITING_APPROVAL = "waiting_approval"
+RUN_STATUS_WAITING_INPUT = "waiting_input"
 RUN_STATUS_CANCELLING = "cancelling"
+RUN_STATUS_NEEDS_RECONCILIATION = "needs_reconciliation"
 RUN_STATUS_COMPLETED = "completed"
 RUN_STATUS_FAILED = "failed"
 RUN_STATUS_CANCELLED = "cancelled"
 
+# Align with durable active unique index (Plan 06 §4 / models).
 RUN_ACTIVE_STATUSES = {
     RUN_STATUS_QUEUED,
     RUN_STATUS_RUNNING,
+    RUN_STATUS_RECOVERING,
     RUN_STATUS_WAITING_APPROVAL,
+    RUN_STATUS_WAITING_INPUT,
     RUN_STATUS_CANCELLING,
+    RUN_STATUS_NEEDS_RECONCILIATION,
 }
 RUN_TERMINAL_STATUSES = {
     RUN_STATUS_COMPLETED,
@@ -59,10 +66,46 @@ class AssistantChatRunService:
         conversation: Conversation,
         user_message: Message,
         assistant_message: Message,
+        runtime_kind: str = "legacy",
+        runtime_contract_version: int | None = None,
+        required_app_build_revision: str | None = None,
+        memory_commit_status: str | None = None,
+        deadline_at=None,
+        commit: bool = True,
     ) -> AssistantChatRun:
+        """Create a Run with immutable ``runtime_kind``.
+
+        Plan 06 Task 6: admission selects ``runtime_kind`` immediately before
+        insertion. Once a ``main_agent`` row exists, Legacy fallback is forbidden.
+
+        For ``runtime_kind=main_agent``, callers should pass ``commit=False``,
+        append the initial public event on the same Session, then commit once so
+        workers never claim a Run that is still missing its initialization event
+        (Plan 06 §9 / Task 3 atomic write path).
+        """
         active = self.get_active_run(conversation_id=conversation.id)
         if active is not None:
             raise ValueError("conversation already has an active run")
+
+        kind = str(runtime_kind or "legacy").strip().lower()
+        if kind not in {"legacy", "main_agent"}:
+            raise ValueError(f"invalid runtime_kind: {runtime_kind!r}")
+
+        if kind == "main_agent":
+            if runtime_contract_version is None:
+                runtime_contract_version = 1
+            if not required_app_build_revision:
+                raise ValueError(
+                    "required_app_build_revision is required for runtime_kind=main_agent"
+                )
+            if memory_commit_status is None:
+                memory_commit_status = "pending"
+        else:
+            # Legacy shape: contract version + build must be null.
+            runtime_contract_version = None
+            required_app_build_revision = None
+            if memory_commit_status is None:
+                memory_commit_status = "not_applicable"
 
         run = AssistantChatRun(
             conversation_id=conversation.id,
@@ -71,10 +114,18 @@ class AssistantChatRunService:
             status=RUN_STATUS_QUEUED,
             last_event_seq=0,
             checkpoint_seq=0,
+            runtime_kind=kind,
+            runtime_contract_version=runtime_contract_version,
+            required_app_build_revision=required_app_build_revision,
+            memory_commit_status=memory_commit_status,
+            deadline_at=deadline_at,
         )
         self.db.add(run)
-        self.db.commit()
-        self.db.refresh(run)
+        if commit:
+            self.db.commit()
+            self.db.refresh(run)
+        else:
+            self.db.flush()
         return run
 
     def append_event(
@@ -83,21 +134,38 @@ class AssistantChatRunService:
         run_id: UUID,
         event_name: str,
         payload: dict,
+        event_key: str | None = None,
+        commit: bool = True,
     ) -> int:
+        """Append one event.
+
+        Pass ``commit=False`` when composing Main Agent create + initial event in
+        a single transaction (must not interleave with worker claim).
+        """
         run = self.db.get(AssistantChatRun, run_id)
         if run is None:
             raise ValueError(f"run not found: {run_id}")
         next_seq = int(run.last_event_seq or 0) + 1
+        name = str(event_name or "").strip()
+        key = str(event_key).strip() if event_key is not None else ""
+        # Main Agent public events require a deterministic event_key so stream
+        # consumers can dedupe at-least-once transport (Plan 06 §9).
+        if not key and str(getattr(run, "runtime_kind", None) or "") == "main_agent":
+            key = f"{name}:{run.id}:{next_seq}"
         event = AssistantChatRunEvent(
             run_id=run.id,
             seq=next_seq,
-            event_name=str(event_name or "").strip(),
+            event_name=name,
             payload=payload if isinstance(payload, dict) else {},
+            event_key=key or None,
         )
         self.db.add(event)
         run.last_event_seq = next_seq
         run.updated_at = utcnow()
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         return next_seq
 
     def list_events_after(

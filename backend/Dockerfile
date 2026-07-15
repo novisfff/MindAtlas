@@ -72,6 +72,15 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 FROM base AS worker
 CMD ["python", "-m", "app.lightrag.worker"]
 
+# Stage 5b: Durable Main Agent assistant worker (Plan 06)
+# Same base image/deps as the API (DB + provider + private MinIO Artifact access).
+FROM base AS assistant-worker
+ENV ASSISTANT_WORKER_STATE_PATH=/tmp/mindatlas-assistant-worker-state.json
+# Healthcheck validates a *fresh compatible registration* (not mere PID liveness).
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
+  CMD ["python", "-m", "app.assistant.worker", "--healthcheck"]
+CMD ["python", "-m", "app.assistant.worker"]
+
 # Stage 6: Parse Worker target (Docling document parsing)
 FROM python:3.11-slim AS parse-worker-builder
 

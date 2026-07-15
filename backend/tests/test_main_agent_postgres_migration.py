@@ -24,6 +24,7 @@ reset_caches()
 
 
 PLAN03_HEAD = "b666b11a5faa"
+PLAN06_HEAD = "6af373ef040f"
 DOWNGRADE_BLOCKED_TOKEN = "MINDATLAS_PLAN04_DOWNGRADE_BLOCKED_ENABLED_AGGREGATES"
 
 CATALOG_CHECK = "ck_assistant_skill_package_catalog_disabled"
@@ -104,22 +105,34 @@ def _err_text(exc: BaseException) -> str:
 
 
 def _plan04_revision() -> str:
-    """Resolve the sole child of Plan 03 head (Plan 04 enable flags migration)."""
+    """Resolve the Plan 04 enable-flags migration (child of Plan 03 head).
+
+    Plan 06 and later may extend the chain; the sole Alembic head is no longer
+    necessarily Plan 04. Walk the script map for the revision whose
+    ``down_revision`` is the Plan 03 parent.
+    """
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(_alembic_config())
-    heads = script.get_heads()
-    assert len(heads) == 1, f"expected sole alembic head, got {heads}"
-    head = heads[0]
-    assert head != PLAN03_HEAD, (
-        f"Plan 04 migration missing: head is still parent {PLAN03_HEAD}"
+    # Prefer the known Plan 04 id when present (stable across Plan 05/06 heads).
+    known = "9ed6f561a381"
+    try:
+        rev = script.get_revision(known)
+        if rev is not None and rev.down_revision == PLAN03_HEAD:
+            return known
+    except Exception:
+        rev = None
+    matches: list[str] = []
+    for r in script.walk_revisions():
+        if r.down_revision == PLAN03_HEAD:
+            matches.append(r.revision)
+    assert matches, (
+        f"Plan 04 migration missing: no revision revises parent {PLAN03_HEAD}"
     )
-    rev = script.get_revision(head)
-    assert rev is not None
-    assert rev.down_revision == PLAN03_HEAD, (
-        f"Plan 04 revision must revise {PLAN03_HEAD}, got down_revision={rev.down_revision}"
+    assert len(matches) == 1, (
+        f"expected sole Plan 04 child of {PLAN03_HEAD}, got {matches}"
     )
-    return head
+    return matches[0]
 
 
 def _check_names(conn, table: str) -> set[str]:
@@ -161,9 +174,13 @@ def _reset_to_plan03_parent() -> None:
         except AssertionError:
             plan04 = None
 
-        if plan04 is not None and current == plan04:
-            with engine.begin() as conn:
-                _clear_enabled_flags(conn)
+        if current is not None and current != PLAN03_HEAD:
+            # Descendant of Plan 03 (Plan 04/05/06/...): clear enable flags when
+            # present, then downgrade through the chain to Plan 03.
+            if plan04 is not None:
+                with engine.begin() as conn:
+                    _clear_enabled_flags(conn)
+            # Plan 06 downgrade refuses durable data; empty disposable DBs pass.
             _run_alembic("downgrade", PLAN03_HEAD)
         elif current != PLAN03_HEAD:
             # Mid/unknown state: ensure schema reaches parent via upgrade path.
@@ -268,14 +285,12 @@ def test_upgrade_drops_only_disabled_checks_and_preserves_defaults() -> None:
                     )
 
     _run_alembic("upgrade", "head")
-    plan04 = _plan04_revision()
-
     with _engine() as engine:
-        assert _current_revision(engine) == plan04
+        assert _current_revision(engine) == PLAN06_HEAD
         from alembic.script import ScriptDirectory
 
         heads = ScriptDirectory.from_config(_alembic_config()).get_heads()
-        assert heads == [plan04]
+        assert heads == [PLAN06_HEAD]
 
         with engine.begin() as conn:
             pkg_checks = _check_names(conn, "assistant_skill_package")
@@ -420,7 +435,6 @@ def test_data_preservation_across_upgrade() -> None:
 def test_downgrade_blocked_when_any_flag_true() -> None:
     _reset_to_plan03_parent()
     _run_alembic("upgrade", "head")
-    plan04 = _plan04_revision()
 
     with _engine() as engine:
         with engine.begin() as conn:
@@ -438,7 +452,7 @@ def test_downgrade_blocked_when_any_flag_true() -> None:
     assert DOWNGRADE_BLOCKED_TOKEN in _err_text(exc_info.value)
 
     with _engine() as engine:
-        assert _current_revision(engine) == plan04
+        assert _current_revision(engine) == PLAN06_HEAD
         with engine.begin() as conn:
             # Still true; no data deletion on blocked downgrade.
             assert (
@@ -469,7 +483,7 @@ def test_downgrade_blocked_when_any_flag_true() -> None:
     assert DOWNGRADE_BLOCKED_TOKEN in _err_text(exc_info.value)
 
     with _engine() as engine:
-        assert _current_revision(engine) == plan04
+        assert _current_revision(engine) == PLAN06_HEAD
         with engine.begin() as conn:
             assert (
                 conn.execute(
@@ -486,8 +500,6 @@ def test_downgrade_blocked_when_any_flag_true() -> None:
 def test_parent_head_parent_head_cycle_and_sole_head() -> None:
     """parent -> head -> parent -> head with sole head after upgrade."""
     _reset_to_plan03_parent()
-    plan04 = _plan04_revision()
-
     with _engine() as engine:
         with engine.begin() as conn:
             pkg_id = _insert_package(conn, name=f"cycle-{uuid.uuid4().hex[:8]}")
@@ -495,7 +507,7 @@ def test_parent_head_parent_head_cycle_and_sole_head() -> None:
 
     _run_alembic("upgrade", "head")
     with _engine() as engine:
-        assert _current_revision(engine) == plan04
+        assert _current_revision(engine) == PLAN06_HEAD
         with engine.connect() as conn:
             assert CATALOG_CHECK not in _check_names(conn, "assistant_skill_package")
             assert RUNTIME_CHECK not in _check_names(
@@ -550,11 +562,11 @@ def test_parent_head_parent_head_cycle_and_sole_head() -> None:
 
     _run_alembic("upgrade", "head")
     with _engine() as engine:
-        assert _current_revision(engine) == plan04
+        assert _current_revision(engine) == PLAN06_HEAD
         from alembic.script import ScriptDirectory
 
         heads = ScriptDirectory.from_config(_alembic_config()).get_heads()
-        assert heads == [plan04]
+        assert heads == [PLAN06_HEAD]
         with engine.connect() as conn:
             assert CATALOG_CHECK not in _check_names(conn, "assistant_skill_package")
             assert RUNTIME_CHECK not in _check_names(

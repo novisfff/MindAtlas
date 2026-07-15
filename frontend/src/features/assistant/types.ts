@@ -40,8 +40,11 @@ export interface WorkflowStep {
 export type AssistantRunStatus =
   | 'queued'
   | 'running'
+  | 'recovering'
   | 'waiting_approval'
+  | 'waiting_input'
   | 'cancelling'
+  | 'needs_reconciliation'
   | 'completed'
   | 'failed'
   | 'cancelled'
