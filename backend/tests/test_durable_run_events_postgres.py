@@ -449,7 +449,7 @@ def test_two_session_event_key_identical_and_conflict():
             assert r1.run.last_event_seq == 1
             assert r1.state_revision == 2
 
-        # Identical replay reuses, no seq advance
+        # Identical replay reuses, no seq/revision advance (Plan §9 pure no-op).
         with _session(engine) as s2:
             repo = DurableRunRepository(s2)
             lease = LeaseToken(run_id=run_id, worker_id="w1", lease_generation=1)
@@ -467,7 +467,8 @@ def test_two_session_event_key_identical_and_conflict():
             )
             assert r2.run.last_event_seq == 1
             assert r2.reused_event_keys == ("unit.prepared:lu-1",)
-            assert r2.state_revision == 3
+            assert r2.inserted_event_keys == ()
+            assert r2.state_revision == 2
 
         # Conflicting payload advances nothing
         with _session(engine) as s3:
@@ -476,7 +477,7 @@ def test_two_session_event_key_identical_and_conflict():
             with pytest.raises(DurableRunConflict) as ctx:
                 repo.commit_semantic(
                     run_id=run_id,
-                    expected_revision=3,
+                    expected_revision=2,  # still at 2 after pure identical no-op
                     lease=lease,
                     events=[
                         EventSpec(
@@ -491,7 +492,7 @@ def test_two_session_event_key_identical_and_conflict():
         with _session(engine) as s4:
             final = s4.get(AssistantChatRun, run_id)
             assert final is not None
-            assert final.state_revision == 3
+            assert final.state_revision == 2
             assert final.last_event_seq == 1
             count = (
                 s4.query(AssistantChatRunEvent)

@@ -482,12 +482,15 @@ class DurableRunRepositoryUnitTests(unittest.TestCase):
             lease=lease,
             events=[spec],
         )
-        # Sequence does not advance on identical replay; revision still bumps
-        # because the semantic CAS transition committed.
+        # Plan §9: pure identical package replay reuses the event row and
+        # advances neither sequence nor state_revision.
         self.assertEqual(r2.run.last_event_seq, 1)
         self.assertEqual(r2.reused_event_keys, ("unit.prepared:lu-1",))
         self.assertEqual(r2.inserted_event_keys, ())
-        self.assertEqual(r2.state_revision, 3)
+        self.assertEqual(r2.state_revision, 2)
+        self.db.refresh(run)
+        self.assertEqual(run.state_revision, 2)
+        self.assertEqual(run.last_event_seq, 1)
 
     def test_conflicting_event_key_advances_nothing(self) -> None:
         from datetime import datetime, timezone

@@ -721,6 +721,26 @@ class DurableRunRepository:
                 else:
                     inserted_keys.append(spec.event_key)
 
+            # Plan §9: pure identical package replay (all events reused, no child
+            # mutations, no status/side-effect change) advances neither status,
+            # revision, nor sequence — same shape as stop_idempotent.
+            if (
+                not inserted_keys
+                and not self._has_child_mutations(plan)
+                and not self._would_mutate_run_fields(run, plan)
+            ):
+                self.db.rollback()
+                run = self.get_run(plan.run_id) or run
+                return DurableCommitResult(
+                    run=run,
+                    state_revision=int(run.state_revision),
+                    status=str(run.status),
+                    # Event ORM instances expire on rollback; keys are the contract.
+                    events=(),
+                    reused_event_keys=tuple(reused_keys),
+                    inserted_event_keys=(),
+                )
+
             if plan.children is not None:
                 self._append_children(run, plan.children)
 
@@ -1019,6 +1039,70 @@ class DurableRunRepository:
         self.db.add(event)
         self.db.flush()
         return event, False
+
+    @staticmethod
+    def _has_child_mutations(plan: _TransitionPlan) -> bool:
+        """True when the plan would append children or move aggregate pointers."""
+        bundle = plan.children
+        if bundle is None:
+            return False
+        if bundle.rows:
+            return True
+        return any(
+            value is not None
+            for value in (
+                bundle.current_manifest_revision_id,
+                bundle.current_policy_revision_id,
+                bundle.current_checkpoint_id,
+                bundle.current_budget_revision_id,
+                bundle.current_obligation_revision_id,
+            )
+        )
+
+    @staticmethod
+    def _would_mutate_run_fields(run: AssistantChatRun, plan: _TransitionPlan) -> bool:
+        """True when the plan would change Run status or other aggregate fields.
+
+        Pure identical event-package replay must leave status, revision, sequence,
+        and side-effect columns untouched (Plan §9).
+        """
+        if plan.target_status is not None and str(plan.target_status) != str(run.status):
+            return True
+        if plan.set_cancel_requested and run.cancel_requested_at is None:
+            return True
+        if plan.set_started_at_if_missing and run.started_at is None:
+            return True
+        if plan.set_ended_at:
+            return True
+        if plan.failure_code is not None and plan.failure_code != run.failure_code:
+            return True
+        if plan.error_message is not None and plan.error_message != run.error_message:
+            return True
+        if (
+            plan.memory_commit_status is not None
+            and plan.memory_commit_status != run.memory_commit_status
+        ):
+            return True
+        if plan.set_memory_committed_at:
+            return True
+        if plan.bump_recovery_count:
+            return True
+        if plan.next_attempt_at is not None:
+            return True
+        if plan.set_lease:
+            return True
+        if plan.clear_lease and (
+            run.lease_owner is not None or run.lease_expires_at is not None
+        ):
+            return True
+        # Optional lease refresh on semantic commit is a real write.
+        if (
+            plan.require_lease_verify
+            and plan.lease is not None
+            and plan.lease_ttl is not None
+        ):
+            return True
+        return False
 
     def _append_children(self, run: AssistantChatRun, bundle: DurableChildBundle) -> None:
         for row in bundle.rows:
