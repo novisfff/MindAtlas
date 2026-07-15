@@ -1259,20 +1259,19 @@ class DurableArtifactService:
             if expires > utcnow():
                 return False
 
-        # Inflight unit gate: any Checkpoint for this Run implies the object may still
-        # be referenced by recovery/reconciliation paths for nonterminal history. For
-        # terminal Runs we only block if a non-terminal phase Checkpoint exists
-        # (prepared/started units live in state_payload; phase != terminal).
-        open_cp = self.db.scalar(
-            select(AssistantRunCheckpoint.id)
-            .where(
-                AssistantRunCheckpoint.run_id == run_id,
-                AssistantRunCheckpoint.phase != "terminal",
-            )
-            .limit(1)
-        )
-        if open_cp is not None:
-            return False
+        # Inflight unit gate: only the *current* Checkpoint can still commit/use
+        # objects (Plan §10). Historical non-terminal phases are append-only
+        # history and must not permanently block orphan GC on multi-step completed
+        # runs. Prefer leak (block delete) when the current pointer is anomalous
+        # (dangling id) or still non-terminal; no current pointer means no open
+        # inflight unit for a terminal Run.
+        current_id = run.current_checkpoint_id
+        if current_id is not None:
+            current_cp = self.db.get(AssistantRunCheckpoint, current_id)
+            if current_cp is None:
+                return False
+            if str(current_cp.phase or "") != "terminal":
+                return False
         return True
 
 
