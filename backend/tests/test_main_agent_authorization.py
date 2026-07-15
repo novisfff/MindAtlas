@@ -636,3 +636,39 @@ def test_concurrent_single_use_verifier() -> None:
         t.join()
     assert results.count(True) == 1
     assert results.count(False) == 7
+
+
+def test_skill_owner_id_uses_package_id_when_map_provided() -> None:
+    """Plan 05 §4.2: skill owner_id is stable package_id, not version_id."""
+    from types import SimpleNamespace
+
+    from app.assistant.capabilities.contracts import FrozenBindingProvenance
+    from app.assistant.main_agent.authorization import owner_ref_from_binding_provenance
+
+    skill_version = UUID("00000000-0000-4000-8000-000000000501")
+    skill_package = UUID("00000000-0000-4000-8000-000000000502")
+    # owner_ref_from_binding_provenance only reads provenance (+ ref.capability_key
+    # as a Plan 04 fallback). Avoid building a full FrozenCapabilityBinding.
+    binding = SimpleNamespace(
+        provenance=FrozenBindingProvenance(
+            origin="skill_version",
+            binding_row_id=None,
+            owner_version_id=skill_version,
+            source_snapshot_digest=DIGEST_A,
+        ),
+        ref=SimpleNamespace(capability_key="biz.read"),
+    )
+    owner = owner_ref_from_binding_provenance(
+        binding,  # type: ignore[arg-type]
+        profile_key="default",
+        skill_package_id_by_version={skill_version: skill_package},
+    )
+    assert owner.owner_kind == "skill_version"
+    assert owner.owner_id == str(skill_package)
+    assert owner.owner_version_id == skill_version
+    # Without map: Plan 04 minimum path keeps version_id as owner_id.
+    owner_legacy = owner_ref_from_binding_provenance(
+        binding,  # type: ignore[arg-type]
+        profile_key="default",
+    )
+    assert owner_legacy.owner_id == str(skill_version)

@@ -205,8 +205,16 @@ def owner_ref_from_binding_provenance(
     binding: FrozenCapabilityBinding,
     *,
     profile_key: str | None = None,
+    skill_package_id_by_version: Mapping[UUID, UUID] | None = None,
+    skill_package_id: UUID | None = None,
 ) -> CapabilityOwnerRef:
-    """Derive owner from frozen binding provenance (Main Agent or Skill)."""
+    """Derive owner from frozen binding provenance (Main Agent or Skill).
+
+    Skill ownership uses the stable package ID as ``owner_id`` (Plan 05 §4.2),
+    matching ManifestExposureIndex / evaluator claimed-owner identity. Callers
+    must supply ``skill_package_id`` or a version→package map for skill_version
+    bindings; unresolved package identity raises.
+    """
     provenance = binding.provenance
     if provenance.origin == "main_agent_profile":
         return CapabilityOwnerRef(
@@ -215,10 +223,25 @@ def owner_ref_from_binding_provenance(
             owner_version_id=provenance.owner_version_id,
         )
     if provenance.origin == "skill_version":
+        version_id = provenance.owner_version_id
+        package_id: UUID | None = skill_package_id
+        if package_id is None and version_id is not None and skill_package_id_by_version is not None:
+            package_id = skill_package_id_by_version.get(version_id)
+        if package_id is not None:
+            # Plan 05 §4.2: stable package ID is the owner_id for skill exposures.
+            return CapabilityOwnerRef(
+                owner_kind="skill_version",
+                owner_id=str(package_id),
+                owner_version_id=version_id,
+            )
+        if skill_package_id_by_version is not None or skill_package_id is not None:
+            # Map was supplied but this version is unresolved — fail closed.
+            raise AuthorizationEvidenceVerificationError("owner_version_missing")
+        # Plan 04 minimum path (no package map): keep historical version_id owner_id.
         return CapabilityOwnerRef(
             owner_kind="skill_version",
-            owner_id=str(provenance.owner_version_id or binding.ref.capability_key),
-            owner_version_id=provenance.owner_version_id,
+            owner_id=str(version_id or binding.ref.capability_key),
+            owner_version_id=version_id,
         )
     # system/test paths are not production Main Agent owners.
     return CapabilityOwnerRef(
@@ -415,6 +438,7 @@ class MainAgentAuthorizationEvidenceFactory:
         profile_content_digest: str,
         skill_author_policy_by_version: Mapping[UUID, Sequence[str]] | None = None,
         skill_content_digest_by_version: Mapping[UUID, str] | None = None,
+        skill_package_id_by_version: Mapping[UUID, UUID] | None = None,
         ceiling: MainAgentEffectCeiling = MAIN_AGENT_READ_ONLY_EFFECT_CEILING,
         principal: CapabilityPrincipal = LOCAL_ASSISTANT_PRINCIPAL,
         policy_snapshot: Any | None = None,
@@ -426,6 +450,8 @@ class MainAgentAuthorizationEvidenceFactory:
         self.profile_content_digest = profile_content_digest
         self.skill_author_policy_by_version = dict(skill_author_policy_by_version or {})
         self.skill_content_digest_by_version = dict(skill_content_digest_by_version or {})
+        # Plan 05 §4.2: version_id → stable package_id for skill owner_id.
+        self.skill_package_id_by_version = dict(skill_package_id_by_version or {})
         self.ceiling = ceiling
         self.principal = principal
         self.policy_snapshot = policy_snapshot
@@ -440,6 +466,7 @@ class MainAgentAuthorizationEvidenceFactory:
         *,
         skill_author_policy_by_version: Mapping[UUID, Sequence[str]] | None = None,
         skill_content_digest_by_version: Mapping[UUID, str] | None = None,
+        skill_package_id_by_version: Mapping[UUID, UUID] | None = None,
         policy_snapshot: Any | None = None,
         owner_materials: Mapping[Any, Any] | None = None,
     ) -> None:
@@ -458,6 +485,8 @@ class MainAgentAuthorizationEvidenceFactory:
                 self.skill_content_digest_by_version.update(
                     dict(skill_content_digest_by_version)
                 )
+            if skill_package_id_by_version is not None:
+                self.skill_package_id_by_version.update(dict(skill_package_id_by_version))
             if policy_snapshot is not None:
                 self.policy_snapshot = policy_snapshot
             if owner_materials is not None:
@@ -507,7 +536,11 @@ class MainAgentAuthorizationEvidenceFactory:
 
         snapshot = self.policy_snapshot
         assert snapshot is not None
-        owner = owner_ref_from_binding_provenance(binding, profile_key=self.profile_key)
+        owner = owner_ref_from_binding_provenance(
+            binding,
+            profile_key=self.profile_key,
+            skill_package_id_by_version=self.skill_package_id_by_version or None,
+        )
         proposal = proposal_from_descriptor(
             descriptor=descriptor,
             run_id=scope.run_id,

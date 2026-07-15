@@ -1443,6 +1443,30 @@ def test_owner_resolver_maps_domain_keys() -> None:
     assert vid2 == PROFILE_VERSION_ID
 
 
+def test_owner_resolver_rebind_updates_shared_instance() -> None:
+    """rebind mutates in place so ports + runtime can share one resolver."""
+    resolver = DomainKeyOwnerResolver(
+        owners_by_domain_key={
+            "skill.search": ("main_agent", PROFILE_VERSION_ID),
+        },
+        default_owner_kind="main_agent",
+        default_owner_version_id=PROFILE_VERSION_ID,
+    )
+    # Simulate inject accept: rebind ownership without rebuilding ports.
+    resolver.rebind(
+        {
+            "skill.search": ("main_agent", PROFILE_VERSION_ID),
+            "get_statistics": ("skill_version", SKILL_VERSION_A),
+        }
+    )
+    kind, vid = resolver.resolve_owner(
+        call=SimpleNamespace(domain_key="get_statistics"),
+        descriptor=SimpleNamespace(),
+    )
+    assert kind == "skill_version"
+    assert vid == SKILL_VERSION_A
+
+
 def test_multi_call_property_budget_invariants() -> None:
     limits = normalize_run_budget_limits(
         operator_limits={
@@ -1486,3 +1510,74 @@ def test_multi_call_property_budget_invariants() -> None:
     finished = [r for r in snap.reservations if r.state == "finished"]
     assert len(finished) == 5
     assert not any(r.state == "reserved" for r in snap.reservations)
+
+
+def test_round_guard_caps_none_generation_to_remaining_tokens() -> None:
+    """generation.max_output_tokens=None must be capped by remaining completion tokens.
+
+    When remaining is already 0, pure_start_provider_round denies first
+    (budget_exhausted_completion_tokens) — the cap path only runs after a
+    successful start, so exercise remaining>0 with no generation cap.
+    """
+    limits = normalize_run_budget_limits(
+        operator_limits={
+            "max_completion_tokens": 10,
+            "max_provider_rounds": 8,
+            "max_completion_followup_rounds": 2,
+        }
+    )
+    ledger = BudgetLedger.create(limits=limits)
+    ledger.start_provider_round(is_finalization=False)
+    ledger.record_token_usage(prompt_tokens=0, completion_tokens=7)
+    assert ledger.remaining_completion_tokens() == 3
+
+    guard = BudgetLedgerRoundGuard(ledger=ledger)
+    model = _model()
+    surface = _empty_surface(_manifest())
+    request = ProviderRoundRequest(
+        round_index=0,
+        messages=(ProviderUserMessage(content="hi"),),
+        tool_surface=surface,
+        tools_enabled=True,
+        finalization_round=False,
+        model_ref=model,
+        generation=ProviderGenerationOptions(
+            max_output_tokens=None,
+            tool_choice=ProviderToolChoice(mode="auto"),
+        ),
+    )
+    gen = guard.before_round(request)
+    assert gen.max_output_tokens == 3
+
+    # Exhausted tokens: next before_round fails closed at start_provider_round.
+    ledger.record_token_usage(prompt_tokens=0, completion_tokens=3)
+    assert ledger.remaining_completion_tokens() == 0
+    with pytest.raises(ProviderRoundBudgetDeniedError) as ei:
+        guard.before_round(request)
+    assert ei.value.reason_code == "budget_exhausted_completion_tokens"
+
+
+def test_budget_restore_if_revision_rejects_concurrent_advance() -> None:
+    from app.assistant.policy.budgets import BudgetLedger
+    from app.assistant.policy.contracts import normalize_run_budget_limits
+
+    limits = normalize_run_budget_limits(
+        operator_limits={"max_total_capability_calls": 8, "max_provider_rounds": 8}
+    )
+    ledger = BudgetLedger.create(limits=limits)
+    snap = ledger.snapshot()
+    # Concurrent advance.
+    ledger.start_provider_round(is_finalization=False)
+    advanced = ledger.snapshot()
+    assert advanced.revision == snap.revision + 1
+    # Restore expecting pre-advance revision fails.
+    assert (
+        ledger.restore_if_revision(snap, expected_current_revision=snap.revision) is False
+    )
+    # Restore expecting post-advance revision succeeds (rewind concurrent apply).
+    assert (
+        ledger.restore_if_revision(snap, expected_current_revision=advanced.revision)
+        is True
+    )
+    assert ledger.snapshot().revision == snap.revision
+    assert ledger.snapshot().provider_rounds_started == 0

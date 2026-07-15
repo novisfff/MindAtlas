@@ -1006,3 +1006,43 @@ def test_openclaw_verifier_isolation_unchanged() -> None:
     )
     assert ("skill_policy", "main_agent") in mapping
     assert mapping[("skill_policy", "main_agent")] is skill
+
+
+def test_skill_injection_policy_context_reads_completion_followups_started() -> None:
+    """Field name is completion_followups_started (not completion_followup_rounds_started)."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from app.assistant.main_agent.policy_runtime import (
+        skill_injection_policy_context_from_runtime,
+    )
+    from app.assistant.policy.budgets import BudgetLedger
+    from app.assistant.policy.contracts import normalize_run_budget_limits
+
+    limits = normalize_run_budget_limits(
+        operator_limits={
+            "max_provider_rounds": 8,
+            "max_completion_followup_rounds": 2,
+            "max_total_capability_calls": 16,
+            "max_same_read_signature": 3,
+            "max_active_skills": 4,
+        }
+    )
+    ledger = BudgetLedger.create(limits=limits)
+    ledger.start_provider_round(is_finalization=False)
+    # Charge one completion-followup slot so remaining = 8 - 1 - 1 = 6.
+    decision = ledger.start_completion_followup()
+    assert decision.allowed
+
+    runtime = SimpleNamespace(
+        budget_ledger=ledger,
+        run_budget_limits=limits,
+    )
+    ctx = skill_injection_policy_context_from_runtime(runtime)  # type: ignore[arg-type]
+    assert ctx.remaining_provider_slots == 6
+    assert ctx.run_max_active_skills == 4
+    assert ctx.run_max_total_capability_calls == 16
+    # Ensure the wrong attribute name is not present on the snapshot.
+    snap = ledger.snapshot()
+    assert hasattr(snap, "completion_followups_started")
+    assert not hasattr(snap, "completion_followup_rounds_started")

@@ -918,7 +918,7 @@ def test_discard_leaves_no_owner_bucket_or_obligation() -> None:
     )
     assert result.status == "completed"
     assert package is not None
-    assert package.candidate_skill_terminals == ((VER_1, True),)
+    assert package.candidate_skill_terminals == ((VER_1, True, PKG_1),)
 
     lifecycle.discard(call_id="p05-discard", reason_code="manifest_lineage_error")
     assert lifecycle.is_skill_active(VER_1) is False
@@ -966,7 +966,7 @@ def test_skill_terminal_commits_on_accept() -> None:
         policy=SkillInjectionPolicyContext(remaining_provider_slots=4),
     )
     assert result.status == "completed"
-    assert package.candidate_skill_terminals == ((VER_1, True),)
+    assert package.candidate_skill_terminals == ((VER_1, True, PKG_1),)
     # Not yet on ledger.
     assert not any(
         o.owner_kind == "skill_version" and o.owner_version_id == VER_1
@@ -1459,3 +1459,255 @@ def test_accept_owner_limit_denial_is_fail_closed() -> None:
     assert ledger.snapshot().revision == before_revision
     assert list(ledger.snapshot().owner_limits) == before_owners
     assert lifecycle.peek_package("p05-owner-deny") is None
+
+
+def test_stage_package_carries_frozen_bindings_and_package_map() -> None:
+    """Accept rebind payload is populated from SkillActivationCandidate fields."""
+    from app.assistant.capabilities.contracts import (
+        FrozenBindingProvenance,
+        FrozenCapabilityBinding,
+        project_frozen_capability_binding,
+    )
+    from app.assistant.domain.contracts import (
+        CapabilityCompletionContract,
+        ResolvedCapabilityBinding,
+    )
+    from app.assistant.domain.json_schema import binding_schema_digest, normalize_binding_schema
+    from app.assistant.main_agent.manifest_runtime import (
+        SkillActivationCandidate,
+        stage_skill_injection,
+    )
+    from app.assistant.skills.resolution import build_binding_snapshot
+
+    manifest, _ = _manifest_with_controls()
+    in_schema = normalize_binding_schema({"type": "object"}, require_object_root=True)
+    out_schema = normalize_binding_schema({"type": "object"}, require_object_root=True)
+    completion = CapabilityCompletionContract(terminal_output=False, needs_followup=True)
+    snapshot, closure, contract = build_binding_snapshot(
+        capability_type="tool",
+        target_identity="system-tool:get_statistics",
+        target_id=None,
+        target_version_id=None,
+        target_revision=None,
+        input_schema=in_schema,
+        output_schema=out_schema,
+        completion=completion,
+        config_digest=None,
+        executable_revision="plan05-dev",
+        resolution_digest=DIGEST_C,
+        dependencies=(),
+    )
+    resolved = ResolvedCapabilityBinding(
+        capability_type="tool",
+        capability_key="get_statistics",
+        target_identity="system-tool:get_statistics",
+        target_id=None,
+        target_version_id=None,
+        resolved_tool_id=None,
+        resolved_workflow_version_id=None,
+        resolved_agent_version_id=None,
+        resolved_revision=None,
+        input_schema=in_schema,
+        output_schema=out_schema,
+        input_schema_digest=binding_schema_digest(in_schema),
+        output_schema_digest=binding_schema_digest(out_schema),
+        completion=completion,
+        config_digest=None,
+        executable_revision="plan05-dev",
+        resolution_digest=DIGEST_C,
+        resolution_snapshot=snapshot,
+        dependencies=(),
+        dependency_closure_digest=closure,
+        binding_contract_digest=contract,
+    )
+    frozen = project_frozen_capability_binding(
+        resolved=resolved,
+        provenance=FrozenBindingProvenance(
+            origin="skill_version",
+            binding_row_id=None,
+            owner_version_id=VER_1,
+            source_snapshot_digest=DIGEST_A,
+        ),
+    )
+    candidate = SkillActivationCandidate(
+        skill=_skill_ref(),
+        capabilities=(frozen.ref,),
+        frozen_bindings=(frozen,),
+        instruction_char_count=10,
+        max_skill_calls=4,
+    )
+    result, effect, package = stage_skill_injection(
+        call_id="p05-bindings",
+        current_manifest=manifest,
+        candidates=[candidate],
+    )
+    assert result.status == "completed"
+    assert package is not None
+    assert VER_1 in package.candidate_frozen_bindings_by_version
+    assert package.candidate_frozen_bindings_by_version[VER_1][0].ref.capability_key == (
+        "get_statistics"
+    )
+    assert package.candidate_skill_package_id_by_version[VER_1] == PKG_1
+    assert package.candidate_skill_content_digest_by_version[VER_1] == DIGEST_A
+
+
+def test_apply_accept_package_rebind_registers_tools_and_owners() -> None:
+    """Package-aware accept hook updates tools provider + owner resolver."""
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from app.assistant.capabilities.contracts import (
+        FrozenBindingProvenance,
+        project_frozen_capability_binding,
+    )
+    from app.assistant.domain.contracts import (
+        CapabilityCompletionContract,
+        ResolvedCapabilityBinding,
+    )
+    from app.assistant.domain.json_schema import binding_schema_digest, normalize_binding_schema
+    from app.assistant.main_agent.inject_wiring import apply_accept_package_rebind
+    from app.assistant.main_agent.manifest_runtime import PendingSkillActivationPackage
+    from app.assistant.main_agent.policy_runtime import MainAgentGatewayToolsProvider
+    from app.assistant.policy.evaluator import OwnerGrantMaterial
+    from app.assistant.policy.runtime import DomainKeyOwnerResolver
+    from app.assistant.skills.resolution import build_binding_snapshot
+
+    manifest, _ = _manifest_with_controls()
+    in_schema = normalize_binding_schema({"type": "object"}, require_object_root=True)
+    out_schema = normalize_binding_schema({"type": "object"}, require_object_root=True)
+    completion = CapabilityCompletionContract()
+    snapshot, closure, contract = build_binding_snapshot(
+        capability_type="tool",
+        target_identity="system-tool:get_statistics",
+        target_id=None,
+        target_version_id=None,
+        target_revision=None,
+        input_schema=in_schema,
+        output_schema=out_schema,
+        completion=completion,
+        config_digest=None,
+        executable_revision="plan05-dev",
+        resolution_digest=DIGEST_C,
+        dependencies=(),
+    )
+    resolved = ResolvedCapabilityBinding(
+        capability_type="tool",
+        capability_key="get_statistics",
+        target_identity="system-tool:get_statistics",
+        target_id=None,
+        target_version_id=None,
+        resolved_tool_id=None,
+        resolved_workflow_version_id=None,
+        resolved_agent_version_id=None,
+        resolved_revision=None,
+        input_schema=in_schema,
+        output_schema=out_schema,
+        input_schema_digest=binding_schema_digest(in_schema),
+        output_schema_digest=binding_schema_digest(out_schema),
+        completion=completion,
+        config_digest=None,
+        executable_revision="plan05-dev",
+        resolution_digest=DIGEST_C,
+        resolution_snapshot=snapshot,
+        dependencies=(),
+        dependency_closure_digest=closure,
+        binding_contract_digest=contract,
+    )
+    frozen = project_frozen_capability_binding(
+        resolved=resolved,
+        provenance=FrozenBindingProvenance(
+            origin="skill_version",
+            binding_row_id=None,
+            owner_version_id=VER_1,
+            source_snapshot_digest=DIGEST_A,
+        ),
+    )
+    material = OwnerGrantMaterial(
+        owner_kind="skill_version",
+        owner_id=str(PKG_1),
+        owner_version_id=VER_1,
+        policy_digest=DIGEST_B,
+        author_allowed_side_effects=("read", "compute"),
+        declared_capability_keys=frozenset({"get_statistics"}),
+        is_instruction_only=False,
+    )
+    package = PendingSkillActivationPackage(
+        call_id="rebind-1",
+        effect=SimpleNamespace(),  # type: ignore[arg-type]
+        activated_version_ids=(VER_1,),
+        noop_version_ids=(),
+        candidate_frozen_bindings_by_version={VER_1: (frozen,)},
+        candidate_skill_package_id_by_version={VER_1: PKG_1},
+        candidate_skill_content_digest_by_version={VER_1: DIGEST_A},
+        candidate_owner_materials=(material,),
+    )
+
+    class _Auth:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+            self.skill_package_id_by_version: dict = {}
+            self.skill_content_digest_by_version: dict = {}
+            self.owner_materials: dict = {}
+            self.policy_snapshot = None
+            self.manifest = manifest
+
+        def rebind_manifest(self, m, **kwargs):
+            self.calls.append({"manifest": m, **kwargs})
+            if kwargs.get("skill_package_id_by_version"):
+                self.skill_package_id_by_version.update(
+                    kwargs["skill_package_id_by_version"]
+                )
+
+    auth = _Auth()
+    owners: dict = {}
+    resolver = DomainKeyOwnerResolver(
+        owners_by_domain_key=owners,
+        default_owner_kind="main_agent",
+        default_owner_version_id=uuid4(),
+    )
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.authorization_factory = auth
+            self.owner_materials: dict = {}
+            self.owners_by_domain_key = owners
+            self._owner_resolver = resolver
+            self.manifest = manifest
+            self.policy_snapshot = None
+            self.lifecycle = None
+
+        def rebind_owners(self, mapping):
+            self.owners_by_domain_key = dict(mapping)
+            self._owner_resolver.rebind(mapping)
+
+        def rebind_policy_snapshot(self, snap):
+            self.policy_snapshot = snap
+
+    runtime = _Runtime()
+    tools = MainAgentGatewayToolsProvider(
+        session_factory=lambda: None,  # type: ignore[arg-type,return-value]
+        control_bindings=(),
+        control_port=SimpleNamespace(),  # type: ignore[arg-type]
+        authorization_factory=auth,  # type: ignore[arg-type]
+    )
+    apply_accept_package_rebind(
+        runtime=runtime,
+        tools_provider=tools,
+        ports_owner_resolver=resolver,
+        manifest=manifest,
+        package=package,
+    )
+    assert VER_1 in tools.active_bindings_by_version
+    assert tools.active_bindings_by_version[VER_1][0].ref.capability_key == "get_statistics"
+    assert auth.skill_package_id_by_version[VER_1] == PKG_1
+    kind, vid = resolver.resolve_owner(
+        call=SimpleNamespace(domain_key="get_statistics"),
+        descriptor=SimpleNamespace(),
+    )
+    assert kind == "skill_version"
+    assert vid == VER_1
+    assert (
+        "skill_version",
+        str(PKG_1),
+        VER_1,
+    ) in runtime.owner_materials

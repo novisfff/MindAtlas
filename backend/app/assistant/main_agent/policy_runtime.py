@@ -34,10 +34,11 @@ from app.assistant.capabilities.ports import (
 )
 from app.assistant.capabilities.runtime import build_capability_runtime
 from app.assistant.domain.contracts import ResolvedRunManifestRevision
-from app.assistant.domain.digests import JsonValue
+from app.assistant.domain.digests import JsonValue, sha256_canonical_json
 from app.assistant.main_agent.authorization import (
     LOCAL_ASSISTANT_PRINCIPAL,
     MainAgentAuthorizationEvidenceFactory,
+    owner_ref_from_binding_provenance,
 )
 from app.assistant.main_agent.control_capabilities import (
     MAIN_AGENT_CONTROL_KEYS,
@@ -116,6 +117,8 @@ class MainAgentPolicyRuntime:
 
     run_id: UUID
     conversation_id: UUID
+    # Base Manifest aligned so effective_policy_digest == policy_snapshot digest.
+    manifest: ResolvedRunManifestRevision
     policy_snapshot: EffectiveRunPolicySnapshot
     budget_ledger: BudgetLedger
     obligation_ledger: ObligationLedger
@@ -153,9 +156,11 @@ class MainAgentPolicyRuntime:
         self,
         owners_by_domain_key: Mapping[str, tuple[str, UUID]],
     ) -> None:
+        # Mutate the shared DomainKeyOwnerResolver in place so ProviderLoopPorts
+        # that hold the same instance see skill ownership after inject accept.
         self.owners_by_domain_key = dict(owners_by_domain_key)
-        self._owner_resolver = DomainKeyOwnerResolver(
-            owners_by_domain_key=dict(owners_by_domain_key),
+        self._owner_resolver.rebind(
+            owners_by_domain_key,
             default_owner_kind="main_agent",
             default_owner_version_id=self.profile_version_id,
         )
@@ -186,6 +191,8 @@ class MainAgentGatewayToolDispatcher:
 
     Dual-wires ``dispatch_guard`` into both ProviderLoopPorts and Gateway ports.
     Accepts issuer=skill_policy / entrypoint=main_agent only.
+    Applies CapabilityResult-owned obligation transitions after Gateway execute
+    (Plan 05 call-order step 10).
     """
 
     session_factory: SessionFactory
@@ -199,6 +206,7 @@ class MainAgentGatewayToolDispatcher:
     ) = None
     dispatch_guard: Any | None = None
     call_frames: Any | None = None
+    obligation_ledger: ObligationLedger | None = None
     dispatch_calls: list[dict[str, Any]] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -327,6 +335,12 @@ class MainAgentGatewayToolDispatcher:
                 ports_kwargs["call_frames"] = self.call_frames
             ports = CapabilityRuntimePorts(**ports_kwargs)
             result = gateway.execute(execution_request, ports=ports)
+            self._apply_result_obligations(
+                call=call,
+                binding=binding,
+                result=result,
+                run_id=request.execution_scope.run_id,
+            )
             next_manifest = request.current_manifest
             if self.next_manifest_hook is not None:
                 next_manifest = self.next_manifest_hook(request, result)
@@ -336,6 +350,82 @@ class MainAgentGatewayToolDispatcher:
             )
         finally:
             session.close()
+
+    def _apply_result_obligations(
+        self,
+        *,
+        call: Any,
+        binding: FrozenCapabilityBinding,
+        result: CapabilityResult,
+        run_id: UUID,
+    ) -> None:
+        """Plan 05 call-order step 10: result-owned obligation transitions.
+
+        Failures are contained — obligation ledger errors must not change the
+        already-returned CapabilityResult or double-charge budgets.
+        """
+        ledger = self.obligation_ledger
+        if ledger is None or self.authorization_factory is None:
+            return
+        factory = self.authorization_factory
+        try:
+            owner = owner_ref_from_binding_provenance(
+                binding,
+                profile_key=factory.profile_key,
+                skill_package_id_by_version=factory.skill_package_id_by_version or None,
+            )
+        except Exception:
+            # Plan 04 path / tests without package map: fall back to version_id owner.
+            try:
+                owner = owner_ref_from_binding_provenance(
+                    binding,
+                    profile_key=factory.profile_key,
+                )
+            except Exception:
+                return
+        owner_kind = owner.owner_kind
+        if owner_kind not in {"main_agent", "skill_version", "capability_call"}:
+            owner_kind = "capability_call"
+        try:
+            output_digest = _capability_result_output_digest(result)
+            ledger.apply_capability_result(
+                call_id=call.call_id,
+                result_status=str(result.status),
+                terminal_output=bool(result.terminal_output),
+                needs_followup=bool(result.needs_followup),
+                output_digest=output_digest,
+                owner_kind=owner_kind,  # type: ignore[arg-type]
+                owner_id=str(owner.owner_id),
+                owner_version_id=owner.owner_version_id,
+                run_id=run_id,
+                binding_contract_digest=binding.ref.binding_contract_digest,
+            )
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "obligation apply_capability_result failed for call_id=%s",
+                getattr(call, "call_id", None),
+                exc_info=True,
+            )
+
+
+def _capability_result_output_digest(result: CapabilityResult) -> str:
+    """Deterministic digest of user/structured/artifact output for obligation evidence."""
+    payload: dict[str, Any] = {
+        "status": result.status,
+        "terminalOutput": bool(result.terminal_output),
+        "needsFollowup": bool(result.needs_followup),
+        "userText": result.user_text,
+        "structuredOutput": result.structured_output,
+        "artifactRefs": [
+            {
+                "artifactId": str(getattr(ref, "artifact_id", "") or ""),
+                "digest": getattr(ref, "content_digest", None)
+                or getattr(ref, "digest", None),
+            }
+            for ref in (result.artifact_refs or ())
+        ],
+    }
+    return sha256_canonical_json(payload)  # type: ignore[arg-type]
 
 
 def _blocked(
@@ -632,13 +722,19 @@ def compose_main_agent_policy_runtime(
     resource_handler: Callable[..., Any] | None = None,
     artifact_handler: Callable[..., Any] | None = None,
     session_factory: SessionFactory | None = None,
-    profile_budget_fields: Mapping[str, Any] | None = None,
+    profile_budget_fields: Any | None = None,
+    profile_context_budget: Any | None = None,
+    operator_budget_limits: Mapping[str, int | None] | None = None,
     isolated_parallel: bool = False,
 ) -> tuple[MainAgentPolicyRuntime, ProviderLoopPorts]:
     """Compose Plan 05 policy ledgers + ProviderLoopPorts for one admitted Run.
 
     When composition cannot complete (missing session factory for control
     describe), raises RuntimeError with a safe code — caller falls back.
+
+    ``profile_budget_fields`` is the Profile outputBudget (or mapping).
+    ``profile_context_budget`` supplies ``max_active_skills`` (contextBudget).
+    ``operator_budget_limits`` may lower ceilings only (e.g. settings max_active_skills).
     """
     control_bindings = build_all_main_agent_control_bindings(
         owner_version_id=profile_version_id,
@@ -655,10 +751,12 @@ def compose_main_agent_policy_runtime(
         artifact_handler=artifact_handler,
     )
 
-    # Run budget limits (hard ∩ entrypoint defaults ∩ profile lower-only).
-    profile_fields = dict(profile_budget_fields or {})
+    # Run budget limits: hard ∩ entrypoint ∩ operator lower-only ∩ profile
+    # outputBudget + contextBudget.max_active_skills.
     run_budget_limits = normalize_run_budget_limits(
-        profile_output_budget=profile_fields or None,
+        profile_output_budget=profile_budget_fields,
+        profile_context_budget=profile_context_budget,
+        operator_limits=operator_budget_limits,
     )
     owner_budget = build_main_agent_owner_budget(
         profile_version_id=profile_version_id,
@@ -681,6 +779,13 @@ def compose_main_agent_policy_runtime(
         profile_content_digest=profile_content_digest,
         control_keys=tuple(b.ref.capability_key for b in control_bindings),
     )
+
+    # Build Plan 05 policy snapshot, then rebuild the base Manifest so
+    # Manifest.effective_policy_digest == snapshot.effective_policy_digest.
+    # Exposure-index digest no longer embeds manifest_digest, so this is
+    # cycle-free: policy digest → Manifest.effective_policy_digest →
+    # Manifest.manifest_digest, with exposure_index re-associated to the
+    # new Manifest digest without changing exposure_index_digest.
     policy_snapshot = build_initial_policy_snapshot(
         run_id=run_id,
         app_build_revision=app_build_revision,
@@ -692,12 +797,48 @@ def compose_main_agent_policy_runtime(
         run_budget_limits=run_budget_limits,
         owner_material=owner_material,
     )
+    if manifest.effective_policy_digest != policy_snapshot.effective_policy_digest:
+        from app.assistant.domain.contracts import compute_manifest_digest
 
-    # Replace Manifest effective_policy_digest with Plan 05 snapshot digest when
-    # the base Manifest was built with the Plan 04 effective digest. The Manifest
-    # itself is already frozen at revision 1; policy snapshot is process-local.
-    # Callers that need Manifest.effective_policy_digest == snapshot digest should
-    # rebuild the base Manifest with the snapshot digest before compose.
+        aligned_digest = compute_manifest_digest(
+            run_id=manifest.run_id,
+            revision=manifest.revision,
+            parent_digest=manifest.parent_digest,
+            main_agent=manifest.main_agent,
+            active_skills=manifest.active_skills,
+            capabilities=manifest.capabilities,
+            provider=manifest.provider,
+            model=manifest.model,
+            provider_aliases=manifest.provider_aliases,
+            effective_policy_digest=policy_snapshot.effective_policy_digest,
+        )
+        manifest = ResolvedRunManifestRevision(
+            run_id=manifest.run_id,
+            revision=manifest.revision,
+            parent_digest=manifest.parent_digest,
+            main_agent=manifest.main_agent,
+            active_skills=manifest.active_skills,
+            capabilities=manifest.capabilities,
+            provider=manifest.provider,
+            model=manifest.model,
+            provider_aliases=manifest.provider_aliases,
+            effective_policy_digest=policy_snapshot.effective_policy_digest,
+            manifest_digest=aligned_digest,
+        )
+        # Rebuild snapshot so exposure_index.manifest_digest association matches.
+        policy_snapshot = build_initial_policy_snapshot(
+            run_id=run_id,
+            app_build_revision=app_build_revision,
+            profile_key=profile_key,
+            profile_version_id=profile_version_id,
+            profile_content_digest=profile_content_digest,
+            manifest=manifest,
+            exposure_inputs=exposure_inputs,
+            run_budget_limits=run_budget_limits,
+            owner_material=owner_material,
+        )
+        # Keep control runtime on the aligned Manifest.
+        control_runtime.bind_manifest(manifest)
 
     budget_ledger = BudgetLedger.create(
         limits=run_budget_limits,
@@ -715,14 +856,25 @@ def compose_main_agent_policy_runtime(
         if not decision.allowed:
             raise RuntimeError(decision.reason_code or "budget_exhausted")
 
+    def _can_continue_completion() -> bool:
+        # Follow-up only when completion tokens, provider rounds, and wall
+        # deadline all still have headroom. Avoid burning a followup slot that
+        # will immediately fail the next provider round.
+        snap = budget_ledger.snapshot()
+        remaining_tokens = budget_ledger.remaining_completion_tokens()
+        if remaining_tokens is not None and remaining_tokens < 1:
+            return False
+        if snap.provider_rounds_started >= snap.limits.max_provider_rounds:
+            return False
+        if budget_ledger.remaining_wall_time_ms() < 1:
+            return False
+        return True
+
     completion_guard = ObligationLedgerCompletionGuard(
         obligation_ledger=obligation_ledger,
         locale=locale or "en",
         max_completion_followup_rounds=run_budget_limits.max_completion_followup_rounds,
-        can_continue_fn=lambda: (
-            budget_ledger.remaining_completion_tokens() is None
-            or (budget_ledger.remaining_completion_tokens() or 0) > 0
-        ),
+        can_continue_fn=_can_continue_completion,
         budget_start_followup_fn=_budget_start_followup,
     )
 
@@ -806,6 +958,7 @@ def compose_main_agent_policy_runtime(
         next_manifest_hook=_next_manifest,
         dispatch_guard=dispatch_guard,  # dual-wire: also on ProviderLoopPorts
         call_frames=call_frames,
+        obligation_ledger=obligation_ledger,
     )
 
     if isolated_parallel:
@@ -827,6 +980,14 @@ def compose_main_agent_policy_runtime(
 
     cancellation: CancellationPort = _CancelBridge(cancel_checker)  # type: ignore[assignment]
 
+    # One shared resolver instance for runtime + ports so rebind_owners after
+    # skill.inject accept updates reservation ownership without rebuilding ports.
+    owner_resolver = DomainKeyOwnerResolver(
+        owners_by_domain_key=owners_by_domain_key,
+        default_owner_kind="main_agent",
+        default_owner_version_id=profile_version_id,
+    )
+
     ports = ProviderLoopPorts(
         provider=provider,
         tools_provider=tools_provider,  # type: ignore[arg-type]
@@ -839,11 +1000,7 @@ def compose_main_agent_policy_runtime(
         manifest_effect_lifecycle=lifecycle,  # type: ignore[arg-type]
         round_budget_guard=round_budget_guard,
         call_reservation=call_reservation,
-        call_owner_resolver=DomainKeyOwnerResolver(
-            owners_by_domain_key=owners_by_domain_key,
-            default_owner_kind="main_agent",
-            default_owner_version_id=profile_version_id,
-        ),
+        call_owner_resolver=owner_resolver,
         dispatch_guard=dispatch_guard,  # dual-wire with tool_dispatcher
         call_frames=call_frames,
         completion_guard=completion_guard,
@@ -852,6 +1009,7 @@ def compose_main_agent_policy_runtime(
     runtime = MainAgentPolicyRuntime(
         run_id=run_id,
         conversation_id=conversation_id,
+        manifest=manifest,
         policy_snapshot=policy_snapshot,
         budget_ledger=budget_ledger,
         obligation_ledger=obligation_ledger,
@@ -872,6 +1030,26 @@ def compose_main_agent_policy_runtime(
         profile_version_id=profile_version_id,
         profile_content_digest=profile_content_digest,
     )
+    # Replace the post_init-built resolver with the shared ports instance.
+    runtime._owner_resolver = owner_resolver  # noqa: SLF001
+
+    # Plan 05 enablement: install production skill.inject handler + accept rebind
+    # when the caller did not inject a test/scripted handler.
+    from app.assistant.main_agent.inject_wiring import (
+        build_production_inject_handler,
+        install_accept_rebind_hooks,
+    )
+
+    install_accept_rebind_hooks(runtime=runtime, tools_provider=tools_provider)
+    if inject_handler is None:
+        production_inject = build_production_inject_handler(
+            runtime=runtime,
+            tools_provider=tools_provider,
+            session_factory=session_factory,
+            catalog_state=catalog_state,
+            locale=locale,
+        )
+        control_runtime._inject_handler = production_inject  # noqa: SLF001
     return runtime, ports
 
 
@@ -885,11 +1063,13 @@ def skill_injection_policy_context_from_runtime(
 ) -> SkillInjectionPolicyContext:
     """Build SkillInjectionPolicyContext from the live Run policy runtime."""
     snap = runtime.budget_ledger.snapshot()
+    # BudgetLedgerState field is completion_followups_started (not
+    # completion_followup_rounds_started — that name does not exist).
     remaining_rounds = max(
         0,
         snap.limits.max_provider_rounds
         - snap.provider_rounds_started
-        - snap.completion_followup_rounds_started,
+        - snap.completion_followups_started,
     )
     return SkillInjectionPolicyContext(
         run_max_total_capability_calls=runtime.run_budget_limits.max_total_capability_calls,

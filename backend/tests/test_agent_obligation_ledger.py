@@ -838,3 +838,42 @@ def test_requirement_digest_includes_owner() -> None:
         owner_version_id=SKILL_A,
     )
     assert a != b
+
+
+def test_invalid_output_digest_denies_without_raising() -> None:
+    """Malformed output_digest must return completion_evidence_invalid, not ValueError."""
+    state = create_initial_obligation_ledger_state()
+    # Wrong length.
+    new_state, decision = pure_apply_capability_result_evidence(
+        state,
+        call_id="call-bad-len",
+        result_status="completed",
+        terminal_output=True,
+        needs_followup=False,
+        output_digest="not-a-digest",
+        owner_kind="main_agent",
+        owner_id="main_agent",
+        owner_version_id=None,
+        run_id=RUN_ID,
+    )
+    assert not decision.allowed
+    assert decision.reason_code == REASON_EVIDENCE_INVALID
+    assert new_state.revision == state.revision
+
+    # Correct length but non-hex characters.
+    bad_hex = ("g" * 64)
+    new_state2, decision2 = pure_apply_capability_result_evidence(
+        state,
+        call_id="call-bad-hex",
+        result_status="completed",
+        terminal_output=True,
+        needs_followup=False,
+        output_digest=bad_hex,
+        owner_kind="main_agent",
+        owner_id="main_agent",
+        owner_version_id=None,
+        run_id=RUN_ID,
+    )
+    assert not decision2.allowed
+    assert decision2.reason_code == REASON_EVIDENCE_INVALID
+    assert new_state2.revision == state.revision

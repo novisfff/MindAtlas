@@ -2509,6 +2509,52 @@ class BudgetLedger:
         with self._lock:
             return remaining_completion_tokens(self._state)
 
+    def restore_if_revision(
+        self,
+        snapshot: BudgetLedgerState,
+        *,
+        expected_current_revision: int,
+    ) -> bool:
+        """Rewind to ``snapshot`` only if no concurrent ledger advance occurred.
+
+        Used by Manifest-effect accept to undo a failed multi-step apply without
+        clobbering reservations/charges produced by concurrent Capability calls.
+        Holds the ledger lock for the entire check+install.
+        """
+        with self._lock:
+            if self._state.revision != expected_current_revision:
+                return False
+            if snapshot.limits != self._state.limits:
+                raise ValueError("restore cannot change RunBudgetLimits")
+            if (
+                snapshot.started_at_utc != self._state.started_at_utc
+                or snapshot.deadline_at_utc != self._state.deadline_at_utc
+            ):
+                raise ValueError("restore cannot change started/deadline UTC fields")
+            # Verify snapshot digest coherence.
+            expected_digest = compute_ledger_digest(
+                revision=snapshot.revision,
+                limits=snapshot.limits,
+                owner_limits=snapshot.owner_limits,
+                provider_rounds_started=snapshot.provider_rounds_started,
+                main_agent_cycles_started=snapshot.main_agent_cycles_started,
+                capability_calls_started=snapshot.capability_calls_started,
+                completion_followups_started=snapshot.completion_followups_started,
+                prompt_tokens_used=snapshot.prompt_tokens_used,
+                completion_tokens_used=snapshot.completion_tokens_used,
+                owner_calls_started=snapshot.owner_calls_started,
+                global_read_signatures=snapshot.global_read_signatures,
+                owner_read_signatures=snapshot.owner_read_signatures,
+                reservations=snapshot.reservations,
+                denial_count=snapshot.denial_count,
+                started_at_utc=snapshot.started_at_utc,
+                deadline_at_utc=snapshot.deadline_at_utc,
+            )
+            if expected_digest != snapshot.ledger_digest:
+                raise ValueError("snapshot ledger_digest is inconsistent")
+            self._state = snapshot
+            return True
+
     def add_owner_limits(self, owner_limits: OwnerBudgetLimits) -> BudgetDecision:
         return self._apply(lambda s: pure_add_owner_limits(s, owner_limits))
 

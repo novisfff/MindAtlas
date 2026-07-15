@@ -990,12 +990,21 @@ def build_exposure_index_digest_payload(
     manifest_digest: str,
     exposures: Sequence[CapabilityExposureRef],
 ) -> dict[str, JsonValue]:
+    """Digest payload for ManifestExposureIndex.
+
+    ``manifest_digest`` is intentionally *not* included in the digest payload.
+    The index still carries ``manifest_digest`` as an association field, but
+    including it in the digest creates a cycle with EffectiveRunPolicySnapshot
+    (policy digest → Manifest.effective_policy_digest → Manifest.manifest_digest
+    → exposure_index_digest → policy digest). Association is verified separately
+    by the evaluator's surface/manifest identity checks.
+    """
+    del manifest_digest  # association field only; not part of digest identity
     ordered = tuple(sorted(exposures, key=lambda item: item.domain_key.encode("utf-8")))
     return {
         "schemaVersion": 1,
         "kind": "manifest_exposure_index",
         "manifestRevision": manifest_revision,
-        "manifestDigest": manifest_digest,
         "exposures": [
             {
                 "domainKey": item.domain_key,

@@ -198,6 +198,15 @@ _STABLE_FAILED_REASON_CODES: frozenset[str] = frozenset(
         "completion_evidence_invalid",
         "policy_state_protocol_error",
         "obligation_state_protocol_error",
+        # Provider-loop / reservation surface codes that must not collapse
+        # into main_agent_failed when they stop a Run after request start.
+        "classification_changed",
+        "budget_reservation_error",
+        "reservation_not_found",
+        "reservation_state_invalid",
+        "arguments_digest_mismatch",
+        "duplicate_call_id",
+        "owner_limits_missing",
     }
 )
 
@@ -966,6 +975,10 @@ class MainAgentService:
                     )
                     if self._state is not None:
                         self._state.policy_runtime = policy_runtime
+                        # Prefer Manifest aligned to Plan 05 effective_policy_digest.
+                        if getattr(policy_runtime, "manifest", None) is not None:
+                            self._state.manifest = policy_runtime.manifest
+                            manifest = policy_runtime.manifest
                 except Exception:
                     logger.exception(
                         "main agent policy composition failed run_id=%s",
@@ -1036,6 +1049,8 @@ class MainAgentService:
             )
 
             # Bridge cancellation into ports if caller provided one.
+            # Preserve every Plan 05 additive port — rebuilding without them
+            # drops budget/completion/frame guards and dual-wired dispatch state.
             if request.cancel_checker is not None:
                 ports = ProviderLoopPorts(
                     provider=ports.provider,
@@ -1048,6 +1063,12 @@ class MainAgentService:
                     events=ports.events,
                     round_context_provider=ports.round_context_provider,
                     manifest_effect_lifecycle=ports.manifest_effect_lifecycle,
+                    round_budget_guard=ports.round_budget_guard,
+                    call_reservation=ports.call_reservation,
+                    call_owner_resolver=ports.call_owner_resolver,
+                    dispatch_guard=ports.dispatch_guard,
+                    call_frames=ports.call_frames,
+                    completion_guard=ports.completion_guard,
                 )
 
             fallback.mark_provider_request()
@@ -1184,6 +1205,7 @@ class MainAgentService:
         events: MainAgentEventAdapter,
     ) -> tuple[Any, ProviderLoopPorts]:
         """Compose Plan 05 policy ledgers + ProviderLoopPorts for this Run."""
+        from app.assistant.main_agent.inject_wiring import build_run_catalog_state
         from app.assistant.main_agent.policy_runtime import (
             compose_main_agent_policy_runtime,
         )
@@ -1191,7 +1213,27 @@ class MainAgentService:
         if self.db is None:
             raise RuntimeError("adapter_unavailable_before_request")
 
-        # Emit internal policy_snapshot diagnostic after compose.
+        # Operator may lower max_active_skills only (settings).
+        operator_limits: dict[str, int | None] = {
+            "max_active_skills": int(
+                getattr(self._settings, "assistant_main_agent_max_active_skills", 4)
+            ),
+        }
+        # Per-Run catalog for skill.search / skill.inject (fail soft → empty).
+        catalog_state = None
+        try:
+            scope = getattr(admission.snapshot, "skill_catalog_scope", None)
+            catalog_state = build_run_catalog_state(
+                self.db,
+                scope=scope,
+                locale=request.locale or "und",
+            )
+        except Exception:
+            logger.exception(
+                "main agent catalog build failed run_id=%s", request.run_id
+            )
+            catalog_state = None
+
         runtime, ports = compose_main_agent_policy_runtime(
             db=self.db,
             run_id=request.run_id,
@@ -1205,8 +1247,14 @@ class MainAgentService:
             events=events,
             locale=request.locale or "en",
             cancel_checker=request.cancel_checker,
+            catalog_state=catalog_state,
             profile_budget_fields=admission.snapshot.output_budget,
+            profile_context_budget=admission.snapshot.context_budget,
+            operator_budget_limits=operator_limits,
         )
+        # Use the Manifest aligned to Plan 05 effective_policy_digest.
+        if self._state is not None and runtime.manifest is not None:
+            self._state.manifest = runtime.manifest
         events.policy_snapshot(
             run_id=request.run_id,
             effective_policy_digest=runtime.policy_snapshot.effective_policy_digest,

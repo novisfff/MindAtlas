@@ -583,9 +583,16 @@ def build_skill_terminal_obligation(
     skill_version_id: UUID,
     revision: int,
     ordinal: int = 0,
+    skill_package_id: UUID | None = None,
 ) -> CompletionObligation:
-    """Skill terminal_output obligation when requires_terminal_output=true."""
-    owner_id = str(skill_version_id)
+    """Skill terminal_output obligation when requires_terminal_output=true.
+
+    ``owner_id`` is the stable package ID (Plan 05 §4.2 / §8.2), matching
+    ManifestExposureIndex and authorization claimed-owner identity. When
+    ``skill_package_id`` is omitted, falls back to ``skill_version_id`` for
+    legacy unit tests that pin deterministic IDs.
+    """
+    owner_id = str(skill_package_id) if skill_package_id is not None else str(skill_version_id)
     oid = compute_obligation_id(
         run_id=run_id,
         owner_kind="skill_version",
@@ -1178,8 +1185,9 @@ def pure_apply_provider_text_evidence(
         if decision.allowed:
             satisfied_any = True
         else:
-            # Evidence rejected (e.g. duplicate) — stop.
-            return working, decision
+            # Evidence rejected (e.g. duplicate) — return original state so
+            # prior successful resolves in this batch are not partially applied.
+            return state, decision
 
     if not satisfied_any:
         # Text present but no obligation accepted it (all already satisfied or non-text).
@@ -1251,7 +1259,23 @@ def pure_apply_capability_result_evidence(
         event=None,
     )
 
-    has_output = bool(output_digest) and len(output_digest) == _DIGEST_RE_LEN
+    # Empty / missing output: skip terminal satisfaction (does not satisfy).
+    # Non-empty but malformed digest: deny decision (never raise ValueError into
+    # the Gateway path — callers treat this as evidence_invalid).
+    has_output = False
+    if output_digest:
+        if (
+            isinstance(output_digest, str)
+            and len(output_digest) == _DIGEST_RE_LEN
+            and all(ch in "0123456789abcdef" for ch in output_digest)
+        ):
+            has_output = True
+        else:
+            return _deny(
+                original,
+                reason_code=REASON_EVIDENCE_INVALID,
+                obligation_id=None,
+            )
     if terminal_output and has_output:
         evidence_digest = compute_result_evidence_digest(
             call_id=call_id,
@@ -1481,6 +1505,35 @@ class ObligationLedger:
         with self._lock:
             return dict(self._skill_terminal_text_allowed)
 
+    def restore_if_revision(
+        self,
+        snapshot: ObligationLedgerState,
+        *,
+        expected_current_revision: int,
+        skill_terminal_text_allowed: dict[str, bool] | None = None,
+    ) -> bool:
+        """Rewind to ``snapshot`` only if no concurrent ledger advance occurred.
+
+        Used by Manifest-effect accept to undo a failed multi-step apply without
+        clobbering concurrent obligation transitions. Holds the ledger lock for
+        the entire check+install.
+        """
+        with self._lock:
+            if self._state.revision != expected_current_revision:
+                return False
+            expected_digest = compute_obligation_ledger_digest(
+                revision=snapshot.revision,
+                obligations=snapshot.obligations,
+                evidence_edges=snapshot.evidence_edges,
+                followup_rounds_started=snapshot.followup_rounds_started,
+            )
+            if expected_digest != snapshot.ledger_digest:
+                raise ValueError("snapshot ledger_digest is inconsistent")
+            self._state = snapshot
+            if skill_terminal_text_allowed is not None:
+                self._skill_terminal_text_allowed = dict(skill_terminal_text_allowed)
+            return True
+
     def compare_and_swap(
         self,
         expected_revision: int,
@@ -1557,18 +1610,27 @@ class ObligationLedger:
         skill_version_id: UUID,
         terminal_text_allowed: bool,
         run_id: UUID | None = None,
+        skill_package_id: UUID | None = None,
     ) -> ObligationDecision:
+        """Create a skill terminal obligation.
+
+        ``skill_package_id`` is the stable owner_id (Plan 05 §4.2). When omitted,
+        ``skill_version_id`` is used for both owner_id and the text-allowed map
+        key (legacy unit-test path).
+        """
         rid = run_id or self._run_id
         if rid is None:
             raise ValueError("run_id required")
+        owner_key = str(skill_package_id) if skill_package_id is not None else str(skill_version_id)
         with self._lock:
-            self._skill_terminal_text_allowed[str(skill_version_id)] = bool(
-                terminal_text_allowed
-            )
+            # Text-allowed map is keyed by owner_id so pure_apply_provider_text_evidence
+            # can look up terminal_text_allowed via obligation.owner_id.
+            self._skill_terminal_text_allowed[owner_key] = bool(terminal_text_allowed)
             obligation = build_skill_terminal_obligation(
                 run_id=rid,
                 skill_version_id=skill_version_id,
                 revision=self._state.revision + 1,
+                skill_package_id=skill_package_id,
             )
             new_state, decision = pure_create_obligation(self._state, obligation)
             if new_state is not self._state:

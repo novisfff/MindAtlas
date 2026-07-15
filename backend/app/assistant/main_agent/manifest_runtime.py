@@ -13,7 +13,7 @@ zero residue. skill.inject reservation accounting is independent of discard.
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 from uuid import UUID
 
@@ -143,14 +143,27 @@ class PendingSkillActivationPackage:
     # Plan 05 candidate policy state (committed only on accept).
     candidate_effective_policy_digest: str | None = None
     candidate_owner_budget_limits: tuple[OwnerBudgetLimits, ...] = ()
-    # (skill_version_id, terminal_text_allowed) for requires_terminal_output skills.
-    candidate_skill_terminals: tuple[tuple[UUID, bool], ...] = ()
+    # (skill_version_id, terminal_text_allowed, skill_package_id) for
+    # requires_terminal_output skills. package_id is the stable owner_id.
+    candidate_skill_terminals: tuple[tuple[UUID, bool, UUID], ...] = ()
     # (domain_key, consumer_version_id) non-owning compatible consumers.
     candidate_compatible_consumers: tuple[tuple[str, UUID], ...] = ()
     candidate_exposure_index_digest: str | None = None
     package_digest: str | None = None
     # Snapshot of Run limits digest at stage time (must not change on accept).
     run_budget_limits_digest: str | None = None
+    # Accept-time rebind payload (Plan 05 enablement): frozen bindings / package map /
+    # owner materials so tools surface + auth + budget ownership update together.
+    candidate_frozen_bindings_by_version: dict[UUID, tuple[Any, ...]] = field(
+        default_factory=dict
+    )
+    candidate_skill_package_id_by_version: dict[UUID, UUID] = field(default_factory=dict)
+    candidate_skill_content_digest_by_version: dict[UUID, str] = field(
+        default_factory=dict
+    )
+    candidate_owner_materials: tuple[Any, ...] = ()
+    # Optional pre-registered EffectiveRunPolicySnapshot for the candidate digest.
+    candidate_policy_snapshot: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -198,7 +211,13 @@ class MainAgentManifestEffectLifecycle:
         self._post_commit_sink: Callable[[dict[str, JsonValue]], None] | None = None
         self._event_failures: list[str] = []
         # Optional rebind hooks for auth factory / control runtime after accept.
+        # Legacy hooks receive only the accepted Manifest.
         self._on_accept_hooks: list[Callable[[ResolvedRunManifestRevision], None]] = []
+        # Plan 05 package-aware hooks receive (manifest, package) so tools /
+        # auth / owner resolver can rebind from candidate payload.
+        self._on_accept_package_hooks: list[
+            Callable[[ResolvedRunManifestRevision, PendingSkillActivationPackage], None]
+        ] = []
         # Plan 05 process-local policy ledgers (optional; closed over by Run).
         self._budget_ledger: Any | None = None
         self._obligation_ledger: Any | None = None
@@ -240,6 +259,15 @@ class MainAgentManifestEffectLifecycle:
     ) -> None:
         """Register a callback invoked with the accepted Manifest after commit."""
         self._on_accept_hooks.append(hook)
+
+    def add_on_accept_package_hook(
+        self,
+        hook: Callable[
+            [ResolvedRunManifestRevision, PendingSkillActivationPackage], None
+        ],
+    ) -> None:
+        """Register a package-aware accept hook (tools/auth/owner rebind)."""
+        self._on_accept_package_hooks.append(hook)
 
     def bind_current_manifest(
         self,
@@ -379,7 +407,7 @@ class MainAgentManifestEffectLifecycle:
                     o.owner_budget_digest for o in package.candidate_owner_budget_limits
                 ),
                 skill_terminal_ids=tuple(
-                    vid for vid, _ in package.candidate_skill_terminals
+                    vid for vid, _tt, _pkg in package.candidate_skill_terminals
                 ),
                 compatible_consumers=package.candidate_compatible_consumers,
                 effective_policy_digest=package.candidate_effective_policy_digest
@@ -406,44 +434,79 @@ class MainAgentManifestEffectLifecycle:
             budget_snapshot = None
             obligation_snapshot = None
             skill_terminal_map_snapshot: dict[str, bool] | None = None
+            # Post-apply expected revisions: restore only if the ledger is still
+            # exactly at our post-apply revision (no concurrent foreign advance).
+            budget_expected_rev: int | None = None
+            obligation_expected_rev: int | None = None
             applied_owner_before = dict(self._applied_owner_budget_digests)
             applied_terminals_before = dict(self._applied_skill_terminals)
             try:
                 self._preflight_policy_applies_locked(package)
-                # Snapshot ledger state so a mid-apply race can be fully rewound.
+                # Snapshot ledger state under each ledger's own lock so a mid-apply
+                # failure can be rewound without clobbering concurrent charges.
                 if self._budget_ledger is not None:
                     budget_snapshot = self._budget_ledger.snapshot()
+                    budget_expected_rev = budget_snapshot.revision
                 if self._obligation_ledger is not None:
                     obligation_snapshot = self._obligation_ledger.snapshot()
-                    skill_terminal_map_snapshot = dict(
-                        getattr(
-                            self._obligation_ledger,
-                            "_skill_terminal_text_allowed",
-                            {},
-                        )
+                    obligation_expected_rev = obligation_snapshot.revision
+                    skill_terminal_map_snapshot = (
+                        self._obligation_ledger.skill_terminal_text_allowed_map()
                     )
                 for owner_limits in package.candidate_owner_budget_limits:
                     self._apply_owner_limits_locked(owner_limits, fail_closed=True)
-                for skill_version_id, terminal_text_allowed in package.candidate_skill_terminals:
+                    if self._budget_ledger is not None:
+                        budget_expected_rev = self._budget_ledger.snapshot().revision
+                for (
+                    skill_version_id,
+                    terminal_text_allowed,
+                    skill_package_id,
+                ) in package.candidate_skill_terminals:
                     self._apply_skill_terminal_locked(
                         skill_version_id=skill_version_id,
                         terminal_text_allowed=terminal_text_allowed,
+                        skill_package_id=skill_package_id,
                         fail_closed=True,
                     )
-            except Exception:
-                # Rewind any partial ledger applies; leave Manifest untouched.
-                if budget_snapshot is not None and self._budget_ledger is not None:
-                    self._budget_ledger._state = budget_snapshot  # noqa: SLF001
-                if obligation_snapshot is not None and self._obligation_ledger is not None:
-                    self._obligation_ledger._state = obligation_snapshot  # noqa: SLF001
-                    if skill_terminal_map_snapshot is not None:
-                        self._obligation_ledger._skill_terminal_text_allowed = (  # noqa: SLF001
-                            skill_terminal_map_snapshot
+                    if self._obligation_ledger is not None:
+                        obligation_expected_rev = (
+                            self._obligation_ledger.snapshot().revision
                         )
+            except Exception as apply_exc:
+                # Rewind via locked restore APIs. Restore only if the ledger is
+                # still at our post-apply revision — concurrent Capability calls
+                # that advanced past us cause fail-closed protocol error rather
+                # than wiping foreign reservations/charges.
+                rewind_ok = True
+                if (
+                    budget_snapshot is not None
+                    and budget_expected_rev is not None
+                    and self._budget_ledger is not None
+                ):
+                    if not self._budget_ledger.restore_if_revision(
+                        budget_snapshot,
+                        expected_current_revision=budget_expected_rev,
+                    ):
+                        rewind_ok = False
+                if (
+                    obligation_snapshot is not None
+                    and obligation_expected_rev is not None
+                    and self._obligation_ledger is not None
+                ):
+                    if not self._obligation_ledger.restore_if_revision(
+                        obligation_snapshot,
+                        expected_current_revision=obligation_expected_rev,
+                        skill_terminal_text_allowed=skill_terminal_map_snapshot,
+                    ):
+                        rewind_ok = False
                 self._applied_owner_budget_digests = applied_owner_before
                 self._applied_skill_terminals = applied_terminals_before
                 package.discarded = True
                 self._packages.pop(call_id, None)
+                if not rewind_ok:
+                    raise RuntimeError(
+                        "policy_state_protocol_error:ledger_rewind_conflict"
+                    ) from apply_exc
                 raise
 
             # All pure checks + ledger applies succeeded — advance Manifest.
@@ -466,7 +529,12 @@ class MainAgentManifestEffectLifecycle:
                 for vid, n in self._instruction_chars_by_version.items()
                 if vid in self._accepted_version_ids
             }
-            # Advance optional policy snapshot pointer.
+            # Register candidate policy snapshot (if staged with the package) then advance.
+            if package.candidate_policy_snapshot is not None:
+                snap = package.candidate_policy_snapshot
+                digest = getattr(snap, "effective_policy_digest", None)
+                if isinstance(digest, str) and digest:
+                    self._policy_snapshot_by_digest[digest] = snap
             if package.candidate_effective_policy_digest is not None:
                 snap = self._policy_snapshot_by_digest.get(
                     package.candidate_effective_policy_digest
@@ -480,15 +548,21 @@ class MainAgentManifestEffectLifecycle:
             package.accepted = True
             events = package.post_commit_events
             accepted_manifest = proposed_manifest
+            accepted_package = package
             self._packages.pop(call_id, None)
 
-        # Rebind dependents (auth factory, control runtime) so new Skill
-        # bindings become dispatchable on the next call of this Run.
+        # Rebind dependents (auth factory, control runtime, tools provider) so
+        # new Skill bindings become dispatchable on the next call of this Run.
         for hook in list(self._on_accept_hooks):
             try:
                 hook(accepted_manifest)
             except Exception:
                 # Hooks must not unwind an already-accepted Manifest.
+                self._event_failures.append(call_id)
+        for hook in list(self._on_accept_package_hooks):
+            try:
+                hook(accepted_manifest, accepted_package)
+            except Exception:
                 self._event_failures.append(call_id)
 
         # Event delivery after accept cannot roll back the Manifest.
@@ -526,11 +600,16 @@ class MainAgentManifestEffectLifecycle:
             if run_id is None:
                 raise ValueError("skill_terminal_error:run_id_required")
             state = obligations.snapshot()
-            for skill_version_id, _terminal_text_allowed in package.candidate_skill_terminals:
+            for (
+                skill_version_id,
+                _terminal_text_allowed,
+                skill_package_id,
+            ) in package.candidate_skill_terminals:
                 obligation = build_skill_terminal_obligation(
                     run_id=run_id,
                     skill_version_id=skill_version_id,
                     revision=state.revision + 1,
+                    skill_package_id=skill_package_id,
                 )
                 state, decision = pure_create_obligation(state, obligation)
                 if getattr(decision, "allowed", True) is False:
@@ -589,6 +668,7 @@ class MainAgentManifestEffectLifecycle:
         *,
         skill_version_id: UUID,
         terminal_text_allowed: bool,
+        skill_package_id: UUID | None = None,
         fail_closed: bool = False,
     ) -> None:
         ledger = self._obligation_ledger
@@ -599,6 +679,7 @@ class MainAgentManifestEffectLifecycle:
             decision = ledger.create_skill_terminal(
                 skill_version_id=skill_version_id,
                 terminal_text_allowed=bool(terminal_text_allowed),
+                skill_package_id=skill_package_id,
             )
             if getattr(decision, "allowed", True) is False:
                 msg = (
@@ -1545,7 +1626,7 @@ def stage_skill_injection(
 
     # Owner-budget-limit additions capped by unchanged Run limits.
     owner_limits: tuple[OwnerBudgetLimits, ...] = ()
-    skill_terminals: tuple[tuple[UUID, bool], ...] = ()
+    skill_terminals: tuple[tuple[UUID, bool, UUID], ...] = ()
     if policy is not None or any(
         c.max_skill_calls is not None
         or c.requires_terminal_output
@@ -1569,7 +1650,11 @@ def stage_skill_injection(
                 None,
             )
         skill_terminals = tuple(
-            (c.skill.version_id, bool(c.terminal_text_allowed))
+            (
+                c.skill.version_id,
+                bool(c.terminal_text_allowed),
+                c.skill.package_id,
+            )
             for c in to_append
             if c.requires_terminal_output
         )
@@ -1611,7 +1696,7 @@ def stage_skill_injection(
         call_id=call_id,
         activated_version_ids=tuple(c.skill.version_id for c in to_append),
         owner_budget_digests=tuple(o.owner_budget_digest for o in owner_limits),
-        skill_terminal_ids=tuple(vid for vid, _ in skill_terminals),
+        skill_terminal_ids=tuple(vid for vid, _tt, _pkg in skill_terminals),
         compatible_consumers=consumers,
         effective_policy_digest=candidate_policy_digest
         or proposed.effective_policy_digest,
@@ -1660,6 +1745,17 @@ def stage_skill_injection(
             },
         ),
     )
+    # Accept-time rebind payload from candidates (tools surface / auth / owners).
+    bindings_by_version: dict[UUID, tuple[Any, ...]] = {}
+    package_ids: dict[UUID, UUID] = {}
+    content_digests: dict[UUID, str] = {}
+    for candidate in to_append:
+        vid = candidate.skill.version_id
+        package_ids[vid] = candidate.skill.package_id
+        content_digests[vid] = candidate.skill.content_digest
+        if candidate.frozen_bindings:
+            bindings_by_version[vid] = tuple(candidate.frozen_bindings)
+
     package = PendingSkillActivationPackage(
         call_id=call_id,
         effect=effect,
@@ -1674,6 +1770,9 @@ def stage_skill_injection(
         candidate_skill_terminals=skill_terminals,
         candidate_compatible_consumers=consumers,
         package_digest=pkg_digest,
+        candidate_frozen_bindings_by_version=bindings_by_version,
+        candidate_skill_package_id_by_version=package_ids,
+        candidate_skill_content_digest_by_version=content_digests,
     )
     if lifecycle is not None:
         lifecycle.stage(package)

@@ -8,7 +8,7 @@ provider-neutral decisions / generation options.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 from uuid import UUID
 
 from app.assistant.capabilities.contracts import (
@@ -69,11 +69,44 @@ class BudgetLedgerDispatchGuard:
 
     def finish(self, *, call_id: str, status: str) -> None:
         del status
-        self.ledger.finish(call_id)
+        decision = self.ledger.finish(call_id)
+        if decision.allowed:
+            return
+        # Protocol error: reservation missing or not in started/finished.
+        # Surface like mark_started so callers/logs see the deny instead of
+        # silently leaving a started reservation un-finished.
+        raise CapabilityDomainError(
+            CapabilityError(
+                error_type="unauthorized",
+                safe_code=_safe_code(
+                    decision.reason_code, fallback="reservation_state_invalid"
+                ),
+                safe_message="capability call budget denied at finish",
+                retry_disposition="never",
+                call_id=call_id,
+            )
+        )
 
     def release_unstarted(self, *, call_id: str, reason_code: str) -> None:
         del reason_code
-        self.ledger.release_unstarted(call_id)
+        decision = self.ledger.release_unstarted(call_id)
+        if decision.allowed:
+            return
+        # Missing reservation is best-effort on cancel/deny paths; only raise
+        # when the reservation exists in an invalid state for release.
+        if decision.reason_code == "reservation_not_found":
+            return
+        raise CapabilityDomainError(
+            CapabilityError(
+                error_type="unauthorized",
+                safe_code=_safe_code(
+                    decision.reason_code, fallback="reservation_state_invalid"
+                ),
+                safe_message="capability call budget denied at release",
+                retry_disposition="never",
+                call_id=call_id,
+            )
+        )
 
 
 @dataclass
@@ -107,25 +140,16 @@ class BudgetLedgerRoundGuard:
         remaining = self.ledger.remaining_completion_tokens()
         if remaining is None:
             return generation
+        # Always cap generation by remaining completion budget. When remaining
+        # is 0, force max_output_tokens=1 so the request cannot run unbounded
+        # (start_provider_round already charged this round).
         if remaining < 1:
-            # Round already started/consumed; still block oversized generation.
-            # Caller should enter exhaustion on next attempt; for this round,
-            # force the smallest legal cap when generation had a limit.
-            if generation.max_output_tokens is None:
-                return generation
-            return ProviderGenerationOptions(
-                max_output_tokens=1,
-                temperature=generation.temperature,
-                tool_choice=generation.tool_choice,
-                request_parallel_tool_calls=generation.request_parallel_tool_calls,
-            )
-        current = generation.max_output_tokens
-        if current is None:
-            capped = remaining
+            capped = 1
         else:
-            capped = min(current, remaining)
-        if capped == current:
-            return generation
+            current = generation.max_output_tokens
+            capped = remaining if current is None else min(current, remaining)
+            if capped == current:
+                return generation
         return ProviderGenerationOptions(
             max_output_tokens=capped,
             temperature=generation.temperature,
@@ -217,11 +241,29 @@ class FixedOwnerResolver:
 
 @dataclass
 class DomainKeyOwnerResolver:
-    """Map domain_key -> (owner_kind, owner_version_id); default main agent."""
+    """Map domain_key -> (owner_kind, owner_version_id); default main agent.
+
+    Mutable in place via ``rebind`` so ProviderLoopPorts and MainAgentPolicyRuntime
+    can share one instance across skill.inject accept without rebuilding ports.
+    """
 
     owners_by_domain_key: dict[str, tuple[str, UUID]]
     default_owner_kind: str = "main_agent"
     default_owner_version_id: UUID = UUID(int=0)
+
+    def rebind(
+        self,
+        owners_by_domain_key: Mapping[str, tuple[str, UUID]],
+        *,
+        default_owner_kind: str | None = None,
+        default_owner_version_id: UUID | None = None,
+    ) -> None:
+        """Replace the ownership map (and optional defaults) in place."""
+        self.owners_by_domain_key = dict(owners_by_domain_key)
+        if default_owner_kind is not None:
+            self.default_owner_kind = default_owner_kind
+        if default_owner_version_id is not None:
+            self.default_owner_version_id = default_owner_version_id
 
     def resolve_owner(
         self,
