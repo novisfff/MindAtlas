@@ -1,7 +1,6 @@
 """Plan 06 durable agent run package.
 
-Persistence models for worker registration, immutable Run children, and Artifact GC.
-Repository / codec / worker arrive in later tasks.
+Persistence models, CAS repository, and (later) codec/worker integration.
 """
 
 from app.assistant.durable.models import (  # noqa: F401
@@ -15,6 +14,22 @@ from app.assistant.durable.models import (  # noqa: F401
     AssistantRunProviderMessage,
     AssistantWorkerRegistration,
 )
+from app.assistant.durable.repository import (  # noqa: F401
+    ALLOWED_TRANSITIONS,
+    CODE_EVENT_KEY_CONFLICT,
+    CODE_EVENT_KEY_REQUIRED,
+    CODE_INVALID_SOURCE_STATUS,
+    CODE_LEASE_MISMATCH,
+    CODE_RUN_FINALIZING,
+    CODE_STALE_REVISION,
+    CODE_TERMINAL_IMMUTABLE,
+    DurableChildBundle,
+    DurableCommitResult,
+    DurableRunConflict,
+    DurableRunRepository,
+    EventSpec,
+    LeaseToken,
+)
 
 __all__ = [
     "AssistantWorkerRegistration",
@@ -26,4 +41,18 @@ __all__ = [
     "AssistantRunCheckpoint",
     "AssistantRunArtifact",
     "AssistantRunArtifactGc",
+    "ALLOWED_TRANSITIONS",
+    "CODE_EVENT_KEY_CONFLICT",
+    "CODE_EVENT_KEY_REQUIRED",
+    "CODE_INVALID_SOURCE_STATUS",
+    "CODE_LEASE_MISMATCH",
+    "CODE_RUN_FINALIZING",
+    "CODE_STALE_REVISION",
+    "CODE_TERMINAL_IMMUTABLE",
+    "DurableChildBundle",
+    "DurableCommitResult",
+    "DurableRunConflict",
+    "DurableRunRepository",
+    "EventSpec",
+    "LeaseToken",
 ]
