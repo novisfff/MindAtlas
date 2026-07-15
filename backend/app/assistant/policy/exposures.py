@@ -59,6 +59,7 @@ class ExposureBindingInput:
     binding: FrozenCapabilityBinding
     descriptor: CapabilityDescriptor
     owner: ExposureOwnerIdentity
+    compatible_consumer_version_ids: tuple[UUID, ...] = ()
     # Optional skill-policy fields for duplicate compatibility (skill owners only).
     max_skill_calls: int | None = None
     max_same_read_calls: int | None = None
@@ -243,7 +244,7 @@ def build_exposure_ref_from_input(item: ExposureBindingInput) -> CapabilityExpos
         owner_kind=item.owner.owner_kind,
         owner_id=item.owner.owner_id,
         owner_version_id=item.owner.owner_version_id,
-        compatible_consumer_version_ids=(),
+        compatible_consumer_version_ids=item.compatible_consumer_version_ids,
     )
 
 

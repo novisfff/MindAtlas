@@ -1046,3 +1046,167 @@ def test_skill_injection_policy_context_reads_completion_followups_started() -> 
     snap = ledger.snapshot()
     assert hasattr(snap, "completion_followups_started")
     assert not hasattr(snap, "completion_followup_rounds_started")
+
+
+def test_empty_terminal_capability_result_does_not_satisfy_obligation() -> None:
+    from app.assistant.capabilities.contracts import CapabilityMetrics, completed_result
+    from app.assistant.main_agent.policy_runtime import _capability_result_output_digest
+    from app.assistant.policy.obligations import ObligationLedger
+
+    ledger = ObligationLedger(run_id=RUN_ID)
+    ledger.create_skill_terminal(
+        skill_version_id=SKILL_A,
+        skill_package_id=PKG_A,
+        terminal_text_allowed=False,
+    )
+    result = completed_result(
+        user_text=None,
+        structured_output=None,
+        artifact_refs=(),
+        metrics=CapabilityMetrics(duration_ms=0, input_bytes=0, output_bytes=0),
+        terminal_output=True,
+        needs_followup=False,
+    )
+
+    decision = ledger.apply_capability_result(
+        call_id="empty-terminal-result",
+        result_status=result.status,
+        terminal_output=result.terminal_output,
+        needs_followup=result.needs_followup,
+        output_digest=_capability_result_output_digest(result),
+        owner_kind="skill_version",
+        owner_id=str(PKG_A),
+        owner_version_id=SKILL_A,
+        run_id=RUN_ID,
+        binding_contract_digest=DIGEST_A,
+    )
+
+    assert decision.allowed
+    assert ledger.snapshot().obligations[0].status == "pending"
+
+
+def test_dispatcher_applies_terminal_result_to_compatible_consumers() -> None:
+    from types import SimpleNamespace
+
+    from tests.test_agent_exposure_index import _frozen_binding
+
+    from app.assistant.capabilities.contracts import CapabilityMetrics, completed_result
+    from app.assistant.main_agent.policy_runtime import MainAgentGatewayToolDispatcher
+    from app.assistant.policy.contracts import (
+        build_capability_exposure_ref,
+        build_manifest_exposure_index,
+    )
+    from app.assistant.policy.obligations import ObligationLedger
+
+    binding = _frozen_binding(
+        capability_key="shared.business",
+        origin="skill_version",
+        owner_version_id=SKILL_A,
+    )
+    exposure = build_capability_exposure_ref(
+        domain_key=binding.ref.capability_key,
+        resolved_ref=binding.ref,
+        binding_contract_digest=binding.ref.binding_contract_digest,
+        descriptor_digest=DIGEST_C,
+        owner_kind="skill_version",
+        owner_id=str(PKG_A),
+        owner_version_id=SKILL_A,
+        compatible_consumer_version_ids=(SKILL_B,),
+    )
+    exposure_index = build_manifest_exposure_index(
+        manifest_revision=2,
+        manifest_digest=DIGEST_D,
+        exposures=(exposure,),
+    )
+    ledger = ObligationLedger(run_id=RUN_ID)
+    ledger.create_skill_terminal(
+        skill_version_id=SKILL_A,
+        skill_package_id=PKG_A,
+        terminal_text_allowed=False,
+    )
+    ledger.create_skill_terminal(
+        skill_version_id=SKILL_B,
+        skill_package_id=PKG_B,
+        terminal_text_allowed=False,
+    )
+    dispatcher = MainAgentGatewayToolDispatcher(
+        session_factory=lambda: None,  # type: ignore[arg-type,return-value]
+        authorization_factory=SimpleNamespace(
+            profile_key="general_chat",
+            skill_package_id_by_version={SKILL_A: PKG_A, SKILL_B: PKG_B},
+            policy_snapshot=SimpleNamespace(exposure_index=exposure_index),
+        ),
+        control_port=SimpleNamespace(),  # type: ignore[arg-type]
+        obligation_ledger=ledger,
+    )
+    result = completed_result(
+        user_text="shared terminal output",
+        metrics=CapabilityMetrics(duration_ms=0, input_bytes=0, output_bytes=22),
+        terminal_output=True,
+        needs_followup=False,
+    )
+
+    dispatcher._apply_result_obligations(
+        call=SimpleNamespace(call_id="shared-terminal"),
+        binding=binding,
+        result=result,
+        run_id=RUN_ID,
+    )
+
+    state = ledger.snapshot()
+    assert {item.status for item in state.obligations} == {"satisfied"}
+    assert any(edge.evidence_kind == "compatible_consumer" for edge in state.evidence_edges)
+
+
+def test_dispatcher_fails_closed_when_obligation_apply_is_denied() -> None:
+    from types import SimpleNamespace
+
+    from tests.test_agent_exposure_index import _frozen_binding
+
+    from app.assistant.capabilities.contracts import CapabilityMetrics, completed_result
+    from app.assistant.main_agent.policy_runtime import MainAgentGatewayToolDispatcher
+
+    binding = _frozen_binding(
+        capability_key="denied.evidence",
+        origin="skill_version",
+        owner_version_id=SKILL_A,
+    )
+
+    class _DenyLedger:
+        def snapshot(self):
+            return SimpleNamespace(obligations=())
+
+        def apply_capability_result(self, **_kwargs):
+            return SimpleNamespace(
+                allowed=False,
+                reason_code="completion_evidence_invalid",
+            )
+
+    dispatcher = MainAgentGatewayToolDispatcher(
+        session_factory=lambda: None,  # type: ignore[arg-type,return-value]
+        authorization_factory=SimpleNamespace(
+            profile_key="general_chat",
+            skill_package_id_by_version={SKILL_A: PKG_A},
+            policy_snapshot=None,
+        ),
+        control_port=SimpleNamespace(),  # type: ignore[arg-type]
+        obligation_ledger=_DenyLedger(),  # type: ignore[arg-type]
+    )
+    result = completed_result(
+        user_text="terminal output",
+        metrics=CapabilityMetrics(duration_ms=0, input_bytes=0, output_bytes=15),
+        terminal_output=True,
+        needs_followup=False,
+    )
+
+    applied = dispatcher._apply_result_obligations(
+        call=SimpleNamespace(call_id="denied-evidence"),
+        binding=binding,
+        result=result,
+        run_id=RUN_ID,
+    )
+
+    assert applied is not None
+    assert applied.status == "failed"
+    assert applied.error is not None
+    assert applied.error.safe_code == "obligation_state_protocol_error"

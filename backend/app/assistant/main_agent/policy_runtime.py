@@ -47,6 +47,7 @@ from app.assistant.main_agent.control_capabilities import (
 from app.assistant.main_agent.control_runtime import MainAgentControlRuntime
 from app.assistant.main_agent.dispatch_hooks import next_manifest_from_control_effect
 from app.assistant.main_agent.manifest_runtime import (
+    CandidateExposureView,
     MainAgentManifestEffectLifecycle,
     SkillInjectionPolicyContext,
 )
@@ -131,6 +132,7 @@ class MainAgentPolicyRuntime:
     lifecycle: MainAgentManifestEffectLifecycle
     control_runtime: MainAgentControlRuntime
     control_bindings: tuple[FrozenCapabilityBinding, ...]
+    tools_provider: Any
     owner_materials: dict[tuple[str, str, UUID], OwnerGrantMaterial]
     owners_by_domain_key: dict[str, tuple[str, UUID]]
     run_budget_limits: RunBudgetLimits
@@ -138,6 +140,10 @@ class MainAgentPolicyRuntime:
     profile_key: str
     profile_version_id: UUID
     profile_content_digest: str
+    # Exact accepted Skill policy metadata used by later sequential injection
+    # preflight. Updated only inside the lifecycle accept hook.
+    active_skill_candidates_by_version: dict[UUID, Any] = field(default_factory=dict)
+    enforce_skill_inject_reservation: bool = True
     # Mutable ownership map rebuilt on skill.inject accept.
     _owner_resolver: DomainKeyOwnerResolver = field(init=False, repr=False)
 
@@ -204,6 +210,7 @@ class MainAgentGatewayToolDispatcher:
         Callable[[ProviderDispatchRequest, CapabilityResult], ResolvedRunManifestRevision]
         | None
     ) = None
+    pending_effect_cleanup_hook: Callable[[str, str], None] | None = None
     dispatch_guard: Any | None = None
     call_frames: Any | None = None
     obligation_ledger: ObligationLedger | None = None
@@ -248,6 +255,19 @@ class MainAgentGatewayToolDispatcher:
                 guard.release_unstarted(call_id=call.call_id, reason_code=reason_code)
             except Exception:
                 return
+
+        def _cleanup_pending_effect(reason_code: str) -> None:
+            hook = self.pending_effect_cleanup_hook
+            if hook is None:
+                return
+            try:
+                hook(call.call_id, reason_code)
+            except Exception:
+                logger.debug(
+                    "pending Manifest effect cleanup failed for call_id=%s",
+                    call.call_id,
+                    exc_info=True,
+                )
 
         session = self.session_factory()
         try:
@@ -335,7 +355,7 @@ class MainAgentGatewayToolDispatcher:
                 ports_kwargs["call_frames"] = self.call_frames
             ports = CapabilityRuntimePorts(**ports_kwargs)
             result = gateway.execute(execution_request, ports=ports)
-            self._apply_result_obligations(
+            result = self._apply_result_obligations(
                 call=call,
                 binding=binding,
                 result=result,
@@ -344,12 +364,22 @@ class MainAgentGatewayToolDispatcher:
             next_manifest = request.current_manifest
             if self.next_manifest_hook is not None:
                 next_manifest = self.next_manifest_hook(request, result)
+            if call.domain_key == "skill.inject" and result.status != "completed":
+                _cleanup_pending_effect("control_result_not_completed")
+                next_manifest = request.current_manifest
             return ProviderDispatchResult(
                 capability_result=result,
                 next_manifest=next_manifest,
             )
+        except BaseException:
+            _cleanup_pending_effect("dispatcher_error")
+            raise
         finally:
-            session.close()
+            try:
+                session.close()
+            except BaseException:
+                _cleanup_pending_effect("dispatcher_session_close_error")
+                raise
 
     def _apply_result_obligations(
         self,
@@ -358,7 +388,7 @@ class MainAgentGatewayToolDispatcher:
         binding: FrozenCapabilityBinding,
         result: CapabilityResult,
         run_id: UUID,
-    ) -> None:
+    ) -> CapabilityResult:
         """Plan 05 call-order step 10: result-owned obligation transitions.
 
         Failures are contained — obligation ledger errors must not change the
@@ -366,7 +396,7 @@ class MainAgentGatewayToolDispatcher:
         """
         ledger = self.obligation_ledger
         if ledger is None or self.authorization_factory is None:
-            return
+            return result
         factory = self.authorization_factory
         try:
             owner = owner_ref_from_binding_provenance(
@@ -382,13 +412,46 @@ class MainAgentGatewayToolDispatcher:
                     profile_key=factory.profile_key,
                 )
             except Exception:
-                return
+                return result
         owner_kind = owner.owner_kind
         if owner_kind not in {"main_agent", "skill_version", "capability_call"}:
             owner_kind = "capability_call"
         try:
             output_digest = _capability_result_output_digest(result)
-            ledger.apply_capability_result(
+            compatible_consumers: tuple[UUID, ...] = ()
+            policy_snapshot = getattr(factory, "policy_snapshot", None)
+            exposure_index = getattr(policy_snapshot, "exposure_index", None)
+            if exposure_index is not None:
+                matching_exposures = tuple(
+                    exposure
+                    for exposure in exposure_index.exposures
+                    if exposure.domain_key == binding.ref.capability_key
+                    and exposure.binding_contract_digest
+                    == binding.ref.binding_contract_digest
+                    and exposure.owner_kind == owner_kind
+                    and exposure.owner_id == str(owner.owner_id)
+                    and exposure.owner_version_id == owner.owner_version_id
+                )
+                if len(matching_exposures) == 1:
+                    compatible_consumers = matching_exposures[
+                        0
+                    ].compatible_consumer_version_ids
+            pending_consumer_ids = tuple(
+                obligation.obligation_id
+                for obligation in ledger.snapshot().obligations
+                if obligation.status == "pending"
+                and obligation.obligation_type == "terminal_output"
+                and obligation.owner_version_id in set(compatible_consumers)
+            )
+            completion = binding.resolved.completion
+            completion_contract_digest = sha256_canonical_json(
+                {
+                    "terminalOutput": bool(completion.terminal_output),
+                    "needsFollowup": bool(completion.needs_followup),
+                    "followupHint": completion.followup_hint,
+                }
+            )
+            decision = ledger.apply_capability_result(
                 call_id=call.call_id,
                 result_status=str(result.status),
                 terminal_output=bool(result.terminal_output),
@@ -399,17 +462,69 @@ class MainAgentGatewayToolDispatcher:
                 owner_version_id=owner.owner_version_id,
                 run_id=run_id,
                 binding_contract_digest=binding.ref.binding_contract_digest,
+                compatible_consumer_version_ids=compatible_consumers,
+                completion_contract_digest=completion_contract_digest,
+                target_consumer_obligation_ids=pending_consumer_ids,
             )
+            if not decision.allowed:
+                return _obligation_protocol_failure(
+                    call_id=call.call_id,
+                    target_identity=binding.ref.target_identity,
+                    metrics=result.metrics,
+                )
+            return result
         except Exception:
             logging.getLogger(__name__).debug(
                 "obligation apply_capability_result failed for call_id=%s",
                 getattr(call, "call_id", None),
                 exc_info=True,
             )
+            return _obligation_protocol_failure(
+                call_id=str(getattr(call, "call_id", "") or "unknown"),
+                target_identity=binding.ref.target_identity,
+                metrics=result.metrics,
+            )
+
+
+def _obligation_protocol_failure(
+    *,
+    call_id: str,
+    target_identity: str,
+    metrics: Any,
+) -> CapabilityResult:
+    from app.assistant.capabilities.contracts import CapabilityError, failed_result
+
+    return failed_result(
+        error=CapabilityError(
+            error_type="protocol_error",
+            safe_code="obligation_state_protocol_error",
+            safe_message="capability result obligation transition failed",
+            retry_disposition="never",
+            call_id=call_id,
+            target_identity=target_identity,
+        ),
+        metrics=metrics,
+    )
 
 
 def _capability_result_output_digest(result: CapabilityResult) -> str:
     """Deterministic digest of user/structured/artifact output for obligation evidence."""
+    structured = result.structured_output
+    has_structured_output = False
+    if isinstance(structured, str):
+        has_structured_output = bool(structured.strip())
+    elif isinstance(structured, (dict, list, tuple)):
+        has_structured_output = bool(structured)
+    elif structured is not None:
+        # JSON scalar values, including false and zero, are material output.
+        has_structured_output = True
+    if not (
+        (isinstance(result.user_text, str) and bool(result.user_text.strip()))
+        or has_structured_output
+        or bool(result.artifact_refs)
+    ):
+        return ""
+
     payload: dict[str, Any] = {
         "status": result.status,
         "terminalOutput": bool(result.terminal_output),
@@ -486,6 +601,36 @@ class MainAgentGatewayToolsProvider:
     ) -> None:
         with self._lock:
             self.active_bindings_by_version[version_id] = tuple(bindings)
+
+    def restore_active_bindings(
+        self,
+        bindings_by_version: Mapping[UUID, Sequence[FrozenCapabilityBinding]],
+    ) -> None:
+        """Replace the active binding projection under the provider lock."""
+        with self._lock:
+            self.active_bindings_by_version.clear()
+            self.active_bindings_by_version.update(
+                {
+                    version_id: tuple(bindings)
+                    for version_id, bindings in bindings_by_version.items()
+                }
+            )
+
+    def active_bindings_for_manifest(
+        self,
+        manifest: ResolvedRunManifestRevision,
+    ) -> tuple[FrozenCapabilityBinding, ...]:
+        """Return already-registered bindings for active versions, deterministically."""
+        active_ids = sorted(
+            (skill.version_id for skill in manifest.active_skills),
+            key=lambda item: item.bytes,
+        )
+        with self._lock:
+            return tuple(
+                binding
+                for version_id in active_ids
+                for binding in self.active_bindings_by_version.get(version_id, ())
+            )
 
     def resolve(
         self,
@@ -912,14 +1057,6 @@ def compose_main_agent_policy_runtime(
         policy_snapshot=policy_snapshot,
     )
     lifecycle.register_policy_snapshot(policy_snapshot)
-    lifecycle.add_on_accept_hook(control_runtime.bind_manifest)
-    lifecycle.add_on_accept_hook(
-        lambda m: auth_factory.rebind_manifest(
-            m,
-            policy_snapshot=lifecycle.policy_snapshot,
-            owner_materials=owner_materials,
-        )
-    )
 
     # Session factory for Gateway open per dispatch/describe.
     if session_factory is None:
@@ -945,10 +1082,24 @@ def compose_main_agent_policy_runtime(
         locale=locale,
     )
 
+    def _discard_lifecycle_effect(call_id: str, reason_code: str) -> None:
+        lifecycle.discard(call_id=call_id, reason_code=reason_code)
+
+    def _cleanup_pending_effect(call_id: str, reason_code: str) -> None:
+        try:
+            control_runtime.discard_pending(call_id=call_id)
+        finally:
+            lifecycle.discard(call_id=call_id, reason_code=reason_code)
+
     def _next_manifest(
         request: ProviderDispatchRequest, result: CapabilityResult
     ) -> ResolvedRunManifestRevision:
-        return next_manifest_from_control_effect(control_runtime, request, result)
+        return next_manifest_from_control_effect(
+            control_runtime,
+            request,
+            result,
+            discard_effect=_discard_lifecycle_effect,
+        )
 
     tool_dispatcher = MainAgentGatewayToolDispatcher(
         session_factory=session_factory,
@@ -956,6 +1107,7 @@ def compose_main_agent_policy_runtime(
         control_port=control_runtime,
         locale=locale,
         next_manifest_hook=_next_manifest,
+        pending_effect_cleanup_hook=_cleanup_pending_effect,
         dispatch_guard=dispatch_guard,  # dual-wire: also on ProviderLoopPorts
         call_frames=call_frames,
         obligation_ledger=obligation_ledger,
@@ -1022,6 +1174,7 @@ def compose_main_agent_policy_runtime(
         lifecycle=lifecycle,
         control_runtime=control_runtime,
         control_bindings=control_bindings,
+        tools_provider=tools_provider,
         owner_materials=owner_materials,
         owners_by_domain_key=owners_by_domain_key,
         run_budget_limits=run_budget_limits,
@@ -1071,11 +1224,113 @@ def skill_injection_policy_context_from_runtime(
         - snap.provider_rounds_started
         - snap.completion_followups_started,
     )
+    active_candidates = dict(
+        getattr(runtime, "active_skill_candidates_by_version", {}) or {}
+    )
+    ordered_active = sorted(active_candidates.items(), key=lambda item: item[0].bytes)
+    active_conflict_rules = tuple(
+        (version_id, tuple(candidate.conflict_rules))
+        for version_id, candidate in ordered_active
+    )
+    active_aliases = tuple(
+        (version_id, tuple(candidate.aliases))
+        for version_id, candidate in ordered_active
+    )
+
+    existing_exposures: list[CandidateExposureView] = []
+    policy_snapshot = getattr(runtime, "policy_snapshot", None)
+    exposure_index = getattr(policy_snapshot, "exposure_index", None)
+    for exposure in getattr(exposure_index, "exposures", ()) or ():
+        owner_candidate = active_candidates.get(exposure.owner_version_id)
+        owner_view = None
+        if owner_candidate is not None:
+            owner_view = next(
+                (
+                    view
+                    for view in owner_candidate.exposure_views
+                    if view.domain_key == exposure.domain_key
+                ),
+                None,
+            )
+        existing_exposures.append(
+            CandidateExposureView(
+                domain_key=exposure.domain_key,
+                resolved_ref=exposure.resolved_ref,
+                binding_contract_digest=exposure.binding_contract_digest,
+                descriptor_digest=exposure.descriptor_digest,
+                max_skill_calls=(
+                    owner_candidate.max_skill_calls
+                    if owner_candidate is not None
+                    and exposure.owner_kind == "skill_version"
+                    else None
+                ),
+                max_same_read_calls=(
+                    owner_candidate.max_same_read_calls
+                    if owner_candidate is not None
+                    and exposure.owner_kind == "skill_version"
+                    else None
+                ),
+                requires_terminal_output=(
+                    owner_candidate.requires_terminal_output
+                    if owner_candidate is not None
+                    and exposure.owner_kind == "skill_version"
+                    else None
+                ),
+                terminal_text_allowed=(
+                    owner_candidate.terminal_text_allowed
+                    if owner_candidate is not None
+                    and exposure.owner_kind == "skill_version"
+                    else None
+                ),
+                grant_admits_side_effect=(
+                    owner_view.grant_admits_side_effect
+                    if owner_view is not None
+                    else None
+                ),
+                descriptor_fields_frozen=bool(
+                    owner_view is not None
+                    and owner_view.descriptor_fields_frozen
+                ),
+                side_effect=(
+                    owner_view.side_effect if owner_view is not None else "read"
+                ),
+                executable_revision=(
+                    owner_view.executable_revision
+                    if owner_view is not None
+                    else ""
+                ),
+                timeout_mode=(
+                    owner_view.timeout_mode if owner_view is not None else "none"
+                ),
+                timeout_seconds=(
+                    owner_view.timeout_seconds if owner_view is not None else None
+                ),
+                interrupt_mode=(
+                    owner_view.interrupt_mode if owner_view is not None else "none"
+                ),
+                parallel_safe=(
+                    owner_view.parallel_safe if owner_view is not None else True
+                ),
+                terminal_output=(
+                    owner_view.terminal_output if owner_view is not None else False
+                ),
+                needs_followup=(
+                    owner_view.needs_followup if owner_view is not None else True
+                ),
+                followup_hint=(
+                    owner_view.followup_hint if owner_view is not None else None
+                ),
+            )
+        )
+
     return SkillInjectionPolicyContext(
         run_max_total_capability_calls=runtime.run_budget_limits.max_total_capability_calls,
         run_max_same_read_signature=runtime.run_budget_limits.max_same_read_signature,
         run_max_active_skills=runtime.run_budget_limits.max_active_skills,
         remaining_provider_slots=remaining_rounds,
+        active_conflict_rules=active_conflict_rules,
+        active_aliases=active_aliases,
+        existing_exposures=tuple(existing_exposures),
     )
 
 

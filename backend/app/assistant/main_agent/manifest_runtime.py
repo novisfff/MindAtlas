@@ -92,6 +92,21 @@ class CandidateExposureView:
     max_same_read_calls: int | None = None
     requires_terminal_output: bool | None = None
     terminal_text_allowed: bool | None = None
+    # Result of deriving the owner's immutable grant first, then checking the
+    # classified side effect for membership. None means unavailable/unknown.
+    grant_admits_side_effect: bool | None = None
+    # Full descriptor/completion fields are frozen by production before stage.
+    # Legacy pure-stage callers may leave this False and use binding defaults.
+    descriptor_fields_frozen: bool = False
+    side_effect: str = "read"
+    executable_revision: str = ""
+    timeout_mode: str = "none"
+    timeout_seconds: float | None = None
+    interrupt_mode: str = "none"
+    parallel_safe: bool = True
+    terminal_output: bool = False
+    needs_followup: bool = True
+    followup_hint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -118,6 +133,33 @@ class SkillActivationCandidate:
     exposure_views: tuple[CandidateExposureView, ...] = ()
     # When True, this skill owns no Capability exposure (instruction-only).
     is_instruction_only: bool = False
+
+
+def candidate_grant_admits_side_effect(
+    candidate: SkillActivationCandidate,
+    side_effect: str,
+) -> bool:
+    """Return whether the candidate's author grant admits one classified effect."""
+    if candidate.is_instruction_only or not candidate.author_allowed_side_effects:
+        return False
+    author_to_lattice = {
+        "read": "read",
+        "compute": "compute",
+        "write": "write_local",
+        "draft": "draft",
+        "control": "none",
+    }
+    try:
+        author_lattice = {
+            author_to_lattice[item]
+            for item in candidate.author_allowed_side_effects
+        }
+    except KeyError:
+        return False
+    # The explicit Main Agent entrypoint admits `none`, but the Plan 05 release
+    # gate still clips Skills to the read-only lattice.
+    allowed = ({"none"} | author_lattice) & {"none", "compute", "read"}
+    return side_effect in allowed
 
 
 @dataclass
@@ -150,6 +192,10 @@ class PendingSkillActivationPackage:
     candidate_compatible_consumers: tuple[tuple[str, UUID], ...] = ()
     candidate_exposure_index_digest: str | None = None
     package_digest: str | None = None
+    candidate_rebind_payload_digest: str | None = None
+    # Production packages are accepted only after the Gateway has honestly
+    # charged and finished the originating skill.inject reservation.
+    require_finished_reservation: bool = False
     # Snapshot of Run limits digest at stage time (must not change on accept).
     run_budget_limits_digest: str | None = None
     # Accept-time rebind payload (Plan 05 enablement): frozen bindings / package map /
@@ -162,8 +208,188 @@ class PendingSkillActivationPackage:
         default_factory=dict
     )
     candidate_owner_materials: tuple[Any, ...] = ()
+    # Exact immutable activation metadata retained for later sequential
+    # conflict/duplicate checks after this package is accepted.
+    candidate_activation_candidates: tuple[SkillActivationCandidate, ...] = ()
     # Optional pre-registered EffectiveRunPolicySnapshot for the candidate digest.
     candidate_policy_snapshot: Any | None = None
+
+
+def _model_json(value: Any) -> Any:
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        return dump(mode="json")
+    return value
+
+
+def _candidate_rebind_payload_digest(
+    package: PendingSkillActivationPackage,
+) -> str:
+    """Seal every mutable projection trusted by the lifecycle accept hook."""
+    bindings_payload = []
+    for version_id in sorted(
+        package.candidate_frozen_bindings_by_version,
+        key=lambda item: item.bytes,
+    ):
+        bindings = package.candidate_frozen_bindings_by_version[version_id]
+        bindings_payload.append(
+            {
+                "versionId": str(version_id),
+                "bindings": [
+                    _model_json(binding)
+                    for binding in sorted(
+                        bindings,
+                        key=lambda item: (
+                            item.ref.capability_key,
+                            item.ref.binding_contract_digest,
+                        ),
+                    )
+                ],
+            }
+        )
+
+    materials_payload = []
+    for material in sorted(
+        package.candidate_owner_materials,
+        key=lambda item: (
+            str(getattr(item, "owner_kind", "")),
+            str(getattr(item, "owner_id", "")),
+            str(getattr(item, "owner_version_id", "")),
+        ),
+    ):
+        declared = getattr(material, "declared_capability_keys", None)
+        materials_payload.append(
+            {
+                "ownerKind": str(getattr(material, "owner_kind", "")),
+                "ownerId": str(getattr(material, "owner_id", "")),
+                "ownerVersionId": str(getattr(material, "owner_version_id", "")),
+                "policyDigest": str(getattr(material, "policy_digest", "")),
+                "authorAllowedSideEffects": list(
+                    getattr(material, "author_allowed_side_effects", ()) or ()
+                ),
+                "declaredCapabilityKeys": (
+                    sorted(str(item) for item in declared)
+                    if declared is not None
+                    else None
+                ),
+                "instructionOnly": bool(
+                    getattr(material, "is_instruction_only", False)
+                ),
+            }
+        )
+
+    candidates_payload = []
+    for candidate in sorted(
+        package.candidate_activation_candidates,
+        key=lambda item: item.skill.version_id.bytes,
+    ):
+        candidates_payload.append(
+            {
+                "skill": _model_json(candidate.skill),
+                "capabilities": [
+                    _model_json(capability) for capability in candidate.capabilities
+                ],
+                "instructionCharCount": candidate.instruction_char_count,
+                "resourceIndexDigest": candidate.resource_index_digest,
+                "authorAllowedSideEffects": list(
+                    candidate.author_allowed_side_effects
+                ),
+                "conflictRules": [
+                    _model_json(rule) for rule in candidate.conflict_rules
+                ],
+                "maxSkillCalls": candidate.max_skill_calls,
+                "maxSameReadCalls": candidate.max_same_read_calls,
+                "requiresTerminalOutput": candidate.requires_terminal_output,
+                "terminalTextAllowed": candidate.terminal_text_allowed,
+                "aliases": list(candidate.aliases),
+                "instructionOnly": candidate.is_instruction_only,
+                "exposureViews": [
+                    {
+                        "domainKey": view.domain_key,
+                        "resolvedRef": _model_json(view.resolved_ref),
+                        "bindingContractDigest": view.binding_contract_digest,
+                        "descriptorDigest": view.descriptor_digest,
+                        "maxSkillCalls": view.max_skill_calls,
+                        "maxSameReadCalls": view.max_same_read_calls,
+                        "requiresTerminalOutput": view.requires_terminal_output,
+                        "terminalTextAllowed": view.terminal_text_allowed,
+                        "grantAdmitsSideEffect": view.grant_admits_side_effect,
+                        "descriptorFieldsFrozen": view.descriptor_fields_frozen,
+                        "sideEffect": view.side_effect,
+                        "executableRevision": view.executable_revision,
+                        "timeoutMode": view.timeout_mode,
+                        "timeoutSeconds": view.timeout_seconds,
+                        "interruptMode": view.interrupt_mode,
+                        "parallelSafe": view.parallel_safe,
+                        "terminalOutput": view.terminal_output,
+                        "needsFollowup": view.needs_followup,
+                        "followupHint": view.followup_hint,
+                    }
+                    for view in candidate.exposure_views
+                ],
+            }
+        )
+
+    snapshot = package.candidate_policy_snapshot
+    snapshot_payload = None
+    if snapshot is not None:
+        snapshot_payload = _model_json(snapshot)
+        if snapshot_payload is snapshot:
+            snapshot_payload = {
+                "effectivePolicyDigest": getattr(
+                    snapshot, "effective_policy_digest", None
+                ),
+                "exposureIndexDigest": getattr(
+                    getattr(snapshot, "exposure_index", None),
+                    "exposure_index_digest",
+                    None,
+                ),
+            }
+
+    return sha256_canonical_json(
+        {
+            "bindingsByVersion": bindings_payload,
+            "skillPackageIds": [
+                {"versionId": str(version_id), "packageId": str(package_id)}
+                for version_id, package_id in sorted(
+                    package.candidate_skill_package_id_by_version.items(),
+                    key=lambda item: item[0].bytes,
+                )
+            ],
+            "skillContentDigests": [
+                {"versionId": str(version_id), "contentDigest": digest}
+                for version_id, digest in sorted(
+                    package.candidate_skill_content_digest_by_version.items(),
+                    key=lambda item: item[0].bytes,
+                )
+            ],
+            "ownerBudgetLimits": [
+                _model_json(item)
+                for item in sorted(
+                    package.candidate_owner_budget_limits,
+                    key=lambda item: item.owner_version_id.bytes,
+                )
+            ],
+            "skillTerminals": [
+                {
+                    "versionId": str(version_id),
+                    "terminalTextAllowed": terminal_text_allowed,
+                    "packageId": str(package_id),
+                }
+                for version_id, terminal_text_allowed, package_id in sorted(
+                    package.candidate_skill_terminals,
+                    key=lambda item: item[0].bytes,
+                )
+            ],
+            "ownerMaterials": materials_payload,
+            "activationCandidates": candidates_payload,
+            "policySnapshot": snapshot_payload,
+            "candidateExposureIndexDigest": package.candidate_exposure_index_digest,
+            "runBudgetLimitsDigest": package.run_budget_limits_digest,
+            "requireFinishedReservation": package.require_finished_reservation,
+            "postCommitEvents": list(package.post_commit_events),
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -399,6 +625,18 @@ class MainAgentManifestEffectLifecycle:
                     self._packages.pop(call_id, None)
                     raise ValueError("effective_policy_digest mismatch")
 
+            # Recompute and verify the complete accept-time rebind projection
+            # before trusting any staged bindings/materials/events.
+            actual_rebind_digest = _candidate_rebind_payload_digest(package)
+            if (
+                package.candidate_rebind_payload_digest is None
+                or package.candidate_rebind_payload_digest
+                != actual_rebind_digest
+            ):
+                package.discarded = True
+                self._packages.pop(call_id, None)
+                raise ValueError("package_digest mismatch")
+
             # Recompute and verify package_digest (stage-time integrity seal).
             expected_pkg_digest = _package_digest(
                 call_id=call_id,
@@ -412,6 +650,7 @@ class MainAgentManifestEffectLifecycle:
                 compatible_consumers=package.candidate_compatible_consumers,
                 effective_policy_digest=package.candidate_effective_policy_digest
                 or proposed_manifest.effective_policy_digest,
+                rebind_payload_digest=actual_rebind_digest,
             )
             if package.package_digest is None:
                 package.discarded = True
@@ -427,6 +666,24 @@ class MainAgentManifestEffectLifecycle:
                 package.discarded = True
                 self._packages.pop(call_id, None)
                 raise ValueError("package_digest mismatch")
+
+            if package.require_finished_reservation:
+                budget = self._budget_ledger
+                reservations = (
+                    tuple(
+                        item
+                        for item in budget.snapshot().reservations
+                        if item.call_id == call_id
+                        and item.domain_key == "skill.inject"
+                        and item.owner_kind == "main_agent"
+                    )
+                    if budget is not None
+                    else ()
+                )
+                if len(reservations) != 1 or reservations[0].state != "finished":
+                    package.discarded = True
+                    self._packages.pop(call_id, None)
+                    raise ValueError("skill_inject_reservation_incomplete")
 
             # Pure preflight + ledger apply BEFORE any Manifest mutation (all-or-nothing).
             # Fail-closed: owner-limit/terminal denials discard the package and
@@ -454,7 +711,18 @@ class MainAgentManifestEffectLifecycle:
                         self._obligation_ledger.skill_terminal_text_allowed_map()
                     )
                 for owner_limits in package.candidate_owner_budget_limits:
-                    self._apply_owner_limits_locked(owner_limits, fail_closed=True)
+                    prior_rev = budget_expected_rev
+                    try:
+                        self._apply_owner_limits_locked(owner_limits, fail_closed=True)
+                    except Exception:
+                        if self._budget_ledger is not None and prior_rev is not None:
+                            current_rev = self._budget_ledger.snapshot().revision
+                            # A ledger event sink may raise after the pure state
+                            # transition was installed. Record that exact owned
+                            # +1 revision so outer rollback can still rewind it.
+                            if current_rev in {prior_rev, prior_rev + 1}:
+                                budget_expected_rev = current_rev
+                        raise
                     if self._budget_ledger is not None:
                         budget_expected_rev = self._budget_ledger.snapshot().revision
                 for (
@@ -462,16 +730,34 @@ class MainAgentManifestEffectLifecycle:
                     terminal_text_allowed,
                     skill_package_id,
                 ) in package.candidate_skill_terminals:
-                    self._apply_skill_terminal_locked(
-                        skill_version_id=skill_version_id,
-                        terminal_text_allowed=terminal_text_allowed,
-                        skill_package_id=skill_package_id,
-                        fail_closed=True,
-                    )
+                    prior_rev = obligation_expected_rev
+                    try:
+                        self._apply_skill_terminal_locked(
+                            skill_version_id=skill_version_id,
+                            terminal_text_allowed=terminal_text_allowed,
+                            skill_package_id=skill_package_id,
+                            fail_closed=True,
+                        )
+                    except Exception:
+                        if (
+                            self._obligation_ledger is not None
+                            and prior_rev is not None
+                        ):
+                            current_rev = self._obligation_ledger.snapshot().revision
+                            if current_rev in {prior_rev, prior_rev + 1}:
+                                obligation_expected_rev = current_rev
+                        raise
                     if self._obligation_ledger is not None:
                         obligation_expected_rev = (
                             self._obligation_ledger.snapshot().revision
                         )
+                # Rebind every dependent while the lifecycle commit is still
+                # provisional. A failure participates in the same rollback as
+                # owner limits/obligations and cannot publish the child Manifest.
+                for hook in list(self._on_accept_hooks):
+                    hook(proposed_manifest)
+                for hook in list(self._on_accept_package_hooks):
+                    hook(proposed_manifest, package)
             except Exception as apply_exc:
                 # Rewind via locked restore APIs. Restore only if the ledger is
                 # still at our post-apply revision — concurrent Capability calls
@@ -547,23 +833,7 @@ class MainAgentManifestEffectLifecycle:
 
             package.accepted = True
             events = package.post_commit_events
-            accepted_manifest = proposed_manifest
-            accepted_package = package
             self._packages.pop(call_id, None)
-
-        # Rebind dependents (auth factory, control runtime, tools provider) so
-        # new Skill bindings become dispatchable on the next call of this Run.
-        for hook in list(self._on_accept_hooks):
-            try:
-                hook(accepted_manifest)
-            except Exception:
-                # Hooks must not unwind an already-accepted Manifest.
-                self._event_failures.append(call_id)
-        for hook in list(self._on_accept_package_hooks):
-            try:
-                hook(accepted_manifest, accepted_package)
-            except Exception:
-                self._event_failures.append(call_id)
 
         # Event delivery after accept cannot roll back the Manifest.
         sink = self._post_commit_sink
@@ -744,6 +1014,7 @@ def _package_digest(
     skill_terminal_ids: Sequence[UUID],
     compatible_consumers: Sequence[tuple[str, UUID]],
     effective_policy_digest: str | None,
+    rebind_payload_digest: str | None,
 ) -> str:
     return sha256_canonical_json(
         {
@@ -756,6 +1027,7 @@ def _package_digest(
                 for k, v in sorted(compatible_consumers, key=lambda x: (x[0], x[1].bytes))
             ],
             "effectivePolicyDigest": effective_policy_digest,
+            "rebindPayloadDigest": rebind_payload_digest,
         }
     )
 
@@ -965,7 +1237,17 @@ def _descriptor_fields_for_cap(
     needs_followup = True
     followup_hint: str | None = None
 
-    if binding is not None:
+    if view is not None and view.descriptor_fields_frozen:
+        side_effect = view.side_effect
+        executable_revision = view.executable_revision
+        timeout_mode = view.timeout_mode
+        timeout_seconds = view.timeout_seconds
+        interrupt_mode = view.interrupt_mode
+        parallel_safe = view.parallel_safe
+        terminal_output = view.terminal_output
+        needs_followup = view.needs_followup
+        followup_hint = view.followup_hint
+    elif binding is not None:
         resolved = binding.resolved
         if resolved.executable_revision:
             executable_revision = str(resolved.executable_revision)
@@ -1006,6 +1288,12 @@ def _declaration_from_candidate(
         candidate, domain_key
     )
     fields = _descriptor_fields_for_cap(candidate, cap, domain_key)
+    view = _view_for_domain(candidate, domain_key)
+    grant_admits = (
+        view.grant_admits_side_effect
+        if view is not None and view.grant_admits_side_effect is not None
+        else candidate_grant_admits_side_effect(candidate, fields["side_effect"])
+    )
     return DuplicateCapabilityDeclaration(
         domain_key=domain_key,
         resolved_ref=cap,
@@ -1028,7 +1316,7 @@ def _declaration_from_candidate(
         max_same_read_calls=max_same,
         requires_terminal_output=req_term,
         terminal_text_allowed=term_text,
-        grant_admits_side_effect=True,
+        grant_admits_side_effect=grant_admits,
         conflict_rules=_normalize_conflict_rules(candidate.conflict_rules),
         candidate_skill_version_id=candidate.skill.version_id,
         candidate_canonical_name=candidate.skill.canonical_name,
@@ -1047,6 +1335,12 @@ def _existing_view_from_owner_candidate(
         owner, domain_key
     )
     fields = _descriptor_fields_for_cap(owner, cap, domain_key)
+    view = _view_for_domain(owner, domain_key)
+    grant_admits = (
+        view.grant_admits_side_effect
+        if view is not None and view.grant_admits_side_effect is not None
+        else candidate_grant_admits_side_effect(owner, fields["side_effect"])
+    )
     return ExistingExposureCompatibilityView(
         domain_key=domain_key,
         resolved_ref=cap,
@@ -1069,7 +1363,7 @@ def _existing_view_from_owner_candidate(
         max_same_read_calls=max_same,
         requires_terminal_output=req_term,
         terminal_text_allowed=term_text,
-        grant_admits_side_effect=True,
+        grant_admits_side_effect=grant_admits,
         conflict_rules=_normalize_conflict_rules(owner.conflict_rules),
         owner_version_id=owner.skill.version_id,
         compatible_consumer_version_ids=tuple(consumers),
@@ -1104,19 +1398,55 @@ def _existing_view_from_manifest_cap(
             else existing_cap.binding_contract_digest
         ),
         descriptor_digest=view.descriptor_digest if view is not None else "",
-        side_effect="read",
+        side_effect=(
+            view.side_effect
+            if view is not None and view.descriptor_fields_frozen
+            else "read"
+        ),
         input_schema_digest=existing_cap.input_schema_digest,
         output_schema_digest=existing_cap.output_schema_digest,
         dependency_closure_digest=existing_cap.dependency_closure_digest,
         resolution_digest=existing_cap.resolution_digest,
-        executable_revision="",
-        timeout_mode="none",
-        timeout_seconds=None,
-        interrupt_mode="none",
-        parallel_safe=True,
-        terminal_output=False,
-        needs_followup=True,
-        followup_hint=None,
+        executable_revision=(
+            view.executable_revision
+            if view is not None and view.descriptor_fields_frozen
+            else ""
+        ),
+        timeout_mode=(
+            view.timeout_mode
+            if view is not None and view.descriptor_fields_frozen
+            else "none"
+        ),
+        timeout_seconds=(
+            view.timeout_seconds
+            if view is not None and view.descriptor_fields_frozen
+            else None
+        ),
+        interrupt_mode=(
+            view.interrupt_mode
+            if view is not None and view.descriptor_fields_frozen
+            else "none"
+        ),
+        parallel_safe=(
+            view.parallel_safe
+            if view is not None and view.descriptor_fields_frozen
+            else True
+        ),
+        terminal_output=(
+            view.terminal_output
+            if view is not None and view.descriptor_fields_frozen
+            else False
+        ),
+        needs_followup=(
+            view.needs_followup
+            if view is not None and view.descriptor_fields_frozen
+            else True
+        ),
+        followup_hint=(
+            view.followup_hint
+            if view is not None and view.descriptor_fields_frozen
+            else None
+        ),
         max_skill_calls=view.max_skill_calls if view is not None else None,
         max_same_read_calls=view.max_same_read_calls if view is not None else None,
         requires_terminal_output=(
@@ -1125,7 +1455,11 @@ def _existing_view_from_manifest_cap(
         terminal_text_allowed=(
             view.terminal_text_allowed if view is not None else None
         ),
-        grant_admits_side_effect=True,
+        grant_admits_side_effect=(
+            bool(view.grant_admits_side_effect)
+            if view is not None and view.grant_admits_side_effect is not None
+            else False
+        ),
         conflict_rules=conflict_rules,
         owner_version_id=owner_version_id,
         compatible_consumer_version_ids=tuple(consumers),
@@ -1365,12 +1699,13 @@ def _evaluate_terminal_satisfiability(
     for candidate in to_append:
         if not candidate.requires_terminal_output:
             continue
+        # A declaration/ref alone carries no completion semantics. Only an exact
+        # frozen binding whose immutable completion contract is terminal can
+        # prove the capability path structurally satisfiable.
         has_terminal_cap = any(
-            # Without full descriptors, treat any capability as potential terminal path
-            # when max_skill_calls allows; pure structural check only.
-            True
-            for _ in candidate.capabilities
-        ) if candidate.capabilities else False
+            bool(binding.resolved.completion.terminal_output)
+            for binding in candidate.frozen_bindings
+        )
         view = SkillTerminalSatisfiabilityView(
             skill_version_id=candidate.skill.version_id,
             requires_terminal_output=True,
@@ -1690,18 +2025,6 @@ def stage_skill_injection(
             None,
         )
 
-    # Compatible consumers must not introduce a second Manifest capability entry
-    # (append_skill_activations_batch already keeps first identical ref).
-    pkg_digest = _package_digest(
-        call_id=call_id,
-        activated_version_ids=tuple(c.skill.version_id for c in to_append),
-        owner_budget_digests=tuple(o.owner_budget_digest for o in owner_limits),
-        skill_terminal_ids=tuple(vid for vid, _tt, _pkg in skill_terminals),
-        compatible_consumers=consumers,
-        effective_policy_digest=candidate_policy_digest
-        or proposed.effective_policy_digest,
-    )
-
     effect = PendingManifestEffect(
         call_id=call_id,
         expected_parent_revision=current_manifest.revision,
@@ -1716,7 +2039,7 @@ def stage_skill_injection(
         activation_payload={
             "activatedVersionIds": [str(c.skill.version_id) for c in to_append],
             "effectivePolicyDigest": proposed.effective_policy_digest,
-            "packageDigest": pkg_digest,
+            "packageDigest": "",
         },
         post_commit_events=(
             {
@@ -1769,11 +2092,27 @@ def stage_skill_injection(
         candidate_owner_budget_limits=owner_limits,
         candidate_skill_terminals=skill_terminals,
         candidate_compatible_consumers=consumers,
-        package_digest=pkg_digest,
+        package_digest=None,
         candidate_frozen_bindings_by_version=bindings_by_version,
         candidate_skill_package_id_by_version=package_ids,
         candidate_skill_content_digest_by_version=content_digests,
+        candidate_activation_candidates=tuple(to_append),
     )
+    package.candidate_rebind_payload_digest = _candidate_rebind_payload_digest(
+        package
+    )
+    pkg_digest = _package_digest(
+        call_id=call_id,
+        activated_version_ids=package.activated_version_ids,
+        owner_budget_digests=tuple(o.owner_budget_digest for o in owner_limits),
+        skill_terminal_ids=tuple(vid for vid, _tt, _pkg in skill_terminals),
+        compatible_consumers=consumers,
+        effective_policy_digest=candidate_policy_digest
+        or proposed.effective_policy_digest,
+        rebind_payload_digest=package.candidate_rebind_payload_digest,
+    )
+    package.package_digest = pkg_digest
+    effect.activation_payload["packageDigest"] = pkg_digest
     if lifecycle is not None:
         lifecycle.stage(package)
 

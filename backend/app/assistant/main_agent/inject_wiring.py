@@ -9,6 +9,7 @@ snapshot so post-inject grants and tool surface work.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Any, Callable, Mapping, Sequence
 from uuid import UUID
 
@@ -40,8 +41,12 @@ from app.assistant.main_agent.catalog import (
 )
 from app.assistant.main_agent.control_runtime import PendingManifestEffect
 from app.assistant.main_agent.manifest_runtime import (
+    CandidateExposureView,
     PendingSkillActivationPackage,
     SkillActivationCandidate,
+    _candidate_rebind_payload_digest,
+    _package_digest,
+    candidate_grant_admits_side_effect,
     resolve_inject_selectors,
     stage_skill_injection,
 )
@@ -379,24 +384,6 @@ def load_skill_activation_candidate(
     )
     is_instruction_only = len(frozen) == 0
     author_effects = tuple(policy.allowed_side_effects) if policy.allowed_side_effects else ()
-    # Map author vocabulary → runtime lattice classes used by OwnerGrantMaterial.
-    lattice_effects: list[str] = []
-    for effect in author_effects:
-        if effect in {"read", "compute", "none"}:
-            lattice_effects.append(effect if effect != "read" else "read")
-        elif effect == "control":
-            lattice_effects.append("none")
-        # write/draft intentionally omitted from Plan 05 runtime grants
-    if "none" not in lattice_effects:
-        lattice_effects.insert(0, "none")
-    if "read" in author_effects and "read" not in lattice_effects:
-        lattice_effects.append("read")
-    if "compute" in author_effects and "compute" not in lattice_effects:
-        lattice_effects.append("compute")
-    # Default read-only when author declared empty but has bindings (legacy).
-    if not author_effects and not is_instruction_only:
-        lattice_effects = ["none", "read", "compute"]
-        author_effects = ("read", "compute")
 
     return SkillActivationCandidate(
         skill=skill,
@@ -415,15 +402,61 @@ def load_skill_activation_candidate(
     )
 
 
+def build_candidate_exposure_views(
+    *,
+    candidates: Sequence[SkillActivationCandidate],
+    gateway: Any,
+) -> tuple[SkillActivationCandidate, ...]:
+    """Freeze descriptor identity used by strict duplicate preflight.
+
+    Published binding rows do not carry the current classified descriptor
+    digest. Production injection therefore describes every frozen binding
+    before staging and retains the exact digest beside the candidate policy.
+    """
+    described: list[SkillActivationCandidate] = []
+    for candidate in candidates:
+        views: list[CandidateExposureView] = []
+        for binding in candidate.frozen_bindings:
+            descriptor = gateway.describe(binding)
+            views.append(
+                CandidateExposureView(
+                    domain_key=binding.ref.capability_key,
+                    resolved_ref=binding.ref,
+                    binding_contract_digest=binding.ref.binding_contract_digest,
+                    descriptor_digest=descriptor.descriptor_digest,
+                    max_skill_calls=candidate.max_skill_calls,
+                    max_same_read_calls=candidate.max_same_read_calls,
+                    requires_terminal_output=candidate.requires_terminal_output,
+                    terminal_text_allowed=candidate.terminal_text_allowed,
+                    grant_admits_side_effect=candidate_grant_admits_side_effect(
+                        candidate,
+                        descriptor.behavior.side_effect,
+                    ),
+                    descriptor_fields_frozen=True,
+                    side_effect=descriptor.behavior.side_effect,
+                    executable_revision=descriptor.executable_revision,
+                    timeout_mode=descriptor.behavior.timeout_policy.mode,
+                    timeout_seconds=(
+                        descriptor.behavior.timeout_policy.timeout_seconds
+                    ),
+                    interrupt_mode=descriptor.behavior.interrupt_mode,
+                    parallel_safe=descriptor.behavior.parallel_safe,
+                    terminal_output=descriptor.completion.terminal_output,
+                    needs_followup=descriptor.completion.needs_followup,
+                    followup_hint=descriptor.completion.followup_hint,
+                )
+            )
+        described.append(replace(candidate, exposure_views=tuple(views)))
+    return tuple(described)
+
+
 def build_skill_owner_material(
     candidate: SkillActivationCandidate,
 ) -> OwnerGrantMaterial:
     """OwnerGrantMaterial for one activated Skill (package_id as owner_id)."""
     package_id = candidate.skill.package_id
     version_id = candidate.skill.version_id
-    author = tuple(candidate.author_allowed_side_effects) or (
-        () if candidate.is_instruction_only else ("read", "compute")
-    )
+    author = tuple(candidate.author_allowed_side_effects)
     # Lattice classes for policy digest / grants.
     lattice: list[str] = ["none"]
     if "read" in author or "compute" in author:
@@ -491,10 +524,54 @@ def build_candidate_policy_snapshot(
             locale=locale,
             main_agent_control_port=control_port,
         )
-        # Re-describe controls + skill bindings against proposed identity.
+        # Re-describe the complete proposed surface. A child Manifest is
+        # cumulative, so later injections must retain bindings from previously
+        # accepted Skills rather than rebuilding from only the current batch.
         package_map = {
-            c.skill.version_id: c.skill.package_id for c in candidates
+            skill.version_id: skill.package_id
+            for skill in proposed_manifest.active_skills
         }
+        existing_consumer_ids: dict[str, set[UUID]] = {}
+        if existing_snap is not None:
+            for exposure in existing_snap.exposure_index.exposures:
+                existing_consumer_ids[exposure.domain_key] = set(
+                    exposure.compatible_consumer_version_ids
+                )
+
+        tools_provider = getattr(runtime, "tools_provider", None)
+        existing_bindings: Sequence[FrozenCapabilityBinding] = ()
+        if tools_provider is not None and hasattr(
+            tools_provider, "active_bindings_for_manifest"
+        ):
+            existing_bindings = tools_provider.active_bindings_for_manifest(
+                proposed_manifest
+            )
+        existing_business_domains = {
+            binding.ref.capability_key for binding in existing_bindings
+        }
+        candidate_claims: dict[str, list[SkillActivationCandidate]] = {}
+        for candidate in candidates:
+            for binding in candidate.frozen_bindings:
+                candidate_claims.setdefault(binding.ref.capability_key, []).append(
+                    candidate
+                )
+        consumer_ids: dict[str, set[UUID]] = {
+            key: set(value) for key, value in existing_consumer_ids.items()
+        }
+        for domain_key, claimants in candidate_claims.items():
+            ordered = sorted(
+                claimants,
+                key=lambda item: (
+                    item.skill.canonical_name,
+                    item.skill.version_id.bytes,
+                ),
+            )
+            consumers = ordered if domain_key in existing_business_domains else ordered[1:]
+            consumer_ids.setdefault(domain_key, set()).update(
+                item.skill.version_id for item in consumers
+            )
+
+        seen_domains: set[str] = set()
         for binding in control_bindings:
             descriptor = gateway.describe(binding)
             owner = resolve_owner_from_binding(
@@ -509,8 +586,46 @@ def build_candidate_policy_snapshot(
                     owner=owner,
                 )
             )
-        for candidate in candidates:
+            seen_domains.add(binding.ref.capability_key)
+
+        for binding in existing_bindings:
+            domain_key = binding.ref.capability_key
+            if domain_key in seen_domains:
+                continue
+            descriptor = gateway.describe(binding)
+            owner = resolve_owner_from_binding(
+                binding,
+                profile_key=profile_key,
+                profile_version_id=profile_version_id,
+                skill_package_id_by_version=package_map,
+            )
+            base_inputs.append(
+                ExposureBindingInput(
+                    binding=binding,
+                    descriptor=descriptor,
+                    owner=owner,
+                    compatible_consumer_version_ids=tuple(
+                        sorted(
+                            consumer_ids.get(domain_key, ()),
+                            key=lambda item: item.bytes,
+                        )
+                    ),
+                )
+            )
+            seen_domains.add(domain_key)
+
+        for candidate in sorted(
+            candidates,
+            key=lambda item: (item.skill.canonical_name, item.skill.version_id.bytes),
+        ):
             for binding in candidate.frozen_bindings:
+                domain_key = binding.ref.capability_key
+                if candidate.skill.version_id in consumer_ids.get(domain_key, set()):
+                    continue
+                if domain_key in seen_domains:
+                    # Strict duplicate compatibility has already established
+                    # that this declaration is a non-owning consumer.
+                    continue
                 descriptor = gateway.describe(binding)
                 owner = resolve_owner_from_binding(
                     binding,
@@ -524,6 +639,12 @@ def build_candidate_policy_snapshot(
                         binding=binding,
                         descriptor=descriptor,
                         owner=owner,
+                        compatible_consumer_version_ids=tuple(
+                            sorted(
+                                consumer_ids.get(domain_key, ()),
+                                key=lambda item: item.bytes,
+                            )
+                        ),
                         max_skill_calls=candidate.max_skill_calls,
                         max_same_read_calls=candidate.max_same_read_calls,
                         requires_terminal_output=candidate.requires_terminal_output,
@@ -531,6 +652,7 @@ def build_candidate_policy_snapshot(
                         conflict_rules=candidate.conflict_rules,
                     )
                 )
+                seen_domains.add(domain_key)
 
         exposure_index = build_manifest_exposure_index_from_inputs(
             manifest=proposed_manifest,
@@ -539,22 +661,44 @@ def build_candidate_policy_snapshot(
             allow_empty=False,
         )
         owner_refs = []
-        # Main agent owner ref.
+        owner_ref_keys: set[tuple[str, str, UUID]] = set()
+        # Preserve every owner ref already frozen into the Run snapshot.
         if existing_snap is not None and getattr(existing_snap, "owner_policy_refs", None):
             for ref in existing_snap.owner_policy_refs:
-                if getattr(ref, "owner_kind", None) == "main_agent":
-                    owner_refs.append(ref)
-        else:
-            owner_refs.append(
-                build_owner_policy_ref(
-                    owner_kind="main_agent",
-                    owner_id=profile_key,
-                    owner_version_id=profile_version_id,
-                    content_or_policy_digest=profile_content_digest,
-                    allowed_side_effects=("none", "read", "compute"),
+                owner_refs.append(ref)
+                owner_ref_keys.add(
+                    (ref.owner_kind, ref.owner_id, ref.owner_version_id)
                 )
+        main_key = ("main_agent", profile_key, profile_version_id)
+        if main_key not in owner_ref_keys:
+            main_ref = build_owner_policy_ref(
+                owner_kind="main_agent",
+                owner_id=profile_key,
+                owner_version_id=profile_version_id,
+                content_or_policy_digest=profile_content_digest,
+                allowed_side_effects=("none", "read", "compute"),
             )
+            owner_refs.append(main_ref)
+            owner_ref_keys.add(main_key)
+
+        all_materials: dict[tuple[str, str, UUID], OwnerGrantMaterial] = {
+            key: value
+            for key, value in dict(
+                getattr(runtime, "owner_materials", {}) or {}
+            ).items()
+            if isinstance(value, OwnerGrantMaterial)
+        }
         for material in owner_materials:
+            all_materials[
+                (material.owner_kind, material.owner_id, material.owner_version_id)
+            ] = material
+        for key in sorted(
+            all_materials,
+            key=lambda item: (item[0], item[1], item[2].bytes),
+        ):
+            if key in owner_ref_keys:
+                continue
+            material = all_materials[key]
             lattice = ["none"]
             for effect in material.author_allowed_side_effects:
                 if effect in {"read", "compute"} and effect not in lattice:
@@ -568,6 +712,7 @@ def build_candidate_policy_snapshot(
                     allowed_side_effects=tuple(lattice),
                 )
             )
+            owner_ref_keys.add(key)
         return build_effective_run_policy_snapshot(
             app_build_revision=app_build_revision,
             run_id=proposed_manifest.run_id,
@@ -591,56 +736,157 @@ def apply_accept_package_rebind(
     manifest: ResolvedRunManifestRevision,
     package: PendingSkillActivationPackage,
 ) -> None:
-    """Accept-hook body: register bindings, owners, package map, policy snapshot."""
+    """Atomically rebind accepted tools/auth/owners/policy within lifecycle accept."""
     del ports_owner_resolver  # shared via runtime._owner_resolver
-    # 1) Tools surface bindings.
-    if tools_provider is not None and hasattr(tools_provider, "register_active_bindings"):
-        for version_id, bindings in package.candidate_frozen_bindings_by_version.items():
-            tools_provider.register_active_bindings(version_id, bindings)
+    consumer_pairs = set(package.candidate_compatible_consumers)
+    owned_bindings_by_version: dict[UUID, tuple[FrozenCapabilityBinding, ...]] = {}
+    for version_id, bindings in package.candidate_frozen_bindings_by_version.items():
+        owned = tuple(
+            binding
+            for binding in bindings
+            if (binding.ref.capability_key, version_id) not in consumer_pairs
+        )
+        if owned:
+            owned_bindings_by_version[version_id] = owned
 
-    # 2) Auth factory package map + content digests + owner materials.
     auth = getattr(runtime, "authorization_factory", None)
     owner_materials_update: dict[tuple[str, str, UUID], OwnerGrantMaterial] = {}
     for material in package.candidate_owner_materials:
         if isinstance(material, OwnerGrantMaterial):
             key = (material.owner_kind, material.owner_id, material.owner_version_id)
             owner_materials_update[key] = material
-            runtime.owner_materials[key] = material
-
-    if auth is not None:
-        auth.rebind_manifest(
-            manifest,
-            skill_package_id_by_version=package.candidate_skill_package_id_by_version
-            or None,
-            skill_content_digest_by_version=package.candidate_skill_content_digest_by_version
-            or None,
-            policy_snapshot=package.candidate_policy_snapshot
-            or getattr(runtime, "policy_snapshot", None),
-            owner_materials=owner_materials_update or None,
-        )
-
-    # 3) Domain-key ownership for budget reservation (skill domain keys).
+    active_candidates_update = {
+        candidate.skill.version_id: candidate
+        for candidate in package.candidate_activation_candidates
+    }
     owners = dict(getattr(runtime, "owners_by_domain_key", {}) or {})
-    for version_id, bindings in package.candidate_frozen_bindings_by_version.items():
+    for version_id, bindings in owned_bindings_by_version.items():
         for binding in bindings:
             domain_key = binding.ref.capability_key
             owners[domain_key] = ("skill_version", version_id)
-    if hasattr(runtime, "rebind_owners"):
-        runtime.rebind_owners(owners)
-
-    # 4) Policy snapshot pointer.
     snap = package.candidate_policy_snapshot
-    if snap is not None and hasattr(runtime, "rebind_policy_snapshot"):
-        runtime.rebind_policy_snapshot(snap)
-    elif snap is not None:
-        runtime.policy_snapshot = snap
-        lifecycle = getattr(runtime, "lifecycle", None)
-        if lifecycle is not None and hasattr(lifecycle, "register_policy_snapshot"):
-            lifecycle.register_policy_snapshot(snap)
+    effective_snap = snap or getattr(runtime, "policy_snapshot", None)
 
-    # Keep runtime.manifest aligned.
-    if hasattr(runtime, "manifest"):
-        runtime.manifest = manifest
+    # Snapshot every mutable projection before the first write. The lifecycle
+    # still owns the outer lock; these copies make an unexpected dependent
+    # failure reversible before the Manifest pointer is published.
+    tools_before = dict(
+        getattr(tools_provider, "active_bindings_by_version", {}) or {}
+    )
+    runtime_materials_before = dict(getattr(runtime, "owner_materials", {}) or {})
+    runtime_candidates_before = dict(
+        getattr(runtime, "active_skill_candidates_by_version", {}) or {}
+    )
+    runtime_owners_before = dict(getattr(runtime, "owners_by_domain_key", {}) or {})
+    runtime_policy_before = getattr(runtime, "policy_snapshot", None)
+    runtime_manifest_before = getattr(runtime, "manifest", None)
+    resolver = getattr(runtime, "_owner_resolver", None)
+    resolver_before = (
+        dict(getattr(resolver, "owners_by_domain_key", {}) or {})
+        if resolver is not None
+        else None
+    )
+    control_runtime = getattr(runtime, "control_runtime", None)
+    control_manifest_before = getattr(control_runtime, "_current_manifest", None)
+    auth_before: dict[str, Any] | None = None
+    if auth is not None:
+        auth_before = {
+            "manifest": getattr(auth, "manifest", None),
+            "skill_package_id_by_version": dict(
+                getattr(auth, "skill_package_id_by_version", {}) or {}
+            ),
+            "skill_content_digest_by_version": dict(
+                getattr(auth, "skill_content_digest_by_version", {}) or {}
+            ),
+            "policy_snapshot": getattr(auth, "policy_snapshot", None),
+            "owner_materials": dict(getattr(auth, "owner_materials", {}) or {}),
+        }
+
+    try:
+        if tools_provider is not None and hasattr(
+            tools_provider, "register_active_bindings"
+        ):
+            for version_id, bindings in owned_bindings_by_version.items():
+                tools_provider.register_active_bindings(version_id, bindings)
+
+        runtime.owner_materials.update(owner_materials_update)
+        active_candidates = getattr(
+            runtime, "active_skill_candidates_by_version", None
+        )
+        if active_candidates is not None:
+            active_candidates.update(active_candidates_update)
+        if auth is not None:
+            auth.rebind_manifest(
+                manifest,
+                skill_package_id_by_version=(
+                    package.candidate_skill_package_id_by_version or None
+                ),
+                skill_content_digest_by_version=(
+                    package.candidate_skill_content_digest_by_version or None
+                ),
+                policy_snapshot=effective_snap,
+                owner_materials=owner_materials_update or None,
+            )
+        if hasattr(runtime, "rebind_owners"):
+            runtime.rebind_owners(owners)
+        if snap is not None:
+            runtime.policy_snapshot = snap
+        if control_runtime is not None and hasattr(control_runtime, "bind_manifest"):
+            control_runtime.bind_manifest(manifest)
+        if hasattr(runtime, "manifest"):
+            runtime.manifest = manifest
+    except Exception:
+        if tools_provider is not None:
+            if hasattr(tools_provider, "restore_active_bindings"):
+                tools_provider.restore_active_bindings(tools_before)
+            elif hasattr(tools_provider, "active_bindings_by_version"):
+                lock = getattr(tools_provider, "_lock", None)
+                if lock is None:
+                    tools_provider.active_bindings_by_version = tools_before
+                else:
+                    with lock:
+                        tools_provider.active_bindings_by_version.clear()
+                        tools_provider.active_bindings_by_version.update(tools_before)
+        runtime.owner_materials.clear()
+        runtime.owner_materials.update(runtime_materials_before)
+        active_candidates = getattr(
+            runtime, "active_skill_candidates_by_version", None
+        )
+        if active_candidates is not None:
+            active_candidates.clear()
+            active_candidates.update(runtime_candidates_before)
+        runtime.owners_by_domain_key = runtime_owners_before
+        if resolver is not None and resolver_before is not None:
+            resolver.rebind(resolver_before)
+        runtime.policy_snapshot = runtime_policy_before
+        if hasattr(runtime, "manifest"):
+            runtime.manifest = runtime_manifest_before
+        if control_runtime is not None and hasattr(control_runtime, "bind_manifest"):
+            control_runtime.bind_manifest(control_manifest_before)
+        if auth is not None and auth_before is not None:
+            lock = getattr(auth, "_lock", None)
+            if lock is None:
+                auth.manifest = auth_before["manifest"]
+                auth.skill_package_id_by_version = auth_before[
+                    "skill_package_id_by_version"
+                ]
+                auth.skill_content_digest_by_version = auth_before[
+                    "skill_content_digest_by_version"
+                ]
+                auth.policy_snapshot = auth_before["policy_snapshot"]
+                auth.owner_materials = auth_before["owner_materials"]
+            else:
+                with lock:
+                    auth.manifest = auth_before["manifest"]
+                    auth.skill_package_id_by_version = auth_before[
+                        "skill_package_id_by_version"
+                    ]
+                    auth.skill_content_digest_by_version = auth_before[
+                        "skill_content_digest_by_version"
+                    ]
+                    auth.policy_snapshot = auth_before["policy_snapshot"]
+                    auth.owner_materials = auth_before["owner_materials"]
+        raise
 
 
 def build_production_inject_handler(
@@ -720,6 +966,33 @@ def build_production_inject_handler(
                         None,
                     )
 
+            if any(candidate.frozen_bindings for candidate in candidates):
+                try:
+                    describe_gateway = build_capability_runtime(
+                        db=session,
+                        evidence_verifiers={},
+                        locale=locale,
+                        main_agent_control_port=getattr(
+                            runtime, "control_runtime", None
+                        ),
+                    )
+                    candidates = list(
+                        build_candidate_exposure_views(
+                            candidates=candidates,
+                            gateway=describe_gateway,
+                        )
+                    )
+                except Exception:
+                    logger.exception("candidate exposure describe failed")
+                    return (
+                        _fail_control(
+                            call_id,
+                            "policy_snapshot_unavailable",
+                            "candidate policy snapshot unavailable",
+                        ),
+                        None,
+                    )
+
             policy_ctx = skill_injection_policy_context_from_runtime(runtime)
             max_active = int(policy_ctx.run_max_active_skills)
             result, effect, package = stage_skill_injection(
@@ -739,6 +1012,14 @@ def build_production_inject_handler(
                 in set(package.activated_version_ids)
             )
             package.candidate_owner_materials = owner_materials
+            package.candidate_activation_candidates = tuple(
+                c
+                for c in candidates
+                if c.skill.version_id in set(package.activated_version_ids)
+            )
+            package.require_finished_reservation = bool(
+                getattr(runtime, "enforce_skill_inject_reservation", False)
+            )
 
             # Align proposed Manifest effective_policy_digest when we can build
             # a real child snapshot (otherwise keep stage-derived digest).
@@ -755,21 +1036,96 @@ def build_production_inject_handler(
                 control_port=getattr(runtime, "control_runtime", None),
                 locale=locale,
             )
-            if child_snap is not None:
-                package.candidate_policy_snapshot = child_snap
-                package.candidate_effective_policy_digest = (
-                    child_snap.effective_policy_digest
+            if child_snap is None:
+                if lifecycle is not None:
+                    lifecycle.discard(
+                        call_id=call_id,
+                        reason_code="policy_snapshot_unavailable",
+                    )
+                return (
+                    _fail_control(
+                        call_id,
+                        "policy_snapshot_unavailable",
+                        "candidate policy snapshot unavailable",
+                    ),
+                    None,
                 )
-                # Rebuild proposed Manifest so digest matches child snapshot.
-                # Must also recompute effect_digest — accept seals against it.
-                from app.assistant.domain.contracts import (
-                    ResolvedRunManifestRevision as RMR,
-                    compute_manifest_digest,
-                )
-                from app.assistant.main_agent.manifest_runtime import _effect_digest
+            package.candidate_policy_snapshot = child_snap
+            package.candidate_effective_policy_digest = (
+                child_snap.effective_policy_digest
+            )
+            # Rebuild proposed Manifest so digest matches child snapshot.
+            # Must also recompute effect_digest — accept seals against it.
+            from app.assistant.domain.contracts import (
+                ResolvedRunManifestRevision as RMR,
+                compute_manifest_digest,
+            )
+            from app.assistant.main_agent.manifest_runtime import _effect_digest
 
-                proposed = effect.proposed_manifest
-                if proposed.effective_policy_digest != child_snap.effective_policy_digest:
+            proposed = effect.proposed_manifest
+            if proposed.effective_policy_digest != child_snap.effective_policy_digest:
+                aligned = compute_manifest_digest(
+                    run_id=proposed.run_id,
+                    revision=proposed.revision,
+                    parent_digest=proposed.parent_digest,
+                    main_agent=proposed.main_agent,
+                    active_skills=proposed.active_skills,
+                    capabilities=proposed.capabilities,
+                    provider=proposed.provider,
+                    model=proposed.model,
+                    provider_aliases=proposed.provider_aliases,
+                    effective_policy_digest=child_snap.effective_policy_digest,
+                )
+                new_manifest = RMR(
+                    run_id=proposed.run_id,
+                    revision=proposed.revision,
+                    parent_digest=proposed.parent_digest,
+                    main_agent=proposed.main_agent,
+                    active_skills=proposed.active_skills,
+                    capabilities=proposed.capabilities,
+                    provider=proposed.provider,
+                    model=proposed.model,
+                    provider_aliases=proposed.provider_aliases,
+                    effective_policy_digest=child_snap.effective_policy_digest,
+                    manifest_digest=aligned,
+                )
+                # Rebuild child snap against aligned manifest association.
+                child_snap2 = build_candidate_policy_snapshot(
+                    runtime=runtime,
+                    proposed_manifest=new_manifest,
+                    candidates=[
+                        c
+                        for c in candidates
+                        if c.skill.version_id in set(package.activated_version_ids)
+                    ],
+                    owner_materials=owner_materials,
+                    session=session,
+                    control_port=getattr(runtime, "control_runtime", None),
+                    locale=locale,
+                )
+                if child_snap2 is None:
+                    if lifecycle is not None:
+                        lifecycle.discard(
+                            call_id=call_id,
+                            reason_code="policy_snapshot_unavailable",
+                        )
+                    return (
+                        _fail_control(
+                            call_id,
+                            "policy_snapshot_unavailable",
+                            "candidate policy snapshot unavailable",
+                        ),
+                        None,
+                    )
+                package.candidate_policy_snapshot = child_snap2
+                package.candidate_effective_policy_digest = (
+                    child_snap2.effective_policy_digest
+                )
+                # If digest shifted again, re-align once more to the final snap.
+                if (
+                    new_manifest.effective_policy_digest
+                    != child_snap2.effective_policy_digest
+                ):
                     aligned = compute_manifest_digest(
                         run_id=proposed.run_id,
                         revision=proposed.revision,
@@ -780,7 +1136,7 @@ def build_production_inject_handler(
                         provider=proposed.provider,
                         model=proposed.model,
                         provider_aliases=proposed.provider_aliases,
-                        effective_policy_digest=child_snap.effective_policy_digest,
+                        effective_policy_digest=child_snap2.effective_policy_digest,
                     )
                     new_manifest = RMR(
                         run_id=proposed.run_id,
@@ -792,77 +1148,100 @@ def build_production_inject_handler(
                         provider=proposed.provider,
                         model=proposed.model,
                         provider_aliases=proposed.provider_aliases,
-                        effective_policy_digest=child_snap.effective_policy_digest,
+                        effective_policy_digest=child_snap2.effective_policy_digest,
                         manifest_digest=aligned,
                     )
-                    # Rebuild child snap against aligned manifest digest association.
-                    child_snap2 = build_candidate_policy_snapshot(
-                        runtime=runtime,
-                        proposed_manifest=new_manifest,
-                        candidates=[
-                            c
-                            for c in candidates
-                            if c.skill.version_id in set(package.activated_version_ids)
-                        ],
-                        owner_materials=owner_materials,
-                        session=session,
-                        control_port=getattr(runtime, "control_runtime", None),
-                        locale=locale,
+                effect.proposed_manifest = new_manifest
+                effect.effect_digest = _effect_digest(
+                    call_id=call_id,
+                    parent_revision=effect.expected_parent_revision,
+                    parent_digest=effect.expected_parent_digest,
+                    proposed=new_manifest,
+                )
+                if isinstance(effect.activation_payload, dict):
+                    effect.activation_payload["effectivePolicyDigest"] = (
+                        new_manifest.effective_policy_digest
                     )
-                    if child_snap2 is not None:
-                        package.candidate_policy_snapshot = child_snap2
-                        package.candidate_effective_policy_digest = (
-                            child_snap2.effective_policy_digest
-                        )
-                        # If digest shifted again, re-align once more to the final snap.
-                        if (
-                            new_manifest.effective_policy_digest
-                            != child_snap2.effective_policy_digest
-                        ):
-                            aligned = compute_manifest_digest(
-                                run_id=proposed.run_id,
-                                revision=proposed.revision,
-                                parent_digest=proposed.parent_digest,
-                                main_agent=proposed.main_agent,
-                                active_skills=proposed.active_skills,
-                                capabilities=proposed.capabilities,
-                                provider=proposed.provider,
-                                model=proposed.model,
-                                provider_aliases=proposed.provider_aliases,
-                                effective_policy_digest=child_snap2.effective_policy_digest,
-                            )
-                            new_manifest = RMR(
-                                run_id=proposed.run_id,
-                                revision=proposed.revision,
-                                parent_digest=proposed.parent_digest,
-                                main_agent=proposed.main_agent,
-                                active_skills=proposed.active_skills,
-                                capabilities=proposed.capabilities,
-                                provider=proposed.provider,
-                                model=proposed.model,
-                                provider_aliases=proposed.provider_aliases,
-                                effective_policy_digest=child_snap2.effective_policy_digest,
-                                manifest_digest=aligned,
-                            )
-                    effect.proposed_manifest = new_manifest
-                    effect.effect_digest = _effect_digest(
-                        call_id=call_id,
-                        parent_revision=effect.expected_parent_revision,
-                        parent_digest=effect.expected_parent_digest,
-                        proposed=new_manifest,
+                package.effect = effect
+            if (
+                lifecycle is not None
+                and package.candidate_policy_snapshot is not None
+            ):
+                lifecycle.register_policy_snapshot(
+                    package.candidate_policy_snapshot
+                )
+
+            # The production child snapshot is computed after the pure stage
+            # step. Re-seal every staged projection against the final child so
+            # lifecycle.accept verifies the same policy/Manifest identity that
+            # the Tool Result and post-commit events advertise.
+            final_policy_digest = (
+                package.candidate_effective_policy_digest
+                or effect.proposed_manifest.effective_policy_digest
+            )
+            effect.activation_payload["effectivePolicyDigest"] = final_policy_digest
+
+            final_events: list[dict[str, JsonValue]] = []
+            for event in effect.post_commit_events:
+                aligned_event = dict(event)
+                if aligned_event.get("eventType") == "skill_activation_end":
+                    aligned_event["manifestRevision"] = effect.proposed_manifest.revision
+                    aligned_event["manifestDigest"] = (
+                        effect.proposed_manifest.manifest_digest
                     )
-                    if isinstance(effect.activation_payload, dict):
-                        effect.activation_payload["effectivePolicyDigest"] = (
-                            new_manifest.effective_policy_digest
-                        )
-                    package.effect = effect
-                if (
-                    lifecycle is not None
-                    and package.candidate_policy_snapshot is not None
-                ):
-                    lifecycle.register_policy_snapshot(
-                        package.candidate_policy_snapshot
+                    aligned_event["effectivePolicyDigest"] = final_policy_digest
+                elif aligned_event.get("eventType") == "manifest_revision":
+                    aligned_event["revision"] = effect.proposed_manifest.revision
+                    aligned_event["manifestDigest"] = (
+                        effect.proposed_manifest.manifest_digest
                     )
+                    aligned_event["effectivePolicyDigest"] = final_policy_digest
+                final_events.append(aligned_event)
+            effect.post_commit_events = tuple(final_events)
+            package.post_commit_events = effect.post_commit_events
+            package.effect = effect
+            package.candidate_rebind_payload_digest = (
+                _candidate_rebind_payload_digest(package)
+            )
+            final_package_digest = _package_digest(
+                call_id=call_id,
+                activated_version_ids=package.activated_version_ids,
+                owner_budget_digests=tuple(
+                    item.owner_budget_digest
+                    for item in package.candidate_owner_budget_limits
+                ),
+                skill_terminal_ids=tuple(
+                    version_id
+                    for version_id, _terminal_text, _package_id in (
+                        package.candidate_skill_terminals
+                    )
+                ),
+                compatible_consumers=package.candidate_compatible_consumers,
+                effective_policy_digest=final_policy_digest,
+                rebind_payload_digest=package.candidate_rebind_payload_digest,
+            )
+            package.package_digest = final_package_digest
+            effect.activation_payload["packageDigest"] = final_package_digest
+
+            result_payload = dict(result.structured_output or {})
+            result_payload["proposedManifestRevision"] = (
+                effect.proposed_manifest.revision
+            )
+            result_payload["proposedManifestDigest"] = (
+                effect.proposed_manifest.manifest_digest
+            )
+            result_payload["effectivePolicyDigest"] = final_policy_digest
+            result_payload["packageDigest"] = final_package_digest
+            from app.assistant.capabilities.contracts import completed_result
+
+            result = completed_result(
+                user_text=result.user_text,
+                structured_output=result_payload,  # type: ignore[arg-type]
+                artifact_refs=result.artifact_refs,
+                metrics=result.metrics,
+                terminal_output=bool(result.terminal_output),
+                needs_followup=bool(result.needs_followup),
+            )
 
             return result, effect
         finally:
@@ -898,6 +1277,7 @@ def install_accept_rebind_hooks(
 
 __all__ = [
     "apply_accept_package_rebind",
+    "build_candidate_exposure_views",
     "build_candidate_policy_snapshot",
     "build_production_inject_handler",
     "build_run_catalog_state",
