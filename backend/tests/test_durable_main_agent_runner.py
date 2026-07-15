@@ -978,6 +978,76 @@ class DurableSkillActivationTests(unittest.TestCase):
         self.assertEqual(n_replay, 2)
         self.assertIsNotNone(replay)
 
+        # Process restart: new lifecycle has empty process-local state.
+        # Pointer already at child; re-stage + accept parent package without
+        # allow_already_accepted must short-circuit via durable digest (no
+        # lineage error, no duplicate child).
+        restarted = DurableSkillActivationLifecycle()
+        restarted.stage(
+            call_id="inj-1",
+            package={
+                "proposed_manifest_digest": DIGEST_B,
+                "parent_manifest_digest": DIGEST_A,
+                "child_payload": {"schemaVersion": 1, "digest": DIGEST_B, "child": True},
+            },
+        )
+        post_restart = restarted.accept_into_result(
+            db=self.db,
+            run_id=run.id,
+            lease=lease,
+            expected_revision=accepted.state_revision,
+            call_id="inj-1",
+            current_manifest_digest=DIGEST_B,  # pointer advanced to child
+            policy_payload={"schemaVersion": 1, "child": True},
+            policy_digest=DIGEST_B,
+            budget_payload={"schemaVersion": 1, "revision": 1},
+            budget_digest=DIGEST_D,
+            obligation_payload={"schemaVersion": 1},
+            obligation_digest=DIGEST_C,
+            # allow_already_accepted intentionally omitted (False)
+        )
+        n_restart = (
+            self.db.query(AssistantRunManifestRevision)
+            .filter_by(run_id=run.id)
+            .count()
+        )
+        self.assertEqual(n_restart, 2)
+        self.assertIsNotNone(post_restart)
+        self.assertFalse(restarted.has_pending("inj-1"))
+
+        # True lineage mismatch for a different proposed digest still fails.
+        restarted.stage(
+            call_id="inj-2",
+            package={
+                "proposed_manifest_digest": DIGEST_D,
+                "parent_manifest_digest": DIGEST_A,
+                "child_payload": {"schemaVersion": 1, "digest": DIGEST_D, "other": True},
+            },
+        )
+        with self.assertRaises(ValueError) as ctx:
+            restarted.accept_into_result(
+                db=self.db,
+                run_id=run.id,
+                lease=lease,
+                expected_revision=accepted.state_revision,
+                call_id="inj-2",
+                current_manifest_digest=DIGEST_B,  # not parent, not proposed
+                policy_payload={"schemaVersion": 1},
+                policy_digest=DIGEST_B,
+                budget_payload={"schemaVersion": 1, "revision": 1},
+                budget_digest=DIGEST_D,
+                obligation_payload={"schemaVersion": 1},
+                obligation_digest=DIGEST_C,
+            )
+        self.assertIn("lineage failed", str(ctx.exception))
+        self.assertFalse(restarted.has_pending("inj-2"))
+        n_mismatch = (
+            self.db.query(AssistantRunManifestRevision)
+            .filter_by(run_id=run.id)
+            .count()
+        )
+        self.assertEqual(n_mismatch, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

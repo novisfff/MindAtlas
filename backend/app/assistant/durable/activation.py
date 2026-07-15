@@ -130,21 +130,17 @@ class DurableSkillActivationLifecycle:
                     inserted_event_keys=(),
                 )
 
-            # Already-accepted child: short-circuit without duplicate append.
+            # Already-accepted / post-result short-circuit BEFORE lineage reject.
+            # After process restart, process-local `_accepted_digests` is empty while
+            # the durable pointer may already be the child. Re-stage + accept of the
+            # same package must no-op without failing parent-lineage.
             if proposed_digest in self._accepted_digests or (
                 allow_already_accepted
                 and current_manifest_digest == proposed_digest
             ):
                 return _already_accepted_result()
 
-            # Lineage: current durable Manifest must match staged parent.
-            if current_manifest_digest != parent_digest:
-                raise ValueError(
-                    f"lineage failed: current={current_manifest_digest[:12]}… "
-                    f"parent={parent_digest[:12]}…"
-                )
-
-            # Detect already-committed child by digest to prevent duplicate append.
+            # Durable already-committed child by digest (survives process restart).
             existing = db.execute(
                 select(AssistantRunManifestRevision).where(
                     AssistantRunManifestRevision.run_id == run_id,
@@ -153,6 +149,14 @@ class DurableSkillActivationLifecycle:
             ).scalar_one_or_none()
             if existing is not None:
                 return _already_accepted_result()
+
+            # Lineage: current durable Manifest must match staged parent.
+            # Only reached when the proposed child is not already durable.
+            if current_manifest_digest != parent_digest:
+                raise ValueError(
+                    f"lineage failed: current={current_manifest_digest[:12]}… "
+                    f"parent={parent_digest[:12]}…"
+                )
 
             result = commit_unit_result(
                 db,
