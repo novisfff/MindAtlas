@@ -125,16 +125,24 @@ class AssistantChatRunService:
         run_id: UUID,
         event_name: str,
         payload: dict,
+        event_key: str | None = None,
     ) -> int:
         run = self.db.get(AssistantChatRun, run_id)
         if run is None:
             raise ValueError(f"run not found: {run_id}")
         next_seq = int(run.last_event_seq or 0) + 1
+        name = str(event_name or "").strip()
+        key = str(event_key).strip() if event_key is not None else ""
+        # Main Agent public events require a deterministic event_key so stream
+        # consumers can dedupe at-least-once transport (Plan 06 §9).
+        if not key and str(getattr(run, "runtime_kind", None) or "") == "main_agent":
+            key = f"{name}:{run.id}:{next_seq}"
         event = AssistantChatRunEvent(
             run_id=run.id,
             seq=next_seq,
-            event_name=str(event_name or "").strip(),
+            event_name=name,
             payload=payload if isinstance(payload, dict) else {},
+            event_key=key or None,
         )
         self.db.add(event)
         run.last_event_seq = next_seq

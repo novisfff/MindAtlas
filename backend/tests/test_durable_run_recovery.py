@@ -288,6 +288,80 @@ class RecoveryClassificationTests(unittest.TestCase):
         # Resolver was consulted (classification path), but no Provider I/O.
         self.assertEqual(len(resolver.calls), 1)
 
+    def test_credential_revision_zero_is_not_treated_as_missing(self) -> None:
+        """Revision 0 is a valid frozen revision; ``or`` must not collapse it.
+
+        When the Manifest freezes credential_runtime_revision=0 and live is also 0,
+        recovery must continue (no drift). When live is 1, drift must be detected.
+        """
+        from app.assistant.durable.models import AssistantRunManifestRevision
+        from app.assistant.durable.recovery import (
+            CredentialSnapshot,
+            RecoveryClassifier,
+        )
+
+        run = _make_main_agent_run(self.db, status="recovering", state_revision=1)
+        ck, _ = _attach_checkpoint(self.db, run, phase="ready_for_provider")
+        self.db.refresh(run)
+
+        # Overwrite frozen credential revision to 0 (valid revision, not "missing").
+        manifest = self.db.get(AssistantRunManifestRevision, run.current_manifest_revision_id)
+        assert manifest is not None
+        manifest.payload = {
+            "model": {
+                "credentialId": str(uuid.UUID(int=1)),
+                "credentialRuntimeRevision": 0,
+                "credential_runtime_revision": 0,
+                "credentialConfigDigest": DIGEST_B,
+            }
+        }
+        self.db.commit()
+        self.db.refresh(run)
+
+        # Live also at 0 — no drift.
+        resolver_match = FixedCredentialResolver(
+            CredentialSnapshot(
+                credential_id=uuid.UUID(int=1),
+                credential_runtime_revision=0,
+                credential_config_digest=DIGEST_B,
+            )
+        )
+        clf = RecoveryClassifier(self.db, credential_resolver=resolver_match)
+        decision = clf.classify(
+            run=run,
+            claim_kind="reclaim_recovering",
+            worker_app_build_revision="build-test-1",
+            worker_supported_codec_versions=(1,),
+        )
+        self.assertNotEqual(
+            decision.reason_code,
+            "credential_revision_drift",
+            f"rev 0 must not be treated as missing; got {decision}",
+        )
+        self.assertTrue(
+            decision.kind in {"continue", "reuse_unit", "short_circuit"},
+            f"expected continue-like decision, got {decision.kind}",
+        )
+
+        # Live at 1 while frozen is 0 — drift must be detected.
+        resolver_drift = FixedCredentialResolver(
+            CredentialSnapshot(
+                credential_id=uuid.UUID(int=1),
+                credential_runtime_revision=1,
+                credential_config_digest=DIGEST_B,
+            )
+        )
+        clf2 = RecoveryClassifier(self.db, credential_resolver=resolver_drift)
+        decision2 = clf2.classify(
+            run=run,
+            claim_kind="reclaim_recovering",
+            worker_app_build_revision="build-test-1",
+            worker_supported_codec_versions=(1,),
+        )
+        self.assertEqual(decision2.kind, "needs_reconciliation")
+        self.assertEqual(decision2.reason_code, "credential_revision_drift")
+        _ = ck  # checkpoint attached for classification
+
     def test_same_logical_unit_reuses_reservation_increments_attempt(self) -> None:
         from app.assistant.durable.recovery import RecoveryClassifier
 

@@ -323,7 +323,10 @@ class DurableMemoryFinalizer:
             )
 
         existing = str(msg.content or "")
-        if existing.strip():
+        # Protect any previously accepted final content, including whitespace-only
+        # placeholders that may have been written before validation tightened.
+        # Empty string alone is still "unset" and may be replaced once.
+        if existing != "":
             existing_digest = digest_final_content(existing)
             if existing_digest == expected_digest and existing == allowed:
                 if commit:

@@ -288,6 +288,36 @@ class DurableMemoryL0FinalContentTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.code, "policy_state_protocol_error")
 
+    def test_whitespace_only_existing_content_still_digest_protected(self) -> None:
+        """Whitespace-only existing L0 must not be silently overwritten.
+
+        ``existing.strip()`` used to skip digest checks for whitespace placeholders.
+        Even whitespace content must conflict when digests differ.
+        """
+        from app.assistant.durable.memory import (
+            DurableMemoryError,
+            DurableMemoryFinalizer,
+            digest_final_content,
+        )
+
+        run, _conv, _user, assistant = _seed_run_with_messages(self.db)
+        # Seed whitespace-only content outside the finalizer (legacy/buggy path).
+        assistant.content = " "
+        self.db.commit()
+        self.db.refresh(assistant)
+
+        finalizer = DurableMemoryFinalizer(self.db)
+        with self.assertRaises(DurableMemoryError) as ctx:
+            finalizer.apply_final_l0_content(
+                run_id=run.id,
+                assistant_message_id=assistant.id,
+                content="real final answer",
+                content_digest=digest_final_content("real final answer"),
+            )
+        self.assertEqual(ctx.exception.code, "policy_state_protocol_error")
+        self.db.refresh(assistant)
+        self.assertEqual(assistant.content, " ")
+
     def test_wrong_message_id_is_protocol_error(self) -> None:
         from app.assistant.durable.memory import (
             DurableMemoryError,

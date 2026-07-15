@@ -179,12 +179,18 @@ class MainAgentRunExecutor:
 
             if decision.short_circuit_after_result or decision.kind == "short_circuit":
                 # Post-result short-circuit may still need memory finalization.
+                # ready_for_completion (crash before enter_ready_for_memory) must
+                # enter memory and finalize using reconstructed transcript text.
+                # ready_for_memory finalizes as today. terminal is a no-op.
                 db.refresh(run)
-                if (
-                    self.finalize_memory
-                    and str(run.status) == STATUS_RUNNING
-                    and repo.is_ready_for_memory(run)
-                ):
+                if not self.finalize_memory or str(run.status) != STATUS_RUNNING:
+                    logger.info(
+                        "short_circuit no re-execution run_id=%s status=%s",
+                        claimed.run_id,
+                        getattr(run, "status", None),
+                    )
+                    return
+                if repo.is_ready_for_memory(run):
                     self._finalize_ready_memory(
                         db,
                         run=run,
@@ -192,10 +198,31 @@ class MainAgentRunExecutor:
                         expected_revision=int(run.state_revision),
                         heartbeat=heartbeat,
                     )
-                else:
-                    logger.info(
-                        "short_circuit no re-execution run_id=%s", claimed.run_id
+                    return
+                phase = self._current_checkpoint_phase(db, run_id=run.id)
+                if phase == "ready_for_completion":
+                    final_text = self._reconstruct_final_assistant_text(
+                        db, run_id=run.id
                     )
+                    self._enter_and_finalize_memory(
+                        db,
+                        run_id=run.id,
+                        lease=claimed.lease,
+                        expected_revision=int(run.state_revision),
+                        final_text=final_text,
+                        heartbeat=heartbeat,
+                    )
+                    return
+                if phase == "terminal":
+                    logger.info(
+                        "short_circuit terminal no-op run_id=%s", claimed.run_id
+                    )
+                    return
+                logger.info(
+                    "short_circuit no re-execution run_id=%s phase=%s",
+                    claimed.run_id,
+                    phase,
+                )
                 return
 
             if not decision.allow_provider_io and decision.kind not in {
@@ -257,12 +284,19 @@ class MainAgentRunExecutor:
                     if self.finalize_memory:
                         db.refresh(run)
                         # Result may have been ready_for_completion without memory.
+                        # Prefer reconstructed transcript over blank/" " fallback.
+                        final_text = (
+                            self.scripted_final_text
+                            or self._reconstruct_final_assistant_text(
+                                db, run_id=run.id
+                            )
+                        )
                         self._enter_and_finalize_memory(
                             db,
                             run_id=run.id,
                             lease=claimed.lease,
                             expected_revision=int(run.state_revision),
-                            final_text=self.scripted_final_text or " ",
+                            final_text=final_text,
                             heartbeat=heartbeat,
                         )
                     return
@@ -531,8 +565,14 @@ class MainAgentRunExecutor:
         if not _heartbeat_guard(heartbeat):
             return expected_revision
 
+        # Prefer real provider text; fall back to reconstructed transcript before blank.
+        if not str(final_text or "").strip():
+            final_text = self._reconstruct_final_assistant_text(db, run_id=run_id)
+        # ProviderAssistantMessage allows empty/None; keep a minimal placeholder only
+        # for the durable transcript row when no text exists at all.
+        transcript_content = str(final_text) if final_text is not None else ""
         assistant_msg = ProviderAssistantMessage(
-            content=final_text or " ",
+            content=transcript_content if transcript_content else " ",
             tool_calls=(),
         )
         result = commit_unit_result(
@@ -549,15 +589,48 @@ class MainAgentRunExecutor:
         expected_revision = result.state_revision
 
         if self.finalize_memory:
+            # Prefer real content for L0; reconstruct again if still blank.
+            memory_text = str(final_text or "").strip() or self._reconstruct_final_assistant_text(
+                db, run_id=run_id
+            )
             expected_revision = self._enter_and_finalize_memory(
                 db,
                 run_id=run_id,
                 lease=lease,
                 expected_revision=expected_revision,
-                final_text=final_text or " ",
+                final_text=memory_text,
                 heartbeat=heartbeat,
             )
         return expected_revision
+
+    def _current_checkpoint_phase(self, db: Any, *, run_id: UUID) -> str | None:
+        """Return current checkpoint phase or None when unavailable."""
+        try:
+            ck = load_current_checkpoint(db, run_id=run_id)
+            return str(ck.phase) if ck is not None else None
+        except Exception:  # noqa: BLE001 — classification best-effort
+            return None
+
+    def _reconstruct_final_assistant_text(self, db: Any, *, run_id: UUID) -> str:
+        """Rebuild final assistant text from durable provider transcript.
+
+        Prefers the last non-empty assistant message content. Falls back to
+        scripted_final_text when set; never invents blank whitespace as truth.
+        """
+        if self.scripted_final_text and str(self.scripted_final_text).strip():
+            return str(self.scripted_final_text)
+        try:
+            messages, _digest = reconstruct_provider_transcript(db, run_id=run_id)
+        except Exception:  # noqa: BLE001 — recovery path must stay best-effort
+            messages = ()
+        for msg in reversed(messages):
+            role = getattr(msg, "role", None)
+            if role != "assistant":
+                continue
+            content = getattr(msg, "content", None)
+            if isinstance(content, str) and content.strip():
+                return content
+        return ""
 
     def _enter_and_finalize_memory(
         self,
@@ -569,7 +642,11 @@ class MainAgentRunExecutor:
         final_text: str,
         heartbeat: Callable[[], bool],
     ) -> int:
-        """Enter ready_for_memory with L0 final content, then apply memory once."""
+        """Enter ready_for_memory with L0 final content, then apply memory once.
+
+        Stages L0 on the session (commit=False) then commits ready_for_memory via
+        ``commit_unit_result`` so L0 write and phase CAS share one transaction.
+        """
         from app.assistant.durable.memory import (
             DurableMemoryError,
             DurableMemoryFinalizer,
@@ -593,12 +670,28 @@ class MainAgentRunExecutor:
 
         finalizer = DurableMemoryFinalizer(db)
 
-        # If not yet in ready_for_memory, enter phase then stage L0 final content.
-        # Task 8 residual: do NOT use broad finalize_run_memory for protocol errors.
+        # If not yet in ready_for_memory, stage L0 then enter phase under one CAS.
+        # Prefer reconstructed transcript when caller passed blank/whitespace.
         if not repo.is_ready_for_memory(run):
-            content = str(final_text or " ").strip() or " "
+            content = str(final_text or "").strip()
+            if not content:
+                content = self._reconstruct_final_assistant_text(db, run_id=run_id).strip()
+            if not content:
+                # Last-resort placeholder only when transcript truly has no text.
+                # L0 rejects whitespace-only; use a stable non-blank token.
+                content = "(no content)"
             digest = digest_final_content(content)
             try:
+                # Stage L0 on the same Session; commit_unit_result commits both
+                # so L0 write and ready_for_memory CAS share one transaction.
+                if run.assistant_message_id is not None:
+                    finalizer.apply_final_l0_content(
+                        run_id=run_id,
+                        assistant_message_id=run.assistant_message_id,
+                        content=content,
+                        content_digest=digest,
+                        commit=False,
+                    )
                 result = commit_unit_result(
                     db,
                     run_id=run_id,
@@ -611,24 +704,24 @@ class MainAgentRunExecutor:
                     completed_logical_unit_id="completion:final",
                 )
                 expected_revision = result.state_revision
-                if run.assistant_message_id is not None:
-                    try:
-                        finalizer.apply_final_l0_content(
-                            run_id=run_id,
-                            assistant_message_id=run.assistant_message_id,
-                            content=content,
-                            content_digest=digest,
-                            commit=True,
-                        )
-                    except DurableMemoryError as exc:
-                        # Protocol errors must not convert to memory_failed.
-                        logger.warning(
-                            "l0 final content apply failed run_id=%s code=%s",
-                            run_id,
-                            exc.code,
-                        )
-                        raise
+            except DurableMemoryError as exc:
+                # Protocol errors must not convert to memory_failed.
+                try:
+                    db.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.warning(
+                    "l0 final content apply failed run_id=%s code=%s",
+                    run_id,
+                    exc.code,
+                )
+                raise
             except DurableRunConflict as exc:
+                # Roll back staged L0 so a later successful CAS is clean.
+                try:
+                    db.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
                 if exc.code == "run_finalizing":
                     db.refresh(run)
                     expected_revision = int(run.state_revision)

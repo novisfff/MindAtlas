@@ -682,19 +682,25 @@ class RecoveryClassifier:
                 cred_id = UUID(str(raw_id))
             except (TypeError, ValueError):
                 continue
-            raw_rev = (
-                obj.get("credentialRuntimeRevision")
-                or obj.get("credential_runtime_revision")
-            )
+            # Explicit None checks: revision 0 is a valid revision and must not be
+            # treated as missing (``or`` would collapse 0 to the next key / None).
+            if "credentialRuntimeRevision" in obj:
+                raw_rev = obj.get("credentialRuntimeRevision")
+            elif "credential_runtime_revision" in obj:
+                raw_rev = obj.get("credential_runtime_revision")
+            else:
+                raw_rev = None
             rev: int | None
             try:
                 rev = int(raw_rev) if raw_rev is not None else None
             except (TypeError, ValueError):
                 rev = None
-            digest = (
-                obj.get("credentialConfigDigest")
-                or obj.get("credential_config_digest")
-            )
+            if "credentialConfigDigest" in obj:
+                digest = obj.get("credentialConfigDigest")
+            elif "credential_config_digest" in obj:
+                digest = obj.get("credential_config_digest")
+            else:
+                digest = None
             digest_s = str(digest) if digest else None
             return cred_id, rev, digest_s
         return None

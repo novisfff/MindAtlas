@@ -470,6 +470,7 @@ class AssistantService:
         run_svc.append_event(
             run_id=run.id,
             event_name="run_status",
+            event_key=f"run.status:queued:{run.id}",
             payload={
                 "status": "queued",
                 "runtimeKind": str(run.runtime_kind or runtime_kind),

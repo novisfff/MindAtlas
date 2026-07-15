@@ -751,6 +751,84 @@ class DurableExecutionBoundaryTests(unittest.TestCase):
         self.assertGreaterEqual(len(msgs), 1)
         self.assertGreaterEqual(heartbeats["n"], 1)
 
+    def test_short_circuit_ready_for_completion_finalizes_memory(self) -> None:
+        """Crash after ready_for_completion must still enter memory and complete.
+
+        Classifier returns short_circuit for ready_for_completion with no inflight.
+        Runner must reconstruct assistant text from transcript, enter ready_for_memory,
+        finalize memory, and reach terminal completed — not leave the Run running forever.
+        """
+        from app.assistant.durable.checkpoints import commit_unit_result
+        from app.assistant.durable.leases import ClaimedLease
+        from app.assistant.durable.recovery import RecoveryDecision
+        from app.assistant.durable.repository import LeaseToken
+        from app.assistant.durable.runner import MainAgentRunExecutor
+        from app.assistant.models import Message
+        from app.assistant.provider_loop.messages import ProviderAssistantMessage
+
+        run, lease, rev, repo = self._seed_running_with_base()
+        # Commit post-result checkpoint at ready_for_completion with assistant text.
+        result = commit_unit_result(
+            self.db,
+            run_id=run.id,
+            lease=lease,
+            expected_revision=rev,
+            phase="ready_for_completion",
+            next_action_kind="complete",
+            clear_inflight=True,
+            provider_messages=(
+                ProviderAssistantMessage(content="reconstructed final answer", tool_calls=()),
+            ),
+            completed_logical_unit_id="provider:0",
+        )
+        self.db.refresh(run)
+        self.assertEqual(run.status, "running")
+        self.assertFalse(repo.is_ready_for_memory(run))
+
+        # Simulate recovery claim: status recovering, short_circuit decision.
+        run.status = "recovering"
+        self.db.commit()
+        self.db.refresh(run)
+
+        claimed_lease = ClaimedLease(
+            run=run,
+            lease=LeaseToken(
+                run_id=run.id,
+                worker_id=self.identity.worker_id,
+                lease_generation=int(run.lease_generation),
+            ),
+            kind="reclaim_recovering",
+            state_revision=int(run.state_revision),
+            status="recovering",
+        )
+        decision = RecoveryDecision(
+            kind="short_circuit",
+            reason_code="post_result_committed",
+            detail="checkpoint phase=ready_for_completion has no inflight unit",
+            allow_provider_io=False,
+            allow_capability_io=False,
+            short_circuit_after_result=True,
+        )
+        executor = MainAgentRunExecutor(
+            provider_factory=None,
+            scripted_final_text=None,
+            finalize_memory=True,
+        )
+        executor.execute(
+            claimed=claimed_lease,
+            decision=decision,
+            heartbeat=lambda: True,
+            session_factory=lambda: self.db,
+        )
+        self.db.refresh(run)
+        self.assertEqual(run.status, "completed", f"expected completed, got {run.status}")
+        self.assertIn(str(run.memory_commit_status or ""), {"committed", "failed"})
+        assistant = self.db.get(Message, run.assistant_message_id)
+        self.assertIsNotNone(assistant)
+        self.assertEqual(assistant.content, "reconstructed final answer")
+        # result state_revision used so the binding is not unused
+        self.assertGreaterEqual(result.state_revision, rev)
+
 
 class DurableSkillActivationTests(unittest.TestCase):
     """Process-local stage + one post-lineage result transaction as accept."""
