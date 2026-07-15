@@ -514,18 +514,19 @@ def _append_checkpoint(session, run, *, sequence: int, phase: str):
 
 
 def test_orphan_scanner_deletes_terminal_run_with_historical_nonterminal_checkpoints() -> None:
-    """Historical non-terminal checkpoints must not permanently block orphan GC.
+    """Terminal Run status allows orphan GC even when current phase is not 'terminal'.
 
-    Multi-step completed runs keep append-only history with phase != terminal;
-    only the *current* checkpoint (terminal) gates inflight units.
+    Production memory finalizer leaves current checkpoint at ready_for_memory while
+    status becomes completed. Historical non-terminal phases are append-only and
+    must never permanently block orphan GC (Plan §10 prefer-leak, not infinite retention).
     """
     with session_scope() as session:
         run, _ = _make_run(session, status="completed")
-        # Multi-step history: ready → waiting → terminal (current)
+        # Multi-step history ending at ready_for_memory (real production finalizer phase)
         _append_checkpoint(session, run, sequence=1, phase="ready_for_provider")
         _append_checkpoint(session, run, sequence=2, phase="waiting")
-        terminal = _append_checkpoint(session, run, sequence=3, phase="terminal")
-        run.current_checkpoint_id = terminal.id
+        current = _append_checkpoint(session, run, sequence=3, phase="ready_for_memory")
+        run.current_checkpoint_id = current.id
         session.commit()
 
         from app.assistant.durable.artifacts import InMemoryArtifactObjectBackend
@@ -534,7 +535,7 @@ def test_orphan_scanner_deletes_terminal_run_with_historical_nonterminal_checkpo
         svc = _service(session, backend=backend)
         prepared = svc.prepare(run_id=run.id, content=b"H" * 80)
         assert prepared.object_key is not None
-        # Unreferenced object aged past grace on a terminal multi-step run
+        # Unreferenced object aged past grace on a completed multi-step run
         backend.force_age(bucket=BUCKET, object_key=prepared.object_key, age_sec=10_000)
         deleted = svc.scan_orphans(grace_sec=100)
         assert deleted == 1

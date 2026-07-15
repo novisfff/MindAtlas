@@ -1,7 +1,7 @@
 # Plan 06 Task 10 — Rollout and Exit Evidence
 
 **Recorded at (UTC):** 2026-07-15T09:31:21Z  
-**Branch:** `worktree-plan-06-durable-agent-run` / `pr-52`  
+**Branch:** `worktree-plan-06-durable-agent-run` / `pr-53`  
 **Worktree:** `/root/MindAtlas/.claude/worktrees/plan-06-durable-agent-run`  
 **HEAD at record:** `f068d05be5199f1fd8fdd8b13664e5170bf39558`  
 **Base main (Plan 05 merged):** `0811239df2ef47ffff32e2aed6326f3cdd15f0f0`  
@@ -266,3 +266,25 @@ LIVE_COMPOSE_GOLDEN=not_run_ci_gated
 ```
 
 Plan 06 implementation + rollout documentation complete for merge-dark / operator enablement review. Live PG/MinIO/compose gates remain required before production `read_only`.
+
+## Audit fix wave (post Task 10)
+
+Addressed independent PR audit findings that were verified against the tree:
+
+| Issue | Fix |
+|---|---|
+| Empty-DB migration downgrade required ACK | Downgrade refuses **only** when durable data exists; empty disposable DBs allow upgrade→downgrade→upgrade |
+| Live-lease cancel never sealed by owner | `_RunCancelProbe` observes `cancelling`/`cancel_requested_at`; owner calls `finalize_cancellation` mid-I/O and on CAS conflict |
+| No lease heartbeat during Provider stream | `_LeaseHeartbeatPump` renews lease on a background interval during synchronous adapter I/O |
+| Production finalize emitted no public SSE | `public_terminal_events` commits `content_delta` + `run_status` + `message_end` atomically with memory finalizer / cancel seal |
+| Recovery used `run.cancelled` / `run.failed` names | Recovery finalizer events use frontend-observed `run_status` (+ `message_end` for cancel/fail) |
+| Orphan GC required checkpoint phase=`terminal` | Terminal **status** is sufficient; `ready_for_memory` current phase no longer permanently blocks GC after completed |
+
+### Still intentional residuals (pre-`read_only`)
+
+- Default `MainAgentRunExecutor()` remains a scripted single-unit scaffold without full Plan 03/05 dual-wiring or admission-frozen Manifest digests (`"a"*64` placeholders on fresh materialize). **Mode default stays `off`.**
+- Live PostgreSQL two-session / SKIP LOCKED / MinIO orphan barriers / compose golden kill-restart+SSE still CI/staging-gated.
+- Placeholder digests and empty default `memory_preparer` must be replaced before enablement.
+
+Regression: `backend/tests/test_durable_audit_fixes.py` (7 passed).
+

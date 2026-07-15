@@ -1347,9 +1347,16 @@ def _has_durable_main_agent_data(conn) -> bool:
 
 
 def downgrade() -> None:
+    """Drop Plan 06 durable schema.
+
+    Refusal rule (Plan 06 Task 1): block only when durable Main Agent data
+    exists and the maintenance acknowledgment is absent. Empty disposable
+    databases must allow upgrade → downgrade → upgrade without an env ack so
+    migration gates remain meaningful. When durable rows remain, ack alone is
+    insufficient — data must be purged first.
+    """
     conn = op.get_bind()
     has_data = _has_durable_main_agent_data(conn)
-    ack = os.environ.get(DOWNGRADE_ACK_ENV, "").strip()
     if has_data:
         raise RuntimeError(
             f"{DOWNGRADE_BLOCKED_TOKEN}: durable Main Agent Run/history/worker/"
@@ -1357,12 +1364,9 @@ def downgrade() -> None:
             f"procedure, then set {DOWNGRADE_ACK_ENV}=1 only after data is gone "
             "(ack alone is insufficient while durable rows remain)"
         )
-    if ack != "1":
-        # Even with no durable data, require acknowledgment for a destructive schema drop.
-        raise RuntimeError(
-            f"{DOWNGRADE_BLOCKED_TOKEN}: set {DOWNGRADE_ACK_ENV}=1 to acknowledge "
-            "Plan 06 schema removal after confirming no durable Main Agent data remains"
-        )
+    # No durable data: allow schema drop without ack so disposable upgrade →
+    # downgrade → upgrade cycles work (Plan 06 Task 1). Refusal is for data
+    # presence, not empty schema removal.
 
     # Drop triggers / functions first.
     op.execute(

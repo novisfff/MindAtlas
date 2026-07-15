@@ -10,12 +10,17 @@ Key rules:
 - Fresh authorization evidence after recovery; never replay credentials.
 - Uncommitted unit retry reuses logical_unit_id and does not double-charge.
 - After provider result, enter ``ready_for_memory`` and finalize memory once.
+- Lease heartbeat continues during synchronous Provider I/O (not only at edges).
+- Owning worker observes cancel_requested/cancelling and finalizes cancellation.
+- Public content/status/terminal events commit with the durable finalizer CAS.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+import threading
+import time
+from typing import Any, Callable, Iterator, Mapping, Sequence
 from uuid import UUID
 
 from app.assistant.durable.checkpoints import (
@@ -37,7 +42,10 @@ from app.assistant.durable.recovery import RecoveryClassifier, RecoveryDecision
 from app.assistant.durable.repository import (
     DurableRunConflict,
     DurableRunRepository,
+    EventSpec,
     LeaseToken,
+    STATUS_CANCELLING,
+    STATUS_CANCELLED,
     STATUS_RECOVERING,
     STATUS_RUNNING,
 )
@@ -48,6 +56,11 @@ from app.assistant.provider_loop.messages import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Default heartbeat period during long adapter I/O. Worker settings may be
+# tighter; executor uses min(this, lease_ttl/3) when known.
+_DEFAULT_IO_HEARTBEAT_INTERVAL_SEC = 5.0
+_CONTENT_DELTA_CHUNK = 256
 
 
 def assert_no_legacy_fallback(run: Any) -> None:
@@ -77,6 +90,224 @@ def _heartbeat_guard(heartbeat: Callable[[], bool]) -> bool:
     """Invoke lease heartbeat with optional crash inject at during_heartbeat."""
     maybe_crash(CrashPoint.DURING_HEARTBEAT)
     return bool(heartbeat())
+
+
+class _LeaseHeartbeatPump:
+    """Background lease renewal during synchronous adapter I/O.
+
+    Plan §8.3 requires heartbeats while a unit is held, including long Provider
+    streams. Without a pump, the default 30s lease expires mid-request and a
+    second worker may reclaim the same logical unit.
+    """
+
+    def __init__(
+        self,
+        heartbeat: Callable[[], bool],
+        *,
+        interval_sec: float = _DEFAULT_IO_HEARTBEAT_INTERVAL_SEC,
+    ) -> None:
+        self._heartbeat = heartbeat
+        self._interval = max(0.5, float(interval_sec))
+        self._stop = threading.Event()
+        self._alive = True
+        self._thread: threading.Thread | None = None
+
+    @property
+    def alive(self) -> bool:
+        return self._alive
+
+    def __enter__(self) -> "_LeaseHeartbeatPump":
+        # Immediate edge heartbeat before starting the background loop.
+        if not _heartbeat_guard(self._heartbeat):
+            self._alive = False
+            return self
+        self._thread = threading.Thread(
+            target=self._loop,
+            name="assistant-lease-heartbeat",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self._interval + 1.0)
+        # Final edge heartbeat after I/O (best-effort).
+        if self._alive:
+            try:
+                if not _heartbeat_guard(self._heartbeat):
+                    self._alive = False
+            except Exception:  # noqa: BLE001 — never raise from __exit__
+                self._alive = False
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                if not _heartbeat_guard(self._heartbeat):
+                    self._alive = False
+                    return
+            except Exception:  # noqa: BLE001
+                self._alive = False
+                return
+
+
+class _RunCancelProbe:
+    """Cancellation probe that observes durable cancel_requested / cancelling.
+
+    Plan §4: the lease owner remains responsible for cancelling → cancelled.
+    A hard-coded ``return False`` probe left Runs stuck in cancelling until
+    lease TTL recovery.
+    """
+
+    def __init__(
+        self,
+        session_factory: Callable[[], Any],
+        *,
+        run_id: UUID,
+        lease: LeaseToken,
+    ) -> None:
+        self._session_factory = session_factory
+        self._run_id = run_id
+        self._lease = lease
+        self._cancelled = False
+        self._shared = bool(getattr(session_factory, "_shared_session", False))
+
+    def _close(self, db: Any) -> None:
+        """Close only factory-owned sessions.
+
+        Unit tests pass a lambda that always returns the same Session; closing
+        that would dispose the temp SQLite DB mid-test. Production
+        ``SessionLocal()`` returns a new instance every call — those are closed.
+        """
+        if self._shared:
+            return
+        try:
+            other = self._session_factory()
+            if other is db:
+                # Shared session factory (tests) — never close.
+                return
+            try:
+                other.close()
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            db.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def is_cancelled(self) -> bool:
+        if self._cancelled:
+            return True
+        db = self._session_factory()
+        try:
+            repo = DurableRunRepository(db)
+            run = repo.get_run(self._run_id)
+            if run is None:
+                self._cancelled = True
+                return True
+            status = str(run.status or "")
+            if status == STATUS_CANCELLING or run.cancel_requested_at is not None:
+                self._cancelled = True
+                return True
+            if status in {"cancelled", "completed", "failed"}:
+                self._cancelled = True
+                return True
+            return False
+        except Exception:  # noqa: BLE001 — probe is best-effort fail-closed
+            logger.exception("cancel probe failed run_id=%s", self._run_id)
+            return False
+        finally:
+            self._close(db)
+
+    def try_finalize(self) -> bool:
+        """If Run is cancelling under our lease, seal cancelled with public events."""
+        db = self._session_factory()
+        try:
+            repo = DurableRunRepository(db)
+            # SQLite unit tests cannot use FOR UPDATE; production PG can.
+            try:
+                run = repo.get_run(self._run_id, for_update=True)
+            except Exception:  # noqa: BLE001
+                run = repo.get_run(self._run_id)
+            if run is None:
+                return False
+            if str(run.status) != STATUS_CANCELLING:
+                return str(run.status) == STATUS_CANCELLED
+            rev = int(run.state_revision)
+            events = public_terminal_events(
+                run_id=self._run_id,
+                status="cancelled",
+                finish_reason="cancelled",
+                content=None,
+            )
+            try:
+                repo.finalize_cancellation(
+                    run_id=self._run_id,
+                    expected_revision=rev,
+                    lease=self._lease,
+                    require_lease=True,
+                    events=events,
+                )
+                return True
+            except DurableRunConflict as exc:
+                logger.info(
+                    "cancel finalize conflict run_id=%s code=%s",
+                    self._run_id,
+                    exc.code,
+                )
+                return False
+        finally:
+            self._close(db)
+
+
+def public_terminal_events(
+    *,
+    run_id: UUID,
+    status: str,
+    finish_reason: str,
+    content: str | None = None,
+) -> tuple[EventSpec, ...]:
+    """Deterministic public SSE package for terminal durable completion/cancel.
+
+    Frontend reducers observe ``run_status`` + ``message_end`` (and optional
+    ``content_delta``). Without these, DB may be completed while the client
+    still holds a nonterminal local status.
+    """
+    rid = str(run_id)
+    specs: list[EventSpec] = []
+    text = str(content or "")
+    if text and status == "completed":
+        # Bounded chunks so reconnect clients can reconstruct answer text.
+        for i in range(0, len(text), _CONTENT_DELTA_CHUNK):
+            chunk = text[i : i + _CONTENT_DELTA_CHUNK]
+            specs.append(
+                EventSpec(
+                    event_key=f"content_delta:{rid}:{i}",
+                    event_name="content_delta",
+                    payload={"delta": chunk, "runId": rid},
+                    visibility="public",
+                )
+            )
+    specs.append(
+        EventSpec(
+            event_key=f"run_status:{rid}:{status}",
+            event_name="run_status",
+            payload={"status": status, "runId": rid},
+            visibility="public",
+        )
+    )
+    specs.append(
+        EventSpec(
+            event_key=f"message_end:{rid}:{finish_reason}",
+            event_name="message_end",
+            payload={"finishReason": finish_reason, "runId": rid},
+            visibility="public",
+        )
+    )
+    return tuple(specs)
 
 
 class MainAgentRunExecutor:
@@ -308,6 +539,7 @@ class MainAgentRunExecutor:
                     unit=unit,
                     heartbeat=heartbeat,
                     reuse=True,
+                    session_factory=session_factory,
                 )
                 return
 
@@ -320,6 +552,7 @@ class MainAgentRunExecutor:
                 unit=None,
                 heartbeat=heartbeat,
                 reuse=False,
+                session_factory=session_factory,
             )
         except DurableRunConflict as exc:
             logger.info(
@@ -327,6 +560,19 @@ class MainAgentRunExecutor:
                 claimed.run_id,
                 exc.code,
             )
+            # Lease owner remains responsible for cancelling → cancelled. When a
+            # stop wins CAS first, result commits fail; seal cancellation now so
+            # the Run does not wait for lease TTL recovery.
+            try:
+                probe = _RunCancelProbe(
+                    session_factory, run_id=claimed.run_id, lease=claimed.lease
+                )
+                if probe.is_cancelled():
+                    probe.try_finalize()
+            except Exception:  # noqa: BLE001 — best-effort seal
+                logger.exception(
+                    "post-conflict cancel finalize failed run_id=%s", claimed.run_id
+                )
         except Exception:
             logger.exception("execute failed run_id=%s", claimed.run_id)
             raise
@@ -418,6 +664,7 @@ class MainAgentRunExecutor:
         unit: DurableExecutionUnitV1 | None,
         heartbeat: Callable[[], bool],
         reuse: bool,
+        session_factory: Callable[[], Any] | None = None,
     ) -> int:
         # Determine logical unit.
         if unit is None:
@@ -526,43 +773,72 @@ class MainAgentRunExecutor:
         if not _heartbeat_guard(heartbeat):
             return expected_revision
 
-        # External I/O outside transaction.
-        final_text = self.scripted_final_text or ""
-        if self.provider_factory is not None:
-            provider = self.provider_factory(run_id=run_id)
-            _messages, _digest = reconstruct_provider_transcript(db, run_id=run_id)
-            del _messages, _digest
-            # Minimal stream consume for scripted providers.
-            try:
-                # Scripted providers in unit tests may not need a full request.
-                class _Cancel:
-                    def is_cancelled(self) -> bool:
-                        return False
+        # Cancellation probe observes durable cancel_requested / cancelling.
+        # Fall back to a no-op probe only when session_factory is unavailable
+        # (should not happen on the production worker path).
+        cancel_probe: _RunCancelProbe | None = None
+        if session_factory is not None:
+            cancel_probe = _RunCancelProbe(
+                session_factory, run_id=run_id, lease=lease
+            )
+            if cancel_probe.is_cancelled():
+                cancel_probe.try_finalize()
+                return expected_revision
 
-                # Prefer stream_round if available.
-                if hasattr(provider, "stream_round"):
-                    try:
-                        # Many fakes ignore the request.
-                        stream = provider.stream_round(None, cancellation=_Cancel())
-                    except TypeError:
-                        stream = provider.stream_round(
-                            request=None, cancellation=_Cancel()
-                        )
-                    chunks: list[str] = []
-                    for event in stream:
-                        delta = getattr(event, "delta", None)
-                        if isinstance(delta, str) and delta:
-                            chunks.append(delta)
-                    if chunks and not final_text:
-                        final_text = "".join(chunks)
-            except Exception:
-                logger.exception("provider stream failed run_id=%s", run_id)
-                raise
+        class _NoCancel:
+            def is_cancelled(self) -> bool:
+                return False
+
+        cancellation = cancel_probe if cancel_probe is not None else _NoCancel()
+
+        # External I/O outside transaction, with independent lease heartbeats.
+        final_text = self.scripted_final_text or ""
+        cancelled_during_io = False
+        with _LeaseHeartbeatPump(heartbeat) as pump:
+            if not pump.alive:
+                return expected_revision
+            if self.provider_factory is not None:
+                provider = self.provider_factory(run_id=run_id)
+                _messages, _digest = reconstruct_provider_transcript(db, run_id=run_id)
+                del _messages, _digest
+                try:
+                    if hasattr(provider, "stream_round"):
+                        try:
+                            stream = provider.stream_round(
+                                None, cancellation=cancellation
+                            )
+                        except TypeError:
+                            stream = provider.stream_round(
+                                request=None, cancellation=cancellation
+                            )
+                        chunks: list[str] = []
+                        for event in stream:
+                            if not pump.alive:
+                                return expected_revision
+                            if cancellation.is_cancelled():
+                                cancelled_during_io = True
+                                break
+                            delta = getattr(event, "delta", None)
+                            if isinstance(delta, str) and delta:
+                                chunks.append(delta)
+                        if chunks and not final_text:
+                            final_text = "".join(chunks)
+                except Exception:
+                    logger.exception("provider stream failed run_id=%s", run_id)
+                    raise
+
+        if cancelled_during_io or cancellation.is_cancelled():
+            if cancel_probe is not None:
+                cancel_probe.try_finalize()
+            return expected_revision
 
         # Kill point 3: after Provider response before result commit.
         maybe_crash(CrashPoint.AFTER_PROVIDER_RESPONSE_BEFORE_RESULT)
 
         if not _heartbeat_guard(heartbeat):
+            return expected_revision
+        if cancel_probe is not None and cancel_probe.is_cancelled():
+            cancel_probe.try_finalize()
             return expected_revision
 
         # Prefer real provider text; fall back to reconstructed transcript before blank.
@@ -730,6 +1006,12 @@ class MainAgentRunExecutor:
 
             # Kill point 9: after final Message before memory application.
             maybe_crash(CrashPoint.AFTER_FINAL_MESSAGE_BEFORE_MEMORY_APPLICATION)
+            accepted_text = content
+        else:
+            # Already in ready_for_memory — reconstruct content for public SSE.
+            accepted_text = str(final_text or "").strip() or self._reconstruct_final_assistant_text(
+                db, run_id=run_id
+            ).strip()
 
         db.refresh(run)
         return self._finalize_ready_memory(
@@ -738,6 +1020,7 @@ class MainAgentRunExecutor:
             lease=lease,
             expected_revision=int(run.state_revision),
             heartbeat=heartbeat,
+            final_text=accepted_text,
         )
 
     def _finalize_ready_memory(
@@ -748,6 +1031,7 @@ class MainAgentRunExecutor:
         lease: LeaseToken,
         expected_revision: int,
         heartbeat: Callable[[], bool],
+        final_text: str | None = None,
     ) -> int:
         from app.assistant.durable.memory import (
             CODE_NOT_READY,
@@ -783,21 +1067,42 @@ class MainAgentRunExecutor:
             prepared = None
             compute_error = exc
 
+        # Reconstruct public answer text for content_delta when not provided.
+        content = str(final_text or "").strip()
+        if not content:
+            content = self._reconstruct_final_assistant_text(db, run_id=run.id).strip()
+
         # Careful finalization: protocol/not_ready must not be converted to
         # memory_failed. Only computation/provider failures use failed path.
+        # Public terminal events commit atomically with the finalizer CAS so SSE
+        # clients observe content + completed + message_end.
         try:
             if compute_error is not None or prepared is None:
+                events = public_terminal_events(
+                    run_id=run.id,
+                    status="completed",
+                    finish_reason="error",
+                    content=content or None,
+                )
                 result = finalizer.finalize_memory_failed(
                     run_id=run.id,
                     expected_revision=expected_revision,
                     lease=lease,
+                    events=events,
                 )
                 return result.state_revision
+            events = public_terminal_events(
+                run_id=run.id,
+                status="completed",
+                finish_reason="stop",
+                content=content or None,
+            )
             result = finalizer.apply_prepared_memory_and_finalize(
                 run_id=run.id,
                 expected_revision=expected_revision,
                 lease=lease,
                 prepared=prepared,
+                events=events,
             )
             return result.state_revision
         except DurableMemoryError as exc:
@@ -805,11 +1110,18 @@ class MainAgentRunExecutor:
                 raise
             # Revision conflict / other apply failures → failed outcome without
             # erasing L0 (finalize_memory_failed path).
+            events = public_terminal_events(
+                run_id=run.id,
+                status="completed",
+                finish_reason="error",
+                content=content or None,
+            )
             result = finalizer.finalize_memory_failed(
                 run_id=run.id,
                 expected_revision=expected_revision,
                 lease=lease,
                 diagnostic_code=exc.code,
+                events=events,
             )
             return result.state_revision
 

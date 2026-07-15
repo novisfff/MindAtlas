@@ -373,6 +373,8 @@ class RecoveryClassifier:
         )
 
         if decision.kind == "cancel_only":
+            # Frontend observes run_status + message_end (not run.cancelled).
+            rid = str(run.id)
             return self.repo.finalize_cancellation(
                 run_id=run.id,
                 expected_revision=rev,
@@ -380,12 +382,20 @@ class RecoveryClassifier:
                 require_lease=True,
                 events=(
                     EventSpec(
-                        event_key=f"recovery.cancel_only:{run.id}:{rev}",
-                        event_name="run.cancelled",
+                        event_key=f"run_status:{rid}:cancelled",
+                        event_name="run_status",
                         payload={
+                            "status": "cancelled",
+                            "runId": rid,
                             "reasonCode": decision.reason_code,
                             "via": "recovery_finalizer",
                         },
+                        visibility="public",
+                    ),
+                    EventSpec(
+                        event_key=f"message_end:{rid}:cancelled",
+                        event_name="message_end",
+                        payload={"finishReason": "cancelled", "runId": rid},
                         visibility="public",
                     ),
                 ),
@@ -408,8 +418,10 @@ class RecoveryClassifier:
                     events=(
                         EventSpec(
                             event_key=f"recovery.reconcile:{run.id}:{rev}",
-                            event_name="run.needs_reconciliation",
+                            event_name="run_status",
                             payload={
+                                "status": "needs_reconciliation",
+                                "runId": str(run.id),
                                 "reasonCode": decision.reason_code,
                                 "detail": decision.detail,
                             },
@@ -428,8 +440,10 @@ class RecoveryClassifier:
                 events=(
                     EventSpec(
                         event_key=f"recovery.reconcile:{run.id}:{rev}",
-                        event_name="run.needs_reconciliation",
+                        event_name="run_status",
                         payload={
+                            "status": "needs_reconciliation",
+                            "runId": str(run.id),
                             "reasonCode": decision.reason_code,
                             "detail": decision.detail,
                         },
@@ -451,13 +465,21 @@ class RecoveryClassifier:
                     events=(
                         EventSpec(
                             event_key=f"recovery.fail:{run.id}:{rev}",
-                            event_name="run.failed",
+                            event_name="run_status",
                             payload={
+                                "status": "failed",
+                                "runId": str(run.id),
                                 "reasonCode": decision.reason_code,
                                 "detail": decision.detail,
                             },
                             visibility="public",
                         ),
+                    EventSpec(
+                        event_key=f"message_end:{run.id}:error",
+                        event_name="message_end",
+                        payload={"finishReason": "error", "runId": str(run.id)},
+                        visibility="public",
+                    ),
                     ),
                 )
             return self.repo.commit_running_result(
@@ -470,11 +492,19 @@ class RecoveryClassifier:
                 events=(
                     EventSpec(
                         event_key=f"recovery.fail:{run.id}:{rev}",
-                        event_name="run.failed",
+                        event_name="run_status",
                         payload={
+                            "status": "failed",
+                            "runId": str(run.id),
                             "reasonCode": decision.reason_code,
                             "detail": decision.detail,
                         },
+                        visibility="public",
+                    ),
+                    EventSpec(
+                        event_key=f"message_end:{run.id}:error",
+                        event_name="message_end",
+                        payload={"finishReason": "error", "runId": str(run.id)},
                         visibility="public",
                     ),
                 ),
