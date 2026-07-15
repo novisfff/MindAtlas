@@ -25,4 +25,21 @@ describe('chat-store event cursor', () => {
     expect(store.getState().activeRunId).toBeNull()
     expect(store.getState().activeRunStatus).toBeNull()
   })
+
+  it('setActiveRun does not rewind lastEventSeq for the same Run', () => {
+    const store = createStore<ChatState>(createChatLogic)
+    store.getState().setActiveRun('run-1', 'running', 10)
+    expect(store.getState().lastEventSeq).toBe(10)
+    // Re-attach with an older cursor must not rewind.
+    store.getState().setActiveRun('run-1', 'recovering', 4)
+    expect(store.getState().lastEventSeq).toBe(10)
+    expect(store.getState().activeRunStatus).toBe('recovering')
+    // Forward progress is allowed.
+    store.getState().setActiveRun('run-1', 'running', 12)
+    expect(store.getState().lastEventSeq).toBe(12)
+    // Switching to a different Run may reset the cursor.
+    store.getState().setActiveRun('run-2', 'running', 1)
+    expect(store.getState().activeRunId).toBe('run-2')
+    expect(store.getState().lastEventSeq).toBe(1)
+  })
 })

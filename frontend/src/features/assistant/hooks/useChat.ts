@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useContext, useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { globalChatStore, useChatStore } from '../stores/chat-store'
+import { ChatStoreContext, globalChatStore, useChatStore } from '../stores/chat-store'
 import { buildRunStreamUrl, createConversation, getActiveRun, stopRun } from '../api'
 import { assistantKeys } from '../queries'
 import { ToolCall, SkillCall, WorkflowStep } from '../types'
@@ -19,6 +19,8 @@ import { withMindAtlasLocale } from '@/lib/api/locale'
 import { SSEParser } from '@/lib/sse/SSEParser'
 
 const RUN_CURSOR_KEY_PREFIX = 'assistant.run.cursor.'
+/** Delay before re-attaching SSE after a preserved disconnect. */
+const REATTACH_DELAY_MS = 750
 
 const readStoredRunSeq = (runId: string): number => {
   try {
@@ -41,6 +43,11 @@ const writeStoredRunSeq = (runId: string, seq: number) => {
 
 export function useChat() {
   const queryClient = useQueryClient()
+  // Prefer the provider-bound store (AssistantPage local instance). Fall back to
+  // the module singleton only when no ChatStoreProvider is mounted (FloatingWidget).
+  const storeFromContext = useContext(ChatStoreContext)
+  const chatStore = storeFromContext || globalChatStore
+
   const {
     messages,
     isLoading,
@@ -71,6 +78,11 @@ export function useChat() {
   const conversationRef = useRef<string | null>(currentConversationId)
   /** Per-stream dedupe state; survives equal/older cursor reconnects for the same Run. */
   const eventDedupeRef = useRef<EventDedupeState>(createEventDedupeState())
+  const reattachTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Stable ref so streamFromUrl can schedule reattach without circular deps.
+  const attachActiveRunRef = useRef<
+    ((conversationId: string | null | undefined) => Promise<boolean>) | null
+  >(null)
 
   useEffect(() => {
     const previous = conversationRef.current
@@ -79,12 +91,25 @@ export function useChat() {
       abortRef.current?.abort()
       streamingRunRef.current = null
       eventDedupeRef.current = createEventDedupeState()
+      if (reattachTimerRef.current) {
+        clearTimeout(reattachTimerRef.current)
+        reattachTimerRef.current = null
+      }
       clearActiveRun()
       setActiveWorkflowSteps([])
       setLoading(false)
     }
     conversationRef.current = current
   }, [clearActiveRun, currentConversationId, setActiveWorkflowSteps, setLoading])
+
+  useEffect(() => {
+    return () => {
+      if (reattachTimerRef.current) {
+        clearTimeout(reattachTimerRef.current)
+        reattachTimerRef.current = null
+      }
+    }
+  }, [])
 
   const streamFromUrl = useCallback(async (
     params: {
@@ -151,6 +176,41 @@ export function useChat() {
         }
       }
       return true
+    }
+
+    /** Read status from the same store instance this hook writes to. */
+    const readActiveRunStatus = (): string | null => {
+      return chatStore.getState().activeRunStatus
+    }
+
+    const scheduleReattach = (conversationId: string) => {
+      if (reattachTimerRef.current) {
+        clearTimeout(reattachTimerRef.current)
+      }
+      reattachTimerRef.current = setTimeout(() => {
+        reattachTimerRef.current = null
+        // Only reattach if still no live reader and conversation unchanged.
+        if (streamingRunRef.current) return
+        if (conversationRef.current !== conversationId) return
+        void attachActiveRunRef.current?.(conversationId).catch(() => {
+          // On reattach failure, clear loading so the user is not stuck.
+          const status = chatStore.getState().activeRunStatus
+          if (!isActiveRunStatus(status) && !isPreservedWaitingStatus(status)) {
+            setLoading(false)
+          } else {
+            // One more delayed attempt if still preserved.
+            if (reattachTimerRef.current) return
+            reattachTimerRef.current = setTimeout(() => {
+              reattachTimerRef.current = null
+              if (streamingRunRef.current) return
+              if (conversationRef.current !== conversationId) return
+              void attachActiveRunRef.current?.(conversationId).catch(() => {
+                setLoading(false)
+              })
+            }, REATTACH_DELAY_MS)
+          }
+        })
+      }, REATTACH_DELAY_MS)
     }
 
     try {
@@ -265,7 +325,8 @@ export function useChat() {
           } else if (evt.event === 'message_end') {
             // Do not wipe waiting/recovering/cancelling; terminal clear is owned
             // by run_status / stream-end. Preserve loading while Run stays active.
-            const action = messageEndAction(globalChatStore.getState().activeRunStatus)
+            // CRITICAL: read from the same store instance this hook writes to.
+            const action = messageEndAction(readActiveRunStatus())
             if (action.clearWorkflowSteps) setActiveWorkflowSteps([])
             setLoading(action.setLoading)
             if (action.clearActiveRun) clearActiveRun()
@@ -286,7 +347,7 @@ export function useChat() {
       if (drainingPromise) await drainingPromise
       // Only clear active Run when stream ends on a terminal status. Waiting /
       // recovering / cancelling must stay visible so reconnect can re-attach.
-      const activeStatus = globalChatStore.getState().activeRunStatus
+      const activeStatus = readActiveRunStatus()
       if (isTerminalRunStatus(activeStatus) || !isActiveRunStatus(activeStatus)) {
         setActiveWorkflowSteps([])
         setLoading(false)
@@ -295,7 +356,9 @@ export function useChat() {
         }
       } else {
         // Preserve waiting/recovering/cancelling UI state across reader close.
+        // Schedule re-attach so we do not leave loading=true with no reader.
         setLoading(true)
+        scheduleReattach(convId)
       }
       queryClient.invalidateQueries({ queryKey: [...assistantKeys.conversations(), convId] })
       queryClient.invalidateQueries({ queryKey: assistantKeys.conversations() })
@@ -305,11 +368,15 @@ export function useChat() {
         if (drainingPromise) await drainingPromise
       }
       // On disconnect/abort keep waiting/recovering state; only drop loading when
-      // there is no preserved active status.
-      const activeStatus = globalChatStore.getState().activeRunStatus
+      // there is no preserved active status. When preserving, schedule reattach.
+      const activeStatus = readActiveRunStatus()
       if (!isActiveRunStatus(activeStatus) && !isPreservedWaitingStatus(activeStatus)) {
         setActiveWorkflowSteps([])
         setLoading(false)
+      } else {
+        // Keep loading, but re-attach so we are not stuck without a reader.
+        setLoading(true)
+        scheduleReattach(convId)
       }
     } finally {
       streamingRunRef.current = null
@@ -317,6 +384,7 @@ export function useChat() {
   }, [
     addSkillCall,
     addToolCall,
+    chatStore,
     clearActiveRun,
     endAnalysis,
     queryClient,
@@ -367,6 +435,10 @@ export function useChat() {
     setLoading(true)
     clearActiveRun()
     eventDedupeRef.current = createEventDedupeState()
+    if (reattachTimerRef.current) {
+      clearTimeout(reattachTimerRef.current)
+      reattachTimerRef.current = null
+    }
 
     const assistantId = (Date.now() + 1).toString()
     addMessage({
@@ -438,23 +510,44 @@ export function useChat() {
     }
   }, [clearActiveRun, messages, setActiveRun, setLoading, streamFromUrl])
 
+  // Keep ref in sync for scheduleReattach inside streamFromUrl.
+  attachActiveRunRef.current = attachActiveRun
+
   const stop = useCallback(async () => {
     const convId = currentConversationId
     const runId = activeRunId || streamingRunRef.current
+    const hasLiveReader = Boolean(streamingRunRef.current && abortRef.current)
+
     if (convId && runId) {
       try {
         await stopRun(convId, runId)
         // Durable stop is a state transition; keep the SSE reader attached so
         // cancelling → cancelled (or run_finalizing) events still apply.
         setActiveRunStatus('cancelling')
-        setLoading(true)
+        if (hasLiveReader) {
+          setLoading(true)
+        } else {
+          // No live reader: clear loading and try re-attach so terminal status
+          // can still be observed, or drop spinner if attach fails.
+          setLoading(true)
+          void attachActiveRun(convId).catch(() => {
+            setLoading(false)
+          })
+        }
       } catch {
-        // ignore stop errors — stream may still deliver terminal status
+        // stopRun failed — if no live reader, clear loading so UI is not stuck.
+        if (!hasLiveReader) {
+          setLoading(false)
+        }
       }
+      return
     }
-    // Do not abort the local stream on stop: cancellation is database-driven
-    // and the reader must observe the durable outcome.
-  }, [activeRunId, currentConversationId, setActiveRunStatus, setLoading])
+
+    // No run to stop: abort any local stream and clear loading.
+    abortRef.current?.abort()
+    streamingRunRef.current = null
+    setLoading(false)
+  }, [activeRunId, attachActiveRun, currentConversationId, setActiveRunStatus, setLoading])
 
   return { messages, isLoading, sendMessage, stop, attachActiveRun }
 }
