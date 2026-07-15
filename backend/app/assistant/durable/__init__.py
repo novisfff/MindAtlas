@@ -1,7 +1,8 @@
 """Plan 06 durable agent run package.
 
 Persistence models, CAS repository, codec, artifacts, leases, recovery,
-worker registration, and Main Agent execution at Checkpoint boundaries.
+worker registration, terminal memory finalizer, and Main Agent execution
+at Checkpoint boundaries.
 """
 
 from app.assistant.durable.models import (  # noqa: F401
@@ -75,6 +76,15 @@ from app.assistant.durable.reconstruction import (  # noqa: F401
     reconstruct_provider_transcript,
     validate_resume_transcript,
 )
+from app.assistant.durable.memory import (  # noqa: F401
+    DurableMemoryError,
+    DurableMemoryFinalizer,
+    PreparedL1Update,
+    PreparedL2Update,
+    PreparedMemorySet,
+    digest_final_content,
+    normalize_facts_v2,
+)
 
 __all__ = [
     "AssistantWorkerRegistration",
@@ -130,4 +140,11 @@ __all__ = [
     "reconstruct_capability_frames",
     "reconstruct_provider_transcript",
     "validate_resume_transcript",
+    "DurableMemoryError",
+    "DurableMemoryFinalizer",
+    "PreparedL1Update",
+    "PreparedL2Update",
+    "PreparedMemorySet",
+    "digest_final_content",
+    "normalize_facts_v2",
 ]
