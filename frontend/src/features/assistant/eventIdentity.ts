@@ -52,6 +52,29 @@ export function isPreservedWaitingStatus(status?: string | null): boolean {
   )
 }
 
+/**
+ * Pure decision for SSE `message_end` side effects.
+ *
+ * `message_end` must not wipe waiting/recovering/cancelling active Run state —
+ * stream-end / terminal `run_status` own clearing. Only terminal statuses clear
+ * the active run; preserved-active statuses keep loading + activeRunId.
+ */
+export type MessageEndAction =
+  | { clearActiveRun: true; setLoading: false; clearWorkflowSteps: true }
+  | { clearActiveRun: false; setLoading: true; clearWorkflowSteps: false }
+  | { clearActiveRun: false; setLoading: false; clearWorkflowSteps: true }
+
+export function messageEndAction(status?: string | null): MessageEndAction {
+  if (isTerminalRunStatus(status)) {
+    return { clearActiveRun: true, setLoading: false, clearWorkflowSteps: true }
+  }
+  if (isActiveRunStatus(status) || isPreservedWaitingStatus(status)) {
+    // Keep active waiting/recovering/cancelling/running across message_end.
+    return { clearActiveRun: false, setLoading: true, clearWorkflowSteps: false }
+  }
+  return { clearActiveRun: false, setLoading: false, clearWorkflowSteps: true }
+}
+
 export interface AppliedEventIdentity {
   runId: string
   seq: number

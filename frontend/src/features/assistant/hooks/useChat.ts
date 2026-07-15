@@ -11,6 +11,7 @@ import {
   isActiveRunStatus,
   isPreservedWaitingStatus,
   isTerminalRunStatus,
+  messageEndAction,
   shouldApplyEvent,
   type EventDedupeState,
 } from '../eventIdentity'
@@ -262,9 +263,12 @@ export function useChat() {
           } else if (evt.event === 'title_updated') {
             queryClient.invalidateQueries({ queryKey: assistantKeys.conversations() })
           } else if (evt.event === 'message_end') {
-            setActiveWorkflowSteps([])
-            setLoading(false)
-            clearActiveRun()
+            // Do not wipe waiting/recovering/cancelling; terminal clear is owned
+            // by run_status / stream-end. Preserve loading while Run stays active.
+            const action = messageEndAction(globalChatStore.getState().activeRunStatus)
+            if (action.clearWorkflowSteps) setActiveWorkflowSteps([])
+            setLoading(action.setLoading)
+            if (action.clearActiveRun) clearActiveRun()
           } else if (evt.event === 'analysis_start') {
             startAnalysis(evt.data.id as string)
           } else if (evt.event === 'analysis_delta') {

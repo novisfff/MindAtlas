@@ -6,6 +6,7 @@ import {
   isActiveRunStatus,
   isPreservedWaitingStatus,
   isTerminalRunStatus,
+  messageEndAction,
   shouldApplyEvent,
 } from './eventIdentity'
 
@@ -29,6 +30,51 @@ describe('eventIdentity', () => {
     expect(isTerminalRunStatus('failed')).toBe(true)
     expect(isTerminalRunStatus('cancelled')).toBe(true)
     expect(isTerminalRunStatus('cancelling')).toBe(false)
+  })
+
+  it('message_end preserves activeRun for waiting/recovering/cancelling', () => {
+    for (const status of [
+      'waiting_input',
+      'recovering',
+      'cancelling',
+      'waiting_approval',
+      'running',
+      'queued',
+    ]) {
+      expect(messageEndAction(status)).toEqual({
+        clearActiveRun: false,
+        setLoading: true,
+        clearWorkflowSteps: false,
+      })
+    }
+  })
+
+  it('message_end clears only when status is already terminal', () => {
+    for (const status of ['completed', 'failed', 'cancelled']) {
+      expect(messageEndAction(status)).toEqual({
+        clearActiveRun: true,
+        setLoading: false,
+        clearWorkflowSteps: true,
+      })
+    }
+  })
+
+  it('message_end drops loading without clearActiveRun for unknown status', () => {
+    expect(messageEndAction(null)).toEqual({
+      clearActiveRun: false,
+      setLoading: false,
+      clearWorkflowSteps: true,
+    })
+    expect(messageEndAction(undefined)).toEqual({
+      clearActiveRun: false,
+      setLoading: false,
+      clearWorkflowSteps: true,
+    })
+    expect(messageEndAction('mystery')).toEqual({
+      clearActiveRun: false,
+      setLoading: false,
+      clearWorkflowSteps: true,
+    })
   })
 
   it('dedupes by sequence (older/equal rejected, newer accepted)', () => {
