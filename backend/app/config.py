@@ -19,7 +19,38 @@ ASSISTANT_MAIN_AGENT_ARTIFACT_MAX_BYTES_HARD_MAX = 1 << 20  # 1048576
 ASSISTANT_MAIN_AGENT_ARTIFACT_RUN_MAX_BYTES_HARD_MAX = 10 << 20  # 10485760
 ASSISTANT_MAIN_AGENT_INLINE_RESULT_BYTES_HARD_MAX = 65536
 
+# Plan 06 durable Artifact storage hard ceilings. Configured values may only lower these.
+ASSISTANT_ARTIFACT_INLINE_MAX_BYTES_HARD_MAX = 262144  # 256 KiB
+ASSISTANT_ARTIFACT_MAX_BYTES_HARD_MAX = 26214400  # 25 MiB
+ASSISTANT_ARTIFACT_RUN_MAX_BYTES_HARD_MAX = 104857600  # 100 MiB
+
 AssistantMainAgentMode = Literal["off", "shadow", "read_only"]
+
+
+def compute_artifact_orphan_grace_floor_sec(
+    *,
+    lease_ttl_sec: int,
+    retry_base_ms: int,
+    retry_max_ms: int,
+    max_recovery_attempts: int,
+    orphan_scan_interval_sec: int,
+    clock_skew_sec: int,
+) -> int:
+    """Minimum orphan grace: lease + recovery backoff sum + scan interval + clock skew.
+
+    Plan 06 §8: settings may only raise the grace above this derived recovery window.
+    """
+    backoff_ms = 0
+    for attempt in range(max(0, int(max_recovery_attempts))):
+        step = int(retry_base_ms) * (2**attempt)
+        backoff_ms += min(step, int(retry_max_ms))
+    total = (
+        int(lease_ttl_sec)
+        + (backoff_ms + 999) // 1000  # ceil ms -> sec
+        + int(orphan_scan_interval_sec)
+        + int(clock_skew_sec)
+    )
+    return max(1, total)
 
 
 class Settings(BaseSettings):
@@ -93,6 +124,92 @@ class Settings(BaseSettings):
         ge=256,
         le=ASSISTANT_MAIN_AGENT_INLINE_RESULT_BYTES_HARD_MAX,
         alias="ASSISTANT_MAIN_AGENT_INLINE_RESULT_BYTES",
+    )
+
+    # Plan 06 durable worker / Artifact storage (private MinIO bucket; never use attachment bucket).
+    assistant_worker_poll_interval_ms: int = Field(
+        default=500,
+        ge=50,
+        le=60_000,
+        alias="ASSISTANT_WORKER_POLL_INTERVAL_MS",
+    )
+    assistant_worker_lease_ttl_sec: int = Field(
+        default=30,
+        ge=5,
+        le=3600,
+        alias="ASSISTANT_WORKER_LEASE_TTL_SEC",
+    )
+    assistant_worker_heartbeat_interval_sec: int = Field(
+        default=5,
+        ge=1,
+        le=600,
+        alias="ASSISTANT_WORKER_HEARTBEAT_INTERVAL_SEC",
+    )
+    assistant_worker_registration_ttl_sec: int = Field(
+        default=20,
+        ge=5,
+        le=3600,
+        alias="ASSISTANT_WORKER_REGISTRATION_TTL_SEC",
+    )
+    assistant_worker_max_recovery_attempts: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        alias="ASSISTANT_WORKER_MAX_RECOVERY_ATTEMPTS",
+    )
+    assistant_worker_retry_base_ms: int = Field(
+        default=500,
+        ge=50,
+        le=60_000,
+        alias="ASSISTANT_WORKER_RETRY_BASE_MS",
+    )
+    assistant_worker_retry_max_ms: int = Field(
+        default=30_000,
+        ge=100,
+        le=600_000,
+        alias="ASSISTANT_WORKER_RETRY_MAX_MS",
+    )
+    assistant_artifact_bucket: str = Field(
+        default="mindatlas-assistant-artifacts",
+        min_length=3,
+        max_length=63,
+        alias="ASSISTANT_ARTIFACT_BUCKET",
+    )
+    assistant_artifact_inline_max_bytes: int = Field(
+        default=ASSISTANT_ARTIFACT_INLINE_MAX_BYTES_HARD_MAX,
+        ge=1,
+        le=ASSISTANT_ARTIFACT_INLINE_MAX_BYTES_HARD_MAX,
+        alias="ASSISTANT_ARTIFACT_INLINE_MAX_BYTES",
+    )
+    assistant_artifact_max_bytes: int = Field(
+        default=ASSISTANT_ARTIFACT_MAX_BYTES_HARD_MAX,
+        ge=1,
+        le=ASSISTANT_ARTIFACT_MAX_BYTES_HARD_MAX,
+        alias="ASSISTANT_ARTIFACT_MAX_BYTES",
+    )
+    assistant_artifact_run_max_bytes: int = Field(
+        default=ASSISTANT_ARTIFACT_RUN_MAX_BYTES_HARD_MAX,
+        ge=1,
+        le=ASSISTANT_ARTIFACT_RUN_MAX_BYTES_HARD_MAX,
+        alias="ASSISTANT_ARTIFACT_RUN_MAX_BYTES",
+    )
+    assistant_artifact_orphan_scan_interval_sec: int = Field(
+        default=60,
+        ge=5,
+        le=3600,
+        alias="ASSISTANT_ARTIFACT_ORPHAN_SCAN_INTERVAL_SEC",
+    )
+    assistant_artifact_orphan_grace_sec: int = Field(
+        default=900,
+        ge=1,
+        le=86_400,
+        alias="ASSISTANT_ARTIFACT_ORPHAN_GRACE_SEC",
+    )
+    assistant_durable_clock_skew_sec: int = Field(
+        default=30,
+        ge=0,
+        le=600,
+        alias="ASSISTANT_DURABLE_CLOCK_SKEW_SEC",
     )
 
     # Logging
@@ -300,6 +417,43 @@ class Settings(BaseSettings):
             raise ValueError(
                 "assistant_main_agent_artifact_run_max_bytes must be >= "
                 "assistant_main_agent_artifact_max_bytes"
+            )
+        if self.assistant_artifact_run_max_bytes < self.assistant_artifact_max_bytes:
+            raise ValueError(
+                "assistant_artifact_run_max_bytes must be >= assistant_artifact_max_bytes"
+            )
+        if self.assistant_artifact_inline_max_bytes > self.assistant_artifact_max_bytes:
+            raise ValueError(
+                "assistant_artifact_inline_max_bytes must be <= assistant_artifact_max_bytes"
+            )
+        if self.assistant_worker_retry_max_ms < self.assistant_worker_retry_base_ms:
+            raise ValueError(
+                "assistant_worker_retry_max_ms must be >= assistant_worker_retry_base_ms"
+            )
+        # Heartbeat must be strictly less than lease_ttl / 3.
+        if self.assistant_worker_heartbeat_interval_sec * 3 >= self.assistant_worker_lease_ttl_sec:
+            raise ValueError(
+                "assistant_worker_heartbeat_interval_sec must be < "
+                "assistant_worker_lease_ttl_sec / 3"
+            )
+        min_grace = compute_artifact_orphan_grace_floor_sec(
+            lease_ttl_sec=self.assistant_worker_lease_ttl_sec,
+            retry_base_ms=self.assistant_worker_retry_base_ms,
+            retry_max_ms=self.assistant_worker_retry_max_ms,
+            max_recovery_attempts=self.assistant_worker_max_recovery_attempts,
+            orphan_scan_interval_sec=self.assistant_artifact_orphan_scan_interval_sec,
+            clock_skew_sec=self.assistant_durable_clock_skew_sec,
+        )
+        if self.assistant_artifact_orphan_grace_sec < min_grace:
+            raise ValueError(
+                "assistant_artifact_orphan_grace_sec must be >= derived recovery window "
+                f"({min_grace}s); settings may only raise the grace floor"
+            )
+        bucket = (self.assistant_artifact_bucket or "").strip()
+        if not bucket or bucket == (self.minio_bucket or "").strip():
+            raise ValueError(
+                "assistant_artifact_bucket must be a nonempty private bucket distinct "
+                "from MINIO_BUCKET (attachment public-download bucket)"
             )
         return self
 

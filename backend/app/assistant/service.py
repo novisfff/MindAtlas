@@ -299,6 +299,19 @@ class AssistantService:
 
     def delete_conversation(self, conversation_id: UUID) -> None:
         conversation = self.get_conversation_basic(conversation_id)
+        # Plan 06: enqueue object-backed Artifact GC before cascade delete.
+        # Outbox rows have no Run FK and survive conversation/Run deletion.
+        from app.assistant.durable.artifacts import enqueue_conversation_artifact_gc
+
+        enqueue_conversation_artifact_gc(self.db, conversation_id)
+        # PostgreSQL immutability triggers require the purge flag for durable child DELETE.
+        # SQLite unit tests ignore unknown local settings; production uses PostgreSQL.
+        try:
+            from sqlalchemy import text
+
+            self.db.execute(text("SET LOCAL mindatlas.allow_durable_run_purge = 'on'"))
+        except Exception:
+            pass
         self.db.delete(conversation)
         self.db.commit()
 

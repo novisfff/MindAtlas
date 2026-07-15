@@ -30,6 +30,11 @@ from app.assistant.durable.repository import (  # noqa: F401
     EventSpec,
     LeaseToken,
 )
+from app.assistant.durable.artifacts import (  # noqa: F401
+    ArtifactStorageError,
+    DurableArtifactService,
+    enqueue_conversation_artifact_gc,
+)
 
 __all__ = [
     "AssistantWorkerRegistration",
@@ -55,4 +60,7 @@ __all__ = [
     "DurableRunRepository",
     "EventSpec",
     "LeaseToken",
+    "ArtifactStorageError",
+    "DurableArtifactService",
+    "enqueue_conversation_artifact_gc",
 ]
