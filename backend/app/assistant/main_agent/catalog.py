@@ -647,9 +647,9 @@ def evaluate_candidate_eligibility(
         return "binding_set_unverified"
     if not candidate.bindings_eligible:
         return "bindings_ineligible"
-    if candidate.conflict_rules:
-        # Plan 04 fails closed on nonempty conflict rules (Plan 05 owns semantics).
-        return SKILL_POLICY_UNSUPPORTED
+    # Plan 05: conflict_rules are catalog-eligible; structured evaluation runs at
+    # skill.inject activation via evaluate_skill_conflicts (not here).
+    # Invalid / unparseable rule payloads still fail closed at activation.
     if not candidate.entrypoint_compatible:
         return "entrypoint_incompatible"
     if not candidate.locale_compatible:

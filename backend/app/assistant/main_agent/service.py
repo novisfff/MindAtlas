@@ -133,6 +133,83 @@ FALLBACK_SAFE_REASONS = frozenset(
     }
 )
 
+# Stable policy / budget / completion / recursion codes that may surface as
+# stop_reason or SafeProviderError.semantic_code after Provider request start.
+# Exact membership promotes them onto AssistantRuntimeResult.reason_code;
+# unknown codes fail closed to MAIN_AGENT_FAILED.
+#
+# §5.4 codes are inlined (not imported from app.assistant.policy.contracts) to
+# avoid a circular import: policy.contracts → main_agent.authorization →
+# main_agent.__init__ → main_agent.service → policy.contracts.
+_STABLE_FAILED_REASON_CODES: frozenset[str] = frozenset(
+    {
+        # Plan 05 §5.4 pure authorization deny codes (exclude "allowed").
+        "scope_mismatch",
+        "manifest_surface_mismatch",
+        "exposure_missing",
+        "exposure_ambiguous",
+        "owner_mismatch",
+        "principal_unauthenticated",
+        "principal_not_allowed",
+        "entrypoint_not_allowed",
+        "global_policy_denied",
+        "owner_capability_not_declared",
+        "owner_side_effect_denied",
+        "release_gate_denied",
+        "target_unavailable",
+        "version_or_digest_drift",
+        "recursion_denied",
+        # Recursion / cycle denials.
+        "agent_cycle_denied",
+        "main_agent_restart_denied",
+        # Generic / gateway-aligned policy deny surface.
+        "policy_denied",
+        "capability_denied",
+        # Budget exhaustion family.
+        "budget_exhausted",
+        "budget_exhausted_total_calls",
+        "budget_exhausted_owner_calls",
+        "budget_exhausted_parallel",
+        "budget_exhausted_read_signature",
+        "budget_exhausted_owner_read_signature",
+        "budget_exhausted_deadline",
+        "budget_exhausted_provider_rounds",
+        "budget_exhausted_completion_tokens",
+        "budget_exhausted_prompt_tokens",
+        "budget_exhausted_capability_depth",
+        "budget_exhausted_agent_depth",
+        "budget_exhausted_main_agent_cycles",
+        "budget_exhausted_completion_followups",
+        "budget_exhausted_active_skills",
+        "budget_exhausted_with_obligations",
+        # Completion / obligation codes.
+        "skill_completion_unsatisfiable",
+        "completion_followup_limit",
+        "obligations_pending_at_finalization",
+        "pending_obligation",
+        "terminal_text_missing",
+        "skill_terminal_output_pending",
+        "capability_followup_pending",
+        "artifact_pending",
+        "approval_pending",
+        "user_input_pending",
+        "reconciliation_pending",
+        "waiting_without_obligation",
+        "completion_evidence_invalid",
+        "policy_state_protocol_error",
+        "obligation_state_protocol_error",
+        # Provider-loop / reservation surface codes that must not collapse
+        # into main_agent_failed when they stop a Run after request start.
+        "classification_changed",
+        "budget_reservation_error",
+        "reservation_not_found",
+        "reservation_state_invalid",
+        "arguments_digest_mismatch",
+        "duplicate_call_id",
+        "owner_limits_missing",
+    }
+)
+
 
 class MainAgentAdmissionError(ValueError):
     """Preflight failure with a safe reason code (no secrets / exception text)."""
@@ -301,6 +378,9 @@ class MainAgentRunState:
     applied_skill_version_ids: set[UUID] = field(default_factory=set)
     final_text: str = ""
     status: str = "running"
+    # Plan 05 process-local policy bundle (None when ports were fully injected).
+    policy_runtime: Any | None = None
+    stop_reason: str | None = None
 
 
 def compute_main_agent_effective_policy_digest(
@@ -881,17 +961,36 @@ class MainAgentService:
                     )
 
             ports = self._injected_ports
+            policy_runtime = None
             if ports is None:
-                # Production composition of full Gateway ports is completed as
-                # residual inject work; without injected ports we fail closed
-                # before a Provider request so fallback can still apply.
-                return self._maybe_fallback(
-                    request=request,
-                    reason_code=ADAPTER_UNAVAILABLE_BEFORE_REQUEST,
-                    events=events,
-                    fallback=fallback,
-                    admission=admission,
-                )
+                # Plan 05 Task 8: compose frozen policy snapshot + ledgers +
+                # Gateway/scheduler/completion guards for this admitted Run.
+                try:
+                    policy_runtime, ports = self._compose_policy_ports(
+                        request=request,
+                        admission=admission,
+                        manifest=manifest,
+                        provider=provider,
+                        events=events,
+                    )
+                    if self._state is not None:
+                        self._state.policy_runtime = policy_runtime
+                        # Prefer Manifest aligned to Plan 05 effective_policy_digest.
+                        if getattr(policy_runtime, "manifest", None) is not None:
+                            self._state.manifest = policy_runtime.manifest
+                            manifest = policy_runtime.manifest
+                except Exception:
+                    logger.exception(
+                        "main agent policy composition failed run_id=%s",
+                        request.run_id,
+                    )
+                    return self._maybe_fallback(
+                        request=request,
+                        reason_code=ADAPTER_UNAVAILABLE_BEFORE_REQUEST,
+                        events=events,
+                        fallback=fallback,
+                        admission=admission,
+                    )
 
             # Reject no-op lifecycle for Main Agent composition.
             if isinstance(
@@ -950,6 +1049,8 @@ class MainAgentService:
             )
 
             # Bridge cancellation into ports if caller provided one.
+            # Preserve every Plan 05 additive port — rebuilding without them
+            # drops budget/completion/frame guards and dual-wired dispatch state.
             if request.cancel_checker is not None:
                 ports = ProviderLoopPorts(
                     provider=ports.provider,
@@ -962,6 +1063,12 @@ class MainAgentService:
                     events=ports.events,
                     round_context_provider=ports.round_context_provider,
                     manifest_effect_lifecycle=ports.manifest_effect_lifecycle,
+                    round_budget_guard=ports.round_budget_guard,
+                    call_reservation=ports.call_reservation,
+                    call_owner_resolver=ports.call_owner_resolver,
+                    dispatch_guard=ports.dispatch_guard,
+                    call_frames=ports.call_frames,
+                    completion_guard=ports.completion_guard,
                 )
 
             fallback.mark_provider_request()
@@ -996,10 +1103,33 @@ class MainAgentService:
                 # Fail closed after Provider request started unless retry-safe and
                 # no user-visible output was emitted.
                 reason = MAIN_AGENT_FAILED
+                stop = getattr(result, "stop_reason", None) or ""
+                # When stop_reason is coarse capability_error, prefer the stable
+                # semantic_code from the SafeProviderError (policy/budget/auth codes).
+                semantic = None
+                if result.error is not None:
+                    semantic = getattr(result.error, "semantic_code", None)
+                effective_stop = str(stop)
+                if (
+                    effective_stop in {"", "capability_error"}
+                    and isinstance(semantic, str)
+                    and semantic
+                    and semantic != "capability_error"
+                ):
+                    effective_stop = semantic
+                if effective_stop:
+                    if self._state is not None:
+                        self._state.stop_reason = effective_stop[:64]
+                    # Prefer exact membership against known policy/budget/completion
+                    # stable codes (includes pure §5.4 denials like owner_mismatch).
+                    # Unknown codes fail closed to MAIN_AGENT_FAILED.
+                    if effective_stop in _STABLE_FAILED_REASON_CODES:
+                        reason = effective_stop[:64]
                 if (
                     result.error is not None
                     and getattr(result.error, "retry_disposition", None) == "retryable"
                     and not final_text
+                    and reason == MAIN_AGENT_FAILED
                 ):
                     reason = "provider_retry_safe_before_output"
                     return self._maybe_fallback(
@@ -1065,7 +1195,81 @@ class MainAgentService:
                 write_title=False,
             )
 
+    def _compose_policy_ports(
+        self,
+        *,
+        request: AssistantRuntimeRequest,
+        admission: AdmissionContext,
+        manifest: ResolvedRunManifestRevision,
+        provider: ProviderAdapter,
+        events: MainAgentEventAdapter,
+    ) -> tuple[Any, ProviderLoopPorts]:
+        """Compose Plan 05 policy ledgers + ProviderLoopPorts for this Run."""
+        from app.assistant.main_agent.inject_wiring import build_run_catalog_state
+        from app.assistant.main_agent.policy_runtime import (
+            compose_main_agent_policy_runtime,
+        )
+
+        if self.db is None:
+            raise RuntimeError("adapter_unavailable_before_request")
+
+        # Operator may lower max_active_skills only (settings).
+        operator_limits: dict[str, int | None] = {
+            "max_active_skills": int(
+                getattr(self._settings, "assistant_main_agent_max_active_skills", 4)
+            ),
+        }
+        # Per-Run catalog for skill.search / skill.inject (fail soft → empty).
+        catalog_state = None
+        try:
+            scope = getattr(admission.snapshot, "skill_catalog_scope", None)
+            catalog_state = build_run_catalog_state(
+                self.db,
+                scope=scope,
+                locale=request.locale or "und",
+            )
+        except Exception:
+            logger.exception(
+                "main agent catalog build failed run_id=%s", request.run_id
+            )
+            catalog_state = None
+
+        runtime, ports = compose_main_agent_policy_runtime(
+            db=self.db,
+            run_id=request.run_id,
+            conversation_id=request.conversation_id,
+            manifest=manifest,
+            profile_key=str(admission.main_agent_ref.profile_key),
+            profile_version_id=admission.main_agent_ref.version_id,
+            profile_content_digest=str(admission.main_agent_ref.content_digest),
+            app_build_revision=self._app_build_revision,
+            provider=provider,
+            events=events,
+            locale=request.locale or "en",
+            cancel_checker=request.cancel_checker,
+            catalog_state=catalog_state,
+            profile_budget_fields=admission.snapshot.output_budget,
+            profile_context_budget=admission.snapshot.context_budget,
+            operator_budget_limits=operator_limits,
+        )
+        # Use the Manifest aligned to Plan 05 effective_policy_digest.
+        if self._state is not None and runtime.manifest is not None:
+            self._state.manifest = runtime.manifest
+        events.policy_snapshot(
+            run_id=request.run_id,
+            effective_policy_digest=runtime.policy_snapshot.effective_policy_digest,
+            exposure_index_digest=runtime.policy_snapshot.exposure_index.exposure_index_digest,
+            max_total_capability_calls=int(
+                runtime.run_budget_limits.max_total_capability_calls
+            ),
+            max_provider_rounds=int(runtime.run_budget_limits.max_provider_rounds),
+            max_capability_depth=int(runtime.run_budget_limits.max_capability_depth),
+            max_agent_depth=int(runtime.run_budget_limits.max_agent_depth),
+        )
+        return runtime, ports
+
     def _admission_failure_result(
+
         self,
         *,
         request: AssistantRuntimeRequest,

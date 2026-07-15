@@ -110,6 +110,9 @@ class MainAgentControlRuntime:
     def take_manifest_effect(self, *, call_id: str) -> PendingManifestEffect | None:
         with self._lock:
             if call_id in self._taken_effects:
+                # A replay must not resurrect a value after the one-shot
+                # transfer has already happened.
+                self._pending_effects.pop(call_id, None)
                 return None
             effect = self._pending_effects.pop(call_id, None)
             if effect is not None:

@@ -353,3 +353,40 @@ def test_failed_control_leaves_no_pending_effect() -> None:
     assert result.status == "failed"
     assert runtime.has_pending_effect(call_id="inj-1") is False
     assert runtime.take_manifest_effect(call_id="inj-1") is None
+
+
+def test_replayed_effect_take_drops_reintroduced_pending_value() -> None:
+    from types import SimpleNamespace
+
+    from app.assistant.capabilities.contracts import CapabilityMetrics, completed_result
+    from app.assistant.main_agent.control_runtime import MainAgentControlRuntime
+
+    result = completed_result(
+        user_text=None,
+        structured_output={"activated": True},
+        metrics=CapabilityMetrics(duration_ms=0, input_bytes=0, output_bytes=0),
+        terminal_output=False,
+        needs_followup=True,
+    )
+    effect = SimpleNamespace(proposed_manifest=object())
+    runtime = MainAgentControlRuntime(
+        inject_handler=lambda _call_id, _input, _manifest: (result, effect),
+        current_manifest=object(),  # type: ignore[arg-type]
+    )
+
+    first = runtime.execute(
+        call_id="replayed-inject",
+        capability_key="skill.inject",
+        validated_input={},
+    )
+    assert first.status == "completed"
+    assert runtime.take_manifest_effect(call_id="replayed-inject") is effect
+
+    replay = runtime.execute(
+        call_id="replayed-inject",
+        capability_key="skill.inject",
+        validated_input={},
+    )
+    assert replay.status == "completed"
+    assert runtime.take_manifest_effect(call_id="replayed-inject") is None
+    assert runtime.has_pending_effect(call_id="replayed-inject") is False

@@ -1,8 +1,13 @@
-"""Atomic skill activation and Manifest-effect lifecycle (Plan 04 Task 6).
+"""Atomic skill activation and Manifest-effect lifecycle (Plan 04 + Plan 05 Task 6).
 
 Gateway success stages a PendingSkillActivationPackage; Plan 03 lineage
 validation + ManifestEffectLifecyclePort.accept installs it. Active membership
 is solely the accepted Manifest's active_skills.
+
+Plan 05 extends the pending package so policy/exposure/owner-budget/obligation
+candidate state is computed pre-lineage and committed only inside accept under
+one Run-state revision/lock. Discard removes the entire candidate package with
+zero residue. skill.inject reservation accounting is independent of discard.
 """
 
 from __future__ import annotations
@@ -25,21 +30,40 @@ from app.assistant.domain.contracts import (
     ResolvedRunManifestRevision,
     ResolvedSkillRef,
     SkillVersionConflictError,
-    append_skill_activation,
     append_skill_activations_batch,
 )
 from app.assistant.domain.digests import JsonValue, sha256_canonical_json
 from app.assistant.main_agent.catalog import (
-    CATALOG_CHANGED,
     SKILL_NOT_CATALOGED,
     SKILL_NOT_DISCLOSED,
     CatalogError,
     CatalogSearchState,
-    LivePackageRecheck,
-    recheck_candidates_for_activation,
 )
 from app.assistant.main_agent.control_runtime import PendingManifestEffect
 from app.assistant.main_agent.control_capabilities import MAIN_AGENT_CONTROL_KEYS
+from app.assistant.policy.budgets import pure_add_owner_limits
+from app.assistant.policy.conflicts import (
+    SkillConflictIdentity,
+    SkillConflictParticipant,
+    evaluate_skill_conflicts,
+)
+from app.assistant.policy.contracts import (
+    OwnerBudgetLimits,
+    normalize_owner_budget_limits,
+)
+from app.assistant.policy.exposures import (
+    DuplicateCapabilityDeclaration,
+    ExistingExposureCompatibilityView,
+    ExposureBuildError,
+    evaluate_duplicate_capability_compatibility,
+)
+from app.assistant.policy.obligations import (
+    SkillTerminalSatisfiabilityView,
+    build_skill_terminal_obligation,
+    evaluate_skill_terminal_satisfiability,
+    pure_create_obligation,
+)
+from app.assistant.skills.contracts import SkillConflictRuleV1
 
 SKILL_CAPABILITY_CONFLICT = "skill_capability_conflict"
 SKILL_ALREADY_ACTIVE = "skill_already_active"
@@ -47,11 +71,51 @@ SKILL_VERSION_CONFLICT = "skill_version_conflict"
 SKILL_CONTEXT_BUDGET_EXCEEDED = "skill_context_budget_exceeded"
 ACTIVE_SKILL_LIMIT_EXCEEDED = "active_skill_limit_exceeded"
 CONTROL_EFFECT_PROTOCOL_ERROR = "control_effect_protocol_error"
+DUPLICATE_CAPABILITY_POLICY_CONFLICT = "duplicate_capability_policy_conflict"
+SKILL_COMPLETION_UNSATISFIABLE = "skill_completion_unsatisfiable"
+
+
+@dataclass(frozen=True)
+class CandidateExposureView:
+    """Minimal exposure metadata for a candidate-owned Domain Key.
+
+    Used for §4.3 strict duplicate compatibility when full descriptor/binding
+    inputs are not available at the pure stage layer. Digests must match the
+    existing Manifest capability for a compatible non-owning consumer.
+    """
+
+    domain_key: str
+    resolved_ref: ResolvedCapabilityRef
+    binding_contract_digest: str
+    descriptor_digest: str = ""
+    max_skill_calls: int | None = None
+    max_same_read_calls: int | None = None
+    requires_terminal_output: bool | None = None
+    terminal_text_allowed: bool | None = None
+    # Result of deriving the owner's immutable grant first, then checking the
+    # classified side effect for membership. None means unavailable/unknown.
+    grant_admits_side_effect: bool | None = None
+    # Full descriptor/completion fields are frozen by production before stage.
+    # Legacy pure-stage callers may leave this False and use binding defaults.
+    descriptor_fields_frozen: bool = False
+    side_effect: str = "read"
+    executable_revision: str = ""
+    timeout_mode: str = "none"
+    timeout_seconds: float | None = None
+    interrupt_mode: str = "none"
+    parallel_safe: bool = True
+    terminal_output: bool = False
+    needs_followup: bool = True
+    followup_hint: str | None = None
 
 
 @dataclass(frozen=True)
 class SkillActivationCandidate:
-    """Exact published Skill + bindings prepared for one inject batch item."""
+    """Exact published Skill + bindings prepared for one inject batch item.
+
+    Plan 05 policy fields are optional so Plan 04 tests remain byte-compatible.
+    When present they drive conflict/duplicate/budget/obligation preflight.
+    """
 
     skill: ResolvedSkillRef
     capabilities: tuple[ResolvedCapabilityRef, ...]
@@ -59,11 +123,53 @@ class SkillActivationCandidate:
     instruction_char_count: int = 0
     resource_index_digest: str = ""
     author_allowed_side_effects: tuple[str, ...] = ()
+    # Plan 05 policy fields (optional; activation-time evaluation).
+    conflict_rules: tuple[SkillConflictRuleV1, ...] = ()
+    max_skill_calls: int | None = None
+    max_same_read_calls: int | None = None
+    requires_terminal_output: bool = False
+    terminal_text_allowed: bool = True
+    aliases: tuple[str, ...] = ()
+    exposure_views: tuple[CandidateExposureView, ...] = ()
+    # When True, this skill owns no Capability exposure (instruction-only).
+    is_instruction_only: bool = False
+
+
+def candidate_grant_admits_side_effect(
+    candidate: SkillActivationCandidate,
+    side_effect: str,
+) -> bool:
+    """Return whether the candidate's author grant admits one classified effect."""
+    if candidate.is_instruction_only or not candidate.author_allowed_side_effects:
+        return False
+    author_to_lattice = {
+        "read": "read",
+        "compute": "compute",
+        "write": "write_local",
+        "draft": "draft",
+        "control": "none",
+    }
+    try:
+        author_lattice = {
+            author_to_lattice[item]
+            for item in candidate.author_allowed_side_effects
+        }
+    except KeyError:
+        return False
+    # The explicit Main Agent entrypoint admits `none`, but the Plan 05 release
+    # gate still clips Skills to the read-only lattice.
+    allowed = ({"none"} | author_lattice) & {"none", "compute", "read"}
+    return side_effect in allowed
 
 
 @dataclass
 class PendingSkillActivationPackage:
-    """Call-scoped staged activation; not durable; single-use."""
+    """Call-scoped staged activation; not durable; single-use.
+
+    Plan 05 candidate policy/budget/obligation deltas live here until accept.
+    Current Manifest, ledgers, exposure, and public events remain unchanged
+    until ManifestEffectLifecyclePort.accept commits under one lock.
+    """
 
     call_id: str
     effect: PendingManifestEffect
@@ -76,10 +182,250 @@ class PendingSkillActivationPackage:
     resulting_instruction_chars: int = 0
     # Chars contributed by this package's newly activated skills only.
     activated_instruction_chars: int = 0
+    # Plan 05 candidate policy state (committed only on accept).
+    candidate_effective_policy_digest: str | None = None
+    candidate_owner_budget_limits: tuple[OwnerBudgetLimits, ...] = ()
+    # (skill_version_id, terminal_text_allowed, skill_package_id) for
+    # requires_terminal_output skills. package_id is the stable owner_id.
+    candidate_skill_terminals: tuple[tuple[UUID, bool, UUID], ...] = ()
+    # (domain_key, consumer_version_id) non-owning compatible consumers.
+    candidate_compatible_consumers: tuple[tuple[str, UUID], ...] = ()
+    candidate_exposure_index_digest: str | None = None
+    package_digest: str | None = None
+    candidate_rebind_payload_digest: str | None = None
+    # Production packages are accepted only after the Gateway has honestly
+    # charged and finished the originating skill.inject reservation.
+    require_finished_reservation: bool = False
+    # Snapshot of Run limits digest at stage time (must not change on accept).
+    run_budget_limits_digest: str | None = None
+    # Accept-time rebind payload (Plan 05 enablement): frozen bindings / package map /
+    # owner materials so tools surface + auth + budget ownership update together.
+    candidate_frozen_bindings_by_version: dict[UUID, tuple[Any, ...]] = field(
+        default_factory=dict
+    )
+    candidate_skill_package_id_by_version: dict[UUID, UUID] = field(default_factory=dict)
+    candidate_skill_content_digest_by_version: dict[UUID, str] = field(
+        default_factory=dict
+    )
+    candidate_owner_materials: tuple[Any, ...] = ()
+    # Exact immutable activation metadata retained for later sequential
+    # conflict/duplicate checks after this package is accepted.
+    candidate_activation_candidates: tuple[SkillActivationCandidate, ...] = ()
+    # Optional pre-registered EffectiveRunPolicySnapshot for the candidate digest.
+    candidate_policy_snapshot: Any | None = None
+
+
+def _model_json(value: Any) -> Any:
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        return dump(mode="json")
+    return value
+
+
+def _candidate_rebind_payload_digest(
+    package: PendingSkillActivationPackage,
+) -> str:
+    """Seal every mutable projection trusted by the lifecycle accept hook."""
+    bindings_payload = []
+    for version_id in sorted(
+        package.candidate_frozen_bindings_by_version,
+        key=lambda item: item.bytes,
+    ):
+        bindings = package.candidate_frozen_bindings_by_version[version_id]
+        bindings_payload.append(
+            {
+                "versionId": str(version_id),
+                "bindings": [
+                    _model_json(binding)
+                    for binding in sorted(
+                        bindings,
+                        key=lambda item: (
+                            item.ref.capability_key,
+                            item.ref.binding_contract_digest,
+                        ),
+                    )
+                ],
+            }
+        )
+
+    materials_payload = []
+    for material in sorted(
+        package.candidate_owner_materials,
+        key=lambda item: (
+            str(getattr(item, "owner_kind", "")),
+            str(getattr(item, "owner_id", "")),
+            str(getattr(item, "owner_version_id", "")),
+        ),
+    ):
+        declared = getattr(material, "declared_capability_keys", None)
+        materials_payload.append(
+            {
+                "ownerKind": str(getattr(material, "owner_kind", "")),
+                "ownerId": str(getattr(material, "owner_id", "")),
+                "ownerVersionId": str(getattr(material, "owner_version_id", "")),
+                "policyDigest": str(getattr(material, "policy_digest", "")),
+                "authorAllowedSideEffects": list(
+                    getattr(material, "author_allowed_side_effects", ()) or ()
+                ),
+                "declaredCapabilityKeys": (
+                    sorted(str(item) for item in declared)
+                    if declared is not None
+                    else None
+                ),
+                "instructionOnly": bool(
+                    getattr(material, "is_instruction_only", False)
+                ),
+            }
+        )
+
+    candidates_payload = []
+    for candidate in sorted(
+        package.candidate_activation_candidates,
+        key=lambda item: item.skill.version_id.bytes,
+    ):
+        candidates_payload.append(
+            {
+                "skill": _model_json(candidate.skill),
+                "capabilities": [
+                    _model_json(capability) for capability in candidate.capabilities
+                ],
+                "instructionCharCount": candidate.instruction_char_count,
+                "resourceIndexDigest": candidate.resource_index_digest,
+                "authorAllowedSideEffects": list(
+                    candidate.author_allowed_side_effects
+                ),
+                "conflictRules": [
+                    _model_json(rule) for rule in candidate.conflict_rules
+                ],
+                "maxSkillCalls": candidate.max_skill_calls,
+                "maxSameReadCalls": candidate.max_same_read_calls,
+                "requiresTerminalOutput": candidate.requires_terminal_output,
+                "terminalTextAllowed": candidate.terminal_text_allowed,
+                "aliases": list(candidate.aliases),
+                "instructionOnly": candidate.is_instruction_only,
+                "exposureViews": [
+                    {
+                        "domainKey": view.domain_key,
+                        "resolvedRef": _model_json(view.resolved_ref),
+                        "bindingContractDigest": view.binding_contract_digest,
+                        "descriptorDigest": view.descriptor_digest,
+                        "maxSkillCalls": view.max_skill_calls,
+                        "maxSameReadCalls": view.max_same_read_calls,
+                        "requiresTerminalOutput": view.requires_terminal_output,
+                        "terminalTextAllowed": view.terminal_text_allowed,
+                        "grantAdmitsSideEffect": view.grant_admits_side_effect,
+                        "descriptorFieldsFrozen": view.descriptor_fields_frozen,
+                        "sideEffect": view.side_effect,
+                        "executableRevision": view.executable_revision,
+                        "timeoutMode": view.timeout_mode,
+                        "timeoutSeconds": view.timeout_seconds,
+                        "interruptMode": view.interrupt_mode,
+                        "parallelSafe": view.parallel_safe,
+                        "terminalOutput": view.terminal_output,
+                        "needsFollowup": view.needs_followup,
+                        "followupHint": view.followup_hint,
+                    }
+                    for view in candidate.exposure_views
+                ],
+            }
+        )
+
+    snapshot = package.candidate_policy_snapshot
+    snapshot_payload = None
+    if snapshot is not None:
+        snapshot_payload = _model_json(snapshot)
+        if snapshot_payload is snapshot:
+            snapshot_payload = {
+                "effectivePolicyDigest": getattr(
+                    snapshot, "effective_policy_digest", None
+                ),
+                "exposureIndexDigest": getattr(
+                    getattr(snapshot, "exposure_index", None),
+                    "exposure_index_digest",
+                    None,
+                ),
+            }
+
+    return sha256_canonical_json(
+        {
+            "bindingsByVersion": bindings_payload,
+            "skillPackageIds": [
+                {"versionId": str(version_id), "packageId": str(package_id)}
+                for version_id, package_id in sorted(
+                    package.candidate_skill_package_id_by_version.items(),
+                    key=lambda item: item[0].bytes,
+                )
+            ],
+            "skillContentDigests": [
+                {"versionId": str(version_id), "contentDigest": digest}
+                for version_id, digest in sorted(
+                    package.candidate_skill_content_digest_by_version.items(),
+                    key=lambda item: item[0].bytes,
+                )
+            ],
+            "ownerBudgetLimits": [
+                _model_json(item)
+                for item in sorted(
+                    package.candidate_owner_budget_limits,
+                    key=lambda item: item.owner_version_id.bytes,
+                )
+            ],
+            "skillTerminals": [
+                {
+                    "versionId": str(version_id),
+                    "terminalTextAllowed": terminal_text_allowed,
+                    "packageId": str(package_id),
+                }
+                for version_id, terminal_text_allowed, package_id in sorted(
+                    package.candidate_skill_terminals,
+                    key=lambda item: item[0].bytes,
+                )
+            ],
+            "ownerMaterials": materials_payload,
+            "activationCandidates": candidates_payload,
+            "policySnapshot": snapshot_payload,
+            "candidateExposureIndexDigest": package.candidate_exposure_index_digest,
+            "runBudgetLimitsDigest": package.run_budget_limits_digest,
+            "requireFinishedReservation": package.require_finished_reservation,
+            "postCommitEvents": list(package.post_commit_events),
+        }
+    )
+
+
+@dataclass(frozen=True)
+class SkillInjectionPolicyContext:
+    """Optional frozen policy inputs for candidate construction (Plan 05).
+
+    When omitted, stage_skill_injection preserves Plan 04 behavior (no policy
+    digest rewrite, no owner buckets, no skill terminals).
+    """
+
+    # Cap owner max_calls by these Run totals; never mutate Run counters.
+    run_max_total_capability_calls: int = 16
+    run_max_same_read_signature: int = 3
+    run_max_active_skills: int = 4
+    # Remaining provider/finalization slots for terminal satisfiability.
+    remaining_provider_slots: int = 8
+    # Existing active skills' conflict rules keyed by version_id.
+    active_conflict_rules: tuple[tuple[UUID, tuple[SkillConflictRuleV1, ...]], ...] = ()
+    active_aliases: tuple[tuple[UUID, tuple[str, ...]], ...] = ()
+    # Existing exposure compatibility views keyed for duplicate checks.
+    existing_exposures: tuple[CandidateExposureView, ...] = ()
+    # Optional precomputed candidate effective policy digest (caller-owned).
+    # When None and candidates carry policy fields, a deterministic package
+    # digest is derived from activated versions + owner limits + conflict state.
+    effective_policy_digest: str | None = None
+    # Catalog identities for conflict target resolution (optional).
+    catalog_skills: tuple[SkillConflictIdentity, ...] = ()
 
 
 class MainAgentManifestEffectLifecycle:
-    """Lifecycle port that commits staged activation packages after lineage accept."""
+    """Lifecycle port that commits staged activation packages after lineage accept.
+
+    Plan 05: under the same lock, advances Manifest pointer, optional policy
+    snapshot pointer, owner budget limits, and skill terminal obligations as
+    one revision. Safe success events become post-commit deliverables only.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -91,7 +437,45 @@ class MainAgentManifestEffectLifecycle:
         self._post_commit_sink: Callable[[dict[str, JsonValue]], None] | None = None
         self._event_failures: list[str] = []
         # Optional rebind hooks for auth factory / control runtime after accept.
+        # Legacy hooks receive only the accepted Manifest.
         self._on_accept_hooks: list[Callable[[ResolvedRunManifestRevision], None]] = []
+        # Plan 05 package-aware hooks receive (manifest, package) so tools /
+        # auth / owner resolver can rebind from candidate payload.
+        self._on_accept_package_hooks: list[
+            Callable[[ResolvedRunManifestRevision, PendingSkillActivationPackage], None]
+        ] = []
+        # Plan 05 process-local policy ledgers (optional; closed over by Run).
+        self._budget_ledger: Any | None = None
+        self._obligation_ledger: Any | None = None
+        self._policy_snapshot: Any | None = None
+        self._policy_snapshot_by_digest: dict[str, Any] = {}
+        # Compatible consumers committed with the last accept (for tests).
+        self._compatible_consumers: dict[str, set[UUID]] = {}
+        # Owner budget digests applied (version_id -> digest).
+        self._applied_owner_budget_digests: dict[UUID, str] = {}
+        # Skill terminals created (version_id -> terminal_text_allowed).
+        self._applied_skill_terminals: dict[UUID, bool] = {}
+
+    def bind_policy_ledgers(
+        self,
+        *,
+        budget_ledger: Any | None = None,
+        obligation_ledger: Any | None = None,
+        policy_snapshot: Any | None = None,
+    ) -> None:
+        """Attach process-local Budget/Obligation ledgers for atomic accept."""
+        with self._lock:
+            self._budget_ledger = budget_ledger
+            self._obligation_ledger = obligation_ledger
+            self._policy_snapshot = policy_snapshot
+
+    def register_policy_snapshot(self, snapshot: Any) -> None:
+        """Register a candidate EffectiveRunPolicySnapshot by its digest."""
+        digest = getattr(snapshot, "effective_policy_digest", None)
+        if not isinstance(digest, str) or not digest:
+            raise ValueError("policy snapshot missing effective_policy_digest")
+        with self._lock:
+            self._policy_snapshot_by_digest[digest] = snapshot
 
     def set_event_sink(self, sink: Callable[[dict[str, JsonValue]], None] | None) -> None:
         self._post_commit_sink = sink
@@ -101,6 +485,15 @@ class MainAgentManifestEffectLifecycle:
     ) -> None:
         """Register a callback invoked with the accepted Manifest after commit."""
         self._on_accept_hooks.append(hook)
+
+    def add_on_accept_package_hook(
+        self,
+        hook: Callable[
+            [ResolvedRunManifestRevision, PendingSkillActivationPackage], None
+        ],
+    ) -> None:
+        """Register a package-aware accept hook (tools/auth/owner rebind)."""
+        self._on_accept_package_hooks.append(hook)
 
     def bind_current_manifest(
         self,
@@ -148,6 +541,11 @@ class MainAgentManifestEffectLifecycle:
         with self._lock:
             return self._current_manifest
 
+    @property
+    def policy_snapshot(self) -> Any | None:
+        with self._lock:
+            return self._policy_snapshot
+
     def accepted_skill_version_ids(self) -> frozenset[UUID]:
         with self._lock:
             return frozenset(self._accepted_version_ids)
@@ -157,6 +555,22 @@ class MainAgentManifestEffectLifecycle:
             if self._current_manifest is None:
                 return False
             return any(s.version_id == version_id for s in self._current_manifest.active_skills)
+
+    def applied_owner_budget_digests(self) -> dict[UUID, str]:
+        with self._lock:
+            return dict(self._applied_owner_budget_digests)
+
+    def applied_skill_terminals(self) -> dict[UUID, bool]:
+        with self._lock:
+            return dict(self._applied_skill_terminals)
+
+    def compatible_consumers(self) -> dict[str, frozenset[UUID]]:
+        with self._lock:
+            return {k: frozenset(v) for k, v in self._compatible_consumers.items()}
+
+    def peek_package(self, call_id: str) -> PendingSkillActivationPackage | None:
+        with self._lock:
+            return self._packages.get(call_id)
 
     def stage(self, package: PendingSkillActivationPackage) -> None:
         with self._lock:
@@ -201,8 +615,187 @@ class MainAgentManifestEffectLifecycle:
                 package.discarded = True
                 self._packages.pop(call_id, None)
                 raise ValueError("proposed_manifest mismatch")
+            # Candidate effective_policy_digest must match proposed Manifest.
+            if package.candidate_effective_policy_digest is not None:
+                if (
+                    proposed_manifest.effective_policy_digest
+                    != package.candidate_effective_policy_digest
+                ):
+                    package.discarded = True
+                    self._packages.pop(call_id, None)
+                    raise ValueError("effective_policy_digest mismatch")
 
-            # Failure-atomic: mutate only after all comparisons succeed.
+            # Recompute and verify the complete accept-time rebind projection
+            # before trusting any staged bindings/materials/events.
+            actual_rebind_digest = _candidate_rebind_payload_digest(package)
+            if (
+                package.candidate_rebind_payload_digest is None
+                or package.candidate_rebind_payload_digest
+                != actual_rebind_digest
+            ):
+                package.discarded = True
+                self._packages.pop(call_id, None)
+                raise ValueError("package_digest mismatch")
+
+            # Recompute and verify package_digest (stage-time integrity seal).
+            expected_pkg_digest = _package_digest(
+                call_id=call_id,
+                activated_version_ids=package.activated_version_ids,
+                owner_budget_digests=tuple(
+                    o.owner_budget_digest for o in package.candidate_owner_budget_limits
+                ),
+                skill_terminal_ids=tuple(
+                    vid for vid, _tt, _pkg in package.candidate_skill_terminals
+                ),
+                compatible_consumers=package.candidate_compatible_consumers,
+                effective_policy_digest=package.candidate_effective_policy_digest
+                or proposed_manifest.effective_policy_digest,
+                rebind_payload_digest=actual_rebind_digest,
+            )
+            if package.package_digest is None:
+                package.discarded = True
+                self._packages.pop(call_id, None)
+                raise ValueError("package_digest missing")
+            if package.package_digest != expected_pkg_digest:
+                package.discarded = True
+                self._packages.pop(call_id, None)
+                raise ValueError("package_digest mismatch")
+            # Also recheck activation_payload seal when present.
+            payload_digest = effect.activation_payload.get("packageDigest")
+            if payload_digest is not None and payload_digest != expected_pkg_digest:
+                package.discarded = True
+                self._packages.pop(call_id, None)
+                raise ValueError("package_digest mismatch")
+
+            if package.require_finished_reservation:
+                budget = self._budget_ledger
+                reservations = (
+                    tuple(
+                        item
+                        for item in budget.snapshot().reservations
+                        if item.call_id == call_id
+                        and item.domain_key == "skill.inject"
+                        and item.owner_kind == "main_agent"
+                    )
+                    if budget is not None
+                    else ()
+                )
+                if len(reservations) != 1 or reservations[0].state != "finished":
+                    package.discarded = True
+                    self._packages.pop(call_id, None)
+                    raise ValueError("skill_inject_reservation_incomplete")
+
+            # Pure preflight + ledger apply BEFORE any Manifest mutation (all-or-nothing).
+            # Fail-closed: owner-limit/terminal denials discard the package and
+            # raise so we never leave Manifest advanced without buckets/terminals.
+            budget_snapshot = None
+            obligation_snapshot = None
+            skill_terminal_map_snapshot: dict[str, bool] | None = None
+            # Post-apply expected revisions: restore only if the ledger is still
+            # exactly at our post-apply revision (no concurrent foreign advance).
+            budget_expected_rev: int | None = None
+            obligation_expected_rev: int | None = None
+            applied_owner_before = dict(self._applied_owner_budget_digests)
+            applied_terminals_before = dict(self._applied_skill_terminals)
+            try:
+                self._preflight_policy_applies_locked(package)
+                # Snapshot ledger state under each ledger's own lock so a mid-apply
+                # failure can be rewound without clobbering concurrent charges.
+                if self._budget_ledger is not None:
+                    budget_snapshot = self._budget_ledger.snapshot()
+                    budget_expected_rev = budget_snapshot.revision
+                if self._obligation_ledger is not None:
+                    obligation_snapshot = self._obligation_ledger.snapshot()
+                    obligation_expected_rev = obligation_snapshot.revision
+                    skill_terminal_map_snapshot = (
+                        self._obligation_ledger.skill_terminal_text_allowed_map()
+                    )
+                for owner_limits in package.candidate_owner_budget_limits:
+                    prior_rev = budget_expected_rev
+                    try:
+                        self._apply_owner_limits_locked(owner_limits, fail_closed=True)
+                    except Exception:
+                        if self._budget_ledger is not None and prior_rev is not None:
+                            current_rev = self._budget_ledger.snapshot().revision
+                            # A ledger event sink may raise after the pure state
+                            # transition was installed. Record that exact owned
+                            # +1 revision so outer rollback can still rewind it.
+                            if current_rev in {prior_rev, prior_rev + 1}:
+                                budget_expected_rev = current_rev
+                        raise
+                    if self._budget_ledger is not None:
+                        budget_expected_rev = self._budget_ledger.snapshot().revision
+                for (
+                    skill_version_id,
+                    terminal_text_allowed,
+                    skill_package_id,
+                ) in package.candidate_skill_terminals:
+                    prior_rev = obligation_expected_rev
+                    try:
+                        self._apply_skill_terminal_locked(
+                            skill_version_id=skill_version_id,
+                            terminal_text_allowed=terminal_text_allowed,
+                            skill_package_id=skill_package_id,
+                            fail_closed=True,
+                        )
+                    except Exception:
+                        if (
+                            self._obligation_ledger is not None
+                            and prior_rev is not None
+                        ):
+                            current_rev = self._obligation_ledger.snapshot().revision
+                            if current_rev in {prior_rev, prior_rev + 1}:
+                                obligation_expected_rev = current_rev
+                        raise
+                    if self._obligation_ledger is not None:
+                        obligation_expected_rev = (
+                            self._obligation_ledger.snapshot().revision
+                        )
+                # Rebind every dependent while the lifecycle commit is still
+                # provisional. A failure participates in the same rollback as
+                # owner limits/obligations and cannot publish the child Manifest.
+                for hook in list(self._on_accept_hooks):
+                    hook(proposed_manifest)
+                for hook in list(self._on_accept_package_hooks):
+                    hook(proposed_manifest, package)
+            except Exception as apply_exc:
+                # Rewind via locked restore APIs. Restore only if the ledger is
+                # still at our post-apply revision — concurrent Capability calls
+                # that advanced past us cause fail-closed protocol error rather
+                # than wiping foreign reservations/charges.
+                rewind_ok = True
+                if (
+                    budget_snapshot is not None
+                    and budget_expected_rev is not None
+                    and self._budget_ledger is not None
+                ):
+                    if not self._budget_ledger.restore_if_revision(
+                        budget_snapshot,
+                        expected_current_revision=budget_expected_rev,
+                    ):
+                        rewind_ok = False
+                if (
+                    obligation_snapshot is not None
+                    and obligation_expected_rev is not None
+                    and self._obligation_ledger is not None
+                ):
+                    if not self._obligation_ledger.restore_if_revision(
+                        obligation_snapshot,
+                        expected_current_revision=obligation_expected_rev,
+                        skill_terminal_text_allowed=skill_terminal_map_snapshot,
+                    ):
+                        rewind_ok = False
+                self._applied_owner_budget_digests = applied_owner_before
+                self._applied_skill_terminals = applied_terminals_before
+                package.discarded = True
+                self._packages.pop(call_id, None)
+                if not rewind_ok:
+                    raise RuntimeError(
+                        "policy_state_protocol_error:ledger_rewind_conflict"
+                    ) from apply_exc
+                raise
+
+            # All pure checks + ledger applies succeeded — advance Manifest.
             self._current_manifest = proposed_manifest
             self._accepted_version_ids = {
                 item.version_id for item in proposed_manifest.active_skills
@@ -222,19 +815,25 @@ class MainAgentManifestEffectLifecycle:
                 for vid, n in self._instruction_chars_by_version.items()
                 if vid in self._accepted_version_ids
             }
+            # Register candidate policy snapshot (if staged with the package) then advance.
+            if package.candidate_policy_snapshot is not None:
+                snap = package.candidate_policy_snapshot
+                digest = getattr(snap, "effective_policy_digest", None)
+                if isinstance(digest, str) and digest:
+                    self._policy_snapshot_by_digest[digest] = snap
+            if package.candidate_effective_policy_digest is not None:
+                snap = self._policy_snapshot_by_digest.get(
+                    package.candidate_effective_policy_digest
+                )
+                if snap is not None:
+                    self._policy_snapshot = snap
+            # Commit compatible consumers (local lifecycle state only).
+            for domain_key, consumer_id in package.candidate_compatible_consumers:
+                self._compatible_consumers.setdefault(domain_key, set()).add(consumer_id)
+
             package.accepted = True
             events = package.post_commit_events
-            accepted_manifest = proposed_manifest
             self._packages.pop(call_id, None)
-
-        # Rebind dependents (auth factory, control runtime) so new Skill
-        # bindings become dispatchable on the next call of this Run.
-        for hook in list(self._on_accept_hooks):
-            try:
-                hook(accepted_manifest)
-            except Exception:
-                # Hooks must not unwind an already-accepted Manifest.
-                self._event_failures.append(call_id)
 
         # Event delivery after accept cannot roll back the Manifest.
         sink = self._post_commit_sink
@@ -244,6 +843,132 @@ class MainAgentManifestEffectLifecycle:
                     sink(event)
                 except Exception:
                     self._event_failures.append(call_id)
+
+    def _preflight_policy_applies_locked(
+        self, package: PendingSkillActivationPackage
+    ) -> None:
+        """Pure-preflight owner limits + skill terminals without mutating ledgers.
+
+        Raises ValueError on deny so accept discards the package fail-closed
+        before Manifest mutation.
+        """
+        budget = self._budget_ledger
+        if budget is not None and package.candidate_owner_budget_limits:
+            # Walk pure states sequentially so multi-owner packages stay consistent.
+            state = budget.snapshot()
+            for owner_limits in package.candidate_owner_budget_limits:
+                state, decision = pure_add_owner_limits(state, owner_limits)
+                if getattr(decision, "allowed", True) is False:
+                    raise ValueError(
+                        f"owner_limits_denied:{owner_limits.owner_version_id}:"
+                        f"{getattr(decision, 'reason_code', 'denied')}"
+                    )
+
+        obligations = self._obligation_ledger
+        if obligations is not None and package.candidate_skill_terminals:
+            run_id = getattr(obligations, "_run_id", None)
+            if run_id is None:
+                raise ValueError("skill_terminal_error:run_id_required")
+            state = obligations.snapshot()
+            for (
+                skill_version_id,
+                _terminal_text_allowed,
+                skill_package_id,
+            ) in package.candidate_skill_terminals:
+                obligation = build_skill_terminal_obligation(
+                    run_id=run_id,
+                    skill_version_id=skill_version_id,
+                    revision=state.revision + 1,
+                    skill_package_id=skill_package_id,
+                )
+                state, decision = pure_create_obligation(state, obligation)
+                if getattr(decision, "allowed", True) is False:
+                    raise ValueError(
+                        f"skill_terminal_denied:{skill_version_id}:"
+                        f"{getattr(decision, 'reason_code', 'denied')}"
+                    )
+
+    def _apply_owner_limits_locked(
+        self,
+        owner_limits: OwnerBudgetLimits,
+        *,
+        fail_closed: bool = False,
+    ) -> None:
+        """Apply one owner bucket under the lifecycle lock.
+
+        When fail_closed=True (accept path after pure preflight), denials/errors
+        raise so the package is not treated as accepted with partial residue.
+        Local applied digests are recorded only after a successful apply.
+        """
+        ledger = self._budget_ledger
+        if ledger is None:
+            self._applied_owner_budget_digests[owner_limits.owner_version_id] = (
+                owner_limits.owner_budget_digest
+            )
+            return
+        try:
+            decision = ledger.add_owner_limits(owner_limits)
+            if getattr(decision, "allowed", True) is False:
+                msg = (
+                    f"owner_limits_denied:{owner_limits.owner_version_id}:"
+                    f"{getattr(decision, 'reason_code', 'denied')}"
+                )
+                if fail_closed:
+                    raise ValueError(msg)
+                self._event_failures.append(msg)
+                return
+            self._applied_owner_budget_digests[owner_limits.owner_version_id] = (
+                owner_limits.owner_budget_digest
+            )
+        except ValueError:
+            if fail_closed:
+                raise
+            self._event_failures.append(
+                f"owner_limits_error:{owner_limits.owner_version_id}"
+            )
+        except Exception:
+            if fail_closed:
+                raise
+            self._event_failures.append(
+                f"owner_limits_error:{owner_limits.owner_version_id}"
+            )
+
+    def _apply_skill_terminal_locked(
+        self,
+        *,
+        skill_version_id: UUID,
+        terminal_text_allowed: bool,
+        skill_package_id: UUID | None = None,
+        fail_closed: bool = False,
+    ) -> None:
+        ledger = self._obligation_ledger
+        if ledger is None:
+            self._applied_skill_terminals[skill_version_id] = bool(terminal_text_allowed)
+            return
+        try:
+            decision = ledger.create_skill_terminal(
+                skill_version_id=skill_version_id,
+                terminal_text_allowed=bool(terminal_text_allowed),
+                skill_package_id=skill_package_id,
+            )
+            if getattr(decision, "allowed", True) is False:
+                msg = (
+                    f"skill_terminal_denied:{skill_version_id}:"
+                    f"{getattr(decision, 'reason_code', 'denied')}"
+                )
+                if fail_closed:
+                    raise ValueError(msg)
+                self._event_failures.append(msg)
+                return
+            self._applied_skill_terminals[skill_version_id] = bool(terminal_text_allowed)
+        except ValueError:
+            if fail_closed:
+                raise
+            self._event_failures.append(f"skill_terminal_error:{skill_version_id}")
+        except Exception:
+            if fail_closed:
+                raise
+            self._event_failures.append(f"skill_terminal_error:{skill_version_id}")
 
     def discard(self, *, call_id: str, reason_code: str) -> None:
         del reason_code
@@ -256,6 +981,9 @@ class MainAgentManifestEffectLifecycle:
                 self._packages[call_id] = package
                 return
             package.discarded = True
+            # Candidate state dies with the package: no owner buckets, no
+            # obligations, no consumers, no events. skill.inject accounting is
+            # independent and never rewound here.
 
 
 def _effect_digest(
@@ -273,6 +1001,33 @@ def _effect_digest(
             "proposedRevision": proposed.revision,
             "proposedDigest": proposed.manifest_digest,
             "activeSkillVersionIds": [str(s.version_id) for s in proposed.active_skills],
+            "effectivePolicyDigest": proposed.effective_policy_digest,
+        }
+    )
+
+
+def _package_digest(
+    *,
+    call_id: str,
+    activated_version_ids: Sequence[UUID],
+    owner_budget_digests: Sequence[str],
+    skill_terminal_ids: Sequence[UUID],
+    compatible_consumers: Sequence[tuple[str, UUID]],
+    effective_policy_digest: str | None,
+    rebind_payload_digest: str | None,
+) -> str:
+    return sha256_canonical_json(
+        {
+            "callId": call_id,
+            "activatedVersionIds": [str(v) for v in activated_version_ids],
+            "ownerBudgetDigests": list(owner_budget_digests),
+            "skillTerminalIds": [str(v) for v in skill_terminal_ids],
+            "compatibleConsumers": [
+                {"domainKey": k, "consumerVersionId": str(v)}
+                for k, v in sorted(compatible_consumers, key=lambda x: (x[0], x[1].bytes))
+            ],
+            "effectivePolicyDigest": effective_policy_digest,
+            "rebindPayloadDigest": rebind_payload_digest,
         }
     )
 
@@ -281,8 +1036,15 @@ def build_domain_key_ownership_map(
     *,
     current_manifest: ResolvedRunManifestRevision,
     candidates: Sequence[SkillActivationCandidate],
+    allow_business_duplicates: bool = False,
 ) -> dict[str, str]:
-    """Map domain_key -> owner label for base controls, active, and candidate batch."""
+    """Map domain_key -> owner label for base controls, active, and candidate batch.
+
+    Main Agent base-control collisions remain unconditional failures.
+    When allow_business_duplicates is True, existing-active / same-batch business
+    Domain Keys are recorded but not raised here — §4.3 compatibility evaluation
+    decides consumer-vs-conflict. When False (Plan 04 default), any collision fails.
+    """
     ownership: dict[str, str] = {}
     for cap in current_manifest.capabilities:
         ownership[cap.capability_key] = f"manifest:{cap.capability_key}"
@@ -292,13 +1054,725 @@ def build_domain_key_ownership_map(
         owner = f"skill:{candidate.skill.canonical_name}:{candidate.skill.version_id}"
         for cap in candidate.capabilities:
             prior = ownership.get(cap.capability_key)
-            if prior is not None and not prior.startswith(f"skill:{candidate.skill.canonical_name}:"):
-                # Collision with base/active/other candidate.
+            if prior is None:
+                ownership[cap.capability_key] = owner
+                continue
+            # Unconditional: never collide with base controls.
+            if prior.startswith("base_control:"):
                 raise CatalogError(SKILL_CAPABILITY_CONFLICT)
-            if prior is not None and prior != owner:
-                raise CatalogError(SKILL_CAPABILITY_CONFLICT)
-            ownership[cap.capability_key] = owner
+            if not allow_business_duplicates:
+                # Plan 04 strict exclusivity (any prior owner fails).
+                if prior != owner:
+                    raise CatalogError(SKILL_CAPABILITY_CONFLICT)
+                continue
+            # Plan 05: business duplicates deferred to §4.3; keep first owner.
+            # Same skill may re-declare its own keys.
+            if prior == owner:
+                continue
+            # Leave prior owner; caller evaluates compatibility.
     return ownership
+
+
+def _normalize_conflict_rules(
+    rules: Sequence[SkillConflictRuleV1 | dict[str, Any] | Any],
+) -> tuple[SkillConflictRuleV1, ...]:
+    normalized: list[SkillConflictRuleV1] = []
+    for rule in rules:
+        if isinstance(rule, SkillConflictRuleV1):
+            normalized.append(rule)
+            continue
+        if isinstance(rule, dict):
+            normalized.append(SkillConflictRuleV1.model_validate(rule))
+            continue
+        # Fail closed on unknown payload shapes.
+        raise CatalogError("skill_conflict_invalid_rule")
+    return tuple(normalized)
+
+
+def _evaluate_candidate_conflicts(
+    *,
+    current_manifest: ResolvedRunManifestRevision,
+    to_append: Sequence[SkillActivationCandidate],
+    policy: SkillInjectionPolicyContext | None,
+) -> str | None:
+    """Return a conflict reason_code or None when allowed."""
+    # Collect any rules from candidates or active context.
+    has_rules = any(c.conflict_rules for c in to_append)
+    active_rules_map: dict[UUID, tuple[SkillConflictRuleV1, ...]] = {}
+    active_aliases_map: dict[UUID, tuple[str, ...]] = {}
+    if policy is not None:
+        active_rules_map = {vid: rules for vid, rules in policy.active_conflict_rules}
+        active_aliases_map = {vid: aliases for vid, aliases in policy.active_aliases}
+        has_rules = has_rules or bool(active_rules_map)
+    if not has_rules:
+        return None
+
+    active_participants: list[SkillConflictParticipant] = []
+    for skill in current_manifest.active_skills:
+        rules = active_rules_map.get(skill.version_id, ())
+        aliases = active_aliases_map.get(skill.version_id, ())
+        active_participants.append(
+            SkillConflictParticipant(
+                identity=SkillConflictIdentity(
+                    canonical_name=skill.canonical_name,
+                    version_id=skill.version_id,
+                    package_id=skill.package_id,
+                    aliases=aliases,
+                ),
+                conflict_rules=_normalize_conflict_rules(rules),
+                role="active",
+            )
+        )
+
+    candidate_participants: list[SkillConflictParticipant] = []
+    for candidate in to_append:
+        try:
+            rules = _normalize_conflict_rules(candidate.conflict_rules)
+        except Exception:
+            return "skill_conflict_invalid_rule"
+        candidate_participants.append(
+            SkillConflictParticipant(
+                identity=SkillConflictIdentity(
+                    canonical_name=candidate.skill.canonical_name,
+                    version_id=candidate.skill.version_id,
+                    package_id=candidate.skill.package_id,
+                    aliases=candidate.aliases,
+                ),
+                conflict_rules=rules,
+                role="candidate",
+            )
+        )
+
+    catalog_skills: Sequence[SkillConflictIdentity] | None = None
+    if policy is not None and policy.catalog_skills:
+        catalog_skills = policy.catalog_skills
+    result = evaluate_skill_conflicts(
+        active=active_participants,
+        candidates=candidate_participants,
+        catalog_skills=catalog_skills,
+    )
+    if result.allowed:
+        return None
+    return result.reason_code or "skill_conflict_invalid_rule"
+
+
+def _view_for_domain(
+    candidate: SkillActivationCandidate, domain_key: str
+) -> CandidateExposureView | None:
+    for view in candidate.exposure_views:
+        if view.domain_key == domain_key:
+            return view
+    return None
+
+
+def _binding_for_domain(
+    candidate: SkillActivationCandidate, domain_key: str
+) -> FrozenCapabilityBinding | None:
+    for binding in candidate.frozen_bindings:
+        if binding.ref.capability_key == domain_key:
+            return binding
+    return None
+
+
+def _resolve_skill_policy_ints(
+    candidate: SkillActivationCandidate, domain_key: str
+) -> tuple[int, int, bool, bool]:
+    """Concrete skill-policy fields for §4.3, preferring top-level then exposure view.
+
+    Unset max_* defaults to 0 (matches normalize_owner_budget_limits for skill
+    owners). requires_terminal_output / terminal_text_allowed fall back to the
+    candidate dataclass defaults when neither top-level nor view supplies them.
+    """
+    view = _view_for_domain(candidate, domain_key)
+    max_skill_calls = candidate.max_skill_calls
+    if max_skill_calls is None and view is not None:
+        max_skill_calls = view.max_skill_calls
+    if max_skill_calls is None:
+        max_skill_calls = 0
+
+    max_same_read_calls = candidate.max_same_read_calls
+    if max_same_read_calls is None and view is not None:
+        max_same_read_calls = view.max_same_read_calls
+    if max_same_read_calls is None:
+        max_same_read_calls = 0
+
+    # requires_terminal_output is bool on the candidate (default False).
+    requires_terminal = bool(candidate.requires_terminal_output)
+    if view is not None and view.requires_terminal_output is not None:
+        # Explicit per-exposure view wins when present.
+        requires_terminal = bool(view.requires_terminal_output)
+
+    terminal_text = bool(candidate.terminal_text_allowed)
+    if view is not None and view.terminal_text_allowed is not None:
+        terminal_text = bool(view.terminal_text_allowed)
+
+    return int(max_skill_calls), int(max_same_read_calls), requires_terminal, terminal_text
+
+
+def _descriptor_fields_for_cap(
+    candidate: SkillActivationCandidate,
+    cap: ResolvedCapabilityRef,
+    domain_key: str,
+) -> dict[str, Any]:
+    """Build shared descriptor/side-effect/timeout fields for §4.3 views.
+
+    Prefer CandidateExposureView digests, then frozen binding resolved fields,
+    then stable pure-stage defaults so two candidates with identical refs and
+    top-level policy compare equal when richer inputs are absent.
+    """
+    view = _view_for_domain(candidate, domain_key)
+    binding = _binding_for_domain(candidate, domain_key)
+
+    descriptor_digest = ""
+    if view is not None and view.descriptor_digest:
+        descriptor_digest = view.descriptor_digest
+
+    side_effect: str = "read"
+    executable_revision = ""
+    timeout_mode = "none"
+    timeout_seconds: float | None = None
+    interrupt_mode = "none"
+    parallel_safe = True
+    terminal_output = False
+    needs_followup = True
+    followup_hint: str | None = None
+
+    if view is not None and view.descriptor_fields_frozen:
+        side_effect = view.side_effect
+        executable_revision = view.executable_revision
+        timeout_mode = view.timeout_mode
+        timeout_seconds = view.timeout_seconds
+        interrupt_mode = view.interrupt_mode
+        parallel_safe = view.parallel_safe
+        terminal_output = view.terminal_output
+        needs_followup = view.needs_followup
+        followup_hint = view.followup_hint
+    elif binding is not None:
+        resolved = binding.resolved
+        if resolved.executable_revision:
+            executable_revision = str(resolved.executable_revision)
+        completion = resolved.completion
+        terminal_output = bool(completion.terminal_output)
+        needs_followup = bool(completion.needs_followup)
+        followup_hint = completion.followup_hint
+
+    return {
+        "binding_contract_digest": (
+            view.binding_contract_digest
+            if view is not None and view.binding_contract_digest
+            else cap.binding_contract_digest
+        ),
+        "descriptor_digest": descriptor_digest,
+        "side_effect": side_effect,
+        "input_schema_digest": cap.input_schema_digest,
+        "output_schema_digest": cap.output_schema_digest,
+        "dependency_closure_digest": cap.dependency_closure_digest,
+        "resolution_digest": cap.resolution_digest,
+        "executable_revision": executable_revision,
+        "timeout_mode": timeout_mode,
+        "timeout_seconds": timeout_seconds,
+        "interrupt_mode": interrupt_mode,
+        "parallel_safe": parallel_safe,
+        "terminal_output": terminal_output,
+        "needs_followup": needs_followup,
+        "followup_hint": followup_hint,
+    }
+
+
+def _declaration_from_candidate(
+    candidate: SkillActivationCandidate,
+    cap: ResolvedCapabilityRef,
+    domain_key: str,
+) -> DuplicateCapabilityDeclaration:
+    max_calls, max_same, req_term, term_text = _resolve_skill_policy_ints(
+        candidate, domain_key
+    )
+    fields = _descriptor_fields_for_cap(candidate, cap, domain_key)
+    view = _view_for_domain(candidate, domain_key)
+    grant_admits = (
+        view.grant_admits_side_effect
+        if view is not None and view.grant_admits_side_effect is not None
+        else candidate_grant_admits_side_effect(candidate, fields["side_effect"])
+    )
+    return DuplicateCapabilityDeclaration(
+        domain_key=domain_key,
+        resolved_ref=cap,
+        binding_contract_digest=fields["binding_contract_digest"],
+        descriptor_digest=fields["descriptor_digest"],
+        side_effect=fields["side_effect"],  # type: ignore[arg-type]
+        input_schema_digest=fields["input_schema_digest"],
+        output_schema_digest=fields["output_schema_digest"],
+        dependency_closure_digest=fields["dependency_closure_digest"],
+        resolution_digest=fields["resolution_digest"],
+        executable_revision=fields["executable_revision"],
+        timeout_mode=fields["timeout_mode"],
+        timeout_seconds=fields["timeout_seconds"],
+        interrupt_mode=fields["interrupt_mode"],
+        parallel_safe=fields["parallel_safe"],
+        terminal_output=fields["terminal_output"],
+        needs_followup=fields["needs_followup"],
+        followup_hint=fields["followup_hint"],
+        max_skill_calls=max_calls,
+        max_same_read_calls=max_same,
+        requires_terminal_output=req_term,
+        terminal_text_allowed=term_text,
+        grant_admits_side_effect=grant_admits,
+        conflict_rules=_normalize_conflict_rules(candidate.conflict_rules),
+        candidate_skill_version_id=candidate.skill.version_id,
+        candidate_canonical_name=candidate.skill.canonical_name,
+        candidate_aliases=tuple(candidate.aliases),
+    )
+
+
+def _existing_view_from_owner_candidate(
+    owner: SkillActivationCandidate,
+    cap: ResolvedCapabilityRef,
+    domain_key: str,
+    *,
+    consumers: Sequence[UUID] = (),
+) -> ExistingExposureCompatibilityView:
+    max_calls, max_same, req_term, term_text = _resolve_skill_policy_ints(
+        owner, domain_key
+    )
+    fields = _descriptor_fields_for_cap(owner, cap, domain_key)
+    view = _view_for_domain(owner, domain_key)
+    grant_admits = (
+        view.grant_admits_side_effect
+        if view is not None and view.grant_admits_side_effect is not None
+        else candidate_grant_admits_side_effect(owner, fields["side_effect"])
+    )
+    return ExistingExposureCompatibilityView(
+        domain_key=domain_key,
+        resolved_ref=cap,
+        binding_contract_digest=fields["binding_contract_digest"],
+        descriptor_digest=fields["descriptor_digest"],
+        side_effect=fields["side_effect"],  # type: ignore[arg-type]
+        input_schema_digest=fields["input_schema_digest"],
+        output_schema_digest=fields["output_schema_digest"],
+        dependency_closure_digest=fields["dependency_closure_digest"],
+        resolution_digest=fields["resolution_digest"],
+        executable_revision=fields["executable_revision"],
+        timeout_mode=fields["timeout_mode"],
+        timeout_seconds=fields["timeout_seconds"],
+        interrupt_mode=fields["interrupt_mode"],
+        parallel_safe=fields["parallel_safe"],
+        terminal_output=fields["terminal_output"],
+        needs_followup=fields["needs_followup"],
+        followup_hint=fields["followup_hint"],
+        max_skill_calls=max_calls,
+        max_same_read_calls=max_same,
+        requires_terminal_output=req_term,
+        terminal_text_allowed=term_text,
+        grant_admits_side_effect=grant_admits,
+        conflict_rules=_normalize_conflict_rules(owner.conflict_rules),
+        owner_version_id=owner.skill.version_id,
+        compatible_consumer_version_ids=tuple(consumers),
+        owner_canonical_name=owner.skill.canonical_name,
+        owner_aliases=tuple(owner.aliases),
+    )
+
+
+def _existing_view_from_manifest_cap(
+    *,
+    existing_cap: ResolvedCapabilityRef,
+    domain_key: str,
+    view: CandidateExposureView | None,
+    owner_version_id: UUID,
+    owner_canonical_name: str,
+    owner_aliases: tuple[str, ...],
+    conflict_rules: tuple[SkillConflictRuleV1, ...],
+    consumers: Sequence[UUID] = (),
+) -> ExistingExposureCompatibilityView:
+    """Build an ExistingExposureCompatibilityView for an already-active exposure.
+
+    Skill-policy fields come from the policy-supplied CandidateExposureView when
+    present. Missing skill-policy fields stay None so Task 1's evaluator rejects
+    skill re-declaration of main-agent/unknown-policy exposures fail-closed.
+    """
+    return ExistingExposureCompatibilityView(
+        domain_key=domain_key,
+        resolved_ref=existing_cap,
+        binding_contract_digest=(
+            view.binding_contract_digest
+            if view is not None and view.binding_contract_digest
+            else existing_cap.binding_contract_digest
+        ),
+        descriptor_digest=view.descriptor_digest if view is not None else "",
+        side_effect=(
+            view.side_effect
+            if view is not None and view.descriptor_fields_frozen
+            else "read"
+        ),
+        input_schema_digest=existing_cap.input_schema_digest,
+        output_schema_digest=existing_cap.output_schema_digest,
+        dependency_closure_digest=existing_cap.dependency_closure_digest,
+        resolution_digest=existing_cap.resolution_digest,
+        executable_revision=(
+            view.executable_revision
+            if view is not None and view.descriptor_fields_frozen
+            else ""
+        ),
+        timeout_mode=(
+            view.timeout_mode
+            if view is not None and view.descriptor_fields_frozen
+            else "none"
+        ),
+        timeout_seconds=(
+            view.timeout_seconds
+            if view is not None and view.descriptor_fields_frozen
+            else None
+        ),
+        interrupt_mode=(
+            view.interrupt_mode
+            if view is not None and view.descriptor_fields_frozen
+            else "none"
+        ),
+        parallel_safe=(
+            view.parallel_safe
+            if view is not None and view.descriptor_fields_frozen
+            else True
+        ),
+        terminal_output=(
+            view.terminal_output
+            if view is not None and view.descriptor_fields_frozen
+            else False
+        ),
+        needs_followup=(
+            view.needs_followup
+            if view is not None and view.descriptor_fields_frozen
+            else True
+        ),
+        followup_hint=(
+            view.followup_hint
+            if view is not None and view.descriptor_fields_frozen
+            else None
+        ),
+        max_skill_calls=view.max_skill_calls if view is not None else None,
+        max_same_read_calls=view.max_same_read_calls if view is not None else None,
+        requires_terminal_output=(
+            view.requires_terminal_output if view is not None else None
+        ),
+        terminal_text_allowed=(
+            view.terminal_text_allowed if view is not None else None
+        ),
+        grant_admits_side_effect=(
+            bool(view.grant_admits_side_effect)
+            if view is not None and view.grant_admits_side_effect is not None
+            else False
+        ),
+        conflict_rules=conflict_rules,
+        owner_version_id=owner_version_id,
+        compatible_consumer_version_ids=tuple(consumers),
+        owner_canonical_name=owner_canonical_name,
+        owner_aliases=owner_aliases,
+    )
+
+
+def _evaluate_business_duplicates(
+    *,
+    current_manifest: ResolvedRunManifestRevision,
+    to_append: Sequence[SkillActivationCandidate],
+    policy: SkillInjectionPolicyContext | None,
+) -> tuple[str | None, tuple[tuple[str, UUID], ...]]:
+    """§4.3 strict duplicate compatibility via Task 1 evaluator.
+
+    Returns (reason_code_or_None, compatible_consumer_pairs).
+    Base-control collisions are already rejected by ownership map.
+    Builds proper ExistingExposureCompatibilityView / DuplicateCapabilityDeclaration
+    from candidate top-level policy fields (max_skill_calls, max_same_read_calls,
+    requires_terminal_output, terminal_text_allowed), optional exposure_views,
+    frozen_bindings, and conflict_rules — never identity-only.
+    """
+    existing_caps = {
+        cap.capability_key: cap for cap in current_manifest.capabilities
+    }
+    existing_views: dict[str, CandidateExposureView] = {}
+    if policy is not None:
+        for view in policy.existing_exposures:
+            existing_views[view.domain_key] = view
+
+    # Optional active skill conflict/alias context for coexistence checks.
+    active_rules_map: dict[UUID, tuple[SkillConflictRuleV1, ...]] = {}
+    active_aliases_map: dict[UUID, tuple[str, ...]] = {}
+    if policy is not None:
+        active_rules_map = {
+            vid: _normalize_conflict_rules(rules)
+            for vid, rules in policy.active_conflict_rules
+        }
+        active_aliases_map = {vid: aliases for vid, aliases in policy.active_aliases}
+
+    catalog_skills: Sequence[SkillConflictIdentity] | None = None
+    if policy is not None and policy.catalog_skills:
+        catalog_skills = policy.catalog_skills
+
+    claims: dict[str, list[SkillActivationCandidate]] = {}
+    for candidate in to_append:
+        for cap in candidate.capabilities:
+            claims.setdefault(cap.capability_key, []).append(candidate)
+
+    consumers: list[tuple[str, UUID]] = []
+
+    for domain_key, claimants in claims.items():
+        if domain_key in MAIN_AGENT_CONTROL_KEYS:
+            return SKILL_CAPABILITY_CONFLICT, ()
+
+        existing_cap = existing_caps.get(domain_key)
+        ordered = sorted(
+            claimants,
+            key=lambda c: (c.skill.canonical_name, c.skill.version_id.bytes),
+        )
+
+        if existing_cap is not None:
+            # Existing active owner wins; every claimant must be §4.3-compatible.
+            view = existing_views.get(domain_key)
+            # Owner identity is not on the Manifest capability; use a stable
+            # sentinel unless policy.existing_exposures / active rules supply it.
+            # Task 1 still evaluates full field/policy parity fail-closed.
+            owner_version_id = UUID(int=0)
+            owner_name = ""
+            owner_aliases: tuple[str, ...] = ()
+            owner_rules: tuple[SkillConflictRuleV1, ...] = ()
+            # When exactly one active skill and rules are known for it, use that
+            # identity for coexistence evaluation (best-effort pure-stage mapping).
+            if len(current_manifest.active_skills) == 1:
+                sole = current_manifest.active_skills[0]
+                owner_version_id = sole.version_id
+                owner_name = sole.canonical_name
+                owner_aliases = active_aliases_map.get(sole.version_id, ())
+                owner_rules = active_rules_map.get(sole.version_id, ())
+
+            existing_view = _existing_view_from_manifest_cap(
+                existing_cap=existing_cap,
+                domain_key=domain_key,
+                view=view,
+                owner_version_id=owner_version_id,
+                owner_canonical_name=owner_name,
+                owner_aliases=owner_aliases,
+                conflict_rules=owner_rules,
+                consumers=(),
+            )
+            # Seed running consumer list so sequential claimants append correctly.
+            running_consumers: list[UUID] = []
+            for candidate in ordered:
+                match = next(
+                    (c for c in candidate.capabilities if c.capability_key == domain_key),
+                    None,
+                )
+                if match is None:
+                    continue
+                declaration = _declaration_from_candidate(candidate, match, domain_key)
+                try:
+                    _status, updated = evaluate_duplicate_capability_compatibility(
+                        existing=ExistingExposureCompatibilityView(
+                            domain_key=existing_view.domain_key,
+                            resolved_ref=existing_view.resolved_ref,
+                            binding_contract_digest=existing_view.binding_contract_digest,
+                            descriptor_digest=existing_view.descriptor_digest,
+                            side_effect=existing_view.side_effect,
+                            input_schema_digest=existing_view.input_schema_digest,
+                            output_schema_digest=existing_view.output_schema_digest,
+                            dependency_closure_digest=existing_view.dependency_closure_digest,
+                            resolution_digest=existing_view.resolution_digest,
+                            executable_revision=existing_view.executable_revision,
+                            timeout_mode=existing_view.timeout_mode,
+                            timeout_seconds=existing_view.timeout_seconds,
+                            interrupt_mode=existing_view.interrupt_mode,
+                            parallel_safe=existing_view.parallel_safe,
+                            terminal_output=existing_view.terminal_output,
+                            needs_followup=existing_view.needs_followup,
+                            followup_hint=existing_view.followup_hint,
+                            max_skill_calls=existing_view.max_skill_calls,
+                            max_same_read_calls=existing_view.max_same_read_calls,
+                            requires_terminal_output=existing_view.requires_terminal_output,
+                            terminal_text_allowed=existing_view.terminal_text_allowed,
+                            grant_admits_side_effect=existing_view.grant_admits_side_effect,
+                            conflict_rules=existing_view.conflict_rules,
+                            owner_version_id=existing_view.owner_version_id,
+                            compatible_consumer_version_ids=tuple(running_consumers),
+                            owner_canonical_name=existing_view.owner_canonical_name,
+                            owner_aliases=existing_view.owner_aliases,
+                        ),
+                        candidate=declaration,
+                        catalog_skills=catalog_skills,
+                    )
+                except ExposureBuildError as exc:
+                    if exc.reason_code == DUPLICATE_CAPABILITY_POLICY_CONFLICT:
+                        return DUPLICATE_CAPABILITY_POLICY_CONFLICT, ()
+                    return exc.reason_code or DUPLICATE_CAPABILITY_POLICY_CONFLICT, ()
+                running_consumers = list(updated)
+                consumers.append((domain_key, candidate.skill.version_id))
+            continue
+
+        # No existing Manifest owner: first ordered claimant owns; rest must match.
+        if len(ordered) == 1:
+            continue
+        owner = ordered[0]
+        owner_cap = next(
+            c for c in owner.capabilities if c.capability_key == domain_key
+        )
+        running_consumers: list[UUID] = []
+        for consumer_candidate in ordered[1:]:
+            consumer_cap = next(
+                (
+                    c
+                    for c in consumer_candidate.capabilities
+                    if c.capability_key == domain_key
+                ),
+                None,
+            )
+            if consumer_cap is None:
+                continue
+            existing_view = _existing_view_from_owner_candidate(
+                owner,
+                owner_cap,
+                domain_key,
+                consumers=running_consumers,
+            )
+            declaration = _declaration_from_candidate(
+                consumer_candidate, consumer_cap, domain_key
+            )
+            try:
+                _status, updated = evaluate_duplicate_capability_compatibility(
+                    existing=existing_view,
+                    candidate=declaration,
+                    catalog_skills=catalog_skills,
+                )
+            except ExposureBuildError as exc:
+                if exc.reason_code == DUPLICATE_CAPABILITY_POLICY_CONFLICT:
+                    return DUPLICATE_CAPABILITY_POLICY_CONFLICT, ()
+                return exc.reason_code or DUPLICATE_CAPABILITY_POLICY_CONFLICT, ()
+            running_consumers = list(updated)
+            consumers.append((domain_key, consumer_candidate.skill.version_id))
+
+    unique = sorted(set(consumers), key=lambda x: (x[0], x[1].bytes))
+    return None, tuple(unique)
+
+
+def _build_owner_budget_limits(
+    *,
+    to_append: Sequence[SkillActivationCandidate],
+    policy: SkillInjectionPolicyContext,
+) -> tuple[OwnerBudgetLimits, ...]:
+    """Compute owner-budget-limit additions capped by unchanged Run limits."""
+    from app.assistant.policy.contracts import RunBudgetLimits
+
+    # Minimal RunBudgetLimits for capping; only fields used by normalize.
+    run_limits = RunBudgetLimits(
+        max_provider_rounds=8,
+        max_main_agent_cycles=1,
+        max_active_skills=policy.run_max_active_skills,
+        max_total_capability_calls=policy.run_max_total_capability_calls,
+        max_parallel_calls=min(4, policy.run_max_total_capability_calls),
+        max_capability_depth=4,
+        max_agent_depth=2,
+        max_same_read_signature=policy.run_max_same_read_signature,
+        max_prompt_tokens=None,
+        max_completion_tokens=4096,
+        max_wall_time_ms=120_000,
+        max_completion_followup_rounds=2,
+    )
+    limits: list[OwnerBudgetLimits] = []
+    for candidate in to_append:
+        # Compatible consumers still get their own owner bucket for *their*
+        # owned exposures; instruction-only gets zero-call bucket.
+        is_instruction_only = candidate.is_instruction_only or not candidate.capabilities
+        owner_limits = normalize_owner_budget_limits(
+            owner_kind="skill_version",
+            owner_version_id=candidate.skill.version_id,
+            run_limits=run_limits,
+            max_skill_calls=candidate.max_skill_calls,
+            max_same_read_calls=candidate.max_same_read_calls,
+            is_instruction_only=is_instruction_only,
+        )
+        limits.append(owner_limits)
+    # Deterministic order by owner_version_id.
+    limits.sort(key=lambda item: item.owner_version_id.bytes)
+    return tuple(limits)
+
+
+def _evaluate_terminal_satisfiability(
+    *,
+    to_append: Sequence[SkillActivationCandidate],
+    policy: SkillInjectionPolicyContext,
+) -> str | None:
+    """Return skill_completion_unsatisfiable or None."""
+    for candidate in to_append:
+        if not candidate.requires_terminal_output:
+            continue
+        # A declaration/ref alone carries no completion semantics. Only an exact
+        # frozen binding whose immutable completion contract is terminal can
+        # prove the capability path structurally satisfiable.
+        has_terminal_cap = any(
+            bool(binding.resolved.completion.terminal_output)
+            for binding in candidate.frozen_bindings
+        )
+        view = SkillTerminalSatisfiabilityView(
+            skill_version_id=candidate.skill.version_id,
+            requires_terminal_output=True,
+            terminal_text_allowed=bool(candidate.terminal_text_allowed),
+            remaining_provider_slots=int(policy.remaining_provider_slots),
+            has_terminal_capability_exposure=has_terminal_cap,
+            terminal_capability_path_available=has_terminal_cap
+            and (candidate.max_skill_calls is None or candidate.max_skill_calls >= 1),
+            max_skill_calls=(
+                0
+                if candidate.max_skill_calls is None and not candidate.capabilities
+                else (
+                    int(candidate.max_skill_calls)
+                    if candidate.max_skill_calls is not None
+                    else 16
+                )
+            ),
+        )
+        ok, reason = evaluate_skill_terminal_satisfiability(view)
+        if not ok:
+            return reason or SKILL_COMPLETION_UNSATISFIABLE
+    return None
+
+
+def _derive_candidate_policy_digest(
+    *,
+    current_manifest: ResolvedRunManifestRevision,
+    to_append: Sequence[SkillActivationCandidate],
+    owner_limits: Sequence[OwnerBudgetLimits],
+    consumers: Sequence[tuple[str, UUID]],
+    policy: SkillInjectionPolicyContext | None,
+) -> str | None:
+    """Derive a candidate effective_policy_digest for the proposed Manifest.
+
+    When policy.effective_policy_digest is provided, use it. Otherwise when any
+    policy-bearing field is present, derive a deterministic digest from the
+    parent policy digest + activated versions + owner limits + consumers so the
+    Manifest child carries a distinct policy identity.
+    """
+    if policy is not None and policy.effective_policy_digest is not None:
+        return policy.effective_policy_digest
+    has_policy_fields = any(
+        c.conflict_rules
+        or c.max_skill_calls is not None
+        or c.requires_terminal_output
+        or c.exposure_views
+        for c in to_append
+    ) or bool(owner_limits) or bool(consumers)
+    if not has_policy_fields and policy is None:
+        # Plan 04 path: keep parent digest.
+        return None
+    return sha256_canonical_json(
+        {
+            "kind": "candidate_effective_policy",
+            "parentEffectivePolicyDigest": current_manifest.effective_policy_digest,
+            "activatedVersionIds": [
+                str(c.skill.version_id) for c in sorted(
+                    to_append, key=lambda x: x.skill.version_id.bytes
+                )
+            ],
+            "ownerBudgetDigests": [o.owner_budget_digest for o in owner_limits],
+            "compatibleConsumers": [
+                {"domainKey": k, "consumerVersionId": str(v)}
+                for k, v in sorted(consumers, key=lambda x: (x[0], x[1].bytes))
+            ],
+        }
+    )
 
 
 def resolve_inject_selectors(
@@ -358,8 +1832,15 @@ def stage_skill_injection(
     max_active_skills: int = 4,
     max_active_instruction_chars: int = 24_000,
     lifecycle: MainAgentManifestEffectLifecycle | None = None,
+    policy: SkillInjectionPolicyContext | None = None,
 ) -> tuple[CapabilityResult, PendingManifestEffect | None, PendingSkillActivationPackage | None]:
-    """Validate batch ownership/budgets and stage one pending package (or no-op)."""
+    """Validate batch ownership/budgets/policy and stage one pending package (or no-op).
+
+    Plan 05: when ``policy`` is provided (or candidates carry policy fields),
+    evaluates conflict rules, §4.3 duplicate compatibility, owner budget limits,
+    and terminal-obligation satisfiability before staging. All candidate deltas
+    live only in the pending package until accept.
+    """
     # Idempotent reinjections of exact already-active versions.
     active_by_name = {s.canonical_name: s for s in current_manifest.active_skills}
     to_append: list[SkillActivationCandidate] = []
@@ -378,7 +1859,7 @@ def stage_skill_injection(
         to_append.append(candidate)
 
     if not to_append:
-        # Pure reinjection: unchanged Manifest, no package/event.
+        # Pure reinjection: unchanged Manifest, no package/event/bucket/obligation.
         payload: dict[str, JsonValue] = {
             "status": "noop",
             "activated": [],
@@ -406,11 +1887,22 @@ def stage_skill_injection(
             None,
         )
 
+    # Detect whether Plan 05 policy path is active.
+    policy_active = policy is not None or any(
+        c.conflict_rules
+        or c.max_skill_calls is not None
+        or c.requires_terminal_output
+        or c.exposure_views
+        for c in to_append
+    )
+
     # Pre-staging ownership map across base + active + full candidate batch.
+    # Base-control collisions always fail; business duplicates only when policy path.
     try:
         build_domain_key_ownership_map(
             current_manifest=current_manifest,
             candidates=to_append,
+            allow_business_duplicates=policy_active,
         )
     except CatalogError as exc:
         return (
@@ -418,6 +1910,34 @@ def stage_skill_injection(
             None,
             None,
         )
+
+    # Structured conflict rules (excludes/requires/exclusive_group).
+    conflict_reason = _evaluate_candidate_conflicts(
+        current_manifest=current_manifest,
+        to_append=to_append,
+        policy=policy,
+    )
+    if conflict_reason is not None:
+        return (
+            _fail(call_id, conflict_reason, "skill conflict rule denied activation"),
+            None,
+            None,
+        )
+
+    # §4.3 strict duplicate compatibility (business Domain Keys only).
+    consumers: tuple[tuple[str, UUID], ...] = ()
+    if policy_active:
+        dup_reason, consumers = _evaluate_business_duplicates(
+            current_manifest=current_manifest,
+            to_append=to_append,
+            policy=policy,
+        )
+        if dup_reason is not None:
+            return (
+                _fail(call_id, dup_reason, "duplicate capability policy conflict"),
+                None,
+                None,
+            )
 
     new_active_count = len(current_manifest.active_skills) + len(to_append)
     if new_active_count > max_active_skills:
@@ -439,6 +1959,50 @@ def stage_skill_injection(
             None,
         )
 
+    # Owner-budget-limit additions capped by unchanged Run limits.
+    owner_limits: tuple[OwnerBudgetLimits, ...] = ()
+    skill_terminals: tuple[tuple[UUID, bool, UUID], ...] = ()
+    if policy is not None or any(
+        c.max_skill_calls is not None
+        or c.requires_terminal_output
+        or c.is_instruction_only
+        for c in to_append
+    ):
+        ctx = policy or SkillInjectionPolicyContext(
+            run_max_active_skills=max_active_skills,
+        )
+        owner_limits = _build_owner_budget_limits(to_append=to_append, policy=ctx)
+        # Terminal-obligation satisfiability before staging.
+        unsat = _evaluate_terminal_satisfiability(to_append=to_append, policy=ctx)
+        if unsat is not None:
+            return (
+                _fail(
+                    call_id,
+                    SKILL_COMPLETION_UNSATISFIABLE,
+                    "skill terminal obligation unsatisfiable",
+                ),
+                None,
+                None,
+            )
+        skill_terminals = tuple(
+            (
+                c.skill.version_id,
+                bool(c.terminal_text_allowed),
+                c.skill.package_id,
+            )
+            for c in to_append
+            if c.requires_terminal_output
+        )
+
+    # Candidate effective policy digest (None keeps parent digest — Plan 04 path).
+    candidate_policy_digest = _derive_candidate_policy_digest(
+        current_manifest=current_manifest,
+        to_append=to_append,
+        owner_limits=owner_limits,
+        consumers=consumers,
+        policy=policy,
+    )
+
     # Single lineage step for the whole batch (revision +1 only once).
     try:
         proposed = append_skill_activations_batch(
@@ -446,6 +2010,7 @@ def stage_skill_injection(
             activations=tuple(
                 (candidate.skill, candidate.capabilities) for candidate in to_append
             ),
+            effective_policy_digest=candidate_policy_digest,
         )
     except SkillVersionConflictError:
         return (
@@ -473,6 +2038,8 @@ def stage_skill_injection(
         ),
         activation_payload={
             "activatedVersionIds": [str(c.skill.version_id) for c in to_append],
+            "effectivePolicyDigest": proposed.effective_policy_digest,
+            "packageDigest": "",
         },
         post_commit_events=(
             {
@@ -481,6 +2048,7 @@ def stage_skill_injection(
                 "callId": call_id,
                 "manifestRevision": proposed.revision,
                 "manifestDigest": proposed.manifest_digest,
+                "effectivePolicyDigest": proposed.effective_policy_digest,
                 "activated": [
                     {
                         "canonicalName": c.skill.canonical_name,
@@ -496,9 +2064,21 @@ def stage_skill_injection(
                 "revision": proposed.revision,
                 "manifestDigest": proposed.manifest_digest,
                 "parentDigest": current_manifest.manifest_digest,
+                "effectivePolicyDigest": proposed.effective_policy_digest,
             },
         ),
     )
+    # Accept-time rebind payload from candidates (tools surface / auth / owners).
+    bindings_by_version: dict[UUID, tuple[Any, ...]] = {}
+    package_ids: dict[UUID, UUID] = {}
+    content_digests: dict[UUID, str] = {}
+    for candidate in to_append:
+        vid = candidate.skill.version_id
+        package_ids[vid] = candidate.skill.package_id
+        content_digests[vid] = candidate.skill.content_digest
+        if candidate.frozen_bindings:
+            bindings_by_version[vid] = tuple(candidate.frozen_bindings)
+
     package = PendingSkillActivationPackage(
         call_id=call_id,
         effect=effect,
@@ -507,7 +2087,32 @@ def stage_skill_injection(
         post_commit_events=effect.post_commit_events,
         resulting_instruction_chars=existing_chars + new_chars,
         activated_instruction_chars=new_chars,
+        candidate_effective_policy_digest=candidate_policy_digest
+        or proposed.effective_policy_digest,
+        candidate_owner_budget_limits=owner_limits,
+        candidate_skill_terminals=skill_terminals,
+        candidate_compatible_consumers=consumers,
+        package_digest=None,
+        candidate_frozen_bindings_by_version=bindings_by_version,
+        candidate_skill_package_id_by_version=package_ids,
+        candidate_skill_content_digest_by_version=content_digests,
+        candidate_activation_candidates=tuple(to_append),
     )
+    package.candidate_rebind_payload_digest = _candidate_rebind_payload_digest(
+        package
+    )
+    pkg_digest = _package_digest(
+        call_id=call_id,
+        activated_version_ids=package.activated_version_ids,
+        owner_budget_digests=tuple(o.owner_budget_digest for o in owner_limits),
+        skill_terminal_ids=tuple(vid for vid, _tt, _pkg in skill_terminals),
+        compatible_consumers=consumers,
+        effective_policy_digest=candidate_policy_digest
+        or proposed.effective_policy_digest,
+        rebind_payload_digest=package.candidate_rebind_payload_digest,
+    )
+    package.package_digest = pkg_digest
+    effect.activation_payload["packageDigest"] = pkg_digest
     if lifecycle is not None:
         lifecycle.stage(package)
 
@@ -534,6 +2139,8 @@ def stage_skill_injection(
         ],
         "proposedManifestRevision": proposed.revision,
         "proposedManifestDigest": proposed.manifest_digest,
+        "effectivePolicyDigest": proposed.effective_policy_digest,
+        "packageDigest": pkg_digest,
     }
     return (
         completed_result(
@@ -626,14 +2233,18 @@ class MainAgentToolsProvider:
 __all__ = [
     "ACTIVE_SKILL_LIMIT_EXCEEDED",
     "CONTROL_EFFECT_PROTOCOL_ERROR",
+    "CandidateExposureView",
+    "DUPLICATE_CAPABILITY_POLICY_CONFLICT",
     "MainAgentManifestEffectLifecycle",
     "MainAgentToolsProvider",
     "PendingSkillActivationPackage",
     "SKILL_ALREADY_ACTIVE",
     "SKILL_CAPABILITY_CONFLICT",
+    "SKILL_COMPLETION_UNSATISFIABLE",
     "SKILL_CONTEXT_BUDGET_EXCEEDED",
     "SKILL_VERSION_CONFLICT",
     "SkillActivationCandidate",
+    "SkillInjectionPolicyContext",
     "build_domain_key_ownership_map",
     "resolve_inject_selectors",
     "stage_skill_injection",

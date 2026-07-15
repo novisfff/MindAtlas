@@ -143,6 +143,23 @@ def test_eligible_instruction_only_skill() -> None:
     assert reason is None
 
 
+def test_conflict_rules_are_catalog_eligible() -> None:
+    """Plan 05: nonempty conflict_rules no longer fail catalog eligibility.
+
+    Structured evaluation happens at skill.inject activation.
+    """
+    reason = evaluate_candidate_eligibility(
+        _candidate(
+            conflict_rules=(
+                {"kind": "excludes", "target_skill": "other-skill"},
+                {"kind": "exclusive_group", "group": "review-family"},
+            ),
+        ),
+        scope=_scope_all(),
+    )
+    assert reason is None
+
+
 @pytest.mark.parametrize(
     "overrides,expected",
     [
@@ -152,7 +169,6 @@ def test_eligible_instruction_only_skill() -> None:
         ({"resource_index_verified": False}, "resource_index_unverified"),
         ({"binding_set_verified": False}, "binding_set_unverified"),
         ({"bindings_eligible": False}, "bindings_ineligible"),
-        ({"conflict_rules": ({"kind": "excludes", "target_skill": "x"},)}, SKILL_POLICY_UNSUPPORTED),
         ({"entrypoint_compatible": False}, "entrypoint_incompatible"),
         ({"locale_compatible": False}, "locale_incompatible"),
         ({"instruction_char_count": 20_000}, "instruction_limit_exceeded"),

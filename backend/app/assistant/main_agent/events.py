@@ -31,6 +31,32 @@ FALLBACK_SELECTED = "fallback_selected"
 # Internal-only event names
 SKILL_ACTIVATION_START = "skill_activation_start"
 INTERNAL_DIAGNOSTIC = "main_agent_diagnostic"
+# Plan 05 Task 8 allowlisted internal digests/counts/reasons
+AUTHORIZATION_DECISION = "authorization_decision"
+BUDGET_RESERVED = "budget_reserved"
+BUDGET_STARTED = "budget_started"
+BUDGET_RELEASED = "budget_released"
+BUDGET_DENIED = "budget_denied"
+OBLIGATION_CREATED = "obligation_created"
+OBLIGATION_RESOLVED = "obligation_resolved"
+COMPLETION_DECISION = "completion_decision"
+POLICY_SNAPSHOT = "policy_snapshot"
+
+PLAN05_INTERNAL_EVENTS = frozenset(
+    {
+        AUTHORIZATION_DECISION,
+        BUDGET_RESERVED,
+        BUDGET_STARTED,
+        BUDGET_RELEASED,
+        BUDGET_DENIED,
+        OBLIGATION_CREATED,
+        OBLIGATION_RESOLVED,
+        COMPLETION_DECISION,
+        POLICY_SNAPSHOT,
+        SKILL_ACTIVATION_START,
+        INTERNAL_DIAGNOSTIC,
+    }
+)
 
 
 def mark_internal(payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -328,6 +354,104 @@ class MainAgentEventAdapter:
             return
         self.emit_public(CONTENT_DELTA, {"delta": str(delta)})
 
+    def policy_snapshot(
+        self,
+        *,
+        run_id: UUID | str,
+        effective_policy_digest: str,
+        exposure_index_digest: str | None = None,
+        max_total_capability_calls: int | None = None,
+        max_provider_rounds: int | None = None,
+        max_capability_depth: int | None = None,
+        max_agent_depth: int | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "runId": str(run_id),
+            "effectivePolicyDigest": str(effective_policy_digest)[:64],
+        }
+        if exposure_index_digest:
+            payload["exposureIndexDigest"] = str(exposure_index_digest)[:64]
+        if max_total_capability_calls is not None:
+            payload["maxTotalCapabilityCalls"] = int(max_total_capability_calls)
+        if max_provider_rounds is not None:
+            payload["maxProviderRounds"] = int(max_provider_rounds)
+        if max_capability_depth is not None:
+            payload["maxCapabilityDepth"] = int(max_capability_depth)
+        if max_agent_depth is not None:
+            payload["maxAgentDepth"] = int(max_agent_depth)
+        self.emit_internal(POLICY_SNAPSHOT, payload)
+
+    def authorization_decision(
+        self,
+        *,
+        call_id: str,
+        allowed: bool,
+        reason_code: str,
+        decision_digest: str | None = None,
+        owner_kind: str | None = None,
+        capability_key: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "callId": str(call_id)[:128],
+            "allowed": bool(allowed),
+            "reasonCode": str(reason_code)[:64],
+        }
+        if decision_digest:
+            payload["decisionDigest"] = str(decision_digest)[:64]
+        if owner_kind:
+            payload["ownerKind"] = str(owner_kind)[:32]
+        if capability_key:
+            payload["capabilityKey"] = str(capability_key)[:128]
+        self.emit_internal(AUTHORIZATION_DECISION, payload)
+
+    def budget_event(
+        self,
+        *,
+        event_name: str,
+        call_id: str | None = None,
+        reason_code: str | None = None,
+        dimension: str | None = None,
+        remaining: int | None = None,
+        reserved_count: int | None = None,
+    ) -> None:
+        name = str(event_name or BUDGET_DENIED)
+        if name not in {
+            BUDGET_RESERVED,
+            BUDGET_STARTED,
+            BUDGET_RELEASED,
+            BUDGET_DENIED,
+        }:
+            name = BUDGET_DENIED
+        payload: dict[str, Any] = {}
+        if call_id:
+            payload["callId"] = str(call_id)[:128]
+        if reason_code:
+            payload["reasonCode"] = str(reason_code)[:64]
+        if dimension:
+            payload["dimension"] = str(dimension)[:64]
+        if remaining is not None:
+            payload["remaining"] = int(remaining)
+        if reserved_count is not None:
+            payload["reservedCount"] = int(reserved_count)
+        self.emit_internal(name, payload)
+
+    def completion_decision(
+        self,
+        *,
+        action: str,
+        reason_code: str,
+        pending_count: int = 0,
+        followup_rounds_started: int | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "action": str(action)[:32],
+            "reasonCode": str(reason_code)[:64],
+            "pendingCount": int(pending_count),
+        }
+        if followup_rounds_started is not None:
+            payload["followupRoundsStarted"] = int(followup_rounds_started)
+        self.emit_internal(COMPLETION_DECISION, payload)
+
     def diagnostic(self, *, code: str, detail: Mapping[str, Any] | None = None) -> None:
         payload: dict[str, Any] = {"code": str(code)[:64]}
         if detail:
@@ -363,12 +487,22 @@ class MainAgentEventAdapter:
 
 
 __all__ = [
+    "AUTHORIZATION_DECISION",
+    "BUDGET_DENIED",
+    "BUDGET_RELEASED",
+    "BUDGET_RESERVED",
+    "BUDGET_STARTED",
+    "COMPLETION_DECISION",
     "CONTENT_DELTA",
     "FALLBACK_SELECTED",
     "INTERNAL_DIAGNOSTIC",
     "MANIFEST_REVISION",
     "MainAgentEventAdapter",
     "MESSAGE_END",
+    "OBLIGATION_CREATED",
+    "OBLIGATION_RESOLVED",
+    "PLAN05_INTERNAL_EVENTS",
+    "POLICY_SNAPSHOT",
     "RUN_STATUS",
     "RUNTIME_SELECTED",
     "SKILL_ACTIVATION_END",

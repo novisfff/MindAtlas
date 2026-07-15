@@ -732,6 +732,31 @@ class CapabilityPolicyEngine:
         )
 
 
+def build_composite_evidence_verifiers(
+    *,
+    skill_policy_verifier: AuthorizationEvidenceVerifier | None = None,
+    openclaw_verifier: AuthorizationEvidenceVerifier | None = None,
+    test_verifier: AuthorizationEvidenceVerifier | None = None,
+) -> dict[EvidenceVerifierKey, AuthorizationEvidenceVerifier]:
+    """Explicit Plan 05 composite verifier mapping (issuer/entrypoint → verifier).
+
+    | Issuer/entrypoint            | Verifier                          |
+    |------------------------------|-----------------------------------|
+    | openclaw_bridge / openclaw   | unchanged Plan 02 verifier        |
+    | skill_policy / main_agent    | Plan 05 source-aware verifier     |
+    | test / test                  | injected test verifier only       |
+    | any other combination        | deny (missing mapping)            |
+    """
+    out: dict[EvidenceVerifierKey, AuthorizationEvidenceVerifier] = {}
+    if openclaw_verifier is not None:
+        out[("openclaw_bridge", "openclaw")] = openclaw_verifier
+    if skill_policy_verifier is not None:
+        out[("skill_policy", "main_agent")] = skill_policy_verifier
+    if test_verifier is not None:
+        out[("test", "test")] = test_verifier
+    return out
+
+
 __all__ = [
     "AtomicSingleUseDispatchPermit",
     "AuthorizationEvidenceVerificationError",
@@ -741,6 +766,7 @@ __all__ = [
     "OPENCLAW_CUSTOM_SOURCE_EFFECT_CEILINGS",
     "OPENCLAW_SYSTEM_ITEM_EFFECT_CEILINGS",
     "OpenClawEffectCeiling",
+    "build_composite_evidence_verifiers",
     "build_openclaw_effect_ceiling",
     "compute_decision_digest",
     "grant_source_digest_for_ceiling",

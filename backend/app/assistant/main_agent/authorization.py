@@ -1,7 +1,9 @@
-"""Minimum Plan 04 Main Agent authorization bridge (skill_policy).
+"""Main Agent authorization bridge (skill_policy transport).
 
-Independent platform ceiling + exact owner/Manifest exposure. Descriptor
-behavior is checked against the grant; it never constructs the grant.
+Plan 04 minimum path: independent platform ceiling + exact owner/Manifest
+exposure. Plan 05 source-aware path: pure evaluator-backed grant derivation
+when an EffectiveRunPolicySnapshot is bound. Descriptor behavior is checked
+against the grant; it never constructs the grant.
 """
 
 from __future__ import annotations
@@ -203,8 +205,16 @@ def owner_ref_from_binding_provenance(
     binding: FrozenCapabilityBinding,
     *,
     profile_key: str | None = None,
+    skill_package_id_by_version: Mapping[UUID, UUID] | None = None,
+    skill_package_id: UUID | None = None,
 ) -> CapabilityOwnerRef:
-    """Derive owner from frozen binding provenance (Main Agent or Skill)."""
+    """Derive owner from frozen binding provenance (Main Agent or Skill).
+
+    Skill ownership uses the stable package ID as ``owner_id`` (Plan 05 §4.2),
+    matching ManifestExposureIndex / evaluator claimed-owner identity. Callers
+    must supply ``skill_package_id`` or a version→package map for skill_version
+    bindings; unresolved package identity raises.
+    """
     provenance = binding.provenance
     if provenance.origin == "main_agent_profile":
         return CapabilityOwnerRef(
@@ -213,10 +223,25 @@ def owner_ref_from_binding_provenance(
             owner_version_id=provenance.owner_version_id,
         )
     if provenance.origin == "skill_version":
+        version_id = provenance.owner_version_id
+        package_id: UUID | None = skill_package_id
+        if package_id is None and version_id is not None and skill_package_id_by_version is not None:
+            package_id = skill_package_id_by_version.get(version_id)
+        if package_id is not None:
+            # Plan 05 §4.2: stable package ID is the owner_id for skill exposures.
+            return CapabilityOwnerRef(
+                owner_kind="skill_version",
+                owner_id=str(package_id),
+                owner_version_id=version_id,
+            )
+        if skill_package_id_by_version is not None or skill_package_id is not None:
+            # Map was supplied but this version is unresolved — fail closed.
+            raise AuthorizationEvidenceVerificationError("owner_version_missing")
+        # Plan 04 minimum path (no package map): keep historical version_id owner_id.
         return CapabilityOwnerRef(
             owner_kind="skill_version",
-            owner_id=str(provenance.owner_version_id or binding.ref.capability_key),
-            owner_version_id=provenance.owner_version_id,
+            owner_id=str(version_id or binding.ref.capability_key),
+            owner_version_id=version_id,
         )
     # system/test paths are not production Main Agent owners.
     return CapabilityOwnerRef(
@@ -247,7 +272,12 @@ def derive_allowed_side_effects_for_owner(
 
 
 class SkillPolicyAuthorizationEvidenceVerifier:
-    """Call-scoped single-use verifier for issuer=skill_policy / entrypoint=main_agent."""
+    """Call-scoped single-use verifier for issuer=skill_policy / entrypoint=main_agent.
+
+    Plan 05 source-aware path: expected grant comes from independent sources;
+    descriptor behavior is membership-checked only. ``copy_descriptor_effect`` and
+    ``omit_grant_source_digest`` exist solely for negative tests.
+    """
 
     def __init__(
         self,
@@ -266,6 +296,7 @@ class SkillPolicyAuthorizationEvidenceVerifier:
         ceiling: MainAgentEffectCeiling = MAIN_AGENT_READ_ONLY_EFFECT_CEILING,
         allowed_side_effects: tuple[SideEffectClass, ...] | None = None,
         copy_descriptor_effect: bool = False,
+        omit_grant_source_digest: bool = False,
     ) -> None:
         self.expected_call_id = expected_call_id
         self.expected_capability_key = expected_capability_key
@@ -284,10 +315,9 @@ class SkillPolicyAuthorizationEvidenceVerifier:
             if allowed_side_effects is not None
             else ceiling.allowed_side_effects
         )
-        # Test-only trap: a verifier that copies descriptor.behavior must deny
-        # when production policy compares grants; we still refuse here by default
-        # unless explicitly enabled for the negative test matrix.
+        # Test-only traps: production always leaves these False.
         self.copy_descriptor_effect = copy_descriptor_effect
+        self.omit_grant_source_digest = omit_grant_source_digest
         self.verifier_instance_id = str(uuid.uuid4())
         self._lock = threading.Lock()
         self._consumed = False
@@ -324,6 +354,8 @@ class SkillPolicyAuthorizationEvidenceVerifier:
             raise AuthorizationEvidenceVerificationError("binding_contract_digest_mismatch")
         if evidence.dependency_closure_digest != self.expected_dependency_closure_digest:
             raise AuthorizationEvidenceVerificationError("dependency_closure_digest_mismatch")
+        if self.omit_grant_source_digest:
+            raise AuthorizationEvidenceVerificationError("missing_grant_source_digest")
         if evidence.grant_source_digest != self.expected_grant_source_digest:
             raise AuthorizationEvidenceVerificationError("grant_source_digest_mismatch")
         if evidence.evidence_digest != self.expected_evidence_digest:
@@ -337,11 +369,11 @@ class SkillPolicyAuthorizationEvidenceVerifier:
             raise AuthorizationEvidenceVerificationError("conversation_id_mismatch")
 
         # Independent ceiling check — never synthesize grant from descriptor.
-        granted = (
-            (descriptor.behavior.side_effect,)  # type: ignore[list-item]
-            if self.copy_descriptor_effect
-            else self.allowed_side_effects
-        )
+        granted: tuple[SideEffectClass, ...]
+        if self.copy_descriptor_effect:
+            granted = (descriptor.behavior.side_effect,)  # type: ignore[assignment]
+        else:
+            granted = self.allowed_side_effects
         actual = descriptor.behavior.side_effect
         if actual == "unknown":
             raise AuthorizationEvidenceVerificationError("unknown_side_effect")
@@ -352,6 +384,12 @@ class SkillPolicyAuthorizationEvidenceVerifier:
             raise AuthorizationEvidenceVerificationError("interrupt_mode_above_ceiling")
         if descriptor.availability.status != "available":
             raise AuthorizationEvidenceVerificationError("target_unavailable")
+
+        # Evidence allowed_side_effects must match the independent grant (when not
+        # using the copy trap). Production path refuses descriptor-derived grants.
+        if not self.copy_descriptor_effect:
+            if tuple(evidence.allowed_side_effects) != tuple(self.allowed_side_effects):
+                raise AuthorizationEvidenceVerificationError("evidence_grant_mismatch")
 
         with self._lock:
             if self._consumed:
@@ -369,7 +407,7 @@ class SkillPolicyAuthorizationEvidenceVerifier:
             resolution_digest=evidence.resolution_digest,
             binding_contract_digest=evidence.binding_contract_digest,
             dependency_closure_digest=evidence.dependency_closure_digest,
-            allowed_side_effects=granted,  # type: ignore[arg-type]
+            allowed_side_effects=granted,
             grant_source_digest=evidence.grant_source_digest,
             evidence_digest=evidence.evidence_digest,
             verification_digest=sha256_canonical_json(
@@ -384,7 +422,12 @@ class SkillPolicyAuthorizationEvidenceVerifier:
 
 
 class MainAgentAuthorizationEvidenceFactory:
-    """Issues one-time skill_policy evidence for Main Agent Gateway dispatches."""
+    """Issues one-time skill_policy evidence for Main Agent Gateway dispatches.
+
+    When an ``EffectiveRunPolicySnapshot`` + owner materials are bound, issuance
+    uses the Plan 05 pure evaluator (source-aware grant). Otherwise the Plan 04
+    minimum path remains (independent ceiling ∩ author declaration).
+    """
 
     def __init__(
         self,
@@ -395,8 +438,11 @@ class MainAgentAuthorizationEvidenceFactory:
         profile_content_digest: str,
         skill_author_policy_by_version: Mapping[UUID, Sequence[str]] | None = None,
         skill_content_digest_by_version: Mapping[UUID, str] | None = None,
+        skill_package_id_by_version: Mapping[UUID, UUID] | None = None,
         ceiling: MainAgentEffectCeiling = MAIN_AGENT_READ_ONLY_EFFECT_CEILING,
         principal: CapabilityPrincipal = LOCAL_ASSISTANT_PRINCIPAL,
+        policy_snapshot: Any | None = None,
+        owner_materials: Mapping[Any, Any] | None = None,
     ) -> None:
         self.scope = scope
         self.manifest = manifest
@@ -404,8 +450,12 @@ class MainAgentAuthorizationEvidenceFactory:
         self.profile_content_digest = profile_content_digest
         self.skill_author_policy_by_version = dict(skill_author_policy_by_version or {})
         self.skill_content_digest_by_version = dict(skill_content_digest_by_version or {})
+        # Plan 05 §4.2: version_id → stable package_id for skill owner_id.
+        self.skill_package_id_by_version = dict(skill_package_id_by_version or {})
         self.ceiling = ceiling
         self.principal = principal
+        self.policy_snapshot = policy_snapshot
+        self.owner_materials = dict(owner_materials or {})
         self._lock = threading.Lock()
         self._issued_call_ids: set[str] = set()
         self._verifiers: dict[str, SkillPolicyAuthorizationEvidenceVerifier] = {}
@@ -416,6 +466,9 @@ class MainAgentAuthorizationEvidenceFactory:
         *,
         skill_author_policy_by_version: Mapping[UUID, Sequence[str]] | None = None,
         skill_content_digest_by_version: Mapping[UUID, str] | None = None,
+        skill_package_id_by_version: Mapping[UUID, UUID] | None = None,
+        policy_snapshot: Any | None = None,
+        owner_materials: Mapping[Any, Any] | None = None,
     ) -> None:
         """Point membership checks at the lifecycle-accepted Manifest.
 
@@ -432,6 +485,12 @@ class MainAgentAuthorizationEvidenceFactory:
                 self.skill_content_digest_by_version.update(
                     dict(skill_content_digest_by_version)
                 )
+            if skill_package_id_by_version is not None:
+                self.skill_package_id_by_version.update(dict(skill_package_id_by_version))
+            if policy_snapshot is not None:
+                self.policy_snapshot = policy_snapshot
+            if owner_materials is not None:
+                self.owner_materials.update(dict(owner_materials))
 
     def issue(
         self,
@@ -441,12 +500,122 @@ class MainAgentAuthorizationEvidenceFactory:
         descriptor: CapabilityDescriptor,
         scope: ProviderExecutionScope,
     ) -> CapabilityAuthorizationEvidence:
-        del descriptor  # grant never copies descriptor behavior
         if scope.scope_digest != self.scope.scope_digest:
             raise AuthorizationEvidenceVerificationError("scope_mismatch")
         if scope.run_id != self.scope.run_id or scope.conversation_id != self.scope.conversation_id:
             raise AuthorizationEvidenceVerificationError("scope_identity_mismatch")
 
+        if self.policy_snapshot is not None:
+            return self._issue_plan05(
+                call=call,
+                binding=binding,
+                descriptor=descriptor,
+                scope=scope,
+            )
+        return self._issue_plan04_minimum(
+            call=call,
+            binding=binding,
+            descriptor=descriptor,
+            scope=scope,
+        )
+
+    def _issue_plan05(
+        self,
+        *,
+        call: ProviderToolCall,
+        binding: FrozenCapabilityBinding,
+        descriptor: CapabilityDescriptor,
+        scope: ProviderExecutionScope,
+    ) -> CapabilityAuthorizationEvidence:
+        # Late import avoids circular load with policy.contracts → authorization.
+        from app.assistant.policy.evaluator import (
+            evaluate_authorization,
+            proposal_from_descriptor,
+        )
+        from app.assistant.policy.evidence import issue_skill_policy_evidence
+
+        snapshot = self.policy_snapshot
+        assert snapshot is not None
+        owner = owner_ref_from_binding_provenance(
+            binding,
+            profile_key=self.profile_key,
+            skill_package_id_by_version=self.skill_package_id_by_version or None,
+        )
+        proposal = proposal_from_descriptor(
+            descriptor=descriptor,
+            run_id=scope.run_id,
+            conversation_id=scope.conversation_id,
+            scope_digest=scope.scope_digest,
+            expected_scope_digest=self.scope.scope_digest,
+            expected_run_id=self.scope.run_id,
+            expected_conversation_id=self.scope.conversation_id,
+            manifest_digest=self.manifest.manifest_digest,
+            expected_manifest_digest=snapshot.exposure_index.manifest_digest,
+            principal=self.principal,
+            nesting_depth=0,
+            max_capability_depth=snapshot.run_budget_limits.max_capability_depth,
+            claimed_owner_kind=owner.owner_kind if owner.owner_kind in {"main_agent", "skill_version"} else None,  # type: ignore[arg-type]
+            claimed_owner_id=owner.owner_id,
+            claimed_owner_version_id=owner.owner_version_id,
+        )
+        # Override capability key with the tool-call domain key for surface match.
+        if proposal.capability_key != call.domain_key:
+            raise AuthorizationEvidenceVerificationError("capability_key_mismatch")
+        decision = evaluate_authorization(
+            snapshot=snapshot,
+            proposal=proposal,
+            owner_materials=self.owner_materials,  # type: ignore[arg-type]
+        )
+        if not decision.allowed:
+            raise AuthorizationEvidenceVerificationError(decision.reason_code)
+
+        with self._lock:
+            if call.call_id in self._issued_call_ids:
+                raise AuthorizationEvidenceVerificationError("call_id_replay")
+            self._issued_call_ids.add(call.call_id)
+            counter = len(self._issued_call_ids)
+
+        evidence = issue_skill_policy_evidence(
+            call_id=call.call_id,
+            principal=self.principal,
+            owner=owner,
+            capability_key=call.domain_key,
+            resolution_digest=binding.ref.resolution_digest,
+            binding_contract_digest=binding.ref.binding_contract_digest,
+            dependency_closure_digest=binding.ref.dependency_closure_digest,
+            decision=decision,
+            counter=counter,
+            scope_digest=scope.scope_digest,
+            manifest_digest=self.manifest.manifest_digest,
+        )
+        verifier = SkillPolicyAuthorizationEvidenceVerifier(
+            expected_call_id=call.call_id,
+            expected_capability_key=call.domain_key,
+            expected_owner=owner,
+            expected_resolution_digest=binding.ref.resolution_digest,
+            expected_binding_contract_digest=binding.ref.binding_contract_digest,
+            expected_dependency_closure_digest=binding.ref.dependency_closure_digest,
+            expected_grant_source_digest=evidence.grant_source_digest,
+            expected_evidence_digest=evidence.evidence_digest,
+            expected_principal=self.principal,
+            expected_run_id=scope.run_id,
+            expected_conversation_id=scope.conversation_id,
+            ceiling=self.ceiling,
+            allowed_side_effects=tuple(decision.allowed_side_effects),
+        )
+        with self._lock:
+            self._verifiers[call.call_id] = verifier
+        return evidence
+
+    def _issue_plan04_minimum(
+        self,
+        *,
+        call: ProviderToolCall,
+        binding: FrozenCapabilityBinding,
+        descriptor: CapabilityDescriptor,
+        scope: ProviderExecutionScope,
+    ) -> CapabilityAuthorizationEvidence:
+        del descriptor  # grant never copies descriptor behavior
         owner = owner_ref_from_binding_provenance(binding, profile_key=self.profile_key)
         is_base_control = binding.provenance.origin == "main_agent_profile"
         author_effects: Sequence[str] | None = None
@@ -477,7 +646,6 @@ class MainAgentAuthorizationEvidenceFactory:
             binding_contract_digest=binding.ref.binding_contract_digest,
         )
         # Membership must be present in the current Manifest.
-        # Recompute present flag via digest payload check.
         present = any(
             item.capability_key == binding.ref.capability_key
             and item.binding_contract_digest == binding.ref.binding_contract_digest

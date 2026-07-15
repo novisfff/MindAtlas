@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, ContextManager, Iterator, Protocol, runtime_checkable
 from uuid import UUID
 
 from app.assistant.capabilities.contracts import (
@@ -34,10 +35,86 @@ class CapabilityEventSink(Protocol):
     def emit(self, event: CapabilityRuntimeEvent) -> None: ...
 
 
+@runtime_checkable
+class CapabilityDispatchGuard(Protocol):
+    """Plan 05 additive port: budget reservation lifecycle around adapter dispatch.
+
+    Invoked by CapabilityGateway at exact pre-adapter / post-adapter boundaries.
+    Existing OpenClaw/non-Main-Agent callers use the no-op default.
+    """
+
+    def mark_started(
+        self,
+        *,
+        call_id: str,
+        validated_arguments_digest: str,
+    ) -> None: ...
+
+    def finish(self, *, call_id: str, status: str) -> None: ...
+
+    def release_unstarted(self, *, call_id: str, reason_code: str) -> None: ...
+
+
+class NoOpCapabilityDispatchGuard:
+    """Default no-op dispatch guard; preserves Plan 02 Gateway behavior."""
+
+    def mark_started(
+        self,
+        *,
+        call_id: str,
+        validated_arguments_digest: str,
+    ) -> None:
+        del call_id, validated_arguments_digest
+
+    def finish(self, *, call_id: str, status: str) -> None:
+        del call_id, status
+
+    def release_unstarted(self, *, call_id: str, reason_code: str) -> None:
+        del call_id, reason_code
+
+
+_NOOP_DISPATCH_GUARD = NoOpCapabilityDispatchGuard()
+
+
+@runtime_checkable
+class CapabilityCallFramePort(Protocol):
+    """Plan 05 additive port: process-local capability/agent call frames.
+
+    Concrete frame values and depth/cycle checks live in
+    ``app.assistant.policy.recursion``. This protocol stays free of policy
+    ledger types so OpenClaw/non-Main-Agent callers remain compatible.
+    ``current`` / ``push`` accept any frame object; production injects
+    ``CapabilityCallFrame`` instances.
+    """
+
+    def current(self) -> tuple[Any, ...]: ...
+
+    def push(self, frame: Any) -> ContextManager[None]: ...
+
+
+class NoOpCapabilityCallFramePort:
+    """Default no-op frame port; preserves Plan 02 Gateway behavior."""
+
+    def current(self) -> tuple[Any, ...]:
+        return ()
+
+    @contextmanager
+    def push(self, frame: Any) -> Iterator[None]:
+        del frame
+        yield
+
+
+_NOOP_CALL_FRAMES: CapabilityCallFramePort = NoOpCapabilityCallFramePort()
+
+
 @dataclass(frozen=True)
 class CapabilityRuntimePorts:
     cancellation: CancellationPort
     events: CapabilityEventSink
+    # Default no-op preserves byte/behavior compatibility for Plan 02 callers.
+    dispatch_guard: CapabilityDispatchGuard = field(default=_NOOP_DISPATCH_GUARD)
+    # Plan 05 additive: Main Agent injects ProcessLocalCapabilityCallFramePort.
+    call_frames: CapabilityCallFramePort = field(default=_NOOP_CALL_FRAMES)
 
 
 @dataclass(frozen=True)
@@ -188,6 +265,8 @@ __all__ = [
     "AuthorizedModelRuntimeConfig",
     "CancellationPort",
     "CapabilityAdapterRequest",
+    "CapabilityCallFramePort",
+    "CapabilityDispatchGuard",
     "CapabilityEventSink",
     "CapabilityRuntimePorts",
     "ExactRuntimeDependencyResolver",
@@ -197,6 +276,8 @@ __all__ = [
     "FrozenClosureRuntimeResolver",
     "MainAgentControlCallPort",
     "MainAgentControlExecutable",
+    "NoOpCapabilityCallFramePort",
+    "NoOpCapabilityDispatchGuard",
     "ResolvedCapabilitySurface",
     "ResolvedCapabilityTarget",
     "SingleUseDispatchPermit",

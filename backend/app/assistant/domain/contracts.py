@@ -612,6 +612,7 @@ def append_skill_activation(
     *,
     skill: ResolvedSkillRef,
     capabilities: tuple[ResolvedCapabilityRef, ...],
+    effective_policy_digest: str | None = None,
 ) -> ResolvedRunManifestRevision:
     existing_by_name = {
         item.canonical_name: item for item in current.active_skills
@@ -671,6 +672,11 @@ def append_skill_activation(
     )
     revision = current.revision + 1
     parent_digest = current.manifest_digest
+    policy_digest = (
+        effective_policy_digest
+        if effective_policy_digest is not None
+        else current.effective_policy_digest
+    )
     manifest_digest = compute_manifest_digest(
         run_id=current.run_id,
         revision=revision,
@@ -681,7 +687,7 @@ def append_skill_activation(
         provider=current.provider,
         model=current.model,
         provider_aliases=current.provider_aliases,
-        effective_policy_digest=current.effective_policy_digest,
+        effective_policy_digest=policy_digest,
     )
     return ResolvedRunManifestRevision(
         run_id=current.run_id,
@@ -693,7 +699,7 @@ def append_skill_activation(
         provider=current.provider,
         model=current.model,
         provider_aliases=current.provider_aliases,
-        effective_policy_digest=current.effective_policy_digest,
+        effective_policy_digest=policy_digest,
         manifest_digest=manifest_digest,
     )
 
@@ -702,6 +708,7 @@ def append_skill_activations_batch(
     current: ResolvedRunManifestRevision,
     *,
     activations: tuple[tuple[ResolvedSkillRef, tuple[ResolvedCapabilityRef, ...]], ...],
+    effective_policy_digest: str | None = None,
 ) -> ResolvedRunManifestRevision:
     """Append one or more Skill activations as a single Manifest child (revision +1).
 
@@ -769,6 +776,11 @@ def append_skill_activations_batch(
     )
     revision = current.revision + 1
     parent_digest = current.manifest_digest
+    policy_digest = (
+        effective_policy_digest
+        if effective_policy_digest is not None
+        else current.effective_policy_digest
+    )
     manifest_digest = compute_manifest_digest(
         run_id=current.run_id,
         revision=revision,
@@ -779,7 +791,7 @@ def append_skill_activations_batch(
         provider=current.provider,
         model=current.model,
         provider_aliases=current.provider_aliases,
-        effective_policy_digest=current.effective_policy_digest,
+        effective_policy_digest=policy_digest,
     )
     return ResolvedRunManifestRevision(
         run_id=current.run_id,
@@ -791,7 +803,7 @@ def append_skill_activations_batch(
         provider=current.provider,
         model=current.model,
         provider_aliases=current.provider_aliases,
-        effective_policy_digest=current.effective_policy_digest,
+        effective_policy_digest=policy_digest,
         manifest_digest=manifest_digest,
     )
 

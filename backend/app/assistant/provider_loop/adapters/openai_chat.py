@@ -42,6 +42,7 @@ from app.assistant.provider_loop.contracts import (
 )
 from app.assistant.provider_loop.messages import (
     ProviderAssistantMessage,
+    ProviderCompletionInstructionMessage,
     ProviderContextUpdateMessage,
     ProviderMessage,
     ProviderRuntimeInstructionMessage,
@@ -358,6 +359,10 @@ def encode_openai_chat_messages(messages: tuple[ProviderMessage, ...]) -> list[d
         if isinstance(message, ProviderContextUpdateMessage):
             # Protected Skill/Main Agent context. Map to system; never user/tool/final.
             # Content is not logged.
+            encoded.append({"role": "system", "content": message.content})
+            continue
+        if isinstance(message, ProviderCompletionInstructionMessage):
+            # Plan 05 protected completion instruction. Map to system; never final text.
             encoded.append({"role": "system", "content": message.content})
             continue
         if isinstance(message, ProviderUserMessage):

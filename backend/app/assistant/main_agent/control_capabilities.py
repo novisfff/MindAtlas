@@ -134,6 +134,16 @@ def control_output_schema(domain_key: str) -> dict[str, Any]:
                     "minLength": 64,
                     "maxLength": 64,
                 },
+                "effectivePolicyDigest": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                },
+                "packageDigest": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                },
             },
             required=("status",),
         )
