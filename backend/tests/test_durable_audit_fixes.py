@@ -267,8 +267,11 @@ class MigrationDowngradeEmptyDbLogicTests(unittest.TestCase):
     def test_downgrade_source_allows_empty_without_ack(self) -> None:
         from pathlib import Path
 
-        src = Path(
-            "backend/alembic/versions/6af373ef040f_add_durable_agent_run_foundation.py"
+        src = (
+            Path(__file__).resolve().parents[1]
+            / "alembic"
+            / "versions"
+            / "6af373ef040f_add_durable_agent_run_foundation.py"
         ).read_text()
         # Unconditional empty-DB ack raise must be gone.
         self.assertNotIn(
