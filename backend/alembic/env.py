@@ -27,6 +27,17 @@ from app.ai_registry.models import (  # noqa: E402, F401
     AiComponentBinding,
 )
 from app.assistant.models import Conversation, Message  # noqa: E402, F401
+from app.assistant.durable.models import (  # noqa: E402, F401
+    AssistantRunArtifact,
+    AssistantRunArtifactGc,
+    AssistantRunBudgetRevision,
+    AssistantRunCheckpoint,
+    AssistantRunManifestRevision,
+    AssistantRunObligationRevision,
+    AssistantRunPolicyRevision,
+    AssistantRunProviderMessage,
+    AssistantWorkerRegistration,
+)
 from app.assistant.skills.models import (  # noqa: E402, F401
     AssistantMainAgentProfile,
     AssistantMainAgentProfileVersion,
