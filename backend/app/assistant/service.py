@@ -347,11 +347,21 @@ class AssistantService:
         self.db.commit()
         self.db.refresh(assistant_msg)
 
+        # Plan 06 Task 6: admit + select immutable runtime_kind immediately before
+        # Run insertion. A permitted Legacy fallback happens only before the
+        # durable row exists; once main_agent is inserted, never fall back.
+        from app.assistant.durable.admission import admit_and_select_runtime
+
+        runtime_kind, admit_reason, create_kwargs = admit_and_select_runtime(
+            self.db,
+            execution_kind="production",
+        )
         try:
             run = run_svc.create_run(
                 conversation=conversation,
                 user_message=user_msg,
                 assistant_message=assistant_msg,
+                **create_kwargs,
             )
         except ValueError as exc:
             raise ApiException(status_code=409, code=42260, message=str(exc)) from exc
@@ -359,9 +369,18 @@ class AssistantService:
         run_svc.append_event(
             run_id=run.id,
             event_name="run_status",
-            payload={"status": "queued"},
+            payload={
+                "status": "queued",
+                "runtimeKind": str(run.runtime_kind or runtime_kind),
+                **({"admissionReason": admit_reason} if admit_reason else {}),
+            },
         )
-        self._start_background_run(run_id=run.id, stream_output=stream_output, locale=locale)
+        # Main Agent Runs are claimed by the durable worker — never spawn the
+        # Legacy daemon thread path for runtime_kind=main_agent.
+        if str(run.runtime_kind or "") != "main_agent":
+            self._start_background_run(
+                run_id=run.id, stream_output=stream_output, locale=locale
+            )
         yield from self.stream_run(conversation.id, run_id=run.id, after_seq=0)
 
     def stream_run(self, conversation_id: UUID, *, run_id: UUID, after_seq: int = 0) -> Iterator[bytes]:

@@ -1,12 +1,13 @@
-"""Durable Main Agent assistant worker (Plan 06 Task 5).
+"""Durable Main Agent assistant worker (Plan 06 Task 5+6).
 
 Usage:
     python -m app.assistant.worker
     python -m app.assistant.worker --healthcheck
 
 Task 5 owns registration, claim/lease/heartbeat, recovery classification, and
-the process skeleton. Full Provider/Capability loop execution is Task 6 — this
-module provides clear ports/hooks for that plug-in.
+the process skeleton. Task 6 plugs MainAgentRunExecutor for Provider/Capability
+execution at Checkpoint boundaries. SkeletonRunExecutor remains available for
+tests that inject it explicitly.
 """
 
 from __future__ import annotations
@@ -233,7 +234,13 @@ class AssistantWorker:
     ) -> None:
         self.cfg = cfg
         self.session_factory = session_factory or SessionLocal
-        self.executor = executor or SkeletonRunExecutor()
+        if executor is None:
+            # Task 6: durable Main Agent loop is the default executor.
+            # Skeleton remains available for tests that inject it explicitly.
+            from app.assistant.durable.runner import MainAgentRunExecutor
+
+            executor = MainAgentRunExecutor()
+        self.executor = executor
         self.credential_resolver = credential_resolver or NoopCredentialResolver()
         self.artifact_object_exists = artifact_object_exists
         self._draining = False

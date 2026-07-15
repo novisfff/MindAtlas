@@ -59,10 +59,40 @@ class AssistantChatRunService:
         conversation: Conversation,
         user_message: Message,
         assistant_message: Message,
+        runtime_kind: str = "legacy",
+        runtime_contract_version: int | None = None,
+        required_app_build_revision: str | None = None,
+        memory_commit_status: str | None = None,
+        deadline_at=None,
     ) -> AssistantChatRun:
+        """Create a Run with immutable ``runtime_kind``.
+
+        Plan 06 Task 6: admission selects ``runtime_kind`` immediately before
+        insertion. Once a ``main_agent`` row exists, Legacy fallback is forbidden.
+        """
         active = self.get_active_run(conversation_id=conversation.id)
         if active is not None:
             raise ValueError("conversation already has an active run")
+
+        kind = str(runtime_kind or "legacy").strip().lower()
+        if kind not in {"legacy", "main_agent"}:
+            raise ValueError(f"invalid runtime_kind: {runtime_kind!r}")
+
+        if kind == "main_agent":
+            if runtime_contract_version is None:
+                runtime_contract_version = 1
+            if not required_app_build_revision:
+                raise ValueError(
+                    "required_app_build_revision is required for runtime_kind=main_agent"
+                )
+            if memory_commit_status is None:
+                memory_commit_status = "pending"
+        else:
+            # Legacy shape: contract version + build must be null.
+            runtime_contract_version = None
+            required_app_build_revision = None
+            if memory_commit_status is None:
+                memory_commit_status = "not_applicable"
 
         run = AssistantChatRun(
             conversation_id=conversation.id,
@@ -71,6 +101,11 @@ class AssistantChatRunService:
             status=RUN_STATUS_QUEUED,
             last_event_seq=0,
             checkpoint_seq=0,
+            runtime_kind=kind,
+            runtime_contract_version=runtime_contract_version,
+            required_app_build_revision=required_app_build_revision,
+            memory_commit_status=memory_commit_status,
+            deadline_at=deadline_at,
         )
         self.db.add(run)
         self.db.commit()

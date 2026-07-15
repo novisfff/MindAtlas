@@ -1,7 +1,7 @@
 """Plan 06 durable agent run package.
 
-Persistence models, CAS repository, codec, artifacts, leases, recovery, and
-worker registration.
+Persistence models, CAS repository, codec, artifacts, leases, recovery,
+worker registration, and Main Agent execution at Checkpoint boundaries.
 """
 
 from app.assistant.durable.models import (  # noqa: F401
@@ -54,6 +54,27 @@ from app.assistant.durable.recovery import (  # noqa: F401
     RecoveryClassifier,
     RecoveryDecision,
 )
+from app.assistant.durable.runner import (  # noqa: F401
+    MainAgentRunExecutor,
+    assert_no_legacy_fallback,
+)
+from app.assistant.durable.admission import admit_and_select_runtime  # noqa: F401
+from app.assistant.durable.materialize import materialize_base_run_state  # noqa: F401
+from app.assistant.durable.checkpoints import (  # noqa: F401
+    commit_prepared_unit,
+    commit_started_unit,
+    commit_unit_result,
+    find_post_result_for_unit,
+    resolve_retry_unit,
+)
+from app.assistant.durable.activation import DurableSkillActivationLifecycle  # noqa: F401
+from app.assistant.durable.reconstruction import (  # noqa: F401
+    issue_fresh_authorization_evidence,
+    load_current_checkpoint,
+    reconstruct_capability_frames,
+    reconstruct_provider_transcript,
+    validate_resume_transcript,
+)
 
 __all__ = [
     "AssistantWorkerRegistration",
@@ -94,4 +115,19 @@ __all__ = [
     "CredentialSnapshot",
     "RecoveryClassifier",
     "RecoveryDecision",
+    "MainAgentRunExecutor",
+    "assert_no_legacy_fallback",
+    "admit_and_select_runtime",
+    "materialize_base_run_state",
+    "commit_prepared_unit",
+    "commit_started_unit",
+    "commit_unit_result",
+    "find_post_result_for_unit",
+    "resolve_retry_unit",
+    "DurableSkillActivationLifecycle",
+    "issue_fresh_authorization_evidence",
+    "load_current_checkpoint",
+    "reconstruct_capability_frames",
+    "reconstruct_provider_transcript",
+    "validate_resume_transcript",
 ]
