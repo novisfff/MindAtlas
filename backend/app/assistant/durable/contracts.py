@@ -328,29 +328,23 @@ class DurableAgentCheckpointV1(FrozenContract):
 
     @model_validator(mode="after")
     def _phase_invariants(self) -> DurableAgentCheckpointV1:
+        # Plan 06 §6: a transcript may be open only when phase=waiting and that
+        # continuation validates it. Non-waiting phases must not carry a
+        # provider_loop_continuation.
         if self.phase == "waiting":
             if self.provider_loop_continuation is None:
                 raise ValueError("waiting phase requires provider_loop_continuation")
             if self.inflight_unit is not None:
                 raise ValueError("waiting phase must not carry inflight_unit")
+        elif self.provider_loop_continuation is not None:
+            raise ValueError(
+                "provider_loop_continuation is only valid when phase=waiting"
+            )
         if self.phase == "terminal":
             if self.inflight_unit is not None:
                 raise ValueError("terminal phase must not carry inflight_unit")
             if self.next_action.kind not in {"terminal", "reconcile"}:
                 raise ValueError("terminal phase next_action must be terminal|reconcile")
-        if self.provider_loop_continuation is not None and self.phase not in {
-            "waiting",
-            "dispatching_calls",
-            "ready_for_provider",
-        }:
-            # Continuation is primarily for waiting; allow limited non-waiting presence
-            # only when phase is waiting (strict). Non-waiting must be None.
-            if self.phase != "waiting":
-                # Plan: transcript may be open only when phase=waiting and continuation
-                # validates it. Disallow continuation outside waiting.
-                raise ValueError(
-                    "provider_loop_continuation is only valid when phase=waiting"
-                )
 
         # Frame stack must be consistent with inflight capability unit call_ids.
         unit = self.inflight_unit

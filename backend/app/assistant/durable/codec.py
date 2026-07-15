@@ -275,7 +275,7 @@ def sanitize_json_value(
         value, (type(None), bool, int, float, str, bytes, bytearray, dict, list, tuple)
     ):
         _reject_ephemeral_instance(value)
-        # UUID is allowed only when already stringified by callers; reject raw.
+        # Raw UUID is stringified for portability; callers should prefer strings.
         if isinstance(value, UUID):
             return str(value)
         _fail(

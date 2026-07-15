@@ -1152,6 +1152,39 @@ def test_frame_inflight_inconsistency_rejected() -> None:
         codec["decode_checkpoint_v1"](encoded)
 
 
+def test_continuation_rejected_outside_waiting_phase() -> None:
+    """Plan 06 §6: provider_loop_continuation is only valid when phase=waiting."""
+    cont = _waiting_continuation()
+    for phase, next_kind in (
+        ("ready_for_provider", "continue_provider"),
+        ("dispatching_calls", "dispatch_calls"),
+    ):
+        with pytest.raises(ValidationError) as exc_info:
+            _checkpoint(
+                phase=phase,
+                next_kind=next_kind,
+                continuation=cont,
+                inflight=None,
+            )
+        assert "provider_loop_continuation is only valid when phase=waiting" in str(
+            exc_info.value
+        )
+
+
+def test_waiting_phase_accepts_continuation() -> None:
+    """Keep waiting-phase continuation acceptance green (regression guard)."""
+    cont = _waiting_continuation()
+    cp = _checkpoint(
+        phase="waiting",
+        next_kind="wait",
+        continuation=cont,
+        inflight=None,
+    )
+    assert cp.phase == "waiting"
+    assert cp.provider_loop_continuation is cont
+    assert cp.inflight_unit is None
+
+
 # ===========================================================================
 # Codec rejection corpus: depth/size/NaN/bytes/cycles/classes/ephemerals
 # ===========================================================================
