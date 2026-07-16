@@ -232,6 +232,8 @@ class _TransitionPlan:
     lease_ttl: timedelta | None = None
     require_expired_lease: bool = False
     clear_lease: bool = False
+    # Plan 07 pause: null aggregate active deadline while human-waiting.
+    clear_deadline: bool = False
     events: tuple[EventSpec, ...] = ()
     children: DurableChildBundle | None = None
     set_cancel_requested: bool = False
@@ -597,6 +599,49 @@ class DurableRunRepository:
             )
         )
 
+    def commit_waiting_pause(
+        self,
+        *,
+        run_id: UUID,
+        expected_revision: int,
+        lease: LeaseToken,
+        target_status: str,
+        events: Sequence[EventSpec] = (),
+        children: DurableChildBundle | None = None,
+    ) -> DurableCommitResult:
+        """Lease-owned human pause: running -> waiting_approval|waiting_input.
+
+        Plan 07 §11.1 step 8. Requires exact lease + expected ``state_revision`` +
+        source ``status=running``. Clears lease owner/expiry and aggregate
+        ``deadline_at`` (active wall time is frozen in BudgetSuspensionStateV1).
+        """
+        if target_status not in WAITING_STATUSES:
+            raise DurableRunConflict(
+                CODE_PROTOCOL_ERROR,
+                f"commit_waiting_pause target_status invalid: {target_status}",
+            )
+        rule = {
+            STATUS_WAITING_APPROVAL: "wait_approval",
+            STATUS_WAITING_INPUT: "wait_input",
+        }[target_status]
+        return self._commit(
+            _TransitionPlan(
+                run_id=run_id,
+                expected_revision=expected_revision,
+                target_status=target_status,
+                allowed_from=frozenset({STATUS_RUNNING}),
+                rule_name=rule,
+                lease=lease,
+                require_lease_verify=True,
+                events=tuple(events),
+                children=children,
+                set_started_at_if_missing=True,
+                clear_lease=True,
+                clear_deadline=True,
+                reject_if_ready_for_memory=True,
+            )
+        )
+
     def commit_recovery_terminal(
         self,
         *,
@@ -899,6 +944,9 @@ class DurableRunRepository:
                 # optional heartbeat refresh on semantic commit
                 run.heartbeat_at = now
                 run.lease_expires_at = now + plan.lease_ttl
+
+            if plan.clear_deadline:
+                run.deadline_at = None
 
             run.updated_at = now
 
@@ -1208,6 +1256,8 @@ class DurableRunRepository:
             run.lease_owner is not None or run.lease_expires_at is not None
         ):
             return True
+        if plan.clear_deadline and run.deadline_at is not None:
+            return True
         # Optional lease refresh on semantic commit is a real write.
         if (
             plan.require_lease_verify
@@ -1339,6 +1389,7 @@ __all__ = [
     "STATUS_WAITING_APPROVAL",
     "STATUS_WAITING_INPUT",
     "TERMINAL_STATUSES",
+    "WAITING_STATUSES",
     "event_payload_digest",
     "is_transition_allowed",
 ]

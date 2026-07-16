@@ -4,6 +4,7 @@ Task 1: portable frozen contracts + codec.
 Task 2: frozen DurableExecutionPlanV1 planner + durable publish helpers.
 Task 3: one-boundary durable Workflow/Agent runner + node adapters.
 Task 4: durable human Interrupt persistence (token/schema/repository).
+Task 5: nonblocking durable pause (effect port + atomic waiting commit).
 """
 
 from __future__ import annotations
@@ -75,11 +76,22 @@ from app.assistant.workflow.durable.interrupts import (  # noqa: F401
     normalize_interrupt_field_schema,
     verify_resume_token,
 )
+from app.assistant.workflow.durable.pause import (  # noqa: F401
+    CODE_DURABLE_BLOCKING_RUNTIME_FORBIDDEN,
+    CODE_DURABLE_PAUSE_PROTOCOL_ERROR,
+    DurablePauseCommitResult,
+    DurablePauseProtocolError,
+    WorkerUnitPauseEffectPort,
+    commit_durable_workflow_pause,
+    consume_and_commit_pause,
+)
 
 __all__ = [
     "DURABLE_PLAN_EXTENSION_CONTRACT_VERSION",
     "DURABLE_PLAN_EXTENSION_KEY",
     "DURABLE_WORKFLOW_IDENTITY_NAMESPACE",
+    "CODE_DURABLE_BLOCKING_RUNTIME_FORBIDDEN",
+    "CODE_DURABLE_PAUSE_PROTOCOL_ERROR",
     "BudgetSuspensionStateV1",
     "DurableBranchDecisionV1",
     "DurableCallFrameV1",
@@ -88,23 +100,28 @@ __all__ = [
     "DurableInterruptRepository",
     "DurableLoopCursorV1",
     "DurableNodePlanV1",
+    "DurablePauseCommitResult",
     "DurablePauseEffectPort",
     "DurablePauseProposalV1",
+    "DurablePauseProtocolError",
     "DurablePlanError",
     "DurableWorkflowStateV1",
     "EphemeralWorkflowContext",
     "FrozenExecutionDependencyRef",
     "InterruptConflict",
+    "WorkerUnitPauseEffectPort",
     "attach_durable_plan_extension",
     "build_budget_suspension_state",
     "build_root_continuation",
     "business_side_effect_maximum",
+    "commit_durable_workflow_pause",
     "compute_branch_decision_digest",
     "compute_loop_cursor_digest",
     "compute_plan_digest",
     "compute_proposal_digest",
     "compute_remaining_active_ms",
     "compute_suspension_digest",
+    "consume_and_commit_pause",
     "derive_frame_id",
     "derive_interrupt_id",
     "derive_interrupt_key",

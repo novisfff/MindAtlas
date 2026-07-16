@@ -284,6 +284,7 @@ class DurableWorkflowRunner:
         capability_gateway: Any = None,
         exact_dependency_resolver: Any = None,
         bags: dict[UUID, PortableNodeBag] | None = None,
+        pause_effect_port: Any = None,
     ) -> None:
         self.registry = registry or build_default_registry()
         self.cancellation_probe = cancellation_probe
@@ -291,6 +292,8 @@ class DurableWorkflowRunner:
         self.agent_round_executor = agent_round_executor
         self.capability_gateway = capability_gateway
         self.exact_dependency_resolver = exact_dependency_resolver
+        # Worker-unit ephemeral pause staging port (Plan 07 §5.3). Never serialized.
+        self.pause_effect_port = pause_effect_port
         # Process-local bags keyed by frame_id (never durable by themselves)
         self._bags: dict[UUID, PortableNodeBag] = dict(bags or {})
 
@@ -533,6 +536,7 @@ class DurableWorkflowRunner:
             capability_gateway=self.capability_gateway,
             exact_dependency_resolver=self.exact_dependency_resolver,
             agent_round_executor=self.agent_round_executor,
+            pause_effect_port=self.pause_effect_port,
         )
         try:
             raw = adapter.execute(ctx)

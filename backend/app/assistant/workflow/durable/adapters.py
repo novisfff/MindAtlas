@@ -135,6 +135,8 @@ class AdapterExecutionContext:
     exact_dependency_resolver: Any = None
     # Agent round hook (tests inject; production wires Plan 03 loop)
     agent_round_executor: Callable[..., Mapping[str, Any]] | None = None
+    # Worker-unit ephemeral pause staging port (Plan 07 §5.3). Never serialized.
+    pause_effect_port: Any = None
 
 
 @dataclass(slots=True)
@@ -608,7 +610,17 @@ class HumanInLoopAdapter:
                 proposed_workflow_state=proposed,
             ),
         )
-        # Never call HumanLoopRuntime.create_and_wait
+        # Stage pure proposal on the worker-unit port when injected. Never call
+        # HumanLoopRuntime.create_and_wait from durable execution.
+        port = ctx.pause_effect_port
+        if port is not None:
+            stage = getattr(port, "stage", None)
+            if not callable(stage):
+                raise DurableAdapterError(
+                    "pause_effect_port missing stage()",
+                    reason_code="durable_pause_protocol_error",
+                )
+            stage(proposal)
         return AdapterBoundaryResult(
             kind="human_pause",
             pause_proposal=proposal,
