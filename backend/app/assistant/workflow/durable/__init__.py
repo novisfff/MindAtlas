@@ -7,6 +7,7 @@ Task 4: durable human Interrupt persistence (token/schema/repository).
 Task 5: nonblocking durable pause (effect port + atomic waiting commit).
 Task 6: conversation-scoped token/decision HTTP APIs + expiry scanner.
 Task 7: exact resume of child frames + Provider waiting resolution.
+Task 9: hidden durable-proposal-review golden path publish + recovery proof.
 
 Heavy modules (adapters/runner/interrupts/pause/resume) are imported lazily via
 ``__getattr__`` so ``durable.codec`` Checkpoint v2 rebuild can import

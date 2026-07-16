@@ -1,0 +1,34 @@
+version: 1
+display_name: Durable Proposal Review
+legacy_aliases: []
+
+routing:
+  include_examples:
+  - review a durable proposal for my note
+  - 请帮我审核一条笔记提案
+  - draft a private proposal and wait for my approval
+  exclude_examples:
+  - create a new entry
+  - publish a weekly report
+  - write to the knowledge graph
+  conflict_rules: []
+
+capabilities:
+  - type: workflow
+    key: durable-proposal-review
+
+policy:
+  allowed_side_effects:
+    - compute
+  max_skill_calls: 4
+  max_same_read_calls: 1
+  requires_terminal_output: true
+  terminal_text_allowed: true
+
+provider_aliases: {}
+metadata:
+  plan07_golden: "true"
+  golden_strategy: durable_proposal_review
+  interrupt_mode: durable
+  evaluation_only: "true"
+  hidden: "true"
