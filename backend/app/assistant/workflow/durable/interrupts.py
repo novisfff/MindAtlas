@@ -96,6 +96,8 @@ _SUPPORTED_SCHEMA_TYPES = frozenset(
     {"string", "number", "integer", "boolean", "enum", "array", "object"}
 )
 
+_ALLOWED_SCHEMA_FORMATS = frozenset({"date", "time"})
+
 _REJECTED_SCHEMA_KEYS = frozenset(
     {
         "$ref",
@@ -578,9 +580,27 @@ def _normalize_schema_node(
     out["type"] = type_val
 
     # Preserve safe annotations only.
-    for key in ("title", "description", "default", "minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems", "exclusiveMinimum", "exclusiveMaximum"):
+    for key in (
+        "title",
+        "description",
+        "default",
+        "minimum",
+        "maximum",
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+    ):
         if key in node:
             out[key] = node[key]
+
+    # Allowlisted formats for HITL date/time render widgets.
+    if "format" in node:
+        fmt = node["format"]
+        if fmt in _ALLOWED_SCHEMA_FORMATS:
+            out["format"] = fmt
 
     if "enum" in node:
         enum_vals = node["enum"]
@@ -762,6 +782,30 @@ def _validate_object_against_schema(
     return out
 
 
+def _check_numeric_bounds(
+    value: int | float,
+    schema: Mapping[str, Any],
+    *,
+    path: str,
+) -> None:
+    if "minimum" in schema and value < schema["minimum"]:
+        raise InterruptSchemaError(
+            f"{CODE_INTERRUPT_VALUES_INVALID}: value below minimum at {path}"
+        )
+    if "maximum" in schema and value > schema["maximum"]:
+        raise InterruptSchemaError(
+            f"{CODE_INTERRUPT_VALUES_INVALID}: value above maximum at {path}"
+        )
+    if "exclusiveMinimum" in schema and value <= schema["exclusiveMinimum"]:
+        raise InterruptSchemaError(
+            f"{CODE_INTERRUPT_VALUES_INVALID}: value not above exclusiveMinimum at {path}"
+        )
+    if "exclusiveMaximum" in schema and value >= schema["exclusiveMaximum"]:
+        raise InterruptSchemaError(
+            f"{CODE_INTERRUPT_VALUES_INVALID}: value not below exclusiveMaximum at {path}"
+        )
+
+
 def _validate_value_against_schema(
     value: Any,
     schema: Mapping[str, Any],
@@ -794,12 +838,14 @@ def _validate_value_against_schema(
             raise InterruptSchemaError(
                 f"{CODE_INTERRUPT_VALUES_INVALID}: expected integer at {path}"
             )
+        _check_numeric_bounds(value, schema, path=path)
         return value
     if type_val == "number":
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise InterruptSchemaError(
                 f"{CODE_INTERRUPT_VALUES_INVALID}: expected number at {path}"
             )
+        _check_numeric_bounds(value, schema, path=path)
         return value
     if type_val == "boolean":
         if not isinstance(value, bool):
@@ -811,6 +857,14 @@ def _validate_value_against_schema(
         if not isinstance(value, list):
             raise InterruptSchemaError(
                 f"{CODE_INTERRUPT_VALUES_INVALID}: expected array at {path}"
+            )
+        if "minItems" in schema and len(value) < int(schema["minItems"]):
+            raise InterruptSchemaError(
+                f"{CODE_INTERRUPT_VALUES_INVALID}: array too short at {path}"
+            )
+        if "maxItems" in schema and len(value) > int(schema["maxItems"]):
+            raise InterruptSchemaError(
+                f"{CODE_INTERRUPT_VALUES_INVALID}: array too long at {path}"
             )
         items_schema = schema.get("items") or {}
         return [
@@ -1077,7 +1131,9 @@ class DurableInterruptRepository:
     ) -> InterruptCreateResult:
         """Insert-or-read a pending Interrupt with immutable BudgetSuspensionStateV1.
 
-        Run is locked first. Zero remaining active time refuses creation.
+        Run is locked first. Zero remaining active time refuses creation of a new
+        row. Crash retries that hit an existing key with the same interrupt_id and
+        request_digest return the stored suspension as truth (clock may have moved).
         """
         kind = str(kind)
         if kind not in {"approval", "input"}:
@@ -1085,11 +1141,74 @@ class DurableInterruptRepository:
 
         run = self._lock_run(run_id) if lock_run else self._require_run(run_id)
         now = self._db_now()
+
+        # Parent pointer agreement (independent of suspension clock).
+        if parent_budget_revision_id != budget_revision_id:
+            raise InterruptConflict(
+                CODE_INTERRUPT_PARENT_TAMPER,
+                "budget_revision_id must equal parent_budget_revision_id",
+                run=run,
+            )
+        if run.current_budget_revision_id is not None and run.current_budget_revision_id != parent_budget_revision_id:
+            raise InterruptConflict(
+                CODE_INTERRUPT_PARENT_TAMPER,
+                "run current_budget_revision_id must match suspension parent",
+                run=run,
+            )
+        if int(parent_ledger.revision) < 0:
+            raise InterruptConflict(CODE_PROTOCOL_ERROR, "invalid parent ledger revision", run=run)
+
+        # Schema normalize + request identity (must match on crash retry).
+        if kind == "input" and field_schema is None:
+            raise InterruptSchemaError(
+                f"{CODE_INTERRUPT_SCHEMA_INVALID}: input requires field_schema"
+            )
+        norm_schema = normalize_interrupt_field_schema(
+            field_schema, required=(kind == "input")
+        )
+        init_vals = dict(initial_values or {})
+        if _json_size_bytes(dict(request_payload)) > MAX_REQUEST_JSON_BYTES:
+            raise InterruptSchemaError(
+                f"{CODE_INTERRUPT_SCHEMA_INVALID}: request_payload exceeds bound"
+            )
+        req_digest = compute_request_digest(
+            kind=kind,
+            request_payload=request_payload,
+            field_schema=norm_schema,
+            initial_values=init_vals,
+        )
+        schema_digest = compute_field_schema_digest(norm_schema)
+
+        # Insert-or-read BEFORE recomputing suspension from wall clock.
+        # Stored suspension is immutable identity; a later retry must not reject
+        # the committed row because remaining_active_ms / suspended_at moved.
+        existing = self.get_by_key(run_id=run_id, interrupt_key=interrupt_key, for_update=True)
+        if existing is not None:
+            if existing.id != interrupt_id:
+                raise InterruptConflict(
+                    CODE_INTERRUPT_KEY_CONFLICT,
+                    "interrupt_key owned by a different interrupt_id",
+                    run=run,
+                )
+            if str(existing.request_digest) != req_digest:
+                raise InterruptConflict(
+                    CODE_INTERRUPT_REQUEST_MISMATCH,
+                    "immutable request_digest mismatch on re-create",
+                    run=run,
+                )
+            return InterruptCreateResult(
+                interrupt=existing,
+                created=False,
+                suspension=BudgetSuspensionStateV1.model_validate(
+                    existing.budget_suspension_state
+                ),
+            )
+
+        # New insert path only: compute suspension from current clock.
         suspended_at = suspended_at_utc or now
         if suspended_at.tzinfo is None:
             raise ValueError("suspended_at_utc must be timezone-aware")
 
-        # TTL bound.
         ttl = self._default_ttl_sec if ttl_sec is None else int(ttl_sec)
         if ttl < 1 or ttl > self._max_ttl_sec:
             raise InterruptConflict(
@@ -1111,43 +1230,6 @@ class DurableInterruptRepository:
                 run=run,
             )
 
-        # Parent pointer agreement.
-        if parent_budget_revision_id != budget_revision_id:
-            raise InterruptConflict(
-                CODE_INTERRUPT_PARENT_TAMPER,
-                "budget_revision_id must equal parent_budget_revision_id",
-                run=run,
-            )
-        if run.current_budget_revision_id is not None and run.current_budget_revision_id != parent_budget_revision_id:
-            raise InterruptConflict(
-                CODE_INTERRUPT_PARENT_TAMPER,
-                "run current_budget_revision_id must match suspension parent",
-                run=run,
-            )
-        if int(parent_ledger.revision) < 0:
-            raise InterruptConflict(CODE_PROTOCOL_ERROR, "invalid parent ledger revision", run=run)
-
-        # Schema normalize.
-        if kind == "input" and field_schema is None:
-            raise InterruptSchemaError(
-                f"{CODE_INTERRUPT_SCHEMA_INVALID}: input requires field_schema"
-            )
-        norm_schema = normalize_interrupt_field_schema(
-            field_schema, required=(kind == "input")
-        )
-        init_vals = dict(initial_values or {})
-        if _json_size_bytes(dict(request_payload)) > MAX_REQUEST_JSON_BYTES:
-            raise InterruptSchemaError(
-                f"{CODE_INTERRUPT_SCHEMA_INVALID}: request_payload exceeds bound"
-            )
-        req_digest = compute_request_digest(
-            kind=kind,
-            request_payload=request_payload,
-            field_schema=norm_schema,
-            initial_values=init_vals,
-        )
-        schema_digest = compute_field_schema_digest(norm_schema)
-
         suspension = build_budget_suspension_state(
             run_id=run_id,
             interrupt_id=interrupt_id,
@@ -1158,35 +1240,6 @@ class DurableInterruptRepository:
             remaining_active_ms=remaining,
             human_wait_expires_at_utc=exp.astimezone(timezone.utc),
         )
-
-        existing = self.get_by_key(run_id=run_id, interrupt_key=interrupt_key, for_update=True)
-        if existing is not None:
-            # Insert-or-read: require immutable request/suspension equality.
-            if existing.id != interrupt_id:
-                raise InterruptConflict(
-                    CODE_INTERRUPT_KEY_CONFLICT,
-                    "interrupt_key owned by a different interrupt_id",
-                    run=run,
-                )
-            if str(existing.request_digest) != req_digest:
-                raise InterruptConflict(
-                    CODE_INTERRUPT_REQUEST_MISMATCH,
-                    "immutable request_digest mismatch on re-create",
-                    run=run,
-                )
-            if str(existing.budget_suspension_digest) != suspension.suspension_digest:
-                raise InterruptConflict(
-                    CODE_INTERRUPT_REQUEST_MISMATCH,
-                    "immutable budget_suspension_digest mismatch on re-create",
-                    run=run,
-                )
-            return InterruptCreateResult(
-                interrupt=existing,
-                created=False,
-                suspension=BudgetSuspensionStateV1.model_validate(
-                    existing.budget_suspension_state
-                ),
-            )
 
         pending = self.get_pending_for_run(run_id, for_update=True)
         if pending is not None:
@@ -1414,6 +1467,12 @@ class DurableInterruptRepository:
         if int(row.request_run_revision) != int(expected_run_revision):
             raise InterruptConflict(
                 CODE_STALE_REVISION, "request_run_revision mismatch", run=run
+            )
+        if int(run.state_revision) != int(expected_run_revision):
+            raise InterruptConflict(
+                CODE_STALE_REVISION,
+                "run state_revision mismatch",
+                run=run,
             )
         if int(row.token_revision) != int(expected_token_revision):
             raise InterruptConflict(

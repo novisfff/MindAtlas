@@ -605,6 +605,197 @@ class DurableInterruptModelTests(unittest.TestCase):
                 {"type": "object", "properties": {"password": {"type": "string"}}}
             )
 
+    def test_schema_bounds_enforced_on_submit(self) -> None:
+        from app.assistant.workflow.durable.interrupts import (
+            InterruptSchemaError,
+            normalize_interrupt_field_schema,
+            validate_submitted_values,
+        )
+
+        raw = {
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "exclusiveMinimum": 1,
+                    "exclusiveMaximum": 10,
+                },
+                "score": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                },
+                "tags": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 2,
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["count", "score", "tags"],
+            "additionalProperties": False,
+        }
+        norm = normalize_interrupt_field_schema(raw)
+        assert norm is not None
+
+        ok = validate_submitted_values(
+            field_schema=norm,
+            values={"count": 5, "score": 0.5, "tags": ["a"]},
+            kind="input",
+            outcome="submitted",
+        )
+        self.assertEqual(ok["count"], 5)
+
+        with self.assertRaises(InterruptSchemaError):
+            validate_submitted_values(
+                field_schema=norm,
+                values={"count": 1, "score": 0.5, "tags": ["a"]},
+                kind="input",
+                outcome="submitted",
+            )
+        with self.assertRaises(InterruptSchemaError):
+            validate_submitted_values(
+                field_schema=norm,
+                values={"count": 10, "score": 0.5, "tags": ["a"]},
+                kind="input",
+                outcome="submitted",
+            )
+        with self.assertRaises(InterruptSchemaError):
+            validate_submitted_values(
+                field_schema=norm,
+                values={"count": 5, "score": -0.1, "tags": ["a"]},
+                kind="input",
+                outcome="submitted",
+            )
+        with self.assertRaises(InterruptSchemaError):
+            validate_submitted_values(
+                field_schema=norm,
+                values={"count": 5, "score": 0.5, "tags": []},
+                kind="input",
+                outcome="submitted",
+            )
+        with self.assertRaises(InterruptSchemaError):
+            validate_submitted_values(
+                field_schema=norm,
+                values={"count": 5, "score": 0.5, "tags": ["a", "b", "c"]},
+                kind="input",
+                outcome="submitted",
+            )
+
+    def test_schema_format_date_time_preserved_for_render(self) -> None:
+        from app.assistant.workflow.durable.interrupts import (
+            normalize_interrupt_field_schema,
+            render_interrupt_fields,
+        )
+
+        raw = {
+            "type": "object",
+            "properties": {
+                "due": {"type": "string", "format": "date", "title": "Due"},
+                "at": {"type": "string", "format": "time", "title": "At"},
+                "note": {"type": "string", "format": "email", "title": "Note"},
+            },
+            "required": ["due"],
+            "additionalProperties": False,
+        }
+        norm = normalize_interrupt_field_schema(raw)
+        assert norm is not None
+        self.assertEqual(norm["properties"]["due"].get("format"), "date")
+        self.assertEqual(norm["properties"]["at"].get("format"), "time")
+        self.assertNotIn("format", norm["properties"]["note"])
+        fields = {f["name"]: f for f in render_interrupt_fields(norm)}
+        self.assertEqual(fields["due"]["type"], "date")
+        self.assertEqual(fields["at"]["type"], "time")
+        self.assertEqual(fields["note"]["type"], "input")
+
+    def test_create_pending_crash_retry_after_clock_advance(self) -> None:
+        """Insert-or-read must return stored suspension after wall clock advances."""
+        from app.assistant.workflow.durable.contracts import derive_interrupt_id
+        from app.assistant.workflow.durable.interrupts import (
+            DurableInterruptRepository,
+            derive_interrupt_key,
+        )
+
+        run = _make_main_agent_run(self.db)
+        manifest, _p, budget, _o, ck = _seed_revisions(self.db, run.id)
+        run.current_budget_revision_id = budget.id
+        self.db.commit()
+
+        parent = _parent_ledger(remaining_ms=120_000)
+        frame_id = uuid.uuid4()
+        visit = "visit-crash-retry"
+        iid = derive_interrupt_id(
+            run_id=run.id,
+            root_invocation_digest=DIGEST_A,
+            frame_id=frame_id,
+            node_visit_id=visit,
+            logical_interrupt_ordinal=1,
+        )
+        key = derive_interrupt_key(
+            run_id=run.id,
+            root_invocation_digest=DIGEST_A,
+            frame_id=frame_id,
+            node_visit_id=visit,
+            logical_interrupt_ordinal=1,
+        )
+        suspended_at = parent.started_at_utc + timedelta(seconds=1)
+        repo = DurableInterruptRepository(self.db, token_pepper=PEPPER)
+
+        first = repo.create_pending_interrupt(
+            run_id=run.id,
+            interrupt_id=iid,
+            interrupt_key=key,
+            kind="approval",
+            checkpoint_id=ck.id,
+            manifest_revision_id=manifest.id,
+            budget_revision_id=budget.id,
+            workflow_frame_id=frame_id,
+            node_id="n1",
+            node_visit_id=visit,
+            request_run_revision=1,
+            request_payload={"title": "approve?"},
+            field_schema=None,
+            initial_values={},
+            parent_ledger=parent,
+            parent_budget_revision_id=budget.id,
+            suspended_at_utc=suspended_at,
+        )
+        self.db.commit()
+        self.assertTrue(first.created)
+        stored_digest = first.interrupt.budget_suspension_digest
+        stored_remaining = first.suspension.remaining_active_ms
+
+        later = suspended_at + timedelta(seconds=30)
+        second = repo.create_pending_interrupt(
+            run_id=run.id,
+            interrupt_id=iid,
+            interrupt_key=key,
+            kind="approval",
+            checkpoint_id=ck.id,
+            manifest_revision_id=manifest.id,
+            budget_revision_id=budget.id,
+            workflow_frame_id=frame_id,
+            node_id="n1",
+            node_visit_id=visit,
+            request_run_revision=1,
+            request_payload={"title": "approve?"},
+            field_schema=None,
+            initial_values={},
+            parent_ledger=parent,
+            parent_budget_revision_id=budget.id,
+            suspended_at_utc=later,
+        )
+        self.assertFalse(second.created)
+        self.assertEqual(second.interrupt.id, first.interrupt.id)
+        self.assertEqual(second.interrupt.budget_suspension_digest, stored_digest)
+        self.assertEqual(second.suspension.remaining_active_ms, stored_remaining)
+        self.assertEqual(
+            second.suspension.suspension_digest,
+            first.suspension.suspension_digest,
+        )
+
     def test_settings_defaults(self) -> None:
         from app.config import Settings
 
