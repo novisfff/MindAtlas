@@ -1,65 +1,14 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { X } from 'lucide-react'
-import type {
-  HumanApprovalFieldSchema,
-  HumanApprovalFieldWidget,
-  HumanApprovalOption,
-} from './types'
+import { normalizeOptions, normalizeWidget, toStringArray } from './fieldHelpers'
+import type { HumanApprovalFieldSchema } from './types'
 
 interface HumanApprovalFieldFormProps {
   fields: HumanApprovalFieldSchema[]
   values: Record<string, unknown>
   disabled?: boolean
   onChange: (name: string, value: unknown) => void
-}
-
-function defaultWidgetForType(type: HumanApprovalFieldSchema['type']): HumanApprovalFieldWidget {
-  if (type === 'boolean') return 'switch'
-  if (type === 'array') return 'tag_selector'
-  return 'input'
-}
-
-function normalizeWidget(field: HumanApprovalFieldSchema): HumanApprovalFieldWidget {
-  const raw = String(field.widget ?? '').trim().toLowerCase() as HumanApprovalFieldWidget
-  if (raw) return raw
-  return defaultWidgetForType(field.type)
-}
-
-type NormalizedOption = {
-  value: string
-  label: string
-  description?: string
-}
-
-function normalizeOptions(field: HumanApprovalFieldSchema): NormalizedOption[] {
-  if (!Array.isArray(field.options)) return []
-  const deduped: NormalizedOption[] = []
-  const seen = new Set<string>()
-  field.options.forEach((item: HumanApprovalOption) => {
-    let normalized: NormalizedOption | null = null
-    if (typeof item === 'string') {
-      const text = item.trim()
-      if (text) {
-        normalized = { value: text, label: text }
-      }
-    } else if (item && typeof item === 'object') {
-      const value = String(item.value ?? '').trim()
-      const label = String(item.label ?? value).trim()
-      const description = String(item.description ?? '').trim()
-      if (value && label) {
-        normalized = {
-          value,
-          label,
-          ...(description ? { description } : {}),
-        }
-      }
-    }
-    if (!normalized || seen.has(normalized.value)) return
-    seen.add(normalized.value)
-    deduped.push(normalized)
-  })
-  return deduped
 }
 
 function toStringValue(raw: unknown): string {
@@ -73,20 +22,6 @@ function toBooleanValue(raw: unknown): boolean {
   if (typeof raw === 'boolean') return raw
   const text = String(raw ?? '').trim().toLowerCase()
   return text === 'true' || text === '1'
-}
-
-function toStringArray(raw: unknown): string[] {
-  if (Array.isArray(raw)) {
-    return raw
-      .map((item) => String(item ?? '').trim())
-      .filter(Boolean)
-  }
-  if (typeof raw === 'string') {
-    const text = raw.trim()
-    if (!text) return []
-    return text.split(',').map((item) => item.trim()).filter(Boolean)
-  }
-  return []
 }
 
 interface TagSelectorFieldProps {

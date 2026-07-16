@@ -186,4 +186,75 @@ describe('DurableInterruptCard', () => {
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1))
     expect(onSubmit.mock.calls[0][0].outcome).toBe('rejected')
   })
+
+  it('preserves edited values when tokenRevision updates while still pending', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined)
+    const base = makeInterrupt({ tokenRevision: 0 })
+    const { rerender } = render(
+      <DurableInterruptCard
+        interrupt={base}
+        onSubmit={onSubmit}
+        createResolutionRequestId={() => 'rr-edit-1'}
+      />,
+    )
+
+    const field = screen.getByDisplayValue('draft text')
+    fireEvent.change(field, { target: { value: 'user-edited summary' } })
+    expect(screen.getByDisplayValue('user-edited summary')).toBeInTheDocument()
+
+    // Parent upserts after token rotate while status remains pending.
+    rerender(
+      <DurableInterruptCard
+        interrupt={{ ...base, tokenRevision: 1 }}
+        onSubmit={onSubmit}
+        createResolutionRequestId={() => 'rr-edit-1'}
+      />,
+    )
+
+    expect(screen.getByDisplayValue('user-edited summary')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1))
+    expect(onSubmit.mock.calls[0][0].values.summary).toBe('user-edited summary')
+  })
+
+  it('mints a new resolutionRequestId for a different action after a failed attempt', async () => {
+    let createCount = 0
+    const onSubmit = vi.fn().mockResolvedValue(undefined)
+    render(
+      <DurableInterruptCard
+        interrupt={makeInterrupt({
+          requestPayload: {
+            title: 'Review',
+            requireRejectComment: false,
+            approveLabel: 'Approve',
+            rejectLabel: 'Reject',
+          },
+        })}
+        onSubmit={onSubmit}
+        createResolutionRequestId={() => {
+          createCount += 1
+          return `rr-${createCount}`
+        }}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1))
+    expect(onSubmit.mock.calls[0][0].resolutionRequestId).toBe('rr-1')
+    expect(onSubmit.mock.calls[0][0].outcome).toBe('approved')
+
+    // Failed approve leaves status pending; user then Rejects — new click, new id.
+    fireEvent.click(screen.getByRole('button', { name: 'Reject' }))
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2))
+    expect(onSubmit.mock.calls[1][0].outcome).toBe('rejected')
+    expect(onSubmit.mock.calls[1][0].resolutionRequestId).toBe('rr-2')
+    expect(createCount).toBe(2)
+
+    // Same-outcome retry of Reject reuses the reject id.
+    fireEvent.click(screen.getByRole('button', { name: 'Reject' }))
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(3))
+    expect(onSubmit.mock.calls[2][0].resolutionRequestId).toBe('rr-2')
+    expect(createCount).toBe(2)
+  })
 })
