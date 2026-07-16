@@ -52,7 +52,8 @@ class DurableAdapterError(ValueError):
 class PortableNodeBag:
     """Ephemeral portable values for pure node evaluation.
 
-    Lives only inside one prepared unit. Not a Checkpoint field.
+    Process-local by default. May be projected to a portable snapshot that the
+    runner rehydrates after cross-process recovery (Task 3 minimal durability).
     """
 
     inputs: dict[str, Any] = field(default_factory=dict)
@@ -68,6 +69,44 @@ class PortableNodeBag:
 
     def set_output(self, node_id: str, payload: Mapping[str, Any]) -> None:
         self.node_outputs[node_id] = dict(payload)
+
+    def to_snapshot(self) -> dict[str, Any]:
+        """Project bag into a JSON-friendly portable dict for material/checkpoint."""
+        return {
+            "inputs": dict(self.inputs),
+            "nodeOutputs": {k: dict(v) for k, v in self.node_outputs.items()},
+            "envVars": dict(self.env_vars),
+            "sysVars": dict(self.sys_vars),
+            "variables": dict(self.variables),
+            "artifactIds": [str(a) for a in self.artifact_ids],
+        }
+
+    @classmethod
+    def from_snapshot(cls, snapshot: Mapping[str, Any] | None) -> PortableNodeBag:
+        """Rebuild a bag from a portable snapshot (empty bag if snapshot is None)."""
+        if not snapshot:
+            return cls()
+        arts_raw = snapshot.get("artifactIds") or snapshot.get("artifact_ids") or []
+        arts: list[UUID] = []
+        for item in arts_raw:
+            try:
+                arts.append(item if isinstance(item, UUID) else UUID(str(item)))
+            except (TypeError, ValueError):
+                continue
+        node_outputs_raw = snapshot.get("nodeOutputs") or snapshot.get("node_outputs") or {}
+        node_outputs: dict[str, dict[str, Any]] = {}
+        if isinstance(node_outputs_raw, Mapping):
+            for k, v in node_outputs_raw.items():
+                if isinstance(v, Mapping):
+                    node_outputs[str(k)] = dict(v)
+        return cls(
+            inputs=dict(snapshot.get("inputs") or {}),
+            node_outputs=node_outputs,
+            env_vars=dict(snapshot.get("envVars") or snapshot.get("env_vars") or {}),
+            sys_vars=dict(snapshot.get("sysVars") or snapshot.get("sys_vars") or {}),
+            variables=dict(snapshot.get("variables") or {}),
+            artifact_ids=arts,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -630,8 +669,27 @@ class WorkflowCallAdapter:
             execution_attempt=1,
             phase="ready",
         )
+        # Record the parent call-node successor so CHILD_COMPLETED can advance
+        # without fixture-hardcoded node id maps.
+        return_target = _next_from_single_edge(ctx.node)
+        branch_decision = None
+        if return_target is not None:
+            branch_decision = DurableBranchDecisionV1(
+                node_id=ctx.node.node_id,
+                node_visit_id=ctx.node_visit_id,
+                chosen_handle="return",
+                chosen_target_node_id=return_target,
+                decision_digest=compute_branch_decision_digest(
+                    node_id=ctx.node.node_id,
+                    node_visit_id=ctx.node_visit_id,
+                    chosen_handle="return",
+                    chosen_target_node_id=return_target,
+                ),
+            )
         return AdapterBoundaryResult(
             kind="child_pushed",
+            next_node_id=return_target,
+            branch_decision=branch_decision,
             child_frame=child_frame,
             bag=ctx.bag,
         )
@@ -695,8 +753,26 @@ class AgentCallAdapter:
                 execution_attempt=1,
                 phase="ready",
             )
+            # Record parent call-node successor for CHILD_COMPLETED advance.
+            return_target = _next_from_single_edge(ctx.node)
+            branch_decision = None
+            if return_target is not None:
+                branch_decision = DurableBranchDecisionV1(
+                    node_id=ctx.node.node_id,
+                    node_visit_id=ctx.node_visit_id,
+                    chosen_handle="return",
+                    chosen_target_node_id=return_target,
+                    decision_digest=compute_branch_decision_digest(
+                        node_id=ctx.node.node_id,
+                        node_visit_id=ctx.node_visit_id,
+                        chosen_handle="return",
+                        chosen_target_node_id=return_target,
+                    ),
+                )
             return AdapterBoundaryResult(
                 kind="child_pushed",
+                next_node_id=return_target,
+                branch_decision=branch_decision,
                 child_frame=child_frame,
                 bag=ctx.bag,
             )

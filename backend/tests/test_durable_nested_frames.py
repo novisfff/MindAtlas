@@ -73,7 +73,15 @@ def _child_plan(*, target_version_id: UUID | None = None) -> Any:
     )
 
 
-def _parent_plan_with_call(*, child_version_id: UUID) -> Any:
+def _parent_plan_with_call(
+    *,
+    child_version_id: UUID,
+    call_node_id: str = "nested_wf_invoke",
+    after_call_node_id: str = "parent_final_out",
+) -> Any:
+    """Parent plan with a workflow_call. Node ids are intentionally non-fixture
+    names so parent advance cannot rely on call→p_output / agent_call→output maps.
+    """
     from app.assistant.workflow.durable.contracts import (
         DurableEdgeV1,
         DurableExecutionPlanV1,
@@ -84,7 +92,7 @@ def _parent_plan_with_call(*, child_version_id: UUID) -> Any:
 
     tvid = UUID("00000000-0000-4000-8000-000000000a02")
     dep = FrozenExecutionDependencyRef(
-        dependency_path="nodes.call.workflow",
+        dependency_path=f"nodes.{call_node_id}.workflow",
         dependency_type="workflow",
         target_identity=f"workflow:{child_version_id}",
         target_version_id=child_version_id,
@@ -100,7 +108,7 @@ def _parent_plan_with_call(*, child_version_id: UUID) -> Any:
                 DurableEdgeV1(
                     edge_id="pe0",
                     source_node_id="p_start",
-                    target_node_id="call",
+                    target_node_id=call_node_id,
                 ),
             ),
             adapter_key="start.v1",
@@ -108,14 +116,14 @@ def _parent_plan_with_call(*, child_version_id: UUID) -> Any:
             may_interrupt=False,
         ),
         DurableNodePlanV1(
-            node_id="call",
+            node_id=call_node_id,
             node_type="workflow_call",
             config_digest=DIGEST_B,
             outgoing_edges=(
                 DurableEdgeV1(
                     edge_id="pe1",
-                    source_node_id="call",
-                    target_node_id="p_output",
+                    source_node_id=call_node_id,
+                    target_node_id=after_call_node_id,
                 ),
             ),
             adapter_key="workflow_call.v1",
@@ -124,7 +132,7 @@ def _parent_plan_with_call(*, child_version_id: UUID) -> Any:
             dependency_refs=(dep,),
         ),
         DurableNodePlanV1(
-            node_id="p_output",
+            node_id=after_call_node_id,
             node_type="output",
             config_digest=DIGEST_C,
             outgoing_edges=(),
@@ -188,11 +196,11 @@ class TestNestedWorkflowFrames:
         p0 = runner.prepare_boundary(state=state, material=parent_material)
         r0 = runner.execute_boundary(prepared=p0, material=parent_material)
         state = runner.apply_boundary_result(state=p0.workflow_state, result=r0)
-        assert state.frame_stack[-1].current_node_id == "call"
+        assert state.frame_stack[-1].current_node_id == "nested_wf_invoke"
 
         # workflow_call → child_pushed
         p1 = runner.prepare_boundary(state=state, material=parent_material)
-        assert p1.node_id == "call"
+        assert p1.node_id == "nested_wf_invoke"
         r1 = runner.execute_boundary(
             prepared=p1,
             material=parent_material,
@@ -230,7 +238,12 @@ class TestNestedWorkflowFrames:
         assert len(state.frame_stack) == 1
         parent = state.frame_stack[0]
         assert parent.phase == "ready"
-        assert parent.current_node_id == "p_output"
+        assert parent.current_node_id == "parent_final_out"
+        # Successor was recorded as a branch decision at CHILD_PUSHED time
+        assert any(
+            d.node_id == "nested_wf_invoke" and d.chosen_target_node_id == "parent_final_out"
+            for d in parent.branch_decisions
+        )
 
         # Parent output → root completed
         p4 = runner.prepare_boundary(state=state, material=parent_material)

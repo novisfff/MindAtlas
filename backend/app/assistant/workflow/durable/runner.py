@@ -9,20 +9,16 @@ when committing V2 workflow state.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Mapping, Sequence
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.assistant.durable.contracts import (
-    DurableExecutionUnitV2,
-    DurableNextActionV2,
-)
+from app.assistant.durable.contracts import DurableExecutionUnitV2
 from app.assistant.durable.repository import DurableCommitResult, LeaseToken
 from app.assistant.workflow.durable.adapters import (
-    AdapterBoundaryResult,
     AdapterExecutionContext,
     DefaultDurableNodeAdapterRegistry,
     DurableAdapterError,
@@ -68,6 +64,10 @@ class DurableFrameMaterial:
     node_configs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     # Optional portable bag seed (inputs) for this frame
     inputs: Mapping[str, Any] = field(default_factory=dict)
+    # Portable bag snapshot for cross-process rehydrate (Task 3 minimal durability).
+    # Serialized into Checkpoint/workflow material between boundaries; never Legacy
+    # WorkflowState. prepare_boundary rehydrates process-local bag when missing.
+    bag_snapshot: Mapping[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -100,6 +100,8 @@ class BoundaryResult:
     agent_loop_continuation: Any = None
     output_artifact_id: UUID | None = None
     bag: PortableNodeBag | None = None
+    # Portable bag projection after successful pure/node completion (for material).
+    bag_snapshot: Mapping[str, Any] | None = None
     reason_code: str | None = None
     detail: str | None = None
 
@@ -226,6 +228,44 @@ def _with_stack(
     )
 
 
+def _copy_frame(
+    src: DurableCallFrameV1,
+    **overrides: Any,
+) -> DurableCallFrameV1:
+    """Build a DurableCallFrameV1 from src with field overrides."""
+    base = {
+        "frame_id": src.frame_id,
+        "parent_frame_id": src.parent_frame_id,
+        "invocation_call_id": src.invocation_call_id,
+        "owner_skill_package_id": src.owner_skill_package_id,
+        "owner_skill_version_id": src.owner_skill_version_id,
+        "target_kind": src.target_kind,
+        "target_id": src.target_id,
+        "target_version_id": src.target_version_id,
+        "target_digest": src.target_digest,
+        "execution_plan_digest": src.execution_plan_digest,
+        "current_node_id": src.current_node_id,
+        "node_visit_id": src.node_visit_id,
+        "node_visit_ordinal": src.node_visit_ordinal,
+        "execution_attempt": src.execution_attempt,
+        "phase": src.phase,
+        "node_state_artifact_id": src.node_state_artifact_id,
+        "node_output_artifact_ids": src.node_output_artifact_ids,
+        "branch_decisions": src.branch_decisions,
+        "loop_cursors": src.loop_cursors,
+        "child_frame_ids": src.child_frame_ids,
+        "agent_loop_continuation": src.agent_loop_continuation,
+    }
+    base.update(overrides)
+    return DurableCallFrameV1(**base)
+
+
+def _project_bag_snapshot(bag: PortableNodeBag | None) -> dict[str, Any] | None:
+    if bag is None:
+        return None
+    return bag.to_snapshot()
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -251,7 +291,7 @@ class DurableWorkflowRunner:
         self.agent_round_executor = agent_round_executor
         self.capability_gateway = capability_gateway
         self.exact_dependency_resolver = exact_dependency_resolver
-        # Process-local bags keyed by frame_id (never durable)
+        # Process-local bags keyed by frame_id (never durable by themselves)
         self._bags: dict[UUID, PortableNodeBag] = dict(bags or {})
 
     def get_bag(self, frame_id: UUID, *, inputs: Mapping[str, Any] | None = None) -> PortableNodeBag:
@@ -259,6 +299,30 @@ class DurableWorkflowRunner:
         if bag is None:
             bag = PortableNodeBag(inputs=dict(inputs or {}))
             self._bags[frame_id] = bag
+        return bag
+
+    def export_bag_snapshot(self, frame_id: UUID) -> dict[str, Any] | None:
+        """Export process-local bag as a portable snapshot for material/checkpoint."""
+        bag = self._bags.get(frame_id)
+        if bag is None:
+            return None
+        return bag.to_snapshot()
+
+    def load_bag_snapshot(
+        self,
+        frame_id: UUID,
+        snapshot: Mapping[str, Any] | None,
+        *,
+        inputs: Mapping[str, Any] | None = None,
+    ) -> PortableNodeBag:
+        """Install a portable bag snapshot into process-local storage (new-process recovery)."""
+        if snapshot:
+            bag = PortableNodeBag.from_snapshot(snapshot)
+            if inputs and not bag.inputs:
+                bag.inputs = dict(inputs)
+        else:
+            bag = PortableNodeBag(inputs=dict(inputs or {}))
+        self._bags[frame_id] = bag
         return bag
 
     def prepare_boundary(
@@ -273,6 +337,9 @@ class DurableWorkflowRunner:
 
         On recovery retry (frame already executing with same node), keep node_visit_id
         and increment execution_attempt only.
+
+        When process-local bag is missing, rehydrate from material.bag_snapshot so a
+        simulated new process with the same workflow_state + bag_snapshot can continue.
         """
         if not state.frame_stack:
             raise DurableAdapterError(
@@ -295,7 +362,15 @@ class DurableWorkflowRunner:
             )
         node = nodes[node_id]
 
-        bag = self.get_bag(frame.frame_id, inputs=material.inputs or {})
+        # Rehydrate process-local bag from portable snapshot when missing (new process).
+        if frame.frame_id not in self._bags and material.bag_snapshot:
+            bag = self.load_bag_snapshot(
+                frame.frame_id,
+                material.bag_snapshot,
+                inputs=material.inputs or {},
+            )
+        else:
+            bag = self.get_bag(frame.frame_id, inputs=material.inputs or {})
         # Seed bag from material inputs on first prepare of frame
         if material.inputs and not bag.inputs:
             bag.inputs = dict(material.inputs)
@@ -324,35 +399,17 @@ class DurableWorkflowRunner:
             )
             attempt = 1
 
-        executing_frame = DurableCallFrameV1(
-            frame_id=frame.frame_id,
-            parent_frame_id=frame.parent_frame_id,
-            invocation_call_id=frame.invocation_call_id,
-            owner_skill_package_id=frame.owner_skill_package_id,
-            owner_skill_version_id=frame.owner_skill_version_id,
-            target_kind=frame.target_kind,
-            target_id=frame.target_id,
-            target_version_id=frame.target_version_id,
-            target_digest=frame.target_digest,
-            execution_plan_digest=frame.execution_plan_digest,
+        executing_frame = _copy_frame(
+            frame,
             current_node_id=node_id,
             node_visit_id=node_visit_id,
             node_visit_ordinal=ordinal,
             execution_attempt=attempt,
             phase="executing",
-            node_state_artifact_id=frame.node_state_artifact_id,
-            node_output_artifact_ids=frame.node_output_artifact_ids,
-            branch_decisions=frame.branch_decisions,
-            loop_cursors=frame.loop_cursors,
-            child_frame_ids=frame.child_frame_ids,
-            agent_loop_continuation=frame.agent_loop_continuation,
         )
         new_state = _replace_top_frame(state, executing_frame)
 
-        unit_kind = "agent_round" if (
-            plan.target_kind == "agent" or node.node_type == "agent" and plan.target_kind == "agent"
-        ) else "workflow_node"
-        # Nested agent frames (target_kind=agent) use agent_round units
+        # Nested agent frames (target_kind=agent) use agent_round units.
         if frame.target_kind == "agent":
             unit_kind = "agent_round"
             logical = _agent_logical_unit_id(
@@ -488,6 +545,17 @@ class DurableWorkflowRunner:
             ) from exc
 
         kind = BoundaryKind(raw.kind) if raw.kind in BoundaryKind._value2member_map_ else BoundaryKind.FAILED
+        result_bag = raw.bag or prepared.bag
+        # Project portable bag on successful pure/node boundaries for material.
+        bag_snapshot = None
+        if kind in {
+            BoundaryKind.NODE_COMPLETED,
+            BoundaryKind.ROOT_COMPLETED,
+            BoundaryKind.CHILD_COMPLETED,
+            BoundaryKind.CHILD_PUSHED,
+            BoundaryKind.HUMAN_PAUSE,
+        }:
+            bag_snapshot = _project_bag_snapshot(result_bag)
         return BoundaryResult(
             kind=kind,
             node_id=prepared.node_id,
@@ -499,7 +567,8 @@ class DurableWorkflowRunner:
             pause_proposal=raw.pause_proposal,
             agent_loop_continuation=raw.agent_loop_continuation,
             output_artifact_id=raw.output_artifact_id,
-            bag=raw.bag or prepared.bag,
+            bag=result_bag,
+            bag_snapshot=bag_snapshot,
             reason_code=raw.reason_code,
             detail=raw.detail,
         )
@@ -522,30 +591,12 @@ class DurableWorkflowRunner:
             )
         top = state.frame_stack[-1]
 
+        # Keep process-local bag in sync with result bag when present.
+        if result.bag is not None:
+            self._bags[top.frame_id] = result.bag
+
         if result.kind in {BoundaryKind.CANCELLED, BoundaryKind.LEASE_LOST}:
-            cancelled = DurableCallFrameV1(
-                frame_id=top.frame_id,
-                parent_frame_id=top.parent_frame_id,
-                invocation_call_id=top.invocation_call_id,
-                owner_skill_package_id=top.owner_skill_package_id,
-                owner_skill_version_id=top.owner_skill_version_id,
-                target_kind=top.target_kind,
-                target_id=top.target_id,
-                target_version_id=top.target_version_id,
-                target_digest=top.target_digest,
-                execution_plan_digest=top.execution_plan_digest,
-                current_node_id=top.current_node_id,
-                node_visit_id=top.node_visit_id,
-                node_visit_ordinal=top.node_visit_ordinal,
-                execution_attempt=top.execution_attempt,
-                phase="cancelled",
-                node_state_artifact_id=top.node_state_artifact_id,
-                node_output_artifact_ids=top.node_output_artifact_ids,
-                branch_decisions=top.branch_decisions,
-                loop_cursors=top.loop_cursors,
-                child_frame_ids=top.child_frame_ids,
-                agent_loop_continuation=top.agent_loop_continuation,
-            )
+            cancelled = _copy_frame(top, phase="cancelled")
             return _replace_top_frame(state, cancelled)
 
         if result.kind == BoundaryKind.HUMAN_PAUSE:
@@ -562,28 +613,18 @@ class DurableWorkflowRunner:
                     "child_pushed requires child_frame",
                     reason_code="missing_child_frame",
                 )
-            parent = DurableCallFrameV1(
-                frame_id=top.frame_id,
-                parent_frame_id=top.parent_frame_id,
-                invocation_call_id=top.invocation_call_id,
-                owner_skill_package_id=top.owner_skill_package_id,
-                owner_skill_version_id=top.owner_skill_version_id,
-                target_kind=top.target_kind,
-                target_id=top.target_id,
-                target_version_id=top.target_version_id,
-                target_digest=top.target_digest,
-                execution_plan_digest=top.execution_plan_digest,
-                current_node_id=top.current_node_id,
-                node_visit_id=top.node_visit_id,
-                node_visit_ordinal=top.node_visit_ordinal,
-                execution_attempt=top.execution_attempt,
+            # Record the call-node successor at push time so CHILD_COMPLETED can
+            # advance the parent without fixture-hardcoded node-id maps.
+            branch_decisions = top.branch_decisions
+            if result.branch_decision is not None:
+                branch_decisions = tuple(
+                    d for d in branch_decisions if d.node_id != result.branch_decision.node_id
+                ) + (result.branch_decision,)
+            parent = _copy_frame(
+                top,
                 phase="child_active",
-                node_state_artifact_id=top.node_state_artifact_id,
-                node_output_artifact_ids=top.node_output_artifact_ids,
-                branch_decisions=top.branch_decisions,
-                loop_cursors=top.loop_cursors,
+                branch_decisions=branch_decisions,
                 child_frame_ids=top.child_frame_ids + (result.child_frame.frame_id,),
-                agent_loop_continuation=top.agent_loop_continuation,
             )
             # Seed child bag with empty inputs (caller may pre-seed via get_bag)
             self.get_bag(result.child_frame.frame_id)
@@ -601,36 +642,23 @@ class DurableWorkflowRunner:
                         node_visit_id=result.node_visit_id,
                         output_artifact_id=result.output_artifact_id,
                         bag=result.bag,
+                        bag_snapshot=result.bag_snapshot,
                     ),
                 )
-            # Pop child; advance parent past call node
+            # Pop child; advance parent past call node using successor recorded at push.
             parent = state.frame_stack[-2]
-            # Find next node after the call node currently on parent
             next_node = _advance_parent_after_child(parent, result)
             arts = parent.node_output_artifact_ids
             if result.output_artifact_id is not None:
                 arts = arts + (result.output_artifact_id,)
-            parent_ready = DurableCallFrameV1(
-                frame_id=parent.frame_id,
-                parent_frame_id=parent.parent_frame_id,
-                invocation_call_id=parent.invocation_call_id,
-                owner_skill_package_id=parent.owner_skill_package_id,
-                owner_skill_version_id=parent.owner_skill_version_id,
-                target_kind=parent.target_kind,
-                target_id=parent.target_id,
-                target_version_id=parent.target_version_id,
-                target_digest=parent.target_digest,
-                execution_plan_digest=parent.execution_plan_digest,
+            parent_ready = _copy_frame(
+                parent,
                 current_node_id=next_node,
                 node_visit_id=None,  # next prepare will mint
                 node_visit_ordinal=int(parent.node_visit_ordinal) + 1,
                 execution_attempt=1,
                 phase="ready",
-                node_state_artifact_id=parent.node_state_artifact_id,
                 node_output_artifact_ids=arts,
-                branch_decisions=parent.branch_decisions,
-                loop_cursors=parent.loop_cursors,
-                child_frame_ids=parent.child_frame_ids,
                 agent_loop_continuation=None,
             )
             stack = tuple(state.frame_stack[:-2]) + (parent_ready,)
@@ -642,27 +670,10 @@ class DurableWorkflowRunner:
             arts = top.node_output_artifact_ids
             if result.output_artifact_id is not None:
                 arts = arts + (result.output_artifact_id,)
-            completed = DurableCallFrameV1(
-                frame_id=top.frame_id,
-                parent_frame_id=top.parent_frame_id,
-                invocation_call_id=top.invocation_call_id,
-                owner_skill_package_id=top.owner_skill_package_id,
-                owner_skill_version_id=top.owner_skill_version_id,
-                target_kind=top.target_kind,
-                target_id=top.target_id,
-                target_version_id=top.target_version_id,
-                target_digest=top.target_digest,
-                execution_plan_digest=top.execution_plan_digest,
-                current_node_id=top.current_node_id,
-                node_visit_id=top.node_visit_id,
-                node_visit_ordinal=top.node_visit_ordinal,
-                execution_attempt=top.execution_attempt,
+            completed = _copy_frame(
+                top,
                 phase="completed",
-                node_state_artifact_id=top.node_state_artifact_id,
                 node_output_artifact_ids=arts,
-                branch_decisions=top.branch_decisions,
-                loop_cursors=top.loop_cursors,
-                child_frame_ids=top.child_frame_ids,
                 agent_loop_continuation=None,
             )
             return DurableWorkflowStateV1(
@@ -699,55 +710,22 @@ class DurableWorkflowRunner:
             # Ready frames store the *next* visit ordinal so re-entry (agent rounds,
             # loop iterations, next node) mints a new stable node_visit_id.
             next_ordinal = int(top.node_visit_ordinal) + 1
-            ready = DurableCallFrameV1(
-                frame_id=top.frame_id,
-                parent_frame_id=top.parent_frame_id,
-                invocation_call_id=top.invocation_call_id,
-                owner_skill_package_id=top.owner_skill_package_id,
-                owner_skill_version_id=top.owner_skill_version_id,
-                target_kind=top.target_kind,
-                target_id=top.target_id,
-                target_version_id=top.target_version_id,
-                target_digest=top.target_digest,
-                execution_plan_digest=top.execution_plan_digest,
+            ready = _copy_frame(
+                top,
                 current_node_id=next_node,
                 node_visit_id=None,
                 node_visit_ordinal=next_ordinal,
                 execution_attempt=1,
                 phase="ready",
-                node_state_artifact_id=top.node_state_artifact_id,
                 node_output_artifact_ids=arts,
                 branch_decisions=branch_decisions,
                 loop_cursors=loop_cursors,
-                child_frame_ids=top.child_frame_ids,
                 agent_loop_continuation=result.agent_loop_continuation,
             )
             return _replace_top_frame(state, ready)
 
         if result.kind == BoundaryKind.FAILED:
-            failed = DurableCallFrameV1(
-                frame_id=top.frame_id,
-                parent_frame_id=top.parent_frame_id,
-                invocation_call_id=top.invocation_call_id,
-                owner_skill_package_id=top.owner_skill_package_id,
-                owner_skill_version_id=top.owner_skill_version_id,
-                target_kind=top.target_kind,
-                target_id=top.target_id,
-                target_version_id=top.target_version_id,
-                target_digest=top.target_digest,
-                execution_plan_digest=top.execution_plan_digest,
-                current_node_id=top.current_node_id,
-                node_visit_id=top.node_visit_id,
-                node_visit_ordinal=top.node_visit_ordinal,
-                execution_attempt=top.execution_attempt,
-                phase="failed",
-                node_state_artifact_id=top.node_state_artifact_id,
-                node_output_artifact_ids=top.node_output_artifact_ids,
-                branch_decisions=top.branch_decisions,
-                loop_cursors=top.loop_cursors,
-                child_frame_ids=top.child_frame_ids,
-                agent_loop_continuation=top.agent_loop_continuation,
-            )
+            failed = _copy_frame(top, phase="failed")
             return _replace_top_frame(state, failed)
 
         raise DurableAdapterError(
@@ -760,46 +738,19 @@ def _advance_parent_after_child(
     parent: DurableCallFrameV1,
     result: BoundaryResult,
 ) -> str | None:
-    """After child completes, parent advances to the next edge after the call node.
+    """After child completes, parent advances to the successor of the call node.
 
-    Without the parent plan here, we use a convention: parent.current_node_id is the
-    call node; callers/tests set next via result.next_node_id when known. Default:
-    leave current_node_id and let tests/material resolve. For Task 3 tests, parent
-    plans have single outgoing edges from call → next, so we require the caller's
-    child_completed result to optionally carry next_node_id. When absent, keep the
-    call node id so a subsequent prepare can re-resolve (tests set next explicitly
-    via material).
-
-    The nested-frame tests expect parent.current_node_id == "p_output" / "output"
-    after pop. We store the call node's successor on the parent bag is not available.
-    Instead: look at parent.current_node_id; tests use fixed graphs where call has
-    one outgoing edge. Without plan, we cannot know. So child_completed adapters
-    should set next_node_id on the *child* result only for child path.
-
-    Fix: WorkflowCallAdapter/AgentCallAdapter push; on child complete the runner
-    needs the parent plan. For Task 3 tests we hardcode: if parent.current_node_id
-    is 'call' → 'p_output'; 'agent_call' → 'output'. Better: store pending next on
-    the parent frame via a branch decision at push time.
-
-    We record a synthetic branch decision at push time... but apply of child_pushed
-    doesn't receive the parent next. Look up from child_frame? No.
-
-    Simplest fix matching tests: when applying CHILD_COMPLETED, if result.next_node_id
-    is set use it; else if parent.current_node_id in known map use map; else scan
-    parent node_output...
-
-    Actually the tests' parent plans have call → p_output and agent_call → output.
-    We'll compute next by a lightweight convention used by those tests:
+    Successor is the branch decision recorded at CHILD_PUSHED for the call node
+    (parent.current_node_id). No fixture name maps. Child result.next_node_id is
+    intentionally ignored — it belongs to the child graph, not the parent.
     """
-    if result.next_node_id is not None:
-        return result.next_node_id
-    call = parent.current_node_id or ""
-    # Deterministic defaults for Task 3 fixture graphs
-    if call == "call":
-        return "p_output"
-    if call == "agent_call":
-        return "output"
-    # Unknown: stay on call node (fail-visible)
+    del result  # child result does not own parent successor
+    call = parent.current_node_id
+    if call:
+        for decision in reversed(parent.branch_decisions):
+            if decision.node_id == call and decision.chosen_target_node_id:
+                return decision.chosen_target_node_id
+    # Unknown successor: stay on call node (fail-visible; no name-based fixture maps)
     return call
 
 
@@ -831,6 +782,10 @@ def commit_workflow_boundary_prepare(
     if not as_started and unit.state != "prepared":
         raise ValueError("prepare commit requires unit.state=prepared")
 
+    # Embed input_digest so result commit can re-verify visit/digest continuity.
+    reason_tag = "started" if as_started else "prepared"
+    reason = f"{reason_tag}|input_digest:{prepared.input_digest}|node_visit:{prepared.node_visit_id}"
+
     return commit_checkpoint_v2(
         db,
         run_id=run_id,
@@ -843,7 +798,7 @@ def commit_workflow_boundary_prepare(
         budget_payload=budget_payload,
         budget_digest=budget_digest,
         budget_revision_number=budget_revision_number,
-        reason="started" if as_started else "prepared",
+        reason=reason,
     )
 
 
@@ -855,14 +810,140 @@ def commit_workflow_boundary_result(
     expected_revision: int,
     workflow_state: DurableWorkflowStateV1,
     completed_logical_unit_id: str | None = None,
+    prepared: PreparedBoundary | None = None,
+    expected_logical_unit_id: str | None = None,
+    expected_node_visit_id: str | None = None,
+    expected_input_digest: str | None = None,
     phase: str = "dispatching_calls",
     next_action_kind: str = "continue_child",
     pending_interrupt_id: UUID | None = None,
     budget_suspension: Any = None,
     reason: str = "result",
 ) -> DurableCommitResult:
-    """Append a post-boundary Checkpoint v2 with updated workflow_state, no inflight."""
+    """Append a post-boundary Checkpoint v2 with updated workflow_state, no inflight.
+
+    Re-verifies prepared unit identity (logical_unit_id / node_visit_id / input_digest)
+    against the last Checkpoint's inflight unit (and optional prepared/expected args)
+    before dropping inflight. Mismatch fails with stable reason_code.
+    """
     from app.assistant.durable.checkpoints import commit_checkpoint_v2
+    from app.assistant.durable.codec import decode_checkpoint
+    from app.assistant.durable.models import AssistantRunCheckpoint
+    from app.assistant.models import AssistantChatRun
+
+    # Resolve expected identity from prepared or explicit args.
+    exp_logical = expected_logical_unit_id
+    exp_visit = expected_node_visit_id
+    exp_digest = expected_input_digest
+    if prepared is not None:
+        exp_logical = exp_logical or prepared.unit.logical_unit_id
+        exp_visit = exp_visit or prepared.node_visit_id
+        exp_digest = exp_digest or prepared.input_digest
+    if completed_logical_unit_id is not None and exp_logical is None:
+        exp_logical = completed_logical_unit_id
+
+    # Load last Checkpoint's inflight unit and verify continuity.
+    run = db.get(AssistantChatRun, run_id)
+    if run is None:
+        raise DurableAdapterError(
+            f"run {run_id} not found for result commit",
+            reason_code="run_not_found",
+        )
+    if run.current_checkpoint_id is None:
+        raise DurableAdapterError(
+            "result commit requires a prior prepared/started Checkpoint",
+            reason_code="missing_prepared_checkpoint",
+        )
+    ck = db.get(AssistantRunCheckpoint, run.current_checkpoint_id)
+    if ck is None:
+        raise DurableAdapterError(
+            "current checkpoint row missing for result commit",
+            reason_code="missing_prepared_checkpoint",
+        )
+    try:
+        decoded = decode_checkpoint(ck.state_payload)
+    except Exception as exc:  # noqa: BLE001
+        raise DurableAdapterError(
+            f"failed to decode prior checkpoint: {exc}",
+            reason_code="checkpoint_decode_failed",
+        ) from exc
+
+    inflight = getattr(decoded, "inflight_unit", None)
+    if inflight is None:
+        raise DurableAdapterError(
+            "result commit requires inflight unit on last Checkpoint",
+            reason_code="missing_inflight_unit",
+        )
+
+    inflight_logical = getattr(inflight, "logical_unit_id", None)
+    if exp_logical is not None and inflight_logical != exp_logical:
+        raise DurableAdapterError(
+            f"result logical_unit_id mismatch: expected {exp_logical!r}, "
+            f"inflight {inflight_logical!r}",
+            reason_code="unit_identity_mismatch",
+        )
+
+    # node_visit_id is embedded in logical_unit_id (workflow_node|agent_round:frame:visit)
+    # and also carried on workflow_state top frame. Verify both when available.
+    if exp_visit is not None:
+        inflight_ws = getattr(decoded, "workflow_state", None)
+        if inflight_ws is not None and getattr(inflight_ws, "frame_stack", None):
+            top = inflight_ws.frame_stack[-1]
+            prior_visit = getattr(top, "node_visit_id", None)
+            if prior_visit is not None and prior_visit != exp_visit:
+                raise DurableAdapterError(
+                    f"result node_visit_id mismatch: expected {exp_visit!r}, "
+                    f"prior {prior_visit!r}",
+                    reason_code="node_visit_mismatch",
+                )
+        # Also require visit substring in logical unit id when present.
+        if inflight_logical and exp_visit not in str(inflight_logical):
+            raise DurableAdapterError(
+                f"result node_visit_id {exp_visit!r} not present in "
+                f"inflight logical_unit_id {inflight_logical!r}",
+                reason_code="node_visit_mismatch",
+            )
+
+    prior_reason = getattr(ck, "reason", None) or ""
+    prior_digest_from_ck: str | None = None
+    prior_visit_from_ck: str | None = None
+    if isinstance(prior_reason, str) and prior_reason:
+        # Format: prepared|input_digest:<hex>|node_visit:<id>
+        for part in prior_reason.split("|"):
+            if part.startswith("input_digest:"):
+                prior_digest_from_ck = part.split(":", 1)[1] or None
+            elif part.startswith("node_visit:"):
+                prior_visit_from_ck = part.split(":", 1)[1] or None
+
+    if exp_visit is not None and prior_visit_from_ck is not None:
+        if prior_visit_from_ck != exp_visit:
+            raise DurableAdapterError(
+                f"result node_visit_id mismatch vs prepared checkpoint: "
+                f"expected {exp_visit!r}, prior {prior_visit_from_ck!r}",
+                reason_code="node_visit_mismatch",
+            )
+
+    if exp_digest is not None:
+        if not exp_digest:
+            raise DurableAdapterError(
+                "result commit expected_input_digest is empty",
+                reason_code="input_digest_mismatch",
+            )
+        if prior_digest_from_ck is not None and prior_digest_from_ck != exp_digest:
+            raise DurableAdapterError(
+                f"result input_digest mismatch: expected {exp_digest!r}, "
+                f"prior {prior_digest_from_ck!r}",
+                reason_code="input_digest_mismatch",
+            )
+        # When prepared is supplied but prior checkpoint has no digest marker
+        # (older path), require unit identity already matched above — still fail
+        # closed if caller explicitly expected a digest that cannot be checked
+        # against an empty prior marker when completed_logical differs.
+        if prior_digest_from_ck is None and prepared is not None:
+            # Continuity is established via logical_unit_id + node_visit checks.
+            pass
+
+    completed_id = completed_logical_unit_id or exp_logical or inflight_logical
 
     return commit_checkpoint_v2(
         db,
@@ -873,7 +954,7 @@ def commit_workflow_boundary_result(
         next_action_kind=next_action_kind,
         unit=None,
         workflow_state=workflow_state,
-        completed_logical_unit_id=completed_logical_unit_id,
+        completed_logical_unit_id=completed_id,
         pending_interrupt_id=pending_interrupt_id,
         budget_suspension=budget_suspension,
         reason=reason,

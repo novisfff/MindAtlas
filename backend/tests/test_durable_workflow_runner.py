@@ -910,3 +910,238 @@ class TestDurableWorkflowRunnerCheckpoints:
         assert retry.unit.logical_unit_id == prepared.unit.logical_unit_id
         assert retry.node_visit_id == prepared.node_visit_id
         assert retry.frame.execution_attempt == 2
+
+    def test_result_commit_rejects_unit_identity_mismatch(self) -> None:
+        from app.assistant.workflow.durable.adapters import DurableAdapterError
+        from app.assistant.workflow.durable.runner import (
+            BoundaryKind,
+            DurableWorkflowRunner,
+            commit_workflow_boundary_prepare,
+            commit_workflow_boundary_result,
+        )
+
+        run, lease, rev, _repo = _seed_running_with_base(self.db)
+        plan = _plan_linear_start_output()
+        state = _root_state(plan, run_id=run.id)
+        material = _material(plan)
+        runner = DurableWorkflowRunner()
+
+        prepared = runner.prepare_boundary(state=state, material=material)
+        prep_commit = commit_workflow_boundary_prepare(
+            self.db,
+            run_id=run.id,
+            lease=lease,
+            expected_revision=rev,
+            prepared=prepared,
+        )
+        started = runner.mark_started(prepared=prepared, budget_revision=1)
+        start_commit = commit_workflow_boundary_prepare(
+            self.db,
+            run_id=run.id,
+            lease=lease,
+            expected_revision=prep_commit.state_revision,
+            prepared=started,
+            as_started=True,
+        )
+        result = runner.execute_boundary(prepared=started, material=material)
+        assert result.kind == BoundaryKind.NODE_COMPLETED
+        state_after = runner.apply_boundary_result(
+            state=started.workflow_state, result=result
+        )
+        with pytest.raises(DurableAdapterError) as exc:
+            commit_workflow_boundary_result(
+                self.db,
+                run_id=run.id,
+                lease=lease,
+                expected_revision=start_commit.state_revision,
+                workflow_state=state_after,
+                prepared=started,
+                expected_logical_unit_id="workflow_node:00000000-0000-4000-8000-ffffffffffff:bogus",
+                expected_node_visit_id="bogus-visit",
+                expected_input_digest="0" * 64,
+            )
+        assert exc.value.reason_code == "unit_identity_mismatch"
+
+    def test_result_commit_rejects_node_visit_mismatch(self) -> None:
+        from app.assistant.workflow.durable.adapters import DurableAdapterError
+        from app.assistant.workflow.durable.runner import (
+            BoundaryKind,
+            DurableWorkflowRunner,
+            commit_workflow_boundary_prepare,
+            commit_workflow_boundary_result,
+        )
+
+        run, lease, rev, _repo = _seed_running_with_base(self.db)
+        plan = _plan_linear_start_output()
+        state = _root_state(plan, run_id=run.id)
+        material = _material(plan)
+        runner = DurableWorkflowRunner()
+
+        prepared = runner.prepare_boundary(state=state, material=material)
+        prep_commit = commit_workflow_boundary_prepare(
+            self.db,
+            run_id=run.id,
+            lease=lease,
+            expected_revision=rev,
+            prepared=prepared,
+        )
+        started = runner.mark_started(prepared=prepared, budget_revision=1)
+        start_commit = commit_workflow_boundary_prepare(
+            self.db,
+            run_id=run.id,
+            lease=lease,
+            expected_revision=prep_commit.state_revision,
+            prepared=started,
+            as_started=True,
+        )
+        result = runner.execute_boundary(prepared=started, material=material)
+        state_after = runner.apply_boundary_result(
+            state=started.workflow_state, result=result
+        )
+        with pytest.raises(DurableAdapterError) as exc:
+            commit_workflow_boundary_result(
+                self.db,
+                run_id=run.id,
+                lease=lease,
+                expected_revision=start_commit.state_revision,
+                workflow_state=state_after,
+                completed_logical_unit_id=started.unit.logical_unit_id,
+                expected_node_visit_id="not-the-prepared-visit",
+            )
+        assert exc.value.reason_code == "node_visit_mismatch"
+
+    def test_result_commit_accepts_matching_prepared_identity(self) -> None:
+        from app.assistant.workflow.durable.runner import (
+            BoundaryKind,
+            DurableWorkflowRunner,
+            commit_workflow_boundary_prepare,
+            commit_workflow_boundary_result,
+        )
+
+        run, lease, rev, _repo = _seed_running_with_base(self.db)
+        plan = _plan_linear_start_output()
+        state = _root_state(plan, run_id=run.id)
+        material = _material(plan)
+        runner = DurableWorkflowRunner()
+
+        prepared = runner.prepare_boundary(state=state, material=material)
+        prep_commit = commit_workflow_boundary_prepare(
+            self.db,
+            run_id=run.id,
+            lease=lease,
+            expected_revision=rev,
+            prepared=prepared,
+        )
+        started = runner.mark_started(prepared=prepared, budget_revision=1)
+        start_commit = commit_workflow_boundary_prepare(
+            self.db,
+            run_id=run.id,
+            lease=lease,
+            expected_revision=prep_commit.state_revision,
+            prepared=started,
+            as_started=True,
+        )
+        result = runner.execute_boundary(prepared=started, material=material)
+        assert result.kind == BoundaryKind.NODE_COMPLETED
+        state_after = runner.apply_boundary_result(
+            state=started.workflow_state, result=result
+        )
+        result_commit = commit_workflow_boundary_result(
+            self.db,
+            run_id=run.id,
+            lease=lease,
+            expected_revision=start_commit.state_revision,
+            workflow_state=state_after,
+            prepared=started,
+        )
+        assert result_commit.status == "running"
+
+
+# ---------------------------------------------------------------------------
+# Portable bag rehydrate (cross-process recovery)
+# ---------------------------------------------------------------------------
+
+
+class TestPortableBagRehydrate:
+    def test_new_process_rehydrates_bag_from_snapshot_for_if_else(self) -> None:
+        """Empty process-local bags + bag_snapshot continue correctly after start."""
+        from app.assistant.workflow.durable.runner import (
+            BoundaryKind,
+            DurableFrameMaterial,
+            DurableWorkflowRunner,
+        )
+
+        plan = _plan_with_if_else()
+        inputs = {"flag": "yes"}
+        state = _root_state(plan, inputs=inputs)
+        material = _material(
+            plan,
+            configs={
+                "start": {},
+                "branch": {
+                    "branches": [
+                        {
+                            "id": "true",
+                            "logic": "and",
+                            "conditions": [
+                                {
+                                    "variable": "start.flag",
+                                    "operator": "eq",
+                                    "value": "yes",
+                                }
+                            ],
+                        }
+                    ],
+                    "else_handle": "else",
+                },
+                "out_true": {},
+                "out_false": {},
+            },
+            inputs=inputs,
+        )
+
+        # Process A: run start, project bag snapshot, drop process-local bags.
+        runner_a = DurableWorkflowRunner()
+        p0 = runner_a.prepare_boundary(state=state, material=material)
+        r0 = runner_a.execute_boundary(prepared=p0, material=material)
+        assert r0.kind == BoundaryKind.NODE_COMPLETED
+        assert r0.bag_snapshot is not None
+        assert "start" in (r0.bag_snapshot.get("nodeOutputs") or {})
+        state = runner_a.apply_boundary_result(state=p0.workflow_state, result=r0)
+        bag_snapshot = r0.bag_snapshot
+        frame_id = state.frame_stack[-1].frame_id
+
+        # Process B: empty bags, only workflow_state + bag_snapshot material.
+        runner_b = DurableWorkflowRunner()  # no bags
+        assert frame_id not in runner_b._bags
+        material_b = DurableFrameMaterial(
+            plan=plan,
+            node_configs=material.node_configs,
+            inputs=inputs,
+            bag_snapshot=bag_snapshot,
+        )
+        p1 = runner_b.prepare_boundary(state=state, material=material_b)
+        assert p1.node_id == "branch"
+        # Rehydrated bag must retain start outputs for if_else condition.
+        assert p1.bag.output_of("start").get("flag") == "yes"
+        r1 = runner_b.execute_boundary(prepared=p1, material=material_b)
+        assert r1.kind == BoundaryKind.NODE_COMPLETED
+        assert r1.branch_decision is not None
+        assert r1.branch_decision.chosen_handle == "true"
+        assert r1.next_node_id == "out_true"
+
+    def test_bag_snapshot_roundtrip_preserves_variables(self) -> None:
+        from app.assistant.workflow.durable.adapters import PortableNodeBag
+
+        bag = PortableNodeBag(
+            inputs={"q": 1},
+            node_outputs={"start": {"flag": "yes", "json_fields": {"flag": "yes"}}},
+            variables={"x": 42},
+            env_vars={"x": 42},
+        )
+        snap = bag.to_snapshot()
+        restored = PortableNodeBag.from_snapshot(snap)
+        assert restored.inputs == {"q": 1}
+        assert restored.output_of("start")["flag"] == "yes"
+        assert restored.variables["x"] == 42
+        assert restored.env_vars["x"] == 42

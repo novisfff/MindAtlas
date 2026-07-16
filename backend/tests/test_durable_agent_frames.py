@@ -60,7 +60,15 @@ def _agent_plan(*, target_version_id: UUID | None = None) -> Any:
     )
 
 
-def _parent_workflow_with_agent(*, agent_version_id: UUID) -> Any:
+def _parent_workflow_with_agent(
+    *,
+    agent_version_id: UUID,
+    call_node_id: str = "nested_agent_invoke",
+    after_call_node_id: str = "parent_agent_out",
+) -> Any:
+    """Parent plan with nested agent call. Node ids are intentionally non-fixture
+    names so parent advance cannot rely on agent_call→output maps.
+    """
     from app.assistant.workflow.durable.contracts import (
         DurableEdgeV1,
         DurableExecutionPlanV1,
@@ -71,7 +79,7 @@ def _parent_workflow_with_agent(*, agent_version_id: UUID) -> Any:
 
     tvid = UUID("00000000-0000-4000-8000-000000000b02")
     dep = FrozenExecutionDependencyRef(
-        dependency_path="nodes.agent_call.agent",
+        dependency_path=f"nodes.{call_node_id}.agent",
         dependency_type="agent",
         target_identity=f"agent:{agent_version_id}",
         target_version_id=agent_version_id,
@@ -87,7 +95,7 @@ def _parent_workflow_with_agent(*, agent_version_id: UUID) -> Any:
                 DurableEdgeV1(
                     edge_id="e0",
                     source_node_id="start",
-                    target_node_id="agent_call",
+                    target_node_id=call_node_id,
                 ),
             ),
             adapter_key="start.v1",
@@ -95,14 +103,14 @@ def _parent_workflow_with_agent(*, agent_version_id: UUID) -> Any:
             may_interrupt=False,
         ),
         DurableNodePlanV1(
-            node_id="agent_call",
+            node_id=call_node_id,
             node_type="agent",
             config_digest=DIGEST_B,
             outgoing_edges=(
                 DurableEdgeV1(
                     edge_id="e1",
-                    source_node_id="agent_call",
-                    target_node_id="output",
+                    source_node_id=call_node_id,
+                    target_node_id=after_call_node_id,
                 ),
             ),
             adapter_key="agent.v1",
@@ -111,7 +119,7 @@ def _parent_workflow_with_agent(*, agent_version_id: UUID) -> Any:
             dependency_refs=(dep,),
         ),
         DurableNodePlanV1(
-            node_id="output",
+            node_id=after_call_node_id,
             node_type="output",
             config_digest=DIGEST_C,
             outgoing_edges=(),
@@ -373,9 +381,9 @@ class TestDurableAgentFrames:
         r0 = runner.execute_boundary(prepared=p0, material=parent_material)
         state = runner.apply_boundary_result(state=p0.workflow_state, result=r0)
 
-        # agent_call pushes child agent frame
+        # nested agent invoke pushes child agent frame
         p1 = runner.prepare_boundary(state=state, material=parent_material)
-        assert p1.node_id == "agent_call"
+        assert p1.node_id == "nested_agent_invoke"
         r1 = runner.execute_boundary(
             prepared=p1,
             material=parent_material,
@@ -384,6 +392,9 @@ class TestDurableAgentFrames:
         assert r1.kind == BoundaryKind.CHILD_PUSHED
         assert r1.child_frame is not None
         assert r1.child_frame.target_kind == "agent"
+        assert r1.next_node_id == "parent_agent_out"
+        assert r1.branch_decision is not None
+        assert r1.branch_decision.chosen_target_node_id == "parent_agent_out"
         state = runner.apply_boundary_result(state=p1.workflow_state, result=r1)
         assert len(state.frame_stack) == 2
         assert state.frame_stack[0].phase == "child_active"
@@ -396,7 +407,7 @@ class TestDurableAgentFrames:
         assert r2.kind == BoundaryKind.CHILD_COMPLETED
         state = runner.apply_boundary_result(state=p2.workflow_state, result=r2)
         assert len(state.frame_stack) == 1
-        assert state.frame_stack[0].current_node_id == "output"
+        assert state.frame_stack[0].current_node_id == "parent_agent_out"
 
     def test_nested_agent_has_no_main_agent_skill_injection(self) -> None:
         """Nested agent_round executor receives no Main Agent skill surface."""
