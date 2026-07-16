@@ -474,7 +474,9 @@ def commit_durable_workflow_pause(
                 workflow_frame_id=proposal.frame_id,
                 node_id=proposal.node_id,
                 node_visit_id=proposal.node_visit_id,
-                request_run_revision=int(expected_revision),
+                # Waiting Run revision after this CAS (expected_revision + 1). Clients
+                # and rotate/resolve compare against the waiting Run.state_revision.
+                request_run_revision=int(expected_revision) + 1,
                 request_payload=dict(proposal.request_payload),
                 field_schema=dict(proposal.field_schema) if proposal.field_schema else None,
                 initial_values=dict(proposal.initial_values or {}),
