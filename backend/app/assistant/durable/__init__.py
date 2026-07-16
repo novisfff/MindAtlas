@@ -10,6 +10,7 @@ from app.assistant.durable.models import (  # noqa: F401
     AssistantRunArtifactGc,
     AssistantRunBudgetRevision,
     AssistantRunCheckpoint,
+    AssistantRunInterrupt,
     AssistantRunManifestRevision,
     AssistantRunObligationRevision,
     AssistantRunPolicyRevision,

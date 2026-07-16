@@ -555,3 +555,180 @@ class AssistantRunArtifactGc(UuidPrimaryKeyMixin, Base):
             "next_attempt_at",
         ),
     )
+
+
+class AssistantRunInterrupt(UuidPrimaryKeyMixin, Base):
+    """Durable human Interrupt row (Plan 07).
+
+    Request identity and budget suspension are immutable. Repository/trigger
+    permit only token rotation and one pending -> terminal resolution mutation.
+    ``capability_call_id`` remains null in Plan 07.
+    """
+
+    __tablename__ = "assistant_run_interrupt"
+
+    run_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_chat_run.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    interrupt_key = Column(String(160), nullable=False)
+    kind = Column(String(16), nullable=False)
+    status = Column(String(16), nullable=False, default="pending", server_default=text("'pending'"))
+    checkpoint_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_run_checkpoint.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    resolution_checkpoint_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_run_checkpoint.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    manifest_revision_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_run_manifest_revision.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_skill_package_id = Column(UUID(as_uuid=True), nullable=True)
+    owner_skill_version_id = Column(UUID(as_uuid=True), nullable=True)
+    # Always null in Plan 07; Plan 08 adds FK/population.
+    capability_call_id = Column(UUID(as_uuid=True), nullable=True)
+    workflow_frame_id = Column(UUID(as_uuid=True), nullable=False)
+    node_id = Column(String(128), nullable=False)
+    node_visit_id = Column(String(160), nullable=False)
+    request_revision = Column(Integer, nullable=False, default=1, server_default=text("1"))
+    request_run_revision = Column(Integer, nullable=False)
+    resolution_run_revision = Column(Integer, nullable=True)
+    budget_revision_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_run_budget_revision.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    budget_suspension_state = Column(JSON, nullable=False)
+    budget_suspension_digest = Column(String(64), nullable=False)
+    resolution_budget_revision_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_run_budget_revision.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    request_payload = Column(JSON, nullable=False)
+    request_digest = Column(String(64), nullable=False)
+    field_schema = Column(JSON, nullable=True)
+    field_schema_digest = Column(String(64), nullable=True)
+    initial_values = Column(JSON, nullable=False, default=dict)
+    submitted_values = Column(JSON, nullable=True)
+    decision = Column(String(32), nullable=True)
+    comment = Column(String(4000), nullable=True)
+    resume_token_digest = Column(String(64), nullable=True)
+    token_revision = Column(Integer, nullable=False, default=0, server_default=text("0"))
+    resolution_request_id = Column(UUID(as_uuid=True), nullable=True)
+    resolution_digest = Column(String(64), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    token_rotated_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('approval','input')",
+            name="ck_assistant_run_interrupt_kind",
+        ),
+        CheckConstraint(
+            "status IN ("
+            "'pending','approved','rejected','submitted','cancelled','expired'"
+            ")",
+            name="ck_assistant_run_interrupt_status",
+        ),
+        CheckConstraint(
+            "request_revision > 0",
+            name="ck_assistant_run_interrupt_request_revision",
+        ),
+        CheckConstraint(
+            "request_run_revision >= 0",
+            name="ck_assistant_run_interrupt_request_run_revision",
+        ),
+        CheckConstraint(
+            "resolution_run_revision IS NULL OR resolution_run_revision >= 0",
+            name="ck_assistant_run_interrupt_resolution_run_revision",
+        ),
+        CheckConstraint(
+            "token_revision >= 0",
+            name="ck_assistant_run_interrupt_token_revision",
+        ),
+        # input requires schema; simple approval may omit it.
+        CheckConstraint(
+            "("
+            "  kind = 'approval'"
+            ") OR ("
+            "  kind = 'input'"
+            "  AND field_schema IS NOT NULL"
+            "  AND field_schema_digest IS NOT NULL"
+            ")",
+            name="ck_assistant_run_interrupt_input_schema",
+        ),
+        # Queued resolution requires both resolution pointers; terminal outcome keeps both null.
+        CheckConstraint(
+            "("
+            "  resolution_budget_revision_id IS NULL"
+            "  AND resolution_checkpoint_id IS NULL"
+            ") OR ("
+            "  resolution_budget_revision_id IS NOT NULL"
+            "  AND resolution_checkpoint_id IS NOT NULL"
+            ")",
+            name="ck_assistant_run_interrupt_resolution_pair",
+        ),
+        _sha256_check(
+            "budget_suspension_digest",
+            name="ck_assistant_run_interrupt_budget_suspension_digest",
+        ),
+        _sha256_check(
+            "request_digest",
+            name="ck_assistant_run_interrupt_request_digest",
+        ),
+        _nullable_sha256_check(
+            "field_schema_digest",
+            name="ck_assistant_run_interrupt_field_schema_digest",
+        ),
+        _nullable_sha256_check(
+            "resume_token_digest",
+            name="ck_assistant_run_interrupt_resume_token_digest",
+        ),
+        _nullable_sha256_check(
+            "resolution_digest",
+            name="ck_assistant_run_interrupt_resolution_digest",
+        ),
+        Index(
+            "uq_assistant_run_interrupt_run_key",
+            "run_id",
+            "interrupt_key",
+            unique=True,
+        ),
+        # One pending Interrupt per Run (PostgreSQL partial unique).
+        Index(
+            "uq_assistant_run_interrupt_one_pending",
+            "run_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+        Index(
+            "uq_assistant_run_interrupt_resolution_request",
+            "run_id",
+            "resolution_request_id",
+            unique=True,
+            postgresql_where=text("resolution_request_id IS NOT NULL"),
+            sqlite_where=text("resolution_request_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_assistant_run_interrupt_run_status",
+            "run_id",
+            "status",
+        ),
+        Index(
+            "ix_assistant_run_interrupt_expires_at",
+            "expires_at",
+        ),
+    )

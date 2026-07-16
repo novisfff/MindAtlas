@@ -3,6 +3,7 @@
 Task 1: portable frozen contracts + codec.
 Task 2: frozen DurableExecutionPlanV1 planner + durable publish helpers.
 Task 3: one-boundary durable Workflow/Agent runner + node adapters.
+Task 4: durable human Interrupt persistence (token/schema/repository).
 """
 
 from __future__ import annotations
@@ -62,6 +63,18 @@ from app.assistant.workflow.durable.runner import (  # noqa: F401
     commit_workflow_boundary_prepare,
     commit_workflow_boundary_result,
 )
+from app.assistant.workflow.durable.interrupts import (  # noqa: F401
+    DurableInterruptRepository,
+    InterruptConflict,
+    build_budget_suspension_state,
+    compute_remaining_active_ms,
+    derive_interrupt_key,
+    derive_resume_budget_ledger,
+    digest_resume_token,
+    generate_resume_token,
+    normalize_interrupt_field_schema,
+    verify_resume_token,
+)
 
 __all__ = [
     "DURABLE_PLAN_EXTENSION_CONTRACT_VERSION",
@@ -72,6 +85,7 @@ __all__ = [
     "DurableCallFrameV1",
     "DurableEdgeV1",
     "DurableExecutionPlanV1",
+    "DurableInterruptRepository",
     "DurableLoopCursorV1",
     "DurableNodePlanV1",
     "DurablePauseEffectPort",
@@ -80,23 +94,32 @@ __all__ = [
     "DurableWorkflowStateV1",
     "EphemeralWorkflowContext",
     "FrozenExecutionDependencyRef",
+    "InterruptConflict",
     "attach_durable_plan_extension",
+    "build_budget_suspension_state",
     "build_root_continuation",
     "business_side_effect_maximum",
     "compute_branch_decision_digest",
     "compute_loop_cursor_digest",
     "compute_plan_digest",
     "compute_proposal_digest",
+    "compute_remaining_active_ms",
     "compute_suspension_digest",
     "derive_frame_id",
     "derive_interrupt_id",
+    "derive_interrupt_key",
     "derive_node_visit_id",
+    "derive_resume_budget_ledger",
+    "digest_resume_token",
     "extract_durable_plan_digest",
+    "generate_resume_token",
+    "normalize_interrupt_field_schema",
     "plan_allows_durable_interrupt",
     "plan_durable_execution",
     "plan_durable_execution_from_surface",
     "plan_parallel_safe",
     "publish_durable_binding_snapshot",
+    "verify_resume_token",
     "AdapterBoundaryResult",
     "AdapterExecutionContext",
     "BoundaryKind",
