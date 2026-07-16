@@ -1,4 +1,7 @@
-import type { HumanApprovalRecord } from '../shared/hitl'
+import type {
+  HumanApprovalFieldSchema,
+  HumanApprovalRecord,
+} from '../shared/hitl'
 
 export interface ToolCall {
   id: string
@@ -61,6 +64,80 @@ export interface AssistantRun {
   endedAt?: string | null
 }
 
+/** Legacy human approval (Plan 03/04 path). Explicit source discriminator. */
+export type HumanApproval = HumanApprovalRecord & {
+  source?: 'legacy'
+}
+
+/** Durable Interrupt terminal/pending statuses (Plan 07). */
+export type DurableInterruptStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'submitted'
+  | 'cancelled'
+  | 'expired'
+
+export type DurableInterruptKind = 'approval' | 'input'
+
+/**
+ * Backend render field shape (`render_interrupt_fields`).
+ * `type` here is the widget name (input/select/switch/...), not the data type.
+ */
+export interface DurableInterruptFieldRaw {
+  name: string
+  type: string
+  label?: string
+  required?: boolean
+  description?: string
+  options?: Array<string | { value: string; label: string; description?: string }>
+  allowCustom?: boolean
+  placeholder?: string
+}
+
+/**
+ * Safe public durable Interrupt state.
+ * Terminal GET may include resolutionRequestId; never digests/tokens/values/comments.
+ */
+export interface DurableInterrupt {
+  source: 'durable'
+  interruptId: string
+  runId: string
+  conversationId: string
+  messageId: string | null
+  status: DurableInterruptStatus
+  kind: DurableInterruptKind
+  requestRevision: number
+  runRevision: number
+  tokenRevision: number
+  expiresAt: string | null
+  allowedActions: string[]
+  /** Shared HITL field schema (mapped from backend render fields). */
+  fields: HumanApprovalFieldSchema[]
+  requestPayload: Record<string, unknown>
+  initialValues: Record<string, unknown>
+  nodeId: string
+  nodeVisitId: string
+  resolvedAt: string | null
+  /** Present only on terminal public state when available. */
+  resolutionRequestId?: string
+}
+
+/** Discriminated HITL attachment on assistant messages. */
+export type AssistantHitlItem =
+  | ({ source: 'legacy' } & HumanApprovalRecord)
+  | DurableInterrupt
+
+export function isDurableInterrupt(item: AssistantHitlItem | HumanApproval | DurableInterrupt): item is DurableInterrupt {
+  return (item as DurableInterrupt).source === 'durable'
+}
+
+export function isLegacyHumanApproval(
+  item: AssistantHitlItem | HumanApproval | DurableInterrupt,
+): item is HumanApprovalRecord & { source?: 'legacy' } {
+  return (item as DurableInterrupt).source !== 'durable'
+}
+
 export interface Message {
   id: string
   role: 'user' | 'assistant' | 'system' | 'tool'
@@ -68,7 +145,10 @@ export interface Message {
   toolCalls?: ToolCall[]
   skillCalls?: SkillCall[]
   analysisSteps?: Analysis[]
+  /** Legacy HumanApprovalRecord list — preserved for existing consumers. */
   humanApprovals?: HumanApproval[]
+  /** Durable Interrupt cards attached to this assistant message. */
+  durableInterrupts?: DurableInterrupt[]
   toolResults?: {
     id: string
     status: string
@@ -86,8 +166,6 @@ export interface Message {
   createdAt: string
   updatedAt: string
 }
-
-export type HumanApproval = HumanApprovalRecord
 
 export interface Conversation {
   id: string

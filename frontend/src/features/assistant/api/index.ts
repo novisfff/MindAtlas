@@ -1,5 +1,12 @@
 import { apiClient } from '@/lib/api/client'
-import { AssistantRun, Conversation, ConversationList, HumanApproval } from '../types'
+import {
+  AssistantRun,
+  Conversation,
+  ConversationList,
+  DurableInterrupt,
+  HumanApproval,
+} from '../types'
+import { normalizeDurableInterrupt } from '../interruptUtils'
 
 export async function getConversations(): Promise<ConversationList> {
   return apiClient.get<ConversationList>('/api/assistant/conversations')
@@ -51,4 +58,87 @@ export async function stopRun(conversationId: string, runId: string): Promise<As
 export function buildRunStreamUrl(conversationId: string, runId: string, afterSeq: number): string {
   const seq = Number.isFinite(afterSeq) ? Math.max(0, Math.floor(afterSeq)) : 0
   return `/api/assistant/conversations/${conversationId}/runs/${runId}/stream?afterSeq=${seq}`
+}
+
+// ---------------------------------------------------------------------------
+// Durable Interrupt APIs (Plan 07 Task 8) — conversation-scoped only
+// ---------------------------------------------------------------------------
+
+export interface DurableInterruptTokenRequest {
+  expectedRequestRevision: number
+  expectedRunRevision: number
+}
+
+export interface DurableInterruptTokenResponse {
+  token: string
+  tokenRevision: number
+}
+
+export interface DurableInterruptResolveRequest {
+  token: string
+  resolutionRequestId: string
+  expectedTokenRevision: number
+  expectedRequestRevision: number
+  expectedRunRevision: number
+  outcome: 'approved' | 'rejected' | 'submitted' | 'cancelled'
+  values?: Record<string, unknown>
+  comment?: string
+}
+
+function normalizeInterruptList(raw: unknown): DurableInterrupt[] {
+  if (!Array.isArray(raw)) {
+    if (raw && typeof raw === 'object') {
+      return [normalizeDurableInterrupt(raw as Record<string, unknown>)]
+    }
+    return []
+  }
+  return raw
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+    .map((item) => normalizeDurableInterrupt(item))
+}
+
+export async function listPendingInterrupts(
+  conversationId: string,
+  runId: string,
+): Promise<DurableInterrupt[]> {
+  const data = await apiClient.get<unknown>(
+    `/api/assistant/conversations/${conversationId}/runs/${runId}/interrupts/pending`,
+  )
+  return normalizeInterruptList(data)
+}
+
+export async function getInterruptDetail(
+  conversationId: string,
+  runId: string,
+  interruptId: string,
+): Promise<DurableInterrupt> {
+  const data = await apiClient.get<Record<string, unknown>>(
+    `/api/assistant/conversations/${conversationId}/runs/${runId}/interrupts/${interruptId}`,
+  )
+  return normalizeDurableInterrupt(data)
+}
+
+export async function rotateInterruptToken(
+  conversationId: string,
+  runId: string,
+  interruptId: string,
+  payload: DurableInterruptTokenRequest,
+): Promise<DurableInterruptTokenResponse> {
+  return apiClient.post<DurableInterruptTokenResponse>(
+    `/api/assistant/conversations/${conversationId}/runs/${runId}/interrupts/${interruptId}/token`,
+    { body: payload },
+  )
+}
+
+export async function resolveInterrupt(
+  conversationId: string,
+  runId: string,
+  interruptId: string,
+  payload: DurableInterruptResolveRequest,
+): Promise<DurableInterrupt> {
+  const data = await apiClient.post<Record<string, unknown>>(
+    `/api/assistant/conversations/${conversationId}/runs/${runId}/interrupts/${interruptId}/resolve`,
+    { body: payload },
+  )
+  return normalizeDurableInterrupt(data)
 }
