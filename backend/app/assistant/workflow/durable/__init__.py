@@ -5,6 +5,7 @@ Task 2: frozen DurableExecutionPlanV1 planner + durable publish helpers.
 Task 3: one-boundary durable Workflow/Agent runner + node adapters.
 Task 4: durable human Interrupt persistence (token/schema/repository).
 Task 5: nonblocking durable pause (effect port + atomic waiting commit).
+Task 6: conversation-scoped token/decision HTTP APIs + expiry scanner.
 """
 
 from __future__ import annotations
