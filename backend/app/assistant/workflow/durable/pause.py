@@ -494,6 +494,13 @@ def commit_durable_workflow_pause(
                 run=run,
             ) from exc
 
+        # Plan 07 kill point: Interrupt + provisional Checkpoint flushed, outer
+        # waiting pointer CAS not yet committed. Rollback inject must leave no
+        # visible Interrupt / waiting Run / business write.
+        from app.assistant.durable.crash import CrashPoint, maybe_crash
+
+        maybe_crash(CrashPoint.AFTER_INTERRUPT_INSERT_BEFORE_OUTER_POINTER_CAS)
+
         suspension = created.suspension
         # Rebuild checkpoint payload with the immutable suspension truth.
         final_cp = DurableAgentCheckpointV2(
