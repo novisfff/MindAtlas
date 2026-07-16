@@ -212,6 +212,157 @@ def _lookup_dep(
     return None
 
 
+def _container_context_from_path_prefix(path_prefix: str) -> tuple[str, str] | None:
+    """If path_prefix is a planner body path, return (outer_prefix, container_id).
+
+    Planner nests loop/iteration bodies as ``{outer}/node:{container}/body``.
+    Plan 01 freezes workflow_call inside those containers as
+    ``{outer}/workflow_call:{container}::{node}`` (see skills/resolution.py),
+    not under the synthetic body path.
+    """
+    marker = "/node:"
+    body_suffix = "/body"
+    if not path_prefix.endswith(body_suffix):
+        return None
+    without_body = path_prefix[: -len(body_suffix)]
+    idx = without_body.rfind(marker)
+    if idx < 0:
+        return None
+    outer = without_body[:idx] or "root"
+    container_id = without_body[idx + len(marker) :]
+    if not container_id or "/" in container_id:
+        return None
+    return outer, container_id
+
+
+def _workflow_call_locator_candidates(
+    *,
+    path_prefix: str,
+    node_id: str,
+) -> list[str]:
+    """Build Plan-01-aligned locator candidates for a workflow_call dependency.
+
+    Prefer real freeze forms from resolution:
+    - top-level: ``{prefix}/workflow_call:{node}``
+    - inside loop/iteration: ``{outer}/workflow_call:{container}::{node}``
+    Keep synthetic planner body forms for back-compat with older unit fixtures.
+    """
+    candidates: list[str] = []
+    container_ctx = _container_context_from_path_prefix(path_prefix)
+    if container_ctx is not None:
+        outer, container_id = container_ctx
+        candidates.append(f"{outer}/workflow_call:{container_id}::{node_id}")
+        candidates.append(f"{outer}/workflow_call:{node_id}")
+        candidates.append(
+            f"{outer}/node:{container_id}/body/node:{node_id}/workflow_call"
+        )
+    candidates.append(f"{path_prefix}/workflow_call:{node_id}")
+    candidates.append(f"{path_prefix}/node:{node_id}/workflow_call")
+    # Dedup while preserving order.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for key in candidates:
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(key)
+    return ordered
+
+
+def _lookup_workflow_call_dep(
+    deps: Mapping[str, FrozenExecutionDependencyRef],
+    *,
+    path_prefix: str,
+    node_id: str,
+    target_version_id: UUID | None,
+) -> FrozenExecutionDependencyRef | None:
+    """Resolve frozen workflow_call dep using Plan 01 locator forms.
+
+    Matching order:
+    1. Exact candidate paths (Plan 01 + synthetic body forms)
+    2. Suffix ``/workflow_call:{node}`` under path_prefix
+    3. Container form suffix ``/workflow_call:{container}::{node}`` under outer prefix
+    4. Version-id fallback among workflow deps under the relevant prefixes
+    """
+    candidates = _workflow_call_locator_candidates(
+        path_prefix=path_prefix, node_id=node_id
+    )
+    for key in candidates:
+        dep = deps.get(key)
+        if dep is not None and dep.dependency_type == "workflow":
+            return dep
+
+    container_ctx = _container_context_from_path_prefix(path_prefix)
+    outer_prefix = container_ctx[0] if container_ctx is not None else path_prefix
+    container_id = container_ctx[1] if container_ctx is not None else None
+
+    suffixes = [f"/workflow_call:{node_id}"]
+    if container_id:
+        suffixes.insert(0, f"/workflow_call:{container_id}::{node_id}")
+
+    for path, dep in deps.items():
+        if dep.dependency_type != "workflow":
+            continue
+        if not (
+            path.startswith(path_prefix)
+            or path.startswith(outer_prefix)
+            or path.startswith("root/workflow_call:")
+        ):
+            continue
+        for suffix in suffixes:
+            if path.endswith(suffix):
+                return dep
+
+    if target_version_id is not None:
+        for path, dep in deps.items():
+            if dep.dependency_type != "workflow":
+                continue
+            if dep.target_version_id != target_version_id:
+                continue
+            if not (
+                path.startswith(f"{outer_prefix}/workflow_call:")
+                or path.startswith(f"{path_prefix}/workflow_call:")
+                or path.startswith("root/workflow_call:")
+            ):
+                continue
+            # Prefer paths that mention this node id (plain or container::node).
+            tail = path.rsplit("/workflow_call:", 1)[-1]
+            if tail == node_id or tail.endswith(f"::{node_id}"):
+                return dep
+        # Last resort: unique workflow dep for this version under outer/root.
+        version_matches = [
+            dep
+            for path, dep in deps.items()
+            if dep.dependency_type == "workflow"
+            and dep.target_version_id == target_version_id
+            and (
+                path.startswith(f"{outer_prefix}/workflow_call:")
+                or path.startswith(f"{path_prefix}/workflow_call:")
+                or path.startswith("root/workflow_call:")
+            )
+        ]
+        if len(version_matches) == 1:
+            return version_matches[0]
+    return None
+
+
+def _nested_input_for_workflow_call(
+    nested_workflow_inputs: Mapping[str, Any],
+    *,
+    dep: FrozenExecutionDependencyRef,
+    candidates: Sequence[str],
+) -> Any | None:
+    """Locate nested snapshot by real freeze path, then candidate aliases."""
+    nested = nested_workflow_inputs.get(dep.dependency_path)
+    if nested is not None:
+        return nested
+    for key in candidates:
+        nested = nested_workflow_inputs.get(key)
+        if nested is not None:
+            return nested
+    return None
+
+
 def _system_tool_side_effect(tool_name: str) -> SideEffectClass:
     entry = SYSTEM_TOOL_CLASSIFICATIONS.get(tool_name)
     if entry is None:
@@ -704,16 +855,22 @@ def _plan_workflow_call_node(
             reason_code="mutable_target_lookup",
         )
 
-    call_key = nid
-    call_path = f"{path_prefix}/workflow_call:{call_key}"
-    dep = _lookup_dep(
+    # Prefer pin version for version-id fallback matching before dep is found.
+    pin_version_id: UUID | None
+    try:
+        pin_version_id = UUID(str(target_version))
+    except (TypeError, ValueError):
+        pin_version_id = None
+
+    locator_candidates = _workflow_call_locator_candidates(
+        path_prefix=path_prefix, node_id=nid
+    )
+    call_path = locator_candidates[0]
+    dep = _lookup_workflow_call_dep(
         deps,
-        candidates=(
-            call_path,
-            f"{path_prefix}/node:{nid}/workflow_call",
-        ),
         path_prefix=path_prefix,
-        suffix=f"/workflow_call:{call_key}",
+        node_id=nid,
+        target_version_id=pin_version_id,
     )
     if dep is None or dep.dependency_type != "workflow":
         raise DurablePlanError(
@@ -724,22 +881,23 @@ def _plan_workflow_call_node(
     # Resolve child version identity (prefer frozen dep; fall back to pin).
     child_version_id = dep.target_version_id
     if child_version_id is None:
-        try:
-            child_version_id = UUID(str(target_version))
-        except (TypeError, ValueError) as exc:
+        if pin_version_id is None:
             raise DurablePlanError(
                 f"workflow_call {nid} has invalid target version id",
                 reason_code="mutable_target_lookup",
-            ) from exc
+            )
+        child_version_id = pin_version_id
     if child_version_id in visited_workflow_versions:
         raise DurablePlanError(
             f"workflow_call cycle involving version {child_version_id}",
             reason_code="workflow_call_cycle",
         )
 
-    nested_input = nested_workflow_inputs.get(dep.dependency_path)
-    if nested_input is None:
-        nested_input = nested_workflow_inputs.get(call_path)
+    nested_input = _nested_input_for_workflow_call(
+        nested_workflow_inputs,
+        dep=dep,
+        candidates=locator_candidates,
+    )
     if nested_input is None:
         # Fail closed: without the frozen child graph we cannot prove reachable
         # child content is durable-safe (even on unused branches).
@@ -748,11 +906,12 @@ def _plan_workflow_call_node(
             reason_code="nested_workflow_call_unsupported",
         )
 
+    nested_path_prefix = dep.dependency_path if dep.dependency_path else call_path
     try:
         _child_entry, child_nodes = _plan_workflow_nodes(
             workflow_input=nested_input,
             deps=deps,
-            path_prefix=dep.dependency_path if dep.dependency_path else call_path,
+            path_prefix=nested_path_prefix,
             depth=depth + 1,
             nested_workflow_inputs=nested_workflow_inputs,
             visited_workflow_versions=visited_workflow_versions | {child_version_id},
@@ -914,9 +1073,11 @@ def plan_durable_execution(
     DurablePlanError. Never consults Draft/current/latest ambient state.
 
     ``nested_workflow_inputs`` maps frozen dependency paths
-    (e.g. ``root/workflow_call:<nodeId>``) to child workflow snapshots so
-    ``workflow_call`` nodes can be recursively validated. Missing nested graphs
-    fail closed with ``nested_workflow_call_unsupported``.
+    (Plan 01 forms: ``root/workflow_call:<nodeId>`` or
+    ``root/workflow_call:<container>::<nodeId>`` for loop/iteration bodies)
+    to child workflow snapshots so ``workflow_call`` nodes can be recursively
+    validated. Missing nested graphs fail closed with
+    ``nested_workflow_call_unsupported``.
     """
     if target_kind not in {"workflow", "agent"}:
         raise DurablePlanError("invalid target_kind", reason_code="invalid_graph")

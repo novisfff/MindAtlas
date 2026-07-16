@@ -836,7 +836,7 @@ def test_unpinned_workflow_call_denied() -> None:
 
 
 def test_loop_body_folds_nested_workflow_call_may_interrupt() -> None:
-    """Loop body containing a durable-safe interruptible child folds may_interrupt."""
+    """Loop body workflow_call uses Plan 01 freeze path root/workflow_call:{container}::{node}."""
     from app.assistant.domain.digests import sha256_canonical_json
     from app.assistant.workflow.durable.planner import plan_allows_durable_interrupt
 
@@ -851,8 +851,9 @@ def test_loop_body_folds_nested_workflow_call_may_interrupt() -> None:
             _edge(edge_id="ce2", source="approve", target="output"),
         ],
     }
-    # Body path for loop planning is root/node:loop/body/workflow_call:call_child
-    body_call_path = "root/node:loop/body/workflow_call:call_child"
+    # Plan 01 freezes body workflow_call as root/workflow_call:{container}::{node}
+    # (skills/resolution.py), not the planner's synthetic body path_prefix.
+    plan01_call_path = "root/workflow_call:loop::call_child"
     graph = {
         "nodes": [
             _node("start", "start"),
@@ -873,9 +874,8 @@ def test_loop_body_folds_nested_workflow_call_may_interrupt() -> None:
             _edge(edge_id="e2", source="loop", target="output"),
         ],
     }
-    # Dep path must match body path_prefix used by planner.
     body_workflow_dep = _dep(
-        path=body_call_path,
+        path=plan01_call_path,
         dep_type="workflow",
         identity=f"workflow:{CHILD_WORKFLOW_ID}",
         target_version_id=CHILD_VERSION_ID,
@@ -888,11 +888,152 @@ def test_loop_body_folds_nested_workflow_call_may_interrupt() -> None:
         target_digest=sha256_canonical_json(graph),
         workflow_input=graph,
         dependencies=(body_workflow_dep,),
-        nested_workflow_inputs={body_call_path: child},
+        nested_workflow_inputs={plan01_call_path: child},
     )
     loop = next(n for n in plan.nodes if n.node_id == "loop")
     assert loop.may_interrupt is True
     assert plan_allows_durable_interrupt(plan) is True
+    assert any(
+        r.dependency_path == plan01_call_path for r in loop.dependency_refs
+    )
+
+
+def test_loop_body_workflow_call_accepts_synthetic_body_path_alias() -> None:
+    """Synthetic planner body path still resolves (back-compat with older fixtures)."""
+    from app.assistant.domain.digests import sha256_canonical_json
+    from app.assistant.workflow.durable.planner import plan_allows_durable_interrupt
+
+    child = _safe_child_start_output()
+    synthetic_path = "root/node:loop/body/workflow_call:call_child"
+    graph = {
+        "nodes": [
+            _node("start", "start"),
+            _node(
+                "loop",
+                "loop",
+                config={
+                    "max_iterations": 2,
+                    "body_nodes": [_workflow_call_node("call_child")],
+                },
+            ),
+            _node("output", "output"),
+        ],
+        "edges": [
+            _edge(edge_id="e1", source="start", target="loop"),
+            _edge(edge_id="e2", source="loop", target="output"),
+        ],
+    }
+    plan = plan_or_raise(
+        target_kind="workflow",
+        target_version_id=TARGET_VERSION_ID,
+        target_digest=sha256_canonical_json(graph),
+        workflow_input=graph,
+        dependencies=(
+            _dep(
+                path=synthetic_path,
+                dep_type="workflow",
+                identity=f"workflow:{CHILD_WORKFLOW_ID}",
+                target_version_id=CHILD_VERSION_ID,
+                dependency_digest=("d") * 64,
+                resolution_digest=("e") * 64,
+            ),
+        ),
+        nested_workflow_inputs={synthetic_path: child},
+    )
+    loop = next(n for n in plan.nodes if n.node_id == "loop")
+    assert loop.may_interrupt is False
+    assert loop.business_side_effect == "none"
+    assert plan_allows_durable_interrupt(plan) is False
+
+
+def test_loop_body_workflow_call_real_workflows_by_locator_keys() -> None:
+    """Simulate production workflows_by_locator keys for body workflow_call."""
+    from app.assistant.domain.digests import sha256_canonical_json
+    from app.assistant.workflow.durable.planner import (
+        DurablePlanError,
+        _nested_workflow_inputs_from_closure,
+        business_side_effect_maximum,
+        plan_allows_durable_interrupt,
+        plan_durable_execution,
+    )
+
+    child = _safe_child_start_llm_output()
+    # Real Plan 01 publish freeze locator (resolution.py + workflow_call_node.py).
+    plan01_locator = "root/workflow_call:iter::call_child"
+    graph = {
+        "nodes": [
+            _node("start", "start"),
+            _node(
+                "iter",
+                "iteration",
+                config={
+                    "max_iterations": 5,
+                    "body_nodes": [_workflow_call_node("call_child")],
+                },
+            ),
+            _node("output", "output"),
+        ],
+        "edges": [
+            _edge(edge_id="e1", source="start", target="iter"),
+            _edge(edge_id="e2", source="iter", target="output"),
+        ],
+    }
+    child_model = _dep(
+        path=f"{plan01_locator}/node:child_llm/model",
+        dep_type="model",
+        identity="model:default",
+    )
+    workflow_dep = _dep(
+        path=plan01_locator,
+        dep_type="workflow",
+        identity=f"workflow:{CHILD_WORKFLOW_ID}",
+        target_version_id=CHILD_VERSION_ID,
+        dependency_digest=("d") * 64,
+        resolution_digest=("e") * 64,
+    )
+
+    class _Entry:
+        def __init__(self, parsed: Any) -> None:
+            self.parsed_published_input = parsed
+
+    class _Closure:
+        def __init__(self) -> None:
+            self.workflows_by_locator = {plan01_locator: _Entry(child)}
+
+    # Production closure indexes by Plan 01 locator; planner must resolve it.
+    nested_from_closure = _nested_workflow_inputs_from_closure(_Closure())
+    assert plan01_locator in nested_from_closure
+
+    plan = plan_or_raise(
+        target_kind="workflow",
+        target_version_id=TARGET_VERSION_ID,
+        target_digest=sha256_canonical_json(graph),
+        workflow_input=graph,
+        dependencies=(workflow_dep, child_model),
+        nested_workflow_inputs=nested_from_closure,
+    )
+    container = next(n for n in plan.nodes if n.node_id == "iter")
+    assert container.business_side_effect == "compute"
+    assert container.may_interrupt is False
+    assert any(r.dependency_path == plan01_locator for r in container.dependency_refs)
+    assert any(
+        r.dependency_path.endswith("/node:child_llm/model")
+        for r in container.dependency_refs
+    )
+    assert business_side_effect_maximum(plan) == "compute"
+    assert plan_allows_durable_interrupt(plan) is False
+
+    # Fail closed when the real freeze key is present but nested snapshot is missing.
+    with pytest.raises(DurablePlanError) as exc:
+        plan_durable_execution(
+            target_kind="workflow",
+            target_version_id=TARGET_VERSION_ID,
+            target_digest=sha256_canonical_json(graph),
+            workflow_input=graph,
+            dependencies=(workflow_dep, child_model),
+            nested_workflow_inputs={},
+        )
+    assert exc.value.reason_code == "nested_workflow_call_unsupported"
 
 
 def test_read_tool_allowed() -> None:
