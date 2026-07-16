@@ -598,6 +598,339 @@ def test_unknown_checkpoint_schema_version_needs_reconciliation() -> None:
         codec["migrate_checkpoint"](payload)
 
 
+def _empty_provider_surface(*, manifest_digest: str = DIGEST_1, manifest_revision: int = 1):
+    from app.assistant.provider_loop.contracts import (
+        ProviderToolSurface,
+        compute_alias_map_digest,
+        compute_surface_digest,
+    )
+
+    alias_map_digest = compute_alias_map_digest(
+        provider_protocol="openai_compat",
+        manifest_digest=manifest_digest,
+        aliases=(),
+    )
+    surface_digest = compute_surface_digest(
+        provider_protocol="openai_compat",
+        manifest_revision=manifest_revision,
+        manifest_digest=manifest_digest,
+        alias_map_digest=alias_map_digest,
+        tools=(),
+    )
+    return ProviderToolSurface(
+        provider_protocol="openai_compat",
+        manifest_revision=manifest_revision,
+        manifest_digest=manifest_digest,
+        alias_map_digest=alias_map_digest,
+        tools=(),
+        surface_digest=surface_digest,
+    )
+
+
+def _provider_loop_continuation() -> Any:
+    from app.assistant.capabilities.contracts import ContinuationRef
+    from app.assistant.domain.contracts import create_model_ref, create_provider_ref
+    from app.assistant.provider_loop.contracts import (
+        ProviderLoopContinuation,
+        ProviderUsage,
+        ProviderWaitingCallState,
+        create_execution_scope,
+    )
+    from app.assistant.capabilities.contracts import CapabilityPrincipal
+
+    provider = create_provider_ref(
+        provider_protocol="openai_compat",
+        provider_config_id=UUID("00000000-0000-4000-8000-000000000901"),
+        provider_runtime_revision=1,
+        provider_config_digest=DIGEST_A,
+        adapter_key="openai",
+        adapter_revision="a1",
+        protocol_revision="p1",
+        app_build_revision="build-1",
+    )
+    model = create_model_ref(
+        model_id=UUID("00000000-0000-4000-8000-000000000902"),
+        model_name="gpt-test",
+        model_type="llm",
+        model_runtime_revision=1,
+        credential_id=UUID("00000000-0000-4000-8000-000000000903"),
+        credential_runtime_revision=1,
+        credential_config_digest=DIGEST_A,
+        model_config_digest=DIGEST_B,
+        provider_ref_digest=provider.provider_ref_digest,
+        capability_probe_id=None,
+        capability_probe_digest=None,
+    )
+    scope = create_execution_scope(
+        run_id=RUN_ID,
+        conversation_id=None,
+        principal=CapabilityPrincipal(
+            principal_type="service",
+            principal_id="local-assistant",
+            authenticated=True,
+        ),
+        tenant_scope_id=None,
+    )
+    surface = _empty_provider_surface()
+    waiting_state = ProviderWaitingCallState(
+        call_id="wait-1",
+        call_index=0,
+        binding_contract_digest=DIGEST_A,
+        descriptor_digest=DIGEST_B,
+        behavior_digest=DIGEST_C,
+        classification_revision="plan02-v1",
+        classification_ruleset_digest=DIGEST_A,
+        capability_continuation=ContinuationRef(
+            continuation_type="human_approval",
+            contract_version=1,
+            reference_id="cont-1",
+            payload_digest=DIGEST_B,
+        ),
+    )
+    return ProviderLoopContinuation(
+        execution_scope=scope,
+        model_ref=model,
+        locale="en",
+        max_rounds=4,
+        provider_rounds_used=1,
+        prior_tool_call_count=0,
+        accumulated_usage=ProviderUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+        current_manifest_revision=1,
+        current_manifest_digest=DIGEST_A,
+        exposed_surface=surface,
+        assistant_message_digest=DIGEST_C,
+        transcript_digest=DIGEST_D,
+        waiting_call=waiting_state,
+        next_call_index=1,
+        pending_call_ids=(),
+        completed_call_records=(),
+    )
+
+
+def test_checkpoint_v2_waiting_provider_path_valid() -> None:
+    """Valid waiting shape (a): provider_loop_continuation without pause bundle."""
+    DurableAgentCheckpointV2, _, DurableNextActionV2 = _import_v2_contracts()
+    cont = _provider_loop_continuation()
+    cp = DurableAgentCheckpointV2(
+        run_id=RUN_ID,
+        phase="waiting",
+        manifest_revision_id=MANIFEST_REV_ID,
+        policy_revision_id=POLICY_REV_ID,
+        budget_revision_id=BUDGET_REV_ID,
+        obligation_revision_id=OBLIGATION_REV_ID,
+        provider_message_ordinal=1,
+        provider_transcript_digest=DIGEST_1,
+        provider_loop_continuation=cont,
+        inflight_unit=None,
+        next_action=DurableNextActionV2(kind="wait"),
+        workflow_state=None,
+        active_capability_continuation=None,
+        pending_interrupt_id=None,
+        budget_suspension=None,
+    )
+    assert cp.provider_loop_continuation is cont
+    assert cp.pending_interrupt_id is None
+
+
+def test_checkpoint_v2_waiting_workflow_pause_path_valid() -> None:
+    """Valid waiting shape (b): complete workflow pause bundle without provider cont."""
+    DurableAgentCheckpointV2, _, DurableNextActionV2 = _import_v2_contracts()
+    from app.assistant.capabilities.contracts import ContinuationRef
+
+    cont = ContinuationRef(
+        continuation_type="durable_capability_invocation",
+        contract_version=1,
+        reference_id=str(FRAME_ID),
+        payload_digest=DIGEST_E,
+    )
+    cp = DurableAgentCheckpointV2(
+        run_id=RUN_ID,
+        phase="waiting",
+        manifest_revision_id=MANIFEST_REV_ID,
+        policy_revision_id=POLICY_REV_ID,
+        budget_revision_id=BUDGET_REV_ID,
+        obligation_revision_id=OBLIGATION_REV_ID,
+        provider_message_ordinal=3,
+        provider_transcript_digest=DIGEST_1,
+        provider_loop_continuation=None,
+        inflight_unit=None,
+        next_action=DurableNextActionV2(kind="wait"),
+        workflow_state=_workflow_state_fixture(),
+        active_capability_continuation=cont,
+        pending_interrupt_id=INTERRUPT_ID,
+        budget_suspension=_suspension_fixture(),
+    )
+    assert cp.workflow_state is not None
+    assert cp.budget_suspension is not None
+    assert cp.pending_interrupt_id == INTERRUPT_ID
+
+
+def test_checkpoint_v2_waiting_rejects_empty_and_partial_pause() -> None:
+    """Empty waiting and partial pause bundles must fail closed."""
+    DurableAgentCheckpointV2, _, DurableNextActionV2 = _import_v2_contracts()
+
+    base = dict(
+        run_id=RUN_ID,
+        phase="waiting",
+        manifest_revision_id=MANIFEST_REV_ID,
+        policy_revision_id=POLICY_REV_ID,
+        budget_revision_id=BUDGET_REV_ID,
+        obligation_revision_id=OBLIGATION_REV_ID,
+        provider_message_ordinal=0,
+        provider_transcript_digest=DIGEST_1,
+        provider_loop_continuation=None,
+        inflight_unit=None,
+        next_action=DurableNextActionV2(kind="wait"),
+    )
+
+    # Empty waiting: no provider continuation, no pause bundle.
+    with pytest.raises((ValidationError, ValueError)) as empty_exc:
+        DurableAgentCheckpointV2(**base)
+    assert "waiting phase" in str(empty_exc.value)
+
+    # Partial: only pending_interrupt_id.
+    with pytest.raises((ValidationError, ValueError)):
+        DurableAgentCheckpointV2(
+            **base,
+            pending_interrupt_id=INTERRUPT_ID,
+        )
+
+    # Partial: interrupt + suspension, missing workflow_state.
+    with pytest.raises((ValidationError, ValueError)):
+        DurableAgentCheckpointV2(
+            **base,
+            pending_interrupt_id=INTERRUPT_ID,
+            budget_suspension=_suspension_fixture(),
+        )
+
+    # Partial: interrupt + workflow_state, missing suspension.
+    with pytest.raises((ValidationError, ValueError)):
+        DurableAgentCheckpointV2(
+            **base,
+            pending_interrupt_id=INTERRUPT_ID,
+            workflow_state=_workflow_state_fixture(),
+        )
+
+    # Complete pause fields but mismatched workflow_state.pending_interrupt_id.
+    from app.assistant.workflow.durable.contracts import DurableWorkflowStateV1
+
+    mismatched_ws = _workflow_state_fixture()
+    mismatched_ws = DurableWorkflowStateV1(
+        run_id=mismatched_ws.run_id,
+        root_frame_id=mismatched_ws.root_frame_id,
+        root_invocation_digest=mismatched_ws.root_invocation_digest,
+        frame_stack=mismatched_ws.frame_stack,
+        pending_interrupt_id=UUID("00000000-0000-4000-8000-000000000799"),
+        terminal_output_artifact_id=None,
+    )
+    with pytest.raises((ValidationError, ValueError)) as mismatch_exc:
+        DurableAgentCheckpointV2(
+            **base,
+            pending_interrupt_id=INTERRUPT_ID,
+            budget_suspension=_suspension_fixture(),
+            workflow_state=mismatched_ws,
+        )
+    assert "pending_interrupt_id" in str(mismatch_exc.value)
+
+    # Both provider continuation AND complete pause bundle: rejected.
+    both_kwargs = dict(base)
+    both_kwargs["provider_loop_continuation"] = _provider_loop_continuation()
+    both_kwargs["pending_interrupt_id"] = INTERRUPT_ID
+    both_kwargs["budget_suspension"] = _suspension_fixture()
+    both_kwargs["workflow_state"] = _workflow_state_fixture()
+    with pytest.raises((ValidationError, ValueError)) as both_exc:
+        DurableAgentCheckpointV2(**both_kwargs)
+    assert "provider_loop_continuation" in str(both_exc.value) or "pause" in str(
+        both_exc.value
+    )
+
+
+def test_nested_unknown_workflow_state_version_needs_reconciliation() -> None:
+    """Nested workflowState schemaVersion=99 must raise NeedsReconciliationError.
+
+    Top-level decode_workflow_state already routes unknown versions to
+    needs_reconciliation; Checkpoint V2 nested validation must do the same
+    rather than collapsing into DurableCodecError("checkpoint_invalid").
+    """
+    codec = _import_codec()
+    Needs = codec["NeedsReconciliationError"]
+    Error = codec["DurableCodecError"]
+
+    # Encode a valid v2 waiting pause checkpoint, then mutate nested version.
+    DurableAgentCheckpointV2, _, DurableNextActionV2 = _import_v2_contracts()
+    from app.assistant.capabilities.contracts import ContinuationRef
+
+    cp = DurableAgentCheckpointV2(
+        run_id=RUN_ID,
+        phase="waiting",
+        manifest_revision_id=MANIFEST_REV_ID,
+        policy_revision_id=POLICY_REV_ID,
+        budget_revision_id=BUDGET_REV_ID,
+        obligation_revision_id=OBLIGATION_REV_ID,
+        provider_message_ordinal=3,
+        provider_transcript_digest=DIGEST_1,
+        provider_loop_continuation=None,
+        inflight_unit=None,
+        next_action=DurableNextActionV2(kind="wait"),
+        workflow_state=_workflow_state_fixture(),
+        active_capability_continuation=ContinuationRef(
+            continuation_type="durable_capability_invocation",
+            contract_version=1,
+            reference_id=str(FRAME_ID),
+            payload_digest=DIGEST_E,
+        ),
+        pending_interrupt_id=INTERRUPT_ID,
+        budget_suspension=_suspension_fixture(),
+    )
+    encoded = codec["encode_checkpoint_v2"](cp)
+    encoded["workflowState"] = dict(encoded["workflowState"])
+    encoded["workflowState"]["schemaVersion"] = 99
+
+    with pytest.raises(Needs) as exc:
+        codec["decode_checkpoint_v2"](encoded)
+    assert exc.value.code == "needs_reconciliation"
+    assert exc.value.schema_version == 99
+
+    with pytest.raises(Needs) as exc2:
+        codec["decode_checkpoint"](encoded)
+    assert exc2.value.code == "needs_reconciliation"
+
+    # Must not only surface as generic checkpoint_invalid without Needs.
+    try:
+        codec["decode_checkpoint_v2"](encoded)
+        raise AssertionError("expected NeedsReconciliationError")
+    except Needs:
+        pass
+    except Error as err:
+        raise AssertionError(
+            f"nested unknown workflow version raised DurableCodecError only: {err}"
+        ) from err
+
+
+def test_checkpoint_v2_public_types_are_exact_not_any() -> None:
+    """Public V2 annotations must be exact plan types, not typing.Any."""
+    import typing
+
+    DurableAgentCheckpointV2, _, _ = _import_v2_contracts()
+    hints = typing.get_type_hints(
+        DurableAgentCheckpointV2,
+        include_extras=True,
+    )
+    for field_name in (
+        "workflow_state",
+        "active_capability_continuation",
+        "budget_suspension",
+    ):
+        ann = hints[field_name]
+        # Resolve Optional/Union to concrete args.
+        origin = typing.get_origin(ann)
+        args = typing.get_args(ann) if origin is not None else (ann,)
+        # At least one concrete non-None, non-Any type must be present.
+        concrete = [a for a in args if a is not type(None) and a is not typing.Any]
+        assert concrete, f"{field_name} annotation must not be bare Any: {ann!r}"
+        assert typing.Any not in args, f"{field_name} must not include Any: {ann!r}"
+
+
 def test_ephemeral_context_rejected_by_checkpoint_v2_codec() -> None:
     codec = _import_codec()
     Error = codec["DurableCodecError"]

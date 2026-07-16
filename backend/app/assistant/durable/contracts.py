@@ -7,7 +7,7 @@ budget suspension references without altering Plan 05 BudgetLedgerState.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
@@ -20,6 +20,13 @@ from app.assistant.provider_loop.messages import (
     ProviderMessage,
     digest_provider_message,
 )
+
+if TYPE_CHECKING:
+    from app.assistant.capabilities.contracts import ContinuationRef
+    from app.assistant.workflow.durable.contracts import (
+        BudgetSuspensionStateV1,
+        DurableWorkflowStateV1,
+    )
 
 # ---------------------------------------------------------------------------
 # Vocabulary
@@ -495,11 +502,13 @@ class DurableAgentCheckpointV2(FrozenContract):
     visible_text_artifact_id: UUID | None = None
     next_action: DurableNextActionV2
     # Plan 07 additive fields (null/empty for migrated v1).
-    # Nested types validated in model_validator to avoid import cycles.
-    workflow_state: Any | None = None
-    active_capability_continuation: Any | None = None
+    # Exact types restored via TYPE_CHECKING + model_rebuild(); nested validation
+    # remains lazy in field validators to avoid import cycles and to route unknown
+    # nested schema versions through NeedsReconciliationError at the codec layer.
+    workflow_state: DurableWorkflowStateV1 | None = None
+    active_capability_continuation: ContinuationRef | None = None
     pending_interrupt_id: UUID | None = None
-    budget_suspension: Any | None = None
+    budget_suspension: BudgetSuspensionStateV1 | None = None
 
     @field_validator("provider_message_ordinal")
     @classmethod
@@ -571,9 +580,57 @@ class DurableAgentCheckpointV2(FrozenContract):
     @model_validator(mode="after")
     def _phase_invariants(self) -> DurableAgentCheckpointV2:
         if self.phase == "waiting":
-            # v2 waiting may use provider_loop_continuation (Plan 06) OR workflow pause.
+            # v2 waiting requires exactly one of:
+            # (a) provider_loop_continuation (Plan 06 provider wait path), or
+            # (b) complete workflow pause bundle:
+            #     pending_interrupt_id + budget_suspension + workflow_state
+            #     with matching interrupt ids.
+            # Empty waiting and partial pause bundles are rejected.
             if self.inflight_unit is not None:
                 raise ValueError("waiting phase must not carry inflight_unit")
+            has_provider = self.provider_loop_continuation is not None
+            pause_count = sum(
+                (
+                    self.pending_interrupt_id is not None,
+                    self.budget_suspension is not None,
+                    self.workflow_state is not None,
+                )
+            )
+            has_complete_pause = False
+            if pause_count == 3:
+                if self.workflow_state.pending_interrupt_id != self.pending_interrupt_id:
+                    raise ValueError(
+                        "waiting workflow pause requires workflow_state.pending_interrupt_id "
+                        "to match pending_interrupt_id"
+                    )
+                suspension_interrupt = getattr(
+                    self.budget_suspension, "interrupt_id", None
+                )
+                if (
+                    suspension_interrupt is not None
+                    and suspension_interrupt != self.pending_interrupt_id
+                ):
+                    raise ValueError(
+                        "waiting workflow pause requires budget_suspension.interrupt_id "
+                        "to match pending_interrupt_id"
+                    )
+                has_complete_pause = True
+            elif pause_count > 0:
+                raise ValueError(
+                    "waiting phase workflow pause requires pending_interrupt_id, "
+                    "budget_suspension, and workflow_state together"
+                )
+            if has_provider and has_complete_pause:
+                raise ValueError(
+                    "waiting phase must not combine provider_loop_continuation with "
+                    "workflow pause bundle"
+                )
+            if not has_provider and not has_complete_pause:
+                raise ValueError(
+                    "waiting phase requires provider_loop_continuation or a complete "
+                    "workflow pause bundle "
+                    "(pending_interrupt_id + budget_suspension + workflow_state)"
+                )
         elif self.provider_loop_continuation is not None:
             raise ValueError(
                 "provider_loop_continuation is only valid when phase=waiting"
@@ -595,6 +652,29 @@ class DurableAgentCheckpointV2(FrozenContract):
                 )
         return self
 
+
+def _rebuild_checkpoint_v2() -> None:
+    """Materialize exact nested Plan 07 types without import cycles at class body time."""
+    from app.assistant.capabilities.contracts import ContinuationRef
+    from app.assistant.workflow.durable.contracts import (
+        BudgetSuspensionStateV1,
+        DurableWorkflowStateV1,
+    )
+
+    # Publish into module globals so postponed annotations / get_type_hints resolve.
+    globals()["ContinuationRef"] = ContinuationRef
+    globals()["BudgetSuspensionStateV1"] = BudgetSuspensionStateV1
+    globals()["DurableWorkflowStateV1"] = DurableWorkflowStateV1
+    DurableAgentCheckpointV2.model_rebuild(
+        _types_namespace={
+            "ContinuationRef": ContinuationRef,
+            "BudgetSuspensionStateV1": BudgetSuspensionStateV1,
+            "DurableWorkflowStateV1": DurableWorkflowStateV1,
+        }
+    )
+
+
+_rebuild_checkpoint_v2()
 
 
 __all__ = [

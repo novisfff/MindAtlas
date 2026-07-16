@@ -7,7 +7,7 @@ suspension, and deterministic identity helpers. No runtime execution here.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal, Sequence
+from typing import Any, Literal, Protocol, Sequence
 from uuid import UUID, uuid5
 
 from pydantic import Field, field_validator, model_validator
@@ -671,6 +671,30 @@ def compute_proposal_digest(
     )
 
 
+# ---------------------------------------------------------------------------
+# Pause proposal staging port (Plan 07 §5.3) — Protocol only, no runtime impl
+# ---------------------------------------------------------------------------
+
+
+class DurablePauseEffectPort(Protocol):
+    """Worker-unit-scoped ephemeral pause staging port (Plan 07 §5.3).
+
+    Stages one pure ``DurablePauseProposalV1`` keyed by the exact root
+    call/continuation. The outer worker consumes that exact staged proposal once
+    after Plan 03 builds the open-transcript waiting continuation. Never
+    serialized; cleared in ``finally``.
+    """
+
+    def stage(self, proposal: DurablePauseProposalV1) -> None: ...
+
+    def consume_exact(
+        self,
+        *,
+        root_call_id: str,
+        continuation: ContinuationRef,
+    ) -> DurablePauseProposalV1: ...
+
+
 __all__ = [
     "DURABLE_WORKFLOW_IDENTITY_NAMESPACE",
     "SUPPORTED_BUDGET_SUSPENSION_CONTRACT_VERSIONS",
@@ -684,6 +708,7 @@ __all__ = [
     "DurableExecutionPlanV1",
     "DurableLoopCursorV1",
     "DurableNodePlanV1",
+    "DurablePauseEffectPort",
     "DurablePauseProposalV1",
     "DurableWorkflowStateV1",
     "FrozenExecutionDependencyRef",

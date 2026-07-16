@@ -628,8 +628,95 @@ def encode_checkpoint_v2(checkpoint: DurableAgentCheckpointV2) -> dict[str, Json
     return _dump_contract(checkpoint)
 
 
+def _raise_if_unsupported_nested_checkpoint_versions(
+    payload: Mapping[str, Any],
+) -> None:
+    """Peek nested workflow/plan versions before Checkpoint V2 construction.
+
+    Top-level ``decode_workflow_state`` / ``decode_execution_plan`` raise
+    NeedsReconciliationError for unknown versions. Nested fields on Checkpoint V2
+    must do the same *before* model_validate turns them into ValidationError →
+    DurableCodecError("checkpoint_invalid").
+    """
+    # Local import keeps durable.codec free of hard workflow package import at
+    # module load (workflow codec already imports durable.codec helpers).
+    from app.assistant.workflow.durable.contracts import (
+        SUPPORTED_EXECUTION_PLAN_CONTRACT_VERSIONS,
+        SUPPORTED_WORKFLOW_STATE_SCHEMA_VERSIONS,
+    )
+
+    def _peek_contract_version(obj: Mapping[str, Any]) -> Any:
+        if "contractVersion" in obj:
+            return obj["contractVersion"]
+        if "contract_version" in obj:
+            return obj["contract_version"]
+        return None
+
+    def _check_workflow_state(ws: Any, *, path: str) -> None:
+        if not isinstance(ws, Mapping):
+            return
+        version = _peek_schema_version(ws)
+        if version is None:
+            # Let model validation report missing schemaVersion as invalid.
+            return
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise NeedsReconciliationError(
+                f"unsupported nested workflow state schemaVersion type "
+                f"{type(version)!r} at {path}",
+                schema_version=version,
+            )
+        if version not in SUPPORTED_WORKFLOW_STATE_SCHEMA_VERSIONS:
+            raise NeedsReconciliationError(
+                f"unsupported nested workflow state schemaVersion={version} at {path}; "
+                f"supported={sorted(SUPPORTED_WORKFLOW_STATE_SCHEMA_VERSIONS)}",
+                schema_version=version,
+            )
+        # Nested plan, if present under a known key, also version-gates.
+        for plan_key in ("executionPlan", "execution_plan", "plan"):
+            if plan_key in ws:
+                _check_execution_plan(ws[plan_key], path=f"{path}.{plan_key}")
+
+    def _check_execution_plan(plan: Any, *, path: str) -> None:
+        if not isinstance(plan, Mapping):
+            return
+        version = _peek_contract_version(plan)
+        if version is None:
+            return
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise NeedsReconciliationError(
+                f"unsupported nested execution plan contractVersion type "
+                f"{type(version)!r} at {path}",
+                schema_version=version,
+            )
+        if version not in SUPPORTED_EXECUTION_PLAN_CONTRACT_VERSIONS:
+            raise NeedsReconciliationError(
+                f"unsupported nested execution plan contractVersion={version} at {path}; "
+                f"supported={sorted(SUPPORTED_EXECUTION_PLAN_CONTRACT_VERSIONS)}",
+                schema_version=version,
+            )
+
+    for key in ("workflowState", "workflow_state"):
+        if key in payload:
+            _check_workflow_state(payload[key], path=key)
+            break
+
+    # Pause proposal nested on some payloads may carry proposedWorkflowState.
+    for key in ("budgetSuspension", "budget_suspension"):
+        # budget suspension uses contractVersion, not workflow schema — skip.
+        _ = key
+
+    for key in ("activeCapabilityContinuation", "active_capability_continuation"):
+        # ContinuationRef is not schema-versioned for reconciliation routing.
+        _ = key
+
+
 def decode_checkpoint_v2(payload: Mapping[str, Any]) -> DurableAgentCheckpointV2:
     """Decode Checkpoint v2 only."""
+    # Version-peek nested workflow/plan *before* sanitization+construction so
+    # unknown nested schema versions raise NeedsReconciliationError (same as
+    # top-level decode_workflow_state), not DurableCodecError("checkpoint_invalid").
+    if isinstance(payload, Mapping):
+        _raise_if_unsupported_nested_checkpoint_versions(payload)
     data = _canonical_payload(payload)
     version = data.get("schemaVersion", data.get("schema_version"))
     if version is None:
@@ -639,6 +726,8 @@ def decode_checkpoint_v2(payload: Mapping[str, Any]) -> DurableAgentCheckpointV2
             f"decode_checkpoint_v2 received schemaVersion={version!r}",
             schema_version=version,
         )
+    # Re-check after alias-normalization (canonical payload uses camelCase).
+    _raise_if_unsupported_nested_checkpoint_versions(data)
     try:
         return _CHECKPOINT_V2_ADAPTER.validate_python(data)
     except ValidationError as exc:

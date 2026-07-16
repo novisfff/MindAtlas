@@ -424,6 +424,168 @@ def test_workflow_state_frame_branch_loop_round_trip() -> None:
     assert codec["workflow_state_digest"](decoded) == digest
 
 
+def _agent_provider_loop_continuation() -> Any:
+    """Minimal real ProviderLoopContinuation for nested Agent frame fixture."""
+    from app.assistant.capabilities.contracts import (
+        CapabilityPrincipal,
+        ContinuationRef,
+    )
+    from app.assistant.domain.contracts import create_model_ref, create_provider_ref
+    from app.assistant.provider_loop.contracts import (
+        ProviderLoopContinuation,
+        ProviderToolSurface,
+        ProviderUsage,
+        ProviderWaitingCallState,
+        compute_alias_map_digest,
+        compute_surface_digest,
+        create_execution_scope,
+    )
+
+    provider = create_provider_ref(
+        provider_protocol="openai_compat",
+        provider_config_id=UUID("00000000-0000-4000-8000-000000000911"),
+        provider_runtime_revision=1,
+        provider_config_digest=DIGEST_A,
+        adapter_key="openai",
+        adapter_revision="a1",
+        protocol_revision="p1",
+        app_build_revision="build-1",
+    )
+    model = create_model_ref(
+        model_id=UUID("00000000-0000-4000-8000-000000000912"),
+        model_name="gpt-agent",
+        model_type="llm",
+        model_runtime_revision=1,
+        credential_id=UUID("00000000-0000-4000-8000-000000000913"),
+        credential_runtime_revision=1,
+        credential_config_digest=DIGEST_A,
+        model_config_digest=DIGEST_B,
+        provider_ref_digest=provider.provider_ref_digest,
+        capability_probe_id=None,
+        capability_probe_digest=None,
+    )
+    alias_map_digest = compute_alias_map_digest(
+        provider_protocol="openai_compat",
+        manifest_digest=DIGEST_A,
+        aliases=(),
+    )
+    surface_digest = compute_surface_digest(
+        provider_protocol="openai_compat",
+        manifest_revision=1,
+        manifest_digest=DIGEST_A,
+        alias_map_digest=alias_map_digest,
+        tools=(),
+    )
+    surface = ProviderToolSurface(
+        provider_protocol="openai_compat",
+        manifest_revision=1,
+        manifest_digest=DIGEST_A,
+        alias_map_digest=alias_map_digest,
+        tools=(),
+        surface_digest=surface_digest,
+    )
+    scope = create_execution_scope(
+        run_id=RUN_ID,
+        conversation_id=None,
+        principal=CapabilityPrincipal(
+            principal_type="service",
+            principal_id="local-assistant",
+            authenticated=True,
+        ),
+        tenant_scope_id=None,
+    )
+    waiting_state = ProviderWaitingCallState(
+        call_id="agent-wait-1",
+        call_index=0,
+        binding_contract_digest=DIGEST_A,
+        descriptor_digest=DIGEST_B,
+        behavior_digest=DIGEST_C,
+        classification_revision="plan02-v1",
+        classification_ruleset_digest=DIGEST_A,
+        capability_continuation=ContinuationRef(
+            continuation_type="human_approval",
+            contract_version=1,
+            reference_id="agent-cont-1",
+            payload_digest=DIGEST_B,
+        ),
+    )
+    return ProviderLoopContinuation(
+        execution_scope=scope,
+        model_ref=model,
+        locale="en",
+        max_rounds=4,
+        provider_rounds_used=1,
+        prior_tool_call_count=0,
+        accumulated_usage=ProviderUsage(input_tokens=2, output_tokens=1, total_tokens=3),
+        current_manifest_revision=1,
+        current_manifest_digest=DIGEST_A,
+        exposed_surface=surface,
+        assistant_message_digest=DIGEST_C,
+        transcript_digest=DIGEST_D,
+        waiting_call=waiting_state,
+        next_call_index=1,
+        pending_call_ids=(),
+        completed_call_records=(),
+    )
+
+
+def test_nested_agent_frame_provider_loop_continuation_round_trip() -> None:
+    """DurableCallFrameV1 with real ProviderLoopContinuation round-trips + digests."""
+    codec = _import_workflow_codec()
+    from app.assistant.provider_loop.contracts import ProviderLoopContinuation
+
+    agent_cont = _agent_provider_loop_continuation()
+    assert isinstance(agent_cont, ProviderLoopContinuation)
+    frame = _frame(
+        target_kind="agent",
+        phase="waiting",
+        current_node_id="agent_round",
+        agent_loop_continuation=agent_cont,
+    )
+    assert frame.agent_loop_continuation is agent_cont
+    state = _workflow_state(
+        frame_stack=(frame,),
+        pending_interrupt_id=None,
+    )
+    encoded = codec["encode_workflow_state"](state)
+    nested = encoded["frameStack"][0]["agentLoopContinuation"]
+    assert nested is not None
+    assert nested["waitingCall"]["callId"] == "agent-wait-1"
+    decoded = codec["decode_workflow_state"](encoded)
+    assert decoded == state
+    assert decoded.frame_stack[0].agent_loop_continuation is not None
+    assert (
+        decoded.frame_stack[0].agent_loop_continuation.waiting_call.call_id
+        == "agent-wait-1"
+    )
+    assert (
+        decoded.frame_stack[0].agent_loop_continuation.transcript_digest == DIGEST_D
+    )
+    digest = codec["workflow_state_digest"](state)
+    assert digest == sha256_canonical_json(encoded)
+    assert codec["workflow_state_digest"](decoded) == digest
+    assert codec["encode_workflow_state"](decoded) == encoded
+
+
+def test_durable_pause_effect_port_protocol_surface() -> None:
+    """Protocol-only DurablePauseEffectPort matches plan §5.3 stage/consume_exact."""
+    from typing import get_type_hints
+
+    from app.assistant.workflow.durable.contracts import (
+        DurablePauseEffectPort,
+        DurablePauseProposalV1,
+    )
+
+    assert hasattr(DurablePauseEffectPort, "stage")
+    assert hasattr(DurablePauseEffectPort, "consume_exact")
+    # Structural Protocol: a duck-typed object is accepted by typing but not
+    # instantiated as a runtime implementation here.
+    hints_stage = get_type_hints(DurablePauseEffectPort.stage)
+    assert hints_stage.get("return") is type(None) or hints_stage.get("return") is None
+    # Ensure proposal type is the frozen contract.
+    assert DurablePauseProposalV1 is not None
+
+
 def test_branch_and_loop_digest_helpers() -> None:
     c = _import_workflow_contracts()
     branch = _branch()
