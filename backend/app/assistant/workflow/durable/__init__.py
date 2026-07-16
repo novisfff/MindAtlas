@@ -2,6 +2,7 @@
 
 Task 1: portable frozen contracts + codec.
 Task 2: frozen DurableExecutionPlanV1 planner + durable publish helpers.
+Task 3: one-boundary durable Workflow/Agent runner + node adapters.
 """
 
 from __future__ import annotations
@@ -43,6 +44,24 @@ from app.assistant.workflow.durable.planner import (  # noqa: F401
     plan_parallel_safe,
     publish_durable_binding_snapshot,
 )
+from app.assistant.workflow.durable.adapters import (  # noqa: F401
+    AdapterBoundaryResult,
+    AdapterExecutionContext,
+    DefaultDurableNodeAdapterRegistry,
+    DurableAdapterError,
+    PortableNodeBag,
+    build_default_registry,
+)
+from app.assistant.workflow.durable.runner import (  # noqa: F401
+    BoundaryKind,
+    BoundaryResult,
+    DurableFrameMaterial,
+    DurableWorkflowRunner,
+    PreparedBoundary,
+    build_initial_workflow_state,
+    commit_workflow_boundary_prepare,
+    commit_workflow_boundary_result,
+)
 
 __all__ = [
     "DURABLE_PLAN_EXTENSION_CONTRACT_VERSION",
@@ -78,4 +97,18 @@ __all__ = [
     "plan_durable_execution_from_surface",
     "plan_parallel_safe",
     "publish_durable_binding_snapshot",
+    "AdapterBoundaryResult",
+    "AdapterExecutionContext",
+    "BoundaryKind",
+    "BoundaryResult",
+    "DefaultDurableNodeAdapterRegistry",
+    "DurableAdapterError",
+    "DurableFrameMaterial",
+    "DurableWorkflowRunner",
+    "PortableNodeBag",
+    "PreparedBoundary",
+    "build_default_registry",
+    "build_initial_workflow_state",
+    "commit_workflow_boundary_prepare",
+    "commit_workflow_boundary_result",
 ]

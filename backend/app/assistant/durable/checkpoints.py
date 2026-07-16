@@ -17,12 +17,16 @@ from sqlalchemy.orm import Session
 from app.assistant.durable.codec import (
     checkpoint_state_digest,
     encode_checkpoint_v1,
+    encode_checkpoint_v2,
     encode_provider_message,
 )
 from app.assistant.durable.contracts import (
     DurableAgentCheckpointV1,
+    DurableAgentCheckpointV2,
     DurableExecutionUnitV1,
+    DurableExecutionUnitV2,
     DurableNextActionV1,
+    DurableNextActionV2,
 )
 from app.assistant.durable.models import (
     AssistantRunBudgetRevision,
@@ -681,7 +685,271 @@ def find_post_result_for_unit(
     return None
 
 
+def commit_checkpoint_v2(
+    db: Session,
+    *,
+    run_id: UUID,
+    lease: LeaseToken,
+    expected_revision: int,
+    phase: str,
+    next_action_kind: str,
+    unit: DurableExecutionUnitV2 | None = None,
+    workflow_state: Any = None,
+    capability_frames: Sequence[Any] = (),
+    provider_loop_continuation: ProviderLoopContinuation | None = None,
+    provider_messages: Sequence[ProviderMessage] = (),
+    protection_kinds: Sequence[str] | None = None,
+    budget_payload: Mapping[str, Any] | None = None,
+    budget_digest: str | None = None,
+    budget_revision_number: int | None = None,
+    policy_payload: Mapping[str, Any] | None = None,
+    policy_digest: str | None = None,
+    policy_revision_number: int | None = None,
+    obligation_payload: Mapping[str, Any] | None = None,
+    obligation_digest: str | None = None,
+    obligation_revision_number: int | None = None,
+    manifest_payload: Mapping[str, Any] | None = None,
+    manifest_digest: str | None = None,
+    manifest_revision_number: int | None = None,
+    parent_manifest_id: UUID | None = None,
+    parent_manifest_digest: str | None = None,
+    completed_logical_unit_id: str | None = None,
+    pending_interrupt_id: UUID | None = None,
+    budget_suspension: Any = None,
+    active_capability_continuation: Any = None,
+    enter_ready_for_memory: bool = False,
+    reason: str | None = None,
+) -> DurableCommitResult:
+    """Append a Checkpoint v2 carrying optional workflow_state / workflow units.
+
+    Mirrors :func:`_append_checkpoint_bundle` but encodes
+    :class:`DurableAgentCheckpointV2` (schema_version=2) so Plan 07 workflow
+    frames, agent rounds, and pause pointers can be persisted. Does not change
+    the V1 prepare/started/result path used by Plan 06 provider units.
+    """
+    run = _load_run_pointers(db, run_id)
+    repo = DurableRunRepository(db)
+
+    manifest_id = run.current_manifest_revision_id
+    policy_id = run.current_policy_revision_id
+    budget_id = run.current_budget_revision_id
+    obligation_id = run.current_obligation_revision_id
+    if not all([manifest_id, policy_id, budget_id, obligation_id]):
+        raise DurableRunConflict(
+            "protocol_error",
+            "base Manifest/policy/budget/obligation must exist before unit commits",
+            run=run,
+        )
+
+    rows: list[Any] = []
+    new_manifest_id = manifest_id
+    new_policy_id = policy_id
+    new_budget_id = budget_id
+    new_obligation_id = obligation_id
+
+    if manifest_payload is not None and manifest_digest is not None:
+        rev_n = int(manifest_revision_number or 0)
+        if rev_n < 1:
+            max_rev = db.scalar(
+                select(func.coalesce(func.max(AssistantRunManifestRevision.revision), 0)).where(
+                    AssistantRunManifestRevision.run_id == run_id
+                )
+            )
+            rev_n = int(max_rev or 0) + 1
+        m = AssistantRunManifestRevision(
+            id=uuid4(),
+            run_id=run_id,
+            revision=rev_n,
+            parent_revision_id=parent_manifest_id or manifest_id,
+            parent_digest=parent_manifest_digest,
+            manifest_digest=manifest_digest,
+            schema_version=1,
+            payload=dict(manifest_payload),
+        )
+        rows.append(m)
+        new_manifest_id = m.id
+
+    if policy_payload is not None and policy_digest is not None:
+        rev_n = int(policy_revision_number or 0)
+        if rev_n < 1:
+            max_rev = db.scalar(
+                select(func.coalesce(func.max(AssistantRunPolicyRevision.revision), 0)).where(
+                    AssistantRunPolicyRevision.run_id == run_id
+                )
+            )
+            rev_n = int(max_rev or 0) + 1
+        p = AssistantRunPolicyRevision(
+            id=uuid4(),
+            run_id=run_id,
+            revision=rev_n,
+            parent_revision_id=policy_id,
+            parent_digest=None,
+            policy_digest=policy_digest,
+            payload=dict(policy_payload),
+        )
+        rows.append(p)
+        new_policy_id = p.id
+
+    if budget_payload is not None and budget_digest is not None:
+        rev_n = int(budget_revision_number or 0)
+        if rev_n < 1:
+            max_rev = db.scalar(
+                select(func.coalesce(func.max(AssistantRunBudgetRevision.revision), 0)).where(
+                    AssistantRunBudgetRevision.run_id == run_id
+                )
+            )
+            rev_n = int(max_rev or 0) + 1
+        b = AssistantRunBudgetRevision(
+            id=uuid4(),
+            run_id=run_id,
+            revision=rev_n,
+            parent_revision_id=budget_id,
+            parent_digest=None,
+            budget_digest=budget_digest,
+            payload=dict(budget_payload),
+        )
+        rows.append(b)
+        new_budget_id = b.id
+
+    if obligation_payload is not None and obligation_digest is not None:
+        rev_n = int(obligation_revision_number or 0)
+        if rev_n < 1:
+            max_rev = db.scalar(
+                select(func.coalesce(func.max(AssistantRunObligationRevision.revision), 0)).where(
+                    AssistantRunObligationRevision.run_id == run_id
+                )
+            )
+            rev_n = int(max_rev or 0) + 1
+        o = AssistantRunObligationRevision(
+            id=uuid4(),
+            run_id=run_id,
+            revision=rev_n,
+            parent_revision_id=obligation_id,
+            parent_digest=None,
+            obligation_digest=obligation_digest,
+            payload=dict(obligation_payload),
+        )
+        rows.append(o)
+        new_obligation_id = o.id
+
+    if rows:
+        for r in rows:
+            db.add(r)
+        db.flush()
+
+    ordinal, transcript_digest, existing_msgs = _current_transcript_digest(db, run_id)
+    if provider_messages:
+        start = 1 if ordinal == 0 else ordinal + 1
+        msg_rows = _build_provider_message_rows(
+            run_id=run_id,
+            messages=provider_messages,
+            start_ordinal=start,
+            manifest_revision_id=new_manifest_id,
+            policy_revision_id=new_policy_id,
+            obligation_revision_id=new_obligation_id,
+            protection_kinds=protection_kinds,
+        )
+        for mr in msg_rows:
+            db.add(mr)
+        db.flush()
+        all_msgs = existing_msgs + tuple(provider_messages)
+        ordinal = start + len(provider_messages) - 1
+        transcript_digest = digest_provider_transcript(all_msgs)
+
+    frames = tuple(capability_frames or ())
+    next_action = DurableNextActionV2(kind=next_action_kind)  # type: ignore[arg-type]
+    checkpoint = DurableAgentCheckpointV2(
+        run_id=run_id,
+        phase=phase,  # type: ignore[arg-type]
+        manifest_revision_id=new_manifest_id,
+        policy_revision_id=new_policy_id,
+        budget_revision_id=new_budget_id,
+        obligation_revision_id=new_obligation_id,
+        provider_message_ordinal=ordinal,
+        provider_transcript_digest=transcript_digest,
+        provider_loop_continuation=provider_loop_continuation,
+        inflight_unit=unit,
+        capability_frames=frames,
+        artifact_ids=(),
+        visible_text_artifact_id=None,
+        next_action=next_action,
+        workflow_state=workflow_state,
+        active_capability_continuation=active_capability_continuation,
+        pending_interrupt_id=pending_interrupt_id,
+        budget_suspension=budget_suspension,
+    )
+    state_payload = encode_checkpoint_v2(checkpoint)
+    state_digest = checkpoint_state_digest(checkpoint)
+    seq = _next_checkpoint_sequence(db, run_id)
+    logical_unit_id = None
+    if unit is not None:
+        logical_unit_id = unit.logical_unit_id
+    elif completed_logical_unit_id:
+        logical_unit_id = completed_logical_unit_id
+
+    ck_row = AssistantRunCheckpoint(
+        id=uuid4(),
+        run_id=run_id,
+        sequence=seq,
+        expected_state_revision=int(expected_revision),
+        committed_state_revision=int(expected_revision) + 1,
+        schema_version=2,
+        manifest_revision_id=new_manifest_id,
+        policy_revision_id=new_policy_id,
+        budget_revision_id=new_budget_id,
+        obligation_revision_id=new_obligation_id,
+        provider_message_ordinal=ordinal,
+        provider_transcript_digest=transcript_digest,
+        phase=phase,
+        logical_unit_id=logical_unit_id,
+        reason=reason,
+        state_payload=state_payload,
+        state_digest=state_digest,
+    )
+    bundle = DurableChildBundle(
+        rows=[ck_row],
+        current_manifest_revision_id=new_manifest_id,
+        current_policy_revision_id=new_policy_id,
+        current_budget_revision_id=new_budget_id,
+        current_obligation_revision_id=new_obligation_id,
+        current_checkpoint_id=ck_row.id,
+    )
+
+    unit_key = logical_unit_id or "none"
+    state = unit.state if unit is not None else ("result" if completed_logical_unit_id else phase)
+    events = [
+        EventSpec(
+            event_key=f"unit.{state}:{unit_key}:rev{expected_revision}",
+            event_name=f"unit.{state}",
+            payload={
+                "phase": phase,
+                "logicalUnitId": unit_key,
+                "attempt": unit.attempt if unit is not None else None,
+                "schemaVersion": 2,
+            },
+            visibility="internal",
+        )
+    ]
+
+    if enter_ready_for_memory:
+        return repo.enter_ready_for_memory(
+            run_id=run_id,
+            expected_revision=expected_revision,
+            lease=lease,
+            events=events,
+            children=bundle,
+        )
+    return repo.commit_semantic(
+        run_id=run_id,
+        expected_revision=expected_revision,
+        lease=lease,
+        events=events,
+        children=bundle,
+    )
+
+
 __all__ = [
+    "commit_checkpoint_v2",
     "commit_prepared_unit",
     "commit_started_unit",
     "commit_unit_result",
