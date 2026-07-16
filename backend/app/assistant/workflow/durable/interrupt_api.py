@@ -631,28 +631,14 @@ def resolve_interrupt_http(
         prepared["expected_revision"] = expected_revision
         return checkpoint_id, budget_id, expected_revision + 1
 
-    try:
-        result = repo.resolve_interrupt(
-            run_id=run_id,
-            interrupt_id=interrupt_id,
-            resolution_request_id=resolution_request_id,
-            token=token,
-            expected_token_revision=expected_token_revision,
-            expected_request_revision=expected_request_revision,
-            expected_run_revision=expected_run_revision,
-            outcome=outcome,
-            submitted_values=values,
-            comment=comment,
-            token_pepper=pepper,
-            queues_execution=queues,
-            prepare_queued_children=_prepare_queued if queues else None,
-        )
+    def _finish_after_resolve(result) -> dict[str, Any]:
+        """Continue queue/cancel CAS after a first-resolution interrupt mutation.
 
-        if result.idempotent_replay:
-            db.commit()
-            db.refresh(run)
-            return serialize_interrupt_safe(result.interrupt, run=run)
-
+        Used by both the primary path and IntegrityError re-entry when
+        ``created_resolution`` is true. Short-circuit only happens on
+        ``idempotent_replay`` before this helper is called.
+        """
+        nonlocal run
         run_repo = DurableRunRepository(db)
         if queues:
             from_status = str(prepared["from_status"])
@@ -743,6 +729,30 @@ def resolve_interrupt_http(
         db.refresh(result.interrupt)
         return serialize_interrupt_safe(result.interrupt, run=run)
 
+    try:
+        result = repo.resolve_interrupt(
+            run_id=run_id,
+            interrupt_id=interrupt_id,
+            resolution_request_id=resolution_request_id,
+            token=token,
+            expected_token_revision=expected_token_revision,
+            expected_request_revision=expected_request_revision,
+            expected_run_revision=expected_run_revision,
+            outcome=outcome,
+            submitted_values=values,
+            comment=comment,
+            token_pepper=pepper,
+            queues_execution=queues,
+            prepare_queued_children=_prepare_queued if queues else None,
+        )
+
+        if result.idempotent_replay:
+            db.commit()
+            db.refresh(run)
+            return serialize_interrupt_safe(result.interrupt, run=run)
+
+        return _finish_after_resolve(result)
+
     except DurableInterruptApiError:
         db.rollback()
         raise
@@ -751,6 +761,8 @@ def resolve_interrupt_http(
         raise _conflict_to_api(exc) from exc
     except IntegrityError as exc:
         # Concurrent multi-tab first paths / unique races: re-enter resolve under lock.
+        # Pass prepare_queued_children so first-resolution re-entry still prepares
+        # children under the Run lock; only short-circuit on exact idempotent_replay.
         try:
             db.rollback()
         except Exception:
@@ -769,19 +781,16 @@ def resolve_interrupt_http(
                 comment=comment,
                 token_pepper=pepper,
                 queues_execution=queues,
+                prepare_queued_children=_prepare_queued if queues else None,
             )
             if replay.idempotent_replay:
                 db.commit()
                 db.refresh(run)
                 return serialize_interrupt_safe(replay.interrupt, run=run)
-            db.rollback()
-            raise DurableInterruptApiError(
-                CODE_INTERRUPT_ALREADY_RESOLVED
-                if str(getattr(replay.interrupt, "status", "")) != "pending"
-                else CODE_INTERRUPT_IDEMPOTENCY_CONFLICT,
-                "concurrent resolution race",
-                status_code=409,
-            ) from exc
+            # Re-entry took the first-resolution path (e.g. IntegrityError from
+            # event/pointer CAS after interrupt mutation rolled back). Continue
+            # the same queue/cancel CAS finish path instead of rolling back a win.
+            return _finish_after_resolve(replay)
         except DurableInterruptApiError:
             raise
         except (InterruptConflict, DurableRunConflict, InterruptTokenError, InterruptSchemaError) as race_exc:

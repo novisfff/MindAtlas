@@ -971,6 +971,146 @@ class DurableInterruptApiTests(unittest.TestCase):
         # Second pass finds no pending expired (or no-ops).
         self.assertEqual(second.expired_count, 0)
 
+    # ------------------------------------------------------------------
+    # IntegrityError re-entry (created_resolution finish path)
+    # ------------------------------------------------------------------
+
+    def test_integrityerror_reentry_created_resolution_queues(self) -> None:
+        """IntegrityError after interrupt mutation: re-entry with prepare finishes CAS.
+
+        Simulates event/pointer unique race: first resolve mutates interrupt then
+        CAS raises IntegrityError; rollback; re-enter takes first-resolution path
+        again (with prepare_queued_children) and continues queue CAS successfully.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        from app.assistant.durable.models import (
+            AssistantRunBudgetRevision,
+            AssistantRunCheckpoint,
+            AssistantRunInterrupt,
+        )
+        from app.assistant.workflow.durable.interrupt_api import resolve_interrupt_http
+
+        conv, _msg, run, interrupt, *_ = self._seed_approval()
+        tok = self._issue_token(conv, run, interrupt)
+        req_id = uuid.uuid4()
+
+        real_commit = None
+        calls = {"n": 0}
+
+        from app.assistant.durable.repository import DurableRunRepository
+
+        real_commit = DurableRunRepository.commit_resume_queued
+
+        def _flaky_commit(self, *args, **kwargs):  # noqa: ANN001
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise IntegrityError(
+                    "simulated event/pointer unique race",
+                    params=None,
+                    orig=Exception("unique violation"),
+                )
+            return real_commit(self, *args, **kwargs)
+
+        with patch.object(DurableRunRepository, "commit_resume_queued", _flaky_commit):
+            payload = resolve_interrupt_http(
+                self.db,
+                conversation_id=conv.id,
+                run_id=run.id,
+                interrupt_id=interrupt.id,
+                token=tok["token"],
+                resolution_request_id=req_id,
+                expected_token_revision=int(tok["tokenRevision"]),
+                expected_request_revision=int(interrupt.request_revision),
+                expected_run_revision=int(interrupt.request_run_revision),
+                outcome="approved",
+                values={},
+            )
+
+        self.assertEqual(payload["status"], "approved")
+        self.assertEqual(payload["resolutionRequestId"], str(req_id))
+        self.assertGreaterEqual(calls["n"], 2)
+
+        self.db.refresh(run)
+        self.assertEqual(run.status, "queued")
+        self.assertIsNotNone(run.current_checkpoint_id)
+        self.assertIsNotNone(run.current_budget_revision_id)
+        self.assertIsNotNone(run.deadline_at)
+
+        row = self.db.get(AssistantRunInterrupt, interrupt.id)
+        self.assertEqual(row.status, "approved")
+        self.assertEqual(row.resolution_request_id, req_id)
+        self.assertIsNotNone(row.resolution_checkpoint_id)
+        self.assertIsNotNone(row.resolution_budget_revision_id)
+        self.assertIsNone(row.resume_token_digest)
+
+        # Resume children exist (prepared on re-entry first-resolution path).
+        self.assertGreaterEqual(
+            self.db.query(AssistantRunCheckpoint)
+            .filter(AssistantRunCheckpoint.run_id == run.id)
+            .count(),
+            2,
+        )
+        self.assertGreaterEqual(
+            self.db.query(AssistantRunBudgetRevision)
+            .filter(AssistantRunBudgetRevision.run_id == run.id)
+            .count(),
+            2,
+        )
+
+    def test_integrityerror_reentry_created_resolution_cancelled(self) -> None:
+        """IntegrityError on cancel CAS: re-entry created_resolution finishes cancel."""
+        from sqlalchemy.exc import IntegrityError
+
+        from app.assistant.durable.models import AssistantRunInterrupt
+        from app.assistant.durable.repository import DurableRunRepository
+        from app.assistant.workflow.durable.interrupt_api import resolve_interrupt_http
+
+        conv, _msg, run, interrupt, *_ = self._seed_approval()
+        tok = self._issue_token(conv, run, interrupt)
+        req_id = uuid.uuid4()
+        calls = {"n": 0}
+        real_commit = DurableRunRepository.commit_waiting_terminal_cancel
+
+        def _flaky_cancel(self, *args, **kwargs):  # noqa: ANN001
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise IntegrityError(
+                    "simulated cancel event unique race",
+                    params=None,
+                    orig=Exception("unique violation"),
+                )
+            return real_commit(self, *args, **kwargs)
+
+        with patch.object(
+            DurableRunRepository, "commit_waiting_terminal_cancel", _flaky_cancel
+        ):
+            payload = resolve_interrupt_http(
+                self.db,
+                conversation_id=conv.id,
+                run_id=run.id,
+                interrupt_id=interrupt.id,
+                token=tok["token"],
+                resolution_request_id=req_id,
+                expected_token_revision=int(tok["tokenRevision"]),
+                expected_request_revision=int(interrupt.request_revision),
+                expected_run_revision=int(interrupt.request_run_revision),
+                outcome="cancelled",
+                values=None,
+            )
+
+        self.assertEqual(payload["status"], "cancelled")
+        self.assertEqual(payload["resolutionRequestId"], str(req_id))
+        self.assertGreaterEqual(calls["n"], 2)
+
+        self.db.refresh(run)
+        self.assertEqual(run.status, "cancelled")
+        row = self.db.get(AssistantRunInterrupt, interrupt.id)
+        self.assertEqual(row.status, "cancelled")
+        self.assertEqual(row.resolution_request_id, req_id)
+        self.assertIsNone(row.resolution_checkpoint_id)
+        self.assertIsNone(row.resolution_budget_revision_id)
+
 
 if __name__ == "__main__":
     unittest.main()
