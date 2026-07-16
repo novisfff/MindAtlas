@@ -777,15 +777,33 @@ class DurableInterruptApiTests(unittest.TestCase):
             ),
         ):
             conv, _msg, run, interrupt, *_ = self._seed_approval()
-            resp = self.client.post(
+            token_resp = self.client.post(
                 f"{self._base(conv.id, run.id)}/{interrupt.id}/token",
                 json={
                     "expectedRequestRevision": interrupt.request_revision,
                     "expectedRunRevision": interrupt.request_run_revision,
                 },
             )
-            self.assertIn(resp.status_code, (503, 500, 409))
-            # Re-enable for remaining tests
+            self.assertEqual(token_resp.status_code, 503)
+            self.assertEqual(
+                self._reason(token_resp), "durable_interrupt_auth_mode_unavailable"
+            )
+            resolve_resp = self.client.post(
+                f"{self._base(conv.id, run.id)}/{interrupt.id}/resolve",
+                json={
+                    "token": "x",
+                    "resolutionRequestId": str(uuid.uuid4()),
+                    "expectedTokenRevision": 1,
+                    "expectedRequestRevision": interrupt.request_revision,
+                    "expectedRunRevision": interrupt.request_run_revision,
+                    "outcome": "approved",
+                },
+            )
+            self.assertEqual(resolve_resp.status_code, 503)
+            self.assertEqual(
+                self._reason(resolve_resp), "durable_interrupt_auth_mode_unavailable"
+            )
+        # Re-enable for remaining tests
         self._settings_patch = patch(
             "app.assistant.workflow.durable.interrupt_api.get_settings",
             return_value=MagicMock(
@@ -797,6 +815,126 @@ class DurableInterruptApiTests(unittest.TestCase):
             ),
         )
         self._settings_patch.start()
+
+    def test_resolve_run_revision_mismatch(self) -> None:
+        conv, _msg, run, interrupt, *_ = self._seed_approval()
+        tok = self._issue_token(conv, run, interrupt)
+        resp = self.client.post(
+            f"{self._base(conv.id, run.id)}/{interrupt.id}/resolve",
+            json={
+                "token": tok["token"],
+                "resolutionRequestId": str(uuid.uuid4()),
+                "expectedTokenRevision": tok["tokenRevision"],
+                "expectedRequestRevision": interrupt.request_revision,
+                "expectedRunRevision": STATE_REVISION + 99,
+                "outcome": "approved",
+            },
+        )
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(self._reason(resp), "interrupt_run_revision_mismatch")
+
+    def test_resolve_expired_interrupt(self) -> None:
+        past = datetime.now(timezone.utc) - timedelta(hours=1)
+        conv, _msg, run, interrupt, *_ = self._seed_approval()
+        # Mint token while still valid, then expire before resolve.
+        tok = self._issue_token(conv, run, interrupt)
+        interrupt.expires_at = past
+        self.db.commit()
+        resp = self.client.post(
+            f"{self._base(conv.id, run.id)}/{interrupt.id}/resolve",
+            json={
+                "token": tok["token"],
+                "resolutionRequestId": str(uuid.uuid4()),
+                "expectedTokenRevision": tok["tokenRevision"],
+                "expectedRequestRevision": interrupt.request_revision,
+                "expectedRunRevision": interrupt.request_run_revision,
+                "outcome": "approved",
+            },
+        )
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(self._reason(resp), "interrupt_expired")
+
+    def test_resolve_request_id_owned_by_other_interrupt(self) -> None:
+        """Same resolutionRequestId already stored on another Interrupt → conflict."""
+        conv, _msg, run, interrupt, *_ = self._seed_approval()
+        tok = self._issue_token(conv, run, interrupt)
+        req_id = str(uuid.uuid4())
+        first = self.client.post(
+            f"{self._base(conv.id, run.id)}/{interrupt.id}/resolve",
+            json={
+                "token": tok["token"],
+                "resolutionRequestId": req_id,
+                "expectedTokenRevision": tok["tokenRevision"],
+                "expectedRequestRevision": interrupt.request_revision,
+                "expectedRunRevision": interrupt.request_run_revision,
+                "outcome": "approved",
+            },
+        )
+        self.assertEqual(first.status_code, 200, first.text)
+
+        # After first resolve, interrupt is terminal (not pending), so a second pending
+        # row on the same run is allowed. Resolve it with the winning request id →
+        # ownership conflict (request id belongs to the first interrupt).
+        from app.assistant.durable.models import AssistantRunInterrupt
+        from app.assistant.workflow.durable.contracts import derive_interrupt_id
+        from app.assistant.workflow.durable.interrupts import derive_interrupt_key
+
+        self.db.refresh(interrupt)
+        frame_id = uuid.uuid4()
+        visit = "visit-conflict-2"
+        iid2 = derive_interrupt_id(
+            run_id=run.id,
+            root_invocation_digest=DIGEST_A,
+            frame_id=frame_id,
+            node_visit_id=visit,
+            logical_interrupt_ordinal=2,
+        )
+        key2 = derive_interrupt_key(
+            run_id=run.id,
+            root_invocation_digest=DIGEST_A,
+            frame_id=frame_id,
+            node_visit_id=visit,
+            logical_interrupt_ordinal=2,
+        )
+        row = AssistantRunInterrupt(
+            id=iid2,
+            run_id=run.id,
+            interrupt_key=key2,
+            kind="approval",
+            status="pending",
+            checkpoint_id=interrupt.checkpoint_id,
+            manifest_revision_id=interrupt.manifest_revision_id,
+            budget_revision_id=interrupt.budget_revision_id,
+            workflow_frame_id=frame_id,
+            node_id="n2",
+            node_visit_id=visit,
+            request_revision=1,
+            request_run_revision=int(interrupt.request_run_revision),
+            budget_suspension_state=dict(interrupt.budget_suspension_state or {}),
+            budget_suspension_digest=str(interrupt.budget_suspension_digest),
+            request_payload={"title": "other"},
+            request_digest=DIGEST_A,
+            initial_values={},
+            token_revision=1,
+            resume_token_digest="b" * 64,
+            expires_at=interrupt.expires_at,
+        )
+        self.db.add(row)
+        self.db.commit()
+
+        resp = self.client.post(
+            f"{self._base(conv.id, run.id)}/{iid2}/resolve",
+            json={
+                "token": "unused",
+                "resolutionRequestId": req_id,
+                "expectedTokenRevision": 1,
+                "expectedRequestRevision": 1,
+                "expectedRunRevision": interrupt.request_run_revision,
+                "outcome": "approved",
+            },
+        )
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(self._reason(resp), "resolution_idempotency_conflict")
 
     # ------------------------------------------------------------------
     # Expiry scanner

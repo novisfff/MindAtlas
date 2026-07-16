@@ -13,6 +13,7 @@ from typing import Any, Mapping
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.assistant.durable.codec import checkpoint_state_digest, encode_checkpoint_v2
@@ -546,18 +547,23 @@ def resolve_interrupt_http(
     values: Mapping[str, Any] | None = None,
     comment: str | None = None,
 ) -> dict[str, Any]:
-    """One-transaction HTTP resolve: queue-only, no Workflow/Provider/Gateway."""
+    """One-transaction HTTP resolve: queue-only, no Workflow/Provider/Gateway.
+
+    Spec §11.2 order: authorize → lock Run (inside resolve_interrupt) → idempotency
+    → (unknown only) validate pending/token/revisions/deadline → validate decision →
+    derive child budget + resume Checkpoint under lock → CAS → commit.
+    Children are never built/flushed before first-resolution validation succeeds.
+    """
     pepper = _require_pepper_for_token_ops()
     run = _authorize_run(db, conversation_id=conversation_id, run_id=run_id)
-    interrupt = _get_interrupt_for_run(db, run_id=run_id, interrupt_id=interrupt_id)
+    _get_interrupt_for_run(db, run_id=run_id, interrupt_id=interrupt_id)
 
     outcome = str(outcome)
     queues = outcome in _QUEUEING_OUTCOMES
 
-    # Early cancel/terminal run guard for new resolutions (idempotent path still OK).
+    # Soft pre-check: terminal run allows exact idempotent replay only.
     run_status = str(run.status)
     if run_status in {STATUS_CANCELLED, STATUS_CANCELLING, "failed", "completed"}:
-        # Still allow exact idempotent replay if request already stored.
         existing = (
             db.execute(
                 select(AssistantRunInterrupt).where(
@@ -581,17 +587,176 @@ def resolve_interrupt_http(
         max_ttl_sec=int(get_settings().assistant_interrupt_max_ttl_sec),
     )
 
-    # Idempotency short-circuit before building children (no second budget/checkpoint).
-    try:
-        # Peek without full resolve first for unknown-vs-existing.
-        existing = repo.get_by_resolution_request_id(
-            run_id=run_id,
-            resolution_request_id=resolution_request_id,
-            for_update=False,
+    # Captures filled only after unknown-ID validation under Run lock.
+    prepared: dict[str, Any] = {
+        "budget_id": None,
+        "checkpoint_id": None,
+        "deadline": None,
+        "from_status": run_status,
+        "expected_revision": int(run.state_revision),
+    }
+
+    def _require_waiting(locked_run: AssistantChatRun) -> str:
+        locked_status = str(locked_run.status)
+        if locked_status in WAITING_STATUSES:
+            return locked_status
+        if locked_status in {STATUS_CANCELLED, STATUS_CANCELLING, "failed", "completed"}:
+            raise DurableInterruptApiError(
+                CODE_INTERRUPT_RUN_CANCELLED,
+                f"run status is {locked_status}",
+                status_code=409,
+            )
+        raise DurableInterruptApiError(
+            CODE_INTERRUPT_NOT_PENDING,
+            f"run is not waiting (status={locked_status})",
+            status_code=409,
         )
-        if existing is not None:
-            # Let repository enforce digest/ownership and return replay.
-            result = repo.resolve_interrupt(
+
+    def _prepare_queued(locked_run: AssistantChatRun, locked_interrupt: AssistantRunInterrupt):
+        locked_status = _require_waiting(locked_run)
+        expected_revision = int(locked_run.state_revision)
+        child_rows, budget_id, checkpoint_id, deadline = _build_resume_children(
+            db,
+            run=locked_run,
+            interrupt=locked_interrupt,
+            expected_revision=expected_revision,
+        )
+        for row in child_rows:
+            db.add(row)
+        db.flush()
+        prepared["budget_id"] = budget_id
+        prepared["checkpoint_id"] = checkpoint_id
+        prepared["deadline"] = deadline
+        prepared["from_status"] = locked_status
+        prepared["expected_revision"] = expected_revision
+        return checkpoint_id, budget_id, expected_revision + 1
+
+    try:
+        result = repo.resolve_interrupt(
+            run_id=run_id,
+            interrupt_id=interrupt_id,
+            resolution_request_id=resolution_request_id,
+            token=token,
+            expected_token_revision=expected_token_revision,
+            expected_request_revision=expected_request_revision,
+            expected_run_revision=expected_run_revision,
+            outcome=outcome,
+            submitted_values=values,
+            comment=comment,
+            token_pepper=pepper,
+            queues_execution=queues,
+            prepare_queued_children=_prepare_queued if queues else None,
+        )
+
+        if result.idempotent_replay:
+            db.commit()
+            db.refresh(run)
+            return serialize_interrupt_safe(result.interrupt, run=run)
+
+        run_repo = DurableRunRepository(db)
+        if queues:
+            from_status = str(prepared["from_status"])
+            expected_revision = int(prepared["expected_revision"])
+            budget_id = prepared["budget_id"]
+            checkpoint_id = prepared["checkpoint_id"]
+            deadline = prepared["deadline"]
+            events = (
+                EventSpec(
+                    event_key=f"human_interrupt_resolved:{interrupt_id}:{resolution_request_id}",
+                    event_name="human_interrupt_resolved",
+                    payload={
+                        "interruptId": str(interrupt_id),
+                        "status": result.interrupt.status,
+                        "kind": str(result.interrupt.kind),
+                        "resolutionRequestId": str(resolution_request_id),
+                        "requestRevision": int(result.interrupt.request_revision),
+                        "runRevision": expected_revision,
+                    },
+                    visibility="public",
+                ),
+                EventSpec(
+                    event_key=f"run_status:queued:{interrupt_id}:{resolution_request_id}",
+                    event_name="run_status",
+                    payload={
+                        "status": "queued",
+                        "interruptId": str(interrupt_id),
+                        "fromStatus": from_status,
+                    },
+                    visibility="public",
+                ),
+            )
+            # Children already flushed under lock during prepare; pass empty rows so
+            # CAS only advances pointers/deadline/events/status (no second insert).
+            # checkpoint_seq is folded into _append_children pointer advance.
+            bundle = DurableChildBundle(
+                rows=[],
+                current_checkpoint_id=checkpoint_id,
+                current_budget_revision_id=budget_id,
+            )
+            commit = run_repo.commit_resume_queued(
+                run_id=run_id,
+                expected_revision=expected_revision,
+                events=events,
+                children=bundle,
+                set_deadline_at=deadline,
+            )
+            run = commit.run
+        else:
+            # Terminal non-queue outcome via HTTP (cancelled): cancel waiting run.
+            current = db.get(AssistantChatRun, run_id)
+            if current is None:
+                raise DurableInterruptApiError(
+                    CODE_DURABLE_INTERRUPT_NOT_FOUND,
+                    f"run not found: {run_id}",
+                    status_code=404,
+                )
+            _require_waiting(current)
+            expected_revision = int(current.state_revision)
+            events = (
+                EventSpec(
+                    event_key=f"human_interrupt_resolved:{interrupt_id}:{resolution_request_id}",
+                    event_name="human_interrupt_resolved",
+                    payload={
+                        "interruptId": str(interrupt_id),
+                        "status": result.interrupt.status,
+                        "kind": str(result.interrupt.kind),
+                        "resolutionRequestId": str(resolution_request_id),
+                    },
+                    visibility="public",
+                ),
+                EventSpec(
+                    event_key=f"run_status:cancelled:{interrupt_id}:{resolution_request_id}",
+                    event_name="run_status",
+                    payload={"status": "cancelled", "interruptId": str(interrupt_id)},
+                    visibility="public",
+                ),
+            )
+            commit = run_repo.commit_waiting_terminal_cancel(
+                run_id=run_id,
+                expected_revision=expected_revision,
+                events=events,
+                failure_code=None,
+                error_message=None,
+            )
+            run = commit.run
+
+        db.refresh(result.interrupt)
+        return serialize_interrupt_safe(result.interrupt, run=run)
+
+    except DurableInterruptApiError:
+        db.rollback()
+        raise
+    except (InterruptConflict, DurableRunConflict, InterruptTokenError, InterruptSchemaError) as exc:
+        db.rollback()
+        raise _conflict_to_api(exc) from exc
+    except IntegrityError as exc:
+        # Concurrent multi-tab first paths / unique races: re-enter resolve under lock.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            replay = repo.resolve_interrupt(
                 run_id=run_id,
                 interrupt_id=interrupt_id,
                 resolution_request_id=resolution_request_id,
@@ -605,180 +770,30 @@ def resolve_interrupt_http(
                 token_pepper=pepper,
                 queues_execution=queues,
             )
-            db.commit()
-            db.refresh(run)
-            return serialize_interrupt_safe(result.interrupt, run=run)
-
-        # First resolution path.
-        if run_status not in WAITING_STATUSES and run_status not in {
-            STATUS_CANCELLED,
-            STATUS_CANCELLING,
-        }:
-            # Still pending interrupt but run not waiting — protocol mismatch.
-            if interrupt.status == "pending" and run_status not in WAITING_STATUSES:
-                if run_status in {STATUS_CANCELLED, STATUS_CANCELLING, "failed", "completed"}:
-                    raise DurableInterruptApiError(
-                        CODE_INTERRUPT_RUN_CANCELLED,
-                        f"run status is {run_status}",
-                        status_code=409,
-                    )
-
-        if interrupt.status != "pending":
-            raise DurableInterruptApiError(
-                CODE_INTERRUPT_ALREADY_RESOLVED
-                if interrupt.status in {"approved", "rejected", "submitted", "cancelled", "expired"}
-                else CODE_INTERRUPT_NOT_PENDING,
-                f"interrupt status is {interrupt.status}",
-                status_code=409,
-            )
-
-        if run_status not in WAITING_STATUSES:
-            if run_status in {STATUS_CANCELLED, STATUS_CANCELLING, "failed", "completed"}:
-                raise DurableInterruptApiError(
-                    CODE_INTERRUPT_RUN_CANCELLED,
-                    f"run status is {run_status}",
-                    status_code=409,
-                )
-            raise DurableInterruptApiError(
-                CODE_INTERRUPT_NOT_PENDING,
-                f"run is not waiting (status={run_status})",
-                status_code=409,
-            )
-
-        child_rows: list[Any] = []
-        budget_id: UUID | None = None
-        checkpoint_id: UUID | None = None
-        deadline: datetime | None = None
-
-        if queues:
-            child_rows, budget_id, checkpoint_id, deadline = _build_resume_children(
-                db,
-                run=run,
-                interrupt=interrupt,
-                expected_revision=int(run.state_revision),
-            )
-            # Flush so FK targets exist for interrupt resolution pointers.
-            for row in child_rows:
-                db.add(row)
-            db.flush()
-
-        result = repo.resolve_interrupt(
-            run_id=run_id,
-            interrupt_id=interrupt_id,
-            resolution_request_id=resolution_request_id,
-            token=token,
-            expected_token_revision=expected_token_revision,
-            expected_request_revision=expected_request_revision,
-            expected_run_revision=expected_run_revision,
-            outcome=outcome,
-            submitted_values=values,
-            comment=comment,
-            resolution_checkpoint_id=checkpoint_id,
-            resolution_budget_revision_id=budget_id,
-            resolution_run_revision=int(run.state_revision) + 1 if queues else int(run.state_revision),
-            token_pepper=pepper,
-            queues_execution=queues,
-        )
-
-        if result.idempotent_replay:
-            db.commit()
-            db.refresh(run)
-            return serialize_interrupt_safe(result.interrupt, run=run)
-
-        run_repo = DurableRunRepository(db)
-        if queues:
-            events = (
-                EventSpec(
-                    event_key=f"human_interrupt_resolved:{interrupt_id}:{resolution_request_id}",
-                    event_name="human_interrupt_resolved",
-                    payload={
-                        "interruptId": str(interrupt_id),
-                        "status": result.interrupt.status,
-                        "kind": str(result.interrupt.kind),
-                        "resolutionRequestId": str(resolution_request_id),
-                        "requestRevision": int(result.interrupt.request_revision),
-                        "runRevision": int(run.state_revision),
-                    },
-                    visibility="public",
-                ),
-                EventSpec(
-                    event_key=f"run_status:queued:{interrupt_id}:{resolution_request_id}",
-                    event_name="run_status",
-                    payload={
-                        "status": "queued",
-                        "interruptId": str(interrupt_id),
-                        "fromStatus": run_status,
-                    },
-                    visibility="public",
-                ),
-            )
-            bundle = DurableChildBundle(
-                rows=list(child_rows),
-                current_checkpoint_id=checkpoint_id,
-                current_budget_revision_id=budget_id,
-            )
-            commit = run_repo.commit_resume_queued(
-                run_id=run_id,
-                expected_revision=int(run.state_revision),
-                events=events,
-                children=bundle,
-                set_deadline_at=deadline,
-            )
-            # Keep aggregate checkpoint_seq in sync for API compatibility.
-            if commit.run.current_checkpoint_id is not None:
-                ck = db.get(AssistantRunCheckpoint, commit.run.current_checkpoint_id)
-                if ck is not None:
-                    commit.run.checkpoint_seq = max(
-                        int(commit.run.checkpoint_seq or 0), int(ck.sequence or 0)
-                    )
-                    db.add(commit.run)
-                    db.commit()
-            run = commit.run
-        else:
-            # Terminal non-queue outcome via HTTP (cancelled): cancel waiting run.
-            events = (
-                EventSpec(
-                    event_key=f"human_interrupt_resolved:{interrupt_id}:{resolution_request_id}",
-                    event_name="human_interrupt_resolved",
-                    payload={
-                        "interruptId": str(interrupt_id),
-                        "status": result.interrupt.status,
-                        "kind": str(result.interrupt.kind),
-                        "resolutionRequestId": str(resolution_request_id),
-                    },
-                    visibility="public",
-                ),
-            )
-            if run_status in WAITING_STATUSES:
-                commit = run_repo.commit_waiting_terminal_cancel(
-                    run_id=run_id,
-                    expected_revision=int(run.state_revision),
-                    events=events
-                    + (
-                        EventSpec(
-                            event_key=f"run_status:cancelled:{interrupt_id}:{resolution_request_id}",
-                            event_name="run_status",
-                            payload={"status": "cancelled", "interruptId": str(interrupt_id)},
-                            visibility="public",
-                        ),
-                    ),
-                    failure_code=None,
-                    error_message=None,
-                )
-                run = commit.run
-            else:
+            if replay.idempotent_replay:
                 db.commit()
                 db.refresh(run)
-
-        db.refresh(result.interrupt)
-        return serialize_interrupt_safe(result.interrupt, run=run)
-
-    except DurableInterruptApiError:
-        db.rollback()
-        raise
-    except (InterruptConflict, DurableRunConflict, InterruptTokenError, InterruptSchemaError) as exc:
-        db.rollback()
-        raise _conflict_to_api(exc) from exc
+                return serialize_interrupt_safe(replay.interrupt, run=run)
+            db.rollback()
+            raise DurableInterruptApiError(
+                CODE_INTERRUPT_ALREADY_RESOLVED
+                if str(getattr(replay.interrupt, "status", "")) != "pending"
+                else CODE_INTERRUPT_IDEMPOTENCY_CONFLICT,
+                "concurrent resolution race",
+                status_code=409,
+            ) from exc
+        except DurableInterruptApiError:
+            raise
+        except (InterruptConflict, DurableRunConflict, InterruptTokenError, InterruptSchemaError) as race_exc:
+            db.rollback()
+            raise _conflict_to_api(race_exc) from exc
+        except Exception as race_exc:
+            db.rollback()
+            raise DurableInterruptApiError(
+                CODE_INTERRUPT_IDEMPOTENCY_CONFLICT,
+                f"concurrent resolution race: {race_exc}",
+                status_code=409,
+            ) from exc
     except ApiException:
         db.rollback()
         raise

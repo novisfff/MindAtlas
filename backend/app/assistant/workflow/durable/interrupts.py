@@ -13,7 +13,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
@@ -1389,11 +1389,30 @@ class DurableInterruptRepository:
         resolution_run_revision: int | None = None,
         token_pepper: str | None = None,
         queues_execution: bool = False,
+        prepare_queued_children: (
+            Callable[
+                [AssistantChatRun, AssistantRunInterrupt],
+                tuple[UUID, UUID, int],
+            ]
+            | None
+        ) = None,
     ) -> InterruptResolveResult:
         """Resolve pending Interrupt with Run-first lock and idempotency-before-token.
 
-        Idempotency lookup by (run_id, resolution_request_id) precedes pending/token
-        checks. Matching digest returns stored terminal state without re-mutation.
+        Ordering (Plan 07 §10.4 / §11.2):
+        1. lock Run
+        2. idempotency lookup by (run_id, resolution_request_id)
+        3. only for unknown IDs: lock Interrupt, verify pending/token/revisions/deadline
+        4. validate decision/values/comment
+        5. optionally prepare/flush queued children under the same lock
+        6. mutate Interrupt + flush
+
+        ``prepare_queued_children`` (if provided) is invoked only after unknown-ID
+        validation succeeds. Signature::
+
+            (run, interrupt) -> (checkpoint_id, budget_id, resolution_run_revision)
+
+        Explicit resolution pointer kwargs remain supported for direct repository tests.
         """
         pepper = require_interrupt_token_pepper(
             token_pepper if token_pepper is not None else self._token_pepper
@@ -1496,7 +1515,21 @@ class DurableInterruptRepository:
             outcome=outcome,
         )
 
+        # Derive/flush children only after unknown-ID validation under Run lock.
+        # Never build orphans on the replay path.
         if queues_execution:
+            if prepare_queued_children is not None:
+                prepared = prepare_queued_children(run, row)
+                if prepared is None or len(prepared) != 3:
+                    raise InterruptConflict(
+                        CODE_PROTOCOL_ERROR,
+                        "prepare_queued_children must return (checkpoint_id, budget_id, resolution_run_revision)",
+                        run=run,
+                    )
+                resolution_checkpoint_id = prepared[0]
+                resolution_budget_revision_id = prepared[1]
+                if resolution_run_revision is None:
+                    resolution_run_revision = prepared[2]
             if resolution_checkpoint_id is None or resolution_budget_revision_id is None:
                 raise InterruptConflict(
                     CODE_PROTOCOL_ERROR,
@@ -1504,6 +1537,12 @@ class DurableInterruptRepository:
                     run=run,
                 )
         else:
+            if prepare_queued_children is not None:
+                raise InterruptConflict(
+                    CODE_PROTOCOL_ERROR,
+                    "prepare_queued_children is only valid for queued resolutions",
+                    run=run,
+                )
             if resolution_checkpoint_id is not None or resolution_budget_revision_id is not None:
                 raise InterruptConflict(
                     CODE_PROTOCOL_ERROR,

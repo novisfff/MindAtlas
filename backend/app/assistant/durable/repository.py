@@ -1419,6 +1419,15 @@ class DurableRunRepository:
             if len(new_cks) == 1 and new_cks[0].id is not None:
                 run.current_checkpoint_id = new_cks[0].id
 
+        # Fold aggregate checkpoint_seq into the same CAS as pointer advance so
+        # queue + pointers stay one commit (Plan 07 §11.2).
+        if run.current_checkpoint_id is not None:
+            ck = self.db.get(AssistantRunCheckpoint, run.current_checkpoint_id)
+            if ck is not None and getattr(ck, "sequence", None) is not None:
+                run.checkpoint_seq = max(
+                    int(run.checkpoint_seq or 0), int(ck.sequence or 0)
+                )
+
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
