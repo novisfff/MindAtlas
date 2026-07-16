@@ -633,11 +633,25 @@ class TestGoldenRecoveryPath:
         assert result.applied_node_visit_id == proposal.node_visit_id
         assert result.capability_result is not None
         assert result.capability_result.status == "completed"
-        # Final Artifact / bounded text projected via structured_output or user_text.
-        assert (
-            result.capability_result.structured_output is not None
-            or result.capability_result.user_text is not None
-        )
+        # Concrete private terminal Artifact + non-empty bounded text (not soft or).
+        assert result.workflow_state is not None
+        terminal_art_id = result.workflow_state.terminal_output_artifact_id
+        assert terminal_art_id is not None, "expected terminal_output_artifact_id on workflow state"
+        assert isinstance(terminal_art_id, UUID)
+        top = result.workflow_state.frame_stack[-1]
+        assert terminal_art_id in top.node_output_artifact_ids
+        text = result.capability_result.user_text
+        assert isinstance(text, str) and text.strip(), "expected non-empty bounded user_text"
+        assert "proposal" in text.lower() or "artifact" in text.lower()
+        structured = result.capability_result.structured_output
+        assert isinstance(structured, dict)
+        node_outputs = structured.get("nodeOutputs") or structured.get("node_outputs") or {}
+        assert isinstance(node_outputs, dict) and "output" in node_outputs
+        out_payload = node_outputs["output"]
+        assert isinstance(out_payload, dict)
+        assert str(out_payload.get("text") or "").strip()
+        bag_art_ids = structured.get("artifactIds") or structured.get("artifact_ids") or []
+        assert str(terminal_art_id) in {str(a) for a in bag_art_ids}
         assert result.human_result is not None
         assert result.human_result.resolution_digest == interrupt.resolution_digest
 
@@ -898,34 +912,22 @@ class TestGoldenRecoveryPath:
             reason="expiry_test",
         )
         interrupt = pause.interrupt
-        # Force expiry in the past
+        # Force expiry in the past so real expire path is valid.
         interrupt.expires_at = datetime.now(timezone.utc) - timedelta(seconds=5)
         self.db.flush()
 
         irepo = DurableInterruptRepository(self.db, token_pepper=PEPPER)
-        # Prefer repository expire helper if present; else direct status transition via resolve path.
-        expired = False
-        if hasattr(irepo, "expire_interrupt"):
-            try:
-                irepo.expire_interrupt(run_id=run.id, interrupt_id=interrupt.id)
-                expired = True
-            except Exception:
-                expired = False
-        if not expired and hasattr(irepo, "scan_and_expire"):
-            try:
-                irepo.scan_and_expire(now=datetime.now(timezone.utc))
-                expired = True
-            except Exception:
-                expired = False
-        if not expired:
-            # Direct CAS-like update for unit proof when scanner API shape differs
-            interrupt.status = "expired"
-            self.db.flush()
+        # Real expire path only — no hasattr/bare-except fallback that writes status="expired".
+        resolved = irepo.expire_interrupt(run_id=run.id, interrupt_id=interrupt.id)
+        assert resolved.created_resolution or resolved.idempotent_replay
 
         interrupt = irepo.get_interrupt(interrupt.id)
         assert interrupt is not None
         assert str(interrupt.status) == "expired"
         assert interrupt.resolution_budget_revision_id is None
+        assert interrupt.resolution_checkpoint_id is None
+        assert interrupt.decision == "expired"
+        assert interrupt.resolution_digest is not None
 
     def test_two_sequential_interrupts_preserve_outer_continuation(self) -> None:
         """Two sequential human nodes: approve then second approve, one root completion."""
@@ -1032,6 +1034,11 @@ class TestGoldenRecoveryPath:
         ledger = _parent_ledger()
         _install_full_ledger(self.db, run, ledger)
 
+        from app.assistant.durable.models import AssistantRunInterrupt
+        from app.assistant.durable.repository import DurableChildBundle, DurableRunRepository
+        from app.assistant.workflow.durable.interrupt_api import _build_resume_children
+        from app.assistant.workflow.durable.interrupts import DurableInterruptRepository
+
         # First interrupt
         (
             run,
@@ -1062,121 +1069,133 @@ class TestGoldenRecoveryPath:
             material=material,
             parent_ledger=parent_ledger,
         )
-        # Second pause or terminal — sequential HITL should produce second_pause
-        assert cont1.kind in {"second_pause", "root_terminal", "human_applied"}, (
+        # Sequential HITL must force a second pause (no soft-pass on root_terminal).
+        assert cont1.kind == "second_pause", (
             cont1.kind,
             cont1.reason_code,
             cont1.detail,
         )
-        if cont1.kind == "second_pause":
-            # Claim again after second pause commit path if runner exposed it
-            db = self.db
-            db.refresh(run)
-            # Drive second pause via re-entry: if still running with pending pause effect,
-            # the resume unit may have re-paused. Fall back to another pause_resolve if waiting.
-            if run.status in {"waiting_approval", "waiting_input"}:
-                # Second interrupt already committed by resume path; resolve it.
-                from app.assistant.durable.repository import DurableChildBundle, DurableRunRepository
-                from app.assistant.workflow.durable.interrupt_api import _build_resume_children
-                from app.assistant.workflow.durable.interrupts import DurableInterruptRepository
+        assert cont1.pause_commit is not None or cont1.workflow_state is not None
+        assert cont1.root_continuation is not None
+        assert (
+            cont1.root_continuation.payload_digest
+            == proposal1.root_continuation.payload_digest
+        )
 
-                irepo = DurableInterruptRepository(db, token_pepper=PEPPER)
-                interrupt2 = irepo.get_pending_for_run(run_id=run.id)
-                assert interrupt2 is not None, "expected second pending interrupt"
-                waiting_revision = int(run.state_revision)
-                tok = irepo.rotate_token(
-                    run_id=run.id,
-                    interrupt_id=interrupt2.id,
-                    expected_request_revision=int(interrupt2.request_revision),
-                    expected_run_revision=waiting_revision,
-                )
-                prepared_hold: dict[str, Any] = {}
+        db = self.db
+        db.refresh(run)
+        assert run.status in {"waiting_approval", "waiting_input"}, (
+            f"expected waiting after second pause, got {run.status}"
+        )
 
-                def prepare_queued(locked_run, locked_interrupt):
-                    rows, budget_id, ck_id, deadline = _build_resume_children(
-                        db,
-                        run=locked_run,
-                        interrupt=locked_interrupt,
-                        expected_revision=int(locked_run.state_revision),
-                    )
-                    for row in rows:
-                        db.add(row)
-                    db.flush()
-                    prepared_hold["budget_id"] = budget_id
-                    prepared_hold["checkpoint_id"] = ck_id
-                    prepared_hold["deadline"] = deadline
-                    prepared_hold["expected_revision"] = int(locked_run.state_revision)
-                    return ck_id, budget_id, int(locked_run.state_revision) + 1
+        # Second interrupt row must exist and be pending.
+        irepo = DurableInterruptRepository(db, token_pepper=PEPPER)
+        interrupt2 = irepo.get_pending_for_run(run_id=run.id)
+        assert interrupt2 is not None, "expected second pending interrupt"
+        assert str(interrupt2.id) != str(interrupt1.id)
+        # Prefer node_id when present on the interrupt row.
+        if getattr(interrupt2, "node_id", None) is not None:
+            assert str(interrupt2.node_id) == "hitl2"
+        waiting_revision = int(run.state_revision)
+        tok = irepo.rotate_token(
+            run_id=run.id,
+            interrupt_id=interrupt2.id,
+            expected_request_revision=int(interrupt2.request_revision),
+            expected_run_revision=waiting_revision,
+        )
+        prepared_hold: dict[str, Any] = {}
 
-                irepo.resolve_interrupt(
-                    run_id=run.id,
-                    interrupt_id=interrupt2.id,
-                    resolution_request_id=uuid.uuid4(),
-                    token=tok.token,
-                    expected_token_revision=tok.token_revision,
-                    expected_request_revision=int(interrupt2.request_revision),
-                    expected_run_revision=waiting_revision,
-                    outcome="approved",
-                    submitted_values={"note": "second"},
-                    comment="ok2",
-                    queues_execution=True,
-                    prepare_queued_children=prepare_queued,
-                )
-                interrupt2 = irepo.get_interrupt(interrupt2.id)
-                run_repo = DurableRunRepository(db)
-                bundle = DurableChildBundle(
-                    rows=[],
-                    current_checkpoint_id=interrupt2.resolution_checkpoint_id,
-                    current_budget_revision_id=interrupt2.resolution_budget_revision_id,
-                )
-                commit = run_repo.commit_resume_queued(
-                    run_id=run.id,
-                    expected_revision=int(prepared_hold["expected_revision"]),
-                    children=bundle,
-                    set_deadline_at=prepared_hold.get("deadline")
-                    or (datetime.now(timezone.utc) + timedelta(minutes=5)),
-                )
-                claimed = run_repo.claim_queued(
-                    run_id=run.id,
-                    expected_revision=int(commit.state_revision),
-                    worker_id=lease.worker_id,
-                    lease_ttl=timedelta(seconds=30),
-                )
-                lease = type(lease)(
-                    run_id=run.id,
-                    worker_id=lease.worker_id,
-                    lease_generation=int(claimed.run.lease_generation),
-                )
-                cont2 = execute_interrupt_resume(
-                    self.db,
-                    run_id=run.id,
-                    lease=lease,
-                    expected_revision=int(claimed.state_revision),
-                    material=material,
-                    parent_ledger=parent_ledger,
-                )
-                assert cont2.kind == "root_terminal", (
-                    cont2.kind,
-                    cont2.reason_code,
-                    cont2.detail,
-                )
-                # Stable outer continuation across both interrupts
-                assert cont2.root_continuation is not None
-                assert (
-                    cont2.root_continuation.payload_digest
-                    == proposal1.root_continuation.payload_digest
-                )
-            else:
-                # Resume path completed both without re-wait — still one root terminal
-                pass
-        elif cont1.kind == "root_terminal":
-            # Graph advanced through second HITL without re-pause in this runner mode
-            assert cont1.root_continuation is not None
-            assert (
-                cont1.root_continuation.payload_digest
-                == proposal1.root_continuation.payload_digest
+        def prepare_queued(locked_run, locked_interrupt):
+            rows, budget_id, ck_id, deadline = _build_resume_children(
+                db,
+                run=locked_run,
+                interrupt=locked_interrupt,
+                expected_revision=int(locked_run.state_revision),
             )
+            for row in rows:
+                db.add(row)
+            db.flush()
+            prepared_hold["budget_id"] = budget_id
+            prepared_hold["checkpoint_id"] = ck_id
+            prepared_hold["deadline"] = deadline
+            prepared_hold["expected_revision"] = int(locked_run.state_revision)
+            return ck_id, budget_id, int(locked_run.state_revision) + 1
 
+        irepo.resolve_interrupt(
+            run_id=run.id,
+            interrupt_id=interrupt2.id,
+            resolution_request_id=uuid.uuid4(),
+            token=tok.token,
+            expected_token_revision=tok.token_revision,
+            expected_request_revision=int(interrupt2.request_revision),
+            expected_run_revision=waiting_revision,
+            outcome="approved",
+            submitted_values={"note": "second"},
+            comment="ok2",
+            queues_execution=True,
+            prepare_queued_children=prepare_queued,
+        )
+        interrupt2 = irepo.get_interrupt(interrupt2.id)
+        assert interrupt2 is not None
+        assert str(interrupt2.status) == "approved"
+        run_repo = DurableRunRepository(db)
+        bundle = DurableChildBundle(
+            rows=[],
+            current_checkpoint_id=interrupt2.resolution_checkpoint_id,
+            current_budget_revision_id=interrupt2.resolution_budget_revision_id,
+        )
+        commit = run_repo.commit_resume_queued(
+            run_id=run.id,
+            expected_revision=int(prepared_hold["expected_revision"]),
+            children=bundle,
+            set_deadline_at=prepared_hold.get("deadline")
+            or (datetime.now(timezone.utc) + timedelta(minutes=5)),
+        )
+        claimed = run_repo.claim_queued(
+            run_id=run.id,
+            expected_revision=int(commit.state_revision),
+            worker_id=lease.worker_id,
+            lease_ttl=timedelta(seconds=30),
+        )
+        lease = type(lease)(
+            run_id=run.id,
+            worker_id=lease.worker_id,
+            lease_generation=int(claimed.run.lease_generation),
+        )
+        cont2 = execute_interrupt_resume(
+            self.db,
+            run_id=run.id,
+            lease=lease,
+            expected_revision=int(claimed.state_revision),
+            material=material,
+            parent_ledger=parent_ledger,
+        )
+        assert cont2.kind == "root_terminal", (
+            cont2.kind,
+            cont2.reason_code,
+            cont2.detail,
+        )
+        # One stable outer continuation across both interrupts.
+        assert cont2.root_continuation is not None
+        assert (
+            cont2.root_continuation.payload_digest
+            == proposal1.root_continuation.payload_digest
+        )
+        assert (
+            cont2.root_continuation.payload_digest
+            == cont1.root_continuation.payload_digest
+        )
+
+        rows = (
+            self.db.query(AssistantRunInterrupt)
+            .filter(AssistantRunInterrupt.run_id == run.id)
+            .all()
+        )
+        assert len(rows) == 2, f"expected exactly two interrupt rows, got {len(rows)}"
+        statuses = sorted(str(r.status) for r in rows)
+        assert statuses == ["approved", "approved"]
+        interrupt1 = irepo.get_interrupt(interrupt1.id)
+        assert interrupt1 is not None
         assert str(interrupt1.status) == "approved"
 
     def test_nested_child_human_then_parent_completes(self) -> None:

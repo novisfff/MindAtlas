@@ -21,6 +21,10 @@ Private Artifact + bounded user text only. No Entry/Tag/Relation/Draft/HTTP/exte
 - Registry: `CapabilityRegistry.resolve` uses `classify_for_durable_publish` when plan extension present and re-derived plan digest matches
 - Catalog remains `catalog_enabled=false`; no admissions flag flip
 
+### Workflow publish helper exception (intentional)
+
+There is **no Plan 01 production `WorkflowService.publish` surface** for `AssistantWorkflow` rows comparable to `AgentSkillService.publish`. Golden path therefore inserts a fresh Workflow + published version via the evaluation helper `_create_published_workflow` in `golden_path.py` (same pattern as test-only `create_published_workflow` in `agent_skill_test_support.py`). Skill binding/publish remains the real Plan 01 path; only the Workflow row materialization is the helper exception. Not a production admissions flip.
+
 ## Behavior freeze (descriptor)
 
 | Field | Value |
@@ -72,11 +76,26 @@ Scenario covered:
 3. Kill/restart sim (durable waiting on disk; no in-memory waiter)  
 4. Pending fetch + token rotate + edit/approve resolve  
 5. Kill/restart sim after decision (queued resume-ready)  
-6. `execute_interrupt_resume` → root terminal + structured output / user text  
+6. `execute_interrupt_resume` → root terminal + **concrete** `terminal_output_artifact_id` + non-empty bounded `user_text` + bag `nodeOutputs.output`  
 7. One interrupt decision; one derived resume budget with byte-identical non-time usage  
 8. Zero Entry/Tag/Relation/Draft row deltas  
 
-Also: rejection, cancellation, expiry, malformed values, two sequential HITLs, nested child frame.
+Also:
+
+- Rejection / cancellation: terminal, no resume budget  
+- Expiry: real `DurableInterruptRepository.expire_interrupt` (no status-write fallback)  
+- Malformed values: remains pending  
+- Two sequential HITLs: **requires** `second_pause` + two interrupt rows + one stable outer continuation  
+- Nested child human → parent complete  
+
+### Prior Plan 07 Task 7 coverage (not re-proven here)
+
+Pending sibling suffix + Provider waiting close / memory-timing concerns are covered by Plan 07 Task 7 provider-waiting tests (same honesty style as env-gated gaps below):
+
+- `backend/tests/test_durable_provider_waiting_resume.py` — one `ProviderWaitingResolution`, pending sibling suffix preserved, original surface / continuation integrity  
+- Related interrupt resume suites under `backend/tests/test_durable_interrupt_resume.py` / `test_durable_provider_continuation.py`  
+
+Task 9 golden path stays focused on Workflow interrupt recovery + private Artifact; it does not re-drive sibling re-authorization or live memory timing.
 
 ## Env-gated gaps (honest)
 
@@ -85,6 +104,7 @@ Also: rejection, cancellation, expiry, malformed values, two sequential HITLs, n
 | Postgres dual-session kill/restart | skipped unless `MINDATLAS_TEST_POSTGRES_URL` |
 | Live MinIO Artifact store | skipped unless `MINDATLAS_TEST_MINIO` |
 | Live Provider I/O | skipped unless `MINDATLAS_TEST_LIVE_PROVIDER`; tests use scripted LLM gateway |
+| Pending sibling re-authorization / memory timing | covered by Plan 07 Task 7 provider-waiting tests (not re-run as golden scenarios) |
 | Full compose API+worker smoke | not run in Task 9 (library recovery preferred) |
 | Production catalog/runtime admissions | **not flipped** (evaluation/hidden only) |
 
