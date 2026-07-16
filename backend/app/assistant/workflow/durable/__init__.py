@@ -1,7 +1,7 @@
 """Plan 07 durable Workflow/Agent execution contracts package.
 
-Task 1 defines portable frozen contracts + codec only. Planner/runner/interrupts
-land in later tasks.
+Task 1: portable frozen contracts + codec.
+Task 2: frozen DurableExecutionPlanV1 planner + durable publish helpers.
 """
 
 from __future__ import annotations
@@ -30,8 +30,23 @@ from app.assistant.workflow.durable.contracts import (  # noqa: F401
     derive_node_visit_id,
 )
 from app.assistant.workflow.durable.context import EphemeralWorkflowContext  # noqa: F401
+from app.assistant.workflow.durable.planner import (  # noqa: F401
+    DURABLE_PLAN_EXTENSION_CONTRACT_VERSION,
+    DURABLE_PLAN_EXTENSION_KEY,
+    DurablePlanError,
+    attach_durable_plan_extension,
+    business_side_effect_maximum,
+    extract_durable_plan_digest,
+    plan_allows_durable_interrupt,
+    plan_durable_execution,
+    plan_durable_execution_from_surface,
+    plan_parallel_safe,
+    publish_durable_binding_snapshot,
+)
 
 __all__ = [
+    "DURABLE_PLAN_EXTENSION_CONTRACT_VERSION",
+    "DURABLE_PLAN_EXTENSION_KEY",
     "DURABLE_WORKFLOW_IDENTITY_NAMESPACE",
     "BudgetSuspensionStateV1",
     "DurableBranchDecisionV1",
@@ -42,10 +57,13 @@ __all__ = [
     "DurableNodePlanV1",
     "DurablePauseEffectPort",
     "DurablePauseProposalV1",
+    "DurablePlanError",
     "DurableWorkflowStateV1",
     "EphemeralWorkflowContext",
     "FrozenExecutionDependencyRef",
+    "attach_durable_plan_extension",
     "build_root_continuation",
+    "business_side_effect_maximum",
     "compute_branch_decision_digest",
     "compute_loop_cursor_digest",
     "compute_plan_digest",
@@ -54,4 +72,10 @@ __all__ = [
     "derive_frame_id",
     "derive_interrupt_id",
     "derive_node_visit_id",
+    "extract_durable_plan_digest",
+    "plan_allows_durable_interrupt",
+    "plan_durable_execution",
+    "plan_durable_execution_from_surface",
+    "plan_parallel_safe",
+    "publish_durable_binding_snapshot",
 ]
