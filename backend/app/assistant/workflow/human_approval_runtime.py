@@ -42,8 +42,13 @@ class DurableBlockingRuntimeForbidden(RuntimeError):
 def _reject_durable_blocking_runtime(session_factory: sessionmaker, run_id: Any) -> None:
     """Fail closed before creating a Legacy approval row for durable main_agent Runs.
 
-    Non-UUID / missing / non-main_agent / non-durable statuses are ignored so
-    explicit Legacy and workflow-test paths remain unchanged.
+    Soft-return only for clearly non-durable identifiers:
+    - empty / non-UUID run ids (Legacy / workflow-test paths)
+    - missing row (not a known durable Main Agent run)
+    - present row whose runtime_kind is not main_agent
+
+    Once the id is a valid UUID, DB/session lookup failures fail closed so a
+    durable Main Agent cannot slip past the guard into Legacy row insert.
     """
     raw = str(run_id or "").strip()
     if not raw:
@@ -69,10 +74,13 @@ def _reject_durable_blocking_runtime(session_factory: sessionmaker, run_id: Any)
             )
     except DurableBlockingRuntimeForbidden:
         raise
-    except Exception:
-        # Session/DB errors must not silently allow durable into Legacy; re-raise
-        # only our stable forbid. Lookup failures for non-durable paths stay open.
-        return
+    except Exception as exc:
+        # Valid UUID + lookup failure: fail closed. Soft-open only for non-UUID
+        # identifiers above; never let DB/session errors admit durable into Legacy.
+        raise DurableBlockingRuntimeForbidden(
+            f"{DURABLE_BLOCKING_RUNTIME_FORBIDDEN}: run lookup failed for "
+            f"{rid}; refusing Legacy create_and_wait"
+        ) from exc
 
 
 def utcnow() -> datetime:

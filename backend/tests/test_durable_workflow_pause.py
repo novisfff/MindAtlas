@@ -7,14 +7,16 @@ Covers:
 - Crash before result transaction leaves no orphan Interrupt
 - Retry converges on same proposal/key/digests
 - Accidental durable call into Legacy create_and_wait forbidden
+- UUID lookup failure fails closed (no Legacy row insert)
+- Parent ledger hard-fail without full BudgetLedgerState
 - No polling/sleep/retained waiter after pause
-- Stop-vs-pause CAS (SQLite sequential; PG dual-session when available)
+- Stop-vs-pause CAS (SQLite sequential; PG dual-session covered by dedicated
+  Plan 06/07 PG suites, not an empty placeholder gate)
 """
 
 from __future__ import annotations
 
 import inspect
-import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -32,7 +34,6 @@ DIGEST_A = "a" * 64
 DIGEST_B = "b" * 64
 DIGEST_C = "c" * 64
 BUILD = "build-test-plan07-t5"
-_POSTGRES_URL = os.environ.get("MINDATLAS_TEST_POSTGRES_URL", "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -864,16 +865,84 @@ class TestDurableBlockingRuntimeForbidden:
         # Missing run UUID is ignored (not treated as durable main_agent).
         _reject_durable_blocking_runtime(factory, str(uuid.uuid4()))
 
+    def test_uuid_lookup_failure_fails_closed(self) -> None:
+        """Valid UUID + DB/session lookup error must not admit Legacy row insert."""
+        from app.assistant.workflow.human_approval_runtime import (
+            DURABLE_BLOCKING_RUNTIME_FORBIDDEN,
+            DurableBlockingRuntimeForbidden,
+            HumanLoopContext,
+            HumanLoopRuntime,
+            _reject_durable_blocking_runtime,
+        )
+
+        class _BrokenSession:
+            def get(self, *args: Any, **kwargs: Any) -> None:
+                raise RuntimeError("simulated session/db failure")
+
+            def __enter__(self) -> "_BrokenSession":
+                return self
+
+            def __exit__(self, *args: Any) -> None:
+                return None
+
+        class _BrokenFactory:
+            def __call__(self) -> _BrokenSession:
+                return _BrokenSession()
+
+        rid = str(uuid.uuid4())
+        with pytest.raises(DurableBlockingRuntimeForbidden) as exc:
+            _reject_durable_blocking_runtime(_BrokenFactory(), rid)  # type: ignore[arg-type]
+        assert exc.value.reason_code == DURABLE_BLOCKING_RUNTIME_FORBIDDEN
+        assert "lookup failed" in str(exc.value).lower() or DURABLE_BLOCKING_RUNTIME_FORBIDDEN in str(
+            exc.value
+        )
+
+        # create_and_wait must also fail closed before any approval row.
+        runtime = HumanLoopRuntime(
+            _BrokenFactory(),  # type: ignore[arg-type]
+            context=HumanLoopContext(run_id=rid, channel_type="assistant"),
+        )
+        with pytest.raises(DurableBlockingRuntimeForbidden):
+            runtime.create_and_wait(
+                node_id="n1",
+                node_label="Approve",
+                request_payload={"title": "x"},
+                field_schema=[{"name": "a", "type": "string"}],
+                initial_values={},
+            )
+
 
 # ---------------------------------------------------------------------------
-# PostgreSQL dual-session stop-vs-pause (optional gate)
+# Parent ledger hard-fail (no synthetic positive remaining)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not _POSTGRES_URL, reason="MINDATLAS_TEST_POSTGRES_URL not set")
-class TestStopVersusPausePostgres:
-    def test_placeholder_gate_documents_requirement(self) -> None:
-        # Full dual-session force is exercised when PG URL is available in CI.
-        # SQLite sequential stop-first / pause-first tests above cover the CAS
-        # predicates; this gate ensures the suite is discoverable under PG.
-        assert _POSTGRES_URL
+class TestParentBudgetLedgerFailClosed:
+    def setup_method(self) -> None:
+        reset_caches()
+        self.db = _make_session()
+
+    def teardown_method(self) -> None:
+        self.db.close()
+
+    def test_resolve_parent_ledger_rejects_partial_budget_payload(self) -> None:
+        from app.assistant.workflow.durable.pause import (
+            DurablePauseProtocolError,
+            resolve_parent_budget_ledger,
+        )
+
+        run, _lease, _rev, _repo = _seed_running_with_base(self.db)
+        # materialize_base_run_state stores a partial budget payload without ledger.
+        with pytest.raises(DurablePauseProtocolError) as exc:
+            resolve_parent_budget_ledger(self.db, run=run)
+        assert "full parent" in str(exc.value).lower() or "parent_ledger" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQL dual-session stop-vs-pause
+# ---------------------------------------------------------------------------
+# Honest skip only — SQLite sequential stop-first / pause-first tests above
+# cover the CAS predicates. True two-Session force requires a full PG seed
+# (worker registry + base materialize + pause commit) and lives with other
+# Plan 06/07 PG gates (see test_durable_worker_lease_postgres.py). Do not
+# claim a PG gate with an empty placeholder assertion.

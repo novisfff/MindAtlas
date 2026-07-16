@@ -37,7 +37,6 @@ from app.assistant.durable.repository import (
     LeaseToken,
 )
 from app.assistant.models import AssistantChatRun
-from app.assistant.policy import create_initial_ledger_state, normalize_run_budget_limits
 from app.assistant.policy.budgets import BudgetLedgerState
 from app.assistant.policy.obligations import build_reserved_obligation
 from app.assistant.workflow.durable.contracts import (
@@ -171,13 +170,13 @@ def resolve_parent_budget_ledger(
     db: Session,
     *,
     run: AssistantChatRun,
-    remaining_ms: int = 120_000,
 ) -> tuple[BudgetLedgerState, UUID]:
     """Return (parent BudgetLedgerState, parent_budget_revision_id).
 
-    Prefers decoding the current budget revision payload when it carries a
-    full ledger; otherwise synthesizes a deterministic positive-remaining
-    ledger suitable for insert-or-read interrupt creation in tests/runtime.
+    Requires a real full parent ledger on the current budget revision payload.
+    Does **not** invent positive remaining for production pause — callers that
+    only have partial budget payloads must pass an explicit live
+    ``parent_ledger`` into ``commit_durable_workflow_pause`` (tests/fixtures do).
     """
     budget_id = run.current_budget_revision_id
     if budget_id is None:
@@ -192,28 +191,19 @@ def resolve_parent_budget_ledger(
             reason_code=CODE_DURABLE_PAUSE_PROTOCOL_ERROR,
         )
     payload = dict(row.payload or {})
-    # Prefer a real ledger payload if present.
+    if "ledgerDigest" not in payload and "ledger_digest" not in payload:
+        raise DurablePauseProtocolError(
+            "budget revision payload is not a full parent BudgetLedgerState; "
+            "pass live parent_ledger to commit_durable_workflow_pause",
+            reason_code=CODE_DURABLE_PAUSE_PROTOCOL_ERROR,
+        )
     try:
-        if "ledgerDigest" in payload or "ledger_digest" in payload:
-            return BudgetLedgerState.model_validate(payload), budget_id
-    except Exception:  # noqa: BLE001
-        pass
-
-    # Synthetic positive-remaining ledger (Task 5 unit / fixture path).
-    from datetime import timedelta
-
-    from app.assistant.policy.contracts import RunBudgetLimits
-
-    start = datetime.now(timezone.utc)
-    limits_payload = normalize_run_budget_limits().model_dump()
-    limits_payload["max_wall_time_ms"] = max(int(remaining_ms), 1_000)
-    limits = RunBudgetLimits(**limits_payload)
-    ledger = create_initial_ledger_state(
-        limits=limits,
-        started_at_utc=start,
-        deadline_at_utc=start + timedelta(milliseconds=int(remaining_ms) + 5_000),
-    )
-    return ledger, budget_id
+        return BudgetLedgerState.model_validate(payload), budget_id
+    except Exception as exc:  # noqa: BLE001
+        raise DurablePauseProtocolError(
+            f"budget revision payload failed BudgetLedgerState validation: {exc}",
+            reason_code=CODE_DURABLE_PAUSE_PROTOCOL_ERROR,
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -368,207 +358,209 @@ def commit_durable_workflow_pause(
         prepared.unit.logical_unit_id if prepared is not None else None
     )
 
-    # Optional proposal artifact (inline; no MinIO required for small JSON).
-    artifact_rows: list[Any] = []
-    artifact_ids: list[UUID] = []
-    if store_proposal_artifact:
-        art = _build_proposal_artifact(run_id=run_id, proposal=proposal)
-        artifact_rows.append(art)
-        artifact_ids.append(art.id)
+    # Entire write sequence (Artifact / Obligation / Checkpoint / Interrupt / CAS)
+    # is wrapped so any exception rolls back partial Session dirty state — not
+    # only DurableRunConflict / InterruptConflict.
+    try:
+        # Optional proposal artifact (inline; no MinIO required for small JSON).
+        artifact_rows: list[Any] = []
+        artifact_ids: list[UUID] = []
+        if store_proposal_artifact:
+            art = _build_proposal_artifact(run_id=run_id, proposal=proposal)
+            artifact_rows.append(art)
+            artifact_ids.append(art.id)
 
-    # Optional Plan 05 approval/user-input obligation revision.
-    obligation_row: AssistantRunObligationRevision | None = None
-    new_obligation_id = run.current_obligation_revision_id
-    if add_wait_obligation:
-        obligation_row, new_obligation_id = _build_wait_obligation_revision(
-            db,
-            run=run,
-            proposal=proposal,
+        # Optional Plan 05 approval/user-input obligation revision.
+        obligation_row: AssistantRunObligationRevision | None = None
+        new_obligation_id = run.current_obligation_revision_id
+        if add_wait_obligation:
+            obligation_row, new_obligation_id = _build_wait_obligation_revision(
+                db,
+                run=run,
+                proposal=proposal,
+            )
+
+        # Build waiting Checkpoint v2 (complete pause bundle; no provider cont).
+        from app.assistant.durable.checkpoints import (
+            _current_transcript_digest,  # noqa: SLF001
+            _next_checkpoint_sequence,  # noqa: SLF001
         )
+        from app.assistant.durable.codec import checkpoint_state_digest
 
-    # Build waiting Checkpoint v2 (complete pause bundle; no provider cont).
-    from app.assistant.durable.checkpoints import (
-        _current_transcript_digest,  # noqa: SLF001
-        _next_checkpoint_sequence,  # noqa: SLF001
-    )
-    from app.assistant.durable.codec import checkpoint_state_digest
+        ordinal, transcript_digest, _msgs = _current_transcript_digest(db, run_id)
+        next_action = DurableNextActionV2(kind="wait")
+        # Suspension is created by interrupt repository; placeholder filled after create.
+        # We first need suspension from create_pending_interrupt. Order:
+        # 1) create interrupt with temporary checkpoint row already flushed
+        # 2) build checkpoint payload with suspension
+        # 3) CAS commit children
 
-    ordinal, transcript_digest, _msgs = _current_transcript_digest(db, run_id)
-    next_action = DurableNextActionV2(kind="wait")
-    # Suspension is created by interrupt repository; placeholder filled after create.
-    # We first need suspension from create_pending_interrupt. Order:
-    # 1) create interrupt with temporary checkpoint row already flushed
-    # 2) build checkpoint payload with suspension
-    # 3) CAS commit children
+        # Flush artifact + obligation first so FKs/pointers resolve.
+        child_pre: list[Any] = list(artifact_rows)
+        if obligation_row is not None:
+            child_pre.append(obligation_row)
+        for row in child_pre:
+            db.add(row)
+        if child_pre:
+            db.flush()
 
-    # Flush artifact + obligation first so FKs/pointers resolve.
-    child_pre: list[Any] = list(artifact_rows)
-    if obligation_row is not None:
-        child_pre.append(obligation_row)
-    for row in child_pre:
-        db.add(row)
-    if child_pre:
+        # Create a provisional checkpoint shell so Interrupt FK is satisfied, then
+        # overwrite payload after suspension is known (same row id).
+        provisional = DurableAgentCheckpointV2(
+            run_id=run_id,
+            phase="waiting",
+            manifest_revision_id=run.current_manifest_revision_id,
+            policy_revision_id=run.current_policy_revision_id,
+            budget_revision_id=run.current_budget_revision_id,
+            obligation_revision_id=new_obligation_id,
+            provider_message_ordinal=ordinal,
+            provider_transcript_digest=transcript_digest,
+            provider_loop_continuation=None,
+            inflight_unit=None,
+            capability_frames=(),
+            artifact_ids=tuple(artifact_ids),
+            visible_text_artifact_id=None,
+            next_action=next_action,
+            workflow_state=workflow_state,
+            active_capability_continuation=proposal.root_continuation,
+            # Temporary: use a throwaway suspension that will be replaced — we cannot
+            # construct DurableAgentCheckpointV2 without complete pause bundle.
+            # So create interrupt first with a pre-inserted minimal checkpoint row
+            # that is not yet a valid v2 encode, then replace.
+            pending_interrupt_id=proposal.interrupt_id,
+            budget_suspension=_provisional_suspension(
+                run_id=run_id,
+                interrupt_id=proposal.interrupt_id,
+                parent_budget_revision_id=parent_budget_id,
+                parent_ledger=parent_ledger,
+            ),
+        )
+        state_payload = encode_checkpoint_v2(provisional)
+        state_digest = checkpoint_state_digest(provisional)
+        seq = _next_checkpoint_sequence(db, run_id)
+        ck_row = AssistantRunCheckpoint(
+            id=checkpoint_id,
+            run_id=run_id,
+            sequence=seq,
+            expected_state_revision=int(expected_revision),
+            committed_state_revision=int(expected_revision) + 1,
+            schema_version=2,
+            manifest_revision_id=run.current_manifest_revision_id,
+            policy_revision_id=run.current_policy_revision_id,
+            budget_revision_id=run.current_budget_revision_id,
+            obligation_revision_id=new_obligation_id,
+            provider_message_ordinal=ordinal,
+            provider_transcript_digest=transcript_digest,
+            phase="waiting",
+            logical_unit_id=completed_logical,
+            reason=reason,
+            state_payload=state_payload,
+            state_digest=state_digest,
+        )
+        db.add(ck_row)
         db.flush()
 
-    # Create a provisional checkpoint shell so Interrupt FK is satisfied, then
-    # overwrite payload after suspension is known (same row id).
-    provisional = DurableAgentCheckpointV2(
-        run_id=run_id,
-        phase="waiting",
-        manifest_revision_id=run.current_manifest_revision_id,
-        policy_revision_id=run.current_policy_revision_id,
-        budget_revision_id=run.current_budget_revision_id,
-        obligation_revision_id=new_obligation_id,
-        provider_message_ordinal=ordinal,
-        provider_transcript_digest=transcript_digest,
-        provider_loop_continuation=None,
-        inflight_unit=None,
-        capability_frames=(),
-        artifact_ids=tuple(artifact_ids),
-        visible_text_artifact_id=None,
-        next_action=next_action,
-        workflow_state=workflow_state,
-        active_capability_continuation=proposal.root_continuation,
-        # Temporary: use a throwaway suspension that will be replaced — we cannot
-        # construct DurableAgentCheckpointV2 without complete pause bundle.
-        # So create interrupt first with a pre-inserted minimal checkpoint row
-        # that is not yet a valid v2 encode, then replace.
-        pending_interrupt_id=proposal.interrupt_id,
-        budget_suspension=_provisional_suspension(
-            run_id=run_id,
-            interrupt_id=proposal.interrupt_id,
-            parent_budget_revision_id=parent_budget_id,
-            parent_ledger=parent_ledger,
-        ),
-    )
-    state_payload = encode_checkpoint_v2(provisional)
-    state_digest = checkpoint_state_digest(provisional)
-    seq = _next_checkpoint_sequence(db, run_id)
-    ck_row = AssistantRunCheckpoint(
-        id=checkpoint_id,
-        run_id=run_id,
-        sequence=seq,
-        expected_state_revision=int(expected_revision),
-        committed_state_revision=int(expected_revision) + 1,
-        schema_version=2,
-        manifest_revision_id=run.current_manifest_revision_id,
-        policy_revision_id=run.current_policy_revision_id,
-        budget_revision_id=run.current_budget_revision_id,
-        obligation_revision_id=new_obligation_id,
-        provider_message_ordinal=ordinal,
-        provider_transcript_digest=transcript_digest,
-        phase="waiting",
-        logical_unit_id=completed_logical,
-        reason=reason,
-        state_payload=state_payload,
-        state_digest=state_digest,
-    )
-    db.add(ck_row)
-    db.flush()
+        # Insert-or-read Interrupt (Run already locked above).
+        irepo = DurableInterruptRepository(db)
+        try:
+            created = irepo.create_pending_interrupt(
+                run_id=run_id,
+                interrupt_id=proposal.interrupt_id,
+                interrupt_key=interrupt_key,
+                kind=proposal.kind,
+                checkpoint_id=checkpoint_id,
+                manifest_revision_id=run.current_manifest_revision_id,
+                budget_revision_id=parent_budget_id,
+                workflow_frame_id=proposal.frame_id,
+                node_id=proposal.node_id,
+                node_visit_id=proposal.node_visit_id,
+                request_run_revision=int(expected_revision),
+                request_payload=dict(proposal.request_payload),
+                field_schema=dict(proposal.field_schema) if proposal.field_schema else None,
+                initial_values=dict(proposal.initial_values or {}),
+                parent_ledger=parent_ledger,
+                parent_budget_revision_id=parent_budget_id,
+                ttl_sec=ttl_sec,
+                owner_skill_package_id=top.owner_skill_package_id,
+                owner_skill_version_id=top.owner_skill_version_id,
+                lock_run=False,  # already locked
+            )
+        except InterruptConflict as exc:
+            raise DurableRunConflict(
+                getattr(exc, "code", CODE_DURABLE_PAUSE_PROTOCOL_ERROR),
+                str(exc),
+                run=run,
+            ) from exc
 
-    # Insert-or-read Interrupt (Run already locked above).
-    irepo = DurableInterruptRepository(db)
-    try:
-        created = irepo.create_pending_interrupt(
+        suspension = created.suspension
+        # Rebuild checkpoint payload with the immutable suspension truth.
+        final_cp = DurableAgentCheckpointV2(
             run_id=run_id,
-            interrupt_id=proposal.interrupt_id,
-            interrupt_key=interrupt_key,
-            kind=proposal.kind,
-            checkpoint_id=checkpoint_id,
+            phase="waiting",
             manifest_revision_id=run.current_manifest_revision_id,
-            budget_revision_id=parent_budget_id,
-            workflow_frame_id=proposal.frame_id,
-            node_id=proposal.node_id,
-            node_visit_id=proposal.node_visit_id,
-            request_run_revision=int(expected_revision),
-            request_payload=dict(proposal.request_payload),
-            field_schema=dict(proposal.field_schema) if proposal.field_schema else None,
-            initial_values=dict(proposal.initial_values or {}),
-            parent_ledger=parent_ledger,
-            parent_budget_revision_id=parent_budget_id,
-            ttl_sec=ttl_sec,
-            owner_skill_package_id=top.owner_skill_package_id,
-            owner_skill_version_id=top.owner_skill_version_id,
-            lock_run=False,  # already locked
+            policy_revision_id=run.current_policy_revision_id,
+            budget_revision_id=run.current_budget_revision_id,
+            obligation_revision_id=new_obligation_id,
+            provider_message_ordinal=ordinal,
+            provider_transcript_digest=transcript_digest,
+            provider_loop_continuation=None,
+            inflight_unit=None,
+            capability_frames=(),
+            artifact_ids=tuple(artifact_ids),
+            visible_text_artifact_id=None,
+            next_action=next_action,
+            workflow_state=workflow_state,
+            active_capability_continuation=proposal.root_continuation,
+            pending_interrupt_id=proposal.interrupt_id,
+            budget_suspension=suspension,
         )
-    except InterruptConflict as exc:
-        db.rollback()
-        raise DurableRunConflict(
-            getattr(exc, "code", CODE_DURABLE_PAUSE_PROTOCOL_ERROR),
-            str(exc),
-            run=run,
-        ) from exc
+        ck_row.state_payload = encode_checkpoint_v2(final_cp)
+        ck_row.state_digest = checkpoint_state_digest(final_cp)
+        db.add(ck_row)
+        db.flush()
 
-    suspension = created.suspension
-    # Rebuild checkpoint payload with the immutable suspension truth.
-    final_cp = DurableAgentCheckpointV2(
-        run_id=run_id,
-        phase="waiting",
-        manifest_revision_id=run.current_manifest_revision_id,
-        policy_revision_id=run.current_policy_revision_id,
-        budget_revision_id=run.current_budget_revision_id,
-        obligation_revision_id=new_obligation_id,
-        provider_message_ordinal=ordinal,
-        provider_transcript_digest=transcript_digest,
-        provider_loop_continuation=None,
-        inflight_unit=None,
-        capability_frames=(),
-        artifact_ids=tuple(artifact_ids),
-        visible_text_artifact_id=None,
-        next_action=next_action,
-        workflow_state=workflow_state,
-        active_capability_continuation=proposal.root_continuation,
-        pending_interrupt_id=proposal.interrupt_id,
-        budget_suspension=suspension,
-    )
-    ck_row.state_payload = encode_checkpoint_v2(final_cp)
-    ck_row.state_digest = checkpoint_state_digest(final_cp)
-    db.add(ck_row)
-    db.flush()
+        target_status = (
+            STATUS_WAITING_INPUT if proposal.kind == "input" else STATUS_WAITING_APPROVAL
+        )
+        events = (
+            EventSpec(
+                event_key=f"run.wait:{target_status}:{proposal.interrupt_id}:rev{expected_revision}",
+                event_name="run.wait",
+                payload={
+                    "interruptId": str(proposal.interrupt_id),
+                    "kind": proposal.kind,
+                    "nodeId": proposal.node_id,
+                    "nodeVisitId": proposal.node_visit_id,
+                    "proposalDigest": proposal.proposal_digest,
+                    "targetStatus": target_status,
+                },
+                visibility="public",
+            ),
+            EventSpec(
+                event_key=f"unit.result:{completed_logical or 'none'}:rev{expected_revision}",
+                event_name="unit.result",
+                payload={
+                    "phase": "waiting",
+                    "logicalUnitId": completed_logical,
+                    "schemaVersion": 2,
+                    "pendingInterruptId": str(proposal.interrupt_id),
+                },
+                visibility="internal",
+            ),
+        )
 
-    target_status = (
-        STATUS_WAITING_INPUT if proposal.kind == "input" else STATUS_WAITING_APPROVAL
-    )
-    events = (
-        EventSpec(
-            event_key=f"run.wait:{target_status}:{proposal.interrupt_id}:rev{expected_revision}",
-            event_name="run.wait",
-            payload={
-                "interruptId": str(proposal.interrupt_id),
-                "kind": proposal.kind,
-                "nodeId": proposal.node_id,
-                "nodeVisitId": proposal.node_visit_id,
-                "proposalDigest": proposal.proposal_digest,
-                "targetStatus": target_status,
-            },
-            visibility="public",
-        ),
-        EventSpec(
-            event_key=f"unit.result:{completed_logical or 'none'}:rev{expected_revision}",
-            event_name="unit.result",
-            payload={
-                "phase": "waiting",
-                "logicalUnitId": completed_logical,
-                "schemaVersion": 2,
-                "pendingInterruptId": str(proposal.interrupt_id),
-            },
-            visibility="internal",
-        ),
-    )
+        # Interrupt is already in the session; children bundle carries checkpoint +
+        # optional obligation/artifacts (already flushed). Re-add checkpoint so
+        # pointer advance still runs through the shared CAS path.
+        bundle = DurableChildBundle(
+            rows=[ck_row],
+            current_manifest_revision_id=run.current_manifest_revision_id,
+            current_policy_revision_id=run.current_policy_revision_id,
+            current_budget_revision_id=run.current_budget_revision_id,
+            current_obligation_revision_id=new_obligation_id,
+            current_checkpoint_id=checkpoint_id,
+        )
 
-    # Interrupt is already in the session; children bundle carries checkpoint +
-    # optional obligation/artifacts (already flushed). Re-add checkpoint so
-    # pointer advance still runs through the shared CAS path.
-    bundle = DurableChildBundle(
-        rows=[ck_row],
-        current_manifest_revision_id=run.current_manifest_revision_id,
-        current_policy_revision_id=run.current_policy_revision_id,
-        current_budget_revision_id=run.current_budget_revision_id,
-        current_obligation_revision_id=new_obligation_id,
-        current_checkpoint_id=checkpoint_id,
-    )
-
-    try:
         commit = repo.commit_waiting_pause(
             run_id=run_id,
             expected_revision=expected_revision,
@@ -577,20 +569,27 @@ def commit_durable_workflow_pause(
             events=events,
             children=bundle,
         )
-    except DurableRunConflict:
-        # Entire txn including Interrupt rolls back.
-        raise
 
-    db.refresh(created.interrupt)
-    return DurablePauseCommitResult(
-        commit=commit,
-        interrupt=created.interrupt,
-        checkpoint_id=checkpoint_id,
-        proposal=proposal,
-        suspension_digest=str(created.interrupt.budget_suspension_digest),
-        request_digest=str(created.interrupt.request_digest),
-        interrupt_key=interrupt_key,
-    )
+        db.refresh(created.interrupt)
+        return DurablePauseCommitResult(
+            commit=commit,
+            interrupt=created.interrupt,
+            checkpoint_id=checkpoint_id,
+            proposal=proposal,
+            suspension_digest=str(created.interrupt.budget_suspension_digest),
+            request_digest=str(created.interrupt.request_digest),
+            interrupt_key=interrupt_key,
+        )
+    except Exception:
+        # Roll back Artifact / Obligation / Checkpoint / Interrupt dirty state
+        # for any failure path (CAS conflict, interrupt conflict, encode error,
+        # DB error, etc.). DurableRunRepository also rolls back on conflict, so
+        # a second rollback here is a no-op / safe re-entrant cleanup.
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        raise
 
 
 def consume_and_commit_pause(
@@ -778,6 +777,32 @@ def _build_wait_obligation_revision(
     return row, row.id
 
 
+def _node_visit_from_logical_unit_id(logical_unit_id: str | None) -> str | None:
+    """Extract exact node_visit_id from workflow/agent logical unit ids.
+
+    Formats:
+      - ``workflow_node:{frame_id}:{node_visit_id}``
+      - ``agent_round:{frame_id}:{node_visit_id}``
+
+    Returns None when the id is missing or not in a known exact-identity form.
+    """
+    if not logical_unit_id:
+        return None
+    raw = str(logical_unit_id)
+    for prefix in ("workflow_node:", "agent_round:"):
+        if not raw.startswith(prefix):
+            continue
+        rest = raw[len(prefix) :]
+        # frame_id is a UUID (no colons in hex form) then ":" then node_visit_id.
+        # Split once after first colon segment so visit may itself contain colons.
+        if ":" not in rest:
+            return None
+        _frame, visit = rest.split(":", 1)
+        visit = visit.strip()
+        return visit or None
+    return None
+
+
 def _verify_prepared_continuity(
     db: Session,
     *,
@@ -818,12 +843,19 @@ def _verify_prepared_continuity(
             f"inflight {inflight_logical!r}",
             reason_code="unit_identity_mismatch",
         )
-    if exp_visit is not None and inflight_logical and exp_visit not in str(inflight_logical):
-        raise DurablePauseProtocolError(
-            f"result node_visit_id {exp_visit!r} not present in "
-            f"inflight logical_unit_id {inflight_logical!r}",
-            reason_code="node_visit_mismatch",
+    if exp_visit is not None:
+        # Exact identity: workflow_node|agent_round:{frame_id}:{node_visit_id}
+        # (or any prefix:visit form). Reject substring false positives.
+        inflight_visit = _node_visit_from_logical_unit_id(
+            str(inflight_logical) if inflight_logical is not None else None
         )
+        if inflight_visit is None or inflight_visit != exp_visit:
+            raise DurablePauseProtocolError(
+                f"result node_visit_id mismatch: expected {exp_visit!r}, "
+                f"inflight {inflight_visit!r} "
+                f"(logical_unit_id={inflight_logical!r})",
+                reason_code="node_visit_mismatch",
+            )
     prior_reason = getattr(ck, "reason", None) or ""
     if exp_digest is not None and isinstance(prior_reason, str) and prior_reason:
         prior_digest = None
