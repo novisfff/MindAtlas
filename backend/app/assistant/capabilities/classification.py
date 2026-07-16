@@ -860,10 +860,9 @@ class CapabilityClassifier:
             # meaningless; fail closed rather than silently claiming durable.
             raise ValueError("durable publish requires at least one may_interrupt node")
 
+        # Interrupt-capable durable plans are never parallel_safe
+        # (plan_parallel_safe already forces False when any may_interrupt).
         parallel_safe = plan_parallel_safe(plan)
-        # Interrupt-capable durable plans are never parallel_safe.
-        if parallel_safe:
-            parallel_safe = False
 
         partial = _PartialBehavior(
             side_effect=side,

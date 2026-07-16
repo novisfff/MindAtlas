@@ -353,6 +353,8 @@ def _plan_node(
     deps: Mapping[str, FrozenExecutionDependencyRef],
     path_prefix: str,
     depth: int,
+    nested_workflow_inputs: Mapping[str, Any],
+    visited_workflow_versions: frozenset[UUID],
 ) -> DurableNodePlanV1:
     if depth > 16:
         raise DurablePlanError("plan depth exceeded", reason_code="depth_exceeded")
@@ -520,6 +522,7 @@ def _plan_node(
         # not expanded into the top-level plan graph (runner owns iteration).
         body_side: SideEffectClass = "none"
         body_deps: list[FrozenExecutionDependencyRef] = []
+        body_may_interrupt = False
         body_path = f"{path_prefix}/node:{nid}/body"
         for body_node in body_nodes:
             # Body nodes have no top-level outgoing edges in this plan version.
@@ -529,11 +532,11 @@ def _plan_node(
                 deps=deps,
                 path_prefix=body_path,
                 depth=depth + 1,
+                nested_workflow_inputs=nested_workflow_inputs,
+                visited_workflow_versions=visited_workflow_versions,
             )
-            if body_plan.may_interrupt:
-                # Nested interrupt inside loop body is allowed by matrix but
-                # must surface may_interrupt on the loop node.
-                pass
+            # Nested interrupt (human or nested workflow_call) must surface.
+            body_may_interrupt = body_may_interrupt or body_plan.may_interrupt
             body_side = _max_side_effect(body_side, body_plan.business_side_effect)
             body_deps.extend(body_plan.dependency_refs)
             if body_plan.business_side_effect not in _ALLOWED_BUSINESS_SIDE_EFFECTS:
@@ -549,9 +552,6 @@ def _plan_node(
                 continue
             seen_paths.add(d.dependency_path)
             ordered_deps.append(d)
-        may_interrupt = any(
-            _node_type(bn) == "human_in_loop" for bn in body_nodes
-        )
         return DurableNodePlanV1(
             node_id=nid,
             node_type=ntype,
@@ -559,49 +559,21 @@ def _plan_node(
             outgoing_edges=edges,
             adapter_key=_adapter_key(ntype),
             business_side_effect=body_side,
-            may_interrupt=may_interrupt,
+            may_interrupt=body_may_interrupt,
             dependency_refs=tuple(ordered_deps),
         )
 
     if ntype == "workflow_call":
-        binding_mode = str(
-            _cfg_get(cfg, "binding_mode", "bindingMode", default="pinned") or "pinned"
-        ).strip().lower()
-        target_version = _cfg_get(
-            cfg, "target_published_version_id", "targetPublishedVersionId", default=None
-        )
-        if binding_mode != "pinned" or not target_version:
-            raise DurablePlanError(
-                f"workflow_call {nid} must be pinned to an exact published version",
-                reason_code="mutable_target_lookup",
-            )
-        call_key = nid
-        dep = _lookup_dep(
-            deps,
-            candidates=(
-                f"{path_prefix}/workflow_call:{call_key}",
-                f"{path_prefix}/node:{nid}/workflow_call",
-            ),
+        return _plan_workflow_call_node(
+            node,
+            nid=nid,
+            cfg=cfg,
+            edges=edges,
+            deps=deps,
             path_prefix=path_prefix,
-            suffix=f"/workflow_call:{call_key}",
-        )
-        if dep is None or dep.dependency_type != "workflow":
-            raise DurablePlanError(
-                f"missing frozen workflow_call dependency for node {nid}",
-                reason_code="incomplete_dependency_closure",
-            )
-        # Child side effect is not re-derived here without nested graph; require
-        # that the frozen dep exists. Nested plan validation is recursive when
-        # nested workflow_input is provided via deps only for identity.
-        return DurableNodePlanV1(
-            node_id=nid,
-            node_type=ntype,
-            config_digest=_config_digest(node),
-            outgoing_edges=edges,
-            adapter_key=_adapter_key(ntype),
-            business_side_effect="compute",  # conservative; child plan revalidated at publish
-            may_interrupt=True,  # child may pause
-            dependency_refs=(dep,),
+            depth=depth,
+            nested_workflow_inputs=nested_workflow_inputs,
+            visited_workflow_versions=visited_workflow_versions,
         )
 
     if ntype == "agent":
@@ -702,73 +674,142 @@ def _plan_node(
     )
 
 
-def plan_durable_execution(
+def _plan_workflow_call_node(
+    node: Any,
     *,
-    target_kind: Literal["workflow", "agent"],
-    target_version_id: UUID,
-    target_digest: str,
-    workflow_input: Any,
-    dependencies: Sequence[FrozenExecutionDependencyRef | ResolvedCapabilityDependency] = (),
-) -> DurableExecutionPlanV1:
-    """Derive a frozen DurableExecutionPlanV1 from an exact immutable snapshot.
+    nid: str,
+    cfg: Mapping[str, Any],
+    edges: tuple[DurableEdgeV1, ...],
+    deps: Mapping[str, FrozenExecutionDependencyRef],
+    path_prefix: str,
+    depth: int,
+    nested_workflow_inputs: Mapping[str, Any],
+    visited_workflow_versions: frozenset[UUID],
+) -> DurableNodePlanV1:
+    """Fail-closed durable plan for a pinned workflow_call.
 
-    Fail-closed: unsupported/unsafe/ambiguous/cyclic/unbounded cases raise
-    DurablePlanError. Never consults Draft/current/latest ambient state.
+    Recurses into the frozen child workflow snapshot (when available) so every
+    reachable child node/target is validated against the durable matrix. Parent
+    plan folds child business side-effect max and may_interrupt.
     """
-    if target_kind not in {"workflow", "agent"}:
-        raise DurablePlanError("invalid target_kind", reason_code="invalid_graph")
-    if not isinstance(target_version_id, UUID):
-        raise DurablePlanError("target_version_id must be a UUID", reason_code="invalid_graph")
-    if (
-        not isinstance(target_digest, str)
-        or len(target_digest) != 64
-        or any(c not in "0123456789abcdef" for c in target_digest)
-    ):
-        raise DurablePlanError("target_digest must be sha256 hex", reason_code="invalid_graph")
+    binding_mode = str(
+        _cfg_get(cfg, "binding_mode", "bindingMode", default="pinned") or "pinned"
+    ).strip().lower()
+    target_version = _cfg_get(
+        cfg, "target_published_version_id", "targetPublishedVersionId", default=None
+    )
+    if binding_mode != "pinned" or not target_version:
+        raise DurablePlanError(
+            f"workflow_call {nid} must be pinned to an exact published version",
+            reason_code="mutable_target_lookup",
+        )
 
-    if target_kind == "agent":
-        # Agent target plans as a single synthetic agent node using the snapshot
-        # as agent config. Kept minimal for Task 2; workflow is the golden path.
-        if not isinstance(workflow_input, Mapping):
+    call_key = nid
+    call_path = f"{path_prefix}/workflow_call:{call_key}"
+    dep = _lookup_dep(
+        deps,
+        candidates=(
+            call_path,
+            f"{path_prefix}/node:{nid}/workflow_call",
+        ),
+        path_prefix=path_prefix,
+        suffix=f"/workflow_call:{call_key}",
+    )
+    if dep is None or dep.dependency_type != "workflow":
+        raise DurablePlanError(
+            f"missing frozen workflow_call dependency for node {nid}",
+            reason_code="incomplete_dependency_closure",
+        )
+
+    # Resolve child version identity (prefer frozen dep; fall back to pin).
+    child_version_id = dep.target_version_id
+    if child_version_id is None:
+        try:
+            child_version_id = UUID(str(target_version))
+        except (TypeError, ValueError) as exc:
             raise DurablePlanError(
-                "agent snapshot must be a mapping",
-                reason_code="invalid_graph",
-            )
-        synthetic = {
-            "node_id": "agent_root",
-            "node_type": "agent",
-            "config": dict(workflow_input),
-        }
-        deps = _deps_by_path(dependencies)
-        node_plan = _plan_node(
-            synthetic,
-            outgoing=(),
-            deps=deps,
-            path_prefix="root",
-            depth=0,
-        )
-        nodes = (node_plan,)
-        plan_digest = compute_plan_digest(
-            target_kind=target_kind,
-            target_version_id=target_version_id,
-            target_digest=target_digest,
-            entry_node_id="agent_root",
-            nodes=nodes,
-        )
-        return DurableExecutionPlanV1(
-            target_kind=target_kind,
-            target_version_id=target_version_id,
-            target_digest=target_digest,
-            entry_node_id="agent_root",
-            nodes=nodes,
-            plan_digest=plan_digest,
+                f"workflow_call {nid} has invalid target version id",
+                reason_code="mutable_target_lookup",
+            ) from exc
+    if child_version_id in visited_workflow_versions:
+        raise DurablePlanError(
+            f"workflow_call cycle involving version {child_version_id}",
+            reason_code="workflow_call_cycle",
         )
 
+    nested_input = nested_workflow_inputs.get(dep.dependency_path)
+    if nested_input is None:
+        nested_input = nested_workflow_inputs.get(call_path)
+    if nested_input is None:
+        # Fail closed: without the frozen child graph we cannot prove reachable
+        # child content is durable-safe (even on unused branches).
+        raise DurablePlanError(
+            f"workflow_call {nid} missing frozen nested workflow snapshot for durable planning",
+            reason_code="nested_workflow_call_unsupported",
+        )
+
+    try:
+        _child_entry, child_nodes = _plan_workflow_nodes(
+            workflow_input=nested_input,
+            deps=deps,
+            path_prefix=dep.dependency_path if dep.dependency_path else call_path,
+            depth=depth + 1,
+            nested_workflow_inputs=nested_workflow_inputs,
+            visited_workflow_versions=visited_workflow_versions | {child_version_id},
+        )
+    except DurablePlanError as exc:
+        raise DurablePlanError(
+            f"nested workflow_call {nid} denied: {exc}",
+            reason_code=exc.reason_code,
+        ) from exc
+
+    child_side = business_side_effect_maximum_from_nodes(child_nodes)
+    if child_side not in _ALLOWED_BUSINESS_SIDE_EFFECTS:
+        raise DurablePlanError(
+            f"nested workflow_call {nid} side effect {child_side!r} denied",
+            reason_code="denied_side_effect",
+        )
+    child_may_interrupt = any(n.may_interrupt for n in child_nodes)
+
+    # Surface the workflow dep itself plus nested child dependency refs.
+    nested_refs: list[FrozenExecutionDependencyRef] = [dep]
+    seen_paths = {dep.dependency_path}
+    for child_node in child_nodes:
+        for ref in child_node.dependency_refs:
+            if ref.dependency_path in seen_paths:
+                continue
+            seen_paths.add(ref.dependency_path)
+            nested_refs.append(ref)
+
+    return DurableNodePlanV1(
+        node_id=nid,
+        node_type="workflow_call",
+        config_digest=_config_digest(node),
+        outgoing_edges=edges,
+        adapter_key=_adapter_key("workflow_call"),
+        business_side_effect=child_side,
+        may_interrupt=child_may_interrupt,
+        dependency_refs=tuple(nested_refs),
+    )
+
+
+def _plan_workflow_nodes(
+    *,
+    workflow_input: Any,
+    deps: Mapping[str, FrozenExecutionDependencyRef],
+    path_prefix: str,
+    depth: int,
+    nested_workflow_inputs: Mapping[str, Any],
+    visited_workflow_versions: frozenset[UUID],
+) -> tuple[str, list[DurableNodePlanV1]]:
+    """Plan every declared node of a workflow graph (fail-closed).
+
+    Returns ``(entry_node_id, planned_nodes)``.
+    """
     nodes_raw = _extract_nodes(workflow_input)
     if not nodes_raw:
         raise DurablePlanError("empty workflow graph", reason_code="invalid_graph")
 
-    # Deduplicate node ids.
     by_id: dict[str, Any] = {}
     for node in nodes_raw:
         nid = _node_id(node)
@@ -798,11 +839,9 @@ def plan_durable_execution(
     }
     _detect_unbounded_cycle(entry=entry, adj=adj, loop_nodes=loop_nodes)
 
-    # Fail closed on every reachable node (and actually every declared node —
-    # unreachable unsafe nodes still poison the plan per plan §6).
-    deps = _deps_by_path(dependencies)
-    planned: list[DurableNodePlanV1] = []
     # Stable order: entry first via BFS, then remaining by node_id.
+    # Unreachable unsafe nodes still poison the plan (fail closed).
+    planned: list[DurableNodePlanV1] = []
     order: list[str] = []
     seen_order: set[str] = set()
     q: deque[str] = deque([entry])
@@ -826,10 +865,122 @@ def plan_durable_execution(
                 node,
                 outgoing=outgoing_by_source.get(nid, ()),
                 deps=deps,
-                path_prefix="root",
-                depth=0,
+                path_prefix=path_prefix,
+                depth=depth,
+                nested_workflow_inputs=nested_workflow_inputs,
+                visited_workflow_versions=visited_workflow_versions,
             )
         )
+    return entry, planned
+
+
+def _nested_workflow_inputs_from_closure(closure: Any) -> dict[str, Any]:
+    """Extract frozen nested workflow graphs from an execution closure index."""
+    out: dict[str, Any] = {}
+    if closure is None:
+        return out
+    workflows = getattr(closure, "workflows_by_locator", None)
+    if isinstance(workflows, Mapping):
+        for locator, entry in workflows.items():
+            parsed = getattr(entry, "parsed_published_input", None)
+            if parsed is not None:
+                out[str(locator)] = parsed
+    inspect = getattr(closure, "workflow_input_for_classification", None)
+    if callable(inspect) and isinstance(workflows, Mapping):
+        for locator in workflows:
+            if str(locator) in out:
+                continue
+            try:
+                parsed = inspect(source_locator=locator)
+            except Exception:
+                continue
+            if parsed is not None:
+                out[str(locator)] = parsed
+    return out
+
+
+def plan_durable_execution(
+    *,
+    target_kind: Literal["workflow", "agent"],
+    target_version_id: UUID,
+    target_digest: str,
+    workflow_input: Any,
+    dependencies: Sequence[FrozenExecutionDependencyRef | ResolvedCapabilityDependency] = (),
+    nested_workflow_inputs: Mapping[str, Any] | None = None,
+) -> DurableExecutionPlanV1:
+    """Derive a frozen DurableExecutionPlanV1 from an exact immutable snapshot.
+
+    Fail-closed: unsupported/unsafe/ambiguous/cyclic/unbounded cases raise
+    DurablePlanError. Never consults Draft/current/latest ambient state.
+
+    ``nested_workflow_inputs`` maps frozen dependency paths
+    (e.g. ``root/workflow_call:<nodeId>``) to child workflow snapshots so
+    ``workflow_call`` nodes can be recursively validated. Missing nested graphs
+    fail closed with ``nested_workflow_call_unsupported``.
+    """
+    if target_kind not in {"workflow", "agent"}:
+        raise DurablePlanError("invalid target_kind", reason_code="invalid_graph")
+    if not isinstance(target_version_id, UUID):
+        raise DurablePlanError("target_version_id must be a UUID", reason_code="invalid_graph")
+    if (
+        not isinstance(target_digest, str)
+        or len(target_digest) != 64
+        or any(c not in "0123456789abcdef" for c in target_digest)
+    ):
+        raise DurablePlanError("target_digest must be sha256 hex", reason_code="invalid_graph")
+
+    nested_inputs: Mapping[str, Any] = (
+        dict(nested_workflow_inputs) if isinstance(nested_workflow_inputs, Mapping) else {}
+    )
+    deps = _deps_by_path(dependencies)
+
+    if target_kind == "agent":
+        # Agent target plans as a single synthetic agent node using the snapshot
+        # as agent config. Kept minimal for Task 2; workflow is the golden path.
+        if not isinstance(workflow_input, Mapping):
+            raise DurablePlanError(
+                "agent snapshot must be a mapping",
+                reason_code="invalid_graph",
+            )
+        synthetic = {
+            "node_id": "agent_root",
+            "node_type": "agent",
+            "config": dict(workflow_input),
+        }
+        node_plan = _plan_node(
+            synthetic,
+            outgoing=(),
+            deps=deps,
+            path_prefix="root",
+            depth=0,
+            nested_workflow_inputs=nested_inputs,
+            visited_workflow_versions=frozenset(),
+        )
+        nodes = (node_plan,)
+        plan_digest = compute_plan_digest(
+            target_kind=target_kind,
+            target_version_id=target_version_id,
+            target_digest=target_digest,
+            entry_node_id="agent_root",
+            nodes=nodes,
+        )
+        return DurableExecutionPlanV1(
+            target_kind=target_kind,
+            target_version_id=target_version_id,
+            target_digest=target_digest,
+            entry_node_id="agent_root",
+            nodes=nodes,
+            plan_digest=plan_digest,
+        )
+
+    entry, planned = _plan_workflow_nodes(
+        workflow_input=workflow_input,
+        deps=deps,
+        path_prefix="root",
+        depth=0,
+        nested_workflow_inputs=nested_inputs,
+        visited_workflow_versions=frozenset({target_version_id}),
+    )
 
     # Aggregate business side-effect max must stay within allowed set.
     biz = business_side_effect_maximum_from_nodes(planned)
@@ -900,6 +1051,9 @@ def plan_durable_execution_from_surface(surface: Any) -> DurableExecutionPlanV1:
     resolved = binding.resolved
     executable = surface.executable
     deps = tuple(resolved.dependencies)
+    nested_inputs = _nested_workflow_inputs_from_closure(
+        getattr(surface, "execution_closure", None)
+    )
 
     if isinstance(executable, ExecutableWorkflowVersionTarget):
         target_digest = str(resolved.config_digest or resolved.resolution_digest)
@@ -909,6 +1063,7 @@ def plan_durable_execution_from_surface(surface: Any) -> DurableExecutionPlanV1:
             target_digest=target_digest,
             workflow_input=executable.parsed_published_input,
             dependencies=deps,
+            nested_workflow_inputs=nested_inputs,
         )
     if isinstance(executable, ExecutableAgentVersionTarget):
         target_digest = str(resolved.config_digest or resolved.resolution_digest)
@@ -921,6 +1076,7 @@ def plan_durable_execution_from_surface(surface: Any) -> DurableExecutionPlanV1:
             target_digest=target_digest,
             workflow_input=snapshot,
             dependencies=deps,
+            nested_workflow_inputs=nested_inputs,
         )
     raise DurablePlanError(
         "surface executable is not a workflow/agent target",

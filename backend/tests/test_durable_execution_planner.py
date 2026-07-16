@@ -535,6 +535,366 @@ def test_invalid_edge_target_denied() -> None:
     assert exc.value.reason_code in {"invalid_edge", "invalid_graph"}
 
 
+# ---------------------------------------------------------------------------
+# Nested workflow_call: fail-closed recursion (Accept / Deny)
+# ---------------------------------------------------------------------------
+
+
+CHILD_VERSION_ID = UUID("00000000-0000-4000-8000-000000000901")
+CHILD_WORKFLOW_ID = UUID("00000000-0000-4000-8000-000000000902")
+
+
+def _workflow_call_node(
+    node_id: str,
+    *,
+    target_workflow_id: UUID = CHILD_WORKFLOW_ID,
+    target_version_id: UUID = CHILD_VERSION_ID,
+) -> dict[str, Any]:
+    return _node(
+        node_id,
+        "workflow_call",
+        config={
+            "binding_mode": "pinned",
+            "target_workflow_id": str(target_workflow_id),
+            "target_published_version_id": str(target_version_id),
+        },
+    )
+
+
+def _workflow_dep(
+    node_id: str,
+    *,
+    target_version_id: UUID = CHILD_VERSION_ID,
+    identity: str | None = None,
+) -> Any:
+    return _dep(
+        path=f"root/workflow_call:{node_id}",
+        dep_type="workflow",
+        identity=identity or f"workflow:{CHILD_WORKFLOW_ID}",
+        target_version_id=target_version_id,
+        dependency_digest=("d") * 64,
+        resolution_digest=("e") * 64,
+    )
+
+
+def _safe_child_start_output() -> dict[str, Any]:
+    return {
+        "nodes": [
+            _node("start", "start", config={"input_mode": "text"}),
+            _node("output", "output", config={"output_mode": "text"}),
+        ],
+        "edges": [_edge(edge_id="ce1", source="start", target="output")],
+    }
+
+
+def _safe_child_start_llm_output() -> dict[str, Any]:
+    return {
+        "nodes": [
+            _node("start", "start", config={"input_mode": "text"}),
+            _node("child_llm", "llm", config={"model_source": "default", "prompt": "hi"}),
+            _node("output", "output", config={"output_mode": "text"}),
+        ],
+        "edges": [
+            _edge(edge_id="ce1", source="start", target="child_llm"),
+            _edge(edge_id="ce2", source="child_llm", target="output"),
+        ],
+    }
+
+
+def _unsafe_child_code_executor() -> dict[str, Any]:
+    return {
+        "nodes": [
+            _node("start", "start"),
+            _node("code", "code_executor", config={"code": "print(1)"}),
+            _node("output", "output"),
+        ],
+        "edges": [
+            _edge(edge_id="ce1", source="start", target="code"),
+            _edge(edge_id="ce2", source="code", target="output"),
+        ],
+    }
+
+
+def _unsafe_child_write_tool() -> dict[str, Any]:
+    return {
+        "nodes": [
+            _node("start", "start"),
+            _node("write", "tool", config={"tool_name": "create_entry"}),
+            _node("output", "output"),
+        ],
+        "edges": [
+            _edge(edge_id="ce1", source="start", target="write"),
+            _edge(edge_id="ce2", source="write", target="output"),
+        ],
+    }
+
+
+def _parent_with_call(call_node_id: str = "call_child") -> dict[str, Any]:
+    return {
+        "nodes": [
+            _node("start", "start"),
+            _workflow_call_node(call_node_id),
+            _node("output", "output"),
+        ],
+        "edges": [
+            _edge(edge_id="e1", source="start", target=call_node_id),
+            _edge(edge_id="e2", source=call_node_id, target="output"),
+        ],
+    }
+
+
+def test_safe_pinned_child_workflow_call_accepted_folds_none_side_effect() -> None:
+    """Safe child start→output: parent plan accepted; child side-effect folded to none."""
+    from app.assistant.domain.digests import sha256_canonical_json
+    from app.assistant.workflow.durable.planner import (
+        business_side_effect_maximum,
+        plan_allows_durable_interrupt,
+    )
+
+    parent = _parent_with_call("call_child")
+    child = _safe_child_start_output()
+    call_path = "root/workflow_call:call_child"
+    plan = plan_or_raise(
+        target_kind="workflow",
+        target_version_id=TARGET_VERSION_ID,
+        target_digest=sha256_canonical_json(parent),
+        workflow_input=parent,
+        dependencies=(_workflow_dep("call_child"),),
+        nested_workflow_inputs={call_path: child},
+    )
+    by_id = {n.node_id: n for n in plan.nodes}
+    call = by_id["call_child"]
+    assert call.node_type == "workflow_call"
+    assert call.business_side_effect == "none"
+    assert call.may_interrupt is False
+    assert business_side_effect_maximum(plan) == "none"
+    assert plan_allows_durable_interrupt(plan) is False
+    assert any(r.dependency_type == "workflow" for r in call.dependency_refs)
+
+
+def test_safe_pinned_child_with_llm_folds_compute() -> None:
+    """Safe child start→llm→output: parent folds compute; may_interrupt false."""
+    from app.assistant.domain.digests import sha256_canonical_json
+    from app.assistant.workflow.durable.planner import business_side_effect_maximum
+
+    parent = _parent_with_call("call_child")
+    child = _safe_child_start_llm_output()
+    call_path = "root/workflow_call:call_child"
+    child_model = _dep(
+        path=f"{call_path}/node:child_llm/model",
+        dep_type="model",
+        identity="model:default",
+    )
+    plan = plan_or_raise(
+        target_kind="workflow",
+        target_version_id=TARGET_VERSION_ID,
+        target_digest=sha256_canonical_json(parent),
+        workflow_input=parent,
+        dependencies=(_workflow_dep("call_child"), child_model),
+        nested_workflow_inputs={call_path: child},
+    )
+    call = next(n for n in plan.nodes if n.node_id == "call_child")
+    assert call.business_side_effect == "compute"
+    assert call.may_interrupt is False
+    assert business_side_effect_maximum(plan) == "compute"
+    # Child model dep folded onto the call node.
+    assert any(r.dependency_path.endswith("/node:child_llm/model") for r in call.dependency_refs)
+
+
+def test_safe_child_with_human_folds_may_interrupt() -> None:
+    """Safe child with human_in_loop: parent folds may_interrupt=True, business none."""
+    from app.assistant.domain.digests import sha256_canonical_json
+    from app.assistant.workflow.durable.planner import (
+        business_side_effect_maximum,
+        plan_allows_durable_interrupt,
+    )
+
+    parent = _parent_with_call("call_child")
+    child = {
+        "nodes": [
+            _node("start", "start"),
+            _node("approve", "human_in_loop", config={"prompt": "ok?", "mode": "approval"}),
+            _node("output", "output"),
+        ],
+        "edges": [
+            _edge(edge_id="ce1", source="start", target="approve"),
+            _edge(edge_id="ce2", source="approve", target="output"),
+        ],
+    }
+    call_path = "root/workflow_call:call_child"
+    plan = plan_or_raise(
+        target_kind="workflow",
+        target_version_id=TARGET_VERSION_ID,
+        target_digest=sha256_canonical_json(parent),
+        workflow_input=parent,
+        dependencies=(_workflow_dep("call_child"),),
+        nested_workflow_inputs={call_path: child},
+    )
+    call = next(n for n in plan.nodes if n.node_id == "call_child")
+    assert call.business_side_effect == "none"
+    assert call.may_interrupt is True
+    assert business_side_effect_maximum(plan) == "none"
+    assert plan_allows_durable_interrupt(plan) is True
+
+
+def test_unsafe_child_code_executor_denies_parent() -> None:
+    """Unsafe pinned child with code_executor → parent plan denied."""
+    from app.assistant.domain.digests import sha256_canonical_json
+    from app.assistant.workflow.durable.planner import DurablePlanError
+
+    parent = _parent_with_call("call_child")
+    child = _unsafe_child_code_executor()
+    call_path = "root/workflow_call:call_child"
+    with pytest.raises(DurablePlanError) as exc:
+        plan_or_raise(
+            target_kind="workflow",
+            target_version_id=TARGET_VERSION_ID,
+            target_digest=sha256_canonical_json(parent),
+            workflow_input=parent,
+            dependencies=(_workflow_dep("call_child"),),
+            nested_workflow_inputs={call_path: child},
+        )
+    assert exc.value.reason_code == "unsupported_node"
+    assert "code_executor" in str(exc.value).lower() or "call_child" in str(exc.value)
+
+
+def test_unsafe_child_write_tool_denies_parent() -> None:
+    """Unsafe pinned child with write tool → parent plan denied with denied_side_effect."""
+    from app.assistant.domain.digests import sha256_canonical_json
+    from app.assistant.workflow.durable.planner import DurablePlanError
+
+    parent = _parent_with_call("call_child")
+    child = _unsafe_child_write_tool()
+    call_path = "root/workflow_call:call_child"
+    child_tool = _dep(
+        path=f"{call_path}/node:write/tool:create_entry",
+        dep_type="system_tool",
+        identity="system-tool:create_entry",
+        dependency_digest=("f") * 64,
+    )
+    with pytest.raises(DurablePlanError) as exc:
+        plan_or_raise(
+            target_kind="workflow",
+            target_version_id=TARGET_VERSION_ID,
+            target_digest=sha256_canonical_json(parent),
+            workflow_input=parent,
+            dependencies=(_workflow_dep("call_child"), child_tool),
+            nested_workflow_inputs={call_path: child},
+        )
+    assert exc.value.reason_code == "denied_side_effect"
+
+
+def test_workflow_call_without_nested_snapshot_denied() -> None:
+    """Missing frozen nested graph fails closed (cannot prove child is durable-safe)."""
+    from app.assistant.domain.digests import sha256_canonical_json
+    from app.assistant.workflow.durable.planner import DurablePlanError
+
+    parent = _parent_with_call("call_child")
+    with pytest.raises(DurablePlanError) as exc:
+        plan_or_raise(
+            target_kind="workflow",
+            target_version_id=TARGET_VERSION_ID,
+            target_digest=sha256_canonical_json(parent),
+            workflow_input=parent,
+            dependencies=(_workflow_dep("call_child"),),
+            # no nested_workflow_inputs
+        )
+    assert exc.value.reason_code == "nested_workflow_call_unsupported"
+
+
+def test_unpinned_workflow_call_denied() -> None:
+    from app.assistant.domain.digests import sha256_canonical_json
+    from app.assistant.workflow.durable.planner import DurablePlanError
+
+    graph = {
+        "nodes": [
+            _node("start", "start"),
+            _node(
+                "call_child",
+                "workflow_call",
+                config={
+                    "binding_mode": "latest",
+                    "target_workflow_id": str(CHILD_WORKFLOW_ID),
+                },
+            ),
+            _node("output", "output"),
+        ],
+        "edges": [
+            _edge(edge_id="e1", source="start", target="call_child"),
+            _edge(edge_id="e2", source="call_child", target="output"),
+        ],
+    }
+    with pytest.raises(DurablePlanError) as exc:
+        plan_or_raise(
+            target_kind="workflow",
+            target_version_id=TARGET_VERSION_ID,
+            target_digest=sha256_canonical_json(graph),
+            workflow_input=graph,
+            dependencies=(),
+        )
+    assert exc.value.reason_code == "mutable_target_lookup"
+
+
+def test_loop_body_folds_nested_workflow_call_may_interrupt() -> None:
+    """Loop body containing a durable-safe interruptible child folds may_interrupt."""
+    from app.assistant.domain.digests import sha256_canonical_json
+    from app.assistant.workflow.durable.planner import plan_allows_durable_interrupt
+
+    child = {
+        "nodes": [
+            _node("start", "start"),
+            _node("approve", "human_in_loop", config={"prompt": "ok?", "mode": "approval"}),
+            _node("output", "output"),
+        ],
+        "edges": [
+            _edge(edge_id="ce1", source="start", target="approve"),
+            _edge(edge_id="ce2", source="approve", target="output"),
+        ],
+    }
+    # Body path for loop planning is root/node:loop/body/workflow_call:call_child
+    body_call_path = "root/node:loop/body/workflow_call:call_child"
+    graph = {
+        "nodes": [
+            _node("start", "start"),
+            _node(
+                "loop",
+                "iteration",
+                config={
+                    "max_iterations": 3,
+                    "body_nodes": [
+                        _workflow_call_node("call_child"),
+                    ],
+                },
+            ),
+            _node("output", "output"),
+        ],
+        "edges": [
+            _edge(edge_id="e1", source="start", target="loop"),
+            _edge(edge_id="e2", source="loop", target="output"),
+        ],
+    }
+    # Dep path must match body path_prefix used by planner.
+    body_workflow_dep = _dep(
+        path=body_call_path,
+        dep_type="workflow",
+        identity=f"workflow:{CHILD_WORKFLOW_ID}",
+        target_version_id=CHILD_VERSION_ID,
+        dependency_digest=("d") * 64,
+        resolution_digest=("e") * 64,
+    )
+    plan = plan_or_raise(
+        target_kind="workflow",
+        target_version_id=TARGET_VERSION_ID,
+        target_digest=sha256_canonical_json(graph),
+        workflow_input=graph,
+        dependencies=(body_workflow_dep,),
+        nested_workflow_inputs={body_call_path: child},
+    )
+    loop = next(n for n in plan.nodes if n.node_id == "loop")
+    assert loop.may_interrupt is True
+    assert plan_allows_durable_interrupt(plan) is True
+
+
 def test_read_tool_allowed() -> None:
     from app.assistant.domain.digests import sha256_canonical_json
     from app.assistant.workflow.durable.planner import business_side_effect_maximum
