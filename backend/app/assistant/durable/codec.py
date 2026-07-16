@@ -21,7 +21,10 @@ from app.assistant.domain.digests import (
 )
 from app.assistant.durable.contracts import (
     DurableAgentCheckpointV1,
+    DurableAgentCheckpointV2,
+    DurableExecutionUnitV2,
     DurableGrantSetV1,
+    DurableNextActionV2,
     DurableProviderMessageRecordV1,
 )
 from app.assistant.policy.budgets import (
@@ -57,7 +60,7 @@ from app.assistant.provider_loop.messages import (
 
 MAX_CODEC_JSON_DEPTH: Final[int] = 64
 MAX_CODEC_JSON_BYTES: Final[int] = 256 * 1024
-SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS: Final[frozenset[int]] = frozenset({1})
+SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS: Final[frozenset[int]] = frozenset({1, 2})
 
 # Exact keys (case-insensitive) that must never appear in durable JSON.
 # Intentionally exact — do not substring-match legitimate fields like
@@ -160,6 +163,20 @@ _FORBIDDEN_TYPE_NAMES: Final[frozenset[str]] = frozenset(
         "method",
         "builtin_function_or_method",
         "type",
+        # Plan 07 ephemeral / Legacy runtime families
+        "EphemeralWorkflowContext",
+        "WorkflowState",
+        "HumanLoopRuntime",
+        "ArtifactStore",
+        "EventSink",
+        "CancellationProbe",
+        "Clock",
+        "ProviderResolver",
+        "DurableNodeAdapterRegistry",
+        "ExactRuntimeDependencyResolver",
+        "LangGraphEngine",
+        "CompiledStateGraph",
+        "Pregel",
     }
 )
 
@@ -185,6 +202,9 @@ _GRANT_FORBIDDEN_KEYS: Final[frozenset[str]] = frozenset(
 _PROVIDER_MESSAGE_ADAPTER: TypeAdapter[ProviderMessage] = TypeAdapter(ProviderMessage)
 _CHECKPOINT_V1_ADAPTER: TypeAdapter[DurableAgentCheckpointV1] = TypeAdapter(
     DurableAgentCheckpointV1
+)
+_CHECKPOINT_V2_ADAPTER: TypeAdapter[DurableAgentCheckpointV2] = TypeAdapter(
+    DurableAgentCheckpointV2
 )
 _GRANT_ADAPTER: TypeAdapter[EffectiveCapabilityGrant] = TypeAdapter(
     EffectiveCapabilityGrant
@@ -564,6 +584,9 @@ def decode_obligation_ledger_state(
 # ---------------------------------------------------------------------------
 
 
+AnyCheckpoint = DurableAgentCheckpointV1 | DurableAgentCheckpointV2
+
+
 def encode_checkpoint_v1(checkpoint: DurableAgentCheckpointV1) -> dict[str, JsonValue]:
     _reject_ephemeral_instance(checkpoint)
     if not isinstance(checkpoint, DurableAgentCheckpointV1):
@@ -593,6 +616,35 @@ def decode_checkpoint_v1(payload: Mapping[str, Any]) -> DurableAgentCheckpointV1
         raise DurableCodecError("checkpoint_invalid", str(exc)) from exc
 
 
+def encode_checkpoint_v2(checkpoint: DurableAgentCheckpointV2) -> dict[str, JsonValue]:
+    _reject_ephemeral_instance(checkpoint)
+    if not isinstance(checkpoint, DurableAgentCheckpointV2):
+        _fail(
+            "unsupported_type",
+            f"expected DurableAgentCheckpointV2, got {type(checkpoint)!r}",
+        )
+    if checkpoint.schema_version != 2:
+        _fail("schema_version", "encode_checkpoint_v2 requires schema_version=2")
+    return _dump_contract(checkpoint)
+
+
+def decode_checkpoint_v2(payload: Mapping[str, Any]) -> DurableAgentCheckpointV2:
+    """Decode Checkpoint v2 only."""
+    data = _canonical_payload(payload)
+    version = data.get("schemaVersion", data.get("schema_version"))
+    if version is None:
+        _fail("missing_schema_version", "checkpoint requires schemaVersion")
+    if version != 2:
+        raise NeedsReconciliationError(
+            f"decode_checkpoint_v2 received schemaVersion={version!r}",
+            schema_version=version,
+        )
+    try:
+        return _CHECKPOINT_V2_ADAPTER.validate_python(data)
+    except ValidationError as exc:
+        raise DurableCodecError("checkpoint_invalid", str(exc)) from exc
+
+
 def _peek_schema_version(payload: Mapping[str, Any]) -> Any:
     """Read schema version without constructing runtime Checkpoint objects."""
     if not isinstance(payload, Mapping):
@@ -605,11 +657,11 @@ def _peek_schema_version(payload: Mapping[str, Any]) -> Any:
     return None
 
 
-def decode_checkpoint(payload: Mapping[str, Any]) -> DurableAgentCheckpointV1:
-    """Decode any supported Checkpoint version via the migration registry.
+def decode_checkpoint(payload: Mapping[str, Any]) -> AnyCheckpoint:
+    """Decode any supported Checkpoint version without forcing migration.
 
     Unknown future versions raise NeedsReconciliationError *before* constructing
-    DurableAgentCheckpointV1 / nested runtime contracts.
+    nested runtime contracts.
     """
     version = _peek_schema_version(payload)
     if version is None:
@@ -631,16 +683,86 @@ def decode_checkpoint(payload: Mapping[str, Any]) -> DurableAgentCheckpointV1:
     # Only after version gate may we sanitize + construct.
     if version == 1:
         return decode_checkpoint_v1(payload)
-    # Registry extension point (Plan 07 v2 migration).
+    if version == 2:
+        return decode_checkpoint_v2(payload)
     raise NeedsReconciliationError(
         f"no decoder registered for schemaVersion={version}",
         schema_version=version,
     )
 
 
+def migrate_checkpoint_v1_to_v2(
+    checkpoint: DurableAgentCheckpointV1 | Mapping[str, Any],
+) -> DurableAgentCheckpointV2:
+    """Lossless Checkpoint v1 → v2 migration.
+
+    Maps each v1 execution unit into the corresponding v2 kind, preserves every
+    other v1 field/digest meaning, and fills new fields with null/empty values.
+    """
+    if isinstance(checkpoint, Mapping):
+        v1 = decode_checkpoint_v1(checkpoint)
+    elif isinstance(checkpoint, DurableAgentCheckpointV1):
+        v1 = checkpoint
+    else:
+        _fail(
+            "unsupported_type",
+            f"migrate_checkpoint_v1_to_v2 expected DurableAgentCheckpointV1, "
+            f"got {type(checkpoint)!r}",
+        )
+
+    inflight_v2: DurableExecutionUnitV2 | None = None
+    if v1.inflight_unit is not None:
+        u = v1.inflight_unit
+        inflight_v2 = DurableExecutionUnitV2(
+            logical_unit_id=u.logical_unit_id,
+            kind=u.kind,  # v1 kinds are a subset of v2
+            state=u.state,
+            provider_round=u.provider_round,
+            call_ids=u.call_ids,
+            attempt=u.attempt,
+            reserved_budget_revision=u.reserved_budget_revision,
+            started_budget_revision=u.started_budget_revision,
+        )
+
+    next_v2 = DurableNextActionV2(
+        kind=v1.next_action.kind,  # v1 action kinds are a subset of v2
+        reason_code=v1.next_action.reason_code,
+        detail=v1.next_action.detail,
+    )
+
+    return DurableAgentCheckpointV2(
+        run_id=v1.run_id,
+        phase=v1.phase,
+        manifest_revision_id=v1.manifest_revision_id,
+        policy_revision_id=v1.policy_revision_id,
+        budget_revision_id=v1.budget_revision_id,
+        obligation_revision_id=v1.obligation_revision_id,
+        provider_message_ordinal=v1.provider_message_ordinal,
+        provider_transcript_digest=v1.provider_transcript_digest,
+        provider_loop_continuation=v1.provider_loop_continuation,
+        inflight_unit=inflight_v2,
+        capability_frames=v1.capability_frames,
+        artifact_ids=v1.artifact_ids,
+        visible_text_artifact_id=v1.visible_text_artifact_id,
+        next_action=next_v2,
+        workflow_state=None,
+        active_capability_continuation=None,
+        pending_interrupt_id=None,
+        budget_suspension=None,
+    )
+
+
+def _migrate_payload_v1_to_v2(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Registry migrator: canonical v1 payload dict → canonical v2 payload dict."""
+    v2 = migrate_checkpoint_v1_to_v2(payload)
+    return encode_checkpoint_v2(v2)
+
+
 # Migration registry: (from_version, to_version) -> migrator returning payload dict.
 CheckpointMigrator = Callable[[dict[str, JsonValue]], dict[str, JsonValue]]
-_MIGRATION_REGISTRY: dict[tuple[int, int], CheckpointMigrator] = {}
+_MIGRATION_REGISTRY: dict[tuple[int, int], CheckpointMigrator] = {
+    (1, 2): _migrate_payload_v1_to_v2,
+}
 
 
 def register_checkpoint_migration(
@@ -654,7 +776,7 @@ def register_checkpoint_migration(
     _MIGRATION_REGISTRY[(from_version, to_version)] = migrator
 
 
-def migrate_checkpoint(payload: Mapping[str, Any]) -> DurableAgentCheckpointV1:
+def migrate_checkpoint(payload: Mapping[str, Any]) -> AnyCheckpoint:
     """Migrate payload to the latest supported version, then decode.
 
     Unknown source versions signal needs_reconciliation before any runtime
@@ -683,6 +805,20 @@ def migrate_checkpoint(payload: Mapping[str, Any]) -> DurableAgentCheckpointV1:
             f"no migration path from schemaVersion={version} to {target}",
             schema_version=version,
         )
+    # Also require a registered path when source is supported but not latest.
+    if version in SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS and (
+        version,
+        target,
+    ) not in _MIGRATION_REGISTRY:
+        # Allow stepwise hops below.
+        has_step = any(
+            src == version and dst <= target for (src, dst) in _MIGRATION_REGISTRY
+        )
+        if not has_step:
+            raise NeedsReconciliationError(
+                f"no migration path from schemaVersion={version} to {target}",
+                schema_version=version,
+            )
     current = version
     # Sanitize only after we know a path exists.
     data = _canonical_payload(payload)
@@ -709,15 +845,24 @@ def migrate_checkpoint(payload: Mapping[str, Any]) -> DurableAgentCheckpointV1:
     return decode_checkpoint(data)
 
 
-def checkpoint_state_digest(checkpoint: DurableAgentCheckpointV1) -> str:
+def checkpoint_state_digest(checkpoint: AnyCheckpoint) -> str:
     """SHA-256 of the canonical Checkpoint payload (state_digest column)."""
-    return sha256_canonical_json(encode_checkpoint_v1(checkpoint))
+    if isinstance(checkpoint, DurableAgentCheckpointV2):
+        return sha256_canonical_json(encode_checkpoint_v2(checkpoint))
+    if isinstance(checkpoint, DurableAgentCheckpointV1):
+        return sha256_canonical_json(encode_checkpoint_v1(checkpoint))
+    _fail(
+        "unsupported_type",
+        f"checkpoint_state_digest expected DurableAgentCheckpointV1|V2, "
+        f"got {type(checkpoint)!r}",
+    )
 
 
 __all__ = [
     "MAX_CODEC_JSON_BYTES",
     "MAX_CODEC_JSON_DEPTH",
     "SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS",
+    "AnyCheckpoint",
     "DurableCodecError",
     "NeedsReconciliationError",
     "checkpoint_state_digest",
@@ -725,6 +870,7 @@ __all__ = [
     "decode_capability_frame",
     "decode_checkpoint",
     "decode_checkpoint_v1",
+    "decode_checkpoint_v2",
     "decode_grant",
     "decode_grant_set",
     "decode_obligation_ledger_state",
@@ -734,6 +880,7 @@ __all__ = [
     "encode_budget_ledger_state",
     "encode_capability_frame",
     "encode_checkpoint_v1",
+    "encode_checkpoint_v2",
     "encode_grant",
     "encode_grant_set",
     "encode_obligation_ledger_state",
@@ -741,6 +888,7 @@ __all__ = [
     "encode_provider_message",
     "encode_provider_message_record",
     "migrate_checkpoint",
+    "migrate_checkpoint_v1_to_v2",
     "register_checkpoint_migration",
     "sanitize_json_value",
 ]

@@ -1,6 +1,8 @@
-"""Plan 06 durable Checkpoint v1 frozen contracts.
+"""Plan 06/07 durable Checkpoint frozen contracts.
 
 Uses exact Plan 03 / Plan 05 types — no reduced durable-only clones.
+Checkpoint v2 adds Workflow state, capability continuation, interrupt, and
+budget suspension references without altering Plan 05 BudgetLedgerState.
 """
 
 from __future__ import annotations
@@ -29,6 +31,16 @@ DurableExecutionUnitKind = Literal[
     "completion",
     "memory_commit",
 ]
+# Plan 07 additive kinds (Checkpoint v2 only).
+DurableExecutionUnitKindV2 = Literal[
+    "provider_round",
+    "capability_group",
+    "completion",
+    "memory_commit",
+    "workflow_node",
+    "agent_round",
+    "interrupt_resume",
+]
 DurableExecutionUnitState = Literal["prepared", "started"]
 DurableCheckpointPhase = Literal[
     "ready_for_provider",
@@ -46,6 +58,20 @@ DurableNextActionKind = Literal[
     "memory",
     "terminal",
     "reconcile",
+]
+# Plan 07 additive next-action kinds (Checkpoint v2 only).
+DurableNextActionKindV2 = Literal[
+    "continue_provider",
+    "dispatch_calls",
+    "wait",
+    "complete",
+    "memory",
+    "terminal",
+    "reconcile",
+    "resume_child",
+    "continue_child",
+    "resume_provider_loop",
+    "expire_or_cancel_child",
 ]
 DurableProtectionKind = Literal["public", "protected", "internal"]
 ProviderMessageRole = Literal[
@@ -359,14 +385,231 @@ class DurableAgentCheckpointV1(FrozenContract):
         return self
 
 
+
+# ---------------------------------------------------------------------------
+# Checkpoint v2 (Plan 07 additive)
+# ---------------------------------------------------------------------------
+
+
+class DurableExecutionUnitV2(FrozenContract):
+    """Prepared/started logical unit committed before external I/O (v2 kinds)."""
+
+    logical_unit_id: str
+    kind: DurableExecutionUnitKindV2
+    state: DurableExecutionUnitState
+    provider_round: int | None
+    call_ids: tuple[str, ...]
+    attempt: int
+    reserved_budget_revision: int
+    started_budget_revision: int | None
+
+    @field_validator("logical_unit_id")
+    @classmethod
+    def _unit_id(cls, value: str) -> str:
+        return _require_non_empty_str(value, field_name="logical_unit_id")
+
+    @field_validator("attempt")
+    @classmethod
+    def _attempt(cls, value: int) -> int:
+        return _require_positive_int(value, field_name="attempt")
+
+    @field_validator("reserved_budget_revision")
+    @classmethod
+    def _reserved(cls, value: int) -> int:
+        return _require_non_negative_int(value, field_name="reserved_budget_revision")
+
+    @field_validator("provider_round")
+    @classmethod
+    def _round(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        return _require_non_negative_int(value, field_name="provider_round")
+
+    @field_validator("started_budget_revision")
+    @classmethod
+    def _started_rev(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        return _require_non_negative_int(value, field_name="started_budget_revision")
+
+    @field_validator("call_ids", mode="before")
+    @classmethod
+    def _call_ids(cls, value: Any) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, (list, tuple)):
+            raise TypeError("call_ids must be a sequence")
+        out: list[str] = []
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError("call_ids items must be non-empty strings")
+            out.append(item)
+        if len(set(out)) != len(out):
+            raise ValueError("call_ids must be unique")
+        return tuple(out)
+
+    @model_validator(mode="after")
+    def _state_rules(self) -> DurableExecutionUnitV2:
+        if self.state == "prepared" and self.started_budget_revision is not None:
+            raise ValueError("prepared unit must have started_budget_revision=None")
+        if self.state == "started" and self.started_budget_revision is None:
+            raise ValueError("started unit requires started_budget_revision")
+        if self.kind == "capability_group" and self.state == "started" and not self.call_ids:
+            raise ValueError("started capability_group requires call_ids")
+        return self
+
+
+class DurableNextActionV2(FrozenContract):
+    """Worker next-action after reconstructing a Checkpoint (v2 kinds)."""
+
+    kind: DurableNextActionKindV2
+    reason_code: str | None = None
+    detail: str | None = None
+
+    @field_validator("reason_code", "detail")
+    @classmethod
+    def _optional_str(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise TypeError("reason_code/detail must be strings when present")
+        return value
+
+
+class DurableAgentCheckpointV2(FrozenContract):
+    """Schema-versioned durable Main Agent Checkpoint v2 (Plan 07 §3.1)."""
+
+    schema_version: Literal[2] = 2
+    run_id: UUID
+    phase: DurableCheckpointPhase
+    manifest_revision_id: UUID
+    policy_revision_id: UUID
+    budget_revision_id: UUID
+    obligation_revision_id: UUID
+    provider_message_ordinal: int
+    provider_transcript_digest: str
+    provider_loop_continuation: ProviderLoopContinuation | None
+    inflight_unit: DurableExecutionUnitV2 | None
+    capability_frames: tuple[CapabilityCallFrame, ...] = ()
+    artifact_ids: tuple[UUID, ...] = ()
+    visible_text_artifact_id: UUID | None = None
+    next_action: DurableNextActionV2
+    # Plan 07 additive fields (null/empty for migrated v1).
+    # Nested types validated in model_validator to avoid import cycles.
+    workflow_state: Any | None = None
+    active_capability_continuation: Any | None = None
+    pending_interrupt_id: UUID | None = None
+    budget_suspension: Any | None = None
+
+    @field_validator("provider_message_ordinal")
+    @classmethod
+    def _ordinal(cls, value: int) -> int:
+        return _require_non_negative_int(value, field_name="provider_message_ordinal")
+
+    @field_validator("provider_transcript_digest")
+    @classmethod
+    def _transcript(cls, value: str) -> str:
+        return _require_digest(value, field_name="provider_transcript_digest")
+
+    @field_validator("capability_frames", mode="before")
+    @classmethod
+    def _frames(cls, value: Any) -> tuple[Any, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, (list, tuple)):
+            raise TypeError("capability_frames must be a sequence")
+        return tuple(value)
+
+    @field_validator("artifact_ids", mode="before")
+    @classmethod
+    def _artifacts(cls, value: Any) -> tuple[Any, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, (list, tuple)):
+            raise TypeError("artifact_ids must be a sequence")
+        return tuple(value)
+
+    @field_validator("workflow_state", mode="before")
+    @classmethod
+    def _workflow_state(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        from app.assistant.workflow.durable.contracts import DurableWorkflowStateV1
+
+        if isinstance(value, DurableWorkflowStateV1):
+            return value
+        if isinstance(value, dict):
+            return DurableWorkflowStateV1.model_validate(value)
+        raise TypeError("workflow_state must be DurableWorkflowStateV1 or mapping")
+
+    @field_validator("active_capability_continuation", mode="before")
+    @classmethod
+    def _active_cont(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        from app.assistant.capabilities.contracts import ContinuationRef
+
+        if isinstance(value, ContinuationRef):
+            return value
+        if isinstance(value, dict):
+            return ContinuationRef.model_validate(value)
+        raise TypeError("active_capability_continuation must be ContinuationRef or mapping")
+
+    @field_validator("budget_suspension", mode="before")
+    @classmethod
+    def _budget_suspension(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        from app.assistant.workflow.durable.contracts import BudgetSuspensionStateV1
+
+        if isinstance(value, BudgetSuspensionStateV1):
+            return value
+        if isinstance(value, dict):
+            return BudgetSuspensionStateV1.model_validate(value)
+        raise TypeError("budget_suspension must be BudgetSuspensionStateV1 or mapping")
+
+    @model_validator(mode="after")
+    def _phase_invariants(self) -> DurableAgentCheckpointV2:
+        if self.phase == "waiting":
+            # v2 waiting may use provider_loop_continuation (Plan 06) OR workflow pause.
+            if self.inflight_unit is not None:
+                raise ValueError("waiting phase must not carry inflight_unit")
+        elif self.provider_loop_continuation is not None:
+            raise ValueError(
+                "provider_loop_continuation is only valid when phase=waiting"
+            )
+        if self.phase == "terminal":
+            if self.inflight_unit is not None:
+                raise ValueError("terminal phase must not carry inflight_unit")
+            if self.next_action.kind not in {"terminal", "reconcile"}:
+                raise ValueError("terminal phase next_action must be terminal|reconcile")
+
+        unit = self.inflight_unit
+        if unit is not None and unit.kind == "capability_group" and unit.call_ids:
+            frame_ids = {f.call_id for f in self.capability_frames}
+            missing = [cid for cid in unit.call_ids if cid not in frame_ids]
+            if missing:
+                raise ValueError(
+                    "capability_frames inconsistent with inflight unit call_ids: "
+                    f"missing {missing!r}"
+                )
+        return self
+
+
+
 __all__ = [
     "DurableAgentCheckpointV1",
+    "DurableAgentCheckpointV2",
     "DurableExecutionUnitKind",
+    "DurableExecutionUnitKindV2",
     "DurableExecutionUnitState",
     "DurableExecutionUnitV1",
+    "DurableExecutionUnitV2",
     "DurableGrantSetV1",
     "DurableNextActionKind",
+    "DurableNextActionKindV2",
     "DurableNextActionV1",
+    "DurableNextActionV2",
     "DurableProtectionKind",
     "DurableProviderMessageRecordV1",
     "ProviderMessageRole",
