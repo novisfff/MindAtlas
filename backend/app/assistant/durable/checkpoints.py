@@ -719,6 +719,8 @@ def commit_checkpoint_v2(
     active_capability_continuation: Any = None,
     enter_ready_for_memory: bool = False,
     reason: str | None = None,
+    artifact_ids: Sequence[UUID] = (),
+    extra_child_rows: Sequence[Any] = (),
 ) -> DurableCommitResult:
     """Append a Checkpoint v2 carrying optional workflow_state / workflow units.
 
@@ -858,6 +860,7 @@ def commit_checkpoint_v2(
 
     frames = tuple(capability_frames or ())
     next_action = DurableNextActionV2(kind=next_action_kind)  # type: ignore[arg-type]
+    ck_artifact_ids = tuple(artifact_ids or ())
     checkpoint = DurableAgentCheckpointV2(
         run_id=run_id,
         phase=phase,  # type: ignore[arg-type]
@@ -870,7 +873,7 @@ def commit_checkpoint_v2(
         provider_loop_continuation=provider_loop_continuation,
         inflight_unit=unit,
         capability_frames=frames,
-        artifact_ids=(),
+        artifact_ids=ck_artifact_ids,
         visible_text_artifact_id=None,
         next_action=next_action,
         workflow_state=workflow_state,
@@ -906,8 +909,11 @@ def commit_checkpoint_v2(
         state_payload=state_payload,
         state_digest=state_digest,
     )
+    # Artifact / bag-snapshot rows first so Checkpoint FKs resolve in-txn.
+    child_rows: list[Any] = list(extra_child_rows or [])
+    child_rows.append(ck_row)
     bundle = DurableChildBundle(
-        rows=[ck_row],
+        rows=child_rows,
         current_manifest_revision_id=new_manifest_id,
         current_policy_revision_id=new_policy_id,
         current_budget_revision_id=new_budget_id,

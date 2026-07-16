@@ -729,12 +729,16 @@ def _build_wait_obligation_revision(
     from sqlalchemy import func, select
 
     obl_type = "user_input" if proposal.kind == "input" else "approval"
+    # Include interrupt_id + node_visit_id so multi-pause digests are unique
+    # per Run (uq_assistant_run_obligation_revision_run_digest).
+    source_call_id = f"wait:{proposal.interrupt_id}:{proposal.node_visit_id}"
     try:
         item = build_reserved_obligation(
             run_id=run.id,
             obligation_type=obl_type,  # type: ignore[arg-type]
             owner_kind="main_agent",
             owner_id="main",
+            source_call_id=source_call_id,
             ordinal=1,
         )
         payload = {
@@ -744,6 +748,9 @@ def _build_wait_obligation_revision(
                 if hasattr(item, "model_dump")
                 else dict(item)
             ],
+            "interruptId": str(proposal.interrupt_id),
+            "nodeId": proposal.node_id,
+            "nodeVisitId": proposal.node_visit_id,
         }
         digest = sha256_canonical_json(payload)
     except Exception:  # noqa: BLE001 — fixture-friendly minimal obligation
@@ -756,8 +763,11 @@ def _build_wait_obligation_revision(
                     "interruptId": str(proposal.interrupt_id),
                     "nodeId": proposal.node_id,
                     "nodeVisitId": proposal.node_visit_id,
+                    "sourceCallId": source_call_id,
                 }
             ],
+            "interruptId": str(proposal.interrupt_id),
+            "nodeVisitId": proposal.node_visit_id,
         }
         digest = sha256_canonical_json(payload)
 

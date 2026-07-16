@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, Mapping, Sequence
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
 
@@ -192,6 +192,11 @@ class LoadedResumeContext:
     resolution_budget_row: AssistantRunBudgetRevision
     parent_budget_row: AssistantRunBudgetRevision
     human_result: HumanContinuationResult
+    # True when Checkpoint shows human already applied (crash-after-apply recovery).
+    # Frame advanced, pending_interrupt_id cleared, next_action=continue_child.
+    human_already_applied: bool = False
+    # Portable bag snapshot rehydrated from post-apply Artifact (if any).
+    bag_snapshot: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -288,6 +293,98 @@ def build_human_continuation_result(interrupt: AssistantRunInterrupt) -> HumanCo
     )
 
 
+def _parse_human_applied_reason(reason: str | None) -> UUID | None:
+    """Parse interrupt_id from ``human_applied:{interrupt_id}:{node_visit_id}``."""
+    if not reason or not str(reason).startswith("human_applied:"):
+        return None
+    parts = str(reason).split(":")
+    if len(parts) < 2:
+        return None
+    try:
+        return UUID(parts[1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_bag_snapshot_from_artifact(
+    db: Session,
+    *,
+    artifact_id: UUID | None,
+) -> dict[str, Any] | None:
+    """Rehydrate portable bag snapshot from a post-apply Artifact row."""
+    if artifact_id is None:
+        return None
+    from app.assistant.durable.models import AssistantRunArtifact
+
+    art = db.get(AssistantRunArtifact, artifact_id)
+    if art is None or art.inline_bytes is None:
+        return None
+    if str(art.kind) not in {"node_bag_snapshot", "bag_snapshot"}:
+        # Still try to decode JSON if content is JSON.
+        if not str(art.media_type or "").startswith("application/json"):
+            return None
+    try:
+        import json
+
+        payload = json.loads(art.inline_bytes.decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(payload, dict):
+        return None
+    # Unwrap optional envelope.
+    if "bagSnapshot" in payload and isinstance(payload["bagSnapshot"], dict):
+        return dict(payload["bagSnapshot"])
+    if "nodeOutputs" in payload or "node_outputs" in payload:
+        return payload
+    return None
+
+
+def _build_bag_snapshot_artifact(
+    *,
+    run_id: UUID,
+    frame_id: UUID,
+    interrupt_id: UUID,
+    bag: PortableNodeBag,
+) -> Any:
+    """Build inline Artifact carrying portable bag snapshot for crash recovery."""
+    import json
+
+    from app.assistant.domain.digests import sha256_bytes
+    from app.assistant.durable.models import AssistantRunArtifact
+
+    snapshot = bag.to_snapshot()
+    body_obj = {
+        "contractVersion": 1,
+        "kind": "node_bag_snapshot",
+        "frameId": str(frame_id),
+        "interruptId": str(interrupt_id),
+        "bagSnapshot": snapshot,
+    }
+    body = json.dumps(
+        body_obj,
+        separators=(",", ":"),
+        sort_keys=True,
+        ensure_ascii=False,
+    ).encode("utf-8")
+    digest = sha256_bytes(body)
+    return AssistantRunArtifact(
+        id=uuid4(),
+        run_id=run_id,
+        kind="node_bag_snapshot",
+        media_type="application/json",
+        display_label=f"bag:{frame_id}",
+        storage_kind="inline",
+        byte_size=len(body),
+        content_sha256=digest,
+        inline_bytes=body,
+        object_key=None,
+        metadata_json={
+            "frameId": str(frame_id),
+            "interruptId": str(interrupt_id),
+        },
+    )
+
+
 def load_resume_context(
     db: Session,
     *,
@@ -298,6 +395,12 @@ def load_resume_context(
 
     Rejects missing/mismatched child revision and incomplete lineage *before*
     any adapter/runtime construction.
+
+    Also accepts crash-after-apply recovery: Checkpoint with
+    ``next_action=continue_child``, no ``pending_interrupt_id``, frame advanced
+    past the human node. In that case the resolved Interrupt is recovered from
+    the post-apply reason / resolution_checkpoint pointer, and bag_snapshot is
+    rehydrated from the frame's node_state_artifact_id when present.
     """
     run = db.get(AssistantChatRun, run_id)
     if run is None:
@@ -318,30 +421,69 @@ def load_resume_context(
         )
     resume_cp = _decode_v2(resume_row)
 
-    # Resume-ready shape: next_action=resume_child and pending_interrupt_id set.
     next_kind = getattr(resume_cp.next_action, "kind", None)
-    if next_kind not in {"resume_child", "continue_child"}:
-        # Allow continue_child only when human already applied (crash after apply).
-        if resume_cp.pending_interrupt_id is None and resume_cp.workflow_state is not None:
-            # May be mid-continue after human applied — still need interrupt from history.
-            pass
-        else:
+    human_already_applied = False
+    interrupt_id = resume_cp.pending_interrupt_id
+    bag_snapshot: dict[str, Any] | None = None
+
+    if next_kind == "resume_child" and interrupt_id is not None:
+        # Normal first entry: resume-ready with pending resolved interrupt.
+        pass
+    elif next_kind == "continue_child" and interrupt_id is None:
+        # Crash-after-apply recovery: human already applied, frame advanced.
+        human_already_applied = True
+        interrupt_id = _parse_human_applied_reason(getattr(resume_row, "reason", None))
+        if interrupt_id is None:
+            # Fall back: find most recent terminal interrupt whose resolution
+            # checkpoint is an ancestor of current (or any resolved on this run).
+            from sqlalchemy import select
+
+            rows = list(
+                db.scalars(
+                    select(AssistantRunInterrupt)
+                    .where(
+                        AssistantRunInterrupt.run_id == run_id,
+                        AssistantRunInterrupt.status != "pending",
+                    )
+                    .order_by(AssistantRunInterrupt.resolved_at.desc())
+                )
+            )
+            if not rows:
+                raise DurableResumeError(
+                    "continue_child checkpoint missing recoverable interrupt identity",
+                    reason_code=CODE_RESUME_PROTOCOL_ERROR,
+                )
+            interrupt_id = rows[0].id
+    elif next_kind in {"resume_child", "continue_child"}:
+        # continue_child with pending_interrupt_id, or resume_child without it — protocol error.
+        if interrupt_id is None:
             raise DurableResumeError(
-                f"resume checkpoint next_action={next_kind!r} is not resume_child",
+                "resume checkpoint missing pending_interrupt_id",
                 reason_code=CODE_RESUME_PROTOCOL_ERROR,
             )
+    else:
+        raise DurableResumeError(
+            f"resume checkpoint next_action={next_kind!r} is not resume_child/continue_child",
+            reason_code=CODE_RESUME_PROTOCOL_ERROR,
+        )
 
-    interrupt_id = resume_cp.pending_interrupt_id
     if interrupt_id is None:
         raise DurableResumeError(
             "resume checkpoint missing pending_interrupt_id",
             reason_code=CODE_RESUME_PROTOCOL_ERROR,
         )
     if expected_interrupt_id is not None and interrupt_id != expected_interrupt_id:
-        raise DurableResumeError(
-            f"pending_interrupt_id {interrupt_id} != expected {expected_interrupt_id}",
-            reason_code=CODE_RESUME_LINEAGE_MISMATCH,
-        )
+        # For crash-after recovery, expected may still be the original interrupt.
+        if not human_already_applied:
+            raise DurableResumeError(
+                f"pending_interrupt_id {interrupt_id} != expected {expected_interrupt_id}",
+                reason_code=CODE_RESUME_LINEAGE_MISMATCH,
+            )
+        if interrupt_id != expected_interrupt_id:
+            raise DurableResumeError(
+                f"recovered interrupt_id {interrupt_id} != expected {expected_interrupt_id}",
+                reason_code=CODE_RESUME_LINEAGE_MISMATCH,
+            )
 
     interrupt = db.get(AssistantRunInterrupt, interrupt_id)
     if interrupt is None:
@@ -366,7 +508,7 @@ def load_resume_context(
         )
     waiting_cp = _decode_v2(waiting_row)
 
-    # Prefer workflow_state from resume checkpoint (carried from waiting), else waiting.
+    # Prefer workflow_state from resume checkpoint (carried from waiting / post-apply).
     workflow_state = resume_cp.workflow_state or waiting_cp.workflow_state
     if workflow_state is None:
         raise DurableResumeNeedsReconciliation(
@@ -452,7 +594,11 @@ def load_resume_context(
         )
     if resume_cp.budget_revision_id != child_budget.id and run.current_budget_revision_id != child_budget.id:
         # Resume checkpoint or run pointer must reference the derived child.
-        if resume_cp.budget_revision_id != child_budget.id:
+        # After human apply the budget pointer may still be the child; accept either.
+        if (
+            not human_already_applied
+            and resume_cp.budget_revision_id != child_budget.id
+        ):
             raise DurableResumeError(
                 "resume checkpoint budget_revision_id != resolution child budget",
                 reason_code=CODE_RESUME_BUDGET_MISMATCH,
@@ -486,7 +632,7 @@ def load_resume_context(
                 reason_code=CODE_RESUME_FRAME_MISMATCH,
             )
     # When still waiting at human node, top should match.
-    if top.phase == "waiting":
+    if top.phase == "waiting" and not human_already_applied:
         if str(top.current_node_id) != str(interrupt.node_id):
             raise DurableResumeError(
                 f"waiting frame current_node_id {top.current_node_id!r} "
@@ -498,6 +644,24 @@ def load_resume_context(
                 "waiting frame node_visit_id mismatch",
                 reason_code=CODE_RESUME_FRAME_MISMATCH,
             )
+
+    # Crash-after-apply: rehydrate bag from node_state_artifact_id on the frame.
+    if human_already_applied:
+        # Prefer the human frame's node_state_artifact_id.
+        bag_art_id = None
+        for fr in workflow_state.frame_stack:
+            if fr.frame_id == interrupt.workflow_frame_id and fr.node_state_artifact_id:
+                bag_art_id = fr.node_state_artifact_id
+                break
+        if bag_art_id is None and top is not None:
+            bag_art_id = top.node_state_artifact_id
+        # Also accept checkpoint-level artifact_ids (first bag snapshot kind).
+        bag_snapshot = _load_bag_snapshot_from_artifact(db, artifact_id=bag_art_id)
+        if bag_snapshot is None and resume_cp.artifact_ids:
+            for aid in resume_cp.artifact_ids:
+                bag_snapshot = _load_bag_snapshot_from_artifact(db, artifact_id=aid)
+                if bag_snapshot is not None:
+                    break
 
     # Root continuation must match derived root identity.
     expected_root = build_root_continuation(
@@ -525,6 +689,8 @@ def load_resume_context(
         resolution_budget_row=child_budget,
         parent_budget_row=parent_budget,
         human_result=human,
+        human_already_applied=human_already_applied,
+        bag_snapshot=bag_snapshot,
     )
 
 
@@ -1098,6 +1264,53 @@ def execute_interrupt_resume(
     builds one ``ProviderWaitingResolution`` when a ProviderLoopContinuation is
     supplied.
     """
+    def _route_needs_reconciliation(
+        *,
+        reason_code: str,
+        detail: str,
+        human_result: HumanContinuationResult | None = None,
+        root_continuation: ContinuationRef | None = None,
+        workflow_state: DurableWorkflowStateV1 | None = None,
+        revision: int | None = None,
+    ) -> ResumeUnitResult:
+        """CAS Run to needs_reconciliation when possible; always return the outcome."""
+        routed_revision = revision if revision is not None else int(expected_revision)
+        try:
+            commit = route_irreconcilable_to_needs_reconciliation(
+                db,
+                run_id=run_id,
+                lease=lease,
+                expected_revision=routed_revision,
+                reason_code=reason_code,
+                detail=detail,
+            )
+            routed_revision = int(commit.state_revision)
+        except DurableRunConflict as exc:
+            # Stop/stale lease may prevent the CAS; still surface needs_reconciliation.
+            code = getattr(exc, "code", None)
+            if code not in {"invalid_source_status", "stale_revision", "lease_mismatch"}:
+                raise
+            return ResumeUnitResult(
+                kind="needs_reconciliation",
+                reason_code=reason_code,
+                needs_reconciliation=True,
+                detail=f"{detail}; route CAS failed: {exc}",
+                human_result=human_result,
+                root_continuation=root_continuation,
+                workflow_state=workflow_state,
+                state_revision=routed_revision,
+            )
+        return ResumeUnitResult(
+            kind="needs_reconciliation",
+            reason_code=reason_code,
+            needs_reconciliation=True,
+            detail=detail,
+            human_result=human_result,
+            root_continuation=root_continuation,
+            workflow_state=workflow_state,
+            state_revision=routed_revision,
+        )
+
     try:
         ctx = load_resume_context(
             db,
@@ -1105,19 +1318,17 @@ def execute_interrupt_resume(
             expected_interrupt_id=expected_interrupt_id,
         )
     except DurableResumeNeedsReconciliation as exc:
-        return ResumeUnitResult(
-            kind="needs_reconciliation",
+        return _route_needs_reconciliation(
             reason_code=exc.reason_code,
-            needs_reconciliation=True,
             detail=str(exc),
+            revision=expected_revision,
         )
     except DurableResumeError as exc:
         if exc.needs_reconciliation:
-            return ResumeUnitResult(
-                kind="needs_reconciliation",
+            return _route_needs_reconciliation(
                 reason_code=exc.reason_code,
-                needs_reconciliation=True,
                 detail=str(exc),
+                revision=expected_revision,
             )
         return ResumeUnitResult(
             kind="failed",
@@ -1139,16 +1350,24 @@ def execute_interrupt_resume(
             parent_ledger_payload=parent_payload,
         )
     except DurableResumeError as exc:
+        if exc.needs_reconciliation:
+            return _route_needs_reconciliation(
+                reason_code=exc.reason_code,
+                detail=str(exc),
+                human_result=ctx.human_result,
+                root_continuation=ctx.root_continuation,
+                workflow_state=ctx.workflow_state,
+                revision=expected_revision,
+            )
         return ResumeUnitResult(
-            kind="needs_reconciliation" if exc.needs_reconciliation else "failed",
+            kind="failed",
             reason_code=exc.reason_code,
-            needs_reconciliation=exc.needs_reconciliation,
             detail=str(exc),
             human_result=ctx.human_result,
             root_continuation=ctx.root_continuation,
         )
 
-    if crash_before_human_apply:
+    if crash_before_human_apply and not ctx.human_already_applied:
         # Test kill point: after verify, before node continuation commit.
         return ResumeUnitResult(
             kind="failed",
@@ -1160,91 +1379,154 @@ def execute_interrupt_resume(
             state_revision=expected_revision,
         )
 
-    # Build runner + bag (may restore snapshot from waiting material).
+    # Build runner + bag (may restore snapshot from waiting material / post-apply Artifact).
     pause_port = WorkerUnitPauseEffectPort()
     runner = DurableWorkflowRunner(
         registry=build_default_registry(),
         pause_effect_port=pause_port,
     )
-    # Seed bag for each frame; restore snapshot for the human frame when provided.
+    # Prefer caller bag_snapshot, then recovered post-apply Artifact snapshot.
+    effective_bag_snapshot = bag_snapshot if bag_snapshot is not None else ctx.bag_snapshot
     for fr in ctx.workflow_state.frame_stack:
-        if bag_snapshot is not None and fr.frame_id == ctx.human_result.frame_id:
-            runner.load_bag_snapshot(fr.frame_id, bag_snapshot)
+        if effective_bag_snapshot is not None and fr.frame_id == ctx.human_result.frame_id:
+            runner.load_bag_snapshot(fr.frame_id, effective_bag_snapshot)
+        elif effective_bag_snapshot is not None and material.bag_snapshot:
+            runner.load_bag_snapshot(fr.frame_id, material.bag_snapshot)
         else:
             runner.get_bag(fr.frame_id)
 
-    human_bag = runner.get_bag(ctx.human_result.frame_id)
-    try:
-        new_state, human_bag, _next = apply_human_result_once(
-            state=ctx.workflow_state,
-            human=ctx.human_result,
-            plan=material.plan,
-            bag=human_bag,
-            interrupt_kind=str(ctx.interrupt.kind),
-        )
-    except DurableResumeError as exc:
-        return ResumeUnitResult(
-            kind="needs_reconciliation" if exc.needs_reconciliation else "failed",
-            reason_code=exc.reason_code,
-            needs_reconciliation=exc.needs_reconciliation,
-            detail=str(exc),
-            human_result=ctx.human_result,
-            root_continuation=ctx.root_continuation,
-        )
-
-    runner._bags[ctx.human_result.frame_id] = human_bag
-    revision = int(expected_revision)
-
-    # Checkpoint human node output once (Plan 06 CAS: running + expected revision).
-    # Resume-ready checkpoint has no inflight_unit; use commit_checkpoint_v2.
-    if commit_human_apply:
-        from app.assistant.durable.checkpoints import commit_checkpoint_v2
-
-        try:
-            applied = commit_checkpoint_v2(
-                db,
-                run_id=run_id,
-                lease=lease,
-                expected_revision=revision,
-                phase="dispatching_calls",
-                next_action_kind="continue_child",
-                unit=None,
-                workflow_state=new_state,
-                active_capability_continuation=ctx.root_continuation,
-                pending_interrupt_id=None,
-                budget_suspension=None,
-                reason=(
-                    f"human_applied:{ctx.human_result.interrupt_id}:"
-                    f"{ctx.human_result.node_visit_id}"
-                ),
+    # Also rehydrate via material.bag_snapshot pattern (Task 3) when provided.
+    if effective_bag_snapshot is not None:
+        # Ensure material carries snapshot so prepare_boundary can rehydrate too.
+        if material.bag_snapshot is None:
+            material = DurableFrameMaterial(
+                plan=material.plan,
+                node_configs=material.node_configs,
+                inputs=material.inputs,
+                bag_snapshot=effective_bag_snapshot,
             )
-            revision = int(applied.state_revision)
-        except DurableRunConflict as exc:
-            code = getattr(exc, "code", None)
-            if code in {"invalid_source_status", "stale_revision", "lease_mismatch"}:
-                return ResumeUnitResult(
-                    kind="stop_won",
-                    reason_code=CODE_RESUME_STOP_WON,
+
+    revision = int(expected_revision)
+    human_bag = runner.get_bag(ctx.human_result.frame_id)
+
+    if ctx.human_already_applied:
+        # Crash-after-apply recovery: frame already advanced, bag rehydrated.
+        # Do not re-apply human result or re-commit the apply Checkpoint.
+        new_state = ctx.workflow_state
+        # Ensure bag still has human node output (idempotent inject if missing).
+        if ctx.human_result.node_id not in human_bag.node_outputs:
+            human_bag.set_output(
+                ctx.human_result.node_id, ctx.human_result.as_bag_payload()
+            )
+            runner._bags[ctx.human_result.frame_id] = human_bag
+    else:
+        try:
+            new_state, human_bag, _next = apply_human_result_once(
+                state=ctx.workflow_state,
+                human=ctx.human_result,
+                plan=material.plan,
+                bag=human_bag,
+                interrupt_kind=str(ctx.interrupt.kind),
+            )
+        except DurableResumeError as exc:
+            if exc.needs_reconciliation:
+                return _route_needs_reconciliation(
+                    reason_code=exc.reason_code,
                     detail=str(exc),
                     human_result=ctx.human_result,
                     root_continuation=ctx.root_continuation,
-                    workflow_state=new_state,
-                    state_revision=revision,
+                    workflow_state=ctx.workflow_state,
+                    revision=revision,
                 )
-            raise
+            return ResumeUnitResult(
+                kind="failed",
+                reason_code=exc.reason_code,
+                detail=str(exc),
+                human_result=ctx.human_result,
+                root_continuation=ctx.root_continuation,
+            )
 
-    if crash_after_human_apply:
-        # Test kill point: after continuation node commit, before further boundaries.
-        return ResumeUnitResult(
-            kind="human_applied",
-            reason_code="crash_after_human_apply",
-            detail="injected crash after human apply commit",
-            human_result=ctx.human_result,
-            root_continuation=ctx.root_continuation,
-            workflow_state=new_state,
-            state_revision=revision,
-            applied_node_visit_id=ctx.human_result.node_visit_id,
+        runner._bags[ctx.human_result.frame_id] = human_bag
+
+        # Persist bag_snapshot on post-apply Checkpoint (Task 3 pattern + Artifact).
+        # Attach node_state_artifact_id on the advanced human frame so re-entry
+        # can rehydrate without process-local runner._bags.
+        bag_art = _build_bag_snapshot_artifact(
+            run_id=run_id,
+            frame_id=ctx.human_result.frame_id,
+            interrupt_id=ctx.human_result.interrupt_id,
+            bag=human_bag,
         )
+        # Stamp node_state_artifact_id on the frame that owns the human node.
+        stamped_stack = []
+        for fr in new_state.frame_stack:
+            if fr.frame_id == ctx.human_result.frame_id:
+                stamped_stack.append(
+                    _copy_frame(fr, node_state_artifact_id=bag_art.id)
+                )
+            else:
+                stamped_stack.append(fr)
+        new_state = DurableWorkflowStateV1(
+            run_id=new_state.run_id,
+            root_frame_id=new_state.root_frame_id,
+            root_invocation_digest=new_state.root_invocation_digest,
+            frame_stack=tuple(stamped_stack),
+            pending_interrupt_id=None,
+            terminal_output_artifact_id=new_state.terminal_output_artifact_id,
+        )
+
+        # Checkpoint human node output once (Plan 06 CAS: running + expected revision).
+        # Resume-ready checkpoint has no inflight_unit; use commit_checkpoint_v2.
+        if commit_human_apply:
+            from app.assistant.durable.checkpoints import commit_checkpoint_v2
+
+            try:
+                applied = commit_checkpoint_v2(
+                    db,
+                    run_id=run_id,
+                    lease=lease,
+                    expected_revision=revision,
+                    phase="dispatching_calls",
+                    next_action_kind="continue_child",
+                    unit=None,
+                    workflow_state=new_state,
+                    active_capability_continuation=ctx.root_continuation,
+                    pending_interrupt_id=None,
+                    budget_suspension=None,
+                    reason=(
+                        f"human_applied:{ctx.human_result.interrupt_id}:"
+                        f"{ctx.human_result.node_visit_id}"
+                    ),
+                    artifact_ids=(bag_art.id,),
+                    extra_child_rows=(bag_art,),
+                )
+                revision = int(applied.state_revision)
+            except DurableRunConflict as exc:
+                code = getattr(exc, "code", None)
+                if code in {"invalid_source_status", "stale_revision", "lease_mismatch"}:
+                    return ResumeUnitResult(
+                        kind="stop_won",
+                        reason_code=CODE_RESUME_STOP_WON,
+                        detail=str(exc),
+                        human_result=ctx.human_result,
+                        root_continuation=ctx.root_continuation,
+                        workflow_state=new_state,
+                        state_revision=revision,
+                    )
+                raise
+
+        if crash_after_human_apply:
+            # Test kill point: after continuation node commit, before further boundaries.
+            return ResumeUnitResult(
+                kind="human_applied",
+                reason_code="crash_after_human_apply",
+                detail="injected crash after human apply commit",
+                human_result=ctx.human_result,
+                root_continuation=ctx.root_continuation,
+                workflow_state=new_state,
+                state_revision=revision,
+                applied_node_visit_id=ctx.human_result.node_visit_id,
+            )
 
     # If human apply cancelled the root, short-circuit.
     top = new_state.frame_stack[-1] if new_state.frame_stack else None
@@ -1266,10 +1548,18 @@ def execute_interrupt_resume(
                         resolved_waiting=resolution,
                     )
             except DurableResumeError as exc:
+                if exc.needs_reconciliation:
+                    return _route_needs_reconciliation(
+                        reason_code=exc.reason_code,
+                        detail=str(exc),
+                        human_result=ctx.human_result,
+                        root_continuation=ctx.root_continuation,
+                        workflow_state=new_state,
+                        revision=revision,
+                    )
                 return ResumeUnitResult(
-                    kind="needs_reconciliation" if exc.needs_reconciliation else "failed",
+                    kind="failed",
                     reason_code=exc.reason_code,
-                    needs_reconciliation=exc.needs_reconciliation,
                     detail=str(exc),
                     human_result=ctx.human_result,
                     root_continuation=ctx.root_continuation,
@@ -1311,15 +1601,13 @@ def execute_interrupt_resume(
         if not _continuation_equal(
             cont.pause_proposal.root_continuation, ctx.root_continuation
         ):
-            return ResumeUnitResult(
-                kind="needs_reconciliation",
+            return _route_needs_reconciliation(
                 reason_code=CODE_RESUME_CONTINUATION_MISMATCH,
-                needs_reconciliation=True,
                 detail="second pause changed outer ContinuationRef",
                 human_result=ctx.human_result,
                 root_continuation=ctx.root_continuation,
                 workflow_state=cont.workflow_state,
-                state_revision=revision,
+                revision=revision,
             )
         pause_result = None
         if commit_continue:
@@ -1336,9 +1624,9 @@ def execute_interrupt_resume(
                     parent_ledger=None,
                     ttl_sec=pause_ttl_sec,
                     reason="second_human_pause",
-                    # Avoid obligation_digest unique collision with first pause on
-                    # the same Run (second wait obligation is control bookkeeping).
-                    add_wait_obligation=False,
+                    # Obligation digests include interrupt_id + node_visit_id so
+                    # multi-pause wait obligations remain unique per Run.
+                    add_wait_obligation=True,
                 )
                 revision = int(pause_result.commit.state_revision)
             except DurableRunConflict as exc:
@@ -1432,10 +1720,18 @@ def execute_interrupt_resume(
                         resolved_waiting=resolution,
                     )
             except DurableResumeError as exc:
+                if exc.needs_reconciliation:
+                    return _route_needs_reconciliation(
+                        reason_code=exc.reason_code,
+                        detail=str(exc),
+                        human_result=ctx.human_result,
+                        root_continuation=ctx.root_continuation,
+                        workflow_state=cont.workflow_state,
+                        revision=revision,
+                    )
                 return ResumeUnitResult(
-                    kind="needs_reconciliation" if exc.needs_reconciliation else "failed",
+                    kind="failed",
                     reason_code=exc.reason_code,
-                    needs_reconciliation=exc.needs_reconciliation,
                     detail=str(exc),
                     human_result=ctx.human_result,
                     root_continuation=ctx.root_continuation,
