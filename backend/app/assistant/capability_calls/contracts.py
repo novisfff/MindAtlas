@@ -150,6 +150,57 @@ class CapabilityCallIdentity(FrozenContract):
     execution_mode: CapabilityExecutionMode
 
 
+
+class CapabilityCallApprovalBindingV1(FrozenContract):
+    """Exact call-owned approval binding tuple (Plan 08 Task 5).
+
+    Approval binds this digest; any changed field invalidates the pending call.
+    Approval never rewrites authorization_digest or grant digests.
+    """
+
+    contract_version: Literal[1] = 1
+    call_id: UUID
+    logical_call_key: str
+    owner_digest: str
+    binding_contract_digest: str
+    input_digest: str
+    target_version_id: UUID | None
+    target_digest: str
+    descriptor_digest: str
+    authorization_digest: str
+    principal_digest: str
+    request_revision: int
+    approval_binding_digest: str
+
+
+class CapabilityCallPauseProposalV1(FrozenContract):
+    """Staged pause proposal returned by LedgerDispatcher (not durable alone)."""
+
+    contract_version: Literal[1] = 1
+    run_id: UUID
+    call_id: UUID
+    interrupt_id: UUID
+    approval_binding: CapabilityCallApprovalBindingV1
+    safe_request_payload: dict[str, object]
+    proposal_digest: str
+
+
+class SafeApprovalCardV1(FrozenContract):
+    """Server-rendered bounded approval card (secrets already redacted)."""
+
+    contract_version: Literal[1] = 1
+    action_label: str
+    object_type: str
+    side_effect_class: str
+    is_external: bool
+    owner_label: str
+    target_label: str
+    field_summaries: tuple[str, ...]
+    retryable: bool
+    reconcilable: bool
+
+
+
 __all__ = [
     "CAPABILITY_CALL_STATUSES",
     "CAPABILITY_CALL_TERMINAL_STATUSES",
@@ -160,6 +211,9 @@ __all__ = [
     "INTERRUPT_ORIGINS",
     "RECONCILIATION_DECISIONS",
     "CapabilityCallIdentity",
+    "SafeApprovalCardV1",
+    "CapabilityCallPauseProposalV1",
+    "CapabilityCallApprovalBindingV1",
     "CapabilityCallStatus",
     "CapabilityExecutionMode",
     "CapabilityLedgerMode",

@@ -5,6 +5,8 @@ CAS repository, and call-aware settlement. Dispatcher lands in later tasks.
 """
 
 from app.assistant.capability_calls.contracts import (  # noqa: F401
+    CapabilityCallApprovalBindingV1,
+    SafeApprovalCardV1,
     CAPABILITY_CALL_STATUSES,
     CAPABILITY_CALL_TERMINAL_STATUSES,
     CAPABILITY_EXECUTION_MODES,
@@ -41,6 +43,12 @@ from app.assistant.capability_calls.repository import (  # noqa: F401
 from app.assistant.capability_calls.settlement import (  # noqa: F401
     CapabilityCallSettlementRepository,
     SettlementRequest,
+)
+from app.assistant.capability_calls.approval import (  # noqa: F401
+    authorize_call_after_approval,
+    build_approval_binding,
+    close_non_approved_call,
+    render_safe_approval_card,
 )
 from app.assistant.capability_calls.dispatcher import (  # noqa: F401
     LedgerDispatchRequest,
@@ -82,6 +90,11 @@ __all__ = [
     "LedgerDispatchResult",
     "LedgerDispatcher",
     "select_dispatcher",
+    "authorize_call_after_approval",
+    "build_approval_binding",
+    "close_non_approved_call",
+    "render_safe_approval_card",
+    "CapabilityCallApprovalBindingV1",
     "digest_input_payload",
     "idempotency_key_fingerprint",
     "make_nested_agent_logical_call_key",

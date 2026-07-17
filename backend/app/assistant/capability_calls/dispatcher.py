@@ -20,6 +20,7 @@ from app.assistant.capability_calls.idempotency import (
     make_provider_logical_call_key,
     make_server_idempotency_key,
 )
+from app.assistant.capability_calls.approval import build_approval_binding
 from app.assistant.capability_calls.repository import (
     CapabilityCallConflict,
     CapabilityCallRepository,
@@ -256,6 +257,20 @@ class LedgerDispatcher:
 
         # Approval-gated golden write: stage pause, no Gateway.
         if ledger.dispatch_disposition == "awaiting_call_approval":
+            interrupt_id = uuid4()
+            binding = build_approval_binding(
+                call_id=row.id,
+                logical_call_key=logical_key,
+                owner_digest=ledger.authorization_digest,
+                binding_contract_digest=ledger.frozen_target_digest or ledger.input_digest,
+                input_digest=ledger.input_digest,
+                target_digest=ledger.frozen_target_digest or ledger.input_digest,
+                descriptor_digest=str(row.descriptor_digest),
+                authorization_digest=ledger.authorization_digest,
+                principal_digest=ledger.authorization_digest,
+                request_revision=1,
+                target_version_id=None,
+            )
             if str(row.status) == "proposed":
                 row = self.repo.transition_call(
                     call_id=row.id,
@@ -263,21 +278,21 @@ class LedgerDispatcher:
                     expected_run_revision=ledger.expected_run_revision,
                     to_status="awaiting_approval",
                     lease=ledger.lease,
+                    approval_binding_digest=binding.approval_binding_digest,
                 )
-            interrupt_id = uuid4()
             proposal = CapabilityCallPauseProposalV1(
                 contract_version=1,
                 run_id=ledger.run_id,
                 call_id=row.id,
                 interrupt_id=interrupt_id,
-                approval_binding_digest=ledger.authorization_digest,
+                approval_binding_digest=binding.approval_binding_digest,
                 logical_call_key=logical_key,
                 safe_request_payload={
                     "domainKey": str(domain_key),
                     "sideEffectClass": ledger.side_effect_class,
                     "executionMode": ledger.execution_mode,
                 },
-                proposal_digest=ledger.authorization_digest,
+                proposal_digest=binding.approval_binding_digest,
             )
             return LedgerDispatchResult(
                 provider_result=None,
