@@ -42,6 +42,12 @@ from app.assistant.capability_calls.settlement import (  # noqa: F401
     CapabilityCallSettlementRepository,
     SettlementRequest,
 )
+from app.assistant.capability_calls.dispatcher import (  # noqa: F401
+    LedgerDispatchRequest,
+    LedgerDispatchResult,
+    LedgerDispatcher,
+    select_dispatcher,
+)
 from app.assistant.capability_calls.state_machine import (  # noqa: F401
     ALLOWED_CALL_TRANSITIONS,
     PLAN08_RUN_TRANSITION_DELTA,
@@ -72,6 +78,10 @@ __all__ = [
     "ProposeCallSpec",
     "RECONCILIATION_DECISIONS",
     "SettlementRequest",
+    "LedgerDispatchRequest",
+    "LedgerDispatchResult",
+    "LedgerDispatcher",
+    "select_dispatcher",
     "digest_input_payload",
     "idempotency_key_fingerprint",
     "make_nested_agent_logical_call_key",
