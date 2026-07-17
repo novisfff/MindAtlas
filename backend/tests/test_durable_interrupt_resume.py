@@ -581,6 +581,67 @@ def _pause_resolve_claim(db, **kwargs):
 
 
 class TestApplyHumanResultOnce:
+    def test_rejected_without_typed_edge_never_uses_success_edge(self) -> None:
+        from app.assistant.workflow.durable.adapters import PortableNodeBag
+        from app.assistant.workflow.durable.contracts import derive_node_visit_id
+        from app.assistant.workflow.durable.resume import (
+            HumanContinuationResult,
+            apply_human_result_once,
+        )
+        from app.assistant.workflow.durable.runner import (
+            _copy_frame,
+            _replace_top_frame,
+            build_initial_workflow_state,
+        )
+
+        plan = _plan_with_human()
+        state = build_initial_workflow_state(
+            run_id=UUID("00000000-0000-4000-8000-000000000b10"),
+            plan=plan,
+            root_invocation_digest=DIGEST_A,
+            invocation_call_id="root-call-rejected",
+            target_id=UUID("00000000-0000-4000-8000-000000000b11"),
+            inputs={},
+        )
+        top = state.frame_stack[-1]
+        visit = derive_node_visit_id(
+            frame_id=top.frame_id, node_id="hitl", node_visit_ordinal=1
+        )
+        state = _replace_top_frame(
+            state,
+            _copy_frame(
+                top,
+                current_node_id="hitl",
+                node_visit_id=visit,
+                node_visit_ordinal=1,
+                phase="waiting",
+            ),
+        )
+        human = HumanContinuationResult(
+            outcome="rejected",
+            status="rejected",
+            values={},
+            comment=None,
+            resolution_request_id=uuid.uuid4(),
+            resolution_digest=DIGEST_C,
+            interrupt_id=uuid.uuid4(),
+            node_id="hitl",
+            node_visit_id=visit,
+            frame_id=top.frame_id,
+        )
+
+        new_state, bag, next_id = apply_human_result_once(
+            state=state,
+            human=human,
+            plan=plan,
+            bag=PortableNodeBag(),
+            interrupt_kind="approval",
+        )
+
+        assert next_id is None
+        assert new_state.frame_stack[-1].phase == "cancelled"
+        assert bag.output_of("hitl")["outcome"] == "rejected"
+
     def test_injects_typed_result_and_advances(self) -> None:
         from app.assistant.workflow.durable.adapters import PortableNodeBag
         from app.assistant.workflow.durable.resume import (
@@ -1227,20 +1288,14 @@ class TestInterruptResumeIntegration:
         )
         rev = int(claimed.state_revision)
 
-        # Resume: need runner that can select material by top frame — execute_interrupt_resume
-        # uses single material; for nested child wait, pass child plan as material when
-        # interrupt is on child. Our load uses workflow state; continue_child uses one material.
-        # For nested, pass parent material + child_materials; continue uses top target.
-        # The continue_child_until_boundary currently uses only `material` for prepare —
-        # so for nested resume we pass the child material as primary when waiting on child.
-        # apply_human uses the plan that owns the human node (child plan).
-        # continue selects material by top frame target via child_materials.
+        # Primary material remains the root. Resume must select the exact child
+        # material from the interrupt-owning frame before applying human output.
         result = execute_interrupt_resume(
             self.db,
             run_id=run.id,
             lease=lease,
             expected_revision=rev,
-            material=child_material,
+            material=parent_material,
             child_materials=child_materials,
             parent_ledger=ledger,
         )
@@ -1578,11 +1633,21 @@ class TestDecisionRaces:
             expected_request_revision=int(interrupt2.request_revision),
             expected_run_revision=waiting_rev2,
         )
-        exp_first = irepo2.expire_interrupt(
-            run_id=run2.id,
-            interrupt_id=interrupt2.id,
-            resolution_request_id=uuid.uuid4(),
-        )
+        from unittest.mock import patch
+
+        after_expiry = interrupt2.expires_at
+        if after_expiry.tzinfo is None:
+            after_expiry = after_expiry.replace(tzinfo=timezone.utc)
+        with patch.object(
+            irepo2,
+            "_db_now",
+            return_value=after_expiry + timedelta(seconds=1),
+        ):
+            exp_first = irepo2.expire_interrupt(
+                run_id=run2.id,
+                interrupt_id=interrupt2.id,
+                resolution_request_id=uuid.uuid4(),
+            )
         assert exp_first.created_resolution is True
         assert str(exp_first.interrupt.status) == "expired"
         try:

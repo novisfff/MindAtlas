@@ -42,7 +42,7 @@ def _parent_ledger(*, remaining_ms: int = 120_000):
     from app.assistant.policy import create_initial_ledger_state, normalize_run_budget_limits
     from app.assistant.policy.contracts import RunBudgetLimits
 
-    start = datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc)
+    start = datetime.now(timezone.utc)
     limits = normalize_run_budget_limits()
     payload = limits.model_dump()
     payload["max_wall_time_ms"] = max(remaining_ms + 10_000, 30_000)

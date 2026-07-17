@@ -127,6 +127,30 @@ describe('chat-store durable interrupts', () => {
     expect(cards[0].resolutionRequestId).toBe('rr-1')
   })
 
+  it('does not let a stale pending rotate snapshot overwrite terminal SSE state', () => {
+    const store = createStore<ChatState>(createChatLogic)
+    store.getState().addMessage({
+      id: 'msg-1',
+      role: 'assistant',
+      content: '',
+      createdAt: Date.now(),
+    })
+    store.getState().upsertDurableInterrupt(
+      makeInterrupt({
+        status: 'approved',
+        tokenRevision: 1,
+        resolutionRequestId: 'rr-terminal',
+      }),
+    )
+    store.getState().upsertDurableInterrupt(
+      makeInterrupt({ status: 'pending', tokenRevision: 2 }),
+    )
+
+    const interrupt = store.getState().messages[0].durableInterrupts?.[0]
+    expect(interrupt?.status).toBe('approved')
+    expect(interrupt?.resolutionRequestId).toBe('rr-terminal')
+  })
+
   it('setRunPendingInterrupts replaces pending cards without dropping terminal history', () => {
     const store = createStore<ChatState>(createChatLogic)
     store.getState().addMessage({

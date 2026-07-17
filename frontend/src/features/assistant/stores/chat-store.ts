@@ -70,11 +70,15 @@ function attachInterruptToMessages(
   }
   const target = next[targetIndex]
   const existing = target.durableInterrupts ?? []
+  const previous = existing.find((item) => item.interruptId === interrupt.interruptId)
+  const previousTerminal = previous && previous.status !== 'pending'
+  const incomingIsStalePending = previousTerminal && interrupt.status === 'pending'
+  const merged = incomingIsStalePending && previous ? previous : interrupt
   next[targetIndex] = {
     ...target,
     durableInterrupts: [
       ...existing.filter((item) => item.interruptId !== interrupt.interruptId),
-      interrupt,
+      merged,
     ],
   }
   return next

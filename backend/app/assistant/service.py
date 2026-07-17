@@ -234,6 +234,38 @@ class AssistantService:
         )
 
         repo = DurableRunRepository(self.db)
+
+        def _cancel_pending_durable_interrupt() -> None:
+            from app.assistant.workflow.durable.interrupts import (
+                DurableInterruptRepository,
+            )
+
+            try:
+                interrupt_repo = DurableInterruptRepository(self.db)
+                pending_interrupt = interrupt_repo.get_pending_for_run(
+                    run.id,
+                    for_update=False,
+                )
+                if pending_interrupt is not None:
+                    interrupt_repo.cancel_interrupt(
+                        run_id=run.id,
+                        interrupt_id=pending_interrupt.id,
+                        comment="run stopped",
+                    )
+                    self.db.commit()
+            except Exception as exc:
+                self.db.rollback()
+                logger.exception(
+                    "cancel pending durable interrupt after stop failed run_id=%s",
+                    run.id,
+                )
+                raise ApiException(
+                    status_code=500,
+                    code=42272,
+                    message="run stopped but durable interrupt cleanup failed; retry stop",
+                    details={"reasonCode": "durable_interrupt_cleanup_failed", "runId": str(run.id)},
+                ) from exc
+
         # Retry a few times on concurrent revision bumps (worker heartbeat is
         # non-semantic and does not bump; result/recovery/stop do).
         last_conflict: DurableRunConflict | None = None
@@ -241,7 +273,10 @@ class AssistantService:
             self.db.refresh(run)
             status = str(run.status or "")
             if status in TERMINAL_STATUSES:
-                # Idempotent terminal read — do not raise.
+                # Retry cleanup even after the Run transition committed; a prior
+                # response may have been lost between stop CAS and interrupt close.
+                _cancel_pending_durable_interrupt()
+                self.db.refresh(run)
                 return self._serialize_run(run)
 
             expected_revision = int(run.state_revision or 0)
@@ -291,6 +326,7 @@ class AssistantService:
 
             new_status = str(result.status or "")
             if new_status in {STATUS_CANCELLING, STATUS_CANCELLED}:
+                _cancel_pending_durable_interrupt()
                 try:
                     cancel_pending_human_approvals_for_run(self.db, run_id=str(run.id))
                 except Exception:

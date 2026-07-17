@@ -1,12 +1,12 @@
 # Plan 07 Task 0 Baseline (Plan 06 Freeze + Legacy Workflow/HITL Characterization)
 
-**Recorded at (UTC):** 2026-07-15T15:41:30Z  
-**Branch:** `worktree-plan-07-durable-workflow-interrupt`  
-**Worktree:** `/root/MindAtlas/.claude/worktrees/plan-07-durable-workflow-interrupt`  
-**HEAD at freeze:** `8f253db4dde0d72bc45545ce8c99f6f211a2b8e0`  
-**HEAD subject:** `feat(ai): Plan 06 durable agent run foundation (merge-dark) (#53)`  
-**Plan 06 development tip (pre-squash):** `44aee03` (`fix(ai): atomic main_agent create, configured I/O heartbeat, migration gates`)  
-**Tree equivalence:** `git diff --stat 44aee03 8f253db -- backend/app` is empty — squash merge on `main` carries the full Plan 06 product tree.  
+**Recorded at (UTC):** 2026-07-15T15:41:30Z
+**Branch:** `worktree-plan-07-durable-workflow-interrupt`
+**Worktree:** `/root/MindAtlas/.claude/worktrees/plan-07-durable-workflow-interrupt`
+**HEAD at freeze:** `8f253db4dde0d72bc45545ce8c99f6f211a2b8e0`
+**HEAD subject:** `feat(ai): Plan 06 durable agent run foundation (merge-dark) (#53)`
+**Plan 06 development tip (pre-squash):** `44aee03` (`fix(ai): atomic main_agent create, configured I/O heartbeat, migration gates`)
+**Tree equivalence:** `git diff --stat 44aee03 8f253db -- backend/app` is empty — squash merge on `main` carries the full Plan 06 product tree.
 **Working tree product code at freeze start:** clean (untracked local `backend/.venv` symlink only; characterization test + this evidence added by Task 0).
 
 ---

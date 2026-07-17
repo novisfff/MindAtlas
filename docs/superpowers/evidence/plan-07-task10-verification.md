@@ -1,10 +1,18 @@
 # Plan 07 Task 10 — Crash/Race Matrix and Final Verification
 
-**Recorded at (UTC):** 2026-07-16T08:30:47Z  
-**Branch:** `worktree-plan-07-durable-workflow-interrupt` / `pr-52`  
-**Worktree:** `/root/MindAtlas/.claude/worktrees/plan-07-durable-workflow-interrupt`  
-**HEAD base (Task 9 complete):** `7bea415`  
+**Recorded at (UTC):** 2026-07-16T08:30:47Z
+**Branch:** `worktree-plan-07-durable-workflow-interrupt` / `pr-52`
+**Worktree:** `/root/MindAtlas/.claude/worktrees/plan-07-durable-workflow-interrupt`
+**HEAD base (Task 9 complete):** `7bea415`
 **Environment:** no live Docker stack / PostgreSQL / MinIO for full deploy demos — unit/integration + CI-gated evidence recorded honestly.
+
+> **2026-07-16 review correction:** The original results below describe the
+> library/test harness at the recorded commit, not a production API + worker
+> closure. A follow-up audit found and repaired fail-open iteration admission,
+> boundary bag persistence, nested frame data/plan selection, non-success edge
+> fallback, durable-stop cleanup, wall-clock fixtures, migration-head drift, and
+> frontend resolve races. Production `MainAgentRunExecutor` pause/resume routing
+> and periodic expiry scheduling remain residual and admissions remain disabled.
 
 ---
 
@@ -177,6 +185,7 @@ Negative corpus (must never appear in durable payloads): `sk-secret-abc-live-key
 | Full compose API + assistant-worker smoke | not run; `docker compose config` only |
 | Nested Agent frame wait golden | residual (nested Workflow covered) |
 | Outer MainAgentRunExecutor auto-route `resume_child` | library-only worker unit (Task 7 residual) |
+| Periodic production expiry scanner driver | not wired; repository scanner is library-only |
 | Production catalog/runtime admissions | **not flipped** |
 
 ---
@@ -185,19 +194,19 @@ Negative corpus (must never appear in durable payloads): `sk-secret-abc-live-key
 
 | Criterion | Status |
 |---|---|
-| Waiting Workflow/Agent survives API/worker restart; no polling / in-memory waiter | **pass** (pause + golden kill/restart) |
+| Waiting Workflow/Agent survives API/worker restart; no polling / in-memory waiter | **partial** — library recovery is covered; production worker auto-route is residual |
 | Durable state = frozen portable data + version/plan/digest refs + private Artifact refs | **pass** (codec v2 + golden) |
 | Compiled `WorkflowState` / `HumanLoopRuntime` never serialized into Checkpoints | **pass** (characterization + payload scan) |
 | Approval/input resolution conversation-scoped, token/HMAC, schema, revision CAS, auditable, idempotency-before-consumed, lost-response idempotent, one-shot execution | **pass** (API + security suites) |
 | Terminal API exposes winning `resolutionRequestId`; never internal decision digest / token / suspension digest / submitted values / comment | **pass** (API safe shape) |
 | Human wait uses immutable `BudgetSuspensionStateV1` bound to parent Plan 05 budget revision/digest; suspends active time only; cannot increase budgets or extend own expiry | **pass** (security + pause) |
 | Continuing resolution ≤1 ordinary Plan 05 budget child (byte-identical non-time); terminal cancel none; exact HTTP retry nothing | **pass** (API + resume + golden) |
-| Resume continues exact node visit/frame once; committed branch/loop/child not recomputed | **pass** (resume crash before/after apply) |
+| Resume continues exact node visit/frame once; committed branch/child not recomputed | **pass for admitted library paths**; iteration is now rejected until body execution exists |
 | One root Capability may pause multiple times; stable outer continuation; one eventual Provider waiting resolution | **pass** (multiple interrupts + provider waiting) |
 | Completed Provider sibling prefix reused; pending suffix in order; no open transcript to Provider | **pass** (provider waiting suite) |
-| Duplicate decisions / reconnects / two workers / cancel / expiry cannot duplicate continuation | **pass** (races + two workers) |
+| Duplicate decisions / reconnects / two workers / cancel / expiry cannot duplicate continuation | **pass in repository/library tests**; production expiry scheduling is residual |
 | Pause / post-resume result / stop / cancel finalizer use Plan 06 allowed-source + expected-`state_revision` CAS; no overwrite of `cancelling`; no second status machine | **pass** |
-| Golden proposal Artifact path completes after restart; no business table / external system change | **pass** (Task 9 golden + re-run) |
+| Golden proposal Artifact path completes after restart; no business table / external system change | **partial** — library harness passes; API + default worker smoke was not run |
 | Newly published durable descriptors exact/reviewed; old `legacy_blocking` bindings immutable | **pass** |
 | Legacy chat/workflow-test HITL unchanged when Main Agent mode off | **pass** (legacy routes + mode off default) |
 
@@ -209,7 +218,9 @@ Negative corpus (must never appear in durable payloads): `sk-secret-abc-live-key
 |---|---|
 | Plan 07 kill point “after Interrupt insert before outer pointer CAS” lacked a direct inject proof | Added `CrashPoint.AFTER_INTERRUPT_INSERT_BEFORE_OUTER_POINTER_CAS` + `maybe_crash` in `commit_durable_workflow_pause` after interrupt create; matrix test proves rollback leaves 0 Interrupt / running / unchanged revision |
 
-No production-admission or second status-machine bugs found in verification.
+No production admissions were enabled. The follow-up review identified the
+library/runtime integrity defects summarized in the correction above; the
+outer production routing and expiry scheduler remain explicitly unfinished.
 
 ---
 

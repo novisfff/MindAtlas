@@ -61,7 +61,6 @@ from app.assistant.workflow.durable.adapters import (
     DurableAdapterError,
     PortableNodeBag,
     _next_from_single_edge,
-    _target_for_handle,
     build_default_registry,
 )
 from app.assistant.workflow.durable.contracts import (
@@ -757,8 +756,10 @@ def verify_resolution_budget_lineage(
 def _handle_for_outcome(*, kind: str, outcome: str) -> str | None:
     """Map human outcome to optional edge source_handle."""
     o = str(outcome).lower()
-    if o in {"approved", "submitted"}:
+    if o == "approved":
         return "approved"
+    if o == "submitted":
+        return "submitted"
     if o in {"rejected"}:
         return "rejected"
     if o in {"cancelled"}:
@@ -786,11 +787,14 @@ def select_human_successor(
         )
     handle = _handle_for_outcome(kind=kind, outcome=outcome)
     if handle is not None:
-        # Prefer exact handle; fall back to single-edge default.
-        target = _target_for_handle(node, handle)
-        if target is not None:
-            return target
-    return _next_from_single_edge(node)
+        for edge in node.outgoing_edges:
+            if (edge.source_handle or "") == handle:
+                return edge.target_node_id
+    if str(outcome or "").strip().lower() in {"approved", "submitted"}:
+        # Backward-compatible success path for reviewed linear HITL graphs.
+        return _next_from_single_edge(node)
+    # Non-success outcomes must never fall back to an approve/default edge.
+    return None
 
 
 def apply_human_result_once(
@@ -898,10 +902,16 @@ def apply_human_result_once(
         out_bag.set_output(human.node_id, human.as_bag_payload())
 
     if next_id is None:
-        # Terminal human leaf — mark frame completed if root, else leave for caller.
+        # Non-success without an exact typed edge terminates safely; it must not
+        # be represented as a successful completed frame.
+        terminal_phase = (
+            "completed"
+            if human.outcome in {"approved", "submitted"}
+            else "cancelled"
+        )
         completed = _copy_frame(
             frame,
-            phase="completed",
+            phase=terminal_phase,
             current_node_id=human.node_id,
             node_visit_id=human.node_visit_id,
         )
@@ -1379,6 +1389,41 @@ def execute_interrupt_resume(
             state_revision=expected_revision,
         )
 
+    human_frame = next(
+        (
+            frame
+            for frame in ctx.workflow_state.frame_stack
+            if frame.frame_id == ctx.human_result.frame_id
+        ),
+        None,
+    )
+    if human_frame is None:
+        return _route_needs_reconciliation(
+            reason_code=CODE_RESUME_FRAME_MISMATCH,
+            detail="interrupt-owning human frame is missing",
+            human_result=ctx.human_result,
+            root_continuation=ctx.root_continuation,
+            workflow_state=ctx.workflow_state,
+            revision=expected_revision,
+        )
+    human_material = _material_for_top(
+        top=human_frame,
+        material=material,
+        child_materials=child_materials,
+    )
+    if (
+        human_material.plan.target_version_id != human_frame.target_version_id
+        or human_material.plan.plan_digest != human_frame.execution_plan_digest
+    ):
+        return _route_needs_reconciliation(
+            reason_code=CODE_RESUME_FRAME_MISMATCH,
+            detail="exact material for interrupt-owning frame is missing or drifted",
+            human_result=ctx.human_result,
+            root_continuation=ctx.root_continuation,
+            workflow_state=ctx.workflow_state,
+            revision=expected_revision,
+        )
+
     # Build runner + bag (may restore snapshot from waiting material / post-apply Artifact).
     pause_port = WorkerUnitPauseEffectPort()
     runner = DurableWorkflowRunner(
@@ -1388,21 +1433,36 @@ def execute_interrupt_resume(
     # Prefer caller bag_snapshot, then recovered post-apply Artifact snapshot.
     effective_bag_snapshot = bag_snapshot if bag_snapshot is not None else ctx.bag_snapshot
     for fr in ctx.workflow_state.frame_stack:
-        if effective_bag_snapshot is not None and fr.frame_id == ctx.human_result.frame_id:
-            runner.load_bag_snapshot(fr.frame_id, effective_bag_snapshot)
-        elif effective_bag_snapshot is not None and material.bag_snapshot:
-            runner.load_bag_snapshot(fr.frame_id, material.bag_snapshot)
+        frame_material = _material_for_top(
+            top=fr,
+            material=material,
+            child_materials=child_materials,
+        )
+        frame_snapshot = (
+            effective_bag_snapshot
+            if fr.frame_id == ctx.human_result.frame_id
+            else _load_bag_snapshot_from_artifact(
+                db,
+                artifact_id=fr.node_state_artifact_id,
+            )
+        )
+        if frame_snapshot is not None:
+            runner.load_bag_snapshot(
+                fr.frame_id,
+                frame_snapshot,
+                inputs=frame_material.inputs,
+            )
         else:
-            runner.get_bag(fr.frame_id)
+            runner.get_bag(fr.frame_id, inputs=frame_material.inputs)
 
     # Also rehydrate via material.bag_snapshot pattern (Task 3) when provided.
     if effective_bag_snapshot is not None:
         # Ensure material carries snapshot so prepare_boundary can rehydrate too.
-        if material.bag_snapshot is None:
-            material = DurableFrameMaterial(
-                plan=material.plan,
-                node_configs=material.node_configs,
-                inputs=material.inputs,
+        if human_material.bag_snapshot is None:
+            human_material = DurableFrameMaterial(
+                plan=human_material.plan,
+                node_configs=human_material.node_configs,
+                inputs=human_material.inputs,
                 bag_snapshot=effective_bag_snapshot,
             )
 
@@ -1424,7 +1484,7 @@ def execute_interrupt_resume(
             new_state, human_bag, _next = apply_human_result_once(
                 state=ctx.workflow_state,
                 human=ctx.human_result,
-                plan=material.plan,
+                plan=human_material.plan,
                 bag=human_bag,
                 interrupt_kind=str(ctx.interrupt.kind),
             )

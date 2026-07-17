@@ -148,6 +148,7 @@ class AdapterBoundaryResult:
     branch_decision: DurableBranchDecisionV1 | None = None
     loop_cursor: DurableLoopCursorV1 | None = None
     child_frame: DurableCallFrameV1 | None = None
+    child_inputs: Mapping[str, Any] | None = None
     pause_proposal: DurablePauseProposalV1 | None = None
     agent_loop_continuation: Any = None
     output_artifact_id: UUID | None = None
@@ -266,6 +267,36 @@ def _target_for_handle(node: DurableNodePlanV1, handle: str) -> str | None:
         if (e.source_handle or "") in {"else", "false", "default"}:
             return e.target_node_id
     return _next_from_single_edge(node)
+
+
+def _resolve_input_binding(raw: Any, bag: PortableNodeBag) -> Any:
+    """Resolve an exact ``{{node.field}}`` binding without string coercion."""
+    if not isinstance(raw, str):
+        return raw
+    value = raw.strip()
+    if not (value.startswith("{{") and value.endswith("}}")):
+        return raw
+    reference = value[2:-2].strip()
+    if not reference or "." not in reference:
+        return ""
+    source, field = reference.split(".", 1)
+    if source == "sys":
+        return bag.sys_vars.get(field, "")
+    if source == "env":
+        return bag.env_vars.get(field, "")
+    if source == "start":
+        output = bag.output_of("start")
+        json_fields = output.get("json_fields") or {}
+        if isinstance(json_fields, Mapping) and field in json_fields:
+            return json_fields[field]
+        if field in output:
+            return output[field]
+        return bag.inputs.get(field, "")
+    output = bag.output_of(source)
+    json_fields = output.get("json_fields") or {}
+    if isinstance(json_fields, Mapping) and field in json_fields:
+        return json_fields[field]
+    return output.get(field, output.get("text", ""))
 
 
 def _allocate_artifact_id(bag: PortableNodeBag, *, seed: str) -> UUID:
@@ -681,6 +712,13 @@ class WorkflowCallAdapter:
             execution_attempt=1,
             phase="ready",
         )
+        child_inputs = dict(getattr(child_mat, "inputs", {}) or {})
+        bindings = ctx.node_config.get(
+            "input_bindings", ctx.node_config.get("inputBindings")
+        )
+        if isinstance(bindings, Mapping):
+            for name, raw in bindings.items():
+                child_inputs[str(name)] = _resolve_input_binding(raw, ctx.bag)
         # Record the parent call-node successor so CHILD_COMPLETED can advance
         # without fixture-hardcoded node id maps.
         return_target = _next_from_single_edge(ctx.node)
@@ -703,6 +741,7 @@ class WorkflowCallAdapter:
             next_node_id=return_target,
             branch_decision=branch_decision,
             child_frame=child_frame,
+            child_inputs=child_inputs,
             bag=ctx.bag,
         )
 

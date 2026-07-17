@@ -77,8 +77,8 @@ CODE_DURABLE_INTERRUPT_AUTH_MODE_UNAVAILABLE = "durable_interrupt_auth_mode_unav
 CODE_INTERRUPT_ALREADY_RESOLVED = "interrupt_already_resolved"
 
 # Outcomes that continue the frozen graph (queue resume).
-_QUEUEING_OUTCOMES = frozenset({"approved", "rejected", "submitted"})
-_TERMINAL_NON_QUEUE_OUTCOMES = frozenset({"cancelled", "expired"})
+_QUEUEING_OUTCOMES = frozenset({"approved", "submitted"})
+_TERMINAL_NON_QUEUE_OUTCOMES = frozenset({"rejected", "cancelled", "expired"})
 
 
 @dataclass(frozen=True)

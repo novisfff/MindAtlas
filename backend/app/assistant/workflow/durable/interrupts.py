@@ -47,6 +47,7 @@ from app.common.time import utcnow
 CODE_INTERRUPT_NOT_FOUND = "interrupt_not_found"
 CODE_INTERRUPT_NOT_PENDING = "interrupt_not_pending"
 CODE_INTERRUPT_EXPIRED = "interrupt_expired"
+CODE_INTERRUPT_NOT_EXPIRED = "interrupt_not_expired"
 CODE_INTERRUPT_TOKEN_INVALID = "interrupt_token_invalid"
 CODE_INTERRUPT_TOKEN_STALE = "interrupt_token_stale"
 CODE_INTERRUPT_REQUEST_MISMATCH = "interrupt_request_mismatch"
@@ -1610,6 +1611,12 @@ class DurableInterruptRepository:
                 run=run,
             )
         now = self._db_now()
+        if self._as_utc(row.expires_at) > now:
+            raise InterruptConflict(
+                CODE_INTERRUPT_NOT_EXPIRED,
+                "interrupt has not reached expires_at",
+                run=run,
+            )
         req_id = resolution_request_id or uuid4()
         res_digest = compute_resolution_digest(
             interrupt_id=interrupt_id,
@@ -1775,6 +1782,7 @@ __all__ = [
     "CODE_INTERRUPT_IMMUTABLE",
     "CODE_INTERRUPT_KEY_CONFLICT",
     "CODE_INTERRUPT_NOT_FOUND",
+    "CODE_INTERRUPT_NOT_EXPIRED",
     "CODE_INTERRUPT_NOT_PENDING",
     "CODE_INTERRUPT_OUTCOME_INVALID",
     "CODE_INTERRUPT_PARENT_TAMPER",

@@ -158,12 +158,18 @@ def _parent_plan_with_call(
     )
 
 
-def _material(plan: Any, *, configs: dict | None = None) -> Any:
+def _material(
+    plan: Any,
+    *,
+    configs: dict | None = None,
+    inputs: dict | None = None,
+) -> Any:
     from app.assistant.workflow.durable.runner import DurableFrameMaterial
 
     return DurableFrameMaterial(
         plan=plan,
         node_configs=configs or {n.node_id: {} for n in plan.nodes},
+        inputs=inputs or {},
     )
 
 
@@ -188,8 +194,22 @@ class TestNestedWorkflowFrames:
             target_id=UUID("00000000-0000-4000-8000-000000000a11"),
             inputs={"x": 1},
         )
-        parent_material = _material(parent_plan)
-        child_material = _material(child_plan)
+        parent_material = _material(
+            parent_plan,
+            configs={
+                "p_start": {},
+                "nested_wf_invoke": {
+                    "inputBindings": {"x": "{{start.x}}"},
+                },
+                "parent_final_out": {},
+            },
+            inputs={"x": 1},
+        )
+        child_material = _material(
+            child_plan,
+            configs={"c_start": {}, "c_output": {"text": "child-result"}},
+            inputs={"frozenDefault": "default"},
+        )
         runner = DurableWorkflowRunner()
 
         # Parent start
@@ -221,6 +241,8 @@ class TestNestedWorkflowFrames:
         assert parent.phase == "child_active"
         assert child.frame_id in parent.child_frame_ids
         assert child.phase == "ready"
+        child_bag = runner.get_bag(child.frame_id)
+        assert child_bag.inputs == {"frozenDefault": "default", "x": 1}
 
         # Child start
         p2 = runner.prepare_boundary(state=state, material=child_material)
@@ -239,6 +261,8 @@ class TestNestedWorkflowFrames:
         parent = state.frame_stack[0]
         assert parent.phase == "ready"
         assert parent.current_node_id == "parent_final_out"
+        parent_bag = runner.get_bag(parent.frame_id)
+        assert parent_bag.output_of("nested_wf_invoke")["text"] == "child-result"
         # Successor was recorded as a branch decision at CHILD_PUSHED time
         assert any(
             d.node_id == "nested_wf_invoke" and d.chosen_target_node_id == "parent_final_out"

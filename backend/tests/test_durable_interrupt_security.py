@@ -102,7 +102,7 @@ def _parent_ledger(*, remaining_ms: int = 120_000):
     from app.assistant.policy import create_initial_ledger_state, normalize_run_budget_limits
     from app.assistant.policy.contracts import RunBudgetLimits
 
-    start = datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc)
+    start = datetime.now(timezone.utc)
     limits = normalize_run_budget_limits()
     payload = limits.model_dump()
     payload["max_wall_time_ms"] = max(remaining_ms + 10_000, 30_000)
@@ -594,6 +594,18 @@ class InterruptRepositorySecurityFlowTests(unittest.TestCase):
             parent_ledger=parent,
             parent_budget_revision_id=budget_id,
         )
+        self.db.commit()
+        from app.assistant.workflow.durable.interrupts import (
+            CODE_INTERRUPT_NOT_EXPIRED,
+            InterruptConflict,
+        )
+
+        with self.assertRaises(InterruptConflict) as early:
+            repo.expire_interrupt(run_id=run.id, interrupt_id=created2.interrupt.id)
+        self.assertEqual(early.exception.code, CODE_INTERRUPT_NOT_EXPIRED)
+        self.db.rollback()
+
+        created2.interrupt.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
         self.db.commit()
         expired = repo.expire_interrupt(run_id=run.id, interrupt_id=created2.interrupt.id)
         self.db.commit()

@@ -96,6 +96,7 @@ class BoundaryResult:
     branch_decision: DurableBranchDecisionV1 | None = None
     loop_cursor: DurableLoopCursorV1 | None = None
     child_frame: DurableCallFrameV1 | None = None
+    child_inputs: Mapping[str, Any] | None = None
     pause_proposal: DurablePauseProposalV1 | None = None
     agent_loop_continuation: Any = None
     output_artifact_id: UUID | None = None
@@ -264,6 +265,51 @@ def _project_bag_snapshot(bag: PortableNodeBag | None) -> dict[str, Any] | None:
     if bag is None:
         return None
     return bag.to_snapshot()
+
+
+def _build_boundary_bag_artifact(
+    *,
+    run_id: UUID,
+    frame_id: UUID,
+    node_visit_id: str,
+    bag_snapshot: Mapping[str, Any],
+) -> Any:
+    """Build a deterministic inline Artifact for one committed portable bag."""
+    import json
+
+    from app.assistant.domain.digests import sha256_bytes
+    from app.assistant.durable.models import AssistantRunArtifact
+
+    body = json.dumps(
+        {
+            "contractVersion": 1,
+            "kind": "node_bag_snapshot",
+            "runId": str(run_id),
+            "frameId": str(frame_id),
+            "nodeVisitId": str(node_visit_id),
+            "bagSnapshot": dict(bag_snapshot),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+        ensure_ascii=False,
+    ).encode("utf-8")
+    digest = sha256_bytes(body)
+    return AssistantRunArtifact(
+        id=UUID(hex=digest[:32]),
+        run_id=run_id,
+        kind="node_bag_snapshot",
+        media_type="application/json",
+        display_label=f"bag:{frame_id}",
+        storage_kind="inline",
+        byte_size=len(body),
+        content_sha256=digest,
+        inline_bytes=body,
+        object_key=None,
+        metadata_json={
+            "frameId": str(frame_id),
+            "nodeVisitId": str(node_visit_id),
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -568,6 +614,7 @@ class DurableWorkflowRunner:
             branch_decision=raw.branch_decision,
             loop_cursor=raw.loop_cursor,
             child_frame=raw.child_frame,
+            child_inputs=raw.child_inputs,
             pause_proposal=raw.pause_proposal,
             agent_loop_continuation=raw.agent_loop_continuation,
             output_artifact_id=raw.output_artifact_id,
@@ -630,8 +677,10 @@ class DurableWorkflowRunner:
                 branch_decisions=branch_decisions,
                 child_frame_ids=top.child_frame_ids + (result.child_frame.frame_id,),
             )
-            # Seed child bag with empty inputs (caller may pre-seed via get_bag)
-            self.get_bag(result.child_frame.frame_id)
+            self.get_bag(
+                result.child_frame.frame_id,
+                inputs=dict(result.child_inputs or {}),
+            )
             stack = tuple(state.frame_stack[:-1]) + (parent, result.child_frame)
             return _with_stack(state, stack)
 
@@ -651,6 +700,12 @@ class DurableWorkflowRunner:
                 )
             # Pop child; advance parent past call node using successor recorded at push.
             parent = state.frame_stack[-2]
+            parent_bag = self.get_bag(parent.frame_id)
+            child_payload: dict[str, Any] = {}
+            if result.bag is not None:
+                child_payload = result.bag.output_of(result.node_id)
+            if parent.current_node_id:
+                parent_bag.set_output(parent.current_node_id, child_payload)
             next_node = _advance_parent_after_child(parent, result)
             arts = parent.node_output_artifact_ids
             if result.output_artifact_id is not None:
@@ -668,6 +723,8 @@ class DurableWorkflowRunner:
             stack = tuple(state.frame_stack[:-2]) + (parent_ready,)
             # Drop child bag
             self._bags.pop(top.frame_id, None)
+            result.bag = parent_bag
+            result.bag_snapshot = _project_bag_snapshot(parent_bag)
             return _with_stack(state, stack)
 
         if result.kind == BoundaryKind.ROOT_COMPLETED:
@@ -813,6 +870,7 @@ def commit_workflow_boundary_result(
     lease: LeaseToken,
     expected_revision: int,
     workflow_state: DurableWorkflowStateV1,
+    boundary_result: BoundaryResult,
     completed_logical_unit_id: str | None = None,
     prepared: PreparedBoundary | None = None,
     expected_logical_unit_id: str | None = None,
@@ -949,6 +1007,63 @@ def commit_workflow_boundary_result(
 
     completed_id = completed_logical_unit_id or exp_logical or inflight_logical
 
+    workflow_state_for_commit = workflow_state
+    artifact_ids: tuple[UUID, ...] = ()
+    extra_child_rows: tuple[Any, ...] = ()
+    successful_with_bag = boundary_result.kind in {
+        BoundaryKind.NODE_COMPLETED,
+        BoundaryKind.ROOT_COMPLETED,
+        BoundaryKind.CHILD_PUSHED,
+        BoundaryKind.CHILD_COMPLETED,
+    }
+    if successful_with_bag:
+        if boundary_result.bag_snapshot is None:
+            raise DurableAdapterError(
+                "successful boundary result missing bag_snapshot",
+                reason_code="missing_bag_snapshot",
+            )
+        prior_ws = getattr(decoded, "workflow_state", None)
+        prior_top = (
+            prior_ws.frame_stack[-1]
+            if prior_ws is not None and getattr(prior_ws, "frame_stack", None)
+            else None
+        )
+        owning_frame_id = getattr(prior_top, "frame_id", None)
+        current_ids = {frame.frame_id for frame in workflow_state.frame_stack}
+        if owning_frame_id not in current_ids:
+            owning_frame_id = (
+                workflow_state.frame_stack[-1].frame_id
+                if workflow_state.frame_stack
+                else None
+            )
+        if owning_frame_id is None:
+            raise DurableAdapterError(
+                "successful boundary has no owning frame",
+                reason_code="missing_boundary_frame",
+            )
+        bag_artifact = _build_boundary_bag_artifact(
+            run_id=run_id,
+            frame_id=owning_frame_id,
+            node_visit_id=boundary_result.node_visit_id,
+            bag_snapshot=boundary_result.bag_snapshot,
+        )
+        stamped_stack = tuple(
+            _copy_frame(frame, node_state_artifact_id=bag_artifact.id)
+            if frame.frame_id == owning_frame_id
+            else frame
+            for frame in workflow_state.frame_stack
+        )
+        workflow_state_for_commit = DurableWorkflowStateV1(
+            run_id=workflow_state.run_id,
+            root_frame_id=workflow_state.root_frame_id,
+            root_invocation_digest=workflow_state.root_invocation_digest,
+            frame_stack=stamped_stack,
+            pending_interrupt_id=workflow_state.pending_interrupt_id,
+            terminal_output_artifact_id=workflow_state.terminal_output_artifact_id,
+        )
+        artifact_ids = (bag_artifact.id,)
+        extra_child_rows = (bag_artifact,)
+
     return commit_checkpoint_v2(
         db,
         run_id=run_id,
@@ -957,11 +1072,13 @@ def commit_workflow_boundary_result(
         phase=phase,
         next_action_kind=next_action_kind,
         unit=None,
-        workflow_state=workflow_state,
+        workflow_state=workflow_state_for_commit,
         completed_logical_unit_id=completed_id,
         pending_interrupt_id=pending_interrupt_id,
         budget_suspension=budget_suspension,
         reason=reason,
+        artifact_ids=artifact_ids,
+        extra_child_rows=extra_child_rows,
     )
 
 

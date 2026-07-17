@@ -463,6 +463,93 @@ def test_unbounded_iteration_denied() -> None:
     assert exc.value.reason_code in {"unbounded_loop", "incomplete_dependency_closure", "unsupported_node"}
 
 
+def test_bounded_iteration_denied_until_runtime_executes_body() -> None:
+    """Publishing must fail closed while IterationAdapter skips body_nodes."""
+    from app.assistant.domain.digests import sha256_canonical_json
+    from app.assistant.workflow.durable.planner import DurablePlanError
+
+    graph = {
+        "nodes": [
+            _node("start", "start"),
+            _node(
+                "loop",
+                "iteration",
+                config={
+                    "max_iterations": 2,
+                    "body_nodes": [
+                        _node(
+                            "assign_in_body",
+                            "variable_assign",
+                            config={"variableName": "seen", "value": True},
+                        )
+                    ],
+                },
+            ),
+            _node("output", "output"),
+        ],
+        "edges": [
+            _edge(edge_id="e1", source="start", target="loop"),
+            _edge(edge_id="e2", source="loop", target="output"),
+        ],
+    }
+
+    with pytest.raises(DurablePlanError) as exc:
+        plan_or_raise(
+            target_kind="workflow",
+            target_version_id=TARGET_VERSION_ID,
+            target_digest=sha256_canonical_json(graph),
+            workflow_input=graph,
+            dependencies=(),
+        )
+    assert exc.value.reason_code == "unsupported_node"
+
+
+def test_cycle_reentering_loop_container_is_denied() -> None:
+    """A top-level loop -> node -> loop edge is an unbounded graph cycle."""
+    from app.assistant.domain.digests import sha256_canonical_json
+    from app.assistant.workflow.durable.planner import DurablePlanError
+
+    graph = {
+        "nodes": [
+            _node("start", "start"),
+            _node(
+                "loop",
+                "iteration",
+                config={
+                    "max_iterations": 2,
+                    "body_nodes": [
+                        _node(
+                            "body_assign",
+                            "variable_assign",
+                            config={"variableName": "inside", "value": True},
+                        )
+                    ],
+                },
+            ),
+            _node(
+                "after_loop",
+                "variable_assign",
+                config={"variableName": "outside", "value": True},
+            ),
+        ],
+        "edges": [
+            _edge(edge_id="e1", source="start", target="loop"),
+            _edge(edge_id="e2", source="loop", target="after_loop"),
+            _edge(edge_id="e3", source="after_loop", target="loop"),
+        ],
+    }
+
+    with pytest.raises(DurablePlanError) as exc:
+        plan_or_raise(
+            target_kind="workflow",
+            target_version_id=TARGET_VERSION_ID,
+            target_digest=sha256_canonical_json(graph),
+            workflow_input=graph,
+            dependencies=(),
+        )
+    assert exc.value.reason_code == "unbounded_cycle"
+
+
 def test_ambiguous_multiple_entry_nodes_denied() -> None:
     from app.assistant.domain.digests import sha256_canonical_json
     from app.assistant.workflow.durable.planner import DurablePlanError
@@ -835,10 +922,10 @@ def test_unpinned_workflow_call_denied() -> None:
     assert exc.value.reason_code == "mutable_target_lookup"
 
 
-def test_loop_body_folds_nested_workflow_call_may_interrupt() -> None:
-    """Loop body workflow_call uses Plan 01 freeze path root/workflow_call:{container}::{node}."""
+def test_loop_body_with_nested_workflow_call_is_fail_closed() -> None:
+    """A frozen child cannot make an iteration safe while its body is skipped."""
     from app.assistant.domain.digests import sha256_canonical_json
-    from app.assistant.workflow.durable.planner import plan_allows_durable_interrupt
+    from app.assistant.workflow.durable.planner import DurablePlanError
 
     child = {
         "nodes": [
@@ -882,26 +969,22 @@ def test_loop_body_folds_nested_workflow_call_may_interrupt() -> None:
         dependency_digest=("d") * 64,
         resolution_digest=("e") * 64,
     )
-    plan = plan_or_raise(
-        target_kind="workflow",
-        target_version_id=TARGET_VERSION_ID,
-        target_digest=sha256_canonical_json(graph),
-        workflow_input=graph,
-        dependencies=(body_workflow_dep,),
-        nested_workflow_inputs={plan01_call_path: child},
-    )
-    loop = next(n for n in plan.nodes if n.node_id == "loop")
-    assert loop.may_interrupt is True
-    assert plan_allows_durable_interrupt(plan) is True
-    assert any(
-        r.dependency_path == plan01_call_path for r in loop.dependency_refs
-    )
+    with pytest.raises(DurablePlanError) as exc:
+        plan_or_raise(
+            target_kind="workflow",
+            target_version_id=TARGET_VERSION_ID,
+            target_digest=sha256_canonical_json(graph),
+            workflow_input=graph,
+            dependencies=(body_workflow_dep,),
+            nested_workflow_inputs={plan01_call_path: child},
+        )
+    assert exc.value.reason_code == "unsupported_node"
 
 
-def test_loop_body_workflow_call_accepts_synthetic_body_path_alias() -> None:
-    """Synthetic planner body path still resolves (back-compat with older fixtures)."""
+def test_loop_body_synthetic_path_alias_remains_fail_closed() -> None:
+    """Legacy dependency aliases do not bypass the disabled loop runtime."""
     from app.assistant.domain.digests import sha256_canonical_json
-    from app.assistant.workflow.durable.planner import plan_allows_durable_interrupt
+    from app.assistant.workflow.durable.planner import DurablePlanError
 
     child = _safe_child_start_output()
     synthetic_path = "root/node:loop/body/workflow_call:call_child"
@@ -923,37 +1006,33 @@ def test_loop_body_workflow_call_accepts_synthetic_body_path_alias() -> None:
             _edge(edge_id="e2", source="loop", target="output"),
         ],
     }
-    plan = plan_or_raise(
-        target_kind="workflow",
-        target_version_id=TARGET_VERSION_ID,
-        target_digest=sha256_canonical_json(graph),
-        workflow_input=graph,
-        dependencies=(
-            _dep(
-                path=synthetic_path,
-                dep_type="workflow",
-                identity=f"workflow:{CHILD_WORKFLOW_ID}",
-                target_version_id=CHILD_VERSION_ID,
-                dependency_digest=("d") * 64,
-                resolution_digest=("e") * 64,
+    with pytest.raises(DurablePlanError) as exc:
+        plan_or_raise(
+            target_kind="workflow",
+            target_version_id=TARGET_VERSION_ID,
+            target_digest=sha256_canonical_json(graph),
+            workflow_input=graph,
+            dependencies=(
+                _dep(
+                    path=synthetic_path,
+                    dep_type="workflow",
+                    identity=f"workflow:{CHILD_WORKFLOW_ID}",
+                    target_version_id=CHILD_VERSION_ID,
+                    dependency_digest=("d") * 64,
+                    resolution_digest=("e") * 64,
+                ),
             ),
-        ),
-        nested_workflow_inputs={synthetic_path: child},
-    )
-    loop = next(n for n in plan.nodes if n.node_id == "loop")
-    assert loop.may_interrupt is False
-    assert loop.business_side_effect == "none"
-    assert plan_allows_durable_interrupt(plan) is False
+            nested_workflow_inputs={synthetic_path: child},
+        )
+    assert exc.value.reason_code == "unsupported_node"
 
 
-def test_loop_body_workflow_call_real_workflows_by_locator_keys() -> None:
-    """Simulate production workflows_by_locator keys for body workflow_call."""
+def test_loop_body_real_workflow_locator_remains_fail_closed() -> None:
+    """Production closure resolution does not enable the skipped loop body."""
     from app.assistant.domain.digests import sha256_canonical_json
     from app.assistant.workflow.durable.planner import (
         DurablePlanError,
         _nested_workflow_inputs_from_closure,
-        business_side_effect_maximum,
-        plan_allows_durable_interrupt,
         plan_durable_execution,
     )
 
@@ -1004,24 +1083,16 @@ def test_loop_body_workflow_call_real_workflows_by_locator_keys() -> None:
     nested_from_closure = _nested_workflow_inputs_from_closure(_Closure())
     assert plan01_locator in nested_from_closure
 
-    plan = plan_or_raise(
-        target_kind="workflow",
-        target_version_id=TARGET_VERSION_ID,
-        target_digest=sha256_canonical_json(graph),
-        workflow_input=graph,
-        dependencies=(workflow_dep, child_model),
-        nested_workflow_inputs=nested_from_closure,
-    )
-    container = next(n for n in plan.nodes if n.node_id == "iter")
-    assert container.business_side_effect == "compute"
-    assert container.may_interrupt is False
-    assert any(r.dependency_path == plan01_locator for r in container.dependency_refs)
-    assert any(
-        r.dependency_path.endswith("/node:child_llm/model")
-        for r in container.dependency_refs
-    )
-    assert business_side_effect_maximum(plan) == "compute"
-    assert plan_allows_durable_interrupt(plan) is False
+    with pytest.raises(DurablePlanError) as exc:
+        plan_or_raise(
+            target_kind="workflow",
+            target_version_id=TARGET_VERSION_ID,
+            target_digest=sha256_canonical_json(graph),
+            workflow_input=graph,
+            dependencies=(workflow_dep, child_model),
+            nested_workflow_inputs=nested_from_closure,
+        )
+    assert exc.value.reason_code == "unsupported_node"
 
     # Fail closed when the real freeze key is present but nested snapshot is missing.
     with pytest.raises(DurablePlanError) as exc:
@@ -1033,7 +1104,7 @@ def test_loop_body_workflow_call_real_workflows_by_locator_keys() -> None:
             dependencies=(workflow_dep, child_model),
             nested_workflow_inputs={},
         )
-    assert exc.value.reason_code == "nested_workflow_call_unsupported"
+    assert exc.value.reason_code == "unsupported_node"
 
 
 def test_read_tool_allowed() -> None:

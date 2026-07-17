@@ -1,8 +1,8 @@
 # Plan 07 Task 9 — Durable Proposal Review Golden Path
 
-**Recorded (UTC):** 2026-07-16  
-**Branch:** `worktree-plan-07-durable-workflow-interrupt`  
-**Base HEAD:** `c7e8ebe`  
+**Recorded (UTC):** 2026-07-16
+**Branch:** `worktree-plan-07-durable-workflow-interrupt`
+**Base HEAD:** `c7e8ebe`
 **Canonical name:** `durable-proposal-review`
 
 ## Graph
@@ -62,6 +62,10 @@ skill_version_digest=698f3805eb5ef8098d6d5730dcd469d13a8fc35ec11cabf69f2f92f3d7a
 
 ## Recovery proof (library path)
 
+This is a direct library harness. It does **not** prove that the default HTTP
+Run creation path and `assistant-worker` automatically dispatch durable pause,
+claim a resolved Run, or invoke `execute_interrupt_resume` after process restart.
+
 Suite: `backend/tests/test_durable_proposal_review_golden.py`
 
 ```bash
@@ -71,29 +75,29 @@ backend/.venv/bin/python -m pytest backend/tests/test_durable_proposal_review_go
 
 Scenario covered:
 
-1. Publish golden package + durable descriptor  
-2. Scripted LLM compute → durable pause commit  
-3. Kill/restart sim (durable waiting on disk; no in-memory waiter)  
-4. Pending fetch + token rotate + edit/approve resolve  
-5. Kill/restart sim after decision (queued resume-ready)  
-6. `execute_interrupt_resume` → root terminal + **concrete** `terminal_output_artifact_id` + non-empty bounded `user_text` + bag `nodeOutputs.output`  
-7. One interrupt decision; one derived resume budget with byte-identical non-time usage  
-8. Zero Entry/Tag/Relation/Draft row deltas  
+1. Publish golden package + durable descriptor
+2. Scripted LLM compute → durable pause commit
+3. Kill/restart sim (durable waiting on disk; no in-memory waiter)
+4. Pending fetch + token rotate + edit/approve resolve
+5. Kill/restart sim after decision (queued resume-ready)
+6. `execute_interrupt_resume` → root terminal + **concrete** `terminal_output_artifact_id` + non-empty bounded `user_text` + bag `nodeOutputs.output`
+7. One interrupt decision; one derived resume budget with byte-identical non-time usage
+8. Zero Entry/Tag/Relation/Draft row deltas
 
 Also:
 
-- Rejection / cancellation: terminal, no resume budget  
-- Expiry: real `DurableInterruptRepository.expire_interrupt` (no status-write fallback)  
-- Malformed values: remains pending  
-- Two sequential HITLs: **requires** `second_pause` + two interrupt rows + one stable outer continuation  
-- Nested child human → parent complete  
+- Rejection / cancellation: terminal, no resume budget
+- Expiry: real `DurableInterruptRepository.expire_interrupt` (no status-write fallback)
+- Malformed values: remains pending
+- Two sequential HITLs: **requires** `second_pause` + two interrupt rows + one stable outer continuation
+- Nested child human → parent complete
 
 ### Prior Plan 07 Task 7 coverage (not re-proven here)
 
 Pending sibling suffix + Provider waiting close / memory-timing concerns are covered by Plan 07 Task 7 provider-waiting tests (same honesty style as env-gated gaps below):
 
-- `backend/tests/test_durable_provider_waiting_resume.py` — one `ProviderWaitingResolution`, pending sibling suffix preserved, original surface / continuation integrity  
-- Related interrupt resume suites under `backend/tests/test_durable_interrupt_resume.py` / `test_durable_provider_continuation.py`  
+- `backend/tests/test_durable_provider_waiting_resume.py` — one `ProviderWaitingResolution`, pending sibling suffix preserved, original surface / continuation integrity
+- Related interrupt resume suites under `backend/tests/test_durable_interrupt_resume.py` / `test_durable_provider_continuation.py`
 
 Task 9 golden path stays focused on Workflow interrupt recovery + private Artifact; it does not re-drive sibling re-authorization or live memory timing.
 
@@ -106,13 +110,15 @@ Task 9 golden path stays focused on Workflow interrupt recovery + private Artifa
 | Live Provider I/O | skipped unless `MINDATLAS_TEST_LIVE_PROVIDER`; tests use scripted LLM gateway |
 | Pending sibling re-authorization / memory timing | covered by Plan 07 Task 7 provider-waiting tests (not re-run as golden scenarios) |
 | Full compose API+worker smoke | not run in Task 9 (library recovery preferred) |
+| Default worker durable pause/resume auto-route | not wired; library-only residual |
+| Periodic expiry scanner scheduling | not wired; repository scanner is library-only |
 | Production catalog/runtime admissions | **not flipped** (evaluation/hidden only) |
 
 ## Legacy safety
 
-- Default `classify()` without durable extension remains `legacy_blocking` for human_in_loop graphs  
-- Other Legacy blocking Workflows not admitted via golden package  
-- `catalog_enabled` stays false on golden package  
+- Default `classify()` without durable extension remains `legacy_blocking` for human_in_loop graphs
+- Other Legacy blocking Workflows not admitted via golden package
+- `catalog_enabled` stays false on golden package
 
 ## Files
 

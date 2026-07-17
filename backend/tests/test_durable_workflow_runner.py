@@ -806,7 +806,8 @@ class TestDurableWorkflowRunnerCheckpoints:
 
     def test_prepare_and_result_append_v2_checkpoints(self) -> None:
         from app.assistant.durable.codec import decode_checkpoint
-        from app.assistant.durable.models import AssistantRunCheckpoint
+        from app.assistant.durable.models import AssistantRunArtifact, AssistantRunCheckpoint
+        from app.assistant.workflow.durable.adapters import PortableNodeBag
         from app.assistant.workflow.durable.runner import (
             BoundaryKind,
             DurableWorkflowRunner,
@@ -864,6 +865,8 @@ class TestDurableWorkflowRunnerCheckpoints:
             lease=lease,
             expected_revision=start_commit.state_revision,
             workflow_state=state_after,
+            boundary_result=result,
+            prepared=started,
             completed_logical_unit_id=started.unit.logical_unit_id,
             next_action_kind="continue_child",
         )
@@ -875,6 +878,19 @@ class TestDurableWorkflowRunnerCheckpoints:
         assert decoded2.workflow_state is not None
         assert decoded2.workflow_state.frame_stack[-1].current_node_id == "output"
         assert decoded2.workflow_state.frame_stack[-1].phase == "ready"
+        frame = decoded2.workflow_state.frame_stack[-1]
+        assert frame.node_state_artifact_id is not None
+        assert decoded2.artifact_ids == (frame.node_state_artifact_id,)
+
+        artifact = self.db.get(AssistantRunArtifact, frame.node_state_artifact_id)
+        assert artifact is not None
+        assert artifact.kind == "node_bag_snapshot"
+        assert artifact.inline_bytes is not None
+        import json
+
+        envelope = json.loads(bytes(artifact.inline_bytes).decode("utf-8"))
+        recovered = PortableNodeBag.from_snapshot(envelope["bagSnapshot"])
+        assert recovered.output_of("start")["json_fields"] == {}
 
     def test_retry_after_started_reuses_logical_unit(self) -> None:
         from app.assistant.workflow.durable.runner import (
@@ -955,6 +971,7 @@ class TestDurableWorkflowRunnerCheckpoints:
                 lease=lease,
                 expected_revision=start_commit.state_revision,
                 workflow_state=state_after,
+                boundary_result=result,
                 prepared=started,
                 expected_logical_unit_id="workflow_node:00000000-0000-4000-8000-ffffffffffff:bogus",
                 expected_node_visit_id="bogus-visit",
@@ -1005,6 +1022,7 @@ class TestDurableWorkflowRunnerCheckpoints:
                 lease=lease,
                 expected_revision=start_commit.state_revision,
                 workflow_state=state_after,
+                boundary_result=result,
                 completed_logical_unit_id=started.unit.logical_unit_id,
                 expected_node_visit_id="not-the-prepared-visit",
             )
@@ -1052,6 +1070,7 @@ class TestDurableWorkflowRunnerCheckpoints:
             lease=lease,
             expected_revision=start_commit.state_revision,
             workflow_state=state_after,
+            boundary_result=result,
             prepared=started,
         )
         assert result_commit.status == "running"

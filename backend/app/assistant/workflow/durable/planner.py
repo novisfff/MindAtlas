@@ -451,12 +451,12 @@ def _detect_unbounded_cycle(
     *,
     entry: str,
     adj: Mapping[str, list[str]],
-    loop_nodes: set[str],
 ) -> None:
-    """Reject cycles that are not confined to explicit bounded loop containers.
+    """Reject every cycle in the top-level graph.
 
-    Simple DFS cycle detection over the top-level DAG. Edges that re-enter a
-    declared loop container node are ignored (loop body is planned separately).
+    Bounded container bodies are represented inside node configuration rather
+    than by top-level back-edges. A top-level edge that re-enters an iteration
+    node is therefore an ordinary unbounded graph cycle and must not be skipped.
     """
     WHITE, GRAY, BLACK = 0, 1, 2
     color: dict[str, int] = {n: WHITE for n in adj}
@@ -464,9 +464,6 @@ def _detect_unbounded_cycle(
     def dfs(u: str) -> None:
         color[u] = GRAY
         for v in adj.get(u, ()):
-            if v in loop_nodes and u not in loop_nodes:
-                # Entering a loop container is not a free cycle.
-                continue
             if color.get(v, WHITE) == GRAY:
                 raise DurablePlanError(
                     f"graph cycle without bounded loop contract involving {u}->{v}",
@@ -653,65 +650,13 @@ def _plan_node(
         )
 
     if ntype in _LOOP_TYPES:
-        max_raw = _cfg_get(cfg, "max_iterations", "maxIterations", default=None)
-        try:
-            max_iterations = int(max_raw) if max_raw is not None else None
-        except (TypeError, ValueError):
-            max_iterations = None
-        body_nodes = _cfg_get(cfg, "body_nodes", "bodyNodes", default=[])
-        if not isinstance(body_nodes, list) or not body_nodes:
-            raise DurablePlanError(
-                f"loop node {nid} missing body_nodes",
-                reason_code="unbounded_loop",
-            )
-        if max_iterations is None or max_iterations < 1:
-            raise DurablePlanError(
-                f"loop node {nid} is not statically bounded",
-                reason_code="unbounded_loop",
-            )
-        # Plan body nodes for dependency completeness + side-effect max; body is
-        # not expanded into the top-level plan graph (runner owns iteration).
-        body_side: SideEffectClass = "none"
-        body_deps: list[FrozenExecutionDependencyRef] = []
-        body_may_interrupt = False
-        body_path = f"{path_prefix}/node:{nid}/body"
-        for body_node in body_nodes:
-            # Body nodes have no top-level outgoing edges in this plan version.
-            body_plan = _plan_node(
-                body_node,
-                outgoing=(),
-                deps=deps,
-                path_prefix=body_path,
-                depth=depth + 1,
-                nested_workflow_inputs=nested_workflow_inputs,
-                visited_workflow_versions=visited_workflow_versions,
-            )
-            # Nested interrupt (human or nested workflow_call) must surface.
-            body_may_interrupt = body_may_interrupt or body_plan.may_interrupt
-            body_side = _max_side_effect(body_side, body_plan.business_side_effect)
-            body_deps.extend(body_plan.dependency_refs)
-            if body_plan.business_side_effect not in _ALLOWED_BUSINESS_SIDE_EFFECTS:
-                raise DurablePlanError(
-                    f"loop body node has denied side effect",
-                    reason_code="denied_side_effect",
-                )
-        # Dedup deps by path, stable order.
-        seen_paths: set[str] = set()
-        ordered_deps: list[FrozenExecutionDependencyRef] = []
-        for d in body_deps:
-            if d.dependency_path in seen_paths:
-                continue
-            seen_paths.add(d.dependency_path)
-            ordered_deps.append(d)
-        return DurableNodePlanV1(
-            node_id=nid,
-            node_type=ntype,
-            config_digest=_config_digest(node),
-            outgoing_edges=edges,
-            adapter_key=_adapter_key(ntype),
-            business_side_effect=body_side,
-            may_interrupt=body_may_interrupt,
-            dependency_refs=tuple(ordered_deps),
+        # The v1 runtime advances only a synthetic cursor and does not execute
+        # body_nodes. Publishing such a plan would silently claim work and
+        # interrupts happened when they did not. Fail closed until a portable
+        # loop-body state machine is implemented.
+        raise DurablePlanError(
+            f"loop node {nid} is not supported by durable runtime v1",
+            reason_code="unsupported_node",
         )
 
     if ntype == "workflow_call":
@@ -993,10 +938,7 @@ def _plan_workflow_nodes(
         adj.setdefault(nid, [])
         outgoing_by_source.setdefault(nid, [])
 
-    loop_nodes = {
-        nid for nid, node in by_id.items() if _node_type(node) in _LOOP_TYPES
-    }
-    _detect_unbounded_cycle(entry=entry, adj=adj, loop_nodes=loop_nodes)
+    _detect_unbounded_cycle(entry=entry, adj=adj)
 
     # Stable order: entry first via BFS, then remaining by node_id.
     # Unreachable unsafe nodes still poison the plan (fail closed).

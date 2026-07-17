@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -84,6 +84,7 @@ export function MessageItem({ message, variant = 'default', isStreaming }: Messa
   const [submittingApprovalId, setSubmittingApprovalId] = useState<string | null>(null)
   const [submittingInterruptId, setSubmittingInterruptId] = useState<string | null>(null)
   const [interruptConflicts, setInterruptConflicts] = useState<Record<string, string>>({})
+  const interruptSubmissionsRef = useRef<Set<string>>(new Set())
   const isUser = message.role === 'user'
   const isCompact = variant === 'compact'
 
@@ -150,6 +151,10 @@ export function MessageItem({ message, variant = 'default', isStreaming }: Messa
       toast.error(t('settings.skills.humanApproval.submitFailed', 'Submit failed'))
       return
     }
+    if (interruptSubmissionsRef.current.has(interrupt.interruptId)) {
+      return
+    }
+    interruptSubmissionsRef.current.add(interrupt.interruptId)
 
     setSubmittingInterruptId(interrupt.interruptId)
     setInterruptConflicts((prev) => {
@@ -256,6 +261,7 @@ export function MessageItem({ message, variant = 'default', isStreaming }: Messa
       toast.error(text)
     } finally {
       rawToken = null
+      interruptSubmissionsRef.current.delete(interrupt.interruptId)
       setSubmittingInterruptId(null)
     }
   }
