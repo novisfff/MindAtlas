@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import enum
 
-from sqlalchemy import Column, DateTime, Enum, ForeignKey, String, Table, Text
+from sqlalchemy import Column, DateTime, Enum, ForeignKey, Index, String, Table, Text, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -38,7 +38,29 @@ class Entry(UuidPrimaryKeyMixin, TimestampMixin, Base):
     time_from = Column(DateTime(timezone=True), nullable=True)
     time_to = Column(DateTime(timezone=True), nullable=True)
     summary = Column(Text, nullable=True)
+    # Plan 08: trusted ledger link for golden create_entry idempotency.
+    # Unique when non-null; set only from CapabilityDispatchContext, never from model input.
+    source_capability_call_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "assistant_capability_call.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="fk_entry_source_capability_call_id",
+        ),
+        nullable=True,
+    )
 
     # Relationships
     type = relationship(EntryType, lazy="joined")
     tags = relationship(Tag, secondary=entry_tag, lazy="joined")
+
+    __table_args__ = (
+        Index(
+            "uq_entry_source_capability_call_id",
+            "source_capability_call_id",
+            unique=True,
+            postgresql_where=text("source_capability_call_id IS NOT NULL"),
+            sqlite_where=text("source_capability_call_id IS NOT NULL"),
+        ),
+    )

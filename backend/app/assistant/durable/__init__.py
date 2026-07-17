@@ -17,6 +17,12 @@ from app.assistant.durable.models import (  # noqa: F401
     AssistantRunProviderMessage,
     AssistantWorkerRegistration,
 )
+# Plan 08 ledger models (register with Base.metadata for create_all / alembic).
+from app.assistant.capability_calls.models import (  # noqa: F401
+    AssistantCapabilityCall,
+    AssistantCapabilityCallAttempt,
+    AssistantCapabilityReconciliation,
+)
 from app.assistant.durable.repository import (  # noqa: F401
     ALLOWED_TRANSITIONS,
     CODE_EVENT_KEY_CONFLICT,

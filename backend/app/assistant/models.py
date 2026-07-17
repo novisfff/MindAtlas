@@ -211,6 +211,9 @@ class AssistantChatRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
         server_default=text("'not_applicable'"),
     )
     memory_committed_at = Column(DateTime(timezone=True), nullable=True)
+    # Plan 08 capability ledger admission mode. Nullable for runtime_kind=legacy.
+    # Main Agent Runs created before Plan 08 are backfilled to legacy_read_only.
+    capability_ledger_mode = Column(String(32), nullable=True)
 
     conversation = relationship("Conversation", back_populates="chat_runs")
     events = relationship(
@@ -253,15 +256,29 @@ class AssistantChatRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "memory_commit_status IN ('not_applicable','pending','committed','failed')",
             name="ck_assistant_chat_run_memory_commit_status",
         ),
+        CheckConstraint(
+            "capability_ledger_mode IS NULL OR capability_ledger_mode IN ("
+            "'legacy_read_only','enforced'"
+            ")",
+            name="ck_assistant_chat_run_capability_ledger_mode",
+        ),
         # Main Agent rows require contract version + app build revision.
+        # capability_ledger_mode is frozen for main_agent after Plan 08 backfill;
+        # legacy runtime always leaves it null. ORM allows null main_agent only
+        # for pre-backfill test fixtures; migration enforces non-null after upgrade.
         CheckConstraint(
             "("
             "  runtime_kind = 'legacy'"
             "  AND runtime_contract_version IS NULL"
+            "  AND capability_ledger_mode IS NULL"
             ") OR ("
             "  runtime_kind = 'main_agent'"
             "  AND runtime_contract_version IS NOT NULL"
             "  AND required_app_build_revision IS NOT NULL"
+            "  AND ("
+            "    capability_ledger_mode IS NULL"
+            "    OR capability_ledger_mode IN ('legacy_read_only','enforced')"
+            "  )"
             ")",
             name="ck_assistant_chat_run_runtime_kind_shape",
         ),
