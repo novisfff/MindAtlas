@@ -1,10 +1,11 @@
 # Plan 08 Task 0 Baseline (Plans 01–07 Freeze + Pre-Ledger Write Characterization)
 
-**Recorded at (UTC):** 2026-07-17T08:25:23Z  
-**Branch:** `worktree-plan-08-capability-call-ledger`  
-**Worktree:** `/root/MindAtlas/.claude/worktrees/plan-08-capability-call-ledger`  
-**HEAD at freeze:** `7f2c04c2a35cc72945f5bfd66c6c7c595991c6e5`  
-**HEAD subject:** `feat(ai): Plan 07 durable workflow interrupt and resume (#54)`  
+**Recorded at (UTC):** 2026-07-17T08:25:23Z
+**Re-verified at (UTC):** 2026-07-17T08:35:00Z (symbol accuracy + e2e traces + relation-followup nested write)
+**Branch:** `worktree-plan-08-capability-call-ledger`
+**Worktree:** `/root/MindAtlas/.claude/worktrees/plan-08-capability-call-ledger`
+**HEAD at freeze:** `7f2c04c2a35cc72945f5bfd66c6c7c595991c6e5`
+**HEAD subject:** `feat(ai): Plan 07 durable workflow interrupt and resume (#54)`
 **Working tree product code at freeze start:** clean (untracked local `backend/.venv` symlink only).
 
 ---
@@ -47,6 +48,8 @@
 | Ceiling allowed side effects | **`("none", "compute", "read")`** |
 | Ceiling allowed interrupt modes | **`("none", "durable")`** (Plan 07 extended; still **no** write) |
 | Plan 05 hard release gate | **`PLAN05_RELEASE_GATE_SIDE_EFFECTS = ("none", "compute", "read")`** |
+| Plan 05 entrypoint policy revision / digest | **`plan05-v1`** / `9c3899d2450714b2783ad09792dd5fad725324f024524b931de7b3e7feff639b` (`compute_assistant_chat_entrypoint_policy_digest`) |
+| Classification ruleset digest | `1b3d2d217c35dd9272dfcb850a7006ef38872aa8434cbd9f9c535c613ffdb711` (`plan02-v1`) |
 | Policy decision type (merged name) | `AuthorizationDecision` in `app.assistant.policy.contracts` (**no** `contract_version` field yet — Plan 08 Task 3 introduces tagged V1\|V2 union) |
 | Budget suspension contract | `BudgetSuspensionStateV1` with fields: `contract_version`, `run_id`, `interrupt_id`, `parent_budget_revision_id`, `parent_ledger_revision`, `parent_ledger_digest`, `suspended_at_utc`, `remaining_active_ms`, `human_wait_expires_at_utc`, `suspension_digest` |
 
@@ -90,15 +93,64 @@
 
 | Claim | Result | Exact symbols / files |
 |---|---|---|
-| Resolve locks Run first | **pass** | `InterruptRepository.resolve_pending` docstring + body: step 1 `_lock_run(run_id)` (`app.assistant.workflow.durable.interrupts`) |
-| Idempotency lookup **before** consumed-token / pending validation | **pass** | Step 2: `get_by_resolution_request_id(..., for_update=True)` runs **before** locking the Interrupt and verifying token/revisions/deadline. Comment: "Idempotency first (Plan 07 §10.4 / §11.2)." |
-| Public terminal `resolutionRequestId` | **pass** | Column `AssistantRunInterrupt.resolution_request_id`; API serializer `serialize_interrupt_safe(..., include_resolution_request_id=True)` emits camelCase `resolutionRequestId` (`interrupt_api.py`) |
-| Versioned budget suspension | **pass** | `BudgetSuspensionStateV1` frozen contract with `suspension_digest`; pause path persists immutable suspension; resume parses via `_parse_suspension` |
-| Resume Checkpoint lineage | **pass** | Resume path materializes `interrupt_resume` Checkpoint with suspension + resolution evidence (`resume.py`, pause CAS in `pause.py`) |
+| Resolve locks Run first | **pass** | `DurableInterruptRepository.resolve_interrupt` docstring + body: step 1 `_lock_run(run_id)` (`app.assistant.workflow.durable.interrupts`) |
+| Idempotency lookup **before** consumed-token / pending validation | **pass** | Step 2: `get_by_resolution_request_id(..., for_update=True)` runs **before** locking the Interrupt and verifying token/revisions/deadline. Comment: "Idempotency first (Plan 07 §10.4 / §11.2)." Token consume (`resume_token_digest = None`) happens only after unknown-ID validation. |
+| Public terminal `resolutionRequestId` | **pass** | Column `AssistantRunInterrupt.resolution_request_id`; API serializer `serialize_interrupt_safe(..., include_resolution_request_id=True)` emits camelCase `resolutionRequestId` (`interrupt_api.py`); HTTP entry `resolve_interrupt_http` accepts client `resolution_request_id` |
+| Versioned budget suspension | **pass** | `BudgetSuspensionStateV1` (`workflow/durable/contracts.py`) frozen with `contract_version: Literal[1]=1`, parent budget revision/digest, `remaining_active_ms`, `suspension_digest`; built by `build_budget_suspension_state` / `compute_suspension_digest` |
+| Resume Checkpoint lineage | **pass** | Pause CAS: `commit_durable_workflow_pause` → `repo.commit_waiting_pause` freezes suspension + waiting Checkpoint. Resolve queues children under Run lock; resume: `execute_interrupt_resume` re-parses suspension, derives child budget via `derive_resume_budget_ledger`, continues from resolution Checkpoint lineage |
 | Interrupt identity is Workflow-node-shaped | **pass** | `AssistantRunInterrupt`: `workflow_frame_id` / `node_id` / `node_visit_id` are **non-null**; `capability_call_id` is **nullable and always null in Plan 07** (model comment). Plan 08 Task 1 adds `interrupt_origin` discriminator + XOR profile |
 | Checkpoint codec retains v1 and v2 | **pass** | `SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS = {1, 2}`; Plan 08 must retain lossless readers |
 
 **No Plan 07 stop-condition failure.** Call-owned Interrupt profile is an explicit Plan 08 extension of the same pause/resolve CAS path.
+
+### 2.5 End-to-end traces (required Task 0 proofs)
+
+#### Read call (read-only Tool through Main Agent path)
+
+```text
+admit_and_select_runtime (app.assistant.durable.admission)
+  → Run create freezes Manifest + policy snapshot (plan05-v1 entrypoint digest;
+     MAIN_AGENT_READ_ONLY_EFFECT_CEILING = ("none","compute","read"),
+     allowed_interrupt_modes=("none","durable"), ceiling revision plan07-v1)
+  → Provider / MainAgentGatewayToolDispatcher.dispatch
+       • binding/descriptor digest match; issuer=skill_policy entrypoint=main_agent
+       • BudgetLedgerDispatchGuard permit
+  → policy lattice (app.assistant.policy.evaluator)
+       derive_effective_capability_grant  # independent of descriptor
+       evaluate_authorization             # release_gate then effect ∈ grant
+       issue AuthorizationEvidence from decision/grant (not descriptor copy)
+  → CapabilityGateway.execute (app.assistant.capabilities.gateway)
+       describe → input schema → policy → cancel → consume dispatch permit
+       → tool adapter once → Tool Result / metrics
+  → durable unit result CAS only from status=running
+       (ordinary complete/fail cannot source from cancelling — Plan 06)
+```
+
+Representative read tools already classified `read` (e.g. `get_entry_detail`, `list_entry_types`, `search_similar_entries`) cannot mint `write_local` grants under v1.
+
+#### Durable interrupt (Workflow node pause → resolve → resume)
+
+```text
+Workflow human_in_loop node stages DurablePauseProposal
+  → commit_durable_workflow_pause (workflow/durable/pause.py)
+       build_budget_suspension_state → BudgetSuspensionStateV1
+       DurableInterruptRepository.create_pending_interrupt
+       repo.commit_waiting_pause  # Interrupt + waiting Checkpoint + Run
+                                  # waiting_approval|waiting_input + events
+  → HTTP decision → resolve_interrupt_http (workflow/durable/interrupt_api.py)
+       authorize actor → DurableInterruptRepository.resolve_interrupt
+         1) lock Run
+         2) idempotency by (run_id, resolution_request_id)   # BEFORE token
+         3) only unknown IDs: lock Interrupt, pending/token/revisions/deadline
+         4) validate decision/values/comment
+         5) prepare_queued_children (budget child + resume Checkpoint) under lock
+         6) mutate Interrupt terminal; public resolutionRequestId persisted
+  → execute_interrupt_resume (workflow/durable/resume.py)
+       parse BudgetSuspensionStateV1; derive_resume_budget_ledger
+       resume from resolution_checkpoint_id lineage; re-queue Run
+```
+
+Public terminal payloads include `resolutionRequestId` via `serialize_interrupt_safe`. Duplicate decisions with the same request ID replay the stored outcome without re-consuming a token.
 
 ### 2.4 Stop-condition summary
 
@@ -147,7 +199,7 @@ backend/.venv/bin/python -m pytest \
 | skipped | **16** (PG two-session / env-gated) |
 | failed | **8** (all in `test_entry_tools.py`) |
 | warnings | 1 (Starlette/httpx TestClient deprecation) |
-| duration | ~221s |
+| duration | ~303s (re-verified 2026-07-17T08:18Z; same 80/16/8 split) |
 
 ### 3.2 `test_entry_tools.py` baseline failures (recorded, not Plan 08 regressions)
 
@@ -229,7 +281,15 @@ Exact anchors:
 | `openclaw_capture_entry` / `openclaw_create_relation` | `write_local` | Must remain denied |
 | `generate_weekly_report` / `generate_monthly_report` | `write_local` | Must remain denied |
 
-HTTP `EntryService.create` callers (non-tool) keep the committing wrapper after Task 6.
+Other `EntryService.create` callers (keep committing wrapper after Task 6):
+
+| Caller | Path |
+|---|---|
+| HTTP API | `backend/app/entry/router.py::create_entry` → `EntryService(db).create(request)` |
+| OpenClaw tool | `backend/app/assistant/tools/openclaw_tools.py::openclaw_capture_entry` |
+| Assistant tool | `entry_tools.create_entry` (above) |
+
+Golden adapter must not call any of these committing surfaces.
 
 ---
 
@@ -275,9 +335,10 @@ Path: `backend/app/assistant/workflow/system_assets/workflows/smart_capture.json
 | Metric | Value |
 |---|---|
 | Nodes / edges | 12 / 11 |
-| Human nodes | `human_confirm_relations` |
-| Tools | `kb_relation_recommendations` (read) + iteration/if_else structure that enables relation creation path |
-| Why denied | Relation follow-up / additional human approval; not part of golden create-only closure |
+| Human nodes | `human_confirm_relations` ("确认推荐关系") |
+| Tools (top-level) | `tool_relation_recs` → `kb_relation_recommendations` (read) |
+| Nested write | `iter_create_relations` body contains `tool_create_relation` → **`create_relation`** (`write_local`) |
+| Why denied | Additional human approval + `create_relation` write after parent create/update; not part of golden create-only closure |
 
 ### 5.4 Golden path requirements (Plan 08 Task 8 — not present yet)
 
