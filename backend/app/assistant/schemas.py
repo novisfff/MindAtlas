@@ -65,3 +65,24 @@ class AssistantRunResponse(CamelModel):
     cancel_requested_at: datetime | None = None
     started_at: datetime | None = None
     ended_at: datetime | None = None
+
+
+class DurableInterruptTokenRequest(CamelModel):
+    """Token rotation requires exact request/Run revisions (Plan 07 §13)."""
+
+    expected_request_revision: int = Field(..., ge=1)
+    expected_run_revision: int = Field(..., ge=0)
+
+
+class DurableInterruptResolveRequest(CamelModel):
+    """Resolve requires token, resolutionRequestId, revisions, typed outcome."""
+
+    token: str = Field(..., min_length=1, max_length=512)
+    resolution_request_id: UUID
+    expected_token_revision: int = Field(..., ge=0)
+    expected_request_revision: int = Field(..., ge=1)
+    expected_run_revision: int = Field(..., ge=0)
+    outcome: Literal["approved", "rejected", "submitted", "cancelled"]
+    values: dict[str, Any] = Field(default_factory=dict)
+    # Hard ceiling 4000; settings may lower server-side validation further.
+    comment: str | None = Field(default=None, max_length=4000)

@@ -13,9 +13,12 @@ from app.assistant.schemas import (
     ConversationListResponse,
     ConversationResponse,
     ConversationSummaryResponse,
+    DurableInterruptResolveRequest,
+    DurableInterruptTokenRequest,
     HumanApprovalDecisionRequest,
 )
 from app.assistant.service import AssistantService
+from app.assistant.workflow.durable import interrupt_api as durable_interrupt_api
 from app.common.responses import ApiResponse
 from app.database import get_db
 
@@ -148,6 +151,96 @@ def submit_approval_decision(
         conversation_id=id,
         approval_id=approval_id,
         decision=request.decision,
+        values=request.values,
+        comment=request.comment,
+    )
+    return ApiResponse.ok(payload)
+
+
+# ---------------------------------------------------------------------------
+# Durable Interrupt APIs (Plan 07 Task 6) — conversation-scoped only
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/conversations/{id}/runs/{run_id}/interrupts/pending",
+    response_model=ApiResponse,
+)
+def list_pending_durable_interrupts(
+    id: UUID,
+    run_id: UUID,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = AssistantService(db)
+    service.get_conversation_basic(id)
+    items = durable_interrupt_api.service_list_pending(db, id, run_id)
+    return ApiResponse.ok(items)
+
+
+@router.get(
+    "/conversations/{id}/runs/{run_id}/interrupts/{interrupt_id}",
+    response_model=ApiResponse,
+)
+def get_durable_interrupt(
+    id: UUID,
+    run_id: UUID,
+    interrupt_id: UUID,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = AssistantService(db)
+    service.get_conversation_basic(id)
+    payload = durable_interrupt_api.service_get_detail(db, id, run_id, interrupt_id)
+    return ApiResponse.ok(payload)
+
+
+@router.post(
+    "/conversations/{id}/runs/{run_id}/interrupts/{interrupt_id}/token",
+    response_model=ApiResponse,
+)
+def rotate_durable_interrupt_token(
+    id: UUID,
+    run_id: UUID,
+    interrupt_id: UUID,
+    request: DurableInterruptTokenRequest,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = AssistantService(db)
+    service.get_conversation_basic(id)
+    payload = durable_interrupt_api.service_rotate_token(
+        db,
+        conversation_id=id,
+        run_id=run_id,
+        interrupt_id=interrupt_id,
+        expected_request_revision=request.expected_request_revision,
+        expected_run_revision=request.expected_run_revision,
+    )
+    return ApiResponse.ok(payload)
+
+
+@router.post(
+    "/conversations/{id}/runs/{run_id}/interrupts/{interrupt_id}/resolve",
+    response_model=ApiResponse,
+)
+def resolve_durable_interrupt(
+    id: UUID,
+    run_id: UUID,
+    interrupt_id: UUID,
+    request: DurableInterruptResolveRequest,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = AssistantService(db)
+    service.get_conversation_basic(id)
+    payload = durable_interrupt_api.service_resolve(
+        db,
+        conversation_id=id,
+        run_id=run_id,
+        interrupt_id=interrupt_id,
+        token=request.token,
+        resolution_request_id=request.resolution_request_id,
+        expected_token_revision=request.expected_token_revision,
+        expected_request_revision=request.expected_request_revision,
+        expected_run_revision=request.expected_run_revision,
+        outcome=request.outcome,
         values=request.values,
         comment=request.comment,
     )

@@ -508,6 +508,12 @@ def reconstruct_binding_snapshot(
     stored_target = snapshot.get("target") if isinstance(snapshot.get("target"), dict) else None
     if stored_target is not None:
         payload["target"] = stored_target
+    # Plan 07: preserve versioned binding-snapshot extensions (e.g. durable plan
+    # digest) when present. Absent extensions leave the payload unchanged so old
+    # schemaVersion=1 fixed digest vectors remain byte-identical.
+    stored_extensions = snapshot.get("extensions")
+    if isinstance(stored_extensions, dict) and stored_extensions:
+        payload["extensions"] = stored_extensions
     digest = sha256_canonical_json(payload)
     payload["bindingContractDigest"] = digest
     return payload

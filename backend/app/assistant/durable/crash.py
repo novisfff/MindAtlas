@@ -1,4 +1,4 @@
-"""Controlled crash / rollback inject points for Plan 06 Task 9 crash matrix.
+"""Controlled crash / rollback inject points for Plan 06/07 crash matrices.
 
 Production code never arms injectors. Tests arm a process-local
 :class:`CrashInjector` for a single kill point, drive the worker through the
@@ -18,6 +18,10 @@ Kill points match Plan 06 Task 9:
 10. during_memory_computation_before_apply
 11. during_heartbeat
 12. after_stop_request_before_cancellation_seal
+
+Plan 07 Task 10 extensions:
+
+13. after_interrupt_insert_before_outer_pointer_cas  (transaction rollback inject)
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ from typing import Callable, Iterator
 
 
 class CrashPoint(str, Enum):
-    """Named crash inject points matching Plan 06 Task 9 kill matrix."""
+    """Named crash inject points matching Plan 06/07 kill matrices."""
 
     AFTER_PREPARE_BEFORE_STARTED = "after_prepare_before_started"
     AFTER_STARTED_BEFORE_ADAPTER_IO = "after_started_before_adapter_io"
@@ -53,6 +57,10 @@ class CrashPoint(str, Enum):
     DURING_HEARTBEAT = "during_heartbeat"
     AFTER_STOP_REQUEST_BEFORE_CANCELLATION_SEAL = (
         "after_stop_request_before_cancellation_seal"
+    )
+    # Plan 07: Interrupt row flushed, outer waiting pointer CAS not yet committed.
+    AFTER_INTERRUPT_INSERT_BEFORE_OUTER_POINTER_CAS = (
+        "after_interrupt_insert_before_outer_pointer_cas"
     )
 
 
@@ -126,7 +134,10 @@ class CrashInjector:
         if handler is not None:
             handler()
             return
-        if cp is CrashPoint.AFTER_CHECKPOINT_INSERT_BEFORE_POINTER_ADVANCE:
+        if cp in {
+            CrashPoint.AFTER_CHECKPOINT_INSERT_BEFORE_POINTER_ADVANCE,
+            CrashPoint.AFTER_INTERRUPT_INSERT_BEFORE_OUTER_POINTER_CAS,
+        }:
             raise TransactionRollbackInject(cp)
         raise WorkerCrash(cp)
 

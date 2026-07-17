@@ -1,9 +1,17 @@
 import { useCallback, useContext, useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { ChatStoreContext, globalChatStore, useChatStore } from '../stores/chat-store'
-import { buildRunStreamUrl, createConversation, getActiveRun, stopRun } from '../api'
+import {
+  buildRunStreamUrl,
+  createConversation,
+  getActiveRun,
+  getInterruptDetail,
+  listPendingInterrupts,
+  stopRun,
+} from '../api'
 import { assistantKeys } from '../queries'
 import { ToolCall, SkillCall, WorkflowStep } from '../types'
+import { normalizeDurableInterrupt } from '../interruptUtils'
 import {
   bindEventDedupeRun,
   createEventDedupeState,
@@ -61,6 +69,8 @@ export function useChat() {
     addSkillCall,
     updateSkillCall,
     upsertHumanApproval,
+    upsertDurableInterrupt,
+    setRunPendingInterrupts,
     startAnalysis,
     updateAnalysis,
     endAnalysis,
@@ -341,6 +351,57 @@ export function useChat() {
             if (approval && typeof approval === 'object' && typeof approval.id === 'string') {
               upsertHumanApproval(approval)
             }
+          } else if (
+            evt.event === 'human_interrupt_pending'
+            || evt.event === 'human_interrupt_resolved'
+            || evt.event === 'human_interrupt_expired'
+            || evt.event === 'run.wait'
+          ) {
+            // Durable Interrupt SSE: payloads may be full safe state or id-only.
+            // Deduped by acceptEvent (Run/seq/event key) before this branch.
+            const data = evtData
+            const full = data.interrupt && typeof data.interrupt === 'object'
+              ? (data.interrupt as Record<string, unknown>)
+              : null
+            if (full && (full.interruptId || full.id)) {
+              upsertDurableInterrupt(normalizeDurableInterrupt(full))
+            } else if (typeof data.interruptId === 'string' && data.interruptId) {
+              // Minimal payload (ids/status only): merge onto existing card or fetch detail.
+              const existing = chatStore
+                .getState()
+                .messages
+                .flatMap((m) => m.durableInterrupts ?? [])
+                .find((item) => item.interruptId === data.interruptId)
+              if (existing) {
+                upsertDurableInterrupt({
+                  ...existing,
+                  status: (typeof data.status === 'string' ? data.status : existing.status) as typeof existing.status,
+                  ...(typeof data.resolutionRequestId === 'string'
+                    ? { resolutionRequestId: data.resolutionRequestId }
+                    : {}),
+                  ...(typeof data.requestRevision === 'number'
+                    ? { requestRevision: data.requestRevision }
+                    : {}),
+                  ...(typeof data.runRevision === 'number'
+                    ? { runRevision: data.runRevision }
+                    : {}),
+                })
+              } else if (
+                evt.event === 'human_interrupt_pending'
+                || evt.event === 'run.wait'
+              ) {
+                const runIdForFetch = String(data.runId || localRunId || chatStore.getState().activeRunId || '')
+                if (runIdForFetch && convId) {
+                  void getInterruptDetail(convId, runIdForFetch, data.interruptId)
+                    .then((detail) => {
+                      upsertDurableInterrupt(detail)
+                    })
+                    .catch(() => {
+                      // Ignore detail fetch failures; pending list on reattach will recover.
+                    })
+                }
+              }
+            }
           }
         }
       }
@@ -399,6 +460,7 @@ export function useChat() {
     updateLastMessage,
     updateSkillCall,
     updateToolCall,
+    upsertDurableInterrupt,
     upsertHumanApproval,
   ])
 
@@ -497,6 +559,20 @@ export function useChat() {
       setLoading(isActiveRunStatus(run.status) || isPreservedWaitingStatus(run.status))
       streamingRunRef.current = run.runId
 
+      // On reload/reconnect, attach any pending durable Interrupt to the assistant message.
+      if (
+        run.status === 'waiting_approval'
+        || run.status === 'waiting_input'
+        || isPreservedWaitingStatus(run.status)
+      ) {
+        try {
+          const pending = await listPendingInterrupts(convId, run.runId)
+          setRunPendingInterrupts(pending)
+        } catch {
+          // Non-fatal: SSE / later reattach can still surface the card.
+        }
+      }
+
       const afterSeq = Math.max(storedSeq, Number(run.checkpointSeq || 0))
       const url = buildRunStreamUrl(convId, run.runId, afterSeq)
       await streamFromUrl({
@@ -508,7 +584,7 @@ export function useChat() {
     } catch {
       return false
     }
-  }, [clearActiveRun, messages, setActiveRun, setLoading, streamFromUrl])
+  }, [clearActiveRun, messages, setActiveRun, setLoading, setRunPendingInterrupts, streamFromUrl])
 
   // Keep ref in sync for scheduleReattach inside streamFromUrl.
   attachActiveRunRef.current = attachActiveRun

@@ -1,5 +1,7 @@
 export * from './types'
+export * from './fieldHelpers'
 export * from './HumanApprovalCard'
 export * from './HumanApprovalFieldForm'
 export * from './HumanApprovalActionBar'
 export * from './HumanApprovalStatusBadge'
+export * from './DurableInterruptCard'

@@ -102,6 +102,9 @@ class AuthorizationProposal:
     principal: CapabilityPrincipal
     nesting_depth: int
     max_capability_depth: int
+    descriptor_capability_type: str = "tool"
+    descriptor_parallel_safe: bool = True
+    descriptor_has_durable_plan: bool = False
     # Optional claimed owner (must match exposure owner when provided).
     claimed_owner_kind: PolicyOwnerKind | None = None
     claimed_owner_id: str | None = None
@@ -456,6 +459,19 @@ def evaluate_authorization(
             grant_source_digest=grant.grant_source_digest,
         )
     interrupt = proposal.descriptor_interrupt_mode or "none"
+    if interrupt == "durable":
+        if (
+            proposal.descriptor_capability_type not in {"workflow", "agent"}
+            or proposal.descriptor_parallel_safe
+            or not proposal.descriptor_has_durable_plan
+        ):
+            return _deny(
+                "durable_interrupt_denied",
+                owner_policy_digest=owner.policy_digest,
+                exposure_digest=exposure.exposure_digest,
+                allowed_side_effects=grant.allowed_side_effects,
+                grant_source_digest=grant.grant_source_digest,
+            )
     if interrupt not in set(grant.allowed_interrupt_modes):
         return _deny(
             "owner_side_effect_denied",
@@ -565,6 +581,7 @@ def proposal_from_descriptor(
     claimed_owner_kind: PolicyOwnerKind | None = None,
     claimed_owner_id: str | None = None,
     claimed_owner_version_id: UUID | None = None,
+    trusted_durable_plan: bool = False,
 ) -> AuthorizationProposal:
     """Build an AuthorizationProposal from a classified descriptor (identity only)."""
     interrupt = str(getattr(descriptor.behavior, "interrupt_mode", "none") or "none")
@@ -585,6 +602,9 @@ def proposal_from_descriptor(
         descriptor_digest=descriptor.descriptor_digest,
         descriptor_side_effect=descriptor.behavior.side_effect,
         descriptor_interrupt_mode=interrupt,
+        descriptor_capability_type=descriptor.capability_type,
+        descriptor_parallel_safe=descriptor.behavior.parallel_safe,
+        descriptor_has_durable_plan=bool(trusted_durable_plan),
         descriptor_availability_status=status,
         principal=principal,
         nesting_depth=nesting_depth,

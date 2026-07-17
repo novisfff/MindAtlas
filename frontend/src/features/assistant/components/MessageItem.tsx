@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -7,15 +7,36 @@ import { Bot, User, Loader2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
-import { ToolCall, SkillCall, Analysis, HumanApproval } from '../types'
-import { listPendingApprovals, submitApprovalDecision } from '../api'
+import {
+  ToolCall,
+  SkillCall,
+  Analysis,
+  HumanApproval,
+  DurableInterrupt,
+} from '../types'
+import {
+  getInterruptDetail,
+  listPendingApprovals,
+  listPendingInterrupts,
+  resolveInterrupt,
+  rotateInterruptToken,
+  submitApprovalDecision,
+} from '../api'
 import { assistantKeys } from '../queries'
 import { useChatStore } from '../stores/chat-store'
+import {
+  extractInterruptReasonCode,
+  recoverFromLostResolveResponse,
+} from '../interruptUtils'
 import { ToolCallDisplay } from './ToolCallDisplay'
 import { SkillCallDisplay } from './SkillCallDisplay'
 import { AnalysisDisplay } from './AnalysisDisplay'
 import { CitationProvider, CitationMarker, ReferenceList } from './citation'
-import { HumanApprovalCard } from '@/features/shared/hitl'
+import {
+  DurableInterruptCard,
+  HumanApprovalCard,
+  type DurableInterruptSubmitPayload,
+} from '@/features/shared/hitl'
 
 interface MessageItemProps {
   message: {
@@ -26,6 +47,7 @@ interface MessageItemProps {
     skillCalls?: SkillCall[]
     analysisSteps?: Analysis[]
     humanApprovals?: HumanApproval[]
+    durableInterrupts?: DurableInterrupt[]
     createdAt: number
   }
   variant?: 'default' | 'compact'
@@ -42,13 +64,27 @@ const truncateHintText = (value: string, maxChars: number) => {
 export function MessageItem({ message, variant = 'default', isStreaming }: MessageItemProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const { currentConversationId, upsertHumanApproval, setConversationPendingApprovals, activeWorkflowSteps } = useChatStore((state) => ({
+  const {
+    currentConversationId,
+    upsertHumanApproval,
+    setConversationPendingApprovals,
+    upsertDurableInterrupt,
+    setRunPendingInterrupts,
+    activeWorkflowSteps,
+    activeRunId,
+  } = useChatStore((state) => ({
     currentConversationId: state.currentConversationId,
     upsertHumanApproval: state.upsertHumanApproval,
     setConversationPendingApprovals: state.setConversationPendingApprovals,
+    upsertDurableInterrupt: state.upsertDurableInterrupt,
+    setRunPendingInterrupts: state.setRunPendingInterrupts,
     activeWorkflowSteps: state.activeWorkflowSteps,
+    activeRunId: state.activeRunId,
   }))
   const [submittingApprovalId, setSubmittingApprovalId] = useState<string | null>(null)
+  const [submittingInterruptId, setSubmittingInterruptId] = useState<string | null>(null)
+  const [interruptConflicts, setInterruptConflicts] = useState<Record<string, string>>({})
+  const interruptSubmissionsRef = useRef<Set<string>>(new Set())
   const isUser = message.role === 'user'
   const isCompact = variant === 'compact'
 
@@ -95,10 +131,138 @@ export function MessageItem({ message, variant = 'default', isStreaming }: Messa
       queryClient.invalidateQueries({ queryKey: assistantKeys.conversations() })
       toast.success(t('settings.skills.humanApproval.submitted'))
     } catch (error) {
-      const message = error instanceof Error ? error.message : t('settings.skills.humanApproval.submitFailed')
-      toast.error(message)
+      const msg = error instanceof Error ? error.message : t('settings.skills.humanApproval.submitFailed')
+      toast.error(msg)
     } finally {
       setSubmittingApprovalId(null)
+    }
+  }
+
+  const handleSubmitDurableInterrupt = async (
+    interrupt: DurableInterrupt,
+    payload: DurableInterruptSubmitPayload,
+  ) => {
+    if (!currentConversationId) {
+      toast.error(t('settings.skills.humanApproval.noConversation'))
+      return
+    }
+    const runId = interrupt.runId || activeRunId
+    if (!runId) {
+      toast.error(t('settings.skills.humanApproval.submitFailed', 'Submit failed'))
+      return
+    }
+    if (interruptSubmissionsRef.current.has(interrupt.interruptId)) {
+      return
+    }
+    interruptSubmissionsRef.current.add(interrupt.interruptId)
+
+    setSubmittingInterruptId(interrupt.interruptId)
+    setInterruptConflicts((prev) => {
+      const next = { ...prev }
+      delete next[interrupt.interruptId]
+      return next
+    })
+
+    // Token lives only in this function scope — never local/session storage.
+    let rawToken: string | null = null
+    let tokenRevision = interrupt.tokenRevision
+
+    try {
+      const rotated = await rotateInterruptToken(
+        currentConversationId,
+        runId,
+        interrupt.interruptId,
+        {
+          expectedRequestRevision: interrupt.requestRevision,
+          expectedRunRevision: interrupt.runRevision,
+        },
+      )
+      rawToken = rotated.token
+      tokenRevision = rotated.tokenRevision
+
+      // Reflect rotated revision on the card without exposing the raw token.
+      upsertDurableInterrupt({
+        ...interrupt,
+        tokenRevision,
+      })
+
+      const resolved = await resolveInterrupt(
+        currentConversationId,
+        runId,
+        interrupt.interruptId,
+        {
+          token: rawToken,
+          resolutionRequestId: payload.resolutionRequestId,
+          expectedTokenRevision: tokenRevision,
+          expectedRequestRevision: interrupt.requestRevision,
+          expectedRunRevision: interrupt.runRevision,
+          outcome: payload.outcome,
+          values: payload.values,
+          comment: payload.comment,
+        },
+      )
+      // Drop raw token reference immediately after successful resolve.
+      rawToken = null
+      upsertDurableInterrupt(resolved)
+      setInterruptConflicts((prev) => {
+        const next = { ...prev }
+        delete next[interrupt.interruptId]
+        return next
+      })
+
+      try {
+        const pending = await listPendingInterrupts(currentConversationId, runId)
+        setRunPendingInterrupts(pending)
+      } catch {
+        // non-fatal
+      }
+
+      queryClient.invalidateQueries({ queryKey: [...assistantKeys.conversations(), currentConversationId] })
+      queryClient.invalidateQueries({ queryKey: assistantKeys.conversations() })
+      toast.success(t('settings.skills.humanApproval.submitted'))
+    } catch (error) {
+      // Lost POST / network: GET terminal and compare retained resolutionRequestId.
+      try {
+        const current = await getInterruptDetail(
+          currentConversationId,
+          runId,
+          interrupt.interruptId,
+        )
+        const recovery = recoverFromLostResolveResponse({
+          retainedResolutionRequestId: payload.resolutionRequestId,
+          current,
+        })
+        if (recovery.kind === 'won') {
+          upsertDurableInterrupt(recovery.interrupt)
+          toast.success(t('settings.skills.humanApproval.submitted'))
+          return
+        }
+        if (recovery.kind === 'lost_to_other') {
+          upsertDurableInterrupt(recovery.interrupt)
+          const text = t(
+            'settings.skills.humanApproval.resolvedElsewhere',
+            'Resolved by another action',
+          )
+          setInterruptConflicts((prev) => ({ ...prev, [interrupt.interruptId]: text }))
+          toast.error(text)
+          return
+        }
+        if (recovery.kind === 'still_pending') {
+          upsertDurableInterrupt(recovery.interrupt)
+        }
+      } catch {
+        // Fall through to conflict toast.
+      }
+
+      const reason = extractInterruptReasonCode(error)
+      const text = reason
+        || (error instanceof Error ? error.message : t('settings.skills.humanApproval.submitFailed'))
+      setInterruptConflicts((prev) => ({ ...prev, [interrupt.interruptId]: text }))
+      toast.error(text)
+    } finally {
+      rawToken = null
+      interruptSubmissionsRef.current.delete(interrupt.interruptId)
+      setSubmittingInterruptId(null)
     }
   }
 
@@ -153,6 +317,19 @@ export function MessageItem({ message, variant = 'default', isStreaming }: Messa
                   approval={approval}
                   submitting={submittingApprovalId === approval.id}
                   onSubmit={(payload) => handleSubmitApproval(approval.id, payload)}
+                />
+              ))}
+            </div>
+          )}
+          {message.durableInterrupts && message.durableInterrupts.length > 0 && (
+            <div className="my-2 space-y-2">
+              {message.durableInterrupts.map((interrupt) => (
+                <DurableInterruptCard
+                  key={interrupt.interruptId}
+                  interrupt={interrupt}
+                  submitting={submittingInterruptId === interrupt.interruptId}
+                  conflictMessage={interruptConflicts[interrupt.interruptId] ?? null}
+                  onSubmit={(payload) => handleSubmitDurableInterrupt(interrupt, payload)}
                 />
               ))}
             </div>

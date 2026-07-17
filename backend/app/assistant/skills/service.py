@@ -7,7 +7,7 @@ in ordinary list/detail serialization.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Sequence
 from uuid import UUID
 
 # Shared mutex for any path that enables catalog visibility. Prevents two
@@ -384,11 +384,18 @@ class AgentSkillService:
         self,
         package_id: UUID,
         command: PublishSkillVersionCommand,
+        *,
+        durable_capability_keys: Sequence[str] | None = None,
     ) -> SkillVersionSummary:
         """Create an immutable publish version from an owned draft.
 
         Always inserts a new ``version_source=publish`` row. The draft is never
         mutated. ``catalog_enabled`` remains false throughout Plan 01.
+
+        Optional ``durable_capability_keys`` (Plan 07 new-publish only) freezes a
+        validated durable execution plan extension onto matching workflow/agent
+        bindings before digests are sealed. Absent keys leave bindings
+        byte-identical to the pre-Plan-07 path.
         """
         try:
             package = self._lock_package(package_id)
@@ -451,6 +458,12 @@ class AgentSkillService:
                 resolved_bindings,
                 key=lambda b: (b.capability_type, b.capability_key),
             )
+            # Plan 07: optionally freeze durable plan extensions on new bindings.
+            if durable_capability_keys:
+                ordered_bindings = self._apply_durable_plan_extensions(
+                    ordered_bindings,
+                    durable_capability_keys=tuple(durable_capability_keys),
+                )
             set_digest = binding_set_digest_from_bindings(ordered_bindings)
             ver_digest = version_digest_from_parts(
                 content_digest=draft.content_digest,
@@ -576,6 +589,97 @@ class AgentSkillService:
         except IntegrityError as exc:
             self.db.rollback()
             raise self._translate_integrity_error(exc) from exc
+
+    def _apply_durable_plan_extensions(
+        self,
+        ordered_bindings: list[Any],
+        *,
+        durable_capability_keys: Sequence[str],
+    ) -> list[Any]:
+        """Attach validated durable plan extensions to matching workflow/agent bindings.
+
+        Fail-closed: unknown keys, non-workflow/agent targets, or planner denials
+        abort publish. Does not mutate the input list items in place.
+        """
+        from app.assistant.capabilities.contracts import (
+            FrozenBindingProvenance,
+            project_frozen_capability_binding,
+        )
+        from app.assistant.capabilities.registry import CapabilityRegistry
+        from app.assistant.domain.digests import sha256_canonical_json
+        from app.assistant.workflow.durable.planner import (
+            DurablePlanError,
+            plan_durable_execution_from_surface,
+            publish_durable_binding_snapshot,
+        )
+
+        wanted = {str(k) for k in durable_capability_keys if str(k).strip()}
+        if not wanted:
+            return list(ordered_bindings)
+
+        matched: set[str] = set()
+        registry = CapabilityRegistry(self.db)
+        out: list[Any] = []
+        for resolved in ordered_bindings:
+            key = str(resolved.capability_key)
+            if key not in wanted:
+                out.append(resolved)
+                continue
+            if resolved.capability_type not in {"workflow", "agent"}:
+                raise ApiException(
+                    status_code=422,
+                    code=42291,
+                    message=(
+                        f"durable publish requires workflow/agent capability: {key}"
+                    ),
+                )
+            matched.add(key)
+            # Provenance digest is publish-time only; not stored on the binding row.
+            provenance_digest = sha256_canonical_json(
+                {
+                    "capabilityKey": key,
+                    "resolutionDigest": str(resolved.resolution_digest or ""),
+                    "bindingContractDigest": str(resolved.binding_contract_digest or ""),
+                }
+            )
+            frozen = project_frozen_capability_binding(
+                resolved=resolved,
+                provenance=FrozenBindingProvenance(
+                    origin="skill_version",
+                    binding_row_id=None,
+                    owner_version_id=None,
+                    source_snapshot_digest=provenance_digest,
+                ),
+            )
+            try:
+                surface = registry.resolve_surface(frozen)
+                plan = plan_durable_execution_from_surface(surface)
+                new_resolved = publish_durable_binding_snapshot(resolved, plan=plan)
+            except DurablePlanError as exc:
+                raise ApiException(
+                    status_code=422,
+                    code=42291,
+                    message=f"durable plan denied for {key}: {exc}",
+                ) from exc
+            except Exception as exc:  # noqa: BLE001
+                raise ApiException(
+                    status_code=422,
+                    code=42291,
+                    message=f"durable plan publish failed for {key}: {exc}",
+                ) from exc
+            out.append(new_resolved)
+
+        missing = wanted - matched
+        if missing:
+            raise ApiException(
+                status_code=422,
+                code=42291,
+                message=(
+                    "durable_capability_keys not present in package declarations: "
+                    + ", ".join(sorted(missing))
+                ),
+            )
+        return out
 
     def _acquire_catalog_enable_lock(self) -> None:
         """Serialize catalog-enable across sessions (PostgreSQL advisory xact lock)."""

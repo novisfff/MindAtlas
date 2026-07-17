@@ -815,6 +815,74 @@ class CapabilityClassifier:
             resolution_digest=resolved.resolution_digest,
         )
 
+    def classify_for_durable_publish(
+        self,
+        surface: ResolvedCapabilitySurface,
+        *,
+        plan: Any,
+    ) -> CapabilityBehavior:
+        """New-publish-only path: emit interrupt_mode=durable from a validated plan.
+
+        Does not change the default :meth:`classify` path (Legacy human_in_loop
+        remains draft + legacy_blocking). Callers must supply a frozen
+        ``DurableExecutionPlanV1`` already validated by the durable planner.
+        Business side effect is the plan maximum over non-control nodes;
+        human_in_loop control bookkeeping does not authorize Draft.
+        """
+        if not isinstance(surface, ResolvedCapabilitySurface):
+            raise TypeError("surface must be a ResolvedCapabilitySurface")
+        if plan is None:
+            raise TypeError("plan is required for durable publish classification")
+
+        # Local import keeps Plan 02 classification importable without planner.
+        from app.assistant.workflow.durable.contracts import DurableExecutionPlanV1
+        from app.assistant.workflow.durable.planner import (
+            business_side_effect_maximum,
+            plan_allows_durable_interrupt,
+            plan_parallel_safe,
+        )
+
+        if not isinstance(plan, DurableExecutionPlanV1):
+            raise TypeError("plan must be a DurableExecutionPlanV1")
+
+        resolved = surface.binding.resolved
+        # Only workflow/agent targets may declare durable interrupt.
+        if resolved.capability_type not in {"workflow", "agent"}:
+            raise ValueError("durable publish classification requires workflow or agent")
+
+        side = business_side_effect_maximum(plan)
+        if side not in {"none", "read", "compute"}:
+            raise ValueError(
+                f"durable publish rejects business side effect {side!r}"
+            )
+        if not plan_allows_durable_interrupt(plan):
+            # A durable-mode descriptor without any interrupt-capable node is
+            # meaningless; fail closed rather than silently claiming durable.
+            raise ValueError("durable publish requires at least one may_interrupt node")
+
+        # Interrupt-capable durable plans are never parallel_safe
+        # (plan_parallel_safe already forces False when any may_interrupt).
+        parallel_safe = plan_parallel_safe(plan)
+
+        partial = _PartialBehavior(
+            side_effect=side,
+            parallel_safe=parallel_safe,
+            interrupt_mode="durable",
+            timeout_policy=CapabilityTimeoutPolicy(
+                mode="cooperative",
+                timeout_seconds=None,
+                cancellation_supported=True,
+            ),
+            classified_nodes=len(plan.nodes),
+            dependency_refs=sum(len(n.dependency_refs) for n in plan.nodes),
+        )
+        return build_capability_behavior(
+            partial,
+            binding_contract_digest=resolved.binding_contract_digest,
+            dependency_closure_digest=resolved.dependency_closure_digest,
+            resolution_digest=resolved.resolution_digest,
+        )
+
     def _classify_tool_target(
         self,
         executable: ExecutableToolTarget,

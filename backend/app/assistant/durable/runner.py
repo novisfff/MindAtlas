@@ -632,6 +632,368 @@ class MainAgentRunExecutor:
         msg = db.get(Message, run.user_message_id)
         return str(getattr(msg, "content", "") or "") if msg is not None else ""
 
+    def resume_waiting(
+        self,
+        *,
+        db: Any,
+        claimed: ClaimedLease,
+        continuation: Any,
+        resolution: Any,
+        expected_revision: int,
+        heartbeat: Callable[[], bool],
+    ) -> None:
+        """Resume one exact persisted Provider waiting call and finalize the Run."""
+        if not _heartbeat_guard(heartbeat):
+            return
+        from app.assistant.durable.checkpoints import commit_checkpoint_v2
+        from app.assistant.durable.models import (
+            AssistantRunBudgetRevision,
+            AssistantRunManifestRevision,
+            AssistantRunObligationRevision,
+            AssistantRunPolicyRevision,
+        )
+        from app.assistant.domain.contracts import ResolvedRunManifestRevision
+        from app.assistant.main_agent.policy_runtime import (
+            compose_main_agent_policy_runtime,
+        )
+        from app.assistant.main_agent.service import (
+            construct_openai_adapter_after_eligibility,
+        )
+        from app.assistant.main_agent.model_eligibility import FrozenModelIdentity
+        from app.assistant.policy.budgets import BudgetLedgerState
+        from app.assistant.policy.contracts import EffectiveRunPolicySnapshot
+        from app.assistant.policy.obligations import ObligationLedgerState
+        from app.assistant.provider_loop.contracts import ProviderLoopResumeRequest
+        from app.assistant.provider_loop.loop import ProviderAgentLoop
+        from app.assistant.workflow.durable.resume import (
+            validate_provider_waiting_resume,
+        )
+
+        checkpoint = load_current_checkpoint(db, run_id=claimed.run_id)
+        manifest_row = db.get(
+            AssistantRunManifestRevision,
+            checkpoint.manifest_revision_id,
+        )
+        policy_row = db.get(AssistantRunPolicyRevision, checkpoint.policy_revision_id)
+        budget_row = db.get(AssistantRunBudgetRevision, checkpoint.budget_revision_id)
+        obligation_row = db.get(
+            AssistantRunObligationRevision,
+            checkpoint.obligation_revision_id,
+        )
+        if None in {manifest_row, policy_row, budget_row, obligation_row}:
+            raise DurableRunConflict(
+                "provider_resume_state_missing",
+                "Provider resume revision row is missing",
+            )
+
+        manifest = ResolvedRunManifestRevision.model_validate(manifest_row.payload)
+        policy = EffectiveRunPolicySnapshot.model_validate(policy_row.payload)
+        budget = BudgetLedgerState.model_validate(budget_row.payload)
+        obligation = ObligationLedgerState.model_validate(obligation_row.payload)
+        if manifest.manifest_digest != manifest_row.manifest_digest:
+            raise DurableRunConflict(
+                "provider_resume_manifest_drift",
+                "Provider resume Manifest digest mismatch",
+            )
+        if policy.effective_policy_digest != policy_row.policy_digest:
+            raise DurableRunConflict(
+                "provider_resume_policy_drift",
+                "Provider resume policy digest mismatch",
+            )
+        if budget.ledger_digest != budget_row.budget_digest:
+            raise DurableRunConflict(
+                "provider_resume_budget_drift",
+                "Provider resume budget digest mismatch",
+            )
+        if obligation.ledger_digest != obligation_row.obligation_digest:
+            raise DurableRunConflict(
+                "provider_resume_obligation_drift",
+                "Provider resume obligation digest mismatch",
+            )
+        if manifest.provider is None or manifest.model is None:
+            raise DurableRunConflict(
+                "provider_resume_model_missing",
+                "Provider resume Manifest has no frozen provider/model",
+            )
+        model = manifest.model
+        required_model_fields = {
+            "model_runtime_revision": model.model_runtime_revision,
+            "credential_runtime_revision": model.credential_runtime_revision,
+            "credential_config_digest": model.credential_config_digest,
+            "model_config_digest": model.model_config_digest,
+            "capability_probe_id": model.capability_probe_id,
+            "capability_probe_digest": model.capability_probe_digest,
+        }
+        if any(value is None for value in required_model_fields.values()):
+            raise DurableRunConflict(
+                "provider_resume_model_incomplete",
+                "Provider resume frozen model identity is incomplete",
+            )
+        frozen_model = FrozenModelIdentity(
+            model_id=model.model_id,
+            model_name=model.model_name,
+            model_type=model.model_type,
+            model_runtime_revision=int(model.model_runtime_revision),
+            credential_id=model.credential_id,
+            credential_runtime_revision=int(model.credential_runtime_revision),
+            credential_config_digest=str(model.credential_config_digest),
+            model_config_digest=str(model.model_config_digest),
+            provider_ref_digest=model.provider_ref_digest,
+            capability_probe_id=model.capability_probe_id,
+            capability_probe_digest=str(model.capability_probe_digest),
+        )
+        provider = construct_openai_adapter_after_eligibility(
+            db,
+            frozen=frozen_model,
+            provider_ref=manifest.provider,
+            app_build_revision=policy.app_build_revision,
+        )
+        run = DurableRunRepository(db).get_run(claimed.run_id)
+        if run is None:
+            return
+        runtime, ports = compose_main_agent_policy_runtime(
+            db=db,
+            run_id=claimed.run_id,
+            conversation_id=run.conversation_id,
+            manifest=manifest,
+            profile_key=manifest.main_agent.profile_key,
+            profile_version_id=manifest.main_agent.version_id,
+            profile_content_digest=manifest.main_agent.content_digest,
+            app_build_revision=policy.app_build_revision,
+            provider=provider,
+            restored_policy_snapshot=policy,
+            restored_budget_state=budget,
+            restored_obligation_state=obligation,
+        )
+        self._restore_active_skill_bindings(
+            db,
+            manifest=manifest,
+            runtime=runtime,
+            ports=ports,
+        )
+        messages, transcript_digest = reconstruct_provider_transcript(
+            db,
+            run_id=claimed.run_id,
+        )
+        if transcript_digest != continuation.transcript_digest:
+            raise DurableRunConflict(
+                "provider_resume_transcript_drift",
+                "Provider resume transcript digest mismatch",
+            )
+        request: ProviderLoopResumeRequest = validate_provider_waiting_resume(
+            manifest=manifest,
+            messages=messages,
+            continuation=continuation,
+            resolved_waiting=resolution,
+        )
+        # Provider resume is external I/O too; keep the claimed lease alive for
+        # the entire call and stop before committing if renewal is lost.
+        with _LeaseHeartbeatPump(
+            heartbeat, interval_sec=self.heartbeat_interval_sec
+        ) as pump:
+            if not pump.alive:
+                return
+            result = ProviderAgentLoop().resume(request, ports=ports)
+            if not pump.alive:
+                return
+        if result.status != "completed":
+            raise DurableRunConflict(
+                "provider_resume_not_completed",
+                f"Provider resume ended with {result.status}:{result.stop_reason}",
+            )
+        if tuple(result.messages[: len(messages)]) != tuple(messages):
+            raise DurableRunConflict(
+                "provider_resume_transcript_rewrite",
+                "Provider resume rewrote the persisted transcript prefix",
+            )
+        suffix = tuple(result.messages[len(messages) :])
+        final_manifest = getattr(result, "manifest", None) or runtime.manifest
+        final_policy = runtime.policy_snapshot
+        final_budget = runtime.budget_ledger.snapshot()
+        final_obligation = runtime.obligation_ledger.snapshot()
+        commit = commit_checkpoint_v2(
+            db,
+            run_id=claimed.run_id,
+            lease=claimed.lease,
+            expected_revision=expected_revision,
+            phase="ready_for_completion",
+            next_action_kind="complete",
+            workflow_state=getattr(checkpoint, "workflow_state", None),
+            capability_frames=getattr(checkpoint, "capability_frames", ()),
+            provider_messages=suffix,
+            manifest_payload=(
+                final_manifest.model_dump(mode="json", by_alias=True)
+                if final_manifest.manifest_digest != manifest.manifest_digest
+                else None
+            ),
+            manifest_digest=(
+                final_manifest.manifest_digest
+                if final_manifest.manifest_digest != manifest.manifest_digest
+                else None
+            ),
+            parent_manifest_id=checkpoint.manifest_revision_id,
+            parent_manifest_digest=manifest.manifest_digest,
+            policy_payload=(
+                final_policy.model_dump(mode="json", by_alias=True)
+                if final_policy.effective_policy_digest != policy.effective_policy_digest
+                else None
+            ),
+            policy_digest=(
+                final_policy.effective_policy_digest
+                if final_policy.effective_policy_digest != policy.effective_policy_digest
+                else None
+            ),
+            budget_payload=(
+                final_budget.model_dump(mode="json", by_alias=True)
+                if final_budget.ledger_digest != budget.ledger_digest
+                else None
+            ),
+            budget_digest=(
+                final_budget.ledger_digest
+                if final_budget.ledger_digest != budget.ledger_digest
+                else None
+            ),
+            obligation_payload=(
+                final_obligation.model_dump(mode="json", by_alias=True)
+                if final_obligation.ledger_digest != obligation.ledger_digest
+                else None
+            ),
+            obligation_digest=(
+                final_obligation.ledger_digest
+                if final_obligation.ledger_digest != obligation.ledger_digest
+                else None
+            ),
+            reason="provider_waiting_resumed",
+        )
+        self._enter_and_finalize_memory(
+            db,
+            run_id=claimed.run_id,
+            lease=claimed.lease,
+            expected_revision=int(commit.state_revision),
+            final_text=str(result.final_text or ""),
+            heartbeat=heartbeat,
+        )
+
+    @staticmethod
+    def _restore_active_skill_bindings(
+        db: Any,
+        *,
+        manifest: Any,
+        runtime: Any,
+        ports: Any,
+    ) -> None:
+        """Restore exact published Skill bindings already frozen in the Manifest."""
+        from app.assistant.main_agent.inject_wiring import (
+            _parse_skill_policy,
+            freeze_skill_binding,
+            reconstruct_resolved_binding,
+        )
+        from app.assistant.policy.evaluator import OwnerGrantMaterial
+        from app.assistant.skills.models import (
+            AssistantSkillCapabilityBinding,
+            AssistantSkillCapabilityDependency,
+            AssistantSkillVersion,
+        )
+
+        manifest_caps = {
+            item.binding_contract_digest: item for item in manifest.capabilities
+        }
+        policy_refs = {
+            (item.owner_kind, item.owner_version_id): item
+            for item in runtime.policy_snapshot.owner_policy_refs
+        }
+        restored: dict[Any, tuple[Any, ...]] = {}
+        restored_policies: dict[Any, tuple[str, ...]] = {}
+        restored_content: dict[Any, str] = {}
+        restored_packages: dict[Any, Any] = {}
+        owners = dict(runtime.owners_by_domain_key)
+        for skill in manifest.active_skills:
+            version = db.get(AssistantSkillVersion, skill.version_id)
+            if (
+                version is None
+                or str(version.version_source) != "publish"
+                or version.skill_package_id != skill.package_id
+                or str(version.content_digest) != str(skill.content_digest)
+                or str(version.version_digest) != str(skill.version_digest)
+            ):
+                raise DurableRunConflict(
+                    "provider_resume_skill_drift",
+                    f"active Skill version drift: {skill.version_id}",
+                )
+            bindings = []
+            rows = (
+                db.query(AssistantSkillCapabilityBinding)
+                .filter(
+                    AssistantSkillCapabilityBinding.skill_version_id == version.id
+                )
+                .order_by(AssistantSkillCapabilityBinding.ordinal.asc())
+                .all()
+            )
+            for row in rows:
+                deps = (
+                    db.query(AssistantSkillCapabilityDependency)
+                    .filter(AssistantSkillCapabilityDependency.binding_id == row.id)
+                    .order_by(AssistantSkillCapabilityDependency.ordinal.asc())
+                    .all()
+                )
+                frozen = freeze_skill_binding(
+                    resolved=reconstruct_resolved_binding(row, deps),
+                    skill_version_id=version.id,
+                    content_digest=version.content_digest,
+                    binding_row_id=row.id,
+                )
+                if frozen.ref.binding_contract_digest not in manifest_caps:
+                    raise DurableRunConflict(
+                        "provider_resume_binding_drift",
+                        f"active binding missing from Manifest: {row.id}",
+                    )
+                bindings.append(frozen)
+                owners[frozen.ref.capability_key] = (
+                    "skill_version",
+                    version.id,
+                )
+            restored[version.id] = tuple(bindings)
+            policy, _conflicts, _aliases = _parse_skill_policy(version)
+            restored_policies[version.id] = tuple(policy.allowed_side_effects)
+            restored_content[version.id] = str(version.content_digest)
+            restored_packages[version.id] = skill.package_id
+            owner_ref = policy_refs.get(("skill_version", version.id))
+            if owner_ref is None or str(owner_ref.owner_id) != str(skill.package_id):
+                raise DurableRunConflict(
+                    "provider_resume_owner_policy_missing",
+                    f"active Skill owner policy missing: {version.id}",
+                )
+            runtime.owner_materials[
+                ("skill_version", str(skill.package_id), version.id)
+            ] = OwnerGrantMaterial(
+                owner_kind="skill_version",
+                owner_id=str(skill.package_id),
+                owner_version_id=version.id,
+                policy_digest=owner_ref.policy_digest,
+                author_allowed_side_effects=tuple(policy.allowed_side_effects),
+                declared_capability_keys=frozenset(
+                    binding.ref.capability_key for binding in bindings
+                ),
+                is_instruction_only=not bindings,
+            )
+        runtime.tools_provider.restore_active_bindings(restored)
+        runtime.rebind_owners(owners)
+        port_owner_resolver = getattr(ports, "call_owner_resolver", None)
+        if hasattr(port_owner_resolver, "rebind"):
+            port_owner_resolver.rebind(
+                owners,
+                default_owner_kind="main_agent",
+                default_owner_version_id=runtime.profile_version_id,
+            )
+        runtime.rebind_policy_snapshot(runtime.policy_snapshot)
+        runtime.authorization_factory.rebind_manifest(
+            runtime.authorization_factory.manifest,
+            skill_author_policy_by_version=restored_policies,
+            skill_content_digest_by_version=restored_content,
+            skill_package_id_by_version=restored_packages,
+            owner_materials=runtime.owner_materials,
+        )
+
     def _materialize_base(
         self,
         db: Any,

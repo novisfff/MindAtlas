@@ -122,9 +122,14 @@ class CapabilityRegistry:
         )
 
     def resolve(self, binding: FrozenCapabilityBinding) -> ResolvedCapabilityTarget:
-        """Resolve surface, classify once, assemble descriptor + final target."""
+        """Resolve surface, classify once, assemble descriptor + final target.
+
+        When a Plan 07 durable plan extension is frozen on the binding snapshot,
+        classification uses the new-publish durable path (interrupt_mode=durable).
+        Bindings without the extension keep the default Legacy classifier path.
+        """
         surface = self.resolve_surface(binding)
-        behavior = self._classifier.classify(surface)
+        behavior = self._classify_surface(surface)
         descriptor = assemble_capability_descriptor(surface, behavior)
         return ResolvedCapabilityTarget(
             descriptor=descriptor,
@@ -132,6 +137,29 @@ class CapabilityRegistry:
             executable=surface.executable,
             execution_closure=surface.execution_closure,
         )
+
+    def _classify_surface(self, surface: ResolvedCapabilitySurface):
+        """Classify surface; opt into durable when plan extension is present."""
+        from app.assistant.workflow.durable.planner import (
+            DurablePlanError,
+            extract_durable_plan_digest,
+            plan_durable_execution_from_surface,
+        )
+
+        snap = surface.binding.resolved.resolution_snapshot
+        plan_digest = extract_durable_plan_digest(snap if isinstance(snap, dict) else None)
+        if plan_digest is None:
+            return self._classifier.classify(surface)
+        try:
+            plan = plan_durable_execution_from_surface(surface)
+        except DurablePlanError:
+            # Extension present but plan no longer validates → fail closed to
+            # default classifier rather than inventing durable mode.
+            return self._classifier.classify(surface)
+        if str(plan.plan_digest) != plan_digest:
+            # Stale/mismatched frozen digest → do not claim durable.
+            return self._classifier.classify(surface)
+        return self._classifier.classify_for_durable_publish(surface, plan=plan)
 
     def describe(self, binding: FrozenCapabilityBinding) -> CapabilityDescriptor:
         return self.resolve(binding).descriptor

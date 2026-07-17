@@ -467,12 +467,13 @@ class ConfigAndArtifactPolicyEvidenceTests(unittest.TestCase):
         )
 
         self.assertEqual(RUNTIME_CONTRACT_VERSION, 1)
-        self.assertEqual(list(SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS), [1])
+        # Plan 07 Task 1: Checkpoint codec supports v1 and v2.
+        self.assertEqual(sorted(SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS), [1, 2])
         digest = default_capability_feature_digest()
         self.assertEqual(len(digest), 64)
         self.assertEqual(
             digest,
-            "de9af0d91cca357a53e11ac65c614fac5403484ed22bdb3bac55ac4f36b9c63a",
+            "94d7b054b85208d3fcab3279bd60b5292d65d0e890285d4dcf7d0871ee2431c9",
         )
 
     def test_minio_init_script_keeps_artifact_bucket_private(self) -> None:

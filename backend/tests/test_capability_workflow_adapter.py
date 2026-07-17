@@ -230,12 +230,20 @@ def _context(**overrides: Any):
     return CapabilityExecutionContext(**payload)
 
 
-def _ports(cancelled: bool = False):
+def _ports(cancelled: bool = False, *, durable_workflow=None):
     from app.assistant.capabilities.ports import CapabilityRuntimePorts
 
     cancel = _FakeCancellation(cancelled=cancelled)
     sink = _RecordingEventSink()
-    return CapabilityRuntimePorts(cancellation=cancel, events=sink), cancel, sink
+    return (
+        CapabilityRuntimePorts(
+            cancellation=cancel,
+            events=sink,
+            durable_workflow=durable_workflow,
+        ),
+        cancel,
+        sink,
+    )
 
 
 def _resolve_target(db, frozen):
@@ -547,6 +555,81 @@ def test_human_loop_non_openclaw_is_unsupported_interrupt(db) -> None:
     assert result.error.error_type == "unsupported_interrupt"
     assert result.continuation is None
     assert result.status != "waiting"
+
+
+def test_durable_workflow_delegates_to_injected_execution_port(db, monkeypatch) -> None:
+    from app.assistant.capabilities.adapters.workflow import WorkflowCapabilityAdapter
+    from app.assistant.capabilities.contracts import (
+        CapabilityMetrics,
+        CapabilityResult,
+        ContinuationRef,
+    )
+    from app.assistant.capabilities.ports import CapabilityAdapterRequest
+    from app.assistant.workflow.engine.engine import LangGraphEngine
+
+    _workflow, _version, frozen = _freeze_workflow(
+        db,
+        name="wf_durable_port",
+        snapshot=_pure_snapshot(human=True),
+    )
+    target = _resolve_target(db, frozen)
+    target = target.__class__(
+        descriptor=target.descriptor.model_copy(
+            update={
+                "behavior": target.descriptor.behavior.model_copy(
+                    update={"interrupt_mode": "durable", "parallel_safe": False}
+                )
+            }
+        ),
+        binding=target.binding,
+        executable=target.executable,
+        execution_closure=target.execution_closure,
+    )
+    expected = CapabilityResult(
+        status="waiting",
+        user_text=None,
+        structured_output=None,
+        artifact_refs=(),
+        continuation=ContinuationRef(
+            continuation_type="durable_capability_invocation",
+            contract_version=1,
+            reference_id=str(uuid4()),
+            payload_digest=DIGEST_A,
+        ),
+        terminal_output=False,
+        needs_followup=False,
+        error=None,
+        metrics=CapabilityMetrics(duration_ms=1, input_bytes=1, output_bytes=0),
+    )
+
+    class _DurablePort:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def execute(self, request, *, ports):
+            self.calls.append((request, ports))
+            return expected
+
+    durable_port = _DurablePort()
+    monkeypatch.setattr(
+        LangGraphEngine,
+        "__init__",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Legacy workflow engine must not be constructed")
+        ),
+    )
+    ports, _cancel, _sink = _ports(durable_workflow=durable_port)
+    request = CapabilityAdapterRequest(
+        target=target,
+        validated_input={"user_input": "x"},
+        context=_context(request_source="main_agent"),
+        decision=_decision(),
+    )
+
+    result = WorkflowCapabilityAdapter().execute(request, ports=ports)
+
+    assert result is expected
+    assert len(durable_port.calls) == 1
 
 
 def test_invalid_output_fails_safely(db, monkeypatch: pytest.MonkeyPatch) -> None:

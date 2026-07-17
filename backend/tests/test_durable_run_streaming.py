@@ -306,11 +306,23 @@ class DurableRunStreamingTests(unittest.TestCase):
         results: list[list[tuple[str, dict]]] = [[], []]
         errors: list[Exception] = []
         barrier = threading.Barrier(2)
+        run_id = run.id
+        conversation_id = conv.id
+        ReaderSession = sessionmaker(bind=self.db.get_bind(), future=True)
 
         def _reader(idx: int) -> None:
+            from app.assistant.service import AssistantService
+
             try:
                 barrier.wait(timeout=5)
-                chunks = list(self._svc().stream_run(conv.id, run_id=run.id, after_seq=0))
+                with ReaderSession() as reader_db:
+                    chunks = list(
+                        AssistantService(reader_db).stream_run(
+                            conversation_id,
+                            run_id=run_id,
+                            after_seq=0,
+                        )
+                    )
                 results[idx] = [_decode_sse(c) for c in chunks]
             except Exception as exc:  # pragma: no cover
                 errors.append(exc)
@@ -577,6 +589,30 @@ class DurableRunStreamingTests(unittest.TestCase):
         self.assertEqual(payload["status"], "cancelled")
         self.db.refresh(run)
         self.assertEqual(run.status, "cancelled")
+
+    def test_stop_waiting_approval_cancels_pending_durable_interrupt(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        run, conv = _make_main_agent_run(
+            self.db, status="waiting_approval", state_revision=3
+        )
+        pending = MagicMock(id=uuid.uuid4())
+        repo = MagicMock()
+        repo.get_pending_for_run.return_value = pending
+
+        with patch(
+            "app.assistant.workflow.durable.interrupts.DurableInterruptRepository",
+            return_value=repo,
+        ):
+            payload = self._svc().stop_run(conversation_id=conv.id, run_id=run.id)
+
+        self.assertEqual(payload["status"], "cancelled")
+        repo.get_pending_for_run.assert_called_once_with(run.id, for_update=False)
+        repo.cancel_interrupt.assert_called_once_with(
+            run_id=run.id,
+            interrupt_id=pending.id,
+            comment="run stopped",
+        )
 
     def test_stop_after_ready_for_memory_returns_run_finalizing(self) -> None:
         from app.assistant.durable.models import (

@@ -1,6 +1,6 @@
 import { create, useStore, StoreApi, createStore } from 'zustand'
 import { createContext, useContext, useRef } from 'react'
-import { ToolCall, SkillCall, Analysis, HumanApproval, WorkflowStep } from '../types'
+import { ToolCall, SkillCall, Analysis, HumanApproval, DurableInterrupt, WorkflowStep } from '../types'
 
 interface ChatMessage {
   id: string
@@ -10,6 +10,7 @@ interface ChatMessage {
   skillCalls?: SkillCall[]
   analysisSteps?: Analysis[]
   humanApprovals?: HumanApproval[]
+  durableInterrupts?: DurableInterrupt[]
   createdAt: number
 }
 
@@ -31,6 +32,8 @@ export interface ChatState {
   updateSkillCall: (id: string, updates: Partial<SkillCall>) => void
   upsertHumanApproval: (approval: HumanApproval) => void
   setConversationPendingApprovals: (approvals: HumanApproval[]) => void
+  upsertDurableInterrupt: (interrupt: DurableInterrupt) => void
+  setRunPendingInterrupts: (interrupts: DurableInterrupt[]) => void
   startAnalysis: (id: string) => void
   updateAnalysis: (id: string, delta: string) => void
   endAnalysis: (id: string) => void
@@ -45,6 +48,40 @@ export interface ChatState {
   setConversationId: (id: string | null) => void
   clearMessages: () => void
   setMessages: (messages: ChatMessage[]) => void
+}
+
+function attachInterruptToMessages(
+  messages: ChatMessage[],
+  interrupt: DurableInterrupt,
+): ChatMessage[] {
+  if (messages.length === 0) return messages
+  const next = [...messages]
+  const targetMessageId = interrupt.messageId ?? next[next.length - 1].id
+  let targetIndex = next.findIndex((item) => item.id === targetMessageId)
+  if (targetIndex < 0) {
+    // Fall back to last assistant message when message id is unknown/stale.
+    targetIndex = next.length - 1
+    for (let i = next.length - 1; i >= 0; i -= 1) {
+      if (next[i].role === 'assistant') {
+        targetIndex = i
+        break
+      }
+    }
+  }
+  const target = next[targetIndex]
+  const existing = target.durableInterrupts ?? []
+  const previous = existing.find((item) => item.interruptId === interrupt.interruptId)
+  const previousTerminal = previous && previous.status !== 'pending'
+  const incomingIsStalePending = previousTerminal && interrupt.status === 'pending'
+  const merged = incomingIsStalePending && previous ? previous : interrupt
+  next[targetIndex] = {
+    ...target,
+    durableInterrupts: [
+      ...existing.filter((item) => item.interruptId !== interrupt.interruptId),
+      merged,
+    ],
+  }
+  return next
 }
 
 export const createChatLogic = (set: any): Omit<ChatState, 'no-op'> => ({
@@ -175,6 +212,27 @@ export const createChatLogic = (set: any): Omit<ChatState, 'no-op'> => ({
         current.humanApprovals = [...existing.filter((item) => item.id !== approval.id), approval]
       })
 
+      return { messages: nextMessages }
+    }),
+
+  upsertDurableInterrupt: (interrupt: DurableInterrupt) =>
+    set((state: ChatState) => ({
+      messages: attachInterruptToMessages(state.messages, interrupt),
+    })),
+
+  setRunPendingInterrupts: (interrupts: DurableInterrupt[]) =>
+    set((state: ChatState) => {
+      if (state.messages.length === 0) return state
+      // Drop only pending durable cards; keep terminal history already rendered.
+      let nextMessages: ChatMessage[] = state.messages.map((message) => ({
+        ...message,
+        durableInterrupts: (message.durableInterrupts ?? []).filter(
+          (item) => item.status !== 'pending',
+        ),
+      }))
+      interrupts.forEach((interrupt) => {
+        nextMessages = attachInterruptToMessages(nextMessages, interrupt)
+      })
       return { messages: nextMessages }
     }),
 

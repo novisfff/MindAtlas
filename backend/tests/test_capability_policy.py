@@ -690,6 +690,100 @@ def test_classifier_output_cannot_mutate_grant_fields() -> None:
     assert evidence.grant_source_digest == DIGEST_E
 
 
+def test_durable_interrupt_requires_feature_gate() -> None:
+    engine = _engine(
+        verifiers={("skill_policy", "main_agent"): _TestVerifier()}
+    )
+    engine.durable_interrupts_enabled = False
+    decision = engine.authorize(
+        descriptor=_descriptor(
+            capability_type="workflow",
+            target_identity="workflow:review",
+            target_version_id=uuid4(),
+            behavior=_behavior(
+                side_effect="compute",
+                parallel_safe=False,
+                interrupt_mode="durable",
+            ),
+        ),
+        evidence=_evidence(
+            issuer="skill_policy",
+            entrypoint="main_agent",
+        ),
+        context=_context(request_source="main_agent"),
+    )
+
+    _assert_safe_denial(decision, reason_code="durable_interrupts_disabled")
+
+
+def test_durable_interrupt_allows_trusted_main_agent_when_enabled() -> None:
+    engine = _engine(
+        verifiers={("skill_policy", "main_agent"): _TestVerifier()}
+    )
+    engine.durable_interrupts_enabled = True
+    decision = engine.authorize(
+        descriptor=_descriptor(
+            capability_type="workflow",
+            target_identity="workflow:review",
+            target_version_id=uuid4(),
+            behavior=_behavior(
+                side_effect="compute",
+                parallel_safe=False,
+                interrupt_mode="durable",
+            ),
+        ),
+        evidence=_evidence(
+            issuer="skill_policy",
+            entrypoint="main_agent",
+        ),
+        context=_context(request_source="main_agent"),
+    )
+
+    assert decision.allowed is True
+
+
+def test_durable_interrupt_rejects_non_main_agent_or_parallel_descriptor() -> None:
+    engine = _engine()
+    engine.durable_interrupts_enabled = True
+    non_main = engine.authorize(
+        descriptor=_descriptor(
+            capability_type="workflow",
+            target_identity="workflow:review",
+            target_version_id=uuid4(),
+            behavior=_behavior(
+                side_effect="compute",
+                parallel_safe=False,
+                interrupt_mode="durable",
+            ),
+        ),
+        evidence=_evidence(),
+        context=_context(),
+    )
+    _assert_safe_denial(non_main, reason_code="durable_interrupt_denied")
+
+    parallel_engine = _engine(
+        verifiers={("skill_policy", "main_agent"): _TestVerifier()}
+    )
+    parallel_engine.durable_interrupts_enabled = True
+    parallel = parallel_engine.authorize(
+        descriptor=_descriptor(
+            capability_type="workflow",
+            target_identity="workflow:review",
+            target_version_id=uuid4(),
+            behavior=_behavior(
+                side_effect="compute",
+                parallel_safe=True,
+                interrupt_mode="durable",
+            ),
+        ),
+        evidence=_evidence(
+            issuer="skill_policy",
+            entrypoint="main_agent",
+        ),
+        context=_context(request_source="main_agent"),
+    )
+    _assert_safe_denial(parallel, reason_code="durable_interrupt_parallel_denied")
+
 def test_ceiling_revision_change_invalidates_grant_source_digest() -> None:
     from app.assistant.capabilities.policy import (
         build_openclaw_effect_ceiling,

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { MessageItem } from './MessageItem'
-import { ToolCall, SkillCall, Analysis, HumanApproval } from '../types'
+import { ToolCall, SkillCall, Analysis, HumanApproval, DurableInterrupt } from '../types'
 import { useTranslation } from 'react-i18next'
 
 interface Message {
@@ -12,6 +12,7 @@ interface Message {
   skillCalls?: SkillCall[]
   analysisSteps?: Analysis[]
   humanApprovals?: HumanApproval[]
+  durableInterrupts?: DurableInterrupt[]
 }
 
 interface MessageListProps {

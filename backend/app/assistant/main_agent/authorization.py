@@ -43,7 +43,7 @@ LOCAL_ASSISTANT_PRINCIPAL = CapabilityPrincipal(
     authenticated=True,
 )
 
-MAIN_AGENT_CEILING_REVISION: Literal["plan04-v1"] = "plan04-v1"
+MAIN_AGENT_CEILING_REVISION: Literal["plan07-v1"] = "plan07-v1"
 MAIN_AGENT_CEILING_KEY: Literal["main_agent_read_only"] = "main_agent_read_only"
 
 
@@ -52,9 +52,9 @@ class MainAgentEffectCeiling(FrozenContract):
 
     schema_version: Literal[1] = 1
     ceiling_key: Literal["main_agent_read_only"] = "main_agent_read_only"
-    revision: Literal["plan04-v1"] = "plan04-v1"
+    revision: Literal["plan07-v1"] = "plan07-v1"
     allowed_side_effects: tuple[SideEffectClass, ...]
-    allowed_interrupt_modes: tuple[Literal["none"], ...]
+    allowed_interrupt_modes: tuple[Literal["none", "durable"], ...]
     ceiling_digest: str
 
 
@@ -84,15 +84,15 @@ def build_main_agent_read_only_effect_ceiling() -> MainAgentEffectCeiling:
             ceiling_key=MAIN_AGENT_CEILING_KEY,
             revision=MAIN_AGENT_CEILING_REVISION,
             allowed_side_effects=allowed,
-            allowed_interrupt_modes=("none",),
+            allowed_interrupt_modes=("none", "durable"),
         )
     )
     return MainAgentEffectCeiling(
         schema_version=1,
         ceiling_key="main_agent_read_only",
-        revision="plan04-v1",
+        revision="plan07-v1",
         allowed_side_effects=allowed,
-        allowed_interrupt_modes=("none",),
+        allowed_interrupt_modes=("none", "durable"),
         ceiling_digest=digest,
     )
 
@@ -557,6 +557,7 @@ class MainAgentAuthorizationEvidenceFactory:
             claimed_owner_kind=owner.owner_kind if owner.owner_kind in {"main_agent", "skill_version"} else None,  # type: ignore[arg-type]
             claimed_owner_id=owner.owner_id,
             claimed_owner_version_id=owner.owner_version_id,
+            trusted_durable_plan=self._has_trusted_durable_plan(binding),
         )
         # Override capability key with the tool-call domain key for surface match.
         if proposal.capability_key != call.domain_key:
@@ -606,6 +607,15 @@ class MainAgentAuthorizationEvidenceFactory:
         with self._lock:
             self._verifiers[call.call_id] = verifier
         return evidence
+
+    @staticmethod
+    def _has_trusted_durable_plan(binding: FrozenCapabilityBinding) -> bool:
+        from app.assistant.workflow.durable.planner import extract_durable_plan_digest
+
+        snapshot = binding.resolved.resolution_snapshot
+        return bool(
+            extract_durable_plan_digest(snapshot if isinstance(snapshot, dict) else None)
+        )
 
     def _issue_plan04_minimum(
         self,

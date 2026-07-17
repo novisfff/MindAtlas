@@ -30,6 +30,7 @@ from app.assistant.domain.digests import sha256_canonical_json
 from app.assistant.workflow.engine.runtime_dependency_resolver import (
     MAX_CAPABILITY_NESTING_DEPTH,
 )
+from app.config import get_settings
 
 # ---------------------------------------------------------------------------
 # Side-effect lattice prefixes (ordered, no ``unknown`` / no durable interrupt)
@@ -315,10 +316,17 @@ class CapabilityPolicyEngine:
     def __init__(
         self,
         verifiers: Mapping[EvidenceVerifierKey, AuthorizationEvidenceVerifier],
+        *,
+        durable_interrupts_enabled: bool | None = None,
     ) -> None:
         # Snapshot the mapping so callers cannot later inject a permissive verifier.
         self._verifiers: dict[EvidenceVerifierKey, AuthorizationEvidenceVerifier] = dict(
             verifiers
+        )
+        self.durable_interrupts_enabled = (
+            bool(get_settings().assistant_durable_interrupts_enabled)
+            if durable_interrupts_enabled is None
+            else bool(durable_interrupts_enabled)
         )
 
     def authorize(
@@ -612,23 +620,37 @@ class CapabilityPolicyEngine:
                 actual_side_effect=actual_effect,
             )
 
-        # 9) Entrypoint ceiling already enforced by trusted verifier registration
-        # (main_agent has no production verifier). OpenClaw interrupt ceiling is
-        # enforced by the OpenClaw verifier; Policy still rejects durable here.
+        # 9) Durable interrupts are available only to the trusted Main Agent
+        # verifier and only behind the new-admission feature gate. Recovery of an
+        # already-persisted v2 Run happens in the worker and does not pass here.
         if descriptor.behavior.interrupt_mode == "durable":
-            return self._deny(
-                reason_code="durable_interrupt_denied",
-                descriptor=descriptor,
-                evidence=evidence,
-                context=context,
-                principal=principal,
-                entrypoint=evidence.entrypoint,
-                owner=verified.owner,
-                verifier_key=verifier_key,
-                granted_side_effects=granted,
-                grant_source_digest=verified.grant_source_digest,
-                actual_side_effect=actual_effect,
-            )
+            durable_reason: str | None = None
+            if not self.durable_interrupts_enabled:
+                durable_reason = "durable_interrupts_disabled"
+            elif verifier_key != ("skill_policy", "main_agent"):
+                durable_reason = "durable_interrupt_denied"
+            elif descriptor.capability_type not in {"workflow", "agent"}:
+                durable_reason = "durable_interrupt_denied"
+            elif descriptor.target_version_id is None:
+                durable_reason = "durable_interrupt_unversioned"
+            elif actual_effect not in {"none", "read", "compute"}:
+                durable_reason = "durable_interrupt_effect_denied"
+            elif descriptor.behavior.parallel_safe:
+                durable_reason = "durable_interrupt_parallel_denied"
+            if durable_reason is not None:
+                return self._deny(
+                    reason_code=durable_reason,
+                    descriptor=descriptor,
+                    evidence=evidence,
+                    context=context,
+                    principal=principal,
+                    entrypoint=evidence.entrypoint,
+                    owner=verified.owner,
+                    verifier_key=verifier_key,
+                    granted_side_effects=granted,
+                    grant_source_digest=verified.grant_source_digest,
+                    actual_side_effect=actual_effect,
+                )
 
         if verified.dispatch_permit is None:
             return self._deny(

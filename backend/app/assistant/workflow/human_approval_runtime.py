@@ -27,6 +27,61 @@ from app.assistant_config.models import AssistantHumanApproval
 ApprovalDecision = Literal["approved", "rejected"]
 ApprovalStatus = Literal["pending", "approved", "rejected", "cancelled"]
 
+# Plan 07 Task 5: stable fail-closed code when durable Main Agent hits Legacy wait.
+DURABLE_BLOCKING_RUNTIME_FORBIDDEN = "durable_blocking_runtime_forbidden"
+
+
+class DurableBlockingRuntimeForbidden(RuntimeError):
+    """Raised when a durable Main Agent Run accidentally enters Legacy create_and_wait."""
+
+    def __init__(self, message: str = "durable Main Agent must not use Legacy blocking HITL") -> None:
+        super().__init__(message)
+        self.reason_code = DURABLE_BLOCKING_RUNTIME_FORBIDDEN
+
+
+def _reject_durable_blocking_runtime(session_factory: sessionmaker, run_id: Any) -> None:
+    """Fail closed before creating a Legacy approval row for durable main_agent Runs.
+
+    Soft-return only for clearly non-durable identifiers:
+    - empty / non-UUID run ids (Legacy / workflow-test paths)
+    - missing row (not a known durable Main Agent run)
+    - present row whose runtime_kind is not main_agent
+
+    Once the id is a valid UUID, DB/session lookup failures fail closed so a
+    durable Main Agent cannot slip past the guard into Legacy row insert.
+    """
+    raw = str(run_id or "").strip()
+    if not raw:
+        return
+    try:
+        rid = UUID(raw)
+    except (TypeError, ValueError):
+        return
+    try:
+        with session_factory() as session:
+            from app.assistant.models import AssistantChatRun
+
+            run = session.get(AssistantChatRun, rid)
+            if run is None:
+                return
+            if str(getattr(run, "runtime_kind", "") or "") != "main_agent":
+                return
+            # Durable Main Agent Runs always use runtime_kind=main_agent. Any such
+            # call into Legacy create_and_wait is forbidden before row insert.
+            raise DurableBlockingRuntimeForbidden(
+                f"{DURABLE_BLOCKING_RUNTIME_FORBIDDEN}: durable main_agent run "
+                f"{rid} cannot use Legacy HumanLoopRuntime.create_and_wait"
+            )
+    except DurableBlockingRuntimeForbidden:
+        raise
+    except Exception as exc:
+        # Valid UUID + lookup failure: fail closed. Soft-open only for non-UUID
+        # identifiers above; never let DB/session errors admit durable into Legacy.
+        raise DurableBlockingRuntimeForbidden(
+            f"{DURABLE_BLOCKING_RUNTIME_FORBIDDEN}: run lookup failed for "
+            f"{rid}; refusing Legacy create_and_wait"
+        ) from exc
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -251,6 +306,11 @@ class HumanLoopRuntime:
         field_schema: list[dict[str, Any]],
         initial_values: dict[str, Any],
     ) -> dict[str, Any]:
+        # Plan 07 Task 5: durable Main Agent Runs must never enter the Legacy
+        # blocking approval path. Fail closed with a stable reason before any
+        # AssistantHumanApproval row is created.
+        _reject_durable_blocking_runtime(self._session_factory, self._context.run_id)
+
         with self._session_factory() as session:
             approval = AssistantHumanApproval(
                 run_id=self._context.run_id,

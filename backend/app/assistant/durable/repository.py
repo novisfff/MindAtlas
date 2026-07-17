@@ -232,6 +232,10 @@ class _TransitionPlan:
     lease_ttl: timedelta | None = None
     require_expired_lease: bool = False
     clear_lease: bool = False
+    # Plan 07 pause: null aggregate active deadline while human-waiting.
+    clear_deadline: bool = False
+    # Plan 07 resolve: restore active deadline from derived child budget.
+    set_deadline_at: datetime | None = None
     events: tuple[EventSpec, ...] = ()
     children: DurableChildBundle | None = None
     set_cancel_requested: bool = False
@@ -597,6 +601,104 @@ class DurableRunRepository:
             )
         )
 
+    def commit_waiting_pause(
+        self,
+        *,
+        run_id: UUID,
+        expected_revision: int,
+        lease: LeaseToken,
+        target_status: str,
+        events: Sequence[EventSpec] = (),
+        children: DurableChildBundle | None = None,
+    ) -> DurableCommitResult:
+        """Lease-owned human pause: running -> waiting_approval|waiting_input.
+
+        Plan 07 §11.1 step 8. Requires exact lease + expected ``state_revision`` +
+        source ``status=running``. Clears lease owner/expiry and aggregate
+        ``deadline_at`` (active wall time is frozen in BudgetSuspensionStateV1).
+        """
+        if target_status not in WAITING_STATUSES:
+            raise DurableRunConflict(
+                CODE_PROTOCOL_ERROR,
+                f"commit_waiting_pause target_status invalid: {target_status}",
+            )
+        rule = {
+            STATUS_WAITING_APPROVAL: "wait_approval",
+            STATUS_WAITING_INPUT: "wait_input",
+        }[target_status]
+        return self._commit(
+            _TransitionPlan(
+                run_id=run_id,
+                expected_revision=expected_revision,
+                target_status=target_status,
+                allowed_from=frozenset({STATUS_RUNNING}),
+                rule_name=rule,
+                lease=lease,
+                require_lease_verify=True,
+                events=tuple(events),
+                children=children,
+                set_started_at_if_missing=True,
+                clear_lease=True,
+                clear_deadline=True,
+                reject_if_ready_for_memory=True,
+            )
+        )
+
+    def commit_resume_queued(
+        self,
+        *,
+        run_id: UUID,
+        expected_revision: int,
+        events: Sequence[EventSpec] = (),
+        children: DurableChildBundle | None = None,
+        set_deadline_at: datetime | None = None,
+    ) -> DurableCommitResult:
+        """HTTP resolve path: waiting_approval|waiting_input -> queued.
+
+        Plan 07 §11.2 step 8. No lease required (API owns the Run-first lock and
+        Interrupt mutation before this CAS). Advances Checkpoint/budget pointers
+        via children and restores the active deadline from the derived child budget.
+        """
+        return self._commit(
+            _TransitionPlan(
+                run_id=run_id,
+                expected_revision=expected_revision,
+                target_status=STATUS_QUEUED,
+                allowed_from=frozenset(WAITING_STATUSES),
+                rule_name="resume_queued",
+                events=tuple(events),
+                children=children,
+                set_deadline_at=set_deadline_at,
+                clear_lease=True,
+            )
+        )
+
+    def commit_waiting_terminal_cancel(
+        self,
+        *,
+        run_id: UUID,
+        expected_revision: int,
+        events: Sequence[EventSpec] = (),
+        failure_code: str | None = None,
+        error_message: str | None = None,
+    ) -> DurableCommitResult:
+        """Expiry/terminal cancel path: waiting_* -> cancelled (no resume child)."""
+        return self._commit(
+            _TransitionPlan(
+                run_id=run_id,
+                expected_revision=expected_revision,
+                target_status=STATUS_CANCELLED,
+                allowed_from=frozenset(WAITING_STATUSES),
+                rule_name="direct_cancel",
+                events=tuple(events),
+                failure_code=failure_code,
+                error_message=error_message,
+                set_ended_at=True,
+                set_started_at_if_missing=True,
+                clear_lease=True,
+            )
+        )
+
     def commit_recovery_terminal(
         self,
         *,
@@ -899,6 +1001,14 @@ class DurableRunRepository:
                 # optional heartbeat refresh on semantic commit
                 run.heartbeat_at = now
                 run.lease_expires_at = now + plan.lease_ttl
+
+            if plan.clear_deadline:
+                run.deadline_at = None
+            if plan.set_deadline_at is not None:
+                deadline = plan.set_deadline_at
+                if deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=timezone.utc)
+                run.deadline_at = deadline.astimezone(timezone.utc)
 
             run.updated_at = now
 
@@ -1208,6 +1318,10 @@ class DurableRunRepository:
             run.lease_owner is not None or run.lease_expires_at is not None
         ):
             return True
+        if plan.clear_deadline and run.deadline_at is not None:
+            return True
+        if plan.set_deadline_at is not None:
+            return True
         # Optional lease refresh on semantic commit is a real write.
         if (
             plan.require_lease_verify
@@ -1305,6 +1419,15 @@ class DurableRunRepository:
             if len(new_cks) == 1 and new_cks[0].id is not None:
                 run.current_checkpoint_id = new_cks[0].id
 
+        # Fold aggregate checkpoint_seq into the same CAS as pointer advance so
+        # queue + pointers stay one commit (Plan 07 §11.2).
+        if run.current_checkpoint_id is not None:
+            ck = self.db.get(AssistantRunCheckpoint, run.current_checkpoint_id)
+            if ck is not None and getattr(ck, "sequence", None) is not None:
+                run.checkpoint_seq = max(
+                    int(run.checkpoint_seq or 0), int(ck.sequence or 0)
+                )
+
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
@@ -1339,6 +1462,7 @@ __all__ = [
     "STATUS_WAITING_APPROVAL",
     "STATUS_WAITING_INPUT",
     "TERMINAL_STATUSES",
+    "WAITING_STATUSES",
     "event_payload_digest",
     "is_transition_allowed",
 ]

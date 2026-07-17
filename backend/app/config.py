@@ -24,6 +24,10 @@ ASSISTANT_ARTIFACT_INLINE_MAX_BYTES_HARD_MAX = 262144  # 256 KiB
 ASSISTANT_ARTIFACT_MAX_BYTES_HARD_MAX = 26214400  # 25 MiB
 ASSISTANT_ARTIFACT_RUN_MAX_BYTES_HARD_MAX = 104857600  # 100 MiB
 
+# Plan 07 durable Interrupt hard ceilings. Settings may only lower these, never raise.
+ASSISTANT_INTERRUPT_MAX_TTL_SEC_HARD_MAX = 604800  # 7 days
+ASSISTANT_INTERRUPT_COMMENT_MAX_CHARS_HARD_MAX = 4000
+
 AssistantMainAgentMode = Literal["off", "shadow", "read_only"]
 
 
@@ -169,6 +173,18 @@ class Settings(BaseSettings):
         le=600_000,
         alias="ASSISTANT_WORKER_RETRY_MAX_MS",
     )
+    assistant_interrupt_expiry_scan_interval_sec: float = Field(
+        default=5.0,
+        ge=0.1,
+        le=3600.0,
+        alias="ASSISTANT_INTERRUPT_EXPIRY_SCAN_INTERVAL_SEC",
+    )
+    assistant_interrupt_expiry_scan_batch_size: int = Field(
+        default=50,
+        ge=1,
+        le=1000,
+        alias="ASSISTANT_INTERRUPT_EXPIRY_SCAN_BATCH_SIZE",
+    )
     assistant_artifact_bucket: str = Field(
         default="mindatlas-assistant-artifacts",
         min_length=3,
@@ -210,6 +226,36 @@ class Settings(BaseSettings):
         ge=0,
         le=600,
         alias="ASSISTANT_DURABLE_CLOCK_SKEW_SEC",
+    )
+
+    # Plan 07 durable human Interrupts. Default disabled; pepper blank in examples.
+    # Enabling requires a nonempty stable pepper and a compatible v2 worker.
+    assistant_durable_interrupts_enabled: bool = Field(
+        default=False,
+        alias="ASSISTANT_DURABLE_INTERRUPTS_ENABLED",
+    )
+    assistant_interrupt_default_ttl_sec: int = Field(
+        default=86400,
+        ge=1,
+        le=ASSISTANT_INTERRUPT_MAX_TTL_SEC_HARD_MAX,
+        alias="ASSISTANT_INTERRUPT_DEFAULT_TTL_SEC",
+    )
+    assistant_interrupt_max_ttl_sec: int = Field(
+        default=ASSISTANT_INTERRUPT_MAX_TTL_SEC_HARD_MAX,
+        ge=1,
+        le=ASSISTANT_INTERRUPT_MAX_TTL_SEC_HARD_MAX,
+        alias="ASSISTANT_INTERRUPT_MAX_TTL_SEC",
+    )
+    assistant_interrupt_comment_max_chars: int = Field(
+        default=ASSISTANT_INTERRUPT_COMMENT_MAX_CHARS_HARD_MAX,
+        ge=1,
+        le=ASSISTANT_INTERRUPT_COMMENT_MAX_CHARS_HARD_MAX,
+        alias="ASSISTANT_INTERRUPT_COMMENT_MAX_CHARS",
+    )
+    # Never provide a real default. Required nonempty when interrupts are enabled.
+    assistant_interrupt_token_pepper: str = Field(
+        default="",
+        alias="ASSISTANT_INTERRUPT_TOKEN_PEPPER",
     )
 
     # Logging
@@ -454,6 +500,31 @@ class Settings(BaseSettings):
             raise ValueError(
                 "assistant_artifact_bucket must be a nonempty private bucket distinct "
                 "from MINIO_BUCKET (attachment public-download bucket)"
+            )
+        # Plan 07 interrupt TTL / comment ceilings.
+        if self.assistant_interrupt_default_ttl_sec > self.assistant_interrupt_max_ttl_sec:
+            raise ValueError(
+                "assistant_interrupt_default_ttl_sec must be <= assistant_interrupt_max_ttl_sec"
+            )
+        if self.assistant_interrupt_max_ttl_sec > ASSISTANT_INTERRUPT_MAX_TTL_SEC_HARD_MAX:
+            raise ValueError(
+                "assistant_interrupt_max_ttl_sec must be <= "
+                f"{ASSISTANT_INTERRUPT_MAX_TTL_SEC_HARD_MAX}"
+            )
+        if (
+            self.assistant_interrupt_comment_max_chars
+            > ASSISTANT_INTERRUPT_COMMENT_MAX_CHARS_HARD_MAX
+        ):
+            raise ValueError(
+                "assistant_interrupt_comment_max_chars must be <= "
+                f"{ASSISTANT_INTERRUPT_COMMENT_MAX_CHARS_HARD_MAX}"
+            )
+        if self.assistant_durable_interrupts_enabled and not (
+            self.assistant_interrupt_token_pepper or ""
+        ).strip():
+            raise ValueError(
+                "assistant_interrupt_token_pepper is required when "
+                "assistant_durable_interrupts_enabled is true"
             )
         return self
 

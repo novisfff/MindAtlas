@@ -189,6 +189,8 @@ class AssistantWorkerConfig:
     retry_base_ms: int
     retry_max_ms: int
     state_path: Path = DEFAULT_WORKER_STATE_PATH
+    expiry_scan_interval_sec: float = 5.0
+    expiry_scan_batch_size: int = 50
 
     @classmethod
     def from_settings(
@@ -217,6 +219,12 @@ class AssistantWorkerConfig:
             retry_base_ms=int(s.assistant_worker_retry_base_ms),
             retry_max_ms=int(s.assistant_worker_retry_max_ms),
             state_path=state_path or DEFAULT_WORKER_STATE_PATH,
+            expiry_scan_interval_sec=float(
+                s.assistant_interrupt_expiry_scan_interval_sec
+            ),
+            expiry_scan_batch_size=int(
+                s.assistant_interrupt_expiry_scan_batch_size
+            ),
         )
 
 
@@ -231,25 +239,46 @@ class AssistantWorker:
         executor: RunExecutor | None = None,
         credential_resolver: CredentialResolver | None = None,
         artifact_object_exists: Callable[[str], bool] | None = None,
+        expiry_scanner: Callable[..., Any] | None = None,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         self.cfg = cfg
         self.session_factory = session_factory or SessionLocal
         if executor is None:
-            # Task 6: durable Main Agent loop is the default executor.
-            # Skeleton remains available for tests that inject it explicitly.
+            # Route Checkpoint v2 Workflow units without changing the Plan 06
+            # provider executor's persistence ownership.
             from app.assistant.durable.runner import MainAgentRunExecutor
+            from app.assistant.durable.unit_router import DurableRunUnitRouter
+            from app.assistant.durable.workflow_executor import (
+                DurableWorkflowUnitExecutor,
+            )
 
-            executor = MainAgentRunExecutor(
+            provider_executor = MainAgentRunExecutor(
                 heartbeat_interval_sec=float(cfg.heartbeat_interval_sec),
                 lease_ttl_sec=float(cfg.lease_ttl_sec),
+            )
+            executor = DurableRunUnitRouter(
+                provider_executor=provider_executor,
+                durable_executor=DurableWorkflowUnitExecutor(
+                    provider_resume=provider_executor.resume_waiting,
+                ),
             )
         self.executor = executor
         self.credential_resolver = credential_resolver or NoopCredentialResolver()
         self.artifact_object_exists = artifact_object_exists
+        if expiry_scanner is None:
+            from app.assistant.workflow.durable.interrupt_api import (
+                scan_expired_interrupts,
+            )
+
+            expiry_scanner = scan_expired_interrupts
+        self.expiry_scanner = expiry_scanner
+        self._monotonic = monotonic or time.monotonic
         self._draining = False
         self._stop = Event()
         self._last_reg_heartbeat = 0.0
         self._last_lease_heartbeat: dict[str, float] = {}
+        self._last_expiry_scan = float("-inf")
 
     @property
     def worker_id(self) -> str:
@@ -297,6 +326,7 @@ class AssistantWorker:
 
     def run_once(self) -> int:
         """One claim/classify/execute cycle. Returns 1 if work was claimed."""
+        self._maybe_scan_expired_interrupts()
         db = self.session_factory()
         try:
             leases = RunLeaseService(
@@ -313,6 +343,28 @@ class AssistantWorker:
             db.close()
 
         return self._handle_claimed(claimed)
+
+    def _maybe_scan_expired_interrupts(self) -> None:
+        """Run bounded expiry housekeeping without gating existing Runs."""
+        now = self._monotonic()
+        if now - self._last_expiry_scan < self.cfg.expiry_scan_interval_sec:
+            return
+        self._last_expiry_scan = now
+        db = self.session_factory()
+        try:
+            result = self.expiry_scanner(
+                db,
+                limit=self.cfg.expiry_scan_batch_size,
+            )
+            logger.debug("durable interrupt expiry scan result=%s", result)
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            logger.exception("durable interrupt expiry scan failed")
+        finally:
+            db.close()
 
     def _handle_claimed(self, claimed: ClaimedLease) -> int:
         """Classify + execute one claimed lease (fresh DB sessions)."""
@@ -364,12 +416,22 @@ class AssistantWorker:
             self._apply_backoff(claimed, decision)
             return 1
 
-        self.executor.execute(
-            claimed=claimed,
-            decision=decision,
-            heartbeat=heartbeat,
-            session_factory=self.session_factory,
-        )
+        try:
+            self.executor.execute(
+                claimed=claimed,
+                decision=decision,
+                heartbeat=heartbeat,
+                session_factory=self.session_factory,
+            )
+        except (TimeoutError, ConnectionError):
+            # Release the claim through the existing bounded backoff protocol;
+            # durable waiting resumes remain retryable on transient Provider I/O.
+            from types import SimpleNamespace
+
+            self._apply_backoff(
+                claimed,
+                SimpleNamespace(reason_code="provider_resume_transient"),
+            )
         return 1
 
     def _apply_backoff(

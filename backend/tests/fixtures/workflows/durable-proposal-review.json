@@ -1,0 +1,106 @@
+{
+  "nodes": [
+    {
+      "node_id": "start",
+      "node_type": "start",
+      "label": "Start",
+      "position_x": 0,
+      "position_y": 0,
+      "config": {
+        "input_mode": "text"
+      }
+    },
+    {
+      "node_id": "proposal_llm",
+      "node_type": "llm",
+      "label": "Draft proposal",
+      "position_x": 180,
+      "position_y": 0,
+      "config": {
+        "model_source": "default",
+        "model_id": null,
+        "prompt": "Draft a generic MindAtlas note proposal from the user input. Use only title, content, and tags fields. Do not write to any business table or external system."
+      }
+    },
+    {
+      "node_id": "approve",
+      "node_type": "human_in_loop",
+      "label": "Review proposal",
+      "position_x": 360,
+      "position_y": 0,
+      "config": {
+        "prompt": "Review and approve the proposal",
+        "mode": "approval",
+        "kind": "approval",
+        "title": "Review proposal",
+        "field_schema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string",
+              "title": "Title",
+              "maxLength": 200
+            },
+            "content": {
+              "type": "string",
+              "title": "Content",
+              "maxLength": 4000
+            },
+            "tags": {
+              "type": "array",
+              "title": "Tags",
+              "items": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "maxItems": 16
+            }
+          },
+          "required": [
+            "title",
+            "content"
+          ],
+          "additionalProperties": false
+        },
+        "initial_values": {
+          "title": "Untitled proposal",
+          "content": "",
+          "tags": []
+        }
+      }
+    },
+    {
+      "node_id": "output",
+      "node_type": "output",
+      "label": "Emit private Artifact",
+      "position_x": 540,
+      "position_y": 0,
+      "config": {
+        "output_mode": "text",
+        "text": "Approved proposal ready as private Artifact."
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "e1",
+      "source_node_id": "start",
+      "target_node_id": "proposal_llm"
+    },
+    {
+      "edge_id": "e2",
+      "source_node_id": "proposal_llm",
+      "target_node_id": "approve"
+    },
+    {
+      "edge_id": "e3",
+      "source_node_id": "approve",
+      "target_node_id": "output"
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  }
+}
