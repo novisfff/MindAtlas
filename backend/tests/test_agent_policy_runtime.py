@@ -1158,6 +1158,75 @@ def test_dispatcher_applies_terminal_result_to_compatible_consumers() -> None:
     assert any(edge.evidence_kind == "compatible_consumer" for edge in state.evidence_edges)
 
 
+def test_dispatcher_accepts_durable_workflow_execution_port() -> None:
+    from types import SimpleNamespace
+
+    from app.assistant.main_agent.policy_runtime import MainAgentGatewayToolDispatcher
+
+    durable_port = SimpleNamespace(execute=lambda *_args, **_kwargs: None)
+    dispatcher = MainAgentGatewayToolDispatcher(
+        session_factory=lambda: None,  # type: ignore[arg-type,return-value]
+        authorization_factory=SimpleNamespace(),
+        control_port=SimpleNamespace(),  # type: ignore[arg-type]
+        durable_workflow=durable_port,  # type: ignore[arg-type]
+    )
+
+    assert dispatcher.durable_workflow is durable_port
+
+
+def test_policy_runtime_restores_persisted_budget_and_obligation_snapshots(
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from tests._db import make_session
+
+    from app.assistant.main_agent.policy_runtime import (
+        compose_main_agent_policy_runtime,
+    )
+
+    monkeypatch.setenv("APP_BUILD_REVISION", BUILD)
+    db = make_session()
+    try:
+        manifest, _ = _base_manifest()
+        runtime, _ports = compose_main_agent_policy_runtime(
+            db=db,
+            run_id=RUN_ID,
+            conversation_id=CONV_ID,
+            manifest=manifest,
+            profile_key="general_chat",
+            profile_version_id=PROFILE_VERSION_ID,
+            profile_content_digest=DIGEST_A,
+            app_build_revision=BUILD,
+            provider=SimpleNamespace(),  # type: ignore[arg-type]
+        )
+        assert runtime.budget_ledger.start_provider_round().allowed
+        budget = runtime.budget_ledger.snapshot()
+        obligation = runtime.obligation_ledger.snapshot()
+
+        restored, _ = compose_main_agent_policy_runtime(
+            db=db,
+            run_id=RUN_ID,
+            conversation_id=CONV_ID,
+            manifest=runtime.manifest,
+            profile_key="general_chat",
+            profile_version_id=PROFILE_VERSION_ID,
+            profile_content_digest=DIGEST_A,
+            app_build_revision=BUILD,
+            provider=SimpleNamespace(),  # type: ignore[arg-type]
+            restored_policy_snapshot=runtime.policy_snapshot,
+            restored_budget_state=budget,
+            restored_obligation_state=obligation,
+        )
+
+        assert restored.policy_snapshot == runtime.policy_snapshot
+        assert restored.budget_ledger.snapshot() == budget
+        assert restored.obligation_ledger.snapshot() == obligation
+        assert restored.manifest == runtime.manifest
+    finally:
+        db.close()
+
+
 def test_dispatcher_fails_closed_when_obligation_apply_is_denied() -> None:
     from types import SimpleNamespace
 

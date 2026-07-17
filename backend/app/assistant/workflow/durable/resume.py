@@ -384,6 +384,41 @@ def _build_bag_snapshot_artifact(
     )
 
 
+def _build_provider_waiting_resolution_artifact(
+    *,
+    run_id: UUID,
+    resolution: ProviderWaitingResolution,
+) -> Any:
+    """Persist the exact Provider resolution before external Provider resume."""
+    import json
+
+    from app.assistant.domain.digests import sha256_bytes
+    from app.assistant.durable.models import AssistantRunArtifact
+
+    body = json.dumps(
+        resolution.model_dump(mode="json", by_alias=True),
+        separators=(",", ":"),
+        sort_keys=True,
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return AssistantRunArtifact(
+        id=uuid4(),
+        run_id=run_id,
+        kind="provider_waiting_resolution",
+        media_type="application/json",
+        display_label=f"provider-resolution:{resolution.call_id}",
+        storage_kind="inline",
+        byte_size=len(body),
+        content_sha256=sha256_bytes(body),
+        inline_bytes=body,
+        object_key=None,
+        metadata_json={
+            "callId": resolution.call_id,
+            "continuationDigest": resolution.capability_continuation.payload_digest,
+        },
+    )
+
+
 def load_resume_context(
     db: Session,
     *,
@@ -1731,39 +1766,6 @@ def execute_interrupt_resume(
             user_text=cont.user_text,
             structured_output=cont.structured_output,
         )
-        if commit_continue:
-            from app.assistant.durable.checkpoints import commit_checkpoint_v2
-
-            try:
-                terminal_commit = commit_checkpoint_v2(
-                    db,
-                    run_id=run_id,
-                    lease=lease,
-                    expected_revision=revision,
-                    phase="ready_for_completion",
-                    next_action_kind="resume_provider_loop",
-                    unit=None,
-                    workflow_state=cont.workflow_state,
-                    active_capability_continuation=ctx.root_continuation,
-                    pending_interrupt_id=None,
-                    reason=f"root_terminal:{status}",
-                )
-                revision = int(terminal_commit.state_revision)
-            except DurableRunConflict as exc:
-                code = getattr(exc, "code", None)
-                if code in {"invalid_source_status", "stale_revision", "lease_mismatch"}:
-                    return ResumeUnitResult(
-                        kind="stop_won",
-                        reason_code=CODE_RESUME_STOP_WON,
-                        detail=str(exc),
-                        human_result=ctx.human_result,
-                        root_continuation=ctx.root_continuation,
-                        workflow_state=cont.workflow_state,
-                        capability_result=cap,
-                        state_revision=revision,
-                    )
-                raise
-
         resolution = None
         if provider_loop_continuation is not None:
             try:
@@ -1799,6 +1801,53 @@ def execute_interrupt_resume(
                     capability_result=cap,
                     state_revision=revision,
                 )
+
+        if commit_continue:
+            from app.assistant.durable.checkpoints import commit_checkpoint_v2
+
+            try:
+                resolution_artifact = (
+                    _build_provider_waiting_resolution_artifact(
+                        run_id=run_id,
+                        resolution=resolution,
+                    )
+                    if resolution is not None
+                    else None
+                )
+                terminal_commit = commit_checkpoint_v2(
+                    db,
+                    run_id=run_id,
+                    lease=lease,
+                    expected_revision=revision,
+                    phase="ready_for_completion",
+                    next_action_kind="resume_provider_loop",
+                    unit=None,
+                    workflow_state=cont.workflow_state,
+                    active_capability_continuation=ctx.root_continuation,
+                    pending_interrupt_id=None,
+                    reason=f"root_terminal:{status}",
+                    artifact_ids=(
+                        (resolution_artifact.id,) if resolution_artifact is not None else ()
+                    ),
+                    extra_child_rows=(
+                        (resolution_artifact,) if resolution_artifact is not None else ()
+                    ),
+                )
+                revision = int(terminal_commit.state_revision)
+            except DurableRunConflict as exc:
+                code = getattr(exc, "code", None)
+                if code in {"invalid_source_status", "stale_revision", "lease_mismatch"}:
+                    return ResumeUnitResult(
+                        kind="stop_won",
+                        reason_code=CODE_RESUME_STOP_WON,
+                        detail=str(exc),
+                        human_result=ctx.human_result,
+                        root_continuation=ctx.root_continuation,
+                        workflow_state=cont.workflow_state,
+                        capability_result=cap,
+                        state_revision=revision,
+                    )
+                raise
 
         return ResumeUnitResult(
             kind="root_terminal",

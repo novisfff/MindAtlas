@@ -173,6 +173,18 @@ class Settings(BaseSettings):
         le=600_000,
         alias="ASSISTANT_WORKER_RETRY_MAX_MS",
     )
+    assistant_interrupt_expiry_scan_interval_sec: float = Field(
+        default=5.0,
+        ge=0.1,
+        le=3600.0,
+        alias="ASSISTANT_INTERRUPT_EXPIRY_SCAN_INTERVAL_SEC",
+    )
+    assistant_interrupt_expiry_scan_batch_size: int = Field(
+        default=50,
+        ge=1,
+        le=1000,
+        alias="ASSISTANT_INTERRUPT_EXPIRY_SCAN_BATCH_SIZE",
+    )
     assistant_artifact_bucket: str = Field(
         default="mindatlas-assistant-artifacts",
         min_length=3,

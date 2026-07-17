@@ -388,6 +388,18 @@ class TestProviderWaitingResumeIntegration:
         # Completed sibling prefix empty; pending sibling suffix preserved on cont
         assert cont.pending_call_ids == ("sibling-later",)
         assert cont.completed_call_records == ()
+        from app.assistant.durable.models import AssistantRunArtifact
+
+        persisted = (
+            self.db.query(AssistantRunArtifact)
+            .filter(
+                AssistantRunArtifact.run_id == run.id,
+                AssistantRunArtifact.kind == "provider_waiting_resolution",
+            )
+            .one()
+        )
+        assert persisted.inline_bytes is not None
+        assert b'"callId":"wait-call-1"' in persisted.inline_bytes
         # Original surface identity frozen
         assert cont.exposed_surface.manifest_digest == DIGEST_A
         assert cont.provider_rounds_used == 1

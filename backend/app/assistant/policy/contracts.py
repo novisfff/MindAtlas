@@ -388,7 +388,7 @@ class EffectiveCapabilityGrant(FrozenContract):
     capability_key: str
     binding_contract_digest: str
     allowed_side_effects: tuple[SideEffectClass, ...]
-    allowed_interrupt_modes: tuple[Literal["none"], ...]
+    allowed_interrupt_modes: tuple[Literal["none", "durable"], ...]
     platform_ceiling_digest: str
     entrypoint_policy_digest: str
     global_policy_digest: str
@@ -426,8 +426,8 @@ class EffectiveCapabilityGrant(FrozenContract):
             raise TypeError("allowed_interrupt_modes must be a sequence")
         out = tuple(value)
         for item in out:
-            if item != "none":
-                raise ValueError("allowed_interrupt_modes may only contain 'none'")
+            if item not in {"none", "durable"}:
+                raise ValueError("unsupported allowed interrupt mode")
         return out  # type: ignore[return-value]
 
     @model_validator(mode="after")
@@ -724,7 +724,7 @@ def build_effective_capability_grant(
 ) -> EffectiveCapabilityGrant:
     """Build a frozen EffectiveCapabilityGrant with recomputed grant_source_digest."""
     effects = tuple(allowed_side_effects)
-    modes: tuple[Literal["none"], ...] = tuple(  # type: ignore[assignment]
+    modes: tuple[Literal["none", "durable"], ...] = tuple(  # type: ignore[assignment]
         allowed_interrupt_modes  # type: ignore[arg-type]
     )
     digest = grant_source_digest or compute_grant_source_digest(

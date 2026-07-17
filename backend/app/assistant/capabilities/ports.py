@@ -35,6 +35,17 @@ class CapabilityEventSink(Protocol):
     def emit(self, event: CapabilityRuntimeEvent) -> None: ...
 
 
+class DurableWorkflowExecutionPort(Protocol):
+    """Worker-unit port for a trusted durable Workflow/Agent invocation."""
+
+    def execute(
+        self,
+        request: "CapabilityAdapterRequest",
+        *,
+        ports: "CapabilityRuntimePorts",
+    ) -> CapabilityResult: ...
+
+
 @runtime_checkable
 class CapabilityDispatchGuard(Protocol):
     """Plan 05 additive port: budget reservation lifecycle around adapter dispatch.
@@ -115,6 +126,8 @@ class CapabilityRuntimePorts:
     dispatch_guard: CapabilityDispatchGuard = field(default=_NOOP_DISPATCH_GUARD)
     # Plan 05 additive: Main Agent injects ProcessLocalCapabilityCallFramePort.
     call_frames: CapabilityCallFramePort = field(default=_NOOP_CALL_FRAMES)
+    # Plan 07 additive: absent for Legacy/OpenClaw and while durable admission is off.
+    durable_workflow: DurableWorkflowExecutionPort | None = field(default=None)
 
 
 @dataclass(frozen=True)
@@ -268,6 +281,7 @@ __all__ = [
     "CapabilityCallFramePort",
     "CapabilityDispatchGuard",
     "CapabilityEventSink",
+    "DurableWorkflowExecutionPort",
     "CapabilityRuntimePorts",
     "ExactRuntimeDependencyResolver",
     "ExecutableAgentVersionTarget",

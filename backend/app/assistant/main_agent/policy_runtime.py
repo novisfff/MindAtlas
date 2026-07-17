@@ -204,6 +204,7 @@ class MainAgentGatewayToolDispatcher:
     session_factory: SessionFactory
     authorization_factory: MainAgentAuthorizationEvidenceFactory
     control_port: MainAgentControlCallPort
+    durable_workflow: Any | None = None
     locale: str | None = None
     classifier: CapabilityClassifier | None = None
     next_manifest_hook: (
@@ -349,6 +350,8 @@ class MainAgentGatewayToolDispatcher:
                 "cancellation": _CancellationBridge(cancellation),
                 "events": _NullCapabilityEventSink(),  # type: ignore[arg-type]
             }
+            if self.durable_workflow is not None:
+                ports_kwargs["durable_workflow"] = self.durable_workflow
             if self.dispatch_guard is not None:
                 ports_kwargs["dispatch_guard"] = self.dispatch_guard
             if self.call_frames is not None:
@@ -871,6 +874,10 @@ def compose_main_agent_policy_runtime(
     profile_context_budget: Any | None = None,
     operator_budget_limits: Mapping[str, int | None] | None = None,
     isolated_parallel: bool = False,
+    durable_workflow: Any | None = None,
+    restored_policy_snapshot: EffectiveRunPolicySnapshot | None = None,
+    restored_budget_state: Any | None = None,
+    restored_obligation_state: Any | None = None,
 ) -> tuple[MainAgentPolicyRuntime, ProviderLoopPorts]:
     """Compose Plan 05 policy ledgers + ProviderLoopPorts for one admitted Run.
 
@@ -898,10 +905,14 @@ def compose_main_agent_policy_runtime(
 
     # Run budget limits: hard ∩ entrypoint ∩ operator lower-only ∩ profile
     # outputBudget + contextBudget.max_active_skills.
-    run_budget_limits = normalize_run_budget_limits(
-        profile_output_budget=profile_budget_fields,
-        profile_context_budget=profile_context_budget,
-        operator_limits=operator_budget_limits,
+    run_budget_limits = (
+        restored_policy_snapshot.run_budget_limits
+        if restored_policy_snapshot is not None
+        else normalize_run_budget_limits(
+            profile_output_budget=profile_budget_fields,
+            profile_context_budget=profile_context_budget,
+            operator_limits=operator_budget_limits,
+        )
     )
     owner_budget = build_main_agent_owner_budget(
         profile_version_id=profile_version_id,
@@ -931,18 +942,32 @@ def compose_main_agent_policy_runtime(
     # cycle-free: policy digest → Manifest.effective_policy_digest →
     # Manifest.manifest_digest, with exposure_index re-associated to the
     # new Manifest digest without changing exposure_index_digest.
-    policy_snapshot = build_initial_policy_snapshot(
-        run_id=run_id,
-        app_build_revision=app_build_revision,
-        profile_key=profile_key,
-        profile_version_id=profile_version_id,
-        profile_content_digest=profile_content_digest,
-        manifest=manifest,
-        exposure_inputs=exposure_inputs,
-        run_budget_limits=run_budget_limits,
-        owner_material=owner_material,
-    )
-    if manifest.effective_policy_digest != policy_snapshot.effective_policy_digest:
+    if restored_policy_snapshot is not None:
+        policy_snapshot = restored_policy_snapshot
+        if policy_snapshot.run_id != run_id:
+            raise ValueError("restored policy run_id mismatch")
+        if policy_snapshot.app_build_revision != app_build_revision:
+            raise ValueError("restored policy app build mismatch")
+        if policy_snapshot.main_agent_profile_version_id != profile_version_id:
+            raise ValueError("restored policy profile version mismatch")
+        if manifest.effective_policy_digest != policy_snapshot.effective_policy_digest:
+            raise ValueError("restored policy Manifest digest mismatch")
+    else:
+        policy_snapshot = build_initial_policy_snapshot(
+            run_id=run_id,
+            app_build_revision=app_build_revision,
+            profile_key=profile_key,
+            profile_version_id=profile_version_id,
+            profile_content_digest=profile_content_digest,
+            manifest=manifest,
+            exposure_inputs=exposure_inputs,
+            run_budget_limits=run_budget_limits,
+            owner_material=owner_material,
+        )
+    if (
+        restored_policy_snapshot is None
+        and manifest.effective_policy_digest != policy_snapshot.effective_policy_digest
+    ):
         from app.assistant.domain.contracts import compute_manifest_digest
 
         aligned_digest = compute_manifest_digest(
@@ -985,12 +1010,23 @@ def compose_main_agent_policy_runtime(
         # Keep control runtime on the aligned Manifest.
         control_runtime.bind_manifest(manifest)
 
-    budget_ledger = BudgetLedger.create(
-        limits=run_budget_limits,
-        owner_limits=(owner_budget,),
-    )
-    # create() installs the main-agent terminal obligation by default.
-    obligation_ledger = ObligationLedger.create(run_id=run_id)
+    if restored_budget_state is not None:
+        if restored_budget_state.limits != run_budget_limits:
+            raise ValueError("restored budget limits mismatch")
+        budget_ledger = BudgetLedger(restored_budget_state)
+    else:
+        budget_ledger = BudgetLedger.create(
+            limits=run_budget_limits,
+            owner_limits=(owner_budget,),
+        )
+    if restored_obligation_state is not None:
+        obligation_ledger = ObligationLedger(
+            restored_obligation_state,
+            run_id=run_id,
+        )
+    else:
+        # create() installs the main-agent terminal obligation by default.
+        obligation_ledger = ObligationLedger.create(run_id=run_id)
 
     call_frames = ProcessLocalCapabilityCallFramePort()
     dispatch_guard = BudgetLedgerDispatchGuard(ledger=budget_ledger)
@@ -1105,6 +1141,7 @@ def compose_main_agent_policy_runtime(
         session_factory=session_factory,
         authorization_factory=auth_factory,
         control_port=control_runtime,
+        durable_workflow=durable_workflow,
         locale=locale,
         next_manifest_hook=_next_manifest,
         pending_effect_cleanup_hook=_cleanup_pending_effect,

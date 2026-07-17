@@ -328,6 +328,10 @@ class AssistantRuntimeRequest:
     l0_messages: tuple[Mapping[str, str], ...] = ()
     execution_kind: ExecutionKind = "production"
     cancel_checker: Callable[[], bool] | None = None
+    # Worker/API may provide the run-scoped durable Workflow port. Keeping this
+    # explicit prevents the production composition path from silently dropping
+    # staged durable pauses.
+    durable_workflow: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -1251,6 +1255,7 @@ class MainAgentService:
             profile_budget_fields=admission.snapshot.output_budget,
             profile_context_budget=admission.snapshot.context_budget,
             operator_budget_limits=operator_limits,
+            durable_workflow=request.durable_workflow,
         )
         # Use the Manifest aligned to Plan 05 effective_policy_digest.
         if self._state is not None and runtime.manifest is not None:

@@ -401,6 +401,8 @@ class WorkflowCapabilityAdapter:
         # OpenClaw-compat only. Future Main Agent never blocks.
         interrupt_mode = str(descriptor.behavior.interrupt_mode or "none")
         if interrupt_mode == "durable":
+            if ports.durable_workflow is not None:
+                return ports.durable_workflow.execute(request, ports=ports)
             error = CapabilityError(
                 error_type="unsupported_interrupt",
                 safe_code="unsupported_interrupt",

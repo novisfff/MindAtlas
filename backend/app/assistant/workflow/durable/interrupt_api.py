@@ -16,7 +16,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.assistant.durable.codec import checkpoint_state_digest, encode_checkpoint_v2
+from app.assistant.durable.codec import (
+    checkpoint_state_digest,
+    decode_checkpoint,
+    encode_checkpoint_v2,
+)
 from app.assistant.durable.contracts import DurableAgentCheckpointV2, DurableNextActionV2
 from app.assistant.durable.models import (
     AssistantRunBudgetRevision,
@@ -87,6 +91,7 @@ class ExpiryScanResult:
     cancelled_run_count: int
     skipped_count: int
     conflict_count: int
+    queued_run_count: int = 0
 
 
 class DurableInterruptApiError(Exception):
@@ -816,6 +821,75 @@ def resolve_interrupt_http(
 # ---------------------------------------------------------------------------
 
 
+def _has_explicit_expired_edge(plan: Any, node_id: str) -> bool:
+    """Return true only for a frozen typed edge, never a default linear edge."""
+    for node in getattr(plan, "nodes", ()):
+        if str(getattr(node, "node_id", "")) != str(node_id):
+            continue
+        return any(
+            str(getattr(edge, "source_handle", "") or "") == "expired"
+            for edge in getattr(node, "outgoing_edges", ())
+        )
+    return False
+
+
+def _interrupt_has_typed_expiry(
+    db: Session,
+    *,
+    interrupt: AssistantRunInterrupt,
+) -> bool:
+    waiting_row = db.get(AssistantRunCheckpoint, interrupt.checkpoint_id)
+    if waiting_row is None:
+        # Legacy HITL rows may point at a checkpoint that is not present in
+        # the durable workflow table; preserve their terminal expiry path.
+        return False
+    try:
+        payload = waiting_row.state_payload
+        if isinstance(payload, Mapping) and not (
+            payload.get("runId") or payload.get("run_id") or payload.get("workflowState")
+        ):
+            # Older synthetic/legacy HITL checkpoints are not durable workflow
+            # material and retain the existing terminal expiry behavior.
+            return False
+        checkpoint = decode_checkpoint(waiting_row.state_payload)
+        workflow_state = getattr(checkpoint, "workflow_state", None)
+        if workflow_state is None:
+            # Legacy/non-workflow HITL rows have no durable workflow state and
+            # retain the existing terminal-expiry cancellation behavior.
+            return False
+        from app.assistant.workflow.durable.material import (
+            DurableRuntimeMaterialResolver,
+        )
+
+        root, materials = DurableRuntimeMaterialResolver(db).resolve(
+            workflow_state=workflow_state
+        )
+        frame = next(
+            (
+                item
+                for item in workflow_state.frame_stack
+                if item.frame_id == interrupt.workflow_frame_id
+            ),
+            None,
+        )
+        if frame is None:
+            raise DurableInterruptApiError(
+                "durable_expiry_material",
+                "durable expiry material frame is missing",
+                status_code=409,
+            )
+        material = materials.get(str(frame.target_version_id), root)
+        return _has_explicit_expired_edge(material.plan, str(interrupt.node_id))
+    except DurableInterruptApiError:
+        raise
+    except Exception as exc:
+        raise DurableInterruptApiError(
+            "durable_expiry_material",
+            f"durable expiry material cannot be reconstructed: {exc}",
+            status_code=409,
+        ) from exc
+
+
 def list_expired_pending_interrupt_ids(
     db: Session,
     *,
@@ -858,7 +932,63 @@ def expire_one_interrupt(
             db.commit()
             return True
 
-        if str(run.status) in WAITING_STATUSES:
+        if str(run.status) in WAITING_STATUSES and _interrupt_has_typed_expiry(
+            db,
+            interrupt=result.interrupt,
+        ):
+            expected_revision = int(run.state_revision)
+            child_rows, budget_id, checkpoint_id, deadline = _build_resume_children(
+                db,
+                run=run,
+                interrupt=result.interrupt,
+                expected_revision=expected_revision,
+            )
+            for row in child_rows:
+                db.add(row)
+            db.flush()
+            result.interrupt.resolution_checkpoint_id = checkpoint_id
+            result.interrupt.resolution_budget_revision_id = budget_id
+            result.interrupt.resolution_run_revision = expected_revision + 1
+            db.flush()
+            events = (
+                EventSpec(
+                    event_key=(
+                        f"human_interrupt_expired:{interrupt_id}:"
+                        f"{result.interrupt.resolution_request_id}"
+                    ),
+                    event_name="human_interrupt_expired",
+                    payload={
+                        "interruptId": str(interrupt_id),
+                        "status": "expired",
+                        "resolutionRequestId": str(
+                            result.interrupt.resolution_request_id
+                        ),
+                    },
+                    visibility="public",
+                ),
+                EventSpec(
+                    event_key=f"run_status:queued:expired:{interrupt_id}",
+                    event_name="run_status",
+                    payload={
+                        "status": "queued",
+                        "interruptId": str(interrupt_id),
+                        "reason": "typed_interrupt_expiry",
+                    },
+                    visibility="public",
+                ),
+            )
+            run_repo.commit_resume_queued(
+                run_id=run_id,
+                expected_revision=expected_revision,
+                events=events,
+                children=DurableChildBundle(
+                    rows=[],
+                    current_checkpoint_id=checkpoint_id,
+                    current_budget_revision_id=budget_id,
+                ),
+                set_deadline_at=deadline,
+            )
+        elif str(run.status) in WAITING_STATUSES:
             events = (
                 EventSpec(
                     event_key=f"human_interrupt_expired:{interrupt_id}:{result.interrupt.resolution_request_id}",
@@ -915,6 +1045,7 @@ def scan_expired_interrupts(
     candidates = list_expired_pending_interrupt_ids(db, limit=limit, now=now)
     expired = 0
     cancelled = 0
+    queued = 0
     skipped = 0
     conflicts = 0
     for interrupt_id, run_id in candidates:
@@ -932,6 +1063,8 @@ def scan_expired_interrupts(
                     and str(run_after.status) == STATUS_CANCELLED
                 ):
                     cancelled += 1
+                elif run_after is not None and str(run_after.status) == "queued":
+                    queued += 1
             else:
                 skipped += 1
         except (InterruptConflict, DurableRunConflict):
@@ -951,6 +1084,7 @@ def scan_expired_interrupts(
         cancelled_run_count=cancelled,
         skipped_count=skipped,
         conflict_count=conflicts,
+        queued_run_count=queued,
     )
 
 
