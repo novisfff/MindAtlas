@@ -100,12 +100,20 @@ class AssistantChatRunService:
                 )
             if memory_commit_status is None:
                 memory_commit_status = "pending"
+            from app.assistant.capability_calls.release_admission import (
+                freeze_capability_ledger_mode_for_run,
+            )
+
+            capability_ledger_mode = freeze_capability_ledger_mode_for_run(
+                runtime_kind=kind
+            )
         else:
             # Legacy shape: contract version + build must be null.
             runtime_contract_version = None
             required_app_build_revision = None
             if memory_commit_status is None:
                 memory_commit_status = "not_applicable"
+            capability_ledger_mode = None
 
         run = AssistantChatRun(
             conversation_id=conversation.id,
@@ -118,6 +126,7 @@ class AssistantChatRunService:
             runtime_contract_version=runtime_contract_version,
             required_app_build_revision=required_app_build_revision,
             memory_commit_status=memory_commit_status,
+            capability_ledger_mode=capability_ledger_mode,
             deadline_at=deadline_at,
         )
         self.db.add(run)

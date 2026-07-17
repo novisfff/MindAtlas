@@ -29,6 +29,8 @@ ASSISTANT_INTERRUPT_MAX_TTL_SEC_HARD_MAX = 604800  # 7 days
 ASSISTANT_INTERRUPT_COMMENT_MAX_CHARS_HARD_MAX = 4000
 
 AssistantMainAgentMode = Literal["off", "shadow", "read_only"]
+AssistantCapabilityLedgerMode = Literal["legacy_read_only", "enforced"]
+AssistantMainAgentWriteMode = Literal["off", "golden"]
 
 
 def compute_artifact_orphan_grace_floor_sec(
@@ -263,6 +265,22 @@ class Settings(BaseSettings):
     assistant_capability_call_idempotency_secret: str = Field(
         default="",
         alias="ASSISTANT_CAPABILITY_CALL_IDEMPOTENCY_SECRET",
+    )
+    # Plan 08 ledger admission default for new Main Agent Runs (frozen per Run).
+    # Default legacy_read_only; enforced only for explicit test/admin cohorts.
+    assistant_capability_ledger_mode: AssistantCapabilityLedgerMode = Field(
+        default="legacy_read_only",
+        alias="ASSISTANT_CAPABILITY_LEDGER_MODE",
+    )
+    # Plan 08 golden write release gate. Default off; golden requires enforced ledger.
+    assistant_main_agent_write_mode: AssistantMainAgentWriteMode = Field(
+        default="off",
+        alias="ASSISTANT_MAIN_AGENT_WRITE_MODE",
+    )
+    # Optional cohort digest for golden write eligibility (empty = no cohort).
+    assistant_main_agent_write_cohort_digest: str = Field(
+        default="",
+        alias="ASSISTANT_MAIN_AGENT_WRITE_COHORT_DIGEST",
     )
 
     # Logging
@@ -533,6 +551,30 @@ class Settings(BaseSettings):
                 "assistant_interrupt_token_pepper is required when "
                 "assistant_durable_interrupts_enabled is true"
             )
+        # Plan 08 ledger / golden write release gates.
+        write_mode = str(self.assistant_main_agent_write_mode or "off")
+        ledger_mode = str(self.assistant_capability_ledger_mode or "legacy_read_only")
+        if write_mode not in {"off", "golden"}:
+            raise ValueError(
+                "assistant_main_agent_write_mode must be one of: off, golden"
+            )
+        if ledger_mode not in {"legacy_read_only", "enforced"}:
+            raise ValueError(
+                "assistant_capability_ledger_mode must be one of: "
+                "legacy_read_only, enforced"
+            )
+        if write_mode == "golden" and ledger_mode != "enforced":
+            raise ValueError(
+                "assistant_main_agent_write_mode=golden requires "
+                "assistant_capability_ledger_mode=enforced"
+            )
+        if ledger_mode == "enforced" or write_mode == "golden":
+            secret = (self.assistant_capability_call_idempotency_secret or "").strip()
+            if len(secret.encode("utf-8")) < 32:
+                raise ValueError(
+                    "assistant_capability_call_idempotency_secret must be at least "
+                    "32 bytes when ledger mode is enforced or write mode is golden"
+                )
         return self
 
     def cors_origins_list(self) -> list[str]:

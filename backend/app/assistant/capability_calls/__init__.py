@@ -44,6 +44,12 @@ from app.assistant.capability_calls.settlement import (  # noqa: F401
     CapabilityCallSettlementRepository,
     SettlementRequest,
 )
+from app.assistant.capability_calls.release_admission import (  # noqa: F401
+    freeze_capability_ledger_mode_for_run,
+    is_golden_write_eligible,
+    audit_golden_workflow_graph,
+    gateway_allows_write,
+)
 from app.assistant.capability_calls.reconciliation import (  # noqa: F401
     CapabilityReconciliationService,
     ReconciliationDecisionRequest,
@@ -110,6 +116,10 @@ __all__ = [
     "CapabilityReconciliationService",
     "ReconciliationDecisionRequest",
     "ScriptedExternalAdapter",
+    "freeze_capability_ledger_mode_for_run",
+    "is_golden_write_eligible",
+    "audit_golden_workflow_graph",
+    "gateway_allows_write",
     "CapabilityCallApprovalBindingV1",
     "digest_input_payload",
     "idempotency_key_fingerprint",
