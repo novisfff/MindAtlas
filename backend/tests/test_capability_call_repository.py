@@ -65,15 +65,18 @@ def _manifest(db, run_id, *, revision: int = 1):
 
 def _artifact(db, run_id, *, kind: str = "call_input"):
     from app.assistant.durable.models import AssistantRunArtifact
+    import hashlib
+    import os
 
-    payload = b'{"x":1}'
+    payload = (kind + ":" + os.urandom(8).hex()).encode()
+    digest = hashlib.sha256(payload).hexdigest()
     row = AssistantRunArtifact(
         run_id=run_id,
         kind=kind,
         media_type="application/json",
         storage_kind="inline",
         byte_size=len(payload),
-        content_sha256=DIGEST_A,
+        content_sha256=digest,
         inline_bytes=payload,
         metadata_json={},
     )
@@ -444,3 +447,264 @@ class CapabilityCallMigrationMetaTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CapabilityCallRepositoryCasTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests._db import make_session
+
+        self.db = make_session()
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def _seed(self):
+        from app.assistant.capability_calls.repository import ProposeCallSpec
+        from app.assistant.durable.repository import LeaseToken
+
+        run = _make_main_agent_run(self.db, status="running", state_revision=1)
+        run.lease_owner = "worker-1"
+        run.lease_generation = 1
+        self.db.commit()
+        self.db.refresh(run)
+        manifest = _manifest(self.db, run.id)
+        artifact = _artifact(self.db, run.id)
+        lease = LeaseToken(run_id=run.id, worker_id="worker-1", lease_generation=1)
+        spec = ProposeCallSpec(
+            call_id=uuid.uuid4(),
+            run_id=run.id,
+            expected_run_revision=1,
+            lease=lease,
+            manifest_revision_id=manifest.id,
+            logical_call_key=f"provider:0:0:{uuid.uuid4().hex[:8]}",
+            owner_kind="main_agent",
+            capability_type="tool",
+            domain_key="search_entries",
+            descriptor_digest=DIGEST_A,
+            authorization_digest=DIGEST_B,
+            input_artifact_id=artifact.id,
+            input_digest=DIGEST_A,
+            side_effect_class="read",
+            execution_mode="read_replayable",
+            idempotency_key=f"idem-{uuid.uuid4().hex}",
+        )
+        return run, lease, spec
+
+    def test_create_or_verify_idempotent(self) -> None:
+        from app.assistant.capability_calls.repository import CapabilityCallRepository
+
+        run, lease, spec = self._seed()
+        repo = CapabilityCallRepository(self.db)
+        call1, created1 = repo.create_or_verify_proposed(spec)
+        self.db.commit()
+        self.assertTrue(created1)
+        call2, created2 = repo.create_or_verify_proposed(spec)
+        self.db.commit()
+        self.assertFalse(created2)
+        self.assertEqual(call1.id, call2.id)
+
+    def test_create_or_verify_identity_mismatch(self) -> None:
+        from app.assistant.capability_calls.repository import (
+            CODE_IDENTITY_MISMATCH,
+            CapabilityCallConflict,
+            CapabilityCallRepository,
+            ProposeCallSpec,
+        )
+
+        run, lease, spec = self._seed()
+        repo = CapabilityCallRepository(self.db)
+        repo.create_or_verify_proposed(spec)
+        self.db.commit()
+        bad = ProposeCallSpec(
+            **{
+                **{f: getattr(spec, f) for f in ProposeCallSpec.__dataclass_fields__},
+                "input_digest": DIGEST_B,
+            }
+        )
+        with self.assertRaises(CapabilityCallConflict) as ctx:
+            repo.create_or_verify_proposed(bad)
+        self.assertEqual(ctx.exception.code, CODE_IDENTITY_MISMATCH)
+
+    def test_authorize_claim_succeed_read_path(self) -> None:
+        from app.assistant.capability_calls.repository import CapabilityCallRepository
+
+        run, lease, spec = self._seed()
+        repo = CapabilityCallRepository(self.db)
+        call, _ = repo.create_or_verify_proposed(spec)
+        self.db.commit()
+        call = repo.transition_call(
+            call_id=call.id,
+            expected_call_revision=0,
+            expected_run_revision=1,
+            to_status="authorized",
+            lease=lease,
+        )
+        self.db.commit()
+        call, attempt = repo.claim_attempt(
+            call_id=call.id,
+            expected_call_revision=1,
+            expected_run_revision=1,
+            lease=lease,
+            worker_id="worker-1",
+        )
+        self.db.commit()
+        self.assertEqual(call.status, "executing")
+        self.assertEqual(attempt.attempt_number, 1)
+        out = _artifact(self.db, run.id, kind="call_output")
+        call = repo.transition_call(
+            call_id=call.id,
+            expected_call_revision=int(call.state_revision),
+            expected_run_revision=1,
+            to_status="succeeded",
+            lease=lease,
+            output_artifact_id=out.id,
+        )
+        self.db.commit()
+        self.assertEqual(call.status, "succeeded")
+        self.assertIsNotNone(call.terminal_at)
+
+    def test_stale_call_revision_rejected(self) -> None:
+        from app.assistant.capability_calls.repository import (
+            CODE_STALE_CALL_REVISION,
+            CapabilityCallConflict,
+            CapabilityCallRepository,
+        )
+
+        run, lease, spec = self._seed()
+        repo = CapabilityCallRepository(self.db)
+        call, _ = repo.create_or_verify_proposed(spec)
+        self.db.commit()
+        with self.assertRaises(CapabilityCallConflict) as ctx:
+            repo.transition_call(
+                call_id=call.id,
+                expected_call_revision=99,
+                expected_run_revision=1,
+                to_status="authorized",
+                lease=lease,
+            )
+        self.assertEqual(ctx.exception.code, CODE_STALE_CALL_REVISION)
+
+    def test_settlement_unknown_moves_run_to_needs_reconciliation(self) -> None:
+        from app.assistant.capability_calls.repository import CapabilityCallRepository
+        from app.assistant.capability_calls.settlement import (
+            CapabilityCallSettlementRepository,
+            SettlementRequest,
+        )
+        from app.assistant.durable.repository import LeaseToken
+
+        run, lease, spec = self._seed()
+        # external mode for effect-start while executing
+        from dataclasses import replace
+
+        # rebuild spec with external mode
+        from app.assistant.capability_calls.repository import ProposeCallSpec
+
+        run = _make_main_agent_run(self.db, status="running", state_revision=1)
+        run.lease_owner = "worker-1"
+        run.lease_generation = 1
+        self.db.commit()
+        self.db.refresh(run)
+        manifest = _manifest(self.db, run.id)
+        artifact = _artifact(self.db, run.id)
+        lease = LeaseToken(run_id=run.id, worker_id="worker-1", lease_generation=1)
+        spec = ProposeCallSpec(
+            call_id=uuid.uuid4(),
+            run_id=run.id,
+            expected_run_revision=1,
+            lease=lease,
+            manifest_revision_id=manifest.id,
+            logical_call_key=f"provider:0:0:{uuid.uuid4().hex[:8]}",
+            owner_kind="main_agent",
+            capability_type="tool",
+            domain_key="external_write",
+            descriptor_digest=DIGEST_A,
+            authorization_digest=DIGEST_B,
+            input_artifact_id=artifact.id,
+            input_digest=DIGEST_A,
+            side_effect_class="write_external",
+            execution_mode="external_idempotent",
+            idempotency_key=f"idem-{uuid.uuid4().hex}",
+        )
+        repo = CapabilityCallRepository(self.db)
+        call, _ = repo.create_or_verify_proposed(spec)
+        self.db.commit()
+        call = repo.transition_call(
+            call_id=call.id,
+            expected_call_revision=0,
+            expected_run_revision=1,
+            to_status="authorized",
+            lease=lease,
+        )
+        self.db.commit()
+        call, attempt = repo.claim_attempt(
+            call_id=call.id,
+            expected_call_revision=1,
+            expected_run_revision=1,
+            lease=lease,
+            worker_id="worker-1",
+        )
+        self.db.commit()
+        # mark effect started while executing (external protocol)
+        call.side_effect_started_at = datetime.now(timezone.utc)
+        call.state_revision = int(call.state_revision) + 1
+        self.db.commit()
+        # Run enters cancelling
+        run.status = "cancelling"
+        run.state_revision = 2
+        self.db.commit()
+        settlement = CapabilityCallSettlementRepository(self.db)
+        run2 = settlement.settle_while_cancelling(
+            SettlementRequest(
+                call_id=call.id,
+                attempt_id=attempt.id,
+                expected_call_revision=int(call.state_revision),
+                expected_run_revision=2,
+                outcome="unknown",
+                result_artifact_id=None,
+                evidence_digest=DIGEST_A,
+            )
+        )
+        self.db.commit()
+        self.db.refresh(call)
+        self.assertEqual(run2.status, "needs_reconciliation")
+        self.assertEqual(call.status, "needs_reconciliation")
+
+    def test_refuse_cancel_finalizer_with_unproven_started(self) -> None:
+        from app.assistant.capability_calls.repository import (
+            CapabilityCallConflict,
+            CapabilityCallRepository,
+            ProposeCallSpec,
+        )
+        from app.assistant.capability_calls.settlement import (
+            CapabilityCallSettlementRepository,
+        )
+        from app.assistant.durable.repository import LeaseToken
+
+        run = _make_main_agent_run(self.db, status="cancelling", state_revision=2)
+        run.lease_owner = "worker-1"
+        run.lease_generation = 1
+        self.db.commit()
+        self.db.refresh(run)
+        manifest = _manifest(self.db, run.id)
+        artifact = _artifact(self.db, run.id)
+        lease = LeaseToken(run_id=run.id, worker_id="worker-1", lease_generation=1)
+        # Directly insert an executing call with effect started.
+        from app.assistant.capability_calls.models import AssistantCapabilityCall
+
+        call = AssistantCapabilityCall(
+            **_call_kwargs(
+                run.id,
+                manifest.id,
+                artifact.id,
+                status="executing",
+                execution_mode="external_idempotent",
+                side_effect_class="write_external",
+                side_effect_started_at=datetime.now(timezone.utc),
+                state_revision=3,
+            )
+        )
+        self.db.add(call)
+        self.db.commit()
+        settlement = CapabilityCallSettlementRepository(self.db)
+        with self.assertRaises(CapabilityCallConflict):
+            settlement.refuse_cancel_finalizer_if_unproven(run.id)

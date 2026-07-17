@@ -258,6 +258,13 @@ class Settings(BaseSettings):
         alias="ASSISTANT_INTERRUPT_TOKEN_PEPPER",
     )
 
+    # Plan 08: HMAC secret for server-generated capability call idempotency keys.
+    # Required (min 32 bytes) when capability ledger mode is enforced.
+    assistant_capability_call_idempotency_secret: str = Field(
+        default="",
+        alias="ASSISTANT_CAPABILITY_CALL_IDEMPOTENCY_SECRET",
+    )
+
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_json: bool = Field(default=False, alias="LOG_JSON")
