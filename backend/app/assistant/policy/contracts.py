@@ -856,6 +856,380 @@ def build_authorization_decision(
     )
 
 
+
+# ---------------------------------------------------------------------------
+# Plan 08 policy contract v2 — one approval-gated golden write_local
+# ---------------------------------------------------------------------------
+
+# Lattice prefix for the single golden write release (not a global ceiling).
+GOLDEN_WRITE_LATTICE_PREFIX: tuple[SideEffectClass, ...] = (
+    "none",
+    "compute",
+    "read",
+    "draft",
+    "write_local",
+)
+
+
+class GoldenWriteReleaseV1(FrozenContract):
+    """Checked-in exact golden write release record (Plan 08).
+
+    Derived only from versioned server publication / entrypoint / principal /
+    owner / cohort evidence — never from descriptor, model, Skill text, Tool
+    input, approval body, or current catalog lookup.
+    """
+
+    contract_version: Literal[1] = 1
+    principal_digest: str
+    entrypoint: Literal["assistant_chat"] = "assistant_chat"
+    cohort_digest: str
+    owner_kind: Literal["skill_version"]
+    owner_version_id: UUID
+    binding_contract_digest: str
+    domain_key: str
+    target_version_id: UUID | None
+    target_digest: str
+    allowed_side_effects: tuple[SideEffectClass, ...]
+    required_execution_mode: Literal["local_transactional"] = "local_transactional"
+    required_approval_origin: Literal["capability_call"] = "capability_call"
+    release_digest: str
+
+    @field_validator(
+        "principal_digest",
+        "cohort_digest",
+        "binding_contract_digest",
+        "target_digest",
+        "release_digest",
+    )
+    @classmethod
+    def _digests(cls, value: str, info: Any) -> str:
+        return _require_digest(value, field_name=info.field_name)
+
+    @field_validator("domain_key")
+    @classmethod
+    def _domain(cls, value: str) -> str:
+        return _require_non_empty_str(value, field_name="domain_key")
+
+    @field_validator("allowed_side_effects", mode="before")
+    @classmethod
+    def _side_effects(cls, value: Any) -> tuple[SideEffectClass, ...]:
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            raise TypeError("allowed_side_effects must be a sequence")
+        return tuple(value)
+
+    @model_validator(mode="after")
+    def _lattice_prefix(self) -> GoldenWriteReleaseV1:
+        expected = GOLDEN_WRITE_LATTICE_PREFIX
+        if self.allowed_side_effects != expected:
+            raise ValueError(
+                "GoldenWriteReleaseV1.allowed_side_effects must be the canonical "
+                "prefix through write_local"
+            )
+        return self
+
+
+class AuthorizationDecisionV2(FrozenContract):
+    """Tagged v2 authorization decision (Plan 08).
+
+    ``policy_allowed=true`` means the independent ceiling permits the exact
+    proposal. ``dispatch_disposition`` separates executable dispatch from
+    ``awaiting_call_approval``. The immutable decision remains
+    ``awaiting_call_approval`` after approval — call state + linked approval
+    evidence satisfy the requirement without rewriting this body.
+    """
+
+    contract_version: Literal[2] = 2
+    policy_allowed: bool
+    dispatch_disposition: Literal["deny", "dispatch", "awaiting_call_approval"]
+    reason_code: str
+    principal_digest: str
+    entrypoint_policy_digest: str
+    global_policy_digest: str
+    owner_policy_digest: str
+    allowed_side_effects: tuple[SideEffectClass, ...] = ()
+    grant_source_digest: str | None = None
+    exposure_digest: str
+    effective_policy_digest: str
+    write_release_digest: str | None = None
+    decision_digest: str
+
+    @field_validator("reason_code")
+    @classmethod
+    def _reason(cls, value: str) -> str:
+        return _require_non_empty_str(value, field_name="reason_code")
+
+    @field_validator(
+        "principal_digest",
+        "entrypoint_policy_digest",
+        "global_policy_digest",
+        "owner_policy_digest",
+        "exposure_digest",
+        "effective_policy_digest",
+        "decision_digest",
+    )
+    @classmethod
+    def _digests(cls, value: str, info: Any) -> str:
+        return _require_digest(value, field_name=info.field_name)
+
+    @field_validator("grant_source_digest", "write_release_digest")
+    @classmethod
+    def _optional_digests(cls, value: str | None, info: Any) -> str | None:
+        if value is None:
+            return None
+        return _require_digest(value, field_name=info.field_name)
+
+    @field_validator("allowed_side_effects", mode="before")
+    @classmethod
+    def _side_effects(cls, value: Any) -> tuple[SideEffectClass, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            raise TypeError("allowed_side_effects must be a sequence")
+        return tuple(value)
+
+    @model_validator(mode="after")
+    def _coherence(self) -> AuthorizationDecisionV2:
+        if self.dispatch_disposition == "deny":
+            if self.policy_allowed:
+                raise ValueError("deny disposition cannot have policy_allowed=true")
+        if self.dispatch_disposition == "awaiting_call_approval":
+            if not self.policy_allowed:
+                raise ValueError("awaiting_call_approval requires policy_allowed=true")
+            if "write_local" not in self.allowed_side_effects:
+                raise ValueError("awaiting_call_approval requires write_local in grant")
+            if self.write_release_digest is None:
+                raise ValueError("awaiting_call_approval requires write_release_digest")
+            if self.grant_source_digest is None:
+                raise ValueError("awaiting_call_approval requires grant_source_digest")
+        if self.dispatch_disposition == "dispatch":
+            if not self.policy_allowed:
+                raise ValueError("dispatch requires policy_allowed=true")
+            if not self.allowed_side_effects:
+                raise ValueError("dispatch requires nonempty allowed_side_effects")
+            if self.grant_source_digest is None:
+                raise ValueError("dispatch requires grant_source_digest")
+        return self
+
+
+# Backward-compatible alias: Plan 05 v1 body is AuthorizationDecision.
+AuthorizationDecisionV1 = AuthorizationDecision
+AuthorizationDecisionUnion = AuthorizationDecision | AuthorizationDecisionV2
+
+
+def build_golden_write_release_digest_payload(
+    *,
+    principal_digest: str,
+    cohort_digest: str,
+    owner_kind: str,
+    owner_version_id: UUID,
+    binding_contract_digest: str,
+    domain_key: str,
+    target_version_id: UUID | None,
+    target_digest: str,
+    allowed_side_effects: Sequence[SideEffectClass],
+    required_execution_mode: str = "local_transactional",
+    required_approval_origin: str = "capability_call",
+    entrypoint: str = "assistant_chat",
+) -> dict[str, JsonValue]:
+    return {
+        "schemaVersion": 1,
+        "kind": "golden_write_release",
+        "contractVersion": 1,
+        "principalDigest": principal_digest,
+        "entrypoint": entrypoint,
+        "cohortDigest": cohort_digest,
+        "ownerKind": owner_kind,
+        "ownerVersionId": str(owner_version_id),
+        "bindingContractDigest": binding_contract_digest,
+        "domainKey": domain_key,
+        "targetVersionId": str(target_version_id) if target_version_id else None,
+        "targetDigest": target_digest,
+        "allowedSideEffects": list(allowed_side_effects),
+        "requiredExecutionMode": required_execution_mode,
+        "requiredApprovalOrigin": required_approval_origin,
+    }
+
+
+def compute_golden_write_release_digest(
+    *,
+    principal_digest: str,
+    cohort_digest: str,
+    owner_kind: str,
+    owner_version_id: UUID,
+    binding_contract_digest: str,
+    domain_key: str,
+    target_version_id: UUID | None,
+    target_digest: str,
+    allowed_side_effects: Sequence[SideEffectClass] = GOLDEN_WRITE_LATTICE_PREFIX,
+) -> str:
+    return sha256_canonical_json(
+        build_golden_write_release_digest_payload(
+            principal_digest=principal_digest,
+            cohort_digest=cohort_digest,
+            owner_kind=owner_kind,
+            owner_version_id=owner_version_id,
+            binding_contract_digest=binding_contract_digest,
+            domain_key=domain_key,
+            target_version_id=target_version_id,
+            target_digest=target_digest,
+            allowed_side_effects=allowed_side_effects,
+        )
+    )
+
+
+def build_golden_write_release(
+    *,
+    principal_digest: str,
+    cohort_digest: str,
+    owner_version_id: UUID,
+    binding_contract_digest: str,
+    domain_key: str,
+    target_digest: str,
+    target_version_id: UUID | None = None,
+    owner_kind: Literal["skill_version"] = "skill_version",
+    release_digest: str | None = None,
+) -> GoldenWriteReleaseV1:
+    effects = GOLDEN_WRITE_LATTICE_PREFIX
+    digest = release_digest or compute_golden_write_release_digest(
+        principal_digest=principal_digest,
+        cohort_digest=cohort_digest,
+        owner_kind=owner_kind,
+        owner_version_id=owner_version_id,
+        binding_contract_digest=binding_contract_digest,
+        domain_key=domain_key,
+        target_version_id=target_version_id,
+        target_digest=target_digest,
+        allowed_side_effects=effects,
+    )
+    return GoldenWriteReleaseV1(
+        principal_digest=principal_digest,
+        cohort_digest=cohort_digest,
+        owner_kind=owner_kind,
+        owner_version_id=owner_version_id,
+        binding_contract_digest=binding_contract_digest,
+        domain_key=domain_key,
+        target_version_id=target_version_id,
+        target_digest=target_digest,
+        allowed_side_effects=effects,
+        release_digest=digest,
+    )
+
+
+def build_authorization_decision_v2_digest_payload(
+    *,
+    policy_allowed: bool,
+    dispatch_disposition: str,
+    reason_code: str,
+    principal_digest: str,
+    entrypoint_policy_digest: str,
+    global_policy_digest: str,
+    owner_policy_digest: str,
+    allowed_side_effects: Sequence[SideEffectClass],
+    grant_source_digest: str | None,
+    exposure_digest: str,
+    effective_policy_digest: str,
+    write_release_digest: str | None,
+) -> dict[str, JsonValue]:
+    return {
+        "schemaVersion": 2,
+        "kind": "authorization_decision",
+        "contractVersion": 2,
+        "policyAllowed": policy_allowed,
+        "dispatchDisposition": dispatch_disposition,
+        "reasonCode": reason_code,
+        "principalDigest": principal_digest,
+        "entrypointPolicyDigest": entrypoint_policy_digest,
+        "globalPolicyDigest": global_policy_digest,
+        "ownerPolicyDigest": owner_policy_digest,
+        "allowedSideEffects": list(allowed_side_effects),
+        "grantSourceDigest": grant_source_digest,
+        "exposureDigest": exposure_digest,
+        "effectivePolicyDigest": effective_policy_digest,
+        "writeReleaseDigest": write_release_digest,
+    }
+
+
+def compute_authorization_decision_v2_digest(
+    *,
+    policy_allowed: bool,
+    dispatch_disposition: str,
+    reason_code: str,
+    principal_digest: str,
+    entrypoint_policy_digest: str,
+    global_policy_digest: str,
+    owner_policy_digest: str,
+    allowed_side_effects: Sequence[SideEffectClass],
+    grant_source_digest: str | None,
+    exposure_digest: str,
+    effective_policy_digest: str,
+    write_release_digest: str | None,
+) -> str:
+    return sha256_canonical_json(
+        build_authorization_decision_v2_digest_payload(
+            policy_allowed=policy_allowed,
+            dispatch_disposition=dispatch_disposition,
+            reason_code=reason_code,
+            principal_digest=principal_digest,
+            entrypoint_policy_digest=entrypoint_policy_digest,
+            global_policy_digest=global_policy_digest,
+            owner_policy_digest=owner_policy_digest,
+            allowed_side_effects=allowed_side_effects,
+            grant_source_digest=grant_source_digest,
+            exposure_digest=exposure_digest,
+            effective_policy_digest=effective_policy_digest,
+            write_release_digest=write_release_digest,
+        )
+    )
+
+
+def build_authorization_decision_v2(
+    *,
+    policy_allowed: bool,
+    dispatch_disposition: Literal["deny", "dispatch", "awaiting_call_approval"],
+    reason_code: str,
+    principal_digest: str,
+    entrypoint_policy_digest: str,
+    global_policy_digest: str,
+    owner_policy_digest: str,
+    allowed_side_effects: Sequence[SideEffectClass] = (),
+    grant_source_digest: str | None = None,
+    exposure_digest: str,
+    effective_policy_digest: str,
+    write_release_digest: str | None = None,
+    decision_digest: str | None = None,
+) -> AuthorizationDecisionV2:
+    effects = tuple(allowed_side_effects)
+    digest = decision_digest or compute_authorization_decision_v2_digest(
+        policy_allowed=policy_allowed,
+        dispatch_disposition=dispatch_disposition,
+        reason_code=reason_code,
+        principal_digest=principal_digest,
+        entrypoint_policy_digest=entrypoint_policy_digest,
+        global_policy_digest=global_policy_digest,
+        owner_policy_digest=owner_policy_digest,
+        allowed_side_effects=effects,
+        grant_source_digest=grant_source_digest,
+        exposure_digest=exposure_digest,
+        effective_policy_digest=effective_policy_digest,
+        write_release_digest=write_release_digest,
+    )
+    return AuthorizationDecisionV2(
+        policy_allowed=policy_allowed,
+        dispatch_disposition=dispatch_disposition,
+        reason_code=reason_code,
+        principal_digest=principal_digest,
+        entrypoint_policy_digest=entrypoint_policy_digest,
+        global_policy_digest=global_policy_digest,
+        owner_policy_digest=owner_policy_digest,
+        allowed_side_effects=effects,
+        grant_source_digest=grant_source_digest,
+        exposure_digest=exposure_digest,
+        effective_policy_digest=effective_policy_digest,
+        write_release_digest=write_release_digest,
+        decision_digest=digest,
+    )
+
+
 def compute_owner_budget_digest(
     *,
     owner_kind: PolicyOwnerKind,
@@ -1470,6 +1844,15 @@ __all__ = [
     "ASSISTANT_CHAT_RUN_BUDGET_HARD_CEILINGS",
     "AUTHORIZATION_REASON_CODES",
     "AuthorizationDecision",
+    "AuthorizationDecisionV1",
+    "AuthorizationDecisionV2",
+    "AuthorizationDecisionUnion",
+    "GoldenWriteReleaseV1",
+    "GOLDEN_WRITE_LATTICE_PREFIX",
+    "build_authorization_decision_v2",
+    "build_golden_write_release",
+    "compute_authorization_decision_v2_digest",
+    "compute_golden_write_release_digest",
     "CapabilityExposureRef",
     "EMPTY_POLICY_DIGEST",
     "EffectiveCapabilityGrant",
