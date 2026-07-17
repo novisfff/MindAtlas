@@ -44,6 +44,12 @@ from app.assistant.capability_calls.settlement import (  # noqa: F401
     CapabilityCallSettlementRepository,
     SettlementRequest,
 )
+from app.assistant.capability_calls.local_write import (  # noqa: F401
+    create_entry_local_transactional,
+)
+from app.assistant.capability_calls.uow import (  # noqa: F401
+    CapabilityUnitOfWork,
+)
 from app.assistant.capability_calls.approval import (  # noqa: F401
     authorize_call_after_approval,
     build_approval_binding,
@@ -94,6 +100,8 @@ __all__ = [
     "build_approval_binding",
     "close_non_approved_call",
     "render_safe_approval_card",
+    "create_entry_local_transactional",
+    "CapabilityUnitOfWork",
     "CapabilityCallApprovalBindingV1",
     "digest_input_payload",
     "idempotency_key_fingerprint",
