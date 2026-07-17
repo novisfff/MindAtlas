@@ -44,6 +44,11 @@ from app.assistant.capability_calls.settlement import (  # noqa: F401
     CapabilityCallSettlementRepository,
     SettlementRequest,
 )
+from app.assistant.capability_calls.reconciliation import (  # noqa: F401
+    CapabilityReconciliationService,
+    ReconciliationDecisionRequest,
+    ScriptedExternalAdapter,
+)
 from app.assistant.capability_calls.local_write import (  # noqa: F401
     create_entry_local_transactional,
 )
@@ -102,6 +107,9 @@ __all__ = [
     "render_safe_approval_card",
     "create_entry_local_transactional",
     "CapabilityUnitOfWork",
+    "CapabilityReconciliationService",
+    "ReconciliationDecisionRequest",
+    "ScriptedExternalAdapter",
     "CapabilityCallApprovalBindingV1",
     "digest_input_payload",
     "idempotency_key_fingerprint",
