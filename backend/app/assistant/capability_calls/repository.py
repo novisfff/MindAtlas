@@ -36,6 +36,16 @@ CODE_CALL_NOT_FOUND = "call_not_found"
 CODE_INVALID_TRANSITION = "invalid_call_transition"
 CODE_RUN_CANCELLING = "run_cancelling_blocks_ordinary_dispatch"
 
+_ATTEMPT_TRANSITIONS: dict[str, frozenset[str]] = {
+    "claimed": frozenset({"dispatched", "failed", "abandoned"}),
+    "dispatched": frozenset({"response_received", "failed", "uncertain"}),
+    "response_received": frozenset({"committed", "failed", "uncertain"}),
+    "committed": frozenset(),
+    "failed": frozenset(),
+    "uncertain": frozenset(),
+    "abandoned": frozenset(),
+}
+
 
 class CapabilityCallConflict(Exception):
     def __init__(
@@ -416,6 +426,60 @@ class CapabilityCallRepository:
         self.db.add(attempt)
         self.db.flush()
         return call, attempt
+
+    def transition_attempt(
+        self,
+        *,
+        attempt_id: UUID,
+        expected_status: str,
+        to_status: str,
+        request_digest: str | None = None,
+        response_digest: str | None = None,
+        error_code: str | None = None,
+        ended_at: datetime | None = None,
+        now: datetime | None = None,
+    ) -> AssistantCapabilityCallAttempt:
+        """Advance one Attempt through its append-only evidence lifecycle."""
+        attempt = (
+            self.db.query(AssistantCapabilityCallAttempt)
+            .filter(AssistantCapabilityCallAttempt.id == attempt_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if attempt is None:
+            raise CapabilityCallConflict(
+                CODE_CALL_NOT_FOUND, f"attempt {attempt_id} not found"
+            )
+        current = str(attempt.status)
+        if current != expected_status:
+            raise CapabilityCallConflict(
+                CODE_INVALID_TRANSITION,
+                f"expected attempt status {expected_status!r}, got {current!r}",
+            )
+        if to_status not in _ATTEMPT_TRANSITIONS.get(current, frozenset()):
+            raise CapabilityCallConflict(
+                CODE_INVALID_TRANSITION,
+                f"invalid attempt transition {current!r} -> {to_status!r}",
+            )
+        for field, value in (
+            ("request_digest", request_digest),
+            ("response_digest", response_digest),
+        ):
+            if value is None:
+                continue
+            existing = getattr(attempt, field)
+            if existing is not None and existing != value:
+                raise CapabilityCallConflict(
+                    CODE_IDENTITY_MISMATCH, f"{field} is immutable once set"
+                )
+            setattr(attempt, field, value)
+        attempt.status = to_status
+        if error_code is not None:
+            attempt.error_code = error_code
+        if to_status in {"committed", "failed", "uncertain", "abandoned"}:
+            attempt.ended_at = ended_at or now or utcnow()
+        self.db.flush()
+        return attempt
 
     def list_calls_for_run(self, run_id: UUID) -> list[AssistantCapabilityCall]:
         return (

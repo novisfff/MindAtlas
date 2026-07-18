@@ -909,6 +909,19 @@ class DurableRunRepository:
             self._resolve_stop_request(run, plan)
             self._validate_cas(run, plan, now=now)
 
+            # Plan 08: cancellation may be sealed only after every call whose
+            # side effect started has a proven terminal outcome.  The Run row
+            # is already locked here, preserving the global Run-first lock
+            # order before inspecting CapabilityCall rows.
+            if plan.rule_name == "cancel_finalizer":
+                from app.assistant.capability_calls.settlement import (
+                    CapabilityCallSettlementRepository,
+                )
+
+                CapabilityCallSettlementRepository(
+                    self.db
+                ).refuse_cancel_finalizer_if_unproven(run.id)
+
             # Idempotent stop while already cancelling: no revision bump.
             if plan.rule_name == "stop_idempotent":
                 # Release the FOR UPDATE lock without mutating state.

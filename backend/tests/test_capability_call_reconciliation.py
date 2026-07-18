@@ -259,8 +259,12 @@ class ReconciliationServiceTests(unittest.TestCase):
     def test_cli_contract_surface(self) -> None:
         from app.assistant.capability_calls.cli import main
 
-        code = main(["inspect", "--call-id", str(uuid.uuid4())])
-        self.assertEqual(code, 2)
+        _run, call, _artifact = _seed_external_call(self.db)
+        code = main(
+            ["inspect", "--call-id", str(call.id)],
+            session_factory=lambda: self.db,
+        )
+        self.assertEqual(code, 0)
 
 
 if __name__ == "__main__":

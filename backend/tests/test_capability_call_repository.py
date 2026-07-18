@@ -550,6 +550,23 @@ class CapabilityCallRepositoryCasTests(unittest.TestCase):
         self.db.commit()
         self.assertEqual(call.status, "executing")
         self.assertEqual(attempt.attempt_number, 1)
+        attempt = repo.transition_attempt(
+            attempt_id=attempt.id,
+            expected_status="claimed",
+            to_status="dispatched",
+            request_digest=DIGEST_A,
+        )
+        attempt = repo.transition_attempt(
+            attempt_id=attempt.id,
+            expected_status="dispatched",
+            to_status="response_received",
+            response_digest=DIGEST_B,
+        )
+        attempt = repo.transition_attempt(
+            attempt_id=attempt.id,
+            expected_status="response_received",
+            to_status="committed",
+        )
         out = _artifact(self.db, run.id, kind="call_output")
         call = repo.transition_call(
             call_id=call.id,
@@ -561,6 +578,10 @@ class CapabilityCallRepositoryCasTests(unittest.TestCase):
         )
         self.db.commit()
         self.assertEqual(call.status, "succeeded")
+        self.assertEqual(attempt.status, "committed")
+        self.assertEqual(attempt.request_digest, DIGEST_A)
+        self.assertEqual(attempt.response_digest, DIGEST_B)
+        self.assertIsNotNone(attempt.ended_at)
         self.assertIsNotNone(call.terminal_at)
 
     def test_stale_call_revision_rejected(self) -> None:
@@ -678,7 +699,7 @@ class CapabilityCallRepositoryCasTests(unittest.TestCase):
         from app.assistant.capability_calls.settlement import (
             CapabilityCallSettlementRepository,
         )
-        from app.assistant.durable.repository import LeaseToken
+        from app.assistant.durable.repository import DurableRunRepository, LeaseToken
 
         run = _make_main_agent_run(self.db, status="cancelling", state_revision=2)
         run.lease_owner = "worker-1"
@@ -705,6 +726,14 @@ class CapabilityCallRepositoryCasTests(unittest.TestCase):
         )
         self.db.add(call)
         self.db.commit()
+        durable = DurableRunRepository(self.db)
+        with self.assertRaises(CapabilityCallConflict):
+            durable.finalize_cancellation(
+                run_id=run.id,
+                expected_revision=2,
+                lease=lease,
+                require_lease=True,
+            )
         settlement = CapabilityCallSettlementRepository(self.db)
         with self.assertRaises(CapabilityCallConflict):
             settlement.refuse_cancel_finalizer_if_unproven(run.id)
