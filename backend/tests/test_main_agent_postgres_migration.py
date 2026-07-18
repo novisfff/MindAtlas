@@ -182,8 +182,28 @@ def _reset_to_plan03_parent() -> None:
             if plan04 is not None:
                 with engine.begin() as conn:
                     _clear_enabled_flags(conn)
+                    if current in {PLAN06_HEAD, PLAN07_HEAD, PLAN08_HEAD}:
+                        from tests.test_durable_interrupt_repository_postgres import (
+                            _purge_interrupt_and_active,
+                        )
+
+                        _purge_interrupt_and_active(conn)
             # Plan 06 downgrade refuses durable data; empty disposable DBs pass.
-            _run_alembic("downgrade", PLAN03_HEAD)
+            prior_ack = os.environ.get(
+                "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"
+            )
+            os.environ["MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"] = "1"
+            try:
+                _run_alembic("downgrade", PLAN03_HEAD)
+            finally:
+                if prior_ack is None:
+                    os.environ.pop(
+                        "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA", None
+                    )
+                else:
+                    os.environ[
+                        "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"
+                    ] = prior_ack
         elif current != PLAN03_HEAD:
             # Mid/unknown state: ensure schema reaches parent via upgrade path.
             _run_alembic("upgrade", PLAN03_HEAD)

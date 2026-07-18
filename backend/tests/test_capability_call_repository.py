@@ -418,6 +418,115 @@ class CapabilityCallModelTests(unittest.TestCase):
             self.db.commit()
         self.db.rollback()
 
+    def test_interrupt_repository_creates_capability_call_origin(self) -> None:
+        """Call-owned approval rows use the XOR profile and keep call linkage."""
+        from datetime import timedelta
+
+        from app.assistant.capability_calls.models import AssistantCapabilityCall
+        from app.assistant.durable.models import (
+            AssistantRunBudgetRevision,
+            AssistantRunCheckpoint,
+            AssistantRunObligationRevision,
+            AssistantRunPolicyRevision,
+        )
+        from app.assistant.policy import (
+            create_initial_ledger_state,
+            normalize_run_budget_limits,
+        )
+        from app.assistant.workflow.durable.interrupts import DurableInterruptRepository
+
+        run = _make_main_agent_run(
+            self.db,
+            status="running",
+            capability_ledger_mode="enforced",
+            state_revision=4,
+        )
+        manifest = _manifest(self.db, run.id)
+        policy = AssistantRunPolicyRevision(
+            run_id=run.id, revision=1, policy_digest=DIGEST_A, payload={}
+        )
+        start = datetime.now(timezone.utc)
+        ledger = create_initial_ledger_state(
+            limits=normalize_run_budget_limits(),
+            started_at_utc=start,
+            deadline_at_utc=start + timedelta(minutes=2),
+        )
+        budget = AssistantRunBudgetRevision(
+            run_id=run.id,
+            revision=1,
+            budget_digest=ledger.ledger_digest,
+            payload=ledger.model_dump(mode="json", by_alias=True),
+        )
+        obligation = AssistantRunObligationRevision(
+            run_id=run.id, revision=1, obligation_digest=DIGEST_A, payload={}
+        )
+        self.db.add_all([policy, budget, obligation])
+        self.db.flush()
+        checkpoint = AssistantRunCheckpoint(
+            run_id=run.id,
+            sequence=1,
+            expected_state_revision=4,
+            committed_state_revision=4,
+            schema_version=2,
+            manifest_revision_id=manifest.id,
+            policy_revision_id=policy.id,
+            budget_revision_id=budget.id,
+            obligation_revision_id=obligation.id,
+            provider_message_ordinal=0,
+            provider_transcript_digest=DIGEST_A,
+            phase="waiting",
+            state_payload={"schemaVersion": 2, "phase": "waiting"},
+            state_digest=DIGEST_A,
+        )
+        self.db.add(checkpoint)
+        self.db.flush()
+        artifact = _artifact(self.db, run.id)
+        call = AssistantCapabilityCall(
+            **_call_kwargs(
+                run.id,
+                manifest.id,
+                artifact.id,
+                status="awaiting_approval",
+            )
+        )
+        call.approval_binding_digest = DIGEST_B
+        self.db.add(call)
+        self.db.flush()
+        run.current_manifest_revision_id = manifest.id
+        run.current_policy_revision_id = policy.id
+        run.current_budget_revision_id = budget.id
+        run.current_obligation_revision_id = obligation.id
+        run.current_checkpoint_id = checkpoint.id
+        self.db.flush()
+
+        interrupt_id = uuid.uuid4()
+        created = DurableInterruptRepository(self.db).create_pending_interrupt(
+            run_id=run.id,
+            interrupt_id=interrupt_id,
+            interrupt_key=f"capability:{call.id}",
+            kind="approval",
+            checkpoint_id=checkpoint.id,
+            manifest_revision_id=manifest.id,
+            budget_revision_id=budget.id,
+            capability_call_id=call.id,
+            interrupt_origin="capability_call",
+            workflow_frame_id=None,
+            node_id=None,
+            node_visit_id=None,
+            request_run_revision=4,
+            request_payload={"approvalBindingDigest": DIGEST_B},
+            field_schema=None,
+            initial_values={},
+            parent_ledger=ledger,
+            parent_budget_revision_id=budget.id,
+        )
+
+        self.assertEqual(created.interrupt.interrupt_origin, "capability_call")
+        self.assertEqual(created.interrupt.capability_call_id, call.id)
+        self.assertIsNone(created.interrupt.workflow_frame_id)
+        self.assertIsNone(created.interrupt.node_id)
+        self.assertIsNone(created.interrupt.node_visit_id)
+
 
     def test_run_capability_ledger_mode_values(self) -> None:
         run = _make_main_agent_run(self.db, capability_ledger_mode="enforced")

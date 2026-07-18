@@ -209,3 +209,56 @@ cd backend && .venv/bin/alembic heads
 | Golden asset | `.../workflows/smart_capture_golden_create.json` |
 | Ops | `docs/operations/assistant-capability-reconciliation.md` |
 | Task 0 baseline | `docs/superpowers/evidence/plan-08-task0-baseline.md` |
+
+---
+
+## 10. PR #55 completion-audit remediation (2026-07-18, supersedes §§4–8)
+
+The earlier M3/Plan09-ready conclusion above is no longer authoritative. The
+completion audit found production and transaction-boundary gaps, and this
+remediation repaired the code paths rather than relabeling them as deferred.
+
+Fresh evidence from this branch:
+
+- enforced production composition installs `LedgerDispatcher`; fresh enforced
+  worker claims enter the admitted `MainAgentService`/`ProviderAgentLoop` path;
+- Provider siblings are proposed in order with transcript + Checkpoint v3 + Run
+  CAS before dispatch; waiting and result checkpoints retain ordered call state;
+- call-owned approval, Interrupt, Provider continuation, artifacts, and waiting
+  Run transition share one transaction; approval queues the exact call once;
+- read/compute and local-write results are not committed before their matching
+  Tool Result, Checkpoint v3, event, and Run CAS;
+- the golden `create_entry` mutation, outbox, committed Attempt, result Artifact,
+  Tool Result, Checkpoint, and Run revision commit or roll back as one set;
+- cancellation finalization is call-aware; reconciliation CLI opens an
+  application Session and defaults remain `legacy_read_only` / `off` in Compose;
+- Plan 08 migration head is `984c07876856`; parent→head→parent→head and the
+  PostgreSQL interrupt/event/fault suites passed against the configured test DB.
+
+Observed verification:
+
+| Gate | Result |
+|---|---|
+| Plan08/prerequisite focused backend | 238 passed, 3 environment skips |
+| PostgreSQL migrations + interrupt/event/fault group | 47 passed |
+| PostgreSQL fault + Run-event races, three consecutive runs | 19 passed each run |
+| Frontend Vitest | 63 passed |
+| Frontend production build | passed |
+| Alembic heads | one head: `984c07876856` |
+| Compose render with immutable test build revision | passed; ledger/write defaults dark |
+| Full backend | 2536 passed, 66 skipped; 20 failures before stale Plan08 assertions were corrected |
+| Backend excluding the two unrelated legacy StructuredTool files | 2538 passed, 66 skipped |
+
+The full-backend failures split into stale Plan07 assertions now corrected
+(v3 codec support/current migration target, durable interrupt ceiling, and the
+exact golden asset set) and 15 unrelated environment failures where the
+installed LangChain exposes `StructuredTool` as non-callable in legacy
+`entry_tools`/`stats_tools` tests. `pip check` independently reports existing
+Docling/Transformers/HuggingFace/Torch dependency incompatibilities.
+
+Remaining release evidence: an OS-process API/default-worker kill-and-restart
+smoke with a scripted Provider has not been executed in this workspace. The
+database-level approval, crash rollback, replay, and race evidence is green,
+but the original completion rule requires that process smoke before declaring
+Plan09 ready. Therefore **Plan09 remains not ready** and production golden mode
+must remain disabled.

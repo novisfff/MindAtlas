@@ -274,13 +274,13 @@ def _create_interrupt_mutation_trigger() -> None:
                OR NEW.request_revision IS DISTINCT FROM OLD.request_revision
                OR NEW.request_run_revision IS DISTINCT FROM OLD.request_run_revision
                OR NEW.budget_revision_id IS DISTINCT FROM OLD.budget_revision_id
-               OR NEW.budget_suspension_state IS DISTINCT FROM OLD.budget_suspension_state
+               OR NEW.budget_suspension_state::jsonb IS DISTINCT FROM OLD.budget_suspension_state::jsonb
                OR NEW.budget_suspension_digest IS DISTINCT FROM OLD.budget_suspension_digest
-               OR NEW.request_payload IS DISTINCT FROM OLD.request_payload
+               OR NEW.request_payload::jsonb IS DISTINCT FROM OLD.request_payload::jsonb
                OR NEW.request_digest IS DISTINCT FROM OLD.request_digest
-               OR NEW.field_schema IS DISTINCT FROM OLD.field_schema
+               OR NEW.field_schema::jsonb IS DISTINCT FROM OLD.field_schema::jsonb
                OR NEW.field_schema_digest IS DISTINCT FROM OLD.field_schema_digest
-               OR NEW.initial_values IS DISTINCT FROM OLD.initial_values
+               OR NEW.initial_values::jsonb IS DISTINCT FROM OLD.initial_values::jsonb
                OR NEW.expires_at IS DISTINCT FROM OLD.expires_at
                OR NEW.created_at IS DISTINCT FROM OLD.created_at
             THEN
@@ -298,7 +298,7 @@ def _create_interrupt_mutation_trigger() -> None:
                 AND NEW.resolution_checkpoint_id IS NOT DISTINCT FROM OLD.resolution_checkpoint_id
                 AND NEW.resolution_budget_revision_id IS NOT DISTINCT FROM OLD.resolution_budget_revision_id
                 AND NEW.resolution_run_revision IS NOT DISTINCT FROM OLD.resolution_run_revision
-                AND NEW.submitted_values IS NOT DISTINCT FROM OLD.submitted_values
+                AND NEW.submitted_values::jsonb IS NOT DISTINCT FROM OLD.submitted_values::jsonb
                 AND NEW.decision IS NOT DISTINCT FROM OLD.decision
                 AND NEW.comment IS NOT DISTINCT FROM OLD.comment
                 AND NEW.resolution_request_id IS NOT DISTINCT FROM OLD.resolution_request_id

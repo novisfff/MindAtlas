@@ -210,6 +210,88 @@ def _create_pending_interrupt(
     return created.interrupt, repo, ledger, budget, ck
 
 
+def _create_call_owned_pending_interrupt(db, *, run):
+    """Seed the Plan 08 call-owned approval profile for HTTP resolution tests."""
+    import hashlib
+
+    from app.assistant.capability_calls.models import AssistantCapabilityCall
+    from app.assistant.durable.models import AssistantRunArtifact
+    from app.assistant.workflow.durable.interrupts import DurableInterruptRepository
+
+    parent = _parent_ledger()
+    manifest, policy, budget, obligation, ck, ledger = _seed_revisions(
+        db, run.id, parent_ledger=parent
+    )
+    run.current_manifest_revision_id = manifest.id
+    run.current_policy_revision_id = policy.id
+    run.current_budget_revision_id = budget.id
+    run.current_obligation_revision_id = obligation.id
+    run.current_checkpoint_id = ck.id
+    db.flush()
+    payload = b'{"title":"approved golden"}'
+    artifact = AssistantRunArtifact(
+        run_id=run.id,
+        kind="capability_call_input",
+        media_type="application/json",
+        storage_kind="inline",
+        byte_size=len(payload),
+        content_sha256=hashlib.sha256(payload).hexdigest(),
+        inline_bytes=payload,
+        metadata_json={"contractVersion": 1},
+    )
+    db.add(artifact)
+    db.flush()
+    call = AssistantCapabilityCall(
+        run_id=run.id,
+        manifest_revision_id=manifest.id,
+        provider_tool_call_id="provider-call-owned-1",
+        logical_call_key="provider:provider-call-owned-1",
+        owner_kind="main_agent",
+        capability_type="tool",
+        domain_key="create_entry",
+        descriptor_digest=DIGEST_A,
+        authorization_digest=DIGEST_A,
+        approval_binding_digest=DIGEST_A,
+        input_artifact_id=artifact.id,
+        input_digest=artifact.content_sha256,
+        side_effect_class="write_local",
+        execution_mode="local_transactional",
+        idempotency_key=f"idem-{uuid.uuid4().hex}",
+        status="awaiting_approval",
+        state_revision=1,
+        attempt_count=0,
+    )
+    db.add(call)
+    db.flush()
+    interrupt_id = uuid.uuid4()
+    created = DurableInterruptRepository(db, token_pepper=PEPPER).create_pending_interrupt(
+        run_id=run.id,
+        interrupt_id=interrupt_id,
+        interrupt_key=f"capability:{call.id}",
+        kind="approval",
+        checkpoint_id=ck.id,
+        manifest_revision_id=manifest.id,
+        budget_revision_id=budget.id,
+        capability_call_id=call.id,
+        interrupt_origin="capability_call",
+        workflow_frame_id=None,
+        node_id=None,
+        node_visit_id=None,
+        request_run_revision=int(run.state_revision),
+        request_payload={"approvalBindingDigest": DIGEST_A},
+        field_schema=None,
+        initial_values={},
+        parent_ledger=ledger,
+        parent_budget_revision_id=budget.id,
+    )
+    call.interrupt_id = created.interrupt.id
+    db.commit()
+    db.refresh(run)
+    db.refresh(call)
+    db.refresh(created.interrupt)
+    return created.interrupt, call
+
+
 class DurableInterruptApiTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()
@@ -1110,6 +1192,70 @@ class DurableInterruptApiTests(unittest.TestCase):
         self.assertEqual(row.resolution_request_id, req_id)
         self.assertIsNone(row.resolution_checkpoint_id)
         self.assertIsNone(row.resolution_budget_revision_id)
+
+    def test_call_owned_approval_authorizes_once_and_queues_resume(self) -> None:
+        from app.assistant.capability_calls.models import (
+            AssistantCapabilityCall,
+            AssistantCapabilityCallAttempt,
+        )
+        from app.assistant.durable.models import AssistantRunCheckpoint
+        from app.assistant.workflow.durable.interrupt_api import resolve_interrupt_http
+
+        conv, _msg, run = _make_waiting_run(self.db)
+        interrupt, call = _create_call_owned_pending_interrupt(self.db, run=run)
+        token = self._issue_token(conv, run, interrupt)
+        request_id = uuid.uuid4()
+        before_checkpoints = self.db.query(AssistantRunCheckpoint).filter_by(
+            run_id=run.id
+        ).count()
+        payload = resolve_interrupt_http(
+            self.db,
+            conversation_id=conv.id,
+            run_id=run.id,
+            interrupt_id=interrupt.id,
+            token=token["token"],
+            resolution_request_id=request_id,
+            expected_token_revision=int(token["tokenRevision"]),
+            expected_request_revision=int(interrupt.request_revision),
+            expected_run_revision=int(interrupt.request_run_revision),
+            outcome="approved",
+            values={},
+        )
+        self.assertEqual(payload["status"], "approved")
+        self.db.refresh(run)
+        persisted_call = self.db.get(AssistantCapabilityCall, call.id)
+        self.assertEqual(run.status, "queued")
+        self.assertEqual(persisted_call.status, "authorized")
+        self.assertEqual(persisted_call.attempt_count, 0)
+        self.assertEqual(
+            self.db.query(AssistantCapabilityCallAttempt)
+            .filter_by(call_id=call.id)
+            .count(),
+            0,
+        )
+        self.assertEqual(
+            self.db.query(AssistantRunCheckpoint).filter_by(run_id=run.id).count(),
+            before_checkpoints + 1,
+        )
+
+        replay = resolve_interrupt_http(
+            self.db,
+            conversation_id=conv.id,
+            run_id=run.id,
+            interrupt_id=interrupt.id,
+            token=token["token"],
+            resolution_request_id=request_id,
+            expected_token_revision=int(token["tokenRevision"]),
+            expected_request_revision=int(interrupt.request_revision),
+            expected_run_revision=int(interrupt.request_run_revision),
+            outcome="approved",
+            values={},
+        )
+        self.assertEqual(replay["resolutionRequestId"], str(request_id))
+        self.assertEqual(
+            self.db.query(AssistantRunCheckpoint).filter_by(run_id=run.id).count(),
+            before_checkpoints + 1,
+        )
 
 
 if __name__ == "__main__":

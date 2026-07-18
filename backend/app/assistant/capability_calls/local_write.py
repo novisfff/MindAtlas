@@ -28,6 +28,16 @@ class LocalCreateEntryResult:
     outbox_entry_id: UUID | None
 
 
+def stage_create_entry_local(
+    *, session: Session, request: EntryRequest, call_id: UUID
+):
+    """Stage the golden Entry/outbox on the ledger-owned Session; never commit."""
+    return EntryService(session).create_in_uow(
+        request,
+        source_capability_call_id=call_id,
+    )
+
+
 def create_entry_local_transactional(
     *,
     session: Session,
@@ -81,11 +91,7 @@ def create_entry_local_transactional(
         expected_call_revision = int(call.state_revision)
 
     # Core no-commit create.
-    service = EntryService(session)
-    entry = service.create_in_uow(
-        request,
-        source_capability_call_id=call_id,
-    )
+    entry = stage_create_entry_local(session=session, request=request, call_id=call_id)
 
     # Stage call success + effect timestamp in same transaction.
     # local_transactional may only set side_effect_started_at on succeeded.
@@ -140,4 +146,5 @@ __all__ = [
     "LocalCreateEntryResult",
     "assert_no_committing_create_import",
     "create_entry_local_transactional",
+    "stage_create_entry_local",
 ]

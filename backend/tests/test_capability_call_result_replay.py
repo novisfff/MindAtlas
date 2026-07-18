@@ -80,15 +80,30 @@ def test_result_corruption_fails_closed() -> None:
 
 
 def test_durable_aggregate_replays_success_without_redispatch() -> None:
+    from datetime import datetime, timedelta, timezone
     from types import SimpleNamespace
     import uuid
 
     from tests._db import make_session
     from tests.test_capability_call_repository import _make_main_agent_run
     from app.assistant.capability_calls.aggregate import DurableCapabilityLedgerAggregate
-    from app.assistant.durable.models import AssistantRunManifestRevision
+    from app.assistant.durable.models import (
+        AssistantRunBudgetRevision,
+        AssistantRunManifestRevision,
+        AssistantRunObligationRevision,
+        AssistantRunPolicyRevision,
+    )
     from app.assistant.durable.repository import LeaseToken
+    from app.assistant.policy import create_initial_ledger_state, normalize_run_budget_limits
     from app.assistant.policy.contracts import build_authorization_decision_v2
+    from app.assistant.provider_loop.messages import (
+        ProviderAssistantMessage,
+        ProviderToolCall,
+        ProviderToolMessage,
+        ProviderUserMessage,
+        digest_arguments,
+        project_tool_result_envelope,
+    )
 
     db = make_session()
     try:
@@ -102,15 +117,44 @@ def test_durable_aggregate_replays_success_without_redispatch() -> None:
             lease_owner="worker-1",
             lease_generation=1,
         )
-        db.add(
-            AssistantRunManifestRevision(
-                run_id=run.id,
-                revision=1,
-                manifest_digest="a" * 64,
-                schema_version=1,
-                payload={},
-            )
+        manifest = AssistantRunManifestRevision(
+            run_id=run.id,
+            revision=1,
+            manifest_digest="a" * 64,
+            schema_version=1,
+            payload={},
         )
+        started = datetime.now(timezone.utc)
+        ledger = create_initial_ledger_state(
+            limits=normalize_run_budget_limits(),
+            started_at_utc=started,
+            deadline_at_utc=started + timedelta(minutes=2),
+        )
+        policy = AssistantRunPolicyRevision(
+            run_id=run.id,
+            revision=1,
+            policy_digest="b" * 64,
+            payload={},
+        )
+        budget = AssistantRunBudgetRevision(
+            run_id=run.id,
+            revision=1,
+            budget_digest=ledger.ledger_digest,
+            payload=ledger.model_dump(mode="json", by_alias=True),
+        )
+        obligation = AssistantRunObligationRevision(
+            run_id=run.id,
+            revision=1,
+            obligation_digest="d" * 64,
+            payload={},
+        )
+        db.add_all([manifest, policy, budget, obligation])
+        db.flush()
+        run.current_manifest_revision_id = manifest.id
+        run.current_policy_revision_id = policy.id
+        run.current_budget_revision_id = budget.id
+        run.current_obligation_revision_id = obligation.id
+        run.deadline_at = ledger.deadline_at_utc
         db.commit()
         decision = build_authorization_decision_v2(
             policy_allowed=True,
@@ -165,10 +209,66 @@ def test_durable_aggregate_replays_success_without_redispatch() -> None:
                 run_id=run.id, worker_id="worker-1", lease_generation=1
             ),
         )
+        tool_call = ProviderToolCall(
+            call_id="durable-read-1",
+            call_index=0,
+            provider_alias="search_entries",
+            domain_key="search_entries",
+            arguments={"q": "x"},
+            arguments_digest=digest_arguments({"q": "x"}),
+            binding_contract_digest="c" * 64,
+            descriptor_digest="e" * 64,
+            behavior_digest="f" * 64,
+            classification_revision="1",
+            classification_ruleset_digest="1" * 64,
+            manifest_revision=1,
+            manifest_digest="a" * 64,
+            surface_digest="2" * 64,
+        )
+        base_messages = (
+            ProviderUserMessage(content="search"),
+            ProviderAssistantMessage(content=None, tool_calls=(tool_call,)),
+        )
+        aggregate.reserve_siblings((request,), base_messages)
+        from app.assistant.capability_calls.models import AssistantCapabilityCall
+
+        reserved = (
+            db.query(AssistantCapabilityCall)
+            .filter_by(run_id=run.id, provider_tool_call_id="durable-read-1")
+            .one()
+        )
+        assert reserved.status == "proposed"
+        from app.assistant.durable.codec import decode_checkpoint
+        from app.assistant.durable.models import AssistantRunCheckpoint
+
+        db.refresh(run)
+        reservation_checkpoint = db.get(
+            AssistantRunCheckpoint, run.current_checkpoint_id
+        )
+        assert reservation_checkpoint.schema_version == 3
+        reserved_state = decode_checkpoint(reservation_checkpoint.state_payload)
+        assert reserved_state.next_action.kind == "dispatch_calls"
+        assert [item.provider_tool_call_id for item in reserved_state.capability_calls] == [
+            "durable-read-1"
+        ]
+        assert reserved_state.capability_calls[0].status == "proposed"
         prepared = aggregate.prepare(request)
         assert prepared.kind == "dispatch"
         result = _provider_result()
         aggregate.commit_result(prepared, result)
+        aggregate.commit_progress(
+            (
+                *base_messages,
+                ProviderToolMessage(
+                    call_id=tool_call.call_id,
+                    provider_alias=tool_call.provider_alias,
+                    content=project_tool_result_envelope(
+                        domain_key="search_entries",
+                        result=result.capability_result,
+                    ),
+                ),
+            )
+        )
         replay = aggregate.prepare(request)
         assert replay.kind == "replay"
         assert replay.provider_result == result

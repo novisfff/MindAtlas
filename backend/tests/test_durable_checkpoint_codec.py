@@ -826,6 +826,77 @@ def test_checkpoint_v1_round_trip_and_fixed_digest() -> None:
     assert codec["checkpoint_state_digest"](decoded) == digest
 
 
+def test_checkpoint_v3_round_trip_preserves_capability_call_order_and_evidence() -> None:
+    from app.assistant.durable.codec import (
+        checkpoint_state_digest,
+        decode_checkpoint,
+        encode_checkpoint_v3,
+    )
+    from app.assistant.durable.contracts import (
+        DurableAgentCheckpointV3,
+        DurableCapabilityCallStateV1,
+        DurableNextActionV2,
+    )
+
+    call_id = UUID("aaaaaaaa-0000-4000-8000-000000000831")
+    attempt_id = UUID("aaaaaaaa-0000-4000-8000-000000000832")
+    output_id = UUID("aaaaaaaa-0000-4000-8000-000000000833")
+    call_state = DurableCapabilityCallStateV1(
+        call_id=call_id,
+        logical_call_key="provider:call-1",
+        provider_tool_call_id="call-1",
+        provider_order=0,
+        status="succeeded",
+        attempt_id=attempt_id,
+        output_artifact_id=output_id,
+        result_message_digest=DIGEST_2,
+    )
+    checkpoint = DurableAgentCheckpointV3(
+        run_id=RUN_ID,
+        phase="ready_for_provider",
+        manifest_revision_id=MANIFEST_REV_ID,
+        policy_revision_id=POLICY_REV_ID,
+        budget_revision_id=BUDGET_REV_ID,
+        obligation_revision_id=OBLIGATION_REV_ID,
+        provider_message_ordinal=3,
+        provider_transcript_digest=DIGEST_1,
+        provider_loop_continuation=None,
+        inflight_unit=None,
+        capability_frames=(),
+        artifact_ids=(output_id,),
+        visible_text_artifact_id=None,
+        next_action=DurableNextActionV2(kind="continue_provider"),
+        policy_contract_version=2,
+        capability_calls=(call_state,),
+    )
+
+    encoded = encode_checkpoint_v3(checkpoint)
+    assert encoded["schemaVersion"] == 3
+    assert encoded["capabilityCalls"][0]["providerOrder"] == 0
+    assert decode_checkpoint(encoded) == checkpoint
+    assert checkpoint_state_digest(checkpoint) == sha256_canonical_json(encoded)
+
+    with pytest.raises(ValidationError, match="provider_order"):
+        DurableAgentCheckpointV3(
+            **{
+                **checkpoint.model_dump(mode="python", by_alias=False),
+                "capability_calls": (
+                    call_state.model_copy(update={"provider_order": 1}),
+                    call_state.model_copy(
+                        update={
+                            "call_id": UUID(
+                                "aaaaaaaa-0000-4000-8000-000000000834"
+                            ),
+                            "logical_call_key": "provider:call-2",
+                            "provider_tool_call_id": "call-2",
+                            "provider_order": 0,
+                        }
+                    ),
+                ),
+            }
+        )
+
+
 def test_prepared_and_started_units_round_trip() -> None:
     codec = _import_codec()
     prepared = _prepared_unit()

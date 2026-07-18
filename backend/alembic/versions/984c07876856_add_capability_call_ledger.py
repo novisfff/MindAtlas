@@ -477,6 +477,35 @@ def upgrade() -> None:
         "  AND node_visit_id IS NULL"
         ")",
     )
+    # Plan 08 origin/linkage is immutable Interrupt request identity. Keep a
+    # separate trigger so the Plan 07 mutation trigger remains downgradeable.
+    op.execute(
+        """
+        CREATE OR REPLACE FUNCTION mindatlas_interrupt_origin_immutable()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF NEW.interrupt_origin IS DISTINCT FROM OLD.interrupt_origin
+               OR NEW.capability_call_id IS DISTINCT FROM OLD.capability_call_id
+            THEN
+                RAISE EXCEPTION
+                    'MINDATLAS_PLAN08_IMMUTABLE_INTERRUPT_ORIGIN: origin/call linkage is immutable'
+                    USING ERRCODE = 'integrity_constraint_violation';
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_assistant_run_interrupt_00_origin_immutable
+        BEFORE UPDATE ON assistant_run_interrupt
+        FOR EACH ROW
+        EXECUTE PROCEDURE mindatlas_interrupt_origin_immutable();
+        """
+    )
 
     op.execute(
         """
@@ -671,6 +700,16 @@ def downgrade() -> None:
         "ON assistant_capability_call"
     )
     op.execute(
+        "DROP TRIGGER IF EXISTS trg_assistant_run_interrupt_00_origin_immutable "
+        "ON assistant_run_interrupt"
+    )
+    # Compatibility with pre-fix disposable databases that applied this
+    # revision before the trigger was ordered ahead of the Plan 07 guard.
+    op.execute(
+        "DROP TRIGGER IF EXISTS trg_assistant_run_interrupt_origin_immutable "
+        "ON assistant_run_interrupt"
+    )
+    op.execute(
         "DROP FUNCTION IF EXISTS mindatlas_capability_reconciliation_append_only()"
     )
     op.execute(
@@ -679,6 +718,7 @@ def downgrade() -> None:
     op.execute(
         "DROP FUNCTION IF EXISTS mindatlas_capability_call_immutable_identity()"
     )
+    op.execute("DROP FUNCTION IF EXISTS mindatlas_interrupt_origin_immutable()")
 
     op.drop_constraint(
         "ck_assistant_run_interrupt_origin_xor",

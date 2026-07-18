@@ -7,6 +7,7 @@ CI-gated via MINDATLAS_TEST_POSTGRES_URL (skipped locally when unset).
 from __future__ import annotations
 
 import os
+import threading
 import unittest
 import uuid
 from datetime import datetime, timezone
@@ -441,9 +442,284 @@ class FaultMatrixUnitTests(unittest.TestCase):
 
 @unittest.skipUnless(_POSTGRES_URL, "MINDATLAS_TEST_POSTGRES_URL unset; PG races CI-gated")
 class FaultMatrixPostgresRaceTests(unittest.TestCase):
-    def test_placeholder_documents_pg_gate(self) -> None:
-        # Real dual-session races for F08/F11/F13 live in CI with disposable PG.
-        self.assertTrue(bool(_POSTGRES_URL))
+    def test_stop_vs_local_atomic_success_has_one_legal_winner(self) -> None:
+        from sqlalchemy import create_engine, text
+        from sqlalchemy.orm import sessionmaker
+
+        from app.assistant.capability_calls.models import (
+            AssistantCapabilityCall,
+            AssistantCapabilityCallAttempt,
+        )
+        from app.assistant.capability_calls.repository import (
+            CapabilityCallConflict,
+            CapabilityCallRepository,
+            ProposeCallSpec,
+        )
+        from app.assistant.durable.models import AssistantRunArtifact
+        from app.assistant.durable.repository import (
+            DurableRunConflict,
+            DurableRunRepository,
+            EventSpec,
+        )
+        from app.assistant.domain.digests import sha256_bytes
+        from app.entry.models import Entry, TimeMode
+        from app.entry.schemas import EntryRequest
+        from app.entry.service import EntryService
+        from app.entry_type.models import EntryType
+
+        url = _POSTGRES_URL
+        if url.startswith("postgresql://") and "+psycopg2" not in url:
+            url = url.replace("postgresql://", "postgresql+psycopg2://", 1)
+        engine = create_engine(url, future=True, pool_pre_ping=True)
+        factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+        seed = factory()
+        try:
+            entry_type = EntryType(
+                code=f"PG_RACE_{uuid.uuid4().hex[:10]}",
+                name="PG race",
+                color="#123456",
+                graph_enabled=True,
+                ai_enabled=True,
+                enabled=True,
+            )
+            seed.add(entry_type)
+            run, lease, manifest, artifact = _seed_run(seed)
+            call_repo = CapabilityCallRepository(seed)
+            call, _ = call_repo.create_or_verify_proposed(
+                ProposeCallSpec(
+                    call_id=uuid.uuid4(),
+                    run_id=run.id,
+                    expected_run_revision=1,
+                    lease=lease,
+                    manifest_revision_id=manifest.id,
+                    logical_call_key="provider:pg-race-local",
+                    owner_kind="main_agent",
+                    capability_type="tool",
+                    domain_key="create_entry",
+                    descriptor_digest=DIGEST_A,
+                    authorization_digest=DIGEST_A,
+                    input_artifact_id=artifact.id,
+                    input_digest=DIGEST_A,
+                    side_effect_class="write_local",
+                    execution_mode="local_transactional",
+                    idempotency_key=f"pg-race-{uuid.uuid4().hex}",
+                    provider_tool_call_id="pg-race-local",
+                )
+            )
+            call_repo.transition_call(
+                call_id=call.id,
+                expected_call_revision=0,
+                expected_run_revision=1,
+                to_status="authorized",
+                lease=lease,
+            )
+            seed.commit()
+            run_id = run.id
+            conversation_id = run.conversation_id
+            call_id = call.id
+            type_id = entry_type.id
+
+            barrier = threading.Barrier(2)
+            outcomes: dict[str, str] = {}
+
+            def local_success() -> None:
+                db = factory()
+                try:
+                    barrier.wait(timeout=5)
+                    repo = CapabilityCallRepository(db)
+                    locked_call, attempt = repo.claim_attempt(
+                        call_id=call_id,
+                        expected_call_revision=1,
+                        expected_run_revision=1,
+                        lease=lease,
+                        worker_id="worker-1",
+                    )
+                    repo.transition_attempt(
+                        attempt_id=attempt.id,
+                        expected_status="claimed",
+                        to_status="dispatched",
+                        request_digest=DIGEST_A,
+                    )
+                    entry = EntryService(db).create_in_uow(
+                        EntryRequest(
+                            title="pg local race",
+                            summary="",
+                            content="body",
+                            type_id=type_id,
+                            time_mode=TimeMode.POINT,
+                            time_at=datetime.now(timezone.utc),
+                        ),
+                        source_capability_call_id=call_id,
+                    )
+                    payload = (
+                        f'{{"entryId":"{entry.id}","status":"ok"}}'.encode()
+                    )
+                    result_artifact = AssistantRunArtifact(
+                        run_id=run_id,
+                        kind="capability_call_result",
+                        media_type="application/json",
+                        storage_kind="inline",
+                        byte_size=len(payload),
+                        content_sha256=sha256_bytes(payload),
+                        inline_bytes=payload,
+                        metadata_json={"contractVersion": 1},
+                    )
+                    db.add(result_artifact)
+                    db.flush()
+                    repo.transition_attempt(
+                        attempt_id=attempt.id,
+                        expected_status="dispatched",
+                        to_status="response_received",
+                        response_digest=result_artifact.content_sha256,
+                    )
+                    repo.transition_attempt(
+                        attempt_id=attempt.id,
+                        expected_status="response_received",
+                        to_status="committed",
+                    )
+                    repo.transition_call(
+                        call_id=locked_call.id,
+                        expected_call_revision=int(locked_call.state_revision),
+                        expected_run_revision=1,
+                        to_status="succeeded",
+                        lease=lease,
+                        output_artifact_id=result_artifact.id,
+                        side_effect_started_at=datetime.now(timezone.utc),
+                    )
+                    DurableRunRepository(db).commit_semantic(
+                        run_id=run_id,
+                        expected_revision=1,
+                        lease=lease,
+                        events=(
+                            EventSpec(
+                                event_key=f"pg.local.success:{call_id}",
+                                event_name="capability_call.result",
+                                payload={"callId": str(call_id)},
+                            ),
+                        ),
+                    )
+                    outcomes["local"] = "won"
+                except (CapabilityCallConflict, DurableRunConflict):
+                    db.rollback()
+                    outcomes["local"] = "lost"
+                finally:
+                    db.close()
+
+            def stop_run() -> None:
+                db = factory()
+                try:
+                    barrier.wait(timeout=5)
+                    DurableRunRepository(db).request_stop(
+                        run_id=run_id,
+                        expected_revision=1,
+                    )
+                    outcomes["stop"] = "won"
+                except DurableRunConflict:
+                    db.rollback()
+                    outcomes["stop"] = "lost"
+                finally:
+                    db.close()
+
+            threads = [
+                threading.Thread(target=local_success),
+                threading.Thread(target=stop_run),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=15)
+                self.assertFalse(thread.is_alive(), "race thread deadlocked")
+            self.assertEqual(sorted(outcomes.values()), ["lost", "won"])
+
+            verify = factory()
+            try:
+                persisted_call = verify.get(AssistantCapabilityCall, call_id)
+                assert persisted_call is not None
+                entries = verify.query(Entry).filter_by(
+                    source_capability_call_id=call_id
+                ).count()
+                attempts = verify.query(AssistantCapabilityCallAttempt).filter_by(
+                    call_id=call_id
+                ).all()
+                results = verify.query(AssistantRunArtifact).filter_by(
+                    run_id=run_id,
+                    kind="capability_call_result",
+                ).count()
+                outbox = int(
+                    verify.execute(
+                        text(
+                            """
+                            SELECT COUNT(*)
+                            FROM entry_index_outbox o
+                            JOIN entry e ON e.id = o.entry_id
+                            WHERE e.source_capability_call_id = :call_id
+                            """
+                        ),
+                        {"call_id": call_id},
+                    ).scalar()
+                    or 0
+                )
+                if outcomes["local"] == "won":
+                    self.assertEqual(persisted_call.status, "succeeded")
+                    self.assertEqual((entries, len(attempts), results, outbox), (1, 1, 1, 1))
+                    self.assertEqual(attempts[0].status, "committed")
+                else:
+                    self.assertEqual(persisted_call.status, "authorized")
+                    self.assertEqual((entries, len(attempts), results, outbox), (0, 0, 0, 0))
+            finally:
+                verify.close()
+        finally:
+            seed.rollback()
+            seed.close()
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "DELETE FROM entry WHERE source_capability_call_id = :call_id"
+                    ),
+                    {"call_id": locals().get("call_id")},
+                )
+                conn.execute(
+                    text(
+                        "ALTER TABLE assistant_capability_call_attempt DISABLE TRIGGER USER"
+                    )
+                )
+                conn.execute(
+                    text("ALTER TABLE assistant_capability_call DISABLE TRIGGER USER")
+                )
+                conn.execute(
+                    text(
+                        "DELETE FROM assistant_capability_call_attempt WHERE call_id = :call_id"
+                    ),
+                    {"call_id": locals().get("call_id")},
+                )
+                conn.execute(
+                    text("DELETE FROM assistant_capability_call WHERE id = :call_id"),
+                    {"call_id": locals().get("call_id")},
+                )
+                conn.execute(
+                    text("ALTER TABLE assistant_capability_call ENABLE TRIGGER USER")
+                )
+                conn.execute(
+                    text(
+                        "ALTER TABLE assistant_capability_call_attempt ENABLE TRIGGER USER"
+                    )
+                )
+                conn.execute(text("SET LOCAL mindatlas.allow_durable_run_purge = 'on'"))
+                conn.execute(
+                    text("DELETE FROM assistant_chat_run WHERE id = :run_id"),
+                    {"run_id": locals().get("run_id")},
+                )
+                conn.execute(
+                    text(
+                        "DELETE FROM assistant_conversation WHERE id = :conversation_id"
+                    ),
+                    {"conversation_id": locals().get("conversation_id")},
+                )
+                conn.execute(
+                    text("DELETE FROM entry_type WHERE id = :type_id"),
+                    {"type_id": locals().get("type_id")},
+                )
+            engine.dispose()
 
 
 # ---------------------------------------------------------------------------

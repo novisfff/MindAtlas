@@ -985,7 +985,7 @@ class ProviderDispatchResult(FrozenContract):
 class LedgerPrepareOutcome(FrozenContract):
     """Server-owned ledger decision for one frozen Provider dispatch request."""
 
-    kind: Literal["dispatch", "deny", "pause", "replay"]
+    kind: Literal["dispatch", "dispatch_local", "deny", "pause", "replay"]
     call_id: UUID
     call_revision: int
     attempt_id: UUID | None = None
@@ -1017,12 +1017,35 @@ class LedgerPrepareOutcome(FrozenContract):
 class CapabilityLedgerAggregatePort(Protocol):
     """Durable Run-first owner of enforced CapabilityCall aggregate changes."""
 
+    def reserve_siblings(
+        self,
+        requests: Sequence[ProviderDispatchRequest],
+        provider_messages: Sequence[ProviderMessage] = (),
+    ) -> None: ...
+
     def prepare(self, request: ProviderDispatchRequest) -> LedgerPrepareOutcome: ...
 
     def commit_result(
         self,
         outcome: LedgerPrepareOutcome,
         result: ProviderDispatchResult,
+    ) -> ProviderDispatchResult: ...
+
+    def commit_pause(
+        self,
+        continuation: ProviderLoopContinuation,
+        provider_messages: Sequence[ProviderMessage],
+    ) -> None: ...
+
+    def commit_progress(
+        self,
+        provider_messages: Sequence[ProviderMessage],
+    ) -> None: ...
+
+    def execute_local(
+        self,
+        outcome: LedgerPrepareOutcome,
+        request: ProviderDispatchRequest,
     ) -> ProviderDispatchResult: ...
 
     def record_failure(

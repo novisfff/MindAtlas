@@ -1113,9 +1113,9 @@ class DurableInterruptRepository:
         checkpoint_id: UUID,
         manifest_revision_id: UUID,
         budget_revision_id: UUID,
-        workflow_frame_id: UUID,
-        node_id: str,
-        node_visit_id: str,
+        workflow_frame_id: UUID | None,
+        node_id: str | None,
+        node_visit_id: str | None,
         request_run_revision: int,
         request_payload: Mapping[str, Any],
         field_schema: Mapping[str, Any] | None,
@@ -1127,6 +1127,8 @@ class DurableInterruptRepository:
         ttl_sec: int | None = None,
         owner_skill_package_id: UUID | None = None,
         owner_skill_version_id: UUID | None = None,
+        capability_call_id: UUID | None = None,
+        interrupt_origin: str = "workflow_node",
         request_revision: int = 1,
         lock_run: bool = True,
     ) -> InterruptCreateResult:
@@ -1139,6 +1141,27 @@ class DurableInterruptRepository:
         kind = str(kind)
         if kind not in {"approval", "input"}:
             raise InterruptConflict(CODE_PROTOCOL_ERROR, f"invalid interrupt kind {kind}")
+        origin = str(interrupt_origin)
+        if origin == "workflow_node":
+            if capability_call_id is not None or not all(
+                (workflow_frame_id, node_id, node_visit_id)
+            ):
+                raise InterruptConflict(
+                    CODE_PROTOCOL_ERROR,
+                    "workflow_node interrupt requires frame/node/visit and forbids capability_call_id",
+                )
+        elif origin == "capability_call":
+            if capability_call_id is None or any(
+                value is not None for value in (workflow_frame_id, node_id, node_visit_id)
+            ):
+                raise InterruptConflict(
+                    CODE_PROTOCOL_ERROR,
+                    "capability_call interrupt requires call id and forbids workflow identity",
+                )
+        else:
+            raise InterruptConflict(
+                CODE_PROTOCOL_ERROR, f"invalid interrupt_origin {origin!r}"
+            )
 
         run = self._lock_run(run_id) if lock_run else self._require_run(run_id)
         now = self._db_now()
@@ -1261,10 +1284,11 @@ class DurableInterruptRepository:
             manifest_revision_id=manifest_revision_id,
             owner_skill_package_id=owner_skill_package_id,
             owner_skill_version_id=owner_skill_version_id,
-            capability_call_id=None,
+            capability_call_id=capability_call_id,
+            interrupt_origin=origin,
             workflow_frame_id=workflow_frame_id,
-            node_id=str(node_id),
-            node_visit_id=str(node_visit_id),
+            node_id=str(node_id) if node_id is not None else None,
+            node_visit_id=str(node_visit_id) if node_visit_id is not None else None,
             request_revision=int(request_revision),
             request_run_revision=int(request_run_revision),
             resolution_run_revision=None,

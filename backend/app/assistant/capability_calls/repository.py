@@ -128,7 +128,7 @@ class CapabilityCallRepository:
     def get_run(self, run_id: UUID, *, for_update: bool = False) -> AssistantChatRun:
         stmt = self.db.query(AssistantChatRun).filter(AssistantChatRun.id == run_id)
         if for_update:
-            stmt = stmt.with_for_update()
+            stmt = stmt.populate_existing().with_for_update()
         run = stmt.one_or_none()
         if run is None:
             raise CapabilityCallConflict(CODE_CALL_NOT_FOUND, f"run {run_id} not found")
@@ -144,7 +144,7 @@ class CapabilityCallRepository:
             AssistantCapabilityCall.id == call_id
         )
         if for_update:
-            stmt = stmt.with_for_update()
+            stmt = stmt.populate_existing().with_for_update()
         return stmt.one_or_none()
 
     def get_call_by_logical_key(
@@ -159,7 +159,7 @@ class CapabilityCallRepository:
             AssistantCapabilityCall.logical_call_key == logical_call_key,
         )
         if for_update:
-            stmt = stmt.with_for_update()
+            stmt = stmt.populate_existing().with_for_update()
         return stmt.one_or_none()
 
     def _verify_lease(self, run: AssistantChatRun, lease: LeaseToken | None) -> None:
@@ -300,10 +300,16 @@ class CapabilityCallRepository:
     ) -> AssistantCapabilityCall:
         """CAS transition with Run + call revision checks."""
         ts = now or utcnow()
+        call_hint = self.get_call(call_id)
+        if call_hint is None:
+            raise CapabilityCallConflict(CODE_CALL_NOT_FOUND, f"call {call_id} not found")
+        # Global lock order is Run -> Interrupt/CapabilityCall. Resolve the
+        # parent id without a row lock, serialize on Run, then refresh+lock the
+        # call so a blocked Session cannot act on identity-map stale state.
+        run = self.get_run(call_hint.run_id, for_update=True)
         call = self.get_call(call_id, for_update=True)
         if call is None:
             raise CapabilityCallConflict(CODE_CALL_NOT_FOUND, f"call {call_id} not found")
-        run = self.get_run(call.run_id, for_update=True)
         self._verify_lease(run, lease)
         self._require_run_revision(run, expected_run_revision)
         self._require_call_revision(call, expected_call_revision)

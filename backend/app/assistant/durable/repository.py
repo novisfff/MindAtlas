@@ -283,7 +283,14 @@ class DurableRunRepository:
     ) -> AssistantChatRun | None:
         stmt = select(AssistantChatRun).where(AssistantChatRun.id == run_id)
         if for_update:
-            stmt = stmt.with_for_update(nowait=nowait)
+            # A caller may already have loaded the Run into this Session before
+            # blocking on another transaction's row lock. Refresh the identity-
+            # mapped object after the lock is acquired; otherwise stale
+            # last_event_seq/state_revision values can allocate duplicate event
+            # sequences even though PostgreSQL correctly serialized the locks.
+            stmt = stmt.with_for_update(nowait=nowait).execution_options(
+                populate_existing=True
+            )
         return self.db.execute(stmt).scalar_one_or_none()
 
     def get_current_checkpoint_phase(self, run: AssistantChatRun) -> str | None:

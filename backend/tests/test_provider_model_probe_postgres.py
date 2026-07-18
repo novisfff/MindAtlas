@@ -177,6 +177,7 @@ def _reset_to_plan01_parent() -> None:
 def _insert_credential_model(conn, *, name: str, model_name: str) -> tuple[uuid.UUID, uuid.UUID]:
     cred_id = uuid.uuid4()
     model_id = uuid.uuid4()
+    suffix = uuid.uuid4().hex[:8]
     conn.execute(
         text(
             """
@@ -191,7 +192,7 @@ def _insert_credential_model(conn, *, name: str, model_name: str) -> tuple[uuid.
         ),
         {
             "id": cred_id,
-            "name": name,
+            "name": f"{name}-{suffix}",
             "base_url": "https://api.example.com/v1",
             "enc": "enc",
             "hint": "****",
@@ -208,7 +209,7 @@ def _insert_credential_model(conn, *, name: str, model_name: str) -> tuple[uuid.
             )
             """
         ),
-        {"id": model_id, "cred": cred_id, "name": model_name},
+        {"id": model_id, "cred": cred_id, "name": f"{model_name}-{suffix}"},
     )
     return cred_id, model_id
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.exc import IntegrityError
 
@@ -122,13 +122,20 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
         from app.assistant.models import AssistantChatRun, Conversation
         from app.assistant.durable.models import (
             AssistantRunArtifact,
+            AssistantRunBudgetRevision,
             AssistantRunManifestRevision,
+            AssistantRunObligationRevision,
+            AssistantRunPolicyRevision,
         )
         from app.assistant.capability_calls.repository import (
             CapabilityCallRepository,
             ProposeCallSpec,
         )
         from app.assistant.durable.repository import LeaseToken
+        from app.assistant.policy import (
+            create_initial_ledger_state,
+            normalize_run_budget_limits,
+        )
         import hashlib
         import os
 
@@ -169,6 +176,37 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
         )
         self.db.add(self.manifest)
         self.db.flush()
+        self.policy = AssistantRunPolicyRevision(
+            run_id=self.run.id,
+            revision=1,
+            policy_digest=DIGEST_B,
+            payload={},
+        )
+        started = datetime.now(timezone.utc)
+        budget_ledger = create_initial_ledger_state(
+            limits=normalize_run_budget_limits(),
+            started_at_utc=started,
+            deadline_at_utc=started + timedelta(minutes=2),
+        )
+        self.budget = AssistantRunBudgetRevision(
+            run_id=self.run.id,
+            revision=1,
+            budget_digest=budget_ledger.ledger_digest,
+            payload=budget_ledger.model_dump(mode="json", by_alias=True),
+        )
+        self.obligation = AssistantRunObligationRevision(
+            run_id=self.run.id,
+            revision=1,
+            obligation_digest="d" * 64,
+            payload={},
+        )
+        self.db.add_all([self.policy, self.budget, self.obligation])
+        self.db.flush()
+        self.run.current_manifest_revision_id = self.manifest.id
+        self.run.current_policy_revision_id = self.policy.id
+        self.run.current_budget_revision_id = self.budget.id
+        self.run.current_obligation_revision_id = self.obligation.id
+        self.run.deadline_at = budget_ledger.deadline_at_utc
         payload = os.urandom(8)
         self.art = AssistantRunArtifact(
             run_id=self.run.id,
@@ -265,6 +303,275 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
         )
         self.assertEqual(result2.entry_id, result.entry_id)
         self.assertEqual(self.db.query(Entry).count(), 1)
+
+    def test_aggregate_local_dispatch_commits_entry_attempt_and_result_together(self) -> None:
+        from types import SimpleNamespace
+
+        from app.assistant.capability_calls.aggregate import DurableCapabilityLedgerAggregate
+        from app.assistant.capability_calls.models import (
+            AssistantCapabilityCall,
+            AssistantCapabilityCallAttempt,
+        )
+        from app.assistant.durable.models import AssistantRunArtifact
+        from app.assistant.policy.contracts import build_authorization_decision_v2
+        from tests.test_agent_policy_runtime import _base_manifest
+        from app.entry.models import Entry
+        from app.lightrag.models import EntryIndexOutbox
+
+        decision = build_authorization_decision_v2(
+            policy_allowed=True,
+            dispatch_disposition="awaiting_call_approval",
+            reason_code="approval_required",
+            principal_digest=DIGEST_A,
+            entrypoint_policy_digest=DIGEST_A,
+            global_policy_digest=DIGEST_A,
+            owner_policy_digest=DIGEST_A,
+            allowed_side_effects=("none", "compute", "read", "draft", "write_local"),
+            grant_source_digest=DIGEST_B,
+            exposure_digest=DIGEST_A,
+            effective_policy_digest=DIGEST_A,
+            write_release_digest=DIGEST_B,
+        )
+        resolved_manifest, _surface = _base_manifest()
+        resolved_manifest = resolved_manifest.model_copy(
+            update={"run_id": self.run.id, "manifest_digest": DIGEST_A}
+        )
+        request = SimpleNamespace(
+            execution_scope=SimpleNamespace(run_id=self.run.id),
+            call=SimpleNamespace(
+                call_id="golden-aggregate-1",
+                domain_key="create_entry",
+                arguments={
+                    "title": "aggregate golden",
+                    "content": "body",
+                    "type_code": "KNOWLEDGE",
+                    "tags": [],
+                    "time_mode": "POINT",
+                    "time_at": "2026-07-18",
+                },
+            ),
+            current_manifest=resolved_manifest,
+            binding=SimpleNamespace(
+                ref=SimpleNamespace(
+                    binding_contract_digest=DIGEST_A,
+                    resolution_digest=DIGEST_B,
+                )
+            ),
+            descriptor=SimpleNamespace(
+                behavior=SimpleNamespace(side_effect="write_local"),
+                capability_type="tool",
+                target_id=None,
+                target_version_id=None,
+                descriptor_digest=DIGEST_A,
+            ),
+            authorization=SimpleNamespace(
+                owner=SimpleNamespace(
+                    owner_kind="main_agent",
+                    owner_id=None,
+                    owner_version_id=None,
+                )
+            ),
+        )
+        aggregate = DurableCapabilityLedgerAggregate(
+            db=self.db,
+            authorization_factory=SimpleNamespace(
+                decision_for_call=lambda **_kwargs: decision
+            ),
+            idempotency_secret="s" * 32,
+            lease=self.lease,
+        )
+
+        outcome = aggregate.prepare(request)
+        self.assertEqual(outcome.kind, "pause")
+
+        from tests.test_durable_checkpoint_codec import (
+            _manifest,
+            _surface,
+            _tool_call,
+            _waiting_continuation,
+        )
+        from app.assistant.capabilities.contracts import ContinuationRef
+        from app.assistant.provider_loop.messages import (
+            ProviderAssistantMessage,
+            ProviderToolMessage,
+            ProviderUserMessage,
+            digest_provider_transcript,
+            project_tool_result_envelope,
+        )
+
+        surface = _surface(_manifest())
+        tool_call = _tool_call(surface).model_copy(
+            update={"call_id": "golden-aggregate-1"}
+        )
+        base_messages = (
+            ProviderUserMessage(content="create it"),
+            ProviderAssistantMessage(content=None, tool_calls=(tool_call,)),
+        )
+        root_continuation = ContinuationRef(
+            continuation_type="capability_call",
+            contract_version=1,
+            reference_id=outcome.pause_proposal["interruptId"],
+            payload_digest=outcome.pause_proposal["proposalDigest"],
+        )
+        continuation = _waiting_continuation()
+        continuation = continuation.model_copy(
+            update={
+                "execution_scope": continuation.execution_scope.model_copy(
+                    update={"run_id": self.run.id}
+                ),
+                "waiting_call": continuation.waiting_call.model_copy(
+                    update={
+                        "call_id": "golden-aggregate-1",
+                        "capability_continuation": root_continuation,
+                    }
+                ),
+                "transcript_digest": digest_provider_transcript(base_messages),
+            }
+        )
+        aggregate.commit_pause(continuation, base_messages)
+
+        from app.assistant.capability_calls.models import AssistantCapabilityCall
+        from app.assistant.durable.models import AssistantRunInterrupt
+
+        call = (
+            self.db.query(AssistantCapabilityCall)
+            .filter_by(provider_tool_call_id="golden-aggregate-1")
+            .one()
+        )
+        interrupt = self.db.query(AssistantRunInterrupt).filter_by(id=call.interrupt_id).one()
+        interrupt.status = "approved"
+        call.status = "authorized"
+        call.state_revision = int(call.state_revision) + 1
+        self.run.status = "running"
+        self.run.state_revision = int(self.run.state_revision) + 1
+        self.run.lease_owner = "worker-1"
+        self.run.lease_generation = 1
+        self.db.commit()
+
+        aggregate = DurableCapabilityLedgerAggregate(
+            db=self.db,
+            authorization_factory=SimpleNamespace(
+                decision_for_call=lambda **_kwargs: decision
+            ),
+            idempotency_secret="s" * 32,
+            lease=self.lease,
+        )
+        outcome = aggregate.prepare(request)
+        self.assertEqual(outcome.kind, "dispatch_local")
+        result = aggregate.execute_local(outcome, request)
+        aggregate.commit_result(outcome, result)
+
+        tool_message = ProviderToolMessage(
+            call_id="golden-aggregate-1",
+            provider_alias=tool_call.provider_alias,
+            content=project_tool_result_envelope(
+                domain_key="create_entry",
+                result=result.capability_result,
+            ),
+        )
+        from app.assistant.durable.crash import (
+            CrashPoint,
+            TransactionRollbackInject,
+            armed_crash,
+        )
+
+        with armed_crash(CrashPoint.AFTER_CHECKPOINT_INSERT_BEFORE_POINTER_ADVANCE):
+            with self.assertRaises(TransactionRollbackInject):
+                aggregate.commit_progress(
+                    (
+                        *base_messages,
+                        tool_message,
+                    )
+                )
+
+        # The local business mutation and every ledger/result child share the
+        # Run CAS transaction; a crash at the final pointer gap leaves zero.
+        rolled_back_call = (
+            self.db.query(AssistantCapabilityCall)
+            .filter_by(provider_tool_call_id="golden-aggregate-1")
+            .one()
+        )
+        self.assertEqual(rolled_back_call.status, "authorized")
+        self.assertEqual(rolled_back_call.attempt_count, 0)
+        self.assertEqual(
+            self.db.query(AssistantCapabilityCallAttempt)
+            .filter_by(call_id=rolled_back_call.id)
+            .count(),
+            0,
+        )
+        self.assertEqual(
+            self.db.query(Entry).filter_by(source_capability_call_id=outcome.call_id).count(),
+            0,
+        )
+        self.assertEqual(self.db.query(EntryIndexOutbox).count(), 0)
+
+        # Replay the whole logical invocation after rollback; deterministic
+        # call identity converges and the complete set commits once.
+        aggregate = DurableCapabilityLedgerAggregate(
+            db=self.db,
+            authorization_factory=SimpleNamespace(
+                decision_for_call=lambda **_kwargs: decision
+            ),
+            idempotency_secret="s" * 32,
+            lease=self.lease,
+        )
+        outcome = aggregate.prepare(request)
+        result = aggregate.execute_local(outcome, request)
+        aggregate.commit_result(outcome, result)
+        tool_message = ProviderToolMessage(
+            call_id="golden-aggregate-1",
+            provider_alias=tool_call.provider_alias,
+            content=project_tool_result_envelope(
+                domain_key="create_entry",
+                result=result.capability_result,
+            ),
+        )
+        aggregate.commit_progress(
+            (
+                *base_messages,
+                tool_message,
+            )
+        )
+
+        call = (
+            self.db.query(AssistantCapabilityCall)
+            .filter_by(provider_tool_call_id="golden-aggregate-1")
+            .one()
+        )
+        self.assertEqual(call.status, "succeeded")
+        self.assertIsNotNone(call.side_effect_started_at)
+        self.assertEqual(
+            self.db.query(AssistantCapabilityCallAttempt)
+            .filter_by(call_id=call.id, status="committed")
+            .count(),
+            1,
+        )
+        self.assertEqual(
+            self.db.query(AssistantRunArtifact)
+            .filter_by(id=call.output_artifact_id, kind="capability_call_result")
+            .count(),
+            1,
+        )
+        self.assertEqual(
+            self.db.query(Entry).filter_by(source_capability_call_id=call.id).count(),
+            1,
+        )
+        self.assertEqual(self.db.query(EntryIndexOutbox).count(), 1)
+        from app.assistant.durable.models import (
+            AssistantRunCheckpoint,
+            AssistantRunProviderMessage,
+        )
+
+        self.db.refresh(self.run)
+        checkpoint = (
+            self.db.query(AssistantRunCheckpoint)
+            .filter_by(id=self.run.current_checkpoint_id, schema_version=3)
+            .one()
+        )
+        self.assertEqual(checkpoint.schema_version, 3)
+        self.assertEqual(checkpoint.state_payload["capabilityCalls"][0]["status"], "succeeded")
+        self.assertEqual(self.db.query(AssistantRunProviderMessage).count(), 3)
+        self.assertEqual(self.run.state_revision, 4)
 
 
 if __name__ == "__main__":

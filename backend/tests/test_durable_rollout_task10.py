@@ -389,18 +389,19 @@ class RollingDeployDrainTests(unittest.TestCase):
         self.assertFalse(decision.allow_capability_io)
 
 
-class Plan07StillDisabledTests(unittest.TestCase):
-    """Production Main Agent ceiling keeps interrupt_mode=durable out of Plan 06."""
+class Plan07DurableInterruptCompatibilityTests(unittest.TestCase):
+    """Plan 08 preserves the Plan 07 durable-interrupt read-only ceiling."""
 
-    def test_read_only_ceiling_forbids_durable_interrupt(self) -> None:
+    def test_read_only_ceiling_admits_durable_interrupt(self) -> None:
         from app.assistant.main_agent.authorization import (
             MAIN_AGENT_READ_ONLY_EFFECT_CEILING,
         )
 
         self.assertEqual(
-            MAIN_AGENT_READ_ONLY_EFFECT_CEILING.allowed_interrupt_modes, ("none",)
+            MAIN_AGENT_READ_ONLY_EFFECT_CEILING.allowed_interrupt_modes,
+            ("none", "durable"),
         )
-        self.assertNotIn(
+        self.assertIn(
             "durable", MAIN_AGENT_READ_ONLY_EFFECT_CEILING.allowed_interrupt_modes
         )
         self.assertEqual(
@@ -467,13 +468,13 @@ class ConfigAndArtifactPolicyEvidenceTests(unittest.TestCase):
         )
 
         self.assertEqual(RUNTIME_CONTRACT_VERSION, 1)
-        # Plan 07 Task 1: Checkpoint codec supports v1 and v2.
-        self.assertEqual(sorted(SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS), [1, 2])
+        # Plan 08 adds v3 while retaining v1/v2 readers.
+        self.assertEqual(sorted(SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS), [1, 2, 3])
         digest = default_capability_feature_digest()
         self.assertEqual(len(digest), 64)
         self.assertEqual(
             digest,
-            "94d7b054b85208d3fcab3279bd60b5292d65d0e890285d4dcf7d0871ee2431c9",
+            "3c021aaf7113d6ae3a67f56dacb7abcd7d9d8a84b4a7fe55a97da4b5224ef7a2",
         )
 
     def test_minio_init_script_keeps_artifact_bucket_private(self) -> None:

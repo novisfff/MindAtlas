@@ -194,6 +194,13 @@ class LedgerDispatcher:
                 ),
                 next_manifest=getattr(request, "current_manifest", None),
             )
+        if outcome.kind == "dispatch_local":
+            try:
+                result = self.aggregate.execute_local(outcome, request)
+            except BaseException:
+                self.aggregate.record_failure(outcome, "local_transaction_failed")
+                raise
+            return self.aggregate.commit_result(outcome, result)
         if outcome.kind != "dispatch":
             raise TypeError(f"unsupported ledger prepare outcome {outcome.kind!r}")
 

@@ -590,6 +590,7 @@ def _ports(
     sibling_executor=None,
     cancellation: RecordingCancellation | None = None,
     events: RecordingEventSink | None = None,
+    capability_ledger=None,
 ) -> ProviderLoopPorts:
     return ProviderLoopPorts(
         provider=provider,
@@ -600,6 +601,7 @@ def _ports(
         sibling_executor=sibling_executor or SequentialSiblingExecutor(),
         cancellation=cancellation or RecordingCancellation(),
         events=events or RecordingEventSink(),
+        capability_ledger=capability_ledger,
     )
 
 
@@ -1287,6 +1289,23 @@ def test_waiting_scenario_retains_prefix_defers_suffix() -> None:
         },
         verifier=verifier,
     )
+    class RecordingLedger:
+        def __init__(self):
+            self.reservations = []
+            self.pause_calls = 0
+
+        def reserve_siblings(self, requests, provider_messages=()):
+            assert provider_messages
+            self.reservations.append(tuple(request.call.call_id for request in requests))
+
+        def commit_progress(self, provider_messages=()):
+            del provider_messages
+
+        def commit_pause(self, continuation, provider_messages=()):
+            del continuation, provider_messages
+            self.pause_calls += 1
+
+    ledger = RecordingLedger()
     result = run_provider_agent_loop(
         ProviderLoopRequest(
             manifest=manifest,
@@ -1309,6 +1328,7 @@ def test_waiting_scenario_retains_prefix_defers_suffix() -> None:
             verifier=verifier,
             auth=RecordingAuthFactory(),
             dispatcher=dispatcher,
+            capability_ledger=ledger,
         ),
     )
     assert result.status == "waiting"
@@ -1333,6 +1353,8 @@ def test_waiting_scenario_retains_prefix_defers_suffix() -> None:
     assert [m.call_id for m in tool_msgs] == ["r1"]
     validate_provider_transcript(result.messages, allowed_open_continuation=cont)
     assert [r.call.call_id for r in dispatcher.requests] == ["r1", "w1"]
+    assert ledger.reservations == [("r1", "w1", "wr", "r2")]
+    assert ledger.pause_calls == 1
 
 
 def test_resume_completes_pending_and_provider_after_pairing() -> None:
@@ -1354,7 +1376,9 @@ def test_resume_completes_pending_and_provider_after_pairing() -> None:
     res1 = _surface_for_pairs(manifest, pairs)
     res2 = _surface_for_pairs(manifest, pairs)
     aliases = _alias_by_domain(res1.surface)
-    cont_ref = _continuation_ref()
+    cont_ref = _continuation_ref().model_copy(
+        update={"continuation_type": "capability_call"}
+    )
 
     class FlexStart(ScriptedProvider):
         def stream_round(self, request, *, cancellation):
@@ -1441,6 +1465,12 @@ def test_resume_completes_pending_and_provider_after_pairing() -> None:
     resume_auth = RecordingAuthFactory()
     resume_dispatcher = RecordingDispatcher(
         results_by_call_id={
+            "w1": ProviderDispatchResult(
+                capability_result=completed_result(
+                    user_text="approved write executed", metrics=_metrics()
+                ),
+                next_manifest=res1.manifest,
+            ),
             "wr": ProviderDispatchResult(
                 capability_result=completed_result(user_text="wrote", metrics=_metrics()),
                 next_manifest=res1.manifest,
@@ -1476,8 +1506,10 @@ def test_resume_completes_pending_and_provider_after_pairing() -> None:
     )
     assert resumed.status == "completed"
     assert resumed.final_text == "final"
-    # Fresh evidence only for remaining sibling.
-    assert [item["call_id"] for item in resume_auth.issued] == ["wr"]
+    # Call-owned approval re-dispatches the exact waiting call before later
+    # siblings; approval itself is never projected as fake Tool success.
+    assert [item["call_id"] for item in resume_auth.issued] == ["w1", "wr"]
+    assert [item.call.call_id for item in resume_dispatcher.requests] == ["w1", "wr"]
     assert resumed.round_count == 2
     assert resumed.usage.total_tokens == 6
 

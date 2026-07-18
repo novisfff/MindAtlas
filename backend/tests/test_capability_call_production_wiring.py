@@ -29,6 +29,11 @@ class _RecordingInner:
 class _RecordingAggregate:
     outcome: Any
     prepared: list[Any] = field(default_factory=list)
+    reserved: list[Any] = field(default_factory=list)
+
+    def reserve_siblings(self, requests: Any, provider_messages: Any = ()) -> None:
+        del provider_messages
+        self.reserved.extend(requests)
 
     def prepare(self, request: Any) -> Any:
         self.prepared.append(request)
@@ -36,6 +41,16 @@ class _RecordingAggregate:
 
     def commit_result(self, outcome: Any, result: Any) -> Any:
         return result
+
+    def commit_pause(self, continuation: Any, provider_messages: Any = ()) -> None:
+        del continuation, provider_messages
+
+    def commit_progress(self, provider_messages: Any = ()) -> None:
+        del provider_messages
+
+    def execute_local(self, outcome: Any, request: Any) -> Any:
+        del outcome, request
+        raise AssertionError("not used")
 
     def record_failure(self, outcome: Any, reason_code: str) -> None:
         del outcome, reason_code

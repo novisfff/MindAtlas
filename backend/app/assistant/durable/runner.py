@@ -48,6 +48,7 @@ from app.assistant.durable.repository import (
     STATUS_CANCELLED,
     STATUS_RECOVERING,
     STATUS_RUNNING,
+    STATUS_WAITING_APPROVAL,
 )
 from app.assistant.provider_loop.messages import (
     ProviderAssistantMessage,
@@ -483,6 +484,18 @@ class MainAgentRunExecutor:
 
             # Materialize base state if this is a fresh claim without Checkpoint.
             db.refresh(run)
+            if (
+                run.current_checkpoint_id is None
+                and str(run.capability_ledger_mode) == "enforced"
+                and self.provider_factory is None
+            ):
+                self._drive_enforced_main_agent(
+                    db,
+                    run=run,
+                    claimed=claimed,
+                    heartbeat=heartbeat,
+                )
+                return
             if run.current_checkpoint_id is None:
                 user_text = self._resolve_user_text(db, run)
                 expected_revision = self._materialize_base(
@@ -621,6 +634,78 @@ class MainAgentRunExecutor:
                             pass
                 except Exception:
                     pass
+
+    def _drive_enforced_main_agent(
+        self,
+        db: Any,
+        *,
+        run: Any,
+        claimed: ClaimedLease,
+        heartbeat: Callable[[], bool],
+    ) -> None:
+        """Run the real admitted Provider loop for a fresh enforced worker claim."""
+        from app.assistant.main_agent.service import (
+            AssistantRuntimeRequest,
+            MainAgentService,
+        )
+
+        if not _heartbeat_guard(heartbeat):
+            return
+        user_text = self._resolve_user_text(db, run)
+
+        class _HeartbeatCancellation:
+            def __init__(self, callback: Callable[[], bool]) -> None:
+                self._callback = callback
+
+            def __call__(self) -> bool:
+                return not self._callback()
+
+        with _LeaseHeartbeatPump(
+            heartbeat, interval_sec=self.heartbeat_interval_sec
+        ) as pump:
+            if not pump.alive:
+                return
+            result = MainAgentService(db).run(
+                AssistantRuntimeRequest(
+                    run_id=run.id,
+                    conversation_id=run.conversation_id,
+                    user_text=user_text,
+                    locale="zh-CN",
+                    stream_output=False,
+                    execution_kind="production",
+                    cancel_checker=_HeartbeatCancellation(heartbeat),
+                )
+            )
+            if not pump.alive:
+                return
+
+        db.expire_all()
+        current = DurableRunRepository(db).get_run(run.id)
+        if current is None or str(current.status) in {
+            STATUS_WAITING_APPROVAL,
+            "waiting_input",
+        }:
+            return
+        if result.status == "completed":
+            if self.finalize_memory:
+                self._enter_and_finalize_memory(
+                    db,
+                    run_id=run.id,
+                    lease=claimed.lease,
+                    expected_revision=int(current.state_revision),
+                    final_text=result.final_text or "",
+                    heartbeat=heartbeat,
+                )
+            return
+        if result.status == "cancelled":
+            _RunCancelProbe(
+                lambda: db, run_id=run.id, lease=claimed.lease
+            ).try_finalize()
+            return
+        raise DurableRunConflict(
+            "main_agent_runtime_failed",
+            f"enforced Main Agent runtime failed: {result.reason_code or 'unknown'}",
+        )
 
     def _resolve_user_text(self, db: Any, run: Any) -> str:
         if self.user_text_resolver is not None:
@@ -819,7 +904,24 @@ class MainAgentRunExecutor:
                 "provider_resume_transcript_rewrite",
                 "Provider resume rewrote the persisted transcript prefix",
             )
-        suffix = tuple(result.messages[len(messages) :])
+        # A local transactional CapabilityCall may have atomically persisted
+        # its Tool Result and v3 Checkpoint inside the Provider Loop. Re-read
+        # the durable prefix so the outer completion checkpoint appends only
+        # messages that remain uncommitted.
+        persisted_messages, _persisted_digest = reconstruct_provider_transcript(
+            db,
+            run_id=claimed.run_id,
+        )
+        if tuple(result.messages[: len(persisted_messages)]) != tuple(
+            persisted_messages
+        ):
+            raise DurableRunConflict(
+                "provider_resume_transcript_rewrite",
+                "Provider resume rewrote the post-capability durable prefix",
+            )
+        db.refresh(run)
+        expected_revision = int(run.state_revision)
+        suffix = tuple(result.messages[len(persisted_messages) :])
         final_manifest = getattr(result, "manifest", None) or runtime.manifest
         final_policy = runtime.policy_snapshot
         final_budget = runtime.budget_ledger.snapshot()
