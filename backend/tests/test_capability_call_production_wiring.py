@@ -45,8 +45,13 @@ class _RecordingAggregate:
     def commit_pause(self, continuation: Any, provider_messages: Any = ()) -> None:
         del continuation, provider_messages
 
-    def commit_progress(self, provider_messages: Any = ()) -> None:
+    def commit_progress(self, provider_messages: Any = (), **_kwargs: Any) -> None:
         del provider_messages
+
+    def commit_recovery_drift(
+        self, provider_messages: Any, *, stale_call_id: str
+    ) -> None:
+        del provider_messages, stale_call_id
 
     def execute_local(self, outcome: Any, request: Any) -> Any:
         del outcome, request

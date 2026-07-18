@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-from typing import Any
+from typing import Any, Callable, Mapping
 from uuid import UUID, NAMESPACE_URL, uuid4, uuid5
 
 from sqlalchemy.orm import Session
@@ -23,11 +23,15 @@ from app.assistant.capability_calls.result_codec import (
 from app.assistant.domain.digests import canonical_json_bytes, sha256_bytes
 from app.assistant.durable.models import (
     AssistantRunArtifact,
+    AssistantRunBudgetRevision,
     AssistantRunCheckpoint,
     AssistantRunInterrupt,
     AssistantRunManifestRevision,
+    AssistantRunObligationRevision,
+    AssistantRunPolicyRevision,
 )
 from app.assistant.durable.repository import (
+    STATUS_FAILED,
     STATUS_WAITING_APPROVAL,
     DurableChildBundle,
     DurableRunRepository,
@@ -74,11 +78,143 @@ class DurableCapabilityLedgerAggregate:
     authorization_factory: Any
     idempotency_secret: str | bytes
     lease: LeaseToken | None = None
+    runtime_snapshot_provider: Callable[[], Mapping[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         self.calls = CapabilityCallRepository(self.db)
         self._pending_pause: dict[str, Any] | None = None
         self._pending_result: dict[str, Any] | None = None
+
+    def _stage_runtime_snapshot(
+        self, run: Any, *, manifest_override: Any | None = None
+    ) -> tuple[list[Any], UUID, UUID, UUID, UUID]:
+        """Stage changed live runtime revisions for the enclosing semantic CAS."""
+        pointer_ids = (
+            run.current_manifest_revision_id,
+            run.current_policy_revision_id,
+            run.current_budget_revision_id,
+            run.current_obligation_revision_id,
+        )
+        if not all(pointer_ids):
+            raise CapabilityCallConflict(
+                "runtime_snapshot_missing", "Run runtime revision pointers are incomplete"
+            )
+        if self.runtime_snapshot_provider is None:
+            return [], *pointer_ids
+
+        snapshot = self.runtime_snapshot_provider()
+        required = {"manifest", "policy", "budget", "obligation"}
+        if not isinstance(snapshot, Mapping) or set(snapshot) != required:
+            raise CapabilityCallConflict(
+                "runtime_snapshot_invalid", "live runtime snapshot is incomplete"
+            )
+        manifest = manifest_override or snapshot["manifest"]
+        policy = snapshot["policy"]
+        budget = snapshot["budget"]
+        obligation = snapshot["obligation"]
+        if getattr(manifest, "run_id", None) != run.id:
+            raise CapabilityCallConflict(
+                "runtime_snapshot_run_mismatch", "live Manifest belongs to another Run"
+            )
+
+        rows: list[Any] = []
+
+        def _next_revision(model: Any) -> int:
+            value = (
+                self.db.query(model.revision)
+                .filter(model.run_id == run.id)
+                .order_by(model.revision.desc())
+                .limit(1)
+                .scalar()
+            )
+            return int(value or 0) + 1
+
+        current_manifest = self.db.get(
+            AssistantRunManifestRevision, run.current_manifest_revision_id
+        )
+        current_policy = self.db.get(
+            AssistantRunPolicyRevision, run.current_policy_revision_id
+        )
+        current_budget = self.db.get(
+            AssistantRunBudgetRevision, run.current_budget_revision_id
+        )
+        current_obligation = self.db.get(
+            AssistantRunObligationRevision, run.current_obligation_revision_id
+        )
+        if any(
+            row is None
+            for row in (
+                current_manifest,
+                current_policy,
+                current_budget,
+                current_obligation,
+            )
+        ):
+            raise CapabilityCallConflict(
+                "runtime_snapshot_missing", "current runtime revision row is missing"
+            )
+
+        manifest_id = current_manifest.id
+        if manifest.manifest_digest != current_manifest.manifest_digest:
+            row = AssistantRunManifestRevision(
+                id=uuid4(),
+                run_id=run.id,
+                revision=_next_revision(AssistantRunManifestRevision),
+                parent_revision_id=current_manifest.id,
+                parent_digest=current_manifest.manifest_digest,
+                manifest_digest=manifest.manifest_digest,
+                schema_version=1,
+                payload=manifest.model_dump(mode="json", by_alias=True),
+            )
+            rows.append(row)
+            manifest_id = row.id
+
+        policy_id = current_policy.id
+        if policy.effective_policy_digest != current_policy.policy_digest:
+            row = AssistantRunPolicyRevision(
+                id=uuid4(),
+                run_id=run.id,
+                revision=_next_revision(AssistantRunPolicyRevision),
+                parent_revision_id=current_policy.id,
+                parent_digest=current_policy.policy_digest,
+                policy_digest=policy.effective_policy_digest,
+                payload=policy.model_dump(mode="json", by_alias=True),
+            )
+            rows.append(row)
+            policy_id = row.id
+
+        budget_id = current_budget.id
+        if budget.ledger_digest != current_budget.budget_digest:
+            row = AssistantRunBudgetRevision(
+                id=uuid4(),
+                run_id=run.id,
+                revision=_next_revision(AssistantRunBudgetRevision),
+                parent_revision_id=current_budget.id,
+                parent_digest=current_budget.budget_digest,
+                budget_digest=budget.ledger_digest,
+                payload=budget.model_dump(mode="json", by_alias=True),
+            )
+            rows.append(row)
+            budget_id = row.id
+
+        obligation_id = current_obligation.id
+        if obligation.ledger_digest != current_obligation.obligation_digest:
+            row = AssistantRunObligationRevision(
+                id=uuid4(),
+                run_id=run.id,
+                revision=_next_revision(AssistantRunObligationRevision),
+                parent_revision_id=current_obligation.id,
+                parent_digest=current_obligation.obligation_digest,
+                obligation_digest=obligation.ledger_digest,
+                payload=obligation.model_dump(mode="json", by_alias=True),
+            )
+            rows.append(row)
+            obligation_id = row.id
+
+        if rows:
+            self.db.add_all(rows)
+            self.db.flush()
+        return rows, manifest_id, policy_id, budget_id, obligation_id
 
     def _manifest_row(self, request: Any) -> AssistantRunManifestRevision:
         row = (
@@ -95,6 +231,117 @@ class DurableCapabilityLedgerAggregate:
                 "manifest_revision_missing", "frozen manifest revision is not durable"
             )
         return row
+
+    def _commit_attempt_started(self, *, run: Any, call: Any, attempt: Any) -> None:
+        """Persist the live reservation snapshot with the external-I/O fence."""
+        from app.assistant.durable.codec import (
+            checkpoint_state_digest,
+            decode_checkpoint,
+            encode_checkpoint_v3,
+        )
+        from app.assistant.durable.contracts import DurableCapabilityCallStateV1
+        from app.assistant.durable.checkpoints import _next_checkpoint_sequence  # noqa: SLF001
+
+        if self.lease is None or run.current_checkpoint_id is None:
+            raise CapabilityCallConflict(
+                "attempt_start_checkpoint_missing",
+                "external dispatch requires a reserved v3 checkpoint",
+            )
+        current_row = self.db.get(AssistantRunCheckpoint, run.current_checkpoint_id)
+        if current_row is None:
+            raise CapabilityCallConflict(
+                "attempt_start_checkpoint_missing", "reserved checkpoint is missing"
+            )
+        current = decode_checkpoint(current_row.state_payload)
+        if int(getattr(current, "schema_version", 0)) != 3:
+            raise CapabilityCallConflict(
+                "attempt_start_checkpoint_invalid",
+                "external dispatch requires checkpoint schema v3",
+            )
+        replaced = False
+        states = []
+        for state in current.capability_calls:
+            if state.call_id == call.id:
+                states.append(
+                    DurableCapabilityCallStateV1(
+                        call_id=state.call_id,
+                        logical_call_key=state.logical_call_key,
+                        provider_tool_call_id=state.provider_tool_call_id,
+                        provider_order=state.provider_order,
+                        status="executing",
+                        attempt_id=attempt.id,
+                        output_artifact_id=state.output_artifact_id,
+                        interrupt_id=state.interrupt_id,
+                        approval_binding_digest=state.approval_binding_digest,
+                        result_message_digest=state.result_message_digest,
+                    )
+                )
+                replaced = True
+            else:
+                states.append(state)
+        if not replaced:
+            raise CapabilityCallConflict(
+                "attempt_start_call_missing",
+                "reserved checkpoint does not contain the dispatch call",
+            )
+        (
+            runtime_rows,
+            manifest_revision_id,
+            policy_revision_id,
+            budget_revision_id,
+            obligation_revision_id,
+        ) = self._stage_runtime_snapshot(run)
+        expected_revision = int(run.state_revision)
+        checkpoint = current.model_copy(
+            update={
+                "manifest_revision_id": manifest_revision_id,
+                "policy_revision_id": policy_revision_id,
+                "budget_revision_id": budget_revision_id,
+                "obligation_revision_id": obligation_revision_id,
+                "capability_calls": tuple(states),
+            }
+        )
+        checkpoint_id = uuid4()
+        checkpoint_row = AssistantRunCheckpoint(
+            id=checkpoint_id,
+            run_id=run.id,
+            sequence=_next_checkpoint_sequence(self.db, run.id),
+            expected_state_revision=expected_revision,
+            committed_state_revision=expected_revision + 1,
+            schema_version=3,
+            manifest_revision_id=manifest_revision_id,
+            policy_revision_id=policy_revision_id,
+            budget_revision_id=budget_revision_id,
+            obligation_revision_id=obligation_revision_id,
+            provider_message_ordinal=current.provider_message_ordinal,
+            provider_transcript_digest=current.provider_transcript_digest,
+            phase=current.phase,
+            logical_unit_id=str(call.logical_call_key),
+            reason="capability_attempt_started",
+            state_payload=encode_checkpoint_v3(checkpoint),
+            state_digest=checkpoint_state_digest(checkpoint),
+        )
+        DurableRunRepository(self.db).commit_semantic(
+            run_id=run.id,
+            expected_revision=expected_revision,
+            lease=self.lease,
+            events=(
+                EventSpec(
+                    event_key=f"capability_call.started:{call.id}:rev{expected_revision}",
+                    event_name="capability_call.started",
+                    payload={"callId": str(call.id), "attemptId": str(attempt.id)},
+                    visibility="internal",
+                ),
+            ),
+            children=DurableChildBundle(
+                rows=[*runtime_rows, checkpoint_row],
+                current_checkpoint_id=checkpoint_id,
+                current_manifest_revision_id=manifest_revision_id,
+                current_policy_revision_id=policy_revision_id,
+                current_budget_revision_id=budget_revision_id,
+                current_obligation_revision_id=obligation_revision_id,
+            ),
+        )
 
     def _input_artifact(self, request: Any) -> AssistantRunArtifact:
         payload = canonical_json_bytes(dict(request.call.arguments))  # type: ignore[arg-type]
@@ -289,6 +536,14 @@ class DurableCapabilityLedgerAggregate:
                 self.db.rollback()
                 return
 
+            (
+                runtime_rows,
+                manifest_revision_id,
+                policy_revision_id,
+                budget_revision_id,
+                obligation_revision_id,
+            ) = self._stage_runtime_snapshot(run)
+
             provider_order: dict[str, int] = {}
             next_order = 0
             for message in transcript:
@@ -359,9 +614,9 @@ class DurableCapabilityLedgerAggregate:
                 run_id=run.id,
                 messages=suffix,
                 start_ordinal=start_ordinal,
-                manifest_revision_id=run.current_manifest_revision_id,
-                policy_revision_id=run.current_policy_revision_id,
-                obligation_revision_id=run.current_obligation_revision_id,
+                manifest_revision_id=manifest_revision_id,
+                policy_revision_id=policy_revision_id,
+                obligation_revision_id=obligation_revision_id,
             )
             final_ordinal = start_ordinal + len(suffix) - 1 if suffix else ordinal
             transcript_digest = digest_provider_transcript(transcript)
@@ -369,10 +624,10 @@ class DurableCapabilityLedgerAggregate:
             checkpoint = DurableAgentCheckpointV3(
                 run_id=run.id,
                 phase="ready_for_provider",
-                manifest_revision_id=run.current_manifest_revision_id,
-                policy_revision_id=run.current_policy_revision_id,
-                budget_revision_id=run.current_budget_revision_id,
-                obligation_revision_id=run.current_obligation_revision_id,
+                manifest_revision_id=manifest_revision_id,
+                policy_revision_id=policy_revision_id,
+                budget_revision_id=budget_revision_id,
+                obligation_revision_id=obligation_revision_id,
                 provider_message_ordinal=final_ordinal,
                 provider_transcript_digest=transcript_digest,
                 provider_loop_continuation=None,
@@ -398,10 +653,10 @@ class DurableCapabilityLedgerAggregate:
                 expected_state_revision=expected_run_revision,
                 committed_state_revision=expected_run_revision + 1,
                 schema_version=3,
-                manifest_revision_id=run.current_manifest_revision_id,
-                policy_revision_id=run.current_policy_revision_id,
-                budget_revision_id=run.current_budget_revision_id,
-                obligation_revision_id=run.current_obligation_revision_id,
+                manifest_revision_id=manifest_revision_id,
+                policy_revision_id=policy_revision_id,
+                budget_revision_id=budget_revision_id,
+                obligation_revision_id=obligation_revision_id,
                 provider_message_ordinal=final_ordinal,
                 provider_transcript_digest=transcript_digest,
                 phase="ready_for_provider",
@@ -428,12 +683,17 @@ class DurableCapabilityLedgerAggregate:
                     ),
                 ),
                 children=DurableChildBundle(
-                    rows=[*reserved_artifacts, *provider_rows, checkpoint_row],
+                    rows=[
+                        *reserved_artifacts,
+                        *runtime_rows,
+                        *provider_rows,
+                        checkpoint_row,
+                    ],
                     current_checkpoint_id=checkpoint_id,
-                    current_manifest_revision_id=run.current_manifest_revision_id,
-                    current_policy_revision_id=run.current_policy_revision_id,
-                    current_budget_revision_id=run.current_budget_revision_id,
-                    current_obligation_revision_id=run.current_obligation_revision_id,
+                    current_manifest_revision_id=manifest_revision_id,
+                    current_policy_revision_id=policy_revision_id,
+                    current_budget_revision_id=budget_revision_id,
+                    current_obligation_revision_id=obligation_revision_id,
                 ),
             )
         except Exception:
@@ -690,7 +950,7 @@ class DurableCapabilityLedgerAggregate:
                 "only the frozen golden create_entry binding may execute locally",
             )
         if not local_dispatch:
-            self.db.commit()
+            self._commit_attempt_started(run=run, call=call, attempt=attempt)
         return LedgerPrepareOutcome(
             kind="dispatch_local" if local_dispatch else "dispatch",
             call_id=call.id,
@@ -894,6 +1154,14 @@ class DurableCapabilityLedgerAggregate:
                 digest_provider_transcript,
             )
 
+            (
+                runtime_rows,
+                manifest_revision_id,
+                policy_revision_id,
+                budget_revision_id,
+                obligation_revision_id,
+            ) = self._stage_runtime_snapshot(run)
+
             ordinal, _old_digest, prior_messages = _current_transcript_digest(
                 self.db, run.id
             )
@@ -902,9 +1170,9 @@ class DurableCapabilityLedgerAggregate:
                 run_id=run.id,
                 messages=messages,
                 start_ordinal=start_ordinal,
-                manifest_revision_id=run.current_manifest_revision_id,
-                policy_revision_id=run.current_policy_revision_id,
-                obligation_revision_id=run.current_obligation_revision_id,
+                manifest_revision_id=manifest_revision_id,
+                policy_revision_id=policy_revision_id,
+                obligation_revision_id=obligation_revision_id,
             )
             transcript = prior_messages + messages
             transcript_digest = digest_provider_transcript(transcript)
@@ -997,10 +1265,10 @@ class DurableCapabilityLedgerAggregate:
             checkpoint = DurableAgentCheckpointV3(
                 run_id=run.id,
                 phase="waiting",
-                manifest_revision_id=run.current_manifest_revision_id,
-                policy_revision_id=run.current_policy_revision_id,
-                budget_revision_id=run.current_budget_revision_id,
-                obligation_revision_id=run.current_obligation_revision_id,
+                manifest_revision_id=manifest_revision_id,
+                policy_revision_id=policy_revision_id,
+                budget_revision_id=budget_revision_id,
+                obligation_revision_id=obligation_revision_id,
                 provider_message_ordinal=final_ordinal,
                 provider_transcript_digest=transcript_digest,
                 provider_loop_continuation=continuation,
@@ -1019,10 +1287,10 @@ class DurableCapabilityLedgerAggregate:
                 expected_state_revision=expected_revision,
                 committed_state_revision=expected_revision + 1,
                 schema_version=3,
-                manifest_revision_id=run.current_manifest_revision_id,
-                policy_revision_id=run.current_policy_revision_id,
-                budget_revision_id=run.current_budget_revision_id,
-                obligation_revision_id=run.current_obligation_revision_id,
+                manifest_revision_id=manifest_revision_id,
+                policy_revision_id=policy_revision_id,
+                budget_revision_id=budget_revision_id,
+                obligation_revision_id=obligation_revision_id,
                 provider_message_ordinal=final_ordinal,
                 provider_transcript_digest=transcript_digest,
                 phase="waiting",
@@ -1039,16 +1307,20 @@ class DurableCapabilityLedgerAggregate:
             )
             from app.assistant.workflow.durable.pause import resolve_parent_budget_ledger
 
-            parent_ledger, parent_budget_id = resolve_parent_budget_ledger(
-                self.db, run=run
-            )
+            if self.runtime_snapshot_provider is None:
+                parent_ledger, parent_budget_id = resolve_parent_budget_ledger(
+                    self.db, run=run
+                )
+            else:
+                parent_ledger = self.runtime_snapshot_provider()["budget"]
+                parent_budget_id = budget_revision_id
             created = DurableInterruptRepository(self.db).create_pending_interrupt(
                 run_id=run.id,
                 interrupt_id=interrupt_id,
                 interrupt_key=f"capability:{call.id}",
                 kind="approval",
                 checkpoint_id=checkpoint_id,
-                manifest_revision_id=run.current_manifest_revision_id,
+                manifest_revision_id=manifest_revision_id,
                 budget_revision_id=parent_budget_id,
                 capability_call_id=call.id,
                 interrupt_origin="capability_call",
@@ -1077,12 +1349,18 @@ class DurableCapabilityLedgerAggregate:
 
             maybe_crash(CrashPoint.AFTER_INTERRUPT_INSERT_BEFORE_OUTER_POINTER_CAS)
             bundle = DurableChildBundle(
-                rows=[input_artifact, approval_artifact, *provider_rows, checkpoint_row],
+                rows=[
+                    input_artifact,
+                    approval_artifact,
+                    *runtime_rows,
+                    *provider_rows,
+                    checkpoint_row,
+                ],
                 current_checkpoint_id=checkpoint_id,
-                current_manifest_revision_id=run.current_manifest_revision_id,
-                current_policy_revision_id=run.current_policy_revision_id,
-                current_budget_revision_id=run.current_budget_revision_id,
-                current_obligation_revision_id=run.current_obligation_revision_id,
+                current_manifest_revision_id=manifest_revision_id,
+                current_policy_revision_id=policy_revision_id,
+                current_budget_revision_id=budget_revision_id,
+                current_obligation_revision_id=obligation_revision_id,
             )
             repo.commit_waiting_pause(
                 run_id=run.id,
@@ -1179,7 +1457,12 @@ class DurableCapabilityLedgerAggregate:
         }
         return result
 
-    def commit_progress(self, provider_messages: Any = ()) -> None:
+    def commit_progress(
+        self,
+        provider_messages: Any = (),
+        *,
+        current_manifest: Any | None = None,
+    ) -> None:
         """Pair a staged result with its Tool message, Checkpoint, and Run CAS."""
         pending = self._pending_result
         if pending is None:
@@ -1287,14 +1570,24 @@ class DurableCapabilityLedgerAggregate:
                     "Tool Result has no preceding Provider Tool Call",
                 )
 
+            (
+                runtime_rows,
+                manifest_revision_id,
+                policy_revision_id,
+                budget_revision_id,
+                obligation_revision_id,
+            ) = self._stage_runtime_snapshot(
+                run, manifest_override=current_manifest
+            )
+
             start_ordinal = 1 if ordinal == 0 else ordinal + 1
             provider_rows = _build_provider_message_rows(
                 run_id=run.id,
                 messages=suffix,
                 start_ordinal=start_ordinal,
-                manifest_revision_id=run.current_manifest_revision_id,
-                policy_revision_id=run.current_policy_revision_id,
-                obligation_revision_id=run.current_obligation_revision_id,
+                manifest_revision_id=manifest_revision_id,
+                policy_revision_id=policy_revision_id,
+                obligation_revision_id=obligation_revision_id,
             )
             transcript_digest = digest_provider_transcript(transcript)
             final_ordinal = start_ordinal + len(suffix) - 1 if suffix else ordinal
@@ -1362,14 +1655,29 @@ class DurableCapabilityLedgerAggregate:
                     if value is not None
                 )
             )
+            has_unfinished_siblings = any(
+                str(item.status)
+                not in {
+                    "succeeded",
+                    "failed",
+                    "denied",
+                    "rejected",
+                    "cancelled",
+                    "expired",
+                    "compensated",
+                    "unknown",
+                    "needs_reconciliation",
+                }
+                for item in call_rows
+            )
             checkpoint_id = uuid4()
             checkpoint = DurableAgentCheckpointV3(
                 run_id=run.id,
                 phase="ready_for_provider",
-                manifest_revision_id=run.current_manifest_revision_id,
-                policy_revision_id=run.current_policy_revision_id,
-                budget_revision_id=run.current_budget_revision_id,
-                obligation_revision_id=run.current_obligation_revision_id,
+                manifest_revision_id=manifest_revision_id,
+                policy_revision_id=policy_revision_id,
+                budget_revision_id=budget_revision_id,
+                obligation_revision_id=obligation_revision_id,
                 provider_message_ordinal=final_ordinal,
                 provider_transcript_digest=transcript_digest,
                 provider_loop_continuation=None,
@@ -1377,7 +1685,13 @@ class DurableCapabilityLedgerAggregate:
                 capability_frames=(),
                 artifact_ids=artifact_ids,
                 visible_text_artifact_id=None,
-                next_action=DurableNextActionV2(kind="continue_provider"),
+                next_action=DurableNextActionV2(
+                    kind=(
+                        "dispatch_calls"
+                        if has_unfinished_siblings
+                        else "continue_provider"
+                    )
+                ),
                 policy_contract_version=2,
                 capability_calls=tuple(call_states),
             )
@@ -1388,10 +1702,10 @@ class DurableCapabilityLedgerAggregate:
                 expected_state_revision=expected_revision,
                 committed_state_revision=expected_revision + 1,
                 schema_version=3,
-                manifest_revision_id=run.current_manifest_revision_id,
-                policy_revision_id=run.current_policy_revision_id,
-                budget_revision_id=run.current_budget_revision_id,
-                obligation_revision_id=run.current_obligation_revision_id,
+                manifest_revision_id=manifest_revision_id,
+                policy_revision_id=policy_revision_id,
+                budget_revision_id=budget_revision_id,
+                obligation_revision_id=obligation_revision_id,
                 provider_message_ordinal=final_ordinal,
                 provider_transcript_digest=transcript_digest,
                 phase="ready_for_provider",
@@ -1401,12 +1715,17 @@ class DurableCapabilityLedgerAggregate:
                 state_digest=checkpoint_state_digest(checkpoint),
             )
             bundle = DurableChildBundle(
-                rows=[pending["artifact"], *provider_rows, checkpoint_row],
+                rows=[
+                    pending["artifact"],
+                    *runtime_rows,
+                    *provider_rows,
+                    checkpoint_row,
+                ],
                 current_checkpoint_id=checkpoint_id,
-                current_manifest_revision_id=run.current_manifest_revision_id,
-                current_policy_revision_id=run.current_policy_revision_id,
-                current_budget_revision_id=run.current_budget_revision_id,
-                current_obligation_revision_id=run.current_obligation_revision_id,
+                current_manifest_revision_id=manifest_revision_id,
+                current_policy_revision_id=policy_revision_id,
+                current_budget_revision_id=budget_revision_id,
+                current_obligation_revision_id=obligation_revision_id,
             )
             run_repo.commit_semantic(
                 run_id=run.id,
@@ -1464,6 +1783,191 @@ class DurableCapabilityLedgerAggregate:
             failure_code=reason_code,
         )
         self.db.commit()
+
+    def commit_recovery_drift(
+        self, provider_messages: Any, *, stale_call_id: str
+    ) -> None:
+        """Durably seal an unstarted reserved suffix and fail the Run once."""
+        from app.assistant.capability_calls.models import AssistantCapabilityCall
+        from app.assistant.durable.checkpoints import (
+            _build_provider_message_rows,  # noqa: SLF001
+            _current_transcript_digest,  # noqa: SLF001
+            _next_checkpoint_sequence,  # noqa: SLF001
+        )
+        from app.assistant.durable.codec import (
+            checkpoint_state_digest,
+            decode_checkpoint,
+            encode_checkpoint_v3,
+        )
+        from app.assistant.durable.contracts import (
+            DurableCapabilityCallStateV1,
+            DurableNextActionV2,
+        )
+        from app.assistant.provider_loop.messages import (
+            ProviderAssistantMessage,
+            ProviderToolMessage,
+            digest_provider_message,
+            digest_provider_transcript,
+        )
+
+        if self.lease is None:
+            raise CapabilityCallConflict(
+                "ledger_lease_required", "recovery drift settlement requires a lease"
+            )
+        run = self.calls.get_run(self.lease.run_id, for_update=True)
+        expected_revision = int(run.state_revision)
+        ordinal, _digest, prior = _current_transcript_digest(self.db, run.id)
+        supplied = tuple(provider_messages or ())
+        if len(supplied) < len(prior) or supplied[: len(prior)] != prior:
+            raise CapabilityCallConflict(
+                "recovery_drift_transcript_mismatch",
+                "drift settlement does not preserve the durable transcript",
+            )
+        suffix = supplied[len(prior) :]
+        if not suffix or any(not isinstance(item, ProviderToolMessage) for item in suffix):
+            raise CapabilityCallConflict(
+                "recovery_drift_transcript_invalid",
+                "drift settlement requires only new Tool Results",
+            )
+        by_tool_id = {
+            str(row.provider_tool_call_id): row
+            for row in self.db.query(AssistantCapabilityCall)
+            .filter(AssistantCapabilityCall.run_id == run.id)
+            .all()
+            if row.provider_tool_call_id is not None
+        }
+        for message in suffix:
+            call = by_tool_id.get(message.call_id)
+            if call is None or str(call.status) != "proposed":
+                raise CapabilityCallConflict(
+                    "recovery_drift_call_invalid",
+                    "drift settlement call is missing or already started",
+                )
+            target = "denied" if message.call_id == stale_call_id else "cancelled"
+            self.calls.transition_call(
+                call_id=call.id,
+                expected_call_revision=int(call.state_revision),
+                expected_run_revision=expected_revision,
+                to_status=target,
+                lease=self.lease,
+                failure_code="classification_changed",
+            )
+
+        current_row = self.db.get(AssistantRunCheckpoint, run.current_checkpoint_id)
+        current = decode_checkpoint(current_row.state_payload) if current_row else None
+        if current is None or int(getattr(current, "schema_version", 0)) != 3:
+            raise CapabilityCallConflict(
+                "recovery_drift_checkpoint_invalid",
+                "drift settlement requires checkpoint schema v3",
+            )
+        (
+            runtime_rows,
+            manifest_revision_id,
+            policy_revision_id,
+            budget_revision_id,
+            obligation_revision_id,
+        ) = self._stage_runtime_snapshot(run)
+        start_ordinal = 1 if ordinal == 0 else ordinal + 1
+        provider_rows = _build_provider_message_rows(
+            run_id=run.id,
+            messages=suffix,
+            start_ordinal=start_ordinal,
+            manifest_revision_id=manifest_revision_id,
+            policy_revision_id=policy_revision_id,
+            obligation_revision_id=obligation_revision_id,
+        )
+        provider_order: dict[str, int] = {}
+        next_order = 0
+        for message in supplied:
+            if isinstance(message, ProviderAssistantMessage):
+                for tool_call in message.tool_calls:
+                    if tool_call.call_id not in provider_order:
+                        provider_order[tool_call.call_id] = next_order
+                        next_order += 1
+        result_digests = {
+            item.call_id: digest_provider_message(item)
+            for item in supplied
+            if isinstance(item, ProviderToolMessage)
+        }
+        call_states = tuple(
+            DurableCapabilityCallStateV1(
+                call_id=row.id,
+                logical_call_key=str(row.logical_call_key),
+                provider_tool_call_id=str(row.provider_tool_call_id),
+                provider_order=provider_order[str(row.provider_tool_call_id)],
+                status=str(row.status),
+                attempt_id=None,
+                output_artifact_id=row.output_artifact_id,
+                interrupt_id=row.interrupt_id,
+                approval_binding_digest=row.approval_binding_digest,
+                result_message_digest=result_digests.get(
+                    str(row.provider_tool_call_id)
+                ),
+            )
+            for row in sorted(
+                by_tool_id.values(),
+                key=lambda item: provider_order[str(item.provider_tool_call_id)],
+            )
+        )
+        transcript_digest = digest_provider_transcript(supplied)
+        final_ordinal = start_ordinal + len(suffix) - 1
+        checkpoint = current.model_copy(
+            update={
+                "phase": "terminal",
+                "manifest_revision_id": manifest_revision_id,
+                "policy_revision_id": policy_revision_id,
+                "budget_revision_id": budget_revision_id,
+                "obligation_revision_id": obligation_revision_id,
+                "provider_message_ordinal": final_ordinal,
+                "provider_transcript_digest": transcript_digest,
+                "next_action": DurableNextActionV2(kind="terminal"),
+                "capability_calls": call_states,
+            }
+        )
+        checkpoint_id = uuid4()
+        checkpoint_row = AssistantRunCheckpoint(
+            id=checkpoint_id,
+            run_id=run.id,
+            sequence=_next_checkpoint_sequence(self.db, run.id),
+            expected_state_revision=expected_revision,
+            committed_state_revision=expected_revision + 1,
+            schema_version=3,
+            manifest_revision_id=manifest_revision_id,
+            policy_revision_id=policy_revision_id,
+            budget_revision_id=budget_revision_id,
+            obligation_revision_id=obligation_revision_id,
+            provider_message_ordinal=final_ordinal,
+            provider_transcript_digest=transcript_digest,
+            phase="terminal",
+            logical_unit_id=f"recovery-drift:{stale_call_id}",
+            reason="classification_changed",
+            state_payload=encode_checkpoint_v3(checkpoint),
+            state_digest=checkpoint_state_digest(checkpoint),
+        )
+        DurableRunRepository(self.db).commit_running_result(
+            run_id=run.id,
+            expected_revision=expected_revision,
+            lease=self.lease,
+            target_status=STATUS_FAILED,
+            failure_code="classification_changed",
+            error_message="capability classification changed before recovery dispatch",
+            events=(
+                EventSpec(
+                    event_key=f"capability_call.recovery_drift:{stale_call_id}:rev{expected_revision}",
+                    event_name="capability_call.recovery_drift",
+                    payload={"staleCallId": stale_call_id},
+                    visibility="internal",
+                ),
+            ),
+            children=DurableChildBundle(
+                rows=[*runtime_rows, *provider_rows, checkpoint_row],
+                current_checkpoint_id=checkpoint_id,
+                current_manifest_revision_id=manifest_revision_id,
+                current_policy_revision_id=policy_revision_id,
+                current_budget_revision_id=budget_revision_id,
+                current_obligation_revision_id=obligation_revision_id,
+            ),
+        )
 
 
 __all__ = ["DurableCapabilityLedgerAggregate"]

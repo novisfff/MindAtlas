@@ -86,6 +86,7 @@ def test_durable_aggregate_replays_success_without_redispatch() -> None:
 
     from tests._db import make_session
     from tests.test_capability_call_repository import _make_main_agent_run
+    from app.assistant.capabilities.contracts import CapabilityError
     from app.assistant.capability_calls.aggregate import DurableCapabilityLedgerAggregate
     from app.assistant.durable.models import (
         AssistantRunBudgetRevision,
@@ -94,12 +95,17 @@ def test_durable_aggregate_replays_success_without_redispatch() -> None:
         AssistantRunPolicyRevision,
     )
     from app.assistant.durable.repository import LeaseToken
-    from app.assistant.policy import create_initial_ledger_state, normalize_run_budget_limits
+    from app.assistant.policy import (
+        create_initial_ledger_state,
+        normalize_run_budget_limits,
+    )
+    from app.assistant.policy.budgets import pure_start_provider_round
     from app.assistant.policy.contracts import build_authorization_decision_v2
     from app.assistant.provider_loop.messages import (
         ProviderAssistantMessage,
         ProviderToolCall,
         ProviderToolMessage,
+        ProviderToolResultEnvelope,
         ProviderUserMessage,
         digest_arguments,
         project_tool_result_envelope,
@@ -130,6 +136,13 @@ def test_durable_aggregate_replays_success_without_redispatch() -> None:
             started_at_utc=started,
             deadline_at_utc=started + timedelta(minutes=2),
         )
+        live_ledger, round_decision = pure_start_provider_round(
+            ledger,
+            cancelled=False,
+            mono_now_ms=0,
+            mono_deadline_ms=1,
+        )
+        assert round_decision.allowed is True
         policy = AssistantRunPolicyRevision(
             run_id=run.id,
             revision=1,
@@ -201,6 +214,28 @@ def test_durable_aggregate_replays_success_without_redispatch() -> None:
                 )
             ),
         )
+        sibling_request = SimpleNamespace(**vars(request))
+        sibling_request.call = SimpleNamespace(
+            call_id="durable-read-2",
+            domain_key="search_entries",
+            arguments={"q": "y"},
+        )
+        runtime_snapshot = {
+            "manifest": SimpleNamespace(
+                run_id=run.id,
+                manifest_digest=manifest.manifest_digest,
+                model_dump=lambda **_kwargs: {},
+            ),
+            "policy": SimpleNamespace(
+                effective_policy_digest=policy.policy_digest,
+                model_dump=lambda **_kwargs: {},
+            ),
+            "budget": live_ledger,
+            "obligation": SimpleNamespace(
+                ledger_digest=obligation.obligation_digest,
+                model_dump=lambda **_kwargs: {},
+            ),
+        }
         aggregate = DurableCapabilityLedgerAggregate(
             db=db,
             authorization_factory=factory,
@@ -208,6 +243,7 @@ def test_durable_aggregate_replays_success_without_redispatch() -> None:
             lease=LeaseToken(
                 run_id=run.id, worker_id="worker-1", lease_generation=1
             ),
+            runtime_snapshot_provider=lambda: runtime_snapshot,
         )
         tool_call = ProviderToolCall(
             call_id="durable-read-1",
@@ -225,11 +261,28 @@ def test_durable_aggregate_replays_success_without_redispatch() -> None:
             manifest_digest="a" * 64,
             surface_digest="2" * 64,
         )
+        sibling_tool_call = tool_call.model_copy(
+            update={
+                "call_id": "durable-read-2",
+                "call_index": 1,
+                "arguments": {"q": "y"},
+                "arguments_digest": digest_arguments({"q": "y"}),
+            }
+        )
         base_messages = (
             ProviderUserMessage(content="search"),
-            ProviderAssistantMessage(content=None, tool_calls=(tool_call,)),
+            ProviderAssistantMessage(
+                content=None, tool_calls=(tool_call, sibling_tool_call)
+            ),
         )
-        aggregate.reserve_siblings((request,), base_messages)
+        aggregate.reserve_siblings((request, sibling_request), base_messages)
+        db.refresh(run)
+        assert run.current_budget_revision_id != budget.id
+        persisted_live_budget = db.get(
+            AssistantRunBudgetRevision, run.current_budget_revision_id
+        )
+        assert persisted_live_budget.budget_digest == live_ledger.ledger_digest
+        assert persisted_live_budget.payload["providerRoundsStarted"] == 1
         from app.assistant.capability_calls.models import AssistantCapabilityCall
 
         reserved = (
@@ -249,28 +302,95 @@ def test_durable_aggregate_replays_success_without_redispatch() -> None:
         reserved_state = decode_checkpoint(reservation_checkpoint.state_payload)
         assert reserved_state.next_action.kind == "dispatch_calls"
         assert [item.provider_tool_call_id for item in reserved_state.capability_calls] == [
-            "durable-read-1"
+            "durable-read-1",
+            "durable-read-2",
         ]
-        assert reserved_state.capability_calls[0].status == "proposed"
+        assert {item.status for item in reserved_state.capability_calls} == {"proposed"}
         prepared = aggregate.prepare(request)
         assert prepared.kind == "dispatch"
+        db.refresh(run)
+        started_checkpoint = db.get(AssistantRunCheckpoint, run.current_checkpoint_id)
+        started_state = decode_checkpoint(started_checkpoint.state_payload)
+        assert started_checkpoint.reason == "capability_attempt_started"
+        assert started_state.capability_calls[0].status == "executing"
+        assert started_state.budget_revision_id == run.current_budget_revision_id
+        assert (
+            db.get(AssistantRunBudgetRevision, run.current_budget_revision_id).budget_digest
+            == live_ledger.ledger_digest
+        )
         result = _provider_result()
         aggregate.commit_result(prepared, result)
+        runtime_snapshot["manifest"] = SimpleNamespace(
+            run_id=run.id,
+            manifest_digest="9" * 64,
+            model_dump=lambda **_kwargs: {"accepted": True},
+        )
+        first_tool_message = ProviderToolMessage(
+            call_id=tool_call.call_id,
+            provider_alias=tool_call.provider_alias,
+            content=project_tool_result_envelope(
+                domain_key="search_entries",
+                result=result.capability_result,
+            ),
+        )
         aggregate.commit_progress(
             (
                 *base_messages,
-                ProviderToolMessage(
-                    call_id=tool_call.call_id,
-                    provider_alias=tool_call.provider_alias,
-                    content=project_tool_result_envelope(
-                        domain_key="search_entries",
-                        result=result.capability_result,
-                    ),
-                ),
+                first_tool_message,
             )
         )
+        db.refresh(run)
+        assert run.current_manifest_revision_id != manifest.id
+        persisted_manifest = db.get(
+            AssistantRunManifestRevision, run.current_manifest_revision_id
+        )
+        assert persisted_manifest.manifest_digest == "9" * 64
+        assert persisted_manifest.payload == {"accepted": True}
+        progress_checkpoint = db.get(AssistantRunCheckpoint, run.current_checkpoint_id)
+        progress_state = decode_checkpoint(progress_checkpoint.state_payload)
+        assert progress_state.next_action.kind == "dispatch_calls"
+        assert [item.status for item in progress_state.capability_calls] == [
+            "succeeded",
+            "proposed",
+        ]
         replay = aggregate.prepare(request)
         assert replay.kind == "replay"
         assert replay.provider_result == result
+        aggregate.commit_recovery_drift(
+            (
+                *base_messages,
+                first_tool_message,
+                ProviderToolMessage(
+                    call_id=sibling_tool_call.call_id,
+                    provider_alias=sibling_tool_call.provider_alias,
+                    content=ProviderToolResultEnvelope(
+                        status="blocked",
+                        domain_key=sibling_tool_call.domain_key,
+                        user_text=None,
+                        structured_output=None,
+                        terminal_output=False,
+                        needs_followup=False,
+                        error=CapabilityError(
+                            error_type="version_drift",
+                            safe_code="classification_changed",
+                            safe_message="classification changed",
+                            retry_disposition="never",
+                            call_id=sibling_tool_call.call_id,
+                        ),
+                    ),
+                ),
+            ),
+            stale_call_id=sibling_tool_call.call_id,
+        )
+        db.refresh(run)
+        assert run.status == "failed"
+        terminal_checkpoint = db.get(AssistantRunCheckpoint, run.current_checkpoint_id)
+        terminal_state = decode_checkpoint(terminal_checkpoint.state_payload)
+        assert terminal_state.phase == "terminal"
+        assert terminal_state.next_action.kind == "terminal"
+        assert [item.status for item in terminal_state.capability_calls] == [
+            "succeeded",
+            "denied",
+        ]
     finally:
         db.close()

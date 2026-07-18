@@ -1175,6 +1175,12 @@ def compose_main_agent_policy_runtime(
                 authorization_factory=auth_factory,
                 idempotency_secret=capability_ledger_idempotency_secret,
                 lease=capability_ledger_lease,
+                runtime_snapshot_provider=lambda: {
+                    "manifest": lifecycle.current_manifest or manifest,
+                    "policy": lifecycle.policy_snapshot or policy_snapshot,
+                    "budget": budget_ledger.snapshot(),
+                    "obligation": obligation_ledger.snapshot(),
+                },
             )
         if capability_ledger is None:
             raise RuntimeError(

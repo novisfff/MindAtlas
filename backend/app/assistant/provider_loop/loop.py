@@ -46,6 +46,7 @@ from app.assistant.provider_loop.contracts import (
     ProviderLoopContinuation,
     ProviderLoopPorts,
     ProviderLoopRequest,
+    ProviderLoopReservedResumeRequest,
     ProviderLoopResult,
     ProviderLoopResumeRequest,
     ProviderRoundBudgetDeniedError,
@@ -725,6 +726,211 @@ def run_provider_agent_loop(
                 },
             )
         return result
+
+
+def resume_reserved_provider_loop(
+    request: ProviderLoopReservedResumeRequest,
+    ports: ProviderLoopPorts,
+) -> ProviderLoopResult:
+    """Resume a v3 sibling reservation from its durable open transcript.
+
+    The durable prefix must end in one Assistant Tool-Call message followed by
+    a contiguous Provider-order prefix of Tool Results. Remaining siblings are
+    dispatched/replayed before another Provider round is allowed.
+    """
+    if not isinstance(request, ProviderLoopReservedResumeRequest):
+        raise TypeError("request must be a ProviderLoopReservedResumeRequest")
+    messages = list(request.initial_messages)
+    assistant_index = next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if isinstance(messages[index], ProviderAssistantMessage)
+            and messages[index].tool_calls
+        ),
+        None,
+    )
+    if assistant_index is None:
+        raise ProviderLoopError(
+            stop_reason="protocol_error",
+            error=SafeProviderError(
+                semantic_code="reserved_siblings_missing",
+                safe_summary="reserved sibling transcript has no open Tool Calls",
+                retry_disposition="never",
+            ),
+            messages=tuple(messages),
+            manifest=request.manifest,
+        )
+    assistant = messages[assistant_index]
+    assert isinstance(assistant, ProviderAssistantMessage)
+    suffix = messages[assistant_index + 1 :]
+    if any(not isinstance(item, ProviderToolMessage) for item in suffix):
+        raise ProviderLoopError(
+            stop_reason="protocol_error",
+            error=SafeProviderError(
+                semantic_code="reserved_siblings_transcript_invalid",
+                safe_summary="reserved sibling transcript has a non-Tool suffix",
+                retry_disposition="never",
+            ),
+            messages=tuple(messages),
+            manifest=request.manifest,
+        )
+    paired_ids = tuple(item.call_id for item in suffix)
+    expected_prefix = tuple(
+        call.call_id for call in assistant.tool_calls[: len(paired_ids)]
+    )
+    if paired_ids != expected_prefix or len(paired_ids) >= len(assistant.tool_calls):
+        raise ProviderLoopError(
+            stop_reason="protocol_error",
+            error=SafeProviderError(
+                semantic_code="reserved_siblings_order_invalid",
+                safe_summary="reserved Tool Results do not form an open ordered prefix",
+                retry_disposition="never",
+            ),
+            messages=tuple(messages),
+            manifest=request.manifest,
+        )
+
+    resolution = _require_tool_surface_resolution(
+        ports.tools_provider.resolve(
+            request.manifest,
+            scope=request.execution_scope,
+            locale=request.locale,
+        )
+    )
+    _validate_alias_revision_lineage(
+        previous=request.manifest,
+        next_manifest=resolution.manifest,
+    )
+    for call in assistant.tool_calls:
+        if call.surface_digest != resolution.surface.surface_digest:
+            raise ProviderLoopError(
+                stop_reason="protocol_error",
+                error=SafeProviderError(
+                    semantic_code="reserved_surface_drift",
+                    safe_summary="reserved sibling Tool surface changed",
+                    retry_disposition="never",
+                ),
+                messages=tuple(messages),
+                manifest=request.manifest,
+            )
+
+    records = [
+        ProviderToolCallRecord(
+            call=assistant.tool_calls[index],
+            status=tool_message.content.status,
+            result_message_digest=digest_provider_message(tool_message),
+            safe_duration_ms=None,
+        )
+        for index, tool_message in enumerate(suffix)
+    ]
+    remaining_calls = assistant.tool_calls[len(paired_ids) :]
+    try:
+        _preplan_verify_all(
+            ports=ports,
+            surface=resolution.surface,
+            calls=remaining_calls,
+            scope=request.execution_scope,
+        )
+    except _ClassificationDrift as drift:
+        sealed_messages, sealed_records = _seal_classification_drift(
+            messages=messages,
+            tool_call_records=records,
+            calls=remaining_calls,
+            first_stale_index=drift.first_stale_index,
+        )
+        if ports.capability_ledger is not None:
+            stale_call = next(
+                call
+                for call in remaining_calls
+                if call.call_index == drift.first_stale_index
+            )
+            ports.capability_ledger.commit_recovery_drift(
+                sealed_messages,
+                stale_call_id=stale_call.call_id,
+            )
+        raise ProviderLoopError(
+            stop_reason="capability_error",
+            error=SafeProviderError(
+                semantic_code="classification_changed",
+                safe_summary="capability classification changed before recovery dispatch",
+                retry_disposition="never",
+            ),
+            messages=sealed_messages,
+            tool_calls=sealed_records,
+            manifest=resolution.manifest,
+            usage=ProviderUsage(),
+            round_count=0,
+        ) from drift
+    outcome = _execute_sibling_calls(
+        ports=ports,
+        surface=resolution.surface,
+        assistant=assistant,
+        calls=assistant.tool_calls,
+        start_index=len(paired_ids),
+        messages=messages,
+        tool_call_records=records,
+        current_manifest=resolution.manifest,
+        scope=request.execution_scope,
+        model_ref=request.model_ref,
+        locale=request.locale,
+        max_rounds=request.max_rounds,
+        provider_rounds_used=0,
+        prior_tool_call_count=sum(
+            len(item.tool_calls)
+            for item in messages
+            if isinstance(item, ProviderAssistantMessage)
+        ),
+        accumulated_usage=ProviderUsage(),
+    )
+    if outcome.kind == "waiting":
+        return ProviderLoopResult(
+            status="waiting",
+            final_text=None,
+            messages=outcome.messages,
+            tool_calls=outcome.tool_call_records,
+            round_count=0,
+            stop_reason="waiting_interrupt",
+            manifest=outcome.current_manifest,
+            continuation=outcome.continuation,
+            usage=ProviderUsage(),
+            error=None,
+        )
+    if outcome.kind != "continue":
+        status = "cancelled" if outcome.kind == "cancelled" else "failed"
+        return ProviderLoopResult(
+            status=status,
+            final_text=None,
+            messages=outcome.messages,
+            tool_calls=outcome.tool_call_records,
+            round_count=0,
+            stop_reason=outcome.stop_reason or status,
+            manifest=outcome.current_manifest,
+            continuation=None,
+            usage=ProviderUsage(),
+            error=outcome.error,
+        )
+
+    continued = run_provider_agent_loop(
+        ProviderLoopRequest(
+            manifest=outcome.current_manifest,
+            initial_messages=outcome.messages,
+            model_ref=request.model_ref,
+            execution_scope=request.execution_scope,
+            max_rounds=request.max_rounds,
+            locale=request.locale,
+            generation=request.generation,
+        ),
+        ports,
+    )
+    return continued.model_copy(
+        update={
+            "tool_calls": (
+                *outcome.tool_call_records,
+                *continued.tool_calls,
+            )
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2605,7 +2811,9 @@ def _execute_sequential_group(
                 )
             )
             if ports.capability_ledger is not None:
-                ports.capability_ledger.commit_progress(tuple(messages))
+                ports.capability_ledger.commit_progress(
+                    tuple(messages), current_manifest=current_manifest
+                )
             remaining = tuple(item for item in all_calls if item.call_index > call.call_index)
             _append_cancelled_before_start(
                 messages=messages,
@@ -2640,8 +2848,6 @@ def _execute_sequential_group(
                 safe_duration_ms=work.duration_ms,
             )
         )
-        if ports.capability_ledger is not None:
-            ports.capability_ledger.commit_progress(tuple(messages))
         try:
             parent_before = current_manifest
             # Validate lineage without committing loop state yet so a lifecycle
@@ -2724,6 +2930,11 @@ def _execute_sequential_group(
                     safe_summary=str(exc) or "invalid next manifest lineage",
                     retry_disposition="never",
                 ),
+            )
+
+        if ports.capability_ledger is not None:
+            ports.capability_ledger.commit_progress(
+                tuple(messages), current_manifest=current_manifest
             )
 
         event_type = (

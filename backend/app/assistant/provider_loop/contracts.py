@@ -692,6 +692,47 @@ class ProviderLoopRequest(FrozenContract):
         return self
 
 
+class ProviderLoopReservedResumeRequest(FrozenContract):
+    """Checkpoint-v3 resume input whose transcript intentionally remains open."""
+
+    manifest: ResolvedRunManifestRevision
+    initial_messages: tuple[ProviderMessage, ...]
+    model_ref: ModelRef
+    execution_scope: ProviderExecutionScope
+    max_rounds: int
+    locale: str
+    generation: ProviderGenerationOptions = Field(default_factory=ProviderGenerationOptions)
+
+    @field_validator("locale")
+    @classmethod
+    def _locale(cls, value: str) -> str:
+        return _require_non_empty_str(value, field_name="locale")
+
+    @field_validator("max_rounds")
+    @classmethod
+    def _max_rounds(cls, value: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 2:
+            raise ValueError("reserved sibling resume requires max_rounds >= 2")
+        return value
+
+    @field_validator("initial_messages", mode="before")
+    @classmethod
+    def _messages(cls, value: Any) -> tuple[Any, ...]:
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            raise TypeError("initial_messages must be a sequence")
+        return tuple(value)
+
+    @model_validator(mode="after")
+    def _identity(self) -> ProviderLoopReservedResumeRequest:
+        if self.manifest.run_id != self.execution_scope.run_id:
+            raise ValueError("manifest.run_id must equal execution_scope.run_id")
+        if self.manifest.model is not None and (
+            self.manifest.model.model_ref_digest != self.model_ref.model_ref_digest
+        ):
+            raise ValueError("loop model_ref must equal manifest.model")
+        return self
+
+
 class ProviderWaitingCallState(FrozenContract):
     call_id: str
     call_index: int
@@ -1040,6 +1081,15 @@ class CapabilityLedgerAggregatePort(Protocol):
     def commit_progress(
         self,
         provider_messages: Sequence[ProviderMessage],
+        *,
+        current_manifest: ResolvedRunManifestRevision | None = None,
+    ) -> None: ...
+
+    def commit_recovery_drift(
+        self,
+        provider_messages: Sequence[ProviderMessage],
+        *,
+        stale_call_id: str,
     ) -> None: ...
 
     def execute_local(
@@ -1696,6 +1746,7 @@ __all__ = [
     "ProviderLoopEventSink",
     "ProviderLoopPorts",
     "ProviderLoopRequest",
+    "ProviderLoopReservedResumeRequest",
     "ProviderLoopResult",
     "ProviderLoopResumeRequest",
     "ProviderRoundBudgetDeniedError",

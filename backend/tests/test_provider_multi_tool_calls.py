@@ -57,6 +57,7 @@ from app.assistant.provider_loop.contracts import (  # noqa: E402
     ProviderGenerationOptions,
     ProviderLoopPorts,
     ProviderLoopRequest,
+    ProviderLoopReservedResumeRequest,
     ProviderLoopResumeRequest,
     ProviderUsage,
     ProviderWaitingResolution,
@@ -77,6 +78,7 @@ from app.assistant.provider_loop.messages import (  # noqa: E402
     digest_arguments,
     digest_provider_message,
     digest_provider_transcript,
+    project_tool_result_envelope,
     validate_provider_transcript,
 )
 from app.assistant.provider_loop.scheduler import (  # noqa: E402
@@ -1298,8 +1300,11 @@ def test_waiting_scenario_retains_prefix_defers_suffix() -> None:
             assert provider_messages
             self.reservations.append(tuple(request.call.call_id for request in requests))
 
-        def commit_progress(self, provider_messages=()):
+        def commit_progress(self, provider_messages=(), **_kwargs):
             del provider_messages
+
+        def commit_recovery_drift(self, provider_messages, *, stale_call_id):
+            del provider_messages, stale_call_id
 
         def commit_pause(self, continuation, provider_messages=()):
             del continuation, provider_messages
@@ -1355,6 +1360,147 @@ def test_waiting_scenario_retains_prefix_defers_suffix() -> None:
     assert [r.call.call_id for r in dispatcher.requests] == ["r1", "w1"]
     assert ledger.reservations == [("r1", "w1", "wr", "r2")]
     assert ledger.pause_calls == 1
+
+
+def test_reserved_sibling_resume_dispatches_open_prefix_before_provider() -> None:
+    from app.assistant.provider_loop.loop import (
+        ProviderLoopError,
+        resume_reserved_provider_loop,
+    )
+
+    manifest = _manifest()
+    model = _model()
+    pairs = [
+        _pair("tools.read_a", side_effect="read", parallel_safe=False),
+        _pair("tools.read_b", side_effect="read", parallel_safe=False),
+    ]
+    resolution = _surface_for_pairs(manifest, pairs)
+    definitions = {item.domain_key: item for item in resolution.surface.tools}
+    calls = (
+        _call_from_def(
+            resolution.surface,
+            definitions["tools.read_a"],
+            call_id="reserved-r1",
+            call_index=0,
+        ),
+        _call_from_def(
+            resolution.surface,
+            definitions["tools.read_b"],
+            call_id="reserved-r2",
+            call_index=1,
+        ),
+    )
+    persisted_result = completed_result(user_text="ok", metrics=_metrics())
+    open_messages = (
+        ProviderUserMessage(content="resume"),
+        ProviderAssistantMessage(content=None, tool_calls=calls),
+        ProviderToolMessage(
+            call_id=calls[0].call_id,
+            provider_alias=calls[0].provider_alias,
+            content=project_tool_result_envelope(
+                domain_key=calls[0].domain_key,
+                result=persisted_result,
+            ),
+        ),
+    )
+
+    class FinalProvider(ScriptedProvider):
+        def stream_round(self, request, *, cancellation):
+            del cancellation
+            tool_ids = [
+                item.call_id
+                for item in request.messages
+                if isinstance(item, ProviderToolMessage)
+            ]
+            assert tool_ids == ["reserved-r1", "reserved-r2"]
+            yield from text_then_terminal(
+                "done",
+                usage=ProviderUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+            )
+
+    verifier = RecordingDescriptorVerifier(
+        current_by_binding={pair[0].ref.binding_contract_digest: pair[1] for pair in pairs}
+    )
+    dispatcher = RecordingDispatcher(
+        results_by_call_id={
+            call.call_id: ProviderDispatchResult(
+                capability_result=completed_result(user_text="ok", metrics=_metrics()),
+                next_manifest=resolution.manifest,
+            )
+            for call in calls[1:]
+        },
+        verifier=verifier,
+    )
+    result = resume_reserved_provider_loop(
+        ProviderLoopReservedResumeRequest(
+            manifest=resolution.manifest,
+            initial_messages=open_messages,
+            model_ref=model,
+            execution_scope=_scope(),
+            max_rounds=4,
+            locale="en",
+            generation=ProviderGenerationOptions(),
+        ),
+        _ports(
+            provider=FinalProvider(
+                provider_protocol=P,
+                adapter_key=ADAPTER_KEY,
+                adapter_revision=ADAPTER_REVISION,
+                model_config_digest=MODEL_CONFIG,
+                expected_model_ref=model,
+            ),
+            tools=RecordingToolsProvider([resolution, resolution]),
+            verifier=verifier,
+            auth=RecordingAuthFactory(),
+            dispatcher=dispatcher,
+        ),
+    )
+    assert result.status == "completed"
+    assert result.final_text == "done"
+    assert [item.call.call_id for item in dispatcher.requests] == ["reserved-r2"]
+
+    stale_verifier = RecordingDescriptorVerifier(
+        current_by_binding={
+            pair[0].ref.binding_contract_digest: pair[1] for pair in pairs
+        },
+        mutate_after=1,
+    )
+    stale_dispatcher = RecordingDispatcher(
+        results_by_call_id={
+            call.call_id: ProviderDispatchResult(
+                capability_result=completed_result(user_text="unexpected", metrics=_metrics()),
+                next_manifest=resolution.manifest,
+            )
+            for call in calls
+        },
+        verifier=stale_verifier,
+    )
+    with pytest.raises(ProviderLoopError, match="classification changed"):
+        resume_reserved_provider_loop(
+            ProviderLoopReservedResumeRequest(
+                manifest=resolution.manifest,
+                initial_messages=open_messages[:2],
+                model_ref=model,
+                execution_scope=_scope(),
+                max_rounds=4,
+                locale="en",
+                generation=ProviderGenerationOptions(),
+            ),
+            _ports(
+                provider=FinalProvider(
+                    provider_protocol=P,
+                    adapter_key=ADAPTER_KEY,
+                    adapter_revision=ADAPTER_REVISION,
+                    model_config_digest=MODEL_CONFIG,
+                    expected_model_ref=model,
+                ),
+                tools=RecordingToolsProvider([resolution]),
+                verifier=stale_verifier,
+                auth=RecordingAuthFactory(),
+                dispatcher=stale_dispatcher,
+            ),
+        )
+    assert stale_dispatcher.requests == []
 
 
 def test_resume_completes_pending_and_provider_after_pairing() -> None:

@@ -14,7 +14,7 @@
 |---|---|
 | Sole Alembic head | **`984c07876856`** (`984c07876856_add_capability_call_ledger.py`) |
 | Parent | `7a3dac0ac2a8` (Plan 07 interrupts) |
-| Checkpoint schemas | `{1, 2}` (Plan 06/07; Task 4 foundation retains readers) |
+| Checkpoint schemas | `{1, 2, 3}` (v3 persists ordered CapabilityCall state; older readers retained) |
 | `RUNTIME_CONTRACT_VERSION` | `1` |
 | Policy contract | v1 `AuthorizationDecision` (byte-compatible) + v2 `AuthorizationDecisionV2` |
 | Golden release | `GoldenWriteReleaseV1` lattice `none|compute|read|draft|write_local` |
@@ -224,6 +224,16 @@ Fresh evidence from this branch:
   worker claims enter the admitted `MainAgentService`/`ProviderAgentLoop` path;
 - Provider siblings are proposed in order with transcript + Checkpoint v3 + Run
   CAS before dispatch; waiting and result checkpoints retain ordered call state;
+- replacement workers recover `dispatch_calls` from the durable open Tool-call
+  transcript, finish only the unpaired sibling suffix, and recover
+  `continue_provider` through the real frozen Provider runtime rather than the
+  legacy executor skeleton;
+- reservation, external Attempt start, approval pause, and Tool Result commits
+  advance changed live Manifest/policy/budget/obligation revisions in the same
+  Run CAS; recovery therefore cannot restore a pre-charge runtime snapshot;
+- recovery descriptor drift batch-checks the whole remaining suffix before any
+  dispatch, then durably denies/cancels it, pairs Tool Results, and terminally
+  fails the Run instead of retrying the same proposed calls forever;
 - call-owned approval, Interrupt, Provider continuation, artifacts, and waiting
   Run transition share one transaction; approval queues the exact call once;
 - read/compute and local-write results are not committed before their matching
@@ -242,12 +252,13 @@ Observed verification:
 | Plan08/prerequisite focused backend | 238 passed, 3 environment skips |
 | PostgreSQL migrations + interrupt/event/fault group | 47 passed |
 | PostgreSQL fault + Run-event races, three consecutive runs | 19 passed each run |
+| Checkpoint-v3/runtime-snapshot replacement-worker recovery | 121 passed |
 | Frontend Vitest | 63 passed |
 | Frontend production build | passed |
 | Alembic heads | one head: `984c07876856` |
 | Compose render with immutable test build revision | passed; ledger/write defaults dark |
 | Full backend | 2536 passed, 66 skipped; 20 failures before stale Plan08 assertions were corrected |
-| Backend excluding the two unrelated legacy StructuredTool files | 2538 passed, 66 skipped |
+| Backend excluding the two unrelated legacy StructuredTool files | 2540 passed, 66 skipped, 51 subtests |
 
 The full-backend failures split into stale Plan07 assertions now corrected
 (v3 codec support/current migration target, durable interrupt ceiling, and the
@@ -256,8 +267,9 @@ installed LangChain exposes `StructuredTool` as non-callable in legacy
 `entry_tools`/`stats_tools` tests. `pip check` independently reports existing
 Docling/Transformers/HuggingFace/Torch dependency incompatibilities.
 
-Remaining release evidence: an OS-process API/default-worker kill-and-restart
-smoke with a scripted Provider has not been executed in this workspace. The
+Remaining release evidence: the replacement-worker recovery behavior is now
+covered in-process, but an OS-process API/default-worker kill-and-restart smoke
+with a scripted Provider has not been executed in this workspace. The
 database-level approval, crash rollback, replay, and race evidence is green,
 but the original completion rule requires that process smoke before declaring
 Plan09 ready. Therefore **Plan09 remains not ready** and production golden mode
