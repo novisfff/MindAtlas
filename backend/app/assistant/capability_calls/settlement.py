@@ -29,6 +29,10 @@ from app.assistant.durable.repository import (
     STATUS_NEEDS_RECONCILIATION,
 )
 from app.assistant.capability_calls.state_machine import PLAN08_RUN_TRANSITION_DELTA
+from app.assistant.capability_calls.state_machine import (
+    CallTransitionError,
+    validate_call_transition,
+)
 from app.common.time import utcnow
 
 
@@ -71,12 +75,18 @@ class CapabilityCallSettlementRepository:
           needs_reconciliation.
         """
         ts = now or utcnow()
+        probe = self.calls.get_call(request.call_id)
+        if probe is None:
+            raise CapabilityCallConflict(
+                CODE_CALL_NOT_FOUND, f"call {request.call_id} not found"
+            )
+        # Global lock order: Run before call/Attempt/Interrupt rows.
+        run = self.calls.get_run(probe.run_id, for_update=True)
         call = self.calls.get_call(request.call_id, for_update=True)
         if call is None:
             raise CapabilityCallConflict(
                 CODE_CALL_NOT_FOUND, f"call {request.call_id} not found"
             )
-        run = self.calls.get_run(call.run_id, for_update=True)
         if int(run.state_revision) != int(request.expected_run_revision):
             raise CapabilityCallConflict(
                 CODE_STALE_RUN_REVISION,
@@ -109,6 +119,7 @@ class CapabilityCallSettlementRepository:
 
         if request.outcome in {"succeeded", "failed"}:
             to_status = request.outcome
+            self._validate_transition(call, to_status)
             call.status = to_status
             call.state_revision = int(call.state_revision) + 1
             call.updated_at = ts
@@ -120,11 +131,13 @@ class CapabilityCallSettlementRepository:
 
         # unknown -> needs_reconciliation on call; Run cancelling -> needs_reconciliation
         if str(call.status) == "executing":
+            self._validate_transition(call, "unknown")
             call.status = "unknown"
             call.state_revision = int(call.state_revision) + 1
             call.updated_at = ts
             self.db.flush()
         if str(call.status) == "unknown":
+            self._validate_transition(call, "needs_reconciliation")
             call.status = "needs_reconciliation"
             call.state_revision = int(call.state_revision) + 1
             call.updated_at = ts
@@ -133,11 +146,32 @@ class CapabilityCallSettlementRepository:
         # Advance Run via Plan 08 delta.
         edge = (STATUS_CANCELLING, STATUS_NEEDS_RECONCILIATION)
         if edge not in ALLOWED_TRANSITIONS:
-            ALLOWED_TRANSITIONS[edge] = "call_settlement_unproven"
+            raise CapabilityCallConflict(
+                CODE_INVALID_TRANSITION,
+                "cancelling run lacks Plan 08 reconciliation transition",
+                call=call,
+                run=run,
+            )
         run.status = STATUS_NEEDS_RECONCILIATION
         run.state_revision = int(run.state_revision) + 1
         self.db.flush()
         return run
+
+    @staticmethod
+    def _validate_transition(call: object, to_status: str) -> None:
+        try:
+            validate_call_transition(
+                from_status=str(getattr(call, "status")),
+                to_status=to_status,
+                side_effect_started_at_is_set=bool(
+                    getattr(call, "side_effect_started_at", None) is not None
+                ),
+                execution_mode=str(getattr(call, "execution_mode")),
+            )
+        except CallTransitionError as exc:
+            raise CapabilityCallConflict(
+                CODE_INVALID_TRANSITION, exc.message, call=call  # type: ignore[arg-type]
+            ) from exc
 
     def refuse_cancel_finalizer_if_unproven(self, run_id: UUID) -> None:
         """Raise if cancelling -> cancelled would lie about started calls."""
