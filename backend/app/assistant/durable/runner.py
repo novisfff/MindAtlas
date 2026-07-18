@@ -751,6 +751,9 @@ class MainAgentRunExecutor:
         run = DurableRunRepository(db).get_run(claimed.run_id)
         if run is None:
             return
+        from app.config import get_settings
+
+        capability_settings = get_settings()
         runtime, ports = compose_main_agent_policy_runtime(
             db=db,
             run_id=claimed.run_id,
@@ -764,6 +767,16 @@ class MainAgentRunExecutor:
             restored_policy_snapshot=policy,
             restored_budget_state=budget,
             restored_obligation_state=obligation,
+            capability_ledger_mode=str(
+                run.capability_ledger_mode or "legacy_read_only"
+            ),
+            capability_ledger_lease=claimed.lease,
+            capability_ledger_idempotency_secret=(
+                capability_settings.assistant_capability_call_idempotency_secret
+            ),
+            policy_contract_version=(
+                2 if str(run.capability_ledger_mode) == "enforced" else 1
+            ),
         )
         self._restore_active_skill_bindings(
             db,

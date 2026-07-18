@@ -73,6 +73,14 @@ from app.assistant.capability_calls.dispatcher import (  # noqa: F401
     LedgerDispatcher,
     select_dispatcher,
 )
+from app.assistant.capability_calls.aggregate import (  # noqa: F401
+    DurableCapabilityLedgerAggregate,
+)
+from app.assistant.capability_calls.result_codec import (  # noqa: F401
+    CapabilityResultCodecError,
+    decode_capability_result,
+    encode_capability_result,
+)
 from app.assistant.capability_calls.state_machine import (  # noqa: F401
     ALLOWED_CALL_TRANSITIONS,
     PLAN08_RUN_TRANSITION_DELTA,
@@ -106,6 +114,10 @@ __all__ = [
     "LedgerDispatchRequest",
     "LedgerDispatchResult",
     "LedgerDispatcher",
+    "DurableCapabilityLedgerAggregate",
+    "CapabilityResultCodecError",
+    "decode_capability_result",
+    "encode_capability_result",
     "select_dispatcher",
     "authorize_call_after_approval",
     "build_approval_binding",

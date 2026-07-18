@@ -31,6 +31,7 @@ from app.assistant.capabilities.contracts import (
     CapabilityError,
     CapabilityMetrics,
     CapabilityResult,
+    ContinuationRef,
     failed_result,
 )
 from app.assistant.durable.repository import LeaseToken
@@ -167,10 +168,31 @@ class LedgerDispatcher:
                 safe_message="capability denied by durable ledger admission",
             )
         if outcome.kind == "pause":
-            return self._blocked_provider_result(
-                request,
-                reason_code="call_approval_required",
-                safe_message="capability call requires durable approval",
+            proposal = outcome.pause_proposal or {}
+            continuation = ContinuationRef(
+                continuation_type="capability_call",
+                contract_version=1,
+                reference_id=str(proposal.get("interruptId") or outcome.call_id),
+                payload_digest=str(
+                    proposal.get("proposalDigest")
+                    or proposal.get("approvalBindingDigest")
+                ),
+            )
+            return ProviderDispatchResult.model_construct(
+                capability_result=CapabilityResult(
+                    status="waiting",
+                    user_text=None,
+                    structured_output=None,
+                    artifact_refs=(),
+                    continuation=continuation,
+                    terminal_output=False,
+                    needs_followup=False,
+                    error=None,
+                    metrics=CapabilityMetrics(
+                        duration_ms=0.0, input_bytes=0, output_bytes=0
+                    ),
+                ),
+                next_manifest=getattr(request, "current_manifest", None),
             )
         if outcome.kind != "dispatch":
             raise TypeError(f"unsupported ledger prepare outcome {outcome.kind!r}")

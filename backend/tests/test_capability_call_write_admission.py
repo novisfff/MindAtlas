@@ -5,6 +5,8 @@ from __future__ import annotations
 import unittest
 import uuid
 from typing import Any
+from types import SimpleNamespace
+from unittest import mock
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 
@@ -174,6 +176,50 @@ class WriteAdmissionEvaluateTests(unittest.TestCase):
         # v1 pin still holds at the builder layer (above).
         self.assertTrue(callable(evaluate_authorization_v2))
         self.assertTrue(callable(evaluate_authorization))
+
+    def test_v2_without_write_release_still_returns_tagged_dispatch(self) -> None:
+        from app.assistant.capabilities.contracts import CapabilityPrincipal
+        from app.assistant.policy.contracts import build_authorization_decision
+        from app.assistant.policy.write_admission import evaluate_authorization_v2
+
+        allowed = build_authorization_decision(
+            allowed=True,
+            reason_code="allowed",
+            principal_digest=DIGEST_A,
+            entrypoint_policy_digest=DIGEST_A,
+            global_policy_digest=DIGEST_A,
+            owner_policy_digest=DIGEST_A,
+            allowed_side_effects=("none", "compute", "read"),
+            grant_source_digest=DIGEST_B,
+            exposure_digest=DIGEST_A,
+            effective_policy_digest=DIGEST_A,
+        )
+        snapshot = SimpleNamespace(
+            entrypoint_policy_digest=DIGEST_A,
+            global_policy_digest=DIGEST_A,
+            effective_policy_digest=DIGEST_A,
+        )
+        proposal = SimpleNamespace(
+            principal=CapabilityPrincipal(
+                principal_type="service",
+                principal_id="local-assistant",
+                authenticated=True,
+            )
+        )
+        with mock.patch(
+            "app.assistant.policy.write_admission.evaluate_authorization",
+            return_value=allowed,
+        ):
+            decision = evaluate_authorization_v2(
+                snapshot=snapshot,
+                proposal=proposal,
+                owner_materials={},
+                golden_write_release=None,
+                descriptor_side_effect="read",
+                policy_contract_version=2,
+            )
+        self.assertEqual(decision.contract_version, 2)
+        self.assertEqual(decision.dispatch_disposition, "dispatch")
 
     def test_release_match_helper(self) -> None:
         from app.assistant.policy.contracts import build_golden_write_release

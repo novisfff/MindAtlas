@@ -202,7 +202,7 @@ def evaluate_authorization_v2(
     - v2 with exact golden match + write_local descriptor: returns
       ``awaiting_call_approval`` without executable Gateway disposition.
     """
-    if policy_contract_version <= 1 or golden_write_release is None:
+    if policy_contract_version <= 1:
         # Pure v1 path — byte-compatible.
         return evaluate_authorization(
             snapshot=snapshot,
@@ -307,6 +307,15 @@ def evaluate_authorization_v2(
             effective_digest=effective_digest,
         )
 
+    if golden_write_release is None:
+        return _v2_deny(
+            reason_code="release_gate_denied",
+            principal_digest=principal_digest,
+            entrypoint_digest=entrypoint_digest,
+            global_digest=global_digest,
+            effective_digest=effective_digest,
+        )
+
     # Structural gates from v1 that are independent of write release.
     if v1.reason_code in {
         "scope_mismatch",
@@ -334,15 +343,6 @@ def evaluate_authorization_v2(
         )
 
     # Exact golden release match.
-    owner_key = None
-    owner = None
-    for key, material in owner_materials.items():
-        if (
-            material.owner_kind == proposal.claimed_owner_kind
-            or True
-        ):
-            # Prefer matching owner_version_id from proposal claimed fields.
-            pass
     # Resolve owner material the same way as evaluate_authorization.
     matches = _find_exposures_for_key(
         snapshot.exposure_index, capability_key=proposal.capability_key

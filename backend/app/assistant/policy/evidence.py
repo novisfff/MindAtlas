@@ -28,6 +28,8 @@ from app.assistant.main_agent.authorization import (
 )
 from app.assistant.policy.contracts import (
     AuthorizationDecision,
+    AuthorizationDecisionV2,
+    AuthorizationDecisionUnion,
     EffectiveCapabilityGrant,
 )
 
@@ -63,8 +65,18 @@ def assert_redaction_safe(text: str, *, label: str = "value") -> None:
             raise ValueError(f"{label} contains forbidden material: {needle!r}")
 
 
-def decision_safe_repr(decision: AuthorizationDecision) -> str:
+def decision_safe_repr(decision: AuthorizationDecisionUnion) -> str:
     """Deterministic safe repr for decisions (no prose/user data)."""
+    if isinstance(decision, AuthorizationDecisionV2):
+        return (
+            "AuthorizationDecisionV2("
+            f"policy_allowed={decision.policy_allowed!r}, "
+            f"dispatch_disposition={decision.dispatch_disposition!r}, "
+            f"reason_code={decision.reason_code!r}, "
+            f"principal_digest={decision.principal_digest!r}, "
+            f"grant_source_digest={decision.grant_source_digest!r}, "
+            f"decision_digest={decision.decision_digest!r})"
+        )
     return (
         "AuthorizationDecision("
         f"allowed={decision.allowed!r}, "
@@ -128,7 +140,7 @@ def issue_skill_policy_evidence(
     resolution_digest: str,
     binding_contract_digest: str,
     dependency_closure_digest: str,
-    decision: AuthorizationDecision,
+    decision: AuthorizationDecisionUnion,
     grant: EffectiveCapabilityGrant | None = None,
     counter: int = 1,
     scope_digest: str,
@@ -139,7 +151,10 @@ def issue_skill_policy_evidence(
     ``allowed_side_effects`` and ``grant_source_digest`` come from the decision
     (already frozen from EffectiveCapabilityGrant), never from descriptor.
     """
-    if not decision.allowed or decision.reason_code != "allowed":
+    if isinstance(decision, AuthorizationDecisionV2):
+        if not decision.policy_allowed or decision.dispatch_disposition == "deny":
+            raise AuthorizationEvidenceVerificationError("decision_not_allowed")
+    elif not decision.allowed or decision.reason_code != "allowed":
         raise AuthorizationEvidenceVerificationError("decision_not_allowed")
     if decision.grant_source_digest is None:
         raise AuthorizationEvidenceVerificationError("missing_grant_source_digest")

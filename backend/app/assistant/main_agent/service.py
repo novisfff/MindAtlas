@@ -1238,6 +1238,22 @@ class MainAgentService:
             )
             catalog_state = None
 
+        from app.assistant.durable.repository import LeaseToken
+        from app.assistant.models import AssistantChatRun
+
+        run_row = self.db.get(AssistantChatRun, request.run_id)
+        ledger_mode = str(
+            getattr(run_row, "capability_ledger_mode", None)
+            or "legacy_read_only"
+        )
+        ledger_lease = None
+        if run_row is not None and run_row.lease_owner:
+            ledger_lease = LeaseToken(
+                run_id=run_row.id,
+                worker_id=str(run_row.lease_owner),
+                lease_generation=int(run_row.lease_generation or 0),
+            )
+
         runtime, ports = compose_main_agent_policy_runtime(
             db=self.db,
             run_id=request.run_id,
@@ -1256,6 +1272,12 @@ class MainAgentService:
             profile_context_budget=admission.snapshot.context_budget,
             operator_budget_limits=operator_limits,
             durable_workflow=request.durable_workflow,
+            capability_ledger_mode=ledger_mode,
+            capability_ledger_lease=ledger_lease,
+            capability_ledger_idempotency_secret=(
+                self._settings.assistant_capability_call_idempotency_secret
+            ),
+            policy_contract_version=(2 if ledger_mode == "enforced" else 1),
         )
         # Use the Manifest aligned to Plan 05 effective_policy_digest.
         if self._state is not None and runtime.manifest is not None:

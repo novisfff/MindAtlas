@@ -443,6 +443,9 @@ class MainAgentAuthorizationEvidenceFactory:
         principal: CapabilityPrincipal = LOCAL_ASSISTANT_PRINCIPAL,
         policy_snapshot: Any | None = None,
         owner_materials: Mapping[Any, Any] | None = None,
+        policy_contract_version: int = 1,
+        golden_write_release: Any | None = None,
+        admission_context_resolver: Any | None = None,
     ) -> None:
         self.scope = scope
         self.manifest = manifest
@@ -456,9 +459,14 @@ class MainAgentAuthorizationEvidenceFactory:
         self.principal = principal
         self.policy_snapshot = policy_snapshot
         self.owner_materials = dict(owner_materials or {})
+        self.policy_contract_version = int(policy_contract_version)
+        self.golden_write_release = golden_write_release
+        self.admission_context_resolver = admission_context_resolver
         self._lock = threading.Lock()
         self._issued_call_ids: set[str] = set()
         self._verifiers: dict[str, SkillPolicyAuthorizationEvidenceVerifier] = {}
+        self._decisions: dict[str, Any] = {}
+        self._pending_verifier_material: dict[str, dict[str, Any]] = {}
 
     def rebind_manifest(
         self,
@@ -528,10 +536,7 @@ class MainAgentAuthorizationEvidenceFactory:
         scope: ProviderExecutionScope,
     ) -> CapabilityAuthorizationEvidence:
         # Late import avoids circular load with policy.contracts → authorization.
-        from app.assistant.policy.evaluator import (
-            evaluate_authorization,
-            proposal_from_descriptor,
-        )
+        from app.assistant.policy.evaluator import evaluate_authorization, proposal_from_descriptor
         from app.assistant.policy.evidence import issue_skill_policy_evidence
 
         snapshot = self.policy_snapshot
@@ -562,13 +567,46 @@ class MainAgentAuthorizationEvidenceFactory:
         # Override capability key with the tool-call domain key for surface match.
         if proposal.capability_key != call.domain_key:
             raise AuthorizationEvidenceVerificationError("capability_key_mismatch")
-        decision = evaluate_authorization(
-            snapshot=snapshot,
-            proposal=proposal,
-            owner_materials=self.owner_materials,  # type: ignore[arg-type]
-        )
-        if not decision.allowed:
-            raise AuthorizationEvidenceVerificationError(decision.reason_code)
+        if self.policy_contract_version >= 2:
+            from app.assistant.policy.write_admission import evaluate_authorization_v2
+
+            context: Mapping[str, Any] = {}
+            if self.admission_context_resolver is not None:
+                resolved = self.admission_context_resolver(
+                    call=call,
+                    binding=binding,
+                    descriptor=descriptor,
+                    scope=scope,
+                )
+                if resolved is not None:
+                    if not isinstance(resolved, Mapping):
+                        raise AuthorizationEvidenceVerificationError(
+                            "admission_context_invalid"
+                        )
+                    context = resolved
+            decision = evaluate_authorization_v2(
+                snapshot=snapshot,
+                proposal=proposal,
+                owner_materials=self.owner_materials,  # type: ignore[arg-type]
+                golden_write_release=self.golden_write_release,
+                descriptor_side_effect=descriptor.behavior.side_effect,
+                execution_mode=context.get("execution_mode"),
+                target_digest=context.get("target_digest"),
+                target_version_id=context.get(
+                    "target_version_id", descriptor.target_version_id
+                ),
+                policy_contract_version=self.policy_contract_version,
+            )
+            if not decision.policy_allowed or decision.dispatch_disposition == "deny":
+                raise AuthorizationEvidenceVerificationError(decision.reason_code)
+        else:
+            decision = evaluate_authorization(
+                snapshot=snapshot,
+                proposal=proposal,
+                owner_materials=self.owner_materials,  # type: ignore[arg-type]
+            )
+            if not decision.allowed:
+                raise AuthorizationEvidenceVerificationError(decision.reason_code)
 
         with self._lock:
             if call.call_id in self._issued_call_ids:
@@ -589,6 +627,27 @@ class MainAgentAuthorizationEvidenceFactory:
             scope_digest=scope.scope_digest,
             manifest_digest=self.manifest.manifest_digest,
         )
+        with self._lock:
+            self._decisions[call.call_id] = decision
+
+        awaiting_approval = (
+            getattr(decision, "dispatch_disposition", None)
+            == "awaiting_call_approval"
+        )
+        if awaiting_approval:
+            # This evidence is intentionally non-executable: no verifier is
+            # installed until the durable ledger validates a terminal-approved
+            # call-owned Interrupt bound to the frozen decision.
+            with self._lock:
+                self._pending_verifier_material[call.call_id] = {
+                    "owner": owner,
+                    "binding": binding,
+                    "scope": scope,
+                    "evidence": evidence,
+                    "decision": decision,
+                }
+            return evidence
+
         verifier = SkillPolicyAuthorizationEvidenceVerifier(
             expected_call_id=call.call_id,
             expected_capability_key=call.domain_key,
@@ -607,6 +666,52 @@ class MainAgentAuthorizationEvidenceFactory:
         with self._lock:
             self._verifiers[call.call_id] = verifier
         return evidence
+
+    def decision_for_call(self, *, call_id: str) -> Any:
+        """Return the server-derived frozen decision; callers cannot replace it."""
+        with self._lock:
+            decision = self._decisions.get(call_id)
+        if decision is None:
+            raise AuthorizationEvidenceVerificationError("ledger_decision_required")
+        return decision
+
+    def authorize_pending_call(
+        self, *, call_id: str, approval_binding_digest: str
+    ) -> None:
+        """Install Gateway verifier only after aggregate-owned approval checks."""
+        from app.assistant.policy.write_admission import (
+            issue_post_approval_gateway_evidence,
+        )
+
+        with self._lock:
+            material = self._pending_verifier_material.get(call_id)
+        if material is None:
+            raise AuthorizationEvidenceVerificationError("pending_call_not_found")
+        decision = issue_post_approval_gateway_evidence(
+            frozen_decision=material["decision"],
+            approval_binding_digest=approval_binding_digest,
+        )
+        binding = material["binding"]
+        scope = material["scope"]
+        evidence = material["evidence"]
+        verifier = SkillPolicyAuthorizationEvidenceVerifier(
+            expected_call_id=call_id,
+            expected_capability_key=evidence.capability_key,
+            expected_owner=material["owner"],
+            expected_resolution_digest=binding.ref.resolution_digest,
+            expected_binding_contract_digest=binding.ref.binding_contract_digest,
+            expected_dependency_closure_digest=binding.ref.dependency_closure_digest,
+            expected_grant_source_digest=evidence.grant_source_digest,
+            expected_evidence_digest=evidence.evidence_digest,
+            expected_principal=self.principal,
+            expected_run_id=scope.run_id,
+            expected_conversation_id=scope.conversation_id,
+            ceiling=self.ceiling,
+            allowed_side_effects=tuple(decision.allowed_side_effects),
+        )
+        with self._lock:
+            self._verifiers[call_id] = verifier
+            self._pending_verifier_material.pop(call_id, None)
 
     @staticmethod
     def _has_trusted_durable_plan(binding: FrozenCapabilityBinding) -> bool:
