@@ -982,6 +982,56 @@ class ProviderDispatchResult(FrozenContract):
 # ---------------------------------------------------------------------------
 
 
+class LedgerPrepareOutcome(FrozenContract):
+    """Server-owned ledger decision for one frozen Provider dispatch request."""
+
+    kind: Literal["dispatch", "deny", "pause", "replay"]
+    call_id: UUID
+    call_revision: int
+    attempt_id: UUID | None = None
+    provider_result: ProviderDispatchResult | None = None
+    pause_proposal: dict[str, Any] | None = None
+    reason_code: str | None = None
+
+    @field_validator("call_revision")
+    @classmethod
+    def _call_revision(cls, value: int) -> int:
+        return _require_non_negative_int(value, field_name="call_revision")
+
+    @model_validator(mode="after")
+    def _outcome_shape(self) -> LedgerPrepareOutcome:
+        if self.kind == "replay" and self.provider_result is None:
+            raise ValueError("replay ledger outcome requires provider_result")
+        if self.kind != "replay" and self.provider_result is not None:
+            raise ValueError("only replay ledger outcome may carry provider_result")
+        if self.kind == "pause" and self.pause_proposal is None:
+            raise ValueError("pause ledger outcome requires pause_proposal")
+        if self.kind != "pause" and self.pause_proposal is not None:
+            raise ValueError("only pause ledger outcome may carry pause_proposal")
+        if self.kind == "deny" and not self.reason_code:
+            raise ValueError("deny ledger outcome requires reason_code")
+        return self
+
+
+@runtime_checkable
+class CapabilityLedgerAggregatePort(Protocol):
+    """Durable Run-first owner of enforced CapabilityCall aggregate changes."""
+
+    def prepare(self, request: ProviderDispatchRequest) -> LedgerPrepareOutcome: ...
+
+    def commit_result(
+        self,
+        outcome: LedgerPrepareOutcome,
+        result: ProviderDispatchResult,
+    ) -> ProviderDispatchResult: ...
+
+    def record_failure(
+        self,
+        outcome: LedgerPrepareOutcome,
+        reason_code: str,
+    ) -> None: ...
+
+
 @runtime_checkable
 class CancellationPort(Protocol):
     def is_cancelled(self) -> bool: ...
@@ -1488,6 +1538,9 @@ class ProviderLoopPorts:
     sibling_executor: SiblingExecutionPort
     cancellation: CancellationPort
     events: ProviderLoopEventSink
+    # Plan 08 durable aggregate. Required by production enforced composition;
+    # None preserves Plan 03–07 and internal-test callers exactly.
+    capability_ledger: CapabilityLedgerAggregatePort | None = None
     # Default no-op preserves byte-identical Plan 03 behavior for all callers.
     round_context_provider: RoundContextProvider = NoOpRoundContextProvider()
     # Default no-op lifecycle: existing dispatchers remain byte-compatible.
@@ -1593,6 +1646,7 @@ def project_waiting_resolution_message(
 
 __all__ = [
     "CancellationPort",
+    "CapabilityLedgerAggregatePort",
     "CapabilityCallOwnerResolver",
     "CapabilityCallReservationDecision",
     "CapabilityCallReservationItem",
@@ -1605,6 +1659,7 @@ __all__ = [
     "NoOpProviderCompletionGuard",
     "NoOpProviderRoundBudgetGuard",
     "NoOpRoundContextProvider",
+    "LedgerPrepareOutcome",
     "ProviderAdapter",
     "ProviderAuthorizationEvidenceFactory",
     "ProviderCompletionDisposition",

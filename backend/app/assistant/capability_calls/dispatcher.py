@@ -28,10 +28,17 @@ from app.assistant.capability_calls.repository import (
 )
 from app.assistant.capabilities.contracts import (
     CapabilityDescriptor,
+    CapabilityError,
+    CapabilityMetrics,
     CapabilityResult,
     failed_result,
 )
 from app.assistant.durable.repository import LeaseToken
+from app.assistant.provider_loop.contracts import (
+    CapabilityLedgerAggregatePort,
+    LedgerPrepareOutcome,
+    ProviderDispatchResult,
+)
 from app.common.time import utcnow
 
 
@@ -57,10 +64,9 @@ class LedgerDispatchRequest:
     input_digest: str
     execution_mode: str
     side_effect_class: str
+    dispatch_disposition: Literal["deny", "dispatch", "awaiting_call_approval"]
     idempotency_secret: str | bytes | None = None
     frozen_target_digest: str | None = None
-    # When set, write_local proposals that match golden admission stage pause.
-    dispatch_disposition: Literal["deny", "dispatch", "awaiting_call_approval"] | None = None
     owner_kind: str = "main_agent"
     owner_id: UUID | None = None
     owner_version_id: UUID | None = None
@@ -99,17 +105,20 @@ class CapabilityCallPauseProposalV1:
 class LedgerDispatcher:
     """Prepare/claim/dispatch orchestration; adapters only via inner dispatcher."""
 
-    db: Any  # Session
     inner: ToolDispatcherPort
+    aggregate: CapabilityLedgerAggregatePort | None = None
+    db: Any | None = None  # compatibility repository path; removed after aggregate cutover
     # Architecture: Gateway must not import this repository; we own it here.
     _repo: CapabilityCallRepository | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._repo = CapabilityCallRepository(self.db)
+        if self.db is not None:
+            self._repo = CapabilityCallRepository(self.db)
 
     @property
     def repo(self) -> CapabilityCallRepository:
-        assert self._repo is not None
+        if self._repo is None:
+            raise RuntimeError("ledger repository is unavailable without a database session")
         return self._repo
 
     def dispatch(
@@ -124,10 +133,94 @@ class LedgerDispatcher:
         When ``ledger`` is None or mode is ``legacy_read_only``, pass through
         to the inner Gateway dispatcher with zero ledger side effects.
         """
+        if self.aggregate is not None:
+            return self._dispatch_via_aggregate(request, cancellation=cancellation)
+
         if ledger is None or str(ledger.capability_ledger_mode) != "enforced":
             return self.inner.dispatch(request, cancellation=cancellation)
 
         return self.dispatch_enforced(ledger, cancellation=cancellation).provider_result
+
+    def _dispatch_via_aggregate(self, request: Any, *, cancellation: Any) -> Any:
+        """Production enforced path; the aggregate derives every disposition."""
+        if cancellation is not None and getattr(
+            cancellation, "is_cancelled", lambda: False
+        )():
+            return self._blocked_provider_result(
+                request,
+                reason_code="cancelled",
+                safe_message="capability call cancelled before ledger admission",
+                error_type="cancelled",
+            )
+
+        assert self.aggregate is not None
+        outcome = self.aggregate.prepare(request)
+        if not isinstance(outcome, LedgerPrepareOutcome):
+            raise TypeError("capability ledger aggregate returned invalid prepare outcome")
+        if outcome.kind == "replay":
+            assert outcome.provider_result is not None
+            return outcome.provider_result
+        if outcome.kind == "deny":
+            return self._blocked_provider_result(
+                request,
+                reason_code=outcome.reason_code or "capability_denied",
+                safe_message="capability denied by durable ledger admission",
+            )
+        if outcome.kind == "pause":
+            return self._blocked_provider_result(
+                request,
+                reason_code="call_approval_required",
+                safe_message="capability call requires durable approval",
+            )
+        if outcome.kind != "dispatch":
+            raise TypeError(f"unsupported ledger prepare outcome {outcome.kind!r}")
+
+        try:
+            result = self.inner.dispatch(request, cancellation=cancellation)
+        except BaseException:
+            self.aggregate.record_failure(outcome, "dispatcher_error")
+            raise
+        if not isinstance(result, ProviderDispatchResult):
+            # Test doubles may be structurally compatible, but production must
+            # never let a non-contract result cross the Provider Loop boundary.
+            if not hasattr(result, "capability_result"):
+                self.aggregate.record_failure(outcome, "dispatcher_result_invalid")
+                raise TypeError("inner dispatcher returned invalid ProviderDispatchResult")
+        return self.aggregate.commit_result(outcome, result)
+
+    @staticmethod
+    def _blocked_provider_result(
+        request: Any,
+        *,
+        reason_code: str,
+        safe_message: str,
+        error_type: str = "unauthorized",
+    ) -> ProviderDispatchResult:
+        call = getattr(request, "call", None)
+        capability_result = failed_result(
+            error=CapabilityError(
+                error_type=error_type,
+                safe_code=reason_code,
+                safe_message=safe_message,
+                retry_disposition="never",
+                call_id=getattr(call, "call_id", None),
+                target_identity=getattr(
+                    getattr(request, "binding", None), "ref", None
+                )
+                and getattr(request.binding.ref, "target_identity", None),
+            ),
+            metrics=CapabilityMetrics(
+                duration_ms=0.0,
+                input_bytes=0,
+                output_bytes=0,
+            ),
+        )
+        # model_construct keeps unit-test doubles usable; real production
+        # requests always provide a validated current Manifest.
+        return ProviderDispatchResult.model_construct(
+            capability_result=capability_result,
+            next_manifest=getattr(request, "current_manifest", None),
+        )
 
     def dispatch_enforced(
         self,

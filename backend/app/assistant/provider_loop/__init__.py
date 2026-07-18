@@ -26,9 +26,11 @@ from app.assistant.provider_loop.aliases import (
 )
 from app.assistant.provider_loop.contracts import (
     CancellationPort,
+    CapabilityLedgerAggregatePort,
     CurrentCapabilityDescriptorVerifier,
     NoOpProviderCompletionGuard,
     NoOpRoundContextProvider,
+    LedgerPrepareOutcome,
     ProviderAdapter,
     ProviderAuthorizationEvidenceFactory,
     ProviderCompletionDisposition,
@@ -171,7 +173,9 @@ __all__ = [
     "DEFAULT_RESERVED_CONTROL_ALIASES",
     "DefaultFinalizationInstructionProvider",
     "DispatcherCapabilities",
+    "CapabilityLedgerAggregatePort",
     "IDENTITY_BYTE_LIMIT",
+    "LedgerPrepareOutcome",
     "NoOpProviderCompletionGuard",
     "NoOpRoundContextProvider",
     "OPENAI_CHAT_PROVIDER_PROTOCOL",
