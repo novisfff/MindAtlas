@@ -398,7 +398,12 @@ def apply_skill_package_import(
     db: Session = Depends(get_db),
     principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
 ) -> ApiResponse:
-    """Consume a preview token into one unpublished, catalog-disabled draft."""
+    """Consume a preview token into one draft version.
+
+    Create/fork produce an unpublished, catalog-disabled package. Append only
+    advances the draft pointer and aggregate revision — it does not force
+    catalog-disabled or clear publish evidence.
+    """
     svc = ImportPreviewService(db)
     result = svc.apply(
         preview_id=body.preview_id,

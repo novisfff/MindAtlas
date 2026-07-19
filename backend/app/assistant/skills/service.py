@@ -184,6 +184,8 @@ class AgentSkillService:
         *,
         actor_id: UUID | None,
         origin: str,
+        admin_request_id: str | None = None,
+        admin_request_digest: str | None = None,
     ) -> SkillPackageDetail:
         """Create-only import of a parsed package as a disabled native draft.
 
@@ -191,6 +193,10 @@ class AgentSkillService:
         canonical names or aliases return ``40995``. ``actor_id`` is accepted
         for audit callers but is never mixed into content digests (no column
         yet; origin alone records the import channel on the draft version).
+
+        Optional ``admin_request_id`` / ``admin_request_digest`` are stamped on
+        the aggregate in the same transaction as package insert so Plan 09
+        create/fork apply retries remain idempotent after durable success.
         """
         if origin != "import":
             raise ApiException(
@@ -201,6 +207,21 @@ class AgentSkillService:
         # actor_id is intentionally unused in Plan 01 persistence; keep the
         # parameter so API layers can pass it without inventing digest fields.
         _ = actor_id
+        if (admin_request_id is None) ^ (admin_request_digest is None):
+            raise ApiException(
+                status_code=422,
+                code=42290,
+                message=(
+                    "admin_request_id and admin_request_digest must both be "
+                    "provided or both omitted"
+                ),
+            )
+        if admin_request_digest is not None and len(admin_request_digest) != 64:
+            raise ApiException(
+                status_code=422,
+                code=42290,
+                message="admin_request_digest must be a 64-char hex digest",
+            )
 
         try:
             canonical = validate_canonical_skill_name(parsed.canonical_name)
@@ -256,6 +277,11 @@ class AgentSkillService:
             # Never auto-publish or enable catalog on import.
             package.published_version_id = None
             package.catalog_enabled = False
+            # Stamp admin request CAS fields before the single commit so a
+            # crash cannot leave a package without durable requestId evidence.
+            if admin_request_id is not None and admin_request_digest is not None:
+                package.last_admin_request_id = admin_request_id
+                package.last_admin_request_digest = admin_request_digest
             self.db.commit()
         except ApiException as exc:
             self.db.rollback()

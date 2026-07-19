@@ -729,6 +729,83 @@ class TestPreviewTokenAndIdempotency:
         )
         assert len(rows) == 1
 
+    def test_create_apply_stamps_last_admin_request_id_in_one_shot(self) -> None:
+        """Create apply must stamp last_admin_request_* with the package insert."""
+        from app.assistant.skills.models import AssistantSkillPackage
+
+        name = f"stamp-{uuid4().hex[:8]}"
+        raw = _valid_zip(name=name, aliases=[])
+        preview = self.svc.preview(
+            raw_zip=raw, mode="create", principal=self.principal
+        )
+        req = f"req-stamp-{name}"
+        applied = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=req,
+            principal=self.principal,
+        )
+        package = (
+            self.db.query(AssistantSkillPackage)
+            .filter(AssistantSkillPackage.id == applied.package.id)
+            .one()
+        )
+        assert package.last_admin_request_id == req
+        assert package.last_admin_request_digest is not None
+        assert len(package.last_admin_request_digest) == 64
+        assert package.catalog_enabled is False
+        assert package.published_version_id is None
+
+    def test_create_cold_index_retry_returns_package_by_last_admin_request(
+        self,
+    ) -> None:
+        """After durable success, cold _REQUEST_INDEX still returns the package.
+
+        Simulates process restart / multi-worker: in-memory index cleared while
+        the package row already has last_admin_request_id/digest stamped.
+        """
+        import app.assistant.skills.import_preview as ip
+        from app.assistant.skills.models import AssistantSkillPackage
+
+        name = f"cold-{uuid4().hex[:8]}"
+        raw = _valid_zip(name=name, aliases=[])
+        preview = self.svc.preview(
+            raw_zip=raw, mode="create", principal=self.principal
+        )
+        req = f"req-cold-{name}"
+        first = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=req,
+            principal=self.principal,
+        )
+        package = (
+            self.db.query(AssistantSkillPackage)
+            .filter(AssistantSkillPackage.id == first.package.id)
+            .one()
+        )
+        assert package.last_admin_request_id == req
+        stamped_digest = package.last_admin_request_digest
+        assert stamped_digest and len(stamped_digest) == 64
+
+        # Drop process-local request index (cold restart simulation).
+        with ip._STORE_LOCK:
+            ip._REQUEST_INDEX.clear()
+
+        second = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=req,
+            principal=self.principal,
+        )
+        assert second.package.id == first.package.id
+        assert second.package.draft_version.id == first.package.draft_version.id
+        rows = (
+            self.db.query(AssistantSkillPackage)
+            .filter(AssistantSkillPackage.canonical_name == name)
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0].last_admin_request_id == req
+        assert rows[0].last_admin_request_digest == stamped_digest
+
     def test_request_id_reuse_different_payload_conflicts(self) -> None:
         from app.common.exceptions import ApiException
 

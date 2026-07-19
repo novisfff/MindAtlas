@@ -676,6 +676,30 @@ class ImportPreviewService:
                     details={"requestId": request_id},
                 )
 
+            # Durable cold-index recovery: package may already exist from a
+            # prior durable create/fork that stamped last_admin_request_id
+            # before this process's _REQUEST_INDEX was populated.
+            durable = self._lookup_by_admin_request(request_id, digest)
+            if durable is not None:
+                record.consumed = True
+                record.applied_package_id = durable.id
+                record.applied_request_id = request_id
+                record.applied_request_digest = digest
+                record.raw_zip = b""
+                _REQUEST_INDEX[request_id] = {
+                    "status": "done",
+                    "digest": digest,
+                    "package_id": str(durable.id),
+                    "preview_id": str(preview_id),
+                    "mode": token.mode,
+                }
+                return ImportApplyResult(
+                    mode=token.mode,  # type: ignore[arg-type]
+                    preview_id=preview_id,
+                    request_id=request_id,
+                    package=durable,
+                )
+
             # Reserve before durable mutate so concurrent same requestId fails.
             _REQUEST_INDEX[request_id] = {
                 "status": "pending",
@@ -797,6 +821,31 @@ class ImportPreviewService:
             package=detail,
         )
 
+    def _lookup_by_admin_request(
+        self, request_id: str, digest: str
+    ) -> SkillPackageDetail | None:
+        """Return package stamped with this requestId, or raise on digest mismatch.
+
+        Used when process-local ``_REQUEST_INDEX`` is cold after durable success
+        (crash between commit and in-memory index update, or multi-worker).
+        """
+        package = (
+            self.db.query(AssistantSkillPackage)
+            .filter(AssistantSkillPackage.last_admin_request_id == request_id)
+            .one_or_none()
+        )
+        if package is None:
+            return None
+        last_digest = getattr(package, "last_admin_request_digest", None)
+        if last_digest == digest:
+            return self._packages.get_package(package.id)
+        raise ApiException(
+            status_code=409,
+            code=_CODE_CONFLICT_REQUEST,
+            message="requestId was reused with a different payload",
+            details={"requestId": request_id},
+        )
+
     def _apply_create(
         self,
         parsed: ParsedSkillPackage,
@@ -805,20 +854,24 @@ class ImportPreviewService:
         digest: str,
     ) -> SkillPackageDetail:
         # Plan 01 create-only import: unpublished + catalog disabled.
-        detail = self._packages.import_package(
-            parsed, actor_id=None, origin="import"
-        )
-        # Stamp requestId on the new aggregate for future CAS continuity.
-        package = self.db.get(AssistantSkillPackage, detail.id)
-        if package is not None:
-            package.last_admin_request_id = request_id
-            package.last_admin_request_digest = digest
-            # Ensure draft-only invariants (import_package already does this).
-            package.catalog_enabled = False
-            package.published_version_id = None
-            self.db.commit()
-            detail = self._packages.get_package(detail.id)
-        return detail
+        # Stamp requestId/digest in the same transaction as package insert so a
+        # crash cannot leave a durable package without CAS evidence (retry would
+        # otherwise 40995 on namespace instead of returning the existing row).
+        try:
+            return self._packages.import_package(
+                parsed,
+                actor_id=None,
+                origin="import",
+                admin_request_id=request_id,
+                admin_request_digest=digest,
+            )
+        except ApiException as exc:
+            # Race / cold-index: package may already exist with this requestId.
+            if exc.code == 40995:
+                durable = self._lookup_by_admin_request(request_id, digest)
+                if durable is not None:
+                    return durable
+            raise
 
     def _apply_append(
         self,
