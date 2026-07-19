@@ -9,7 +9,7 @@ except retention cleanup of unreferenced high-volume evidence.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 from uuid import UUID, uuid4
 
@@ -110,6 +110,13 @@ def _require_sha256(value: str, *, field: str) -> str:
             CODE_INVALID_INPUT, f"{field} must be 64-char lowercase hex digest"
         )
     return text
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize naive (SQLite) or aware datetimes to UTC for comparisons."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _as_uuid_list(values: Sequence[UUID | str]) -> list[str]:
@@ -919,9 +926,54 @@ class EvaluationRepository:
         if self._gate_has_publication_use(gate.id):
             # Publication-used evidence remains pinned even after gate expiry.
             return True
-        current = now or utcnow()
-        grace_end = gate.expires_at + timedelta(days=int(grace_days))
+        current = _as_utc(now or utcnow())
+        # SQLite may return naive expires_at; normalize before compare.
+        grace_end = _as_utc(gate.expires_at) + timedelta(days=int(grace_days))
         return current <= grace_end
+
+    def _count_pinned_referencing_gates(
+        self,
+        eval_run_id: UUID,
+        *,
+        now: datetime,
+        grace_days: int,
+    ) -> int:
+        """Scan gates referencing ``eval_run_id``, FOR UPDATE lock them, count pins.
+
+        JSON array membership is checked in Python (portable across SQLite/PG).
+        Callers re-invoke immediately before delete so a gate created after the
+        initial snapshot is either locked+seen or causes cleanup to skip.
+        """
+        gates = list(
+            self.session.execute(select(AssistantSkillPublishGate)).scalars().all()
+        )
+        referencing = [
+            g
+            for g in gates
+            if str(eval_run_id)
+            in [str(x) for x in (g.qualifying_eval_run_ids or [])]
+        ]
+        skipped = 0
+        for gate in referencing:
+            locked = self.session.execute(
+                select(AssistantSkillPublishGate)
+                .where(AssistantSkillPublishGate.id == gate.id)
+                .with_for_update()
+            ).scalar_one()
+            if self.is_gate_evidence_pinned(
+                locked, now=now, grace_days=grace_days
+            ):
+                skipped += 1
+        return skipped
+
+    def _cleanup_after_candidates_hook(self) -> None:
+        """Test-only seam: no-op in production.
+
+        Invoked after building the candidate delete set and before the final
+        gate re-scan so unit tests can inject a concurrent ``append_publish_gate``
+        (SQLite demonstrates recheck logic; full concurrent PG race is skippable).
+        """
+        return None
 
     def cleanup_unreferenced_evidence(
         self,
@@ -933,7 +985,10 @@ class EvaluationRepository:
         """Delete only unreferenced high-volume events/non-assertion Artifacts.
 
         Locks/rechecks gate and publication references in the same transaction.
-        Pinning is derived from gate_use existence (not publication_pin_count).
+        Races against gate creation *and* consumption: after the candidate delete
+        set is built, gates are re-scanned and FOR UPDATE locked so a concurrent
+        ``append_publish_gate`` wins and keeps evidence. Pinning is derived from
+        gate_use existence (not publication_pin_count).
         """
         current = now or utcnow()
         run = self.session.execute(
@@ -944,28 +999,10 @@ class EvaluationRepository:
         if run is None:
             raise EvaluationRepositoryError(CODE_NOT_FOUND, "eval run not found")
 
-        # Find gates that reference this run. JSON array membership is checked in
-        # Python because dataset/run id lists are JSON (portable across SQLite/PG).
-        gates = list(
-            self.session.execute(select(AssistantSkillPublishGate)).scalars().all()
+        # Initial pin check (consumption race: existing gates locked via FOR UPDATE).
+        skipped = self._count_pinned_referencing_gates(
+            eval_run_id, now=current, grace_days=grace_days
         )
-        referencing = [
-            g
-            for g in gates
-            if str(eval_run_id) in [str(x) for x in (g.qualifying_eval_run_ids or [])]
-        ]
-        skipped = 0
-        for gate in referencing:
-            # Re-lock gate rows (FOR SHARE/UPDATE of gate is fine; pin is via use rows).
-            locked = self.session.execute(
-                select(AssistantSkillPublishGate)
-                .where(AssistantSkillPublishGate.id == gate.id)
-                .with_for_update()
-            ).scalar_one()
-            if self.is_gate_evidence_pinned(
-                locked, now=current, grace_days=grace_days
-            ):
-                skipped += 1
         if skipped:
             return RetentionCleanupResult(
                 deleted_events=0, deleted_artifacts=0, skipped_pinned=skipped
@@ -994,6 +1031,18 @@ class EvaluationRepository:
         deletable_artifacts = [
             a for a in artifacts if not str(a.kind).startswith("assertion")
         ]
+
+        # Creation race: concurrent append_publish_gate may insert after the
+        # initial snapshot. Re-scan/re-lock immediately before delete.
+        self._cleanup_after_candidates_hook()
+        skipped = self._count_pinned_referencing_gates(
+            eval_run_id, now=current, grace_days=grace_days
+        )
+        if skipped:
+            return RetentionCleanupResult(
+                deleted_events=0, deleted_artifacts=0, skipped_pinned=skipped
+            )
+
         for event in events:
             self.session.delete(event)
         for artifact in deletable_artifacts:

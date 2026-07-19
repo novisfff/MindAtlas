@@ -828,6 +828,91 @@ class EvalRepositorySqliteTests(unittest.TestCase):
         self.assertEqual(pinned.deleted_events, 0)
         self.assertGreaterEqual(pinned.skipped_pinned, 1)
 
+    def test_cleanup_rechecks_gates_created_after_candidate_scan(self) -> None:
+        """Gate created after first scan / before recheck must retain evidence.
+
+        Demonstrates recheck logic on SQLite via the after-candidates hook.
+        Full concurrent PG race (true multi-session) is skippable here.
+        """
+        from app.common.time import utcnow
+
+        _, published, _ = self._publish_minimal_dataset()
+        run = self._create_run(published.version_id)
+        self.repo.append_event(
+            eval_run_id=run.id,
+            expected_run_revision=0,
+            event_type="noise",
+            payload={"i": 1},
+        )
+        self.repo.append_artifact(
+            eval_run_id=run.id,
+            expected_run_revision=1,
+            kind="trace",
+            media_type="text/plain",
+            payload=b"hello",
+        )
+
+        # No gate yet — first scan would allow delete. Inject a within-grace
+        # gate after candidates are built so the pre-delete recheck must see it.
+        def _inject_gate() -> None:
+            self.repo.append_publish_gate(
+                subject_kind="skill_version",
+                subject_aggregate_id=run.subject_aggregate_id,
+                subject_version_id=run.subject_version_id,
+                subject_content_digest=DIGEST_A,
+                subject_binding_digest=DIGEST_B,
+                profile_digest=DIGEST_C,
+                catalog_digest=DIGEST_D,
+                dataset_version_ids=[published.version_id],
+                qualifying_eval_run_ids=[run.id],
+                runtime_contract_version=1,
+                policy_version="p1",
+                threshold_version="t1",
+                build_revision="build-1",
+                decision="passed",
+                expires_at=utcnow() + timedelta(days=7),
+                request_id=f"gate-race-{uuid.uuid4().hex}",
+            )
+
+        original_hook = self.repo._cleanup_after_candidates_hook
+        self.repo._cleanup_after_candidates_hook = _inject_gate  # type: ignore[method-assign]
+        try:
+            result = self.repo.cleanup_unreferenced_evidence(eval_run_id=run.id)
+        finally:
+            self.repo._cleanup_after_candidates_hook = original_hook  # type: ignore[method-assign]
+
+        self.assertEqual(result.deleted_events, 0)
+        self.assertEqual(result.deleted_artifacts, 0)
+        self.assertGreaterEqual(result.skipped_pinned, 1)
+
+        # Evidence retained after the mid-cleanup gate insert.
+        from app.assistant.evaluation.models import (
+            AssistantSkillEvalArtifact,
+            AssistantSkillEvalEvent,
+        )
+        from sqlalchemy import select
+
+        events = (
+            self.db.execute(
+                select(AssistantSkillEvalEvent).where(
+                    AssistantSkillEvalEvent.eval_run_id == run.id
+                )
+            )
+            .scalars()
+            .all()
+        )
+        artifacts = (
+            self.db.execute(
+                select(AssistantSkillEvalArtifact).where(
+                    AssistantSkillEvalArtifact.eval_run_id == run.id
+                )
+            )
+            .scalars()
+            .all()
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(len(artifacts), 1)
+
     def test_plan04_fixture_import_deterministic_and_idempotent(self) -> None:
         from app.assistant.evaluation.datasets import (
             import_plan04_dataset,
