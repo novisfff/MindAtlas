@@ -82,6 +82,7 @@ from app.assistant.provider_loop.aliases import (
     build_provider_tool_surface,
 )
 from app.assistant.provider_loop.contracts import (
+    CapabilityLedgerAggregatePort,
     CancellationPort,
     ProviderAdapter,
     ProviderDispatchRequest,
@@ -878,6 +879,13 @@ def compose_main_agent_policy_runtime(
     restored_policy_snapshot: EffectiveRunPolicySnapshot | None = None,
     restored_budget_state: Any | None = None,
     restored_obligation_state: Any | None = None,
+    capability_ledger_mode: str = "legacy_read_only",
+    capability_ledger: CapabilityLedgerAggregatePort | None = None,
+    policy_contract_version: int = 1,
+    golden_write_release: Any | None = None,
+    admission_context_resolver: Any | None = None,
+    capability_ledger_lease: Any | None = None,
+    capability_ledger_idempotency_secret: str | bytes | None = None,
 ) -> tuple[MainAgentPolicyRuntime, ProviderLoopPorts]:
     """Compose Plan 05 policy ledgers + ProviderLoopPorts for one admitted Run.
 
@@ -1083,6 +1091,9 @@ def compose_main_agent_policy_runtime(
         profile_content_digest=profile_content_digest,
         policy_snapshot=policy_snapshot,
         owner_materials=owner_materials,
+        policy_contract_version=policy_contract_version,
+        golden_write_release=golden_write_release,
+        admission_context_resolver=admission_context_resolver,
     )
 
     lifecycle = MainAgentManifestEffectLifecycle()
@@ -1137,7 +1148,7 @@ def compose_main_agent_policy_runtime(
             discard_effect=_discard_lifecycle_effect,
         )
 
-    tool_dispatcher = MainAgentGatewayToolDispatcher(
+    gateway_dispatcher = MainAgentGatewayToolDispatcher(
         session_factory=session_factory,
         authorization_factory=auth_factory,
         control_port=control_runtime,
@@ -1149,6 +1160,44 @@ def compose_main_agent_policy_runtime(
         call_frames=call_frames,
         obligation_ledger=obligation_ledger,
     )
+    if capability_ledger_mode == "enforced":
+        if capability_ledger is None and capability_ledger_lease is not None:
+            if not capability_ledger_idempotency_secret:
+                raise RuntimeError(
+                    "enforced capability ledger requires idempotency secret"
+                )
+            from app.assistant.capability_calls.aggregate import (
+                DurableCapabilityLedgerAggregate,
+            )
+
+            capability_ledger = DurableCapabilityLedgerAggregate(
+                db=db,
+                authorization_factory=auth_factory,
+                idempotency_secret=capability_ledger_idempotency_secret,
+                lease=capability_ledger_lease,
+                runtime_snapshot_provider=lambda: {
+                    "manifest": lifecycle.current_manifest or manifest,
+                    "policy": lifecycle.policy_snapshot or policy_snapshot,
+                    "budget": budget_ledger.snapshot(),
+                    "obligation": obligation_ledger.snapshot(),
+                },
+            )
+        if capability_ledger is None:
+            raise RuntimeError(
+                "enforced capability ledger requires durable aggregate port"
+            )
+        from app.assistant.capability_calls.dispatcher import LedgerDispatcher
+
+        tool_dispatcher: Any = LedgerDispatcher(
+            inner=gateway_dispatcher,
+            aggregate=capability_ledger,
+        )
+    elif capability_ledger_mode == "legacy_read_only":
+        tool_dispatcher = gateway_dispatcher
+    else:
+        raise ValueError(
+            "capability_ledger_mode must be legacy_read_only or enforced"
+        )
 
     if isolated_parallel:
         sibling_executor: Any = BoundedIsolatedSiblingExecutor(max_workers=4)
@@ -1186,6 +1235,7 @@ def compose_main_agent_policy_runtime(
         sibling_executor=sibling_executor,
         cancellation=cancellation,
         events=events or _NullEventSink(),  # type: ignore[arg-type]
+        capability_ledger=capability_ledger if capability_ledger_mode == "enforced" else None,
         manifest_effect_lifecycle=lifecycle,  # type: ignore[arg-type]
         round_budget_guard=round_budget_guard,
         call_reservation=call_reservation,

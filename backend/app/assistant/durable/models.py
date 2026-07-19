@@ -558,11 +558,14 @@ class AssistantRunArtifactGc(UuidPrimaryKeyMixin, Base):
 
 
 class AssistantRunInterrupt(UuidPrimaryKeyMixin, Base):
-    """Durable human Interrupt row (Plan 07).
+    """Durable human Interrupt row (Plan 07 + Plan 08 origin profile).
 
     Request identity and budget suspension are immutable. Repository/trigger
     permit only token rotation and one pending -> terminal resolution mutation.
-    ``capability_call_id`` remains null in Plan 07.
+
+    Plan 08 adds ``interrupt_origin``:
+    - ``workflow_node``: Workflow frame/node/visit required; ``capability_call_id`` null
+    - ``capability_call``: ``capability_call_id`` required; Workflow identity columns null
     """
 
     __tablename__ = "assistant_run_interrupt"
@@ -593,11 +596,28 @@ class AssistantRunInterrupt(UuidPrimaryKeyMixin, Base):
     )
     owner_skill_package_id = Column(UUID(as_uuid=True), nullable=True)
     owner_skill_version_id = Column(UUID(as_uuid=True), nullable=True)
-    # Always null in Plan 07; Plan 08 adds FK/population.
-    capability_call_id = Column(UUID(as_uuid=True), nullable=True)
-    workflow_frame_id = Column(UUID(as_uuid=True), nullable=False)
-    node_id = Column(String(128), nullable=False)
-    node_visit_id = Column(String(160), nullable=False)
+    # Plan 08: FK to capability call for call-owned interrupts; null for workflow_node.
+    capability_call_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "assistant_capability_call.id",
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="fk_assistant_run_interrupt_capability_call_id",
+        ),
+        nullable=True,
+    )
+    # Plan 08 origin discriminator; existing rows backfilled as workflow_node.
+    interrupt_origin = Column(
+        String(32),
+        nullable=False,
+        default="workflow_node",
+        server_default=text("'workflow_node'"),
+    )
+    # Nullable under capability_call origin; required under workflow_node (see XOR check).
+    workflow_frame_id = Column(UUID(as_uuid=True), nullable=True)
+    node_id = Column(String(128), nullable=True)
+    node_visit_id = Column(String(160), nullable=True)
     request_revision = Column(Integer, nullable=False, default=1, server_default=text("1"))
     request_run_revision = Column(Integer, nullable=False)
     resolution_run_revision = Column(Integer, nullable=True)
@@ -641,6 +661,27 @@ class AssistantRunInterrupt(UuidPrimaryKeyMixin, Base):
             "'pending','approved','rejected','submitted','cancelled','expired'"
             ")",
             name="ck_assistant_run_interrupt_status",
+        ),
+        CheckConstraint(
+            "interrupt_origin IN ('workflow_node','capability_call')",
+            name="ck_assistant_run_interrupt_origin",
+        ),
+        # Plan 08 origin XOR: workflow identity XOR capability_call_id.
+        CheckConstraint(
+            "("
+            "  interrupt_origin = 'workflow_node'"
+            "  AND capability_call_id IS NULL"
+            "  AND workflow_frame_id IS NOT NULL"
+            "  AND node_id IS NOT NULL"
+            "  AND node_visit_id IS NOT NULL"
+            ") OR ("
+            "  interrupt_origin = 'capability_call'"
+            "  AND capability_call_id IS NOT NULL"
+            "  AND workflow_frame_id IS NULL"
+            "  AND node_id IS NULL"
+            "  AND node_visit_id IS NULL"
+            ")",
+            name="ck_assistant_run_interrupt_origin_xor",
         ),
         CheckConstraint(
             "request_revision > 0",

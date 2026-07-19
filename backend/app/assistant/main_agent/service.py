@@ -1052,6 +1052,49 @@ class MainAgentService:
                 generation=generation,
             )
 
+            # Enforced Runs enter the Provider loop only after the exact
+            # Manifest/policy/budget/obligation state and initial prompt have a
+            # durable checkpoint. This gives sibling reservation and result
+            # commits real revision pointers on a fresh worker claim.
+            if policy_runtime is not None and ports.capability_ledger is not None:
+                from app.assistant.durable.materialize import materialize_base_run_state
+                from app.assistant.durable.repository import LeaseToken
+                from app.assistant.models import AssistantChatRun
+
+                run_row = self.db.get(AssistantChatRun, request.run_id)
+                if run_row is None or not run_row.lease_owner:
+                    raise RuntimeError("enforced capability ledger requires Run lease")
+                if run_row.current_manifest_revision_id is None:
+                    budget_state = policy_runtime.budget_ledger.snapshot()
+                    obligation_state = policy_runtime.obligation_ledger.snapshot()
+                    materialize_base_run_state(
+                        self.db,
+                        run_id=request.run_id,
+                        lease=LeaseToken(
+                            run_id=request.run_id,
+                            worker_id=str(run_row.lease_owner),
+                            lease_generation=int(run_row.lease_generation or 0),
+                        ),
+                        expected_revision=int(run_row.state_revision),
+                        manifest_payload=manifest.model_dump(mode="json", by_alias=True),
+                        manifest_digest=manifest.manifest_digest,
+                        policy_payload=policy_runtime.policy_snapshot.model_dump(
+                            mode="json", by_alias=True
+                        ),
+                        policy_digest=(
+                            policy_runtime.policy_snapshot.effective_policy_digest
+                        ),
+                        budget_payload=budget_state.model_dump(
+                            mode="json", by_alias=True
+                        ),
+                        budget_digest=budget_state.ledger_digest,
+                        obligation_payload=obligation_state.model_dump(
+                            mode="json", by_alias=True
+                        ),
+                        obligation_digest=obligation_state.ledger_digest,
+                        provider_messages=prompt.messages,
+                    )
+
             # Bridge cancellation into ports if caller provided one.
             # Preserve every Plan 05 additive port — rebuilding without them
             # drops budget/completion/frame guards and dual-wired dispatch state.
@@ -1073,6 +1116,7 @@ class MainAgentService:
                     dispatch_guard=ports.dispatch_guard,
                     call_frames=ports.call_frames,
                     completion_guard=ports.completion_guard,
+                    capability_ledger=ports.capability_ledger,
                 )
 
             fallback.mark_provider_request()
@@ -1238,6 +1282,22 @@ class MainAgentService:
             )
             catalog_state = None
 
+        from app.assistant.durable.repository import LeaseToken
+        from app.assistant.models import AssistantChatRun
+
+        run_row = self.db.get(AssistantChatRun, request.run_id)
+        ledger_mode = str(
+            getattr(run_row, "capability_ledger_mode", None)
+            or "legacy_read_only"
+        )
+        ledger_lease = None
+        if run_row is not None and run_row.lease_owner:
+            ledger_lease = LeaseToken(
+                run_id=run_row.id,
+                worker_id=str(run_row.lease_owner),
+                lease_generation=int(run_row.lease_generation or 0),
+            )
+
         runtime, ports = compose_main_agent_policy_runtime(
             db=self.db,
             run_id=request.run_id,
@@ -1256,6 +1316,12 @@ class MainAgentService:
             profile_context_budget=admission.snapshot.context_budget,
             operator_budget_limits=operator_limits,
             durable_workflow=request.durable_workflow,
+            capability_ledger_mode=ledger_mode,
+            capability_ledger_lease=ledger_lease,
+            capability_ledger_idempotency_secret=(
+                self._settings.assistant_capability_call_idempotency_secret
+            ),
+            policy_contract_version=(2 if ledger_mode == "enforced" else 1),
         )
         # Use the Manifest aligned to Plan 05 effective_policy_digest.
         if self._state is not None and runtime.manifest is not None:

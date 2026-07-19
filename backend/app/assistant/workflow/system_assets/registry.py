@@ -13,6 +13,7 @@ SystemAssistantAssetUsageTag = Literal["skill_default", "standalone_target", "sy
 QUICK_STATS_ASSET_KEY = "quick_stats"
 SMART_CAPTURE_ASSET_KEY = "smart_capture"
 SMART_CAPTURE_RELATION_FOLLOWUP_ASSET_KEY = "smart_capture_relation_followup"
+SMART_CAPTURE_GOLDEN_CREATE_ASSET_KEY = "smart_capture_golden_create"
 PERIODIC_REVIEW_ASSET_KEY = "periodic_review"
 PERIODIC_REVIEW_CORE_ASSET_KEY = "periodic_review_core"
 GENERAL_CHAT_ASSET_KEY = DEFAULT_SKILL_NAME
@@ -162,6 +163,28 @@ _ASSET_TEMPLATES: tuple[_SystemAssistantAssetTemplate, ...] = (
         ),
         hidden=True,
         usage_tags=("standalone_target",),
+    ),
+    # Plan 08 golden create-only path. Hidden; not a replacement for full smart_capture.
+    # Topology: start -> reviewed structured create input -> create_entry -> output.
+    # Approval is call-owned via LedgerDispatcher (no Workflow human_in_loop node).
+    _SystemAssistantAssetTemplate(
+        asset_key=SMART_CAPTURE_GOLDEN_CREATE_ASSET_KEY,
+        kind="workflow",
+        canonical_name="smart-capture-golden-create__workflow",
+        display_name=_LocalizedText(
+            zh="智能创建记录（Golden 仅创建）",
+            en="Smart Capture Golden Create",
+        ),
+        description=_LocalizedText(
+            zh="Plan 08 隐藏的 create-only golden 工作流：结构化准备后仅调用 create_entry。"
+            "无人工节点、无更新/合并/关系/子流程。审批由 CapabilityCall 账本持有。",
+            en="Plan 08 hidden create-only golden workflow: structured preparation then "
+            "exactly one create_entry call. No human nodes, update/merge/relation/"
+            "follow-up edges. Approval is owned by the CapabilityCall ledger.",
+        ),
+        hidden=True,
+        usage_tags=("standalone_target",),
+        skill_name="smart_capture",
     ),
     _SystemAssistantAssetTemplate(
         asset_key=PERIODIC_REVIEW_ASSET_KEY,

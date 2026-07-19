@@ -69,9 +69,20 @@ class EntryToolsValidationTests(unittest.TestCase):
 
         token = set_current_db(self.db)
         try:
-            return func(*args, **kwargs)
+            target = getattr(func, "func", None)
+            return (target if callable(target) else func)(*args, **kwargs)
         finally:
             reset_current_db(token)
+
+    def test_with_db_calls_structured_tool_function(self) -> None:
+        class _StructuredToolLike:
+            def __init__(self) -> None:
+                self.func = lambda *, value: value
+
+            def __call__(self, *args, **kwargs):  # noqa: ANN002,ANN003
+                raise TypeError("BaseTool.__call__ does not accept keyword arguments")
+
+        self.assertEqual(self._with_db(_StructuredToolLike(), value="ok"), "ok")
 
     def test_create_entry_blank_type_code_uses_default_enabled_type(self) -> None:
         from app.assistant.tools.entry_tools import create_entry  # noqa: E402

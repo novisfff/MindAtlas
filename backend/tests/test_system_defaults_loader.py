@@ -44,12 +44,12 @@ class SystemDefaultsLoaderTests(unittest.TestCase):
         workflow_assets = list_system_assets(kind="workflow", locale="zh")
         agent_assets = list_system_assets(kind="agent", locale="zh")
 
-        self.assertEqual(len(workflow_assets), 8)
         self.assertEqual(
             {item.asset_key for item in workflow_assets},
             {
                 "quick_stats",
                 "smart_capture",
+                "smart_capture_golden_create",
                 "smart_capture_relation_followup",
                 "periodic_review",
                 "periodic_review_core",

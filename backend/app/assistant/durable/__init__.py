@@ -17,6 +17,12 @@ from app.assistant.durable.models import (  # noqa: F401
     AssistantRunProviderMessage,
     AssistantWorkerRegistration,
 )
+# Plan 08 ledger models (register with Base.metadata for create_all / alembic).
+from app.assistant.capability_calls.models import (  # noqa: F401
+    AssistantCapabilityCall,
+    AssistantCapabilityCallAttempt,
+    AssistantCapabilityReconciliation,
+)
 from app.assistant.durable.repository import (  # noqa: F401
     ALLOWED_TRANSITIONS,
     CODE_EVENT_KEY_CONFLICT,
@@ -45,6 +51,7 @@ from app.assistant.durable.worker_registry import (  # noqa: F401
     WorkerRegistry,
     default_capability_feature_digest,
     generate_worker_id,
+    plan08_capability_ledger_feature_digest,
 )
 from app.assistant.durable.leases import (  # noqa: F401
     ClaimedLease,
@@ -128,6 +135,7 @@ __all__ = [
     "WorkerIdentity",
     "WorkerRegistry",
     "default_capability_feature_digest",
+    "plan08_capability_ledger_feature_digest",
     "generate_worker_id",
     "ClaimedLease",
     "RunLeaseService",

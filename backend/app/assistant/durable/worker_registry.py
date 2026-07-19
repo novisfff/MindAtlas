@@ -30,11 +30,13 @@ from app.config import get_settings
 RUNTIME_CONTRACT_VERSION = 1
 
 
-def default_capability_feature_digest() -> str:
-    """Stable digest of the worker's advertised capability feature set.
+def plan08_capability_ledger_feature_digest() -> str:
+    """Stable digest advertised by workers that can execute Plan 08 ledgers.
 
-    Plan 06 keeps every enabled Capability at none|read|compute; the digest is
-    a pure function of that contract surface so API admission can match workers.
+    This is a release compatibility boundary, not a digest of runtime settings.
+    Old workers retain their prior digest; enforced admissions and frozen
+    enforced Runs require this exact contract before any worker can execute
+    them.
     """
     return sha256_canonical_json(
         {
@@ -42,10 +44,24 @@ def default_capability_feature_digest() -> str:
             "supportedCheckpointCodecVersions": sorted(
                 int(v) for v in SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS
             ),
-            "effectCeiling": "none|read|compute",
-            "interruptMode": "none",
+            "capabilityLedger": {
+                "contractVersion": 1,
+                "modes": ["legacy_read_only", "enforced"],
+                "attemptLifecycle": [
+                    "claimed",
+                    "dispatched",
+                    "response_received",
+                    "committed",
+                ],
+                "checkpointSchemaVersion": 3,
+            },
         }
     )
+
+
+def default_capability_feature_digest() -> str:
+    """Feature digest advertised by workers built from the current source."""
+    return plan08_capability_ledger_feature_digest()
 
 
 def generate_worker_id(*, instance_label: str | None = None) -> str:
@@ -118,6 +134,7 @@ class WorkerCompatibility:
     app_build_revision: str
     runtime_contract_version: int = RUNTIME_CONTRACT_VERSION
     required_checkpoint_codec_version: int = 1
+    required_capability_feature_digest: str | None = None
 
     def matches(self, identity: WorkerIdentity | AssistantWorkerRegistration) -> bool:
         build = str(getattr(identity, "app_build_revision", "") or "")
@@ -127,10 +144,15 @@ class WorkerCompatibility:
             # Defensive: JSON may arrive as a string in some drivers.
             supported = []
         supported_set = {int(v) for v in supported}
+        feature_digest = str(getattr(identity, "capability_feature_digest", "") or "")
         return (
             build == str(self.app_build_revision)
             and contract == int(self.runtime_contract_version)
             and int(self.required_checkpoint_codec_version) in supported_set
+            and (
+                self.required_capability_feature_digest is None
+                or feature_digest == str(self.required_capability_feature_digest)
+            )
         )
 
 
@@ -231,6 +253,7 @@ class WorkerRegistry:
         app_build_revision: str,
         runtime_contract_version: int = RUNTIME_CONTRACT_VERSION,
         required_checkpoint_codec_version: int = 1,
+        required_capability_feature_digest: str | None = None,
         registration_ttl: timedelta | None = None,
         require_not_draining: bool = True,
     ) -> bool:
@@ -240,6 +263,7 @@ class WorkerRegistry:
                 app_build_revision=app_build_revision,
                 runtime_contract_version=runtime_contract_version,
                 required_checkpoint_codec_version=required_checkpoint_codec_version,
+                required_capability_feature_digest=(required_capability_feature_digest),
                 registration_ttl=registration_ttl,
                 require_not_draining=require_not_draining,
                 limit=1,
@@ -253,11 +277,12 @@ class WorkerRegistry:
         app_build_revision: str,
         runtime_contract_version: int = RUNTIME_CONTRACT_VERSION,
         required_checkpoint_codec_version: int = 1,
+        required_capability_feature_digest: str | None = None,
         registration_ttl: timedelta | None = None,
         require_not_draining: bool = True,
         limit: int = 50,
     ) -> list[AssistantWorkerRegistration]:
-        """Return fresh registrations matching build/contract/codec."""
+        """Return fresh registrations matching build/contract/codec/feature."""
         ttl = registration_ttl
         if ttl is None:
             s = get_settings()
@@ -280,6 +305,11 @@ class WorkerRegistry:
         )
         if require_not_draining:
             stmt = stmt.where(AssistantWorkerRegistration.draining_at.is_(None))
+        if required_capability_feature_digest is not None:
+            stmt = stmt.where(
+                AssistantWorkerRegistration.capability_feature_digest
+                == str(required_capability_feature_digest)
+            )
 
         rows = list(self.db.scalars(stmt).all())
         required = int(required_checkpoint_codec_version)
@@ -303,6 +333,7 @@ class WorkerRegistry:
         app_build_revision: str,
         runtime_contract_version: int = RUNTIME_CONTRACT_VERSION,
         required_checkpoint_codec_version: int = 1,
+        required_capability_feature_digest: str | None = None,
         registration_ttl: timedelta | None = None,
     ) -> dict[str, Any]:
         """Validate a fresh compatible registration (not mere PID liveness).
@@ -332,6 +363,7 @@ class WorkerRegistry:
             app_build_revision=app_build_revision,
             runtime_contract_version=runtime_contract_version,
             required_checkpoint_codec_version=required_checkpoint_codec_version,
+            required_capability_feature_digest=required_capability_feature_digest,
         )
         if not compat.matches(row):
             return {
@@ -370,4 +402,5 @@ __all__ = [
     "WorkerRegistry",
     "default_capability_feature_digest",
     "generate_worker_id",
+    "plan08_capability_ledger_feature_digest",
 ]

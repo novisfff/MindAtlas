@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
+from tests._db import make_session
 
 
 bootstrap_backend_imports()
@@ -51,9 +52,17 @@ class LightRagQueryApiTests(unittest.TestCase):
 
     def setUp(self) -> None:
         reset_caches()
+        self.db = make_session()
+        self._previous_enabled = os.environ.get("LIGHTRAG_ENABLED")
         os.environ["LIGHTRAG_ENABLED"] = "true"
+        reset_caches()
 
     def tearDown(self) -> None:
+        self.db.close()
+        if self._previous_enabled is None:
+            os.environ.pop("LIGHTRAG_ENABLED", None)
+        else:
+            os.environ["LIGHTRAG_ENABLED"] = self._previous_enabled
         reset_caches()
 
     def test_query_ok_non_stream(self) -> None:

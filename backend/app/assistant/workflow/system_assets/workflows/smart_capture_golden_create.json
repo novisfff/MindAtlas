@@ -1,0 +1,100 @@
+{
+  "nodes": [
+    {
+      "nodeId": "start",
+      "nodeType": "start",
+      "label": "Start",
+      "positionX": 80.0,
+      "positionY": 240.0,
+      "config": {
+        "inputMode": "text",
+        "memoryMode": "off",
+        "structuredFields": []
+      }
+    },
+    {
+      "nodeId": "llm_prepare_create",
+      "nodeType": "llm",
+      "label": "结构化创建输入",
+      "positionX": 480.0,
+      "positionY": 240.0,
+      "config": {
+        "systemPrompt": "你是 MindAtlas 的 golden create 准备节点。只从用户输入提取将要创建的记录字段，不要合并、更新或创建关系。只输出 title、summary、content、type_code、tags、time_mode、time_at。不要编造用户未给出的事实。",
+        "userInput": "date: {{sys.date}}\n\noriginal_input:\n{{start.user_input}}",
+        "outputMode": "structured",
+        "outputFields": [
+          {"name": "title"},
+          {"name": "summary"},
+          {"name": "content"},
+          {"name": "type_code"},
+          {"name": "tags"},
+          {"name": "time_mode"},
+          {"name": "time_at"}
+        ]
+      }
+    },
+    {
+      "nodeId": "tool_create",
+      "nodeType": "tool",
+      "label": "创建记录",
+      "positionX": 880.0,
+      "positionY": 240.0,
+      "config": {
+        "toolName": "create_entry",
+        "inputBindings": {
+          "title": "{{llm_prepare_create.title}}",
+          "summary": "{{llm_prepare_create.summary}}",
+          "content": "{{llm_prepare_create.content}}",
+          "type_code": "{{llm_prepare_create.type_code}}",
+          "tags": "{{llm_prepare_create.tags}}",
+          "time_mode": "{{llm_prepare_create.time_mode}}",
+          "time_at": "{{llm_prepare_create.time_at}}"
+        }
+      }
+    },
+    {
+      "nodeId": "output_final",
+      "nodeType": "output",
+      "label": "输出",
+      "positionX": 1280.0,
+      "positionY": 240.0,
+      "config": {
+        "outputMode": "text",
+        "textTemplate": "已创建记录 {{tool_create.id}}：{{tool_create.title}}"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edgeId": "e_start_prepare",
+      "sourceNodeId": "start",
+      "targetNodeId": "llm_prepare_create",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_prepare_create",
+      "sourceNodeId": "llm_prepare_create",
+      "targetNodeId": "tool_create",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    },
+    {
+      "edgeId": "e_create_output",
+      "sourceNodeId": "tool_create",
+      "targetNodeId": "output_final",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "conditionType": null,
+      "conditionExpr": null,
+      "label": null
+    }
+  ],
+  "viewport": {"x": 0, "y": 0, "zoom": 1}
+}

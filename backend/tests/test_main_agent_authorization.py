@@ -173,8 +173,8 @@ def test_ceiling_fixed_vector_lattice_order() -> None:
 
     ceiling = MAIN_AGENT_READ_ONLY_EFFECT_CEILING
     assert ceiling.allowed_side_effects == ("none", "compute", "read")
-    assert ceiling.allowed_interrupt_modes == ("none",)
-    assert ceiling.revision == "plan04-v1"
+    assert ceiling.allowed_interrupt_modes == ("none", "durable")
+    assert ceiling.revision == "plan07-v1"
     assert ceiling.ceiling_key == "main_agent_read_only"
     assert ceiling.ceiling_digest == MAIN_AGENT_READ_ONLY_EFFECT_CEILING_DIGEST
     assert len(ceiling.ceiling_digest) == 64

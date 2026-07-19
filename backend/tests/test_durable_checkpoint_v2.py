@@ -430,10 +430,14 @@ def test_migrate_checkpoint_v1_to_v2_lossless_fixed_vector() -> None:
     assert codec["encode_checkpoint_v1"](v1) == v1_encoded
     assert codec["checkpoint_state_digest"](v1) == v1_digest
 
-    # migrate via payload registry also lands on v2.
+    # The generic registry advances legacy payloads to the current Plan 08 v3
+    # while the explicit v1→v2 migration above remains byte/meaning stable.
     migrated = codec["migrate_checkpoint"](v1_encoded)
-    assert migrated.schema_version == 2
-    assert migrated == v2
+    assert migrated.schema_version == 3
+    assert migrated.run_id == v2.run_id
+    assert migrated.inflight_unit == v2.inflight_unit
+    assert migrated.policy_contract_version == 1
+    assert migrated.capability_calls == ()
 
 
 def test_migrate_every_v1_unit_kind_losslessly() -> None:

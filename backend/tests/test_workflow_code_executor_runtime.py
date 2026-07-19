@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from tests._bootstrap import bootstrap_backend_imports
 
@@ -27,18 +28,37 @@ class WorkflowCodeExecutorRuntimeTests(unittest.TestCase):
 
     def test_execute_code_javascript_success_with_multiple_custom_keys(self) -> None:
         from app.assistant.workflow.code_executor import execute_code
+        from app.config import get_settings
 
-        result = execute_code(
-            language="javascript",
-            code=(
-                "function main(text, suffix) {\n"
-                "  return { result: String(text ?? '').toUpperCase() + String(suffix ?? '').toUpperCase() }\n"
-                "}\n"
-            ),
-            entrypoint="main",
-            inputs={"text": "mind", "suffix": "atlas"},
-            output_fields=[{"name": "result", "type": "string", "nullable": False}],
+        settings = get_settings().model_copy(
+            update={
+                "workflow_code_executor_max_timeout_ms": 15_000,
+                # RLIMIT_AS constrains V8's reserved virtual address space on
+                # Linux, not merely its resident memory.  This binding test is
+                # intentionally independent from resource-sandbox coverage.
+                "workflow_code_executor_memory_limit_mb": 4_096,
+            }
         )
+        with patch(
+            "app.assistant.workflow.code_executor.get_settings",
+            return_value=settings,
+        ):
+            result = execute_code(
+                language="javascript",
+                code=(
+                    "function main(text, suffix) {\n"
+                    "  return { result: String(text ?? '').toUpperCase() + String(suffix ?? '').toUpperCase() }\n"
+                    "}\n"
+                ),
+                entrypoint="main",
+                inputs={"text": "mind", "suffix": "atlas"},
+                output_fields=[
+                    {"name": "result", "type": "string", "nullable": False}
+                ],
+                # GitHub runners can spend more than the production default on
+                # a cold Node.js process start while the full suite is busy.
+                timeout_ms=15_000,
+            )
 
         self.assertEqual(result.output, {"result": "MINDATLAS"})
 

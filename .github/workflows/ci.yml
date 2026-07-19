@@ -60,18 +60,18 @@ jobs:
         env:
           POSTGRES_USER: mindatlas
           POSTGRES_PASSWORD: mindatlas
-          POSTGRES_DB: mindatlas_migration
+          POSTGRES_DB: mindatlas_test_plan08_ci
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U mindatlas -d mindatlas_migration"
+          --health-cmd "pg_isready -U mindatlas -d mindatlas_test_plan08_ci"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
     env:
       # Disposable CI database only. PRE_PLAN01_HEAD=a7b8c9d0e1f2; Plan 01=acf208493c87.
-      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_migration
-      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_migration
+      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_ci
+      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_ci
       # Minimal app config required by settings import during alembic env.
       AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
     steps:
@@ -111,7 +111,9 @@ jobs:
           alembic heads
 
       - name: PostgreSQL migration preservation and guard tests
-        run: python -m pytest tests/test_agent_skill_postgres_migration.py tests/test_provider_model_probe_postgres.py tests/test_main_agent_postgres_migration.py -q
+        env:
+          MINDATLAS_TEST_POSTGRES_DESTRUCTIVE: "1"
+        run: python -m pytest tests/test_agent_skill_postgres_migration.py tests/test_provider_model_probe_postgres.py tests/test_main_agent_postgres_migration.py tests/test_capability_call_migration_postgres.py -q
 
       - name: System tool golden digest smoke
         run: python -m pytest tests/test_binding_json_schema.py::test_system_tool_golden_schemas_and_contract_set_digest_are_stable -q

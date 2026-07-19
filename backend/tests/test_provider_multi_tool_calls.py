@@ -57,6 +57,7 @@ from app.assistant.provider_loop.contracts import (  # noqa: E402
     ProviderGenerationOptions,
     ProviderLoopPorts,
     ProviderLoopRequest,
+    ProviderLoopReservedResumeRequest,
     ProviderLoopResumeRequest,
     ProviderUsage,
     ProviderWaitingResolution,
@@ -77,6 +78,7 @@ from app.assistant.provider_loop.messages import (  # noqa: E402
     digest_arguments,
     digest_provider_message,
     digest_provider_transcript,
+    project_tool_result_envelope,
     validate_provider_transcript,
 )
 from app.assistant.provider_loop.scheduler import (  # noqa: E402
@@ -590,6 +592,7 @@ def _ports(
     sibling_executor=None,
     cancellation: RecordingCancellation | None = None,
     events: RecordingEventSink | None = None,
+    capability_ledger=None,
 ) -> ProviderLoopPorts:
     return ProviderLoopPorts(
         provider=provider,
@@ -600,6 +603,7 @@ def _ports(
         sibling_executor=sibling_executor or SequentialSiblingExecutor(),
         cancellation=cancellation or RecordingCancellation(),
         events=events or RecordingEventSink(),
+        capability_ledger=capability_ledger,
     )
 
 
@@ -1287,6 +1291,26 @@ def test_waiting_scenario_retains_prefix_defers_suffix() -> None:
         },
         verifier=verifier,
     )
+    class RecordingLedger:
+        def __init__(self):
+            self.reservations = []
+            self.pause_calls = 0
+
+        def reserve_siblings(self, requests, provider_messages=()):
+            assert provider_messages
+            self.reservations.append(tuple(request.call.call_id for request in requests))
+
+        def commit_progress(self, provider_messages=(), **_kwargs):
+            del provider_messages
+
+        def commit_recovery_drift(self, provider_messages, *, stale_call_id):
+            del provider_messages, stale_call_id
+
+        def commit_pause(self, continuation, provider_messages=()):
+            del continuation, provider_messages
+            self.pause_calls += 1
+
+    ledger = RecordingLedger()
     result = run_provider_agent_loop(
         ProviderLoopRequest(
             manifest=manifest,
@@ -1309,6 +1333,7 @@ def test_waiting_scenario_retains_prefix_defers_suffix() -> None:
             verifier=verifier,
             auth=RecordingAuthFactory(),
             dispatcher=dispatcher,
+            capability_ledger=ledger,
         ),
     )
     assert result.status == "waiting"
@@ -1333,6 +1358,149 @@ def test_waiting_scenario_retains_prefix_defers_suffix() -> None:
     assert [m.call_id for m in tool_msgs] == ["r1"]
     validate_provider_transcript(result.messages, allowed_open_continuation=cont)
     assert [r.call.call_id for r in dispatcher.requests] == ["r1", "w1"]
+    assert ledger.reservations == [("r1", "w1", "wr", "r2")]
+    assert ledger.pause_calls == 1
+
+
+def test_reserved_sibling_resume_dispatches_open_prefix_before_provider() -> None:
+    from app.assistant.provider_loop.loop import (
+        ProviderLoopError,
+        resume_reserved_provider_loop,
+    )
+
+    manifest = _manifest()
+    model = _model()
+    pairs = [
+        _pair("tools.read_a", side_effect="read", parallel_safe=False),
+        _pair("tools.read_b", side_effect="read", parallel_safe=False),
+    ]
+    resolution = _surface_for_pairs(manifest, pairs)
+    definitions = {item.domain_key: item for item in resolution.surface.tools}
+    calls = (
+        _call_from_def(
+            resolution.surface,
+            definitions["tools.read_a"],
+            call_id="reserved-r1",
+            call_index=0,
+        ),
+        _call_from_def(
+            resolution.surface,
+            definitions["tools.read_b"],
+            call_id="reserved-r2",
+            call_index=1,
+        ),
+    )
+    persisted_result = completed_result(user_text="ok", metrics=_metrics())
+    open_messages = (
+        ProviderUserMessage(content="resume"),
+        ProviderAssistantMessage(content=None, tool_calls=calls),
+        ProviderToolMessage(
+            call_id=calls[0].call_id,
+            provider_alias=calls[0].provider_alias,
+            content=project_tool_result_envelope(
+                domain_key=calls[0].domain_key,
+                result=persisted_result,
+            ),
+        ),
+    )
+
+    class FinalProvider(ScriptedProvider):
+        def stream_round(self, request, *, cancellation):
+            del cancellation
+            tool_ids = [
+                item.call_id
+                for item in request.messages
+                if isinstance(item, ProviderToolMessage)
+            ]
+            assert tool_ids == ["reserved-r1", "reserved-r2"]
+            yield from text_then_terminal(
+                "done",
+                usage=ProviderUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+            )
+
+    verifier = RecordingDescriptorVerifier(
+        current_by_binding={pair[0].ref.binding_contract_digest: pair[1] for pair in pairs}
+    )
+    dispatcher = RecordingDispatcher(
+        results_by_call_id={
+            call.call_id: ProviderDispatchResult(
+                capability_result=completed_result(user_text="ok", metrics=_metrics()),
+                next_manifest=resolution.manifest,
+            )
+            for call in calls[1:]
+        },
+        verifier=verifier,
+    )
+    result = resume_reserved_provider_loop(
+        ProviderLoopReservedResumeRequest(
+            manifest=resolution.manifest,
+            initial_messages=open_messages,
+            model_ref=model,
+            execution_scope=_scope(),
+            max_rounds=4,
+            locale="en",
+            generation=ProviderGenerationOptions(),
+        ),
+        _ports(
+            provider=FinalProvider(
+                provider_protocol=P,
+                adapter_key=ADAPTER_KEY,
+                adapter_revision=ADAPTER_REVISION,
+                model_config_digest=MODEL_CONFIG,
+                expected_model_ref=model,
+            ),
+            tools=RecordingToolsProvider([resolution, resolution]),
+            verifier=verifier,
+            auth=RecordingAuthFactory(),
+            dispatcher=dispatcher,
+        ),
+    )
+    assert result.status == "completed"
+    assert result.final_text == "done"
+    assert [item.call.call_id for item in dispatcher.requests] == ["reserved-r2"]
+
+    stale_verifier = RecordingDescriptorVerifier(
+        current_by_binding={
+            pair[0].ref.binding_contract_digest: pair[1] for pair in pairs
+        },
+        mutate_after=1,
+    )
+    stale_dispatcher = RecordingDispatcher(
+        results_by_call_id={
+            call.call_id: ProviderDispatchResult(
+                capability_result=completed_result(user_text="unexpected", metrics=_metrics()),
+                next_manifest=resolution.manifest,
+            )
+            for call in calls
+        },
+        verifier=stale_verifier,
+    )
+    with pytest.raises(ProviderLoopError, match="classification changed"):
+        resume_reserved_provider_loop(
+            ProviderLoopReservedResumeRequest(
+                manifest=resolution.manifest,
+                initial_messages=open_messages[:2],
+                model_ref=model,
+                execution_scope=_scope(),
+                max_rounds=4,
+                locale="en",
+                generation=ProviderGenerationOptions(),
+            ),
+            _ports(
+                provider=FinalProvider(
+                    provider_protocol=P,
+                    adapter_key=ADAPTER_KEY,
+                    adapter_revision=ADAPTER_REVISION,
+                    model_config_digest=MODEL_CONFIG,
+                    expected_model_ref=model,
+                ),
+                tools=RecordingToolsProvider([resolution]),
+                verifier=stale_verifier,
+                auth=RecordingAuthFactory(),
+                dispatcher=stale_dispatcher,
+            ),
+        )
+    assert stale_dispatcher.requests == []
 
 
 def test_resume_completes_pending_and_provider_after_pairing() -> None:
@@ -1354,7 +1522,9 @@ def test_resume_completes_pending_and_provider_after_pairing() -> None:
     res1 = _surface_for_pairs(manifest, pairs)
     res2 = _surface_for_pairs(manifest, pairs)
     aliases = _alias_by_domain(res1.surface)
-    cont_ref = _continuation_ref()
+    cont_ref = _continuation_ref().model_copy(
+        update={"continuation_type": "capability_call"}
+    )
 
     class FlexStart(ScriptedProvider):
         def stream_round(self, request, *, cancellation):
@@ -1441,6 +1611,12 @@ def test_resume_completes_pending_and_provider_after_pairing() -> None:
     resume_auth = RecordingAuthFactory()
     resume_dispatcher = RecordingDispatcher(
         results_by_call_id={
+            "w1": ProviderDispatchResult(
+                capability_result=completed_result(
+                    user_text="approved write executed", metrics=_metrics()
+                ),
+                next_manifest=res1.manifest,
+            ),
             "wr": ProviderDispatchResult(
                 capability_result=completed_result(user_text="wrote", metrics=_metrics()),
                 next_manifest=res1.manifest,
@@ -1476,8 +1652,10 @@ def test_resume_completes_pending_and_provider_after_pairing() -> None:
     )
     assert resumed.status == "completed"
     assert resumed.final_text == "final"
-    # Fresh evidence only for remaining sibling.
-    assert [item["call_id"] for item in resume_auth.issued] == ["wr"]
+    # Call-owned approval re-dispatches the exact waiting call before later
+    # siblings; approval itself is never projected as fake Tool success.
+    assert [item["call_id"] for item in resume_auth.issued] == ["w1", "wr"]
+    assert [item.call.call_id for item in resume_dispatcher.requests] == ["w1", "wr"]
     assert resumed.round_count == 2
     assert resumed.usage.total_tokens == 6
 

@@ -755,6 +755,22 @@ def _open_calls_from_messages(
     return open_calls
 
 
+def open_provider_tool_calls(
+    messages: tuple[ProviderMessage, ...],
+) -> tuple[ProviderToolCall, ...]:
+    """Return the ordered, still-unpaired Tool calls in a durable transcript.
+
+    The same protocol parser used by ``validate_provider_transcript`` performs
+    all duplicate, ordering, alias, and message-boundary checks.  Aggregate
+    recovery paths use this to discover ordinary reserved siblings even when
+    there is no waiting continuation.
+    """
+
+    if not isinstance(messages, tuple):
+        raise TypeError("messages must be a tuple")
+    return tuple(item.call for item in _open_calls_from_messages(messages).values())
+
+
 def validate_provider_transcript(
     messages: tuple[ProviderMessage, ...],
     *,
@@ -887,6 +903,7 @@ __all__ = [
     "digest_provider_message",
     "digest_provider_transcript",
     "make_cancelled_envelope",
+    "open_provider_tool_calls",
     "project_tool_result_envelope",
     "provider_message_payload",
     "seal_cancelled_continuation",

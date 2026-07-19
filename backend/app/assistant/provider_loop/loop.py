@@ -39,6 +39,7 @@ from app.assistant.provider_loop.contracts import (
     ProviderAdapter,
     ProviderCompletionDisposition,
     ProviderCompletionRequest,
+    ProviderDeniedLedgerReservationRequest,
     ProviderDispatchRequest,
     ProviderDispatchResult,
     ProviderExecutionScope,
@@ -46,6 +47,7 @@ from app.assistant.provider_loop.contracts import (
     ProviderLoopContinuation,
     ProviderLoopPorts,
     ProviderLoopRequest,
+    ProviderLoopReservedResumeRequest,
     ProviderLoopResult,
     ProviderLoopResumeRequest,
     ProviderRoundBudgetDeniedError,
@@ -727,6 +729,211 @@ def run_provider_agent_loop(
         return result
 
 
+def resume_reserved_provider_loop(
+    request: ProviderLoopReservedResumeRequest,
+    ports: ProviderLoopPorts,
+) -> ProviderLoopResult:
+    """Resume a v3 sibling reservation from its durable open transcript.
+
+    The durable prefix must end in one Assistant Tool-Call message followed by
+    a contiguous Provider-order prefix of Tool Results. Remaining siblings are
+    dispatched/replayed before another Provider round is allowed.
+    """
+    if not isinstance(request, ProviderLoopReservedResumeRequest):
+        raise TypeError("request must be a ProviderLoopReservedResumeRequest")
+    messages = list(request.initial_messages)
+    assistant_index = next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if isinstance(messages[index], ProviderAssistantMessage)
+            and messages[index].tool_calls
+        ),
+        None,
+    )
+    if assistant_index is None:
+        raise ProviderLoopError(
+            stop_reason="protocol_error",
+            error=SafeProviderError(
+                semantic_code="reserved_siblings_missing",
+                safe_summary="reserved sibling transcript has no open Tool Calls",
+                retry_disposition="never",
+            ),
+            messages=tuple(messages),
+            manifest=request.manifest,
+        )
+    assistant = messages[assistant_index]
+    assert isinstance(assistant, ProviderAssistantMessage)
+    suffix = messages[assistant_index + 1 :]
+    if any(not isinstance(item, ProviderToolMessage) for item in suffix):
+        raise ProviderLoopError(
+            stop_reason="protocol_error",
+            error=SafeProviderError(
+                semantic_code="reserved_siblings_transcript_invalid",
+                safe_summary="reserved sibling transcript has a non-Tool suffix",
+                retry_disposition="never",
+            ),
+            messages=tuple(messages),
+            manifest=request.manifest,
+        )
+    paired_ids = tuple(item.call_id for item in suffix)
+    expected_prefix = tuple(
+        call.call_id for call in assistant.tool_calls[: len(paired_ids)]
+    )
+    if paired_ids != expected_prefix or len(paired_ids) >= len(assistant.tool_calls):
+        raise ProviderLoopError(
+            stop_reason="protocol_error",
+            error=SafeProviderError(
+                semantic_code="reserved_siblings_order_invalid",
+                safe_summary="reserved Tool Results do not form an open ordered prefix",
+                retry_disposition="never",
+            ),
+            messages=tuple(messages),
+            manifest=request.manifest,
+        )
+
+    resolution = _require_tool_surface_resolution(
+        ports.tools_provider.resolve(
+            request.manifest,
+            scope=request.execution_scope,
+            locale=request.locale,
+        )
+    )
+    _validate_alias_revision_lineage(
+        previous=request.manifest,
+        next_manifest=resolution.manifest,
+    )
+    for call in assistant.tool_calls:
+        if call.surface_digest != resolution.surface.surface_digest:
+            raise ProviderLoopError(
+                stop_reason="protocol_error",
+                error=SafeProviderError(
+                    semantic_code="reserved_surface_drift",
+                    safe_summary="reserved sibling Tool surface changed",
+                    retry_disposition="never",
+                ),
+                messages=tuple(messages),
+                manifest=request.manifest,
+            )
+
+    records = [
+        ProviderToolCallRecord(
+            call=assistant.tool_calls[index],
+            status=tool_message.content.status,
+            result_message_digest=digest_provider_message(tool_message),
+            safe_duration_ms=None,
+        )
+        for index, tool_message in enumerate(suffix)
+    ]
+    remaining_calls = assistant.tool_calls[len(paired_ids) :]
+    try:
+        _preplan_verify_all(
+            ports=ports,
+            surface=resolution.surface,
+            calls=remaining_calls,
+            scope=request.execution_scope,
+        )
+    except _ClassificationDrift as drift:
+        sealed_messages, sealed_records = _seal_classification_drift(
+            messages=messages,
+            tool_call_records=records,
+            calls=remaining_calls,
+            first_stale_index=drift.first_stale_index,
+        )
+        if ports.capability_ledger is not None:
+            stale_call = next(
+                call
+                for call in remaining_calls
+                if call.call_index == drift.first_stale_index
+            )
+            ports.capability_ledger.commit_recovery_drift(
+                sealed_messages,
+                stale_call_id=stale_call.call_id,
+            )
+        raise ProviderLoopError(
+            stop_reason="capability_error",
+            error=SafeProviderError(
+                semantic_code="classification_changed",
+                safe_summary="capability classification changed before recovery dispatch",
+                retry_disposition="never",
+            ),
+            messages=sealed_messages,
+            tool_calls=sealed_records,
+            manifest=resolution.manifest,
+            usage=ProviderUsage(),
+            round_count=0,
+        ) from drift
+    outcome = _execute_sibling_calls(
+        ports=ports,
+        surface=resolution.surface,
+        assistant=assistant,
+        calls=assistant.tool_calls,
+        start_index=len(paired_ids),
+        messages=messages,
+        tool_call_records=records,
+        current_manifest=resolution.manifest,
+        scope=request.execution_scope,
+        model_ref=request.model_ref,
+        locale=request.locale,
+        max_rounds=request.max_rounds,
+        provider_rounds_used=0,
+        prior_tool_call_count=sum(
+            len(item.tool_calls)
+            for item in messages
+            if isinstance(item, ProviderAssistantMessage)
+        ),
+        accumulated_usage=ProviderUsage(),
+    )
+    if outcome.kind == "waiting":
+        return ProviderLoopResult(
+            status="waiting",
+            final_text=None,
+            messages=outcome.messages,
+            tool_calls=outcome.tool_call_records,
+            round_count=0,
+            stop_reason="waiting_interrupt",
+            manifest=outcome.current_manifest,
+            continuation=outcome.continuation,
+            usage=ProviderUsage(),
+            error=None,
+        )
+    if outcome.kind != "continue":
+        status = "cancelled" if outcome.kind == "cancelled" else "failed"
+        return ProviderLoopResult(
+            status=status,
+            final_text=None,
+            messages=outcome.messages,
+            tool_calls=outcome.tool_call_records,
+            round_count=0,
+            stop_reason=outcome.stop_reason or status,
+            manifest=outcome.current_manifest,
+            continuation=None,
+            usage=ProviderUsage(),
+            error=outcome.error,
+        )
+
+    continued = run_provider_agent_loop(
+        ProviderLoopRequest(
+            manifest=outcome.current_manifest,
+            initial_messages=outcome.messages,
+            model_ref=request.model_ref,
+            execution_scope=request.execution_scope,
+            max_rounds=request.max_rounds,
+            locale=request.locale,
+            generation=request.generation,
+        ),
+        ports,
+    )
+    return continued.model_copy(
+        update={
+            "tool_calls": (
+                *outcome.tool_call_records,
+                *continued.tool_calls,
+            )
+        }
+    )
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -797,6 +1004,7 @@ class _CallWorkItem:
     call: ProviderToolCall
     definition: ProviderToolDefinition
     current_manifest: ResolvedRunManifestRevision
+    authorization: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -1060,6 +1268,7 @@ def _dispatch_one(
     definition: ProviderToolDefinition,
     current_manifest: ResolvedRunManifestRevision,
     scope: ProviderExecutionScope,
+    authorization: Any | None = None,
 ) -> tuple[ProviderToolMessage, ResolvedRunManifestRevision, str]:
     """Pre-dispatch verify, issue evidence, dispatch once. Returns message/manifest/status."""
 
@@ -1119,47 +1328,50 @@ def _dispatch_one(
             cause=exc,
         )
 
-    try:
-        authorization = ports.authorization_evidence.issue(
-            call=call,
-            binding=definition.binding,
-            descriptor=definition.descriptor,
-            scope=scope,
-        )
-    except AuthorizationEvidenceVerificationError as exc:
-        # Pure policy deny / evidence reject: preserve allowlisted reason codes
-        # (Plan 05 §11.3 blocked/<stable code>) instead of collapsing all denials
-        # to authorization_evidence_failed.
-        safe_code = _stable_auth_evidence_reason_code(getattr(exc, "reason_code", None))
-        if safe_code == "authorization_evidence_failed":
-            safe_summary = "authorization evidence factory failed"
-        else:
-            safe_summary = "capability authorization denied"
-        _fatal_before_start(
-            error=CapabilityError(
-                error_type="unauthorized",
+    if authorization is None:
+        try:
+            authorization = ports.authorization_evidence.issue(
+                call=call,
+                binding=definition.binding,
+                descriptor=definition.descriptor,
+                scope=scope,
+            )
+        except AuthorizationEvidenceVerificationError as exc:
+            # Pure policy deny / evidence reject: preserve allowlisted reason codes
+            # (Plan 05 §11.3 blocked/<stable code>) instead of collapsing all denials
+            # to authorization_evidence_failed.
+            safe_code = _stable_auth_evidence_reason_code(
+                getattr(exc, "reason_code", None)
+            )
+            if safe_code == "authorization_evidence_failed":
+                safe_summary = "authorization evidence factory failed"
+            else:
+                safe_summary = "capability authorization denied"
+            _fatal_before_start(
+                error=CapabilityError(
+                    error_type="unauthorized",
+                    safe_code=safe_code,
+                    safe_message=safe_summary,
+                    retry_disposition="never",
+                    call_id=call.call_id,
+                ),
                 safe_code=safe_code,
-                safe_message=safe_summary,
-                retry_disposition="never",
-                call_id=call.call_id,
-            ),
-            safe_code=safe_code,
-            safe_summary=safe_summary,
-            cause=exc,
-        )
-    except Exception as exc:  # noqa: BLE001
-        _fatal_before_start(
-            error=CapabilityError(
-                error_type="unauthorized",
+                safe_summary=safe_summary,
+                cause=exc,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _fatal_before_start(
+                error=CapabilityError(
+                    error_type="unauthorized",
+                    safe_code="authorization_evidence_failed",
+                    safe_message="authorization evidence factory failed",
+                    retry_disposition="never",
+                    call_id=call.call_id,
+                ),
                 safe_code="authorization_evidence_failed",
-                safe_message="authorization evidence factory failed",
-                retry_disposition="never",
-                call_id=call.call_id,
-            ),
-            safe_code="authorization_evidence_failed",
-            safe_summary="authorization evidence factory failed",
-            cause=exc,
-        )
+                safe_summary="authorization evidence factory failed",
+                cause=exc,
+            )
 
     # Reject evidence issued for the wrong scope/call when fields are present.
     if getattr(authorization, "call_id", None) not in {None, call.call_id}:
@@ -2122,6 +2334,7 @@ def _run_dispatch_item(
             definition=item.definition,
             current_manifest=item.current_manifest,
             scope=scope,
+            authorization=item.authorization,
         )
     except _WaitingCapability as waiting:
         duration_ms = (time.perf_counter() - started) * 1000.0
@@ -2237,6 +2450,81 @@ def _build_waiting_continuation(
     )
 
 
+def _reserve_ledger_siblings(
+    *,
+    ports: ProviderLoopPorts,
+    surface: ProviderToolSurface,
+    calls: tuple[ProviderToolCall, ...],
+    current_manifest: ResolvedRunManifestRevision,
+    scope: ProviderExecutionScope,
+    provider_messages: tuple[ProviderMessage, ...],
+) -> dict[str, Any]:
+    """Preauthorize and durably propose one Provider sibling set in order."""
+    ledger = ports.capability_ledger
+    if ledger is None:
+        return {}
+    requests: list[
+        ProviderDispatchRequest | ProviderDeniedLedgerReservationRequest
+    ] = []
+    authorizations: dict[str, Any] = {}
+    for call in calls:
+        definition = lookup_tool_by_alias(surface, call.provider_alias)
+        try:
+            authorization = ports.authorization_evidence.issue(
+                call=call,
+                binding=definition.binding,
+                descriptor=definition.descriptor,
+                scope=scope,
+            )
+        except AuthorizationEvidenceVerificationError:
+            denial_lookup = getattr(
+                ports.authorization_evidence,
+                "denial_reservation_for_call",
+                None,
+            )
+            if not callable(denial_lookup):
+                return {}
+            try:
+                denial_evidence = denial_lookup(call_id=call.call_id)
+                requests.append(
+                    ProviderDeniedLedgerReservationRequest(
+                        call=call,
+                        binding=definition.binding,
+                        descriptor=definition.descriptor,
+                        current_manifest=current_manifest,
+                        execution_scope=scope,
+                        denial_evidence=denial_evidence,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - invalid denial is not reserved
+                return {}
+            continue
+        except Exception:  # noqa: BLE001 - normal dispatch projects the safe denial
+            return {}
+        if getattr(authorization, "call_id", None) not in {None, call.call_id}:
+            return {}
+        principal = getattr(authorization, "principal", None)
+        if (
+            principal is not None
+            and getattr(principal, "principal_id", None)
+            != scope.principal.principal_id
+        ):
+            return {}
+        authorizations[call.call_id] = authorization
+        requests.append(
+            ProviderDispatchRequest(
+                call=call,
+                binding=definition.binding,
+                descriptor=definition.descriptor,
+                current_manifest=current_manifest,
+                execution_scope=scope,
+                authorization=authorization,
+            )
+        )
+    ledger.reserve_siblings(tuple(requests), provider_messages)
+    return authorizations
+
+
 def _execute_sibling_calls(
     *,
     ports: ProviderLoopPorts,
@@ -2263,6 +2551,66 @@ def _execute_sibling_calls(
             messages=tuple(messages),
             tool_call_records=tuple(tool_call_records),
             current_manifest=current_manifest,
+        )
+
+    try:
+        preauthorized = _reserve_ledger_siblings(
+            ports=ports,
+            surface=surface,
+            calls=remaining,
+            current_manifest=current_manifest,
+            scope=scope,
+            provider_messages=tuple(messages),
+        )
+    except Exception as exc:  # noqa: BLE001 - reserve failure must start nothing
+        first = remaining[0]
+        error = CapabilityError(
+            error_type="protocol_error",
+            safe_code="ledger_reservation_failed",
+            safe_message="capability sibling reservation failed",
+            retry_disposition="never",
+            call_id=first.call_id,
+        )
+        message = ProviderToolMessage(
+            call_id=first.call_id,
+            provider_alias=first.provider_alias,
+            content=ProviderToolResultEnvelope(
+                status="blocked",
+                domain_key=first.domain_key,
+                user_text=None,
+                structured_output=None,
+                terminal_output=False,
+                needs_followup=False,
+                error=error,
+            ),
+        )
+        messages.append(message)
+        tool_call_records.append(
+            ProviderToolCallRecord(
+                call=first,
+                status="blocked",
+                result_message_digest=digest_provider_message(message),
+                safe_duration_ms=None,
+            )
+        )
+        _append_cancelled_before_start(
+            messages=messages,
+            tool_call_records=tool_call_records,
+            calls=remaining[1:],
+            safe_message="sibling cancelled after ledger reservation failure",
+        )
+        validate_provider_transcript(tuple(messages))
+        return _SiblingOutcome(
+            kind="fatal",
+            messages=tuple(messages),
+            tool_call_records=tuple(tool_call_records),
+            current_manifest=current_manifest,
+            stop_reason="capability_error",
+            error=SafeProviderError(
+                semantic_code="ledger_reservation_failed",
+                safe_summary="capability sibling reservation failed",
+                retry_disposition="never",
+            ),
         )
 
     capabilities = _dispatcher_capabilities(ports)
@@ -2320,6 +2668,7 @@ def _execute_sibling_calls(
                 provider_rounds_used=provider_rounds_used,
                 prior_tool_call_count=prior_tool_call_count,
                 accumulated_usage=accumulated_usage,
+                preauthorized=preauthorized,
             )
             messages = list(outcome.messages)
             tool_call_records = list(outcome.tool_call_records)
@@ -2345,6 +2694,7 @@ def _execute_sibling_calls(
             prior_tool_call_count=prior_tool_call_count,
             accumulated_usage=accumulated_usage,
             max_workers=capabilities.max_workers,
+            preauthorized=preauthorized,
         )
         messages = list(outcome.messages)
         tool_call_records = list(outcome.tool_call_records)
@@ -2377,6 +2727,7 @@ def _execute_sequential_group(
     provider_rounds_used: int,
     prior_tool_call_count: int,
     accumulated_usage: ProviderUsage,
+    preauthorized: dict[str, Any],
 ) -> _SiblingOutcome:
     for call in group_calls:
         if ports.cancellation.is_cancelled():
@@ -2448,6 +2799,7 @@ def _execute_sequential_group(
                 call=call,
                 definition=definition,
                 current_manifest=current_manifest,
+                authorization=preauthorized.get(call.call_id),
             ),
             scope=scope,
         )
@@ -2484,6 +2836,10 @@ def _execute_sequential_group(
                     safe_duration_ms=work.duration_ms,
                 )
             )
+            if ports.capability_ledger is not None:
+                ports.capability_ledger.commit_progress(
+                    tuple(messages), current_manifest=current_manifest
+                )
             remaining = tuple(item for item in all_calls if item.call_index > call.call_index)
             _append_cancelled_before_start(
                 messages=messages,
@@ -2602,6 +2958,11 @@ def _execute_sequential_group(
                 ),
             )
 
+        if ports.capability_ledger is not None:
+            ports.capability_ledger.commit_progress(
+                tuple(messages), current_manifest=current_manifest
+            )
+
         event_type = (
             "tool_call.completed"
             if work.capability_status == "completed"
@@ -2647,7 +3008,6 @@ def _handle_waiting_result(
     prior_tool_call_count: int,
     accumulated_usage: ProviderUsage,
 ) -> _SiblingOutcome:
-    del ports
     assert work.capability_result is not None
     assert work.next_manifest is not None
     interrupt_mode = definition.descriptor.behavior.interrupt_mode
@@ -2854,6 +3214,8 @@ def _handle_waiting_result(
         completed_call_records=completed_only,
         capability_continuation=continuation_ref,
     )
+    if ports.capability_ledger is not None:
+        ports.capability_ledger.commit_pause(continuation, tuple(messages))
     validate_provider_transcript(tuple(messages), allowed_open_continuation=continuation)
     return _SiblingOutcome(
         kind="waiting",
@@ -2882,6 +3244,7 @@ def _execute_parallel_group(
     prior_tool_call_count: int,
     accumulated_usage: ProviderUsage,
     max_workers: int,
+    preauthorized: dict[str, Any],
 ) -> _SiblingOutcome:
     # Plan 05: reserve eligible parallel batches all-or-none under one ledger lock.
     # On batch denial, replan the group sequentially in Provider order so every
@@ -2908,6 +3271,7 @@ def _execute_parallel_group(
             provider_rounds_used=provider_rounds_used,
             prior_tool_call_count=prior_tool_call_count,
             accumulated_usage=accumulated_usage,
+            preauthorized=preauthorized,
         )
 
     del assistant, model_ref, locale, max_rounds, provider_rounds_used
@@ -2918,6 +3282,7 @@ def _execute_parallel_group(
             call=call,
             definition=lookup_tool_by_alias(surface, call.provider_alias),
             current_manifest=parent_manifest,
+            authorization=preauthorized.get(call.call_id),
         )
         for call in group_calls
     ]
@@ -3325,21 +3690,37 @@ def resume_provider_agent_loop(
                 round_count=round_count,
             )
 
-        # Append trusted terminal waiting result projected by the loop.
-        tool_message = project_waiting_resolution_message(
-            call=waiting_call,
-            resolution=request.resolved_waiting,
+        call_owned_approval = (
+            cont.waiting_call.capability_continuation.continuation_type
+            == "capability_call"
         )
-        messages.append(tool_message)
-        status = tool_message.content.status
-        tool_call_records.append(
-            ProviderToolCallRecord(
+        approval_satisfied = (
+            call_owned_approval
+            and request.resolved_waiting.capability_result.status == "completed"
+        )
+        if approval_satisfied:
+            # Approval satisfies an obligation; it is not the Tool's business
+            # result. Re-enter dispatch for the exact original waiting call so
+            # the authorized ledger row executes and produces the one Tool
+            # Result paired to this Provider Tool Call.
+            status = "completed"
+            resume_start_index = waiting_call.call_index
+        else:
+            tool_message = project_waiting_resolution_message(
                 call=waiting_call,
-                status=status,  # type: ignore[arg-type]
-                result_message_digest=digest_provider_message(tool_message),
-                safe_duration_ms=None,
+                resolution=request.resolved_waiting,
             )
-        )
+            messages.append(tool_message)
+            status = tool_message.content.status
+            tool_call_records.append(
+                ProviderToolCallRecord(
+                    call=waiting_call,
+                    status=status,  # type: ignore[arg-type]
+                    result_message_digest=digest_provider_message(tool_message),
+                    safe_duration_ms=None,
+                )
+            )
+            resume_start_index = cont.next_call_index
 
         if status in {"blocked", "cancelled"} and status != "completed":
             # Terminal non-success waiting resolution still pairs; continue pending only for completed/failed recoverable.
@@ -3372,7 +3753,7 @@ def resume_provider_agent_loop(
             surface=surface,
             assistant=assistant,
             calls=assistant.tool_calls,
-            start_index=cont.next_call_index,
+            start_index=resume_start_index,
             messages=messages,
             tool_call_records=tool_call_records,
             current_manifest=current_manifest,

@@ -127,6 +127,69 @@ class WorkerRegistryUnitTests(unittest.TestCase):
             )
         )
 
+    def test_required_capability_feature_digest_must_match(self) -> None:
+        from app.assistant.durable.worker_registry import (
+            WorkerRegistry,
+            plan08_capability_ledger_feature_digest,
+        )
+
+        reg = WorkerRegistry(self.db)
+        reg.register(_identity(capability_feature_digest=DIGEST))
+
+        self.assertFalse(
+            reg.has_compatible_worker(
+                app_build_revision="build-test-1",
+                required_capability_feature_digest=(
+                    plan08_capability_ledger_feature_digest()
+                ),
+                registration_ttl=timedelta(seconds=60),
+            )
+        )
+
+        reg.register(
+            _identity(
+                capability_feature_digest=(plan08_capability_ledger_feature_digest())
+            )
+        )
+        self.assertTrue(
+            reg.has_compatible_worker(
+                app_build_revision="build-test-1",
+                required_capability_feature_digest=(
+                    plan08_capability_ledger_feature_digest()
+                ),
+                registration_ttl=timedelta(seconds=60),
+            )
+        )
+
+    def test_feature_digest_filter_does_not_hide_older_matching_worker(self) -> None:
+        from app.assistant.durable.worker_registry import (
+            WorkerRegistry,
+            plan08_capability_ledger_feature_digest,
+        )
+        from app.common.time import utcnow
+
+        reg = WorkerRegistry(self.db)
+        matching = reg.register(
+            _identity(
+                capability_feature_digest=plan08_capability_ledger_feature_digest()
+            )
+        )
+        matching.heartbeat_at = utcnow() - timedelta(seconds=10)
+        for offset in range(5):
+            row = reg.register(_identity(capability_feature_digest=DIGEST))
+            row.heartbeat_at = utcnow() - timedelta(seconds=offset)
+        self.db.commit()
+
+        self.assertTrue(
+            reg.has_compatible_worker(
+                app_build_revision="build-test-1",
+                required_capability_feature_digest=(
+                    plan08_capability_ledger_feature_digest()
+                ),
+                registration_ttl=timedelta(seconds=60),
+            )
+        )
+
     def test_stale_registration_not_admitted(self) -> None:
         from app.assistant.durable.worker_registry import WorkerRegistry
         from app.common.time import utcnow

@@ -26,6 +26,9 @@ reset_caches()
 PLAN03_HEAD = "b666b11a5faa"
 PLAN06_HEAD = "6af373ef040f"
 PLAN07_HEAD = "7a3dac0ac2a8"
+PLAN08_LEDGER_REVISION = "984c07876856"
+PLAN08_LIFECYCLE_REVISION = "f2c3a4b5d6e7"
+PLAN08_HEAD = "d7e8f9a0b1c3"
 DOWNGRADE_BLOCKED_TOKEN = "MINDATLAS_PLAN04_DOWNGRADE_BLOCKED_ENABLED_AGGREGATES"
 
 CATALOG_CHECK = "ck_assistant_skill_package_catalog_disabled"
@@ -181,8 +184,34 @@ def _reset_to_plan03_parent() -> None:
             if plan04 is not None:
                 with engine.begin() as conn:
                     _clear_enabled_flags(conn)
+                    if current in {
+                        PLAN06_HEAD,
+                        PLAN07_HEAD,
+                        PLAN08_LEDGER_REVISION,
+                        PLAN08_LIFECYCLE_REVISION,
+                        PLAN08_HEAD,
+                    }:
+                        from tests.test_durable_interrupt_repository_postgres import (
+                            _purge_interrupt_and_active,
+                        )
+
+                        _purge_interrupt_and_active(conn)
             # Plan 06 downgrade refuses durable data; empty disposable DBs pass.
-            _run_alembic("downgrade", PLAN03_HEAD)
+            prior_ack = os.environ.get(
+                "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"
+            )
+            os.environ["MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"] = "1"
+            try:
+                _run_alembic("downgrade", PLAN03_HEAD)
+            finally:
+                if prior_ack is None:
+                    os.environ.pop(
+                        "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA", None
+                    )
+                else:
+                    os.environ[
+                        "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"
+                    ] = prior_ack
         elif current != PLAN03_HEAD:
             # Mid/unknown state: ensure schema reaches parent via upgrade path.
             _run_alembic("upgrade", PLAN03_HEAD)
@@ -287,11 +316,11 @@ def test_upgrade_drops_only_disabled_checks_and_preserves_defaults() -> None:
 
     _run_alembic("upgrade", "head")
     with _engine() as engine:
-        assert _current_revision(engine) == PLAN07_HEAD
+        assert _current_revision(engine) == PLAN08_HEAD
         from alembic.script import ScriptDirectory
 
         heads = ScriptDirectory.from_config(_alembic_config()).get_heads()
-        assert heads == [PLAN07_HEAD]
+        assert heads == [PLAN08_HEAD]
 
         with engine.begin() as conn:
             pkg_checks = _check_names(conn, "assistant_skill_package")
@@ -453,7 +482,7 @@ def test_downgrade_blocked_when_any_flag_true() -> None:
     assert DOWNGRADE_BLOCKED_TOKEN in _err_text(exc_info.value)
 
     with _engine() as engine:
-        assert _current_revision(engine) == PLAN07_HEAD
+        assert _current_revision(engine) == PLAN08_HEAD
         with engine.begin() as conn:
             # Still true; no data deletion on blocked downgrade.
             assert (
@@ -484,7 +513,7 @@ def test_downgrade_blocked_when_any_flag_true() -> None:
     assert DOWNGRADE_BLOCKED_TOKEN in _err_text(exc_info.value)
 
     with _engine() as engine:
-        assert _current_revision(engine) == PLAN07_HEAD
+        assert _current_revision(engine) == PLAN08_HEAD
         with engine.begin() as conn:
             assert (
                 conn.execute(
@@ -508,7 +537,7 @@ def test_parent_head_parent_head_cycle_and_sole_head() -> None:
 
     _run_alembic("upgrade", "head")
     with _engine() as engine:
-        assert _current_revision(engine) == PLAN07_HEAD
+        assert _current_revision(engine) == PLAN08_HEAD
         with engine.connect() as conn:
             assert CATALOG_CHECK not in _check_names(conn, "assistant_skill_package")
             assert RUNTIME_CHECK not in _check_names(
@@ -563,11 +592,11 @@ def test_parent_head_parent_head_cycle_and_sole_head() -> None:
 
     _run_alembic("upgrade", "head")
     with _engine() as engine:
-        assert _current_revision(engine) == PLAN07_HEAD
+        assert _current_revision(engine) == PLAN08_HEAD
         from alembic.script import ScriptDirectory
 
         heads = ScriptDirectory.from_config(_alembic_config()).get_heads()
-        assert heads == [PLAN07_HEAD]
+        assert heads == [PLAN08_HEAD]
         with engine.connect() as conn:
             assert CATALOG_CHECK not in _check_names(conn, "assistant_skill_package")
             assert RUNTIME_CHECK not in _check_names(

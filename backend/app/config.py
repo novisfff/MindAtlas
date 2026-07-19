@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,6 +30,8 @@ ASSISTANT_INTERRUPT_MAX_TTL_SEC_HARD_MAX = 604800  # 7 days
 ASSISTANT_INTERRUPT_COMMENT_MAX_CHARS_HARD_MAX = 4000
 
 AssistantMainAgentMode = Literal["off", "shadow", "read_only"]
+AssistantCapabilityLedgerMode = Literal["legacy_read_only", "enforced"]
+AssistantMainAgentWriteMode = Literal["off", "golden"]
 
 
 def compute_artifact_orphan_grace_floor_sec(
@@ -256,6 +259,43 @@ class Settings(BaseSettings):
     assistant_interrupt_token_pepper: str = Field(
         default="",
         alias="ASSISTANT_INTERRUPT_TOKEN_PEPPER",
+    )
+
+    # Plan 08: HMAC secret for server-generated capability call idempotency keys.
+    # Required (min 32 bytes) when capability ledger mode is enforced.
+    assistant_capability_call_idempotency_secret: str = Field(
+        default="",
+        alias="ASSISTANT_CAPABILITY_CALL_IDEMPOTENCY_SECRET",
+    )
+    # Plan 08 ledger admission default for new Main Agent Runs (frozen per Run).
+    # Default legacy_read_only; enforced only for explicit test/admin cohorts.
+    assistant_capability_ledger_mode: AssistantCapabilityLedgerMode = Field(
+        default="legacy_read_only",
+        alias="ASSISTANT_CAPABILITY_LEDGER_MODE",
+    )
+    # Plan 08 golden write release gate. Default off; golden requires enforced ledger.
+    assistant_main_agent_write_mode: AssistantMainAgentWriteMode = Field(
+        default="off",
+        alias="ASSISTANT_MAIN_AGENT_WRITE_MODE",
+    )
+    # Optional cohort digest for golden write eligibility (empty = no cohort).
+    assistant_main_agent_write_cohort_digest: str = Field(
+        default="",
+        alias="ASSISTANT_MAIN_AGENT_WRITE_COHORT_DIGEST",
+    )
+    # Guarded local reconciliation mutation path. Default-disabled; the actor
+    # identity is server-owned configuration, never request/CLI input.
+    assistant_capability_reconciliation_enabled: bool = Field(
+        default=False,
+        alias="ASSISTANT_CAPABILITY_RECONCILIATION_ENABLED",
+    )
+    assistant_capability_reconciliation_operator_id: UUID | None = Field(
+        default=None,
+        alias="ASSISTANT_CAPABILITY_RECONCILIATION_OPERATOR_ID",
+    )
+    assistant_capability_reconciliation_evidence_secret: str = Field(
+        default="",
+        alias="ASSISTANT_CAPABILITY_RECONCILIATION_EVIDENCE_SECRET",
     )
 
     # Logging
@@ -525,6 +565,53 @@ class Settings(BaseSettings):
             raise ValueError(
                 "assistant_interrupt_token_pepper is required when "
                 "assistant_durable_interrupts_enabled is true"
+            )
+        # Plan 08 ledger / golden write release gates.
+        write_mode = str(self.assistant_main_agent_write_mode or "off")
+        ledger_mode = str(self.assistant_capability_ledger_mode or "legacy_read_only")
+        if write_mode not in {"off", "golden"}:
+            raise ValueError(
+                "assistant_main_agent_write_mode must be one of: off, golden"
+            )
+        if ledger_mode not in {"legacy_read_only", "enforced"}:
+            raise ValueError(
+                "assistant_capability_ledger_mode must be one of: "
+                "legacy_read_only, enforced"
+            )
+        if write_mode == "golden" and ledger_mode != "enforced":
+            raise ValueError(
+                "assistant_main_agent_write_mode=golden requires "
+                "assistant_capability_ledger_mode=enforced"
+            )
+        if (
+            write_mode == "golden"
+            and not self.assistant_capability_reconciliation_enabled
+        ):
+            raise ValueError(
+                "assistant_main_agent_write_mode=golden requires the approved "
+                "capability reconciliation operator path to be enabled"
+            )
+        if ledger_mode == "enforced" or write_mode == "golden":
+            secret = (self.assistant_capability_call_idempotency_secret or "").strip()
+            if len(secret.encode("utf-8")) < 32:
+                raise ValueError(
+                    "assistant_capability_call_idempotency_secret must be at least "
+                    "32 bytes when ledger mode is enforced or write mode is golden"
+                )
+        if (
+            self.assistant_capability_reconciliation_enabled
+            and self.assistant_capability_reconciliation_operator_id is None
+        ):
+            raise ValueError(
+                "assistant_capability_reconciliation_operator_id is required when "
+                "assistant_capability_reconciliation_enabled is true"
+            )
+        if self.assistant_capability_reconciliation_enabled and len(
+            self.assistant_capability_reconciliation_evidence_secret.encode("utf-8")
+        ) < 32:
+            raise ValueError(
+                "assistant_capability_reconciliation_evidence_secret must be at least "
+                "32 bytes when reconciliation is enabled"
             )
         return self
 

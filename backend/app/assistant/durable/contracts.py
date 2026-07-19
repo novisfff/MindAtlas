@@ -379,7 +379,6 @@ class DurableAgentCheckpointV1(FrozenContract):
             if self.next_action.kind not in {"terminal", "reconcile"}:
                 raise ValueError("terminal phase next_action must be terminal|reconcile")
 
-        # Frame stack must be consistent with inflight capability unit call_ids.
         unit = self.inflight_unit
         if unit is not None and unit.kind == "capability_group" and unit.call_ids:
             frame_ids = {f.call_id for f in self.capability_frames}
@@ -653,6 +652,103 @@ class DurableAgentCheckpointV2(FrozenContract):
         return self
 
 
+# ---------------------------------------------------------------------------
+# Checkpoint v3 (Plan 08 additive CapabilityCall ledger state)
+# ---------------------------------------------------------------------------
+
+
+class DurableCapabilityCallStateV1(FrozenContract):
+    """Replay identity for one Provider Tool Call in frozen sibling order."""
+
+    call_id: UUID
+    logical_call_key: str
+    provider_tool_call_id: str
+    provider_order: int
+    status: Literal[
+        "proposed",
+        "denied",
+        "awaiting_approval",
+        "authorized",
+        "executing",
+        "succeeded",
+        "failed",
+        "rejected",
+        "cancelled",
+        "expired",
+        "unknown",
+        "needs_reconciliation",
+        "compensated",
+    ]
+    attempt_id: UUID | None = None
+    output_artifact_id: UUID | None = None
+    interrupt_id: UUID | None = None
+    approval_binding_digest: str | None = None
+    result_message_digest: str | None = None
+
+    @field_validator("logical_call_key", "provider_tool_call_id")
+    @classmethod
+    def _identity_text(cls, value: str) -> str:
+        return _require_non_empty_str(value, field_name="call identity")
+
+    @field_validator("provider_order")
+    @classmethod
+    def _provider_order(cls, value: int) -> int:
+        return _require_non_negative_int(value, field_name="provider_order")
+
+    @field_validator("approval_binding_digest", "result_message_digest")
+    @classmethod
+    def _optional_digest(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_digest(value, field_name="capability call digest")
+
+    @model_validator(mode="after")
+    def _evidence_shape(self) -> DurableCapabilityCallStateV1:
+        if self.status == "awaiting_approval" and (
+            self.interrupt_id is None or self.approval_binding_digest is None
+        ):
+            raise ValueError(
+                "awaiting_approval capability call requires interrupt and binding"
+            )
+        if self.status == "succeeded" and (
+            self.output_artifact_id is None or self.result_message_digest is None
+        ):
+            raise ValueError(
+                "succeeded capability call requires output artifact and Tool result digest"
+            )
+        return self
+
+
+class DurableAgentCheckpointV3(DurableAgentCheckpointV2):
+    """Plan 08 Checkpoint with durable CapabilityCall replay/order state."""
+
+    schema_version: Literal[3] = 3
+    policy_contract_version: Literal[1, 2]
+    capability_calls: tuple[DurableCapabilityCallStateV1, ...] = ()
+
+    @field_validator("capability_calls", mode="before")
+    @classmethod
+    def _call_states(cls, value: Any) -> tuple[Any, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, (list, tuple)):
+            raise TypeError("capability_calls must be a sequence")
+        return tuple(value)
+
+    @model_validator(mode="after")
+    def _call_order_unique(self) -> DurableAgentCheckpointV3:
+        ids = [item.call_id for item in self.capability_calls]
+        keys = [item.logical_call_key for item in self.capability_calls]
+        orders = [item.provider_order for item in self.capability_calls]
+        if len(ids) != len(set(ids)):
+            raise ValueError("capability_calls call_id values must be unique")
+        if len(keys) != len(set(keys)):
+            raise ValueError("capability_calls logical_call_key values must be unique")
+        if len(orders) != len(set(orders)) or orders != sorted(orders):
+            raise ValueError("capability_calls provider_order must be unique and sorted")
+        return self
+
+
 def _rebuild_checkpoint_v2() -> None:
     """Materialize exact nested Plan 07 types without import cycles at class body time."""
     from app.assistant.capabilities.contracts import ContinuationRef
@@ -672,6 +768,13 @@ def _rebuild_checkpoint_v2() -> None:
             "DurableWorkflowStateV1": DurableWorkflowStateV1,
         }
     )
+    DurableAgentCheckpointV3.model_rebuild(
+        _types_namespace={
+            "ContinuationRef": ContinuationRef,
+            "BudgetSuspensionStateV1": BudgetSuspensionStateV1,
+            "DurableWorkflowStateV1": DurableWorkflowStateV1,
+        }
+    )
 
 
 _rebuild_checkpoint_v2()
@@ -680,6 +783,8 @@ _rebuild_checkpoint_v2()
 __all__ = [
     "DurableAgentCheckpointV1",
     "DurableAgentCheckpointV2",
+    "DurableAgentCheckpointV3",
+    "DurableCapabilityCallStateV1",
     "DurableExecutionUnitKind",
     "DurableExecutionUnitKindV2",
     "DurableExecutionUnitState",

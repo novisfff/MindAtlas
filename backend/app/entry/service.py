@@ -91,11 +91,31 @@ class EntryService:
             "total_pages": (total + request.size - 1) // request.size,
         }
 
-    def create(self, request: EntryRequest) -> Entry:
+    def create_in_uow(
+        self,
+        request: EntryRequest,
+        *,
+        source_capability_call_id: UUID | None = None,
+    ) -> Entry:
+        """No-commit transactional core for Entry creation (Plan 08 Task 6).
+
+        Uses the caller-owned Session. Never calls commit/rollback/close/begin
+        or nested Session construction. Safe for ledger-owned Unit of Work.
+        """
+        # Idempotent reload for trusted golden path.
+        if source_capability_call_id is not None:
+            existing = (
+                self.db.query(Entry)
+                .filter(Entry.source_capability_call_id == source_capability_call_id)
+                .one_or_none()
+            )
+            if existing is not None:
+                return existing
+
         # Validate type exists
         self.type_service.find_by_id(request.type_id)
 
-        # Validate tags exist
+        # Validate tags exist (must already be resolved on the same Session)
         tags = []
         if request.tag_ids:
             tags = self.tag_service.find_by_ids(request.tag_ids)
@@ -111,6 +131,7 @@ class EntryService:
             time_at=request.time_at,
             time_from=request.time_from,
             time_to=request.time_to,
+            source_capability_call_id=source_capability_call_id,
         )
         entry.tags = tags
 
@@ -125,6 +146,12 @@ class EntryService:
                 status="pending",
             )
         )
+        self.db.flush()
+        return entry
+
+    def create(self, request: EntryRequest) -> Entry:
+        """HTTP/Legacy compatibility wrapper: create_in_uow + commit + refresh."""
+        entry = self.create_in_uow(request, source_capability_call_id=None)
         self.db.commit()
         self.db.refresh(entry)
         return entry

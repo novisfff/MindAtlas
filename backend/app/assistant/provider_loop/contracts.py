@@ -17,6 +17,7 @@ from typing_extensions import Annotated
 from app.assistant.capabilities.contracts import (
     CapabilityAuthorizationEvidence,
     CapabilityDescriptor,
+    CapabilityOwnerRef,
     CapabilityPrincipal,
     CapabilityResult,
     ContinuationRef,
@@ -692,6 +693,47 @@ class ProviderLoopRequest(FrozenContract):
         return self
 
 
+class ProviderLoopReservedResumeRequest(FrozenContract):
+    """Checkpoint-v3 resume input whose transcript intentionally remains open."""
+
+    manifest: ResolvedRunManifestRevision
+    initial_messages: tuple[ProviderMessage, ...]
+    model_ref: ModelRef
+    execution_scope: ProviderExecutionScope
+    max_rounds: int
+    locale: str
+    generation: ProviderGenerationOptions = Field(default_factory=ProviderGenerationOptions)
+
+    @field_validator("locale")
+    @classmethod
+    def _locale(cls, value: str) -> str:
+        return _require_non_empty_str(value, field_name="locale")
+
+    @field_validator("max_rounds")
+    @classmethod
+    def _max_rounds(cls, value: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 2:
+            raise ValueError("reserved sibling resume requires max_rounds >= 2")
+        return value
+
+    @field_validator("initial_messages", mode="before")
+    @classmethod
+    def _messages(cls, value: Any) -> tuple[Any, ...]:
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            raise TypeError("initial_messages must be a sequence")
+        return tuple(value)
+
+    @model_validator(mode="after")
+    def _identity(self) -> ProviderLoopReservedResumeRequest:
+        if self.manifest.run_id != self.execution_scope.run_id:
+            raise ValueError("manifest.run_id must equal execution_scope.run_id")
+        if self.manifest.model is not None and (
+            self.manifest.model.model_ref_digest != self.model_ref.model_ref_digest
+        ):
+            raise ValueError("loop model_ref must equal manifest.model")
+        return self
+
+
 class ProviderWaitingCallState(FrozenContract):
     call_id: str
     call_index: int
@@ -972,6 +1014,69 @@ class ProviderDispatchRequest(FrozenContract):
         return self
 
 
+class DeniedLedgerReservationEvidence(FrozenContract):
+    """Typed non-executable evidence for persisting a frozen policy denial."""
+
+    contract_version: Literal[1] = 1
+    kind: Literal["denied_ledger_reservation"] = "denied_ledger_reservation"
+    call_id: str
+    owner: CapabilityOwnerRef
+    decision_digest: str
+    reason_code: str
+    scope_digest: str
+    manifest_digest: str
+    binding_contract_digest: str
+    descriptor_digest: str
+
+    @field_validator("call_id", "reason_code")
+    @classmethod
+    def _ids(cls, value: str, info: Any) -> str:
+        return _require_non_empty_str(value, field_name=info.field_name)
+
+    @field_validator(
+        "decision_digest",
+        "scope_digest",
+        "manifest_digest",
+        "binding_contract_digest",
+        "descriptor_digest",
+    )
+    @classmethod
+    def _evidence_digests(cls, value: str, info: Any) -> str:
+        return _require_digest(value, field_name=info.field_name)
+
+
+class ProviderDeniedLedgerReservationRequest(FrozenContract):
+    """Ledger-only request; deliberately cannot enter ToolDispatcher/Gateway."""
+
+    call: ProviderToolCall
+    binding: FrozenCapabilityBinding
+    descriptor: CapabilityDescriptor
+    current_manifest: ResolvedRunManifestRevision
+    execution_scope: ProviderExecutionScope
+    denial_evidence: DeniedLedgerReservationEvidence
+
+    @model_validator(mode="after")
+    def _identity(self) -> ProviderDeniedLedgerReservationRequest:
+        evidence = self.denial_evidence
+        if self.call.binding_contract_digest != self.binding.ref.binding_contract_digest:
+            raise ValueError("denied reservation binding digest mismatch")
+        if self.call.descriptor_digest != self.descriptor.descriptor_digest:
+            raise ValueError("denied reservation descriptor digest mismatch")
+        if self.execution_scope.run_id != self.current_manifest.run_id:
+            raise ValueError("denied reservation scope run_id mismatch")
+        if evidence.call_id != self.call.call_id:
+            raise ValueError("denied reservation call_id mismatch")
+        if evidence.scope_digest != self.execution_scope.scope_digest:
+            raise ValueError("denied reservation scope digest mismatch")
+        if evidence.manifest_digest != self.current_manifest.manifest_digest:
+            raise ValueError("denied reservation manifest digest mismatch")
+        if evidence.binding_contract_digest != self.binding.ref.binding_contract_digest:
+            raise ValueError("denied reservation evidence binding mismatch")
+        if evidence.descriptor_digest != self.descriptor.descriptor_digest:
+            raise ValueError("denied reservation evidence descriptor mismatch")
+        return self
+
+
 class ProviderDispatchResult(FrozenContract):
     capability_result: CapabilityResult
     next_manifest: ResolvedRunManifestRevision
@@ -980,6 +1085,90 @@ class ProviderDispatchResult(FrozenContract):
 # ---------------------------------------------------------------------------
 # Runtime ports (never serializable into messages/surfaces/continuations/results)
 # ---------------------------------------------------------------------------
+
+
+class LedgerPrepareOutcome(FrozenContract):
+    """Server-owned ledger decision for one frozen Provider dispatch request."""
+
+    kind: Literal["dispatch", "dispatch_local", "deny", "pause", "replay"]
+    call_id: UUID
+    call_revision: int
+    attempt_id: UUID | None = None
+    provider_result: ProviderDispatchResult | None = None
+    pause_proposal: dict[str, Any] | None = None
+    reason_code: str | None = None
+
+    @field_validator("call_revision")
+    @classmethod
+    def _call_revision(cls, value: int) -> int:
+        return _require_non_negative_int(value, field_name="call_revision")
+
+    @model_validator(mode="after")
+    def _outcome_shape(self) -> LedgerPrepareOutcome:
+        if self.kind == "replay" and self.provider_result is None:
+            raise ValueError("replay ledger outcome requires provider_result")
+        if self.kind != "replay" and self.provider_result is not None:
+            raise ValueError("only replay ledger outcome may carry provider_result")
+        if self.kind == "pause" and self.pause_proposal is None:
+            raise ValueError("pause ledger outcome requires pause_proposal")
+        if self.kind != "pause" and self.pause_proposal is not None:
+            raise ValueError("only pause ledger outcome may carry pause_proposal")
+        if self.kind == "deny" and not self.reason_code:
+            raise ValueError("deny ledger outcome requires reason_code")
+        return self
+
+
+@runtime_checkable
+class CapabilityLedgerAggregatePort(Protocol):
+    """Durable Run-first owner of enforced CapabilityCall aggregate changes."""
+
+    def reserve_siblings(
+        self,
+        requests: Sequence[
+            ProviderDispatchRequest | ProviderDeniedLedgerReservationRequest
+        ],
+        provider_messages: Sequence[ProviderMessage] = (),
+    ) -> None: ...
+
+    def prepare(self, request: ProviderDispatchRequest) -> LedgerPrepareOutcome: ...
+
+    def commit_result(
+        self,
+        outcome: LedgerPrepareOutcome,
+        result: ProviderDispatchResult,
+    ) -> ProviderDispatchResult: ...
+
+    def commit_pause(
+        self,
+        continuation: ProviderLoopContinuation,
+        provider_messages: Sequence[ProviderMessage],
+    ) -> None: ...
+
+    def commit_progress(
+        self,
+        provider_messages: Sequence[ProviderMessage],
+        *,
+        current_manifest: ResolvedRunManifestRevision | None = None,
+    ) -> None: ...
+
+    def commit_recovery_drift(
+        self,
+        provider_messages: Sequence[ProviderMessage],
+        *,
+        stale_call_id: str,
+    ) -> None: ...
+
+    def execute_local(
+        self,
+        outcome: LedgerPrepareOutcome,
+        request: ProviderDispatchRequest,
+    ) -> ProviderDispatchResult: ...
+
+    def record_failure(
+        self,
+        outcome: LedgerPrepareOutcome,
+        reason_code: str,
+    ) -> None: ...
 
 
 @runtime_checkable
@@ -1488,6 +1677,9 @@ class ProviderLoopPorts:
     sibling_executor: SiblingExecutionPort
     cancellation: CancellationPort
     events: ProviderLoopEventSink
+    # Plan 08 durable aggregate. Required by production enforced composition;
+    # None preserves Plan 03–07 and internal-test callers exactly.
+    capability_ledger: CapabilityLedgerAggregatePort | None = None
     # Default no-op preserves byte-identical Plan 03 behavior for all callers.
     round_context_provider: RoundContextProvider = NoOpRoundContextProvider()
     # Default no-op lifecycle: existing dispatchers remain byte-compatible.
@@ -1593,11 +1785,13 @@ def project_waiting_resolution_message(
 
 __all__ = [
     "CancellationPort",
+    "CapabilityLedgerAggregatePort",
     "CapabilityCallOwnerResolver",
     "CapabilityCallReservationDecision",
     "CapabilityCallReservationItem",
     "CapabilityCallReservationPort",
     "CurrentCapabilityDescriptorVerifier",
+    "DeniedLedgerReservationEvidence",
     "ManifestEffectLifecyclePort",
     "NoOpCapabilityCallOwnerResolver",
     "NoOpCapabilityCallReservationPort",
@@ -1605,12 +1799,14 @@ __all__ = [
     "NoOpProviderCompletionGuard",
     "NoOpProviderRoundBudgetGuard",
     "NoOpRoundContextProvider",
+    "LedgerPrepareOutcome",
     "ProviderAdapter",
     "ProviderAuthorizationEvidenceFactory",
     "ProviderCompletionDisposition",
     "ProviderCompletionGuard",
     "ProviderCompletionRequest",
     "ProviderDispatchRequest",
+    "ProviderDeniedLedgerReservationRequest",
     "ProviderDispatchResult",
     "ProviderExecutionScope",
     "ProviderGenerationOptions",
@@ -1618,6 +1814,7 @@ __all__ = [
     "ProviderLoopEventSink",
     "ProviderLoopPorts",
     "ProviderLoopRequest",
+    "ProviderLoopReservedResumeRequest",
     "ProviderLoopResult",
     "ProviderLoopResumeRequest",
     "ProviderRoundBudgetDeniedError",

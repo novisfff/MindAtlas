@@ -48,6 +48,7 @@ from app.assistant.durable.repository import (
     STATUS_CANCELLED,
     STATUS_RECOVERING,
     STATUS_RUNNING,
+    STATUS_WAITING_APPROVAL,
 )
 from app.assistant.provider_loop.messages import (
     ProviderAssistantMessage,
@@ -483,6 +484,18 @@ class MainAgentRunExecutor:
 
             # Materialize base state if this is a fresh claim without Checkpoint.
             db.refresh(run)
+            if (
+                run.current_checkpoint_id is None
+                and str(run.capability_ledger_mode) == "enforced"
+                and self.provider_factory is None
+            ):
+                self._drive_enforced_main_agent(
+                    db,
+                    run=run,
+                    claimed=claimed,
+                    heartbeat=heartbeat,
+                )
+                return
             if run.current_checkpoint_id is None:
                 user_text = self._resolve_user_text(db, run)
                 expected_revision = self._materialize_base(
@@ -493,6 +506,22 @@ class MainAgentRunExecutor:
                     user_text=user_text,
                 )
                 db.refresh(run)
+
+            checkpoint = decision.checkpoint
+            if (
+                str(run.capability_ledger_mode) == "enforced"
+                and checkpoint is not None
+                and int(getattr(checkpoint, "schema_version", 0)) == 3
+                and checkpoint.next_action.kind
+                in {"dispatch_calls", "continue_provider"}
+            ):
+                self._resume_enforced_checkpoint(
+                    db,
+                    claimed=claimed,
+                    checkpoint=checkpoint,
+                    heartbeat=heartbeat,
+                )
+                return
 
             # Already ready_for_memory (e.g. crash after final message): finalize only.
             if (
@@ -621,6 +650,359 @@ class MainAgentRunExecutor:
                             pass
                 except Exception:
                     pass
+
+    def _drive_enforced_main_agent(
+        self,
+        db: Any,
+        *,
+        run: Any,
+        claimed: ClaimedLease,
+        heartbeat: Callable[[], bool],
+    ) -> None:
+        """Run the real admitted Provider loop for a fresh enforced worker claim."""
+        from app.assistant.main_agent.service import (
+            AssistantRuntimeRequest,
+            MainAgentService,
+        )
+
+        if not _heartbeat_guard(heartbeat):
+            return
+        user_text = self._resolve_user_text(db, run)
+
+        class _HeartbeatCancellation:
+            def __init__(self, callback: Callable[[], bool]) -> None:
+                self._callback = callback
+
+            def __call__(self) -> bool:
+                return not self._callback()
+
+        with _LeaseHeartbeatPump(
+            heartbeat, interval_sec=self.heartbeat_interval_sec
+        ) as pump:
+            if not pump.alive:
+                return
+            result = MainAgentService(db).run(
+                AssistantRuntimeRequest(
+                    run_id=run.id,
+                    conversation_id=run.conversation_id,
+                    user_text=user_text,
+                    locale="zh-CN",
+                    stream_output=False,
+                    execution_kind="production",
+                    cancel_checker=_HeartbeatCancellation(heartbeat),
+                )
+            )
+            if not pump.alive:
+                return
+
+        db.expire_all()
+        current = DurableRunRepository(db).get_run(run.id)
+        if current is None or str(current.status) in {
+            STATUS_WAITING_APPROVAL,
+            "waiting_input",
+        }:
+            return
+        if result.status == "completed":
+            if self.finalize_memory:
+                self._enter_and_finalize_memory(
+                    db,
+                    run_id=run.id,
+                    lease=claimed.lease,
+                    expected_revision=int(current.state_revision),
+                    final_text=result.final_text or "",
+                    heartbeat=heartbeat,
+                )
+            return
+        if result.status == "cancelled":
+            _RunCancelProbe(
+                lambda: db, run_id=run.id, lease=claimed.lease
+            ).try_finalize()
+            return
+        raise DurableRunConflict(
+            "main_agent_runtime_failed",
+            f"enforced Main Agent runtime failed: {result.reason_code or 'unknown'}",
+        )
+
+    def _resume_enforced_checkpoint(
+        self,
+        db: Any,
+        *,
+        claimed: ClaimedLease,
+        checkpoint: Any,
+        heartbeat: Callable[[], bool],
+    ) -> None:
+        """Recover v3 pending siblings or the Provider turn after committed Tools."""
+        from app.assistant.durable.checkpoints import commit_checkpoint_v2
+        from app.assistant.durable.models import (
+            AssistantRunBudgetRevision,
+            AssistantRunManifestRevision,
+            AssistantRunObligationRevision,
+            AssistantRunPolicyRevision,
+        )
+        from app.assistant.domain.contracts import ResolvedRunManifestRevision
+        from app.assistant.main_agent.authorization import LOCAL_ASSISTANT_PRINCIPAL
+        from app.assistant.main_agent.model_eligibility import FrozenModelIdentity
+        from app.assistant.main_agent.policy_runtime import (
+            compose_main_agent_policy_runtime,
+        )
+        from app.assistant.main_agent.service import (
+            construct_openai_adapter_after_eligibility,
+        )
+        from app.assistant.policy.budgets import BudgetLedgerState
+        from app.assistant.policy.contracts import EffectiveRunPolicySnapshot
+        from app.assistant.policy.obligations import ObligationLedgerState
+        from app.assistant.provider_loop.contracts import (
+            ProviderGenerationOptions,
+            ProviderLoopRequest,
+            ProviderLoopReservedResumeRequest,
+            ProviderToolChoice,
+            create_execution_scope,
+        )
+        from app.assistant.provider_loop.loop import (
+            ProviderAgentLoop,
+            resume_reserved_provider_loop,
+        )
+        from app.config import get_settings
+
+        if not _heartbeat_guard(heartbeat):
+            return
+        manifest_row = db.get(
+            AssistantRunManifestRevision, checkpoint.manifest_revision_id
+        )
+        policy_row = db.get(AssistantRunPolicyRevision, checkpoint.policy_revision_id)
+        budget_row = db.get(AssistantRunBudgetRevision, checkpoint.budget_revision_id)
+        obligation_row = db.get(
+            AssistantRunObligationRevision, checkpoint.obligation_revision_id
+        )
+        if any(
+            row is None
+            for row in (manifest_row, policy_row, budget_row, obligation_row)
+        ):
+            raise DurableRunConflict(
+                "provider_resume_state_missing",
+                "Provider recovery revision row is missing",
+            )
+        manifest = ResolvedRunManifestRevision.model_validate(manifest_row.payload)
+        policy = EffectiveRunPolicySnapshot.model_validate(policy_row.payload)
+        budget = BudgetLedgerState.model_validate(budget_row.payload)
+        obligation = ObligationLedgerState.model_validate(obligation_row.payload)
+        if manifest.manifest_digest != manifest_row.manifest_digest:
+            raise DurableRunConflict(
+                "provider_resume_manifest_drift", "Provider recovery Manifest drift"
+            )
+        if policy.effective_policy_digest != policy_row.policy_digest:
+            raise DurableRunConflict(
+                "provider_resume_policy_drift", "Provider recovery policy drift"
+            )
+        if budget.ledger_digest != budget_row.budget_digest:
+            raise DurableRunConflict(
+                "provider_resume_budget_drift", "Provider recovery budget drift"
+            )
+        if obligation.ledger_digest != obligation_row.obligation_digest:
+            raise DurableRunConflict(
+                "provider_resume_obligation_drift", "Provider recovery obligation drift"
+            )
+        if manifest.provider is None or manifest.model is None:
+            raise DurableRunConflict(
+                "provider_resume_model_missing",
+                "Provider recovery Manifest has no frozen provider/model",
+            )
+        model = manifest.model
+        required_model_fields = (
+            model.model_runtime_revision,
+            model.credential_runtime_revision,
+            model.credential_config_digest,
+            model.model_config_digest,
+            model.capability_probe_id,
+            model.capability_probe_digest,
+        )
+        if any(value is None for value in required_model_fields):
+            raise DurableRunConflict(
+                "provider_resume_model_incomplete",
+                "Provider recovery frozen model identity is incomplete",
+            )
+        provider = construct_openai_adapter_after_eligibility(
+            db,
+            frozen=FrozenModelIdentity(
+                model_id=model.model_id,
+                model_name=model.model_name,
+                model_type=model.model_type,
+                model_runtime_revision=int(model.model_runtime_revision),
+                credential_id=model.credential_id,
+                credential_runtime_revision=int(model.credential_runtime_revision),
+                credential_config_digest=str(model.credential_config_digest),
+                model_config_digest=str(model.model_config_digest),
+                provider_ref_digest=model.provider_ref_digest,
+                capability_probe_id=model.capability_probe_id,
+                capability_probe_digest=str(model.capability_probe_digest),
+            ),
+            provider_ref=manifest.provider,
+            app_build_revision=policy.app_build_revision,
+        )
+        run = DurableRunRepository(db).get_run(claimed.run_id)
+        if run is None:
+            return
+        settings = get_settings()
+        runtime, ports = compose_main_agent_policy_runtime(
+            db=db,
+            run_id=claimed.run_id,
+            conversation_id=run.conversation_id,
+            manifest=manifest,
+            profile_key=manifest.main_agent.profile_key,
+            profile_version_id=manifest.main_agent.version_id,
+            profile_content_digest=manifest.main_agent.content_digest,
+            app_build_revision=policy.app_build_revision,
+            provider=provider,
+            restored_policy_snapshot=policy,
+            restored_budget_state=budget,
+            restored_obligation_state=obligation,
+            capability_ledger_mode=str(
+                run.capability_ledger_mode or "legacy_read_only"
+            ),
+            capability_ledger_lease=claimed.lease,
+            capability_ledger_idempotency_secret=(
+                settings.assistant_capability_call_idempotency_secret
+            ),
+            policy_contract_version=2,
+        )
+        self._restore_active_skill_bindings(
+            db, manifest=manifest, runtime=runtime, ports=ports
+        )
+        messages, transcript_digest = reconstruct_provider_transcript(
+            db, run_id=claimed.run_id
+        )
+        if transcript_digest != checkpoint.provider_transcript_digest:
+            raise DurableRunConflict(
+                "provider_resume_transcript_drift",
+                "Provider recovery transcript digest mismatch",
+            )
+        scope = create_execution_scope(
+            run_id=run.id,
+            conversation_id=run.conversation_id,
+            principal=LOCAL_ASSISTANT_PRINCIPAL,
+            tenant_scope_id=None,
+        )
+        locale = next(
+            (
+                str(value)
+                for value in (getattr(item, "locale", None) for item in messages)
+                if value
+            ),
+            "zh-CN",
+        )
+        generation = ProviderGenerationOptions(
+            max_output_tokens=budget.limits.max_completion_tokens,
+            tool_choice=ProviderToolChoice(mode="auto"),
+        )
+        common = {
+            "manifest": manifest,
+            "initial_messages": messages,
+            "model_ref": manifest.model,
+            "execution_scope": scope,
+            "max_rounds": max(2, int(budget.limits.max_provider_rounds)),
+            "locale": locale,
+            "generation": generation,
+        }
+        with _LeaseHeartbeatPump(
+            heartbeat, interval_sec=self.heartbeat_interval_sec
+        ) as pump:
+            if not pump.alive:
+                return
+            if checkpoint.next_action.kind == "dispatch_calls":
+                result = resume_reserved_provider_loop(
+                    ProviderLoopReservedResumeRequest(**common), ports
+                )
+            else:
+                result = ProviderAgentLoop().start(ProviderLoopRequest(**common), ports=ports)
+            if not pump.alive:
+                return
+        if result.status == "waiting":
+            return
+        if result.status != "completed":
+            raise DurableRunConflict(
+                "provider_resume_not_completed",
+                f"Provider recovery ended with {result.status}:{result.stop_reason}",
+            )
+        persisted_messages, _ = reconstruct_provider_transcript(
+            db, run_id=claimed.run_id
+        )
+        if tuple(result.messages[: len(persisted_messages)]) != tuple(
+            persisted_messages
+        ):
+            raise DurableRunConflict(
+                "provider_resume_transcript_rewrite",
+                "Provider recovery rewrote the durable transcript prefix",
+            )
+        db.refresh(run)
+        latest_checkpoint = load_current_checkpoint(db, run_id=claimed.run_id)
+        final_manifest = getattr(result, "manifest", None) or runtime.manifest
+        final_policy = runtime.policy_snapshot
+        final_budget = runtime.budget_ledger.snapshot()
+        final_obligation = runtime.obligation_ledger.snapshot()
+        commit = commit_checkpoint_v2(
+            db,
+            run_id=claimed.run_id,
+            lease=claimed.lease,
+            expected_revision=int(run.state_revision),
+            phase="ready_for_completion",
+            next_action_kind="complete",
+            workflow_state=getattr(latest_checkpoint, "workflow_state", None),
+            capability_frames=getattr(latest_checkpoint, "capability_frames", ()),
+            provider_messages=tuple(result.messages[len(persisted_messages) :]),
+            manifest_payload=(
+                final_manifest.model_dump(mode="json", by_alias=True)
+                if final_manifest.manifest_digest != manifest.manifest_digest
+                else None
+            ),
+            manifest_digest=(
+                final_manifest.manifest_digest
+                if final_manifest.manifest_digest != manifest.manifest_digest
+                else None
+            ),
+            parent_manifest_id=latest_checkpoint.manifest_revision_id,
+            parent_manifest_digest=manifest.manifest_digest,
+            policy_payload=(
+                final_policy.model_dump(mode="json", by_alias=True)
+                if final_policy.effective_policy_digest
+                != policy.effective_policy_digest
+                else None
+            ),
+            policy_digest=(
+                final_policy.effective_policy_digest
+                if final_policy.effective_policy_digest
+                != policy.effective_policy_digest
+                else None
+            ),
+            budget_payload=(
+                final_budget.model_dump(mode="json", by_alias=True)
+                if final_budget.ledger_digest != budget.ledger_digest
+                else None
+            ),
+            budget_digest=(
+                final_budget.ledger_digest
+                if final_budget.ledger_digest != budget.ledger_digest
+                else None
+            ),
+            obligation_payload=(
+                final_obligation.model_dump(mode="json", by_alias=True)
+                if final_obligation.ledger_digest != obligation.ledger_digest
+                else None
+            ),
+            obligation_digest=(
+                final_obligation.ledger_digest
+                if final_obligation.ledger_digest != obligation.ledger_digest
+                else None
+            ),
+            reason="capability_checkpoint_recovered",
+        )
+        self._enter_and_finalize_memory(
+            db,
+            run_id=claimed.run_id,
+            lease=claimed.lease,
+            expected_revision=int(commit.state_revision),
+            final_text=str(result.final_text or ""),
+            heartbeat=heartbeat,
+        )
 
     def _resolve_user_text(self, db: Any, run: Any) -> str:
         if self.user_text_resolver is not None:
@@ -751,6 +1133,9 @@ class MainAgentRunExecutor:
         run = DurableRunRepository(db).get_run(claimed.run_id)
         if run is None:
             return
+        from app.config import get_settings
+
+        capability_settings = get_settings()
         runtime, ports = compose_main_agent_policy_runtime(
             db=db,
             run_id=claimed.run_id,
@@ -764,6 +1149,16 @@ class MainAgentRunExecutor:
             restored_policy_snapshot=policy,
             restored_budget_state=budget,
             restored_obligation_state=obligation,
+            capability_ledger_mode=str(
+                run.capability_ledger_mode or "legacy_read_only"
+            ),
+            capability_ledger_lease=claimed.lease,
+            capability_ledger_idempotency_secret=(
+                capability_settings.assistant_capability_call_idempotency_secret
+            ),
+            policy_contract_version=(
+                2 if str(run.capability_ledger_mode) == "enforced" else 1
+            ),
         )
         self._restore_active_skill_bindings(
             db,
@@ -806,7 +1201,24 @@ class MainAgentRunExecutor:
                 "provider_resume_transcript_rewrite",
                 "Provider resume rewrote the persisted transcript prefix",
             )
-        suffix = tuple(result.messages[len(messages) :])
+        # A local transactional CapabilityCall may have atomically persisted
+        # its Tool Result and v3 Checkpoint inside the Provider Loop. Re-read
+        # the durable prefix so the outer completion checkpoint appends only
+        # messages that remain uncommitted.
+        persisted_messages, _persisted_digest = reconstruct_provider_transcript(
+            db,
+            run_id=claimed.run_id,
+        )
+        if tuple(result.messages[: len(persisted_messages)]) != tuple(
+            persisted_messages
+        ):
+            raise DurableRunConflict(
+                "provider_resume_transcript_rewrite",
+                "Provider resume rewrote the post-capability durable prefix",
+            )
+        db.refresh(run)
+        expected_revision = int(run.state_revision)
+        suffix = tuple(result.messages[len(persisted_messages) :])
         final_manifest = getattr(result, "manifest", None) or runtime.manifest
         final_policy = runtime.policy_snapshot
         final_budget = runtime.budget_ledger.snapshot()

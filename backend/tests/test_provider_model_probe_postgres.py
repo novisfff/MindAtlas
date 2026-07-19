@@ -28,6 +28,9 @@ PLAN03_PROBE_REVISION = "b666b11a5faa"
 PLAN04_HEAD = "9ed6f561a381"
 PLAN06_HEAD = "6af373ef040f"
 PLAN07_HEAD = "7a3dac0ac2a8"
+PLAN08_LEDGER_REVISION = "984c07876856"
+PLAN08_LIFECYCLE_REVISION = "f2c3a4b5d6e7"
+PLAN08_HEAD = "d7e8f9a0b1c3"
 DOWNGRADE_BLOCKED_TOKEN = "MINDATLAS_PLAN03_DOWNGRADE_BLOCKED_PROBE_DATA"
 
 _POSTGRES_URL = os.environ.get("MINDATLAS_TEST_POSTGRES_URL", "").strip()
@@ -119,7 +122,15 @@ def _reset_to_plan01_parent() -> None:
         except Exception:
             current = None
 
-        if current in {PLAN03_PROBE_REVISION, PLAN04_HEAD, PLAN06_HEAD, PLAN07_HEAD}:
+        if current in {
+            PLAN03_PROBE_REVISION,
+            PLAN04_HEAD,
+            PLAN06_HEAD,
+            PLAN07_HEAD,
+            PLAN08_LEDGER_REVISION,
+            PLAN08_LIFECYCLE_REVISION,
+            PLAN08_HEAD,
+        }:
             # Satisfy both descendant downgrade guards, then let Alembic restore
             # every intermediate schema object in revision order. Hand-written
             # DDL + stamp leaves Plan 04's dropped CHECK constraints missing.
@@ -128,7 +139,14 @@ def _reset_to_plan01_parent() -> None:
                     text("UPDATE ai_model SET current_capability_probe_id = NULL")
                 )
                 conn.execute(text("DELETE FROM ai_model_capability_probe"))
-                if current in {PLAN04_HEAD, PLAN06_HEAD, PLAN07_HEAD}:
+                if current in {
+                    PLAN04_HEAD,
+                    PLAN06_HEAD,
+                    PLAN07_HEAD,
+                    PLAN08_LEDGER_REVISION,
+                    PLAN08_LIFECYCLE_REVISION,
+                    PLAN08_HEAD,
+                }:
                     conn.execute(
                         text(
                             "UPDATE assistant_skill_package "
@@ -170,6 +188,7 @@ def _reset_to_plan01_parent() -> None:
 def _insert_credential_model(conn, *, name: str, model_name: str) -> tuple[uuid.UUID, uuid.UUID]:
     cred_id = uuid.uuid4()
     model_id = uuid.uuid4()
+    suffix = uuid.uuid4().hex[:8]
     conn.execute(
         text(
             """
@@ -184,7 +203,7 @@ def _insert_credential_model(conn, *, name: str, model_name: str) -> tuple[uuid.
         ),
         {
             "id": cred_id,
-            "name": name,
+            "name": f"{name}-{suffix}",
             "base_url": "https://api.example.com/v1",
             "enc": "enc",
             "hint": "****",
@@ -201,7 +220,7 @@ def _insert_credential_model(conn, *, name: str, model_name: str) -> tuple[uuid.
             )
             """
         ),
-        {"id": model_id, "cred": cred_id, "name": model_name},
+        {"id": model_id, "cred": cred_id, "name": f"{model_name}-{suffix}"},
     )
     return cred_id, model_id
 
@@ -250,7 +269,7 @@ def test_upgrade_preserves_plan01_revisions_and_null_pointer() -> None:
             PLAN03_PROBE_REVISION,
             PLAN04_HEAD,
             PLAN06_HEAD,
-            PLAN07_HEAD,
+            PLAN08_HEAD,
         }
         with engine.connect() as conn:
             row = conn.execute(
@@ -532,7 +551,7 @@ def test_downgrade_with_probe_rows_refuses_then_upgrade_cycle() -> None:
             PLAN03_PROBE_REVISION,
             PLAN04_HEAD,
             PLAN06_HEAD,
-            PLAN07_HEAD,
+            PLAN08_HEAD,
         }
         with engine.connect() as conn:
             row = conn.execute(

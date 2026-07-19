@@ -561,10 +561,16 @@ def resolve_interrupt_http(
     """
     pepper = _require_pepper_for_token_ops()
     run = _authorize_run(db, conversation_id=conversation_id, run_id=run_id)
-    _get_interrupt_for_run(db, run_id=run_id, interrupt_id=interrupt_id)
+    interrupt_row = _get_interrupt_for_run(
+        db, run_id=run_id, interrupt_id=interrupt_id
+    )
 
     outcome = str(outcome)
-    queues = outcome in _QUEUEING_OUTCOMES
+    call_owned = str(interrupt_row.interrupt_origin) == "capability_call"
+    # A call-owned terminal decision is a Tool result, not a terminal Run
+    # cancellation. Queue the Run for Provider resume for approved and denied
+    # outcomes alike; only workflow-node cancellation terminates the Run.
+    queues = outcome in _QUEUEING_OUTCOMES or call_owned
 
     # Soft pre-check: terminal run allows exact idempotent replay only.
     run_status = str(run.status)
@@ -644,6 +650,72 @@ def resolve_interrupt_http(
         ``idempotent_replay`` before this helper is called.
         """
         nonlocal run
+        if str(result.interrupt.interrupt_origin) == "capability_call":
+            from app.assistant.capability_calls.repository import (
+                CapabilityCallConflict,
+                CapabilityCallRepository,
+            )
+
+            call_id = result.interrupt.capability_call_id
+            if call_id is None:
+                raise DurableInterruptApiError(
+                    "protocol_error",
+                    "call-owned interrupt is missing capability_call_id",
+                    status_code=409,
+                )
+            call_repo = CapabilityCallRepository(db)
+            call = call_repo.get_call(call_id, for_update=True)
+            if (
+                call is None
+                or call.run_id != run_id
+                or call.interrupt_id != result.interrupt.id
+            ):
+                raise DurableInterruptApiError(
+                    "approval_binding_mismatch",
+                    "call-owned interrupt linkage does not match",
+                    status_code=409,
+                )
+            binding = (result.interrupt.request_payload or {}).get(
+                "approvalBindingDigest"
+            )
+            if not binding or str(call.approval_binding_digest) != str(binding):
+                raise DurableInterruptApiError(
+                    "approval_binding_mismatch",
+                    "stored approval binding does not match the call",
+                    status_code=409,
+                )
+            target = {
+                "approved": "authorized",
+                "rejected": "rejected",
+                "expired": "expired",
+                "cancelled": "cancelled",
+            }.get(str(result.interrupt.status))
+            if target is None:
+                raise DurableInterruptApiError(
+                    "protocol_error",
+                    f"unsupported call-owned resolution {result.interrupt.status!r}",
+                    status_code=409,
+                )
+            try:
+                call_repo.transition_call(
+                    call_id=call.id,
+                    expected_call_revision=int(call.state_revision),
+                    expected_run_revision=int(run.state_revision),
+                    to_status=target,
+                    lease=None,
+                    approval_binding_digest=(
+                        str(binding) if target == "authorized" else None
+                    ),
+                    failure_code=(
+                        None if target == "authorized" else f"approval_{target}"
+                    ),
+                )
+            except CapabilityCallConflict as exc:
+                raise DurableInterruptApiError(
+                    getattr(exc, "code", "approval_binding_mismatch"),
+                    str(exc),
+                    status_code=409,
+                ) from exc
         run_repo = DurableRunRepository(db)
         if queues:
             from_status = str(prepared["from_status"])

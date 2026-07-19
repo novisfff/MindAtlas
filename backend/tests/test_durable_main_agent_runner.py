@@ -433,6 +433,80 @@ class DurableExecutionBoundaryTests(unittest.TestCase):
         self.db.refresh(run)
         return run, lease, mat.state_revision, repo
 
+    def test_fresh_enforced_claim_uses_real_main_agent_service_path(self) -> None:
+        from types import SimpleNamespace
+
+        from app.assistant.durable.recovery import RecoveryDecision
+        from app.assistant.durable.leases import ClaimedLease
+        from app.assistant.durable.repository import DurableRunRepository, LeaseToken
+        from app.assistant.durable.runner import MainAgentRunExecutor
+        from app.assistant.models import AssistantChatRun, Conversation, Message
+
+        conv = Conversation(title="enforced")
+        self.db.add(conv)
+        self.db.flush()
+        user = Message(conversation_id=conv.id, role="user", content="create")
+        assistant = Message(conversation_id=conv.id, role="assistant", content="")
+        self.db.add_all([user, assistant])
+        self.db.flush()
+        run = AssistantChatRun(
+            conversation_id=conv.id,
+            user_message_id=user.id,
+            assistant_message_id=assistant.id,
+            status="queued",
+            runtime_kind="main_agent",
+            runtime_contract_version=1,
+            required_app_build_revision=BUILD,
+            memory_commit_status="pending",
+            capability_ledger_mode="enforced",
+            state_revision=0,
+        )
+        self.db.add(run)
+        self.db.commit()
+        claim_result = DurableRunRepository(self.db).claim_queued(
+            run_id=run.id,
+            expected_revision=0,
+            worker_id=self.identity.worker_id,
+            lease_ttl=timedelta(seconds=30),
+        )
+        claimed = ClaimedLease(
+            run=claim_result.run,
+            lease=LeaseToken(
+                run_id=run.id,
+                worker_id=self.identity.worker_id,
+                lease_generation=int(claim_result.run.lease_generation),
+            ),
+            kind="queued",
+            state_revision=claim_result.state_revision,
+            status="running",
+        )
+
+        def _wait(_request):
+            row = self.db.get(AssistantChatRun, run.id)
+            row.status = "waiting_approval"
+            row.state_revision = int(row.state_revision) + 1
+            self.db.commit()
+            return SimpleNamespace(status="failed", reason_code="waiting")
+
+        with patch("app.assistant.main_agent.service.MainAgentService") as service:
+            service.return_value.run.side_effect = _wait
+            MainAgentRunExecutor(provider_factory=None).execute(
+                claimed=claimed,
+                decision=RecoveryDecision(
+                    kind="continue",
+                    reason_code="fresh_claim",
+                    allow_provider_io=True,
+                    allow_capability_io=True,
+                ),
+                heartbeat=lambda: True,
+                session_factory=lambda: self.db,
+            )
+
+        self.db.refresh(run)
+        self.assertEqual(run.status, "waiting_approval")
+        self.assertIsNone(run.current_checkpoint_id)
+        service.return_value.run.assert_called_once()
+
     def test_prepare_then_started_before_provider_io(self) -> None:
         from app.assistant.durable.checkpoints import (
             commit_prepared_unit,

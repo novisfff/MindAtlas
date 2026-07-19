@@ -22,6 +22,7 @@ from app.assistant.domain.digests import (
 from app.assistant.durable.contracts import (
     DurableAgentCheckpointV1,
     DurableAgentCheckpointV2,
+    DurableAgentCheckpointV3,
     DurableExecutionUnitV2,
     DurableGrantSetV1,
     DurableNextActionV2,
@@ -60,7 +61,7 @@ from app.assistant.provider_loop.messages import (
 
 MAX_CODEC_JSON_DEPTH: Final[int] = 64
 MAX_CODEC_JSON_BYTES: Final[int] = 256 * 1024
-SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS: Final[frozenset[int]] = frozenset({1, 2})
+SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS: Final[frozenset[int]] = frozenset({1, 2, 3})
 
 # Exact keys (case-insensitive) that must never appear in durable JSON.
 # Intentionally exact — do not substring-match legitimate fields like
@@ -205,6 +206,9 @@ _CHECKPOINT_V1_ADAPTER: TypeAdapter[DurableAgentCheckpointV1] = TypeAdapter(
 )
 _CHECKPOINT_V2_ADAPTER: TypeAdapter[DurableAgentCheckpointV2] = TypeAdapter(
     DurableAgentCheckpointV2
+)
+_CHECKPOINT_V3_ADAPTER: TypeAdapter[DurableAgentCheckpointV3] = TypeAdapter(
+    DurableAgentCheckpointV3
 )
 _GRANT_ADAPTER: TypeAdapter[EffectiveCapabilityGrant] = TypeAdapter(
     EffectiveCapabilityGrant
@@ -584,7 +588,9 @@ def decode_obligation_ledger_state(
 # ---------------------------------------------------------------------------
 
 
-AnyCheckpoint = DurableAgentCheckpointV1 | DurableAgentCheckpointV2
+AnyCheckpoint = (
+    DurableAgentCheckpointV1 | DurableAgentCheckpointV2 | DurableAgentCheckpointV3
+)
 
 
 def encode_checkpoint_v1(checkpoint: DurableAgentCheckpointV1) -> dict[str, JsonValue]:
@@ -734,6 +740,38 @@ def decode_checkpoint_v2(payload: Mapping[str, Any]) -> DurableAgentCheckpointV2
         raise DurableCodecError("checkpoint_invalid", str(exc)) from exc
 
 
+def encode_checkpoint_v3(checkpoint: DurableAgentCheckpointV3) -> dict[str, JsonValue]:
+    _reject_ephemeral_instance(checkpoint)
+    if not isinstance(checkpoint, DurableAgentCheckpointV3):
+        _fail(
+            "unsupported_type",
+            f"expected DurableAgentCheckpointV3, got {type(checkpoint)!r}",
+        )
+    if checkpoint.schema_version != 3:
+        _fail("schema_version", "encode_checkpoint_v3 requires schema_version=3")
+    return _dump_contract(checkpoint)
+
+
+def decode_checkpoint_v3(payload: Mapping[str, Any]) -> DurableAgentCheckpointV3:
+    """Decode Checkpoint v3 without rewriting v1/v2 payloads."""
+    if isinstance(payload, Mapping):
+        _raise_if_unsupported_nested_checkpoint_versions(payload)
+    data = _canonical_payload(payload)
+    version = data.get("schemaVersion", data.get("schema_version"))
+    if version is None:
+        _fail("missing_schema_version", "checkpoint requires schemaVersion")
+    if version != 3:
+        raise NeedsReconciliationError(
+            f"decode_checkpoint_v3 received schemaVersion={version!r}",
+            schema_version=version,
+        )
+    _raise_if_unsupported_nested_checkpoint_versions(data)
+    try:
+        return _CHECKPOINT_V3_ADAPTER.validate_python(data)
+    except ValidationError as exc:
+        raise DurableCodecError("checkpoint_invalid", str(exc)) from exc
+
+
 def _peek_schema_version(payload: Mapping[str, Any]) -> Any:
     """Read schema version without constructing runtime Checkpoint objects."""
     if not isinstance(payload, Mapping):
@@ -774,6 +812,8 @@ def decode_checkpoint(payload: Mapping[str, Any]) -> AnyCheckpoint:
         return decode_checkpoint_v1(payload)
     if version == 2:
         return decode_checkpoint_v2(payload)
+    if version == 3:
+        return decode_checkpoint_v3(payload)
     raise NeedsReconciliationError(
         f"no decoder registered for schemaVersion={version}",
         schema_version=version,
@@ -847,10 +887,39 @@ def _migrate_payload_v1_to_v2(payload: dict[str, JsonValue]) -> dict[str, JsonVa
     return encode_checkpoint_v2(v2)
 
 
+def migrate_checkpoint_v2_to_v3(
+    checkpoint: DurableAgentCheckpointV2 | Mapping[str, Any],
+) -> DurableAgentCheckpointV3:
+    """Lossless v2 envelope plus empty Plan 08 ledger state."""
+    if isinstance(checkpoint, Mapping):
+        v2 = decode_checkpoint_v2(checkpoint)
+    elif isinstance(checkpoint, DurableAgentCheckpointV2) and not isinstance(
+        checkpoint, DurableAgentCheckpointV3
+    ):
+        v2 = checkpoint
+    else:
+        _fail(
+            "unsupported_type",
+            "migrate_checkpoint_v2_to_v3 expected DurableAgentCheckpointV2",
+        )
+    payload = v2.model_dump(mode="python", by_alias=False)
+    payload.pop("schema_version", None)
+    return DurableAgentCheckpointV3(
+        **payload,
+        policy_contract_version=1,
+        capability_calls=(),
+    )
+
+
+def _migrate_payload_v2_to_v3(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    return encode_checkpoint_v3(migrate_checkpoint_v2_to_v3(payload))
+
+
 # Migration registry: (from_version, to_version) -> migrator returning payload dict.
 CheckpointMigrator = Callable[[dict[str, JsonValue]], dict[str, JsonValue]]
 _MIGRATION_REGISTRY: dict[tuple[int, int], CheckpointMigrator] = {
     (1, 2): _migrate_payload_v1_to_v2,
+    (2, 3): _migrate_payload_v2_to_v3,
 }
 
 
@@ -936,13 +1005,15 @@ def migrate_checkpoint(payload: Mapping[str, Any]) -> AnyCheckpoint:
 
 def checkpoint_state_digest(checkpoint: AnyCheckpoint) -> str:
     """SHA-256 of the canonical Checkpoint payload (state_digest column)."""
+    if isinstance(checkpoint, DurableAgentCheckpointV3):
+        return sha256_canonical_json(encode_checkpoint_v3(checkpoint))
     if isinstance(checkpoint, DurableAgentCheckpointV2):
         return sha256_canonical_json(encode_checkpoint_v2(checkpoint))
     if isinstance(checkpoint, DurableAgentCheckpointV1):
         return sha256_canonical_json(encode_checkpoint_v1(checkpoint))
     _fail(
         "unsupported_type",
-        f"checkpoint_state_digest expected DurableAgentCheckpointV1|V2, "
+        f"checkpoint_state_digest expected DurableAgentCheckpointV1|V2|V3, "
         f"got {type(checkpoint)!r}",
     )
 
@@ -960,6 +1031,7 @@ __all__ = [
     "decode_checkpoint",
     "decode_checkpoint_v1",
     "decode_checkpoint_v2",
+    "decode_checkpoint_v3",
     "decode_grant",
     "decode_grant_set",
     "decode_obligation_ledger_state",
@@ -970,6 +1042,7 @@ __all__ = [
     "encode_capability_frame",
     "encode_checkpoint_v1",
     "encode_checkpoint_v2",
+    "encode_checkpoint_v3",
     "encode_grant",
     "encode_grant_set",
     "encode_obligation_ledger_state",
@@ -978,6 +1051,7 @@ __all__ = [
     "encode_provider_message_record",
     "migrate_checkpoint",
     "migrate_checkpoint_v1_to_v2",
+    "migrate_checkpoint_v2_to_v3",
     "register_checkpoint_migration",
     "sanitize_json_value",
 ]

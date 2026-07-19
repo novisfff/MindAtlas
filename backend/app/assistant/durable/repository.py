@@ -101,6 +101,9 @@ ALLOWED_TRANSITIONS: dict[tuple[str, str], str] = {
     (STATUS_RUNNING, STATUS_NEEDS_RECONCILIATION): "reconcile",
     (STATUS_RECOVERING, STATUS_NEEDS_RECONCILIATION): "reconcile",
     (STATUS_NEEDS_RECONCILIATION, STATUS_CANCELLED): "abandon",
+    (STATUS_NEEDS_RECONCILIATION, STATUS_QUEUED): "reconciliation_resolved",
+    (STATUS_NEEDS_RECONCILIATION, STATUS_COMPLETED): "reconciliation_completed",
+    (STATUS_NEEDS_RECONCILIATION, STATUS_FAILED): "reconciliation_failed",
 }
 
 # Transitions that verify an existing lease token (not claim/takeover which set it).
@@ -283,7 +286,14 @@ class DurableRunRepository:
     ) -> AssistantChatRun | None:
         stmt = select(AssistantChatRun).where(AssistantChatRun.id == run_id)
         if for_update:
-            stmt = stmt.with_for_update(nowait=nowait)
+            # A caller may already have loaded the Run into this Session before
+            # blocking on another transaction's row lock. Refresh the identity-
+            # mapped object after the lock is acquired; otherwise stale
+            # last_event_seq/state_revision values can allocate duplicate event
+            # sequences even though PostgreSQL correctly serialized the locks.
+            stmt = stmt.with_for_update(nowait=nowait).execution_options(
+                populate_existing=True
+            )
         return self.db.execute(stmt).scalar_one_or_none()
 
     def get_current_checkpoint_phase(self, run: AssistantChatRun) -> str | None:
@@ -673,6 +683,74 @@ class DurableRunRepository:
             )
         )
 
+    def commit_reconciliation_resolution(
+        self,
+        *,
+        run_id: UUID,
+        expected_revision: int,
+        target_status: str,
+        events: Sequence[EventSpec] = (),
+        children: DurableChildBundle | None = None,
+        failure_code: str | None = None,
+    ) -> DurableCommitResult:
+        """Resolve a quiescent reconciliation Run through one aggregate CAS."""
+        if target_status not in {STATUS_QUEUED, STATUS_COMPLETED, STATUS_FAILED}:
+            raise DurableRunConflict(
+                CODE_PROTOCOL_ERROR,
+                f"invalid reconciliation target_status={target_status!r}",
+            )
+        return self._commit(
+            _TransitionPlan(
+                run_id=run_id,
+                expected_revision=expected_revision,
+                target_status=target_status,
+                allowed_from=frozenset({STATUS_NEEDS_RECONCILIATION}),
+                rule_name={
+                    STATUS_QUEUED: "reconciliation_resolved",
+                    STATUS_COMPLETED: "reconciliation_completed",
+                    STATUS_FAILED: "reconciliation_failed",
+                }[target_status],
+                events=tuple(events),
+                children=children,
+                clear_lease=True,
+                set_started_at_if_missing=target_status in TERMINAL_STATUSES,
+                set_ended_at=target_status in TERMINAL_STATUSES,
+                failure_code=failure_code,
+            )
+        )
+
+    def commit_cancellation_settlement(
+        self,
+        *,
+        run_id: UUID,
+        expected_revision: int,
+        target_status: str,
+        events: Sequence[EventSpec] = (),
+        children: DurableChildBundle | None = None,
+    ) -> DurableCommitResult:
+        """Commit a no-new-I/O Call settlement while the Run is cancelling."""
+        if target_status not in {STATUS_CANCELLING, STATUS_NEEDS_RECONCILIATION}:
+            raise DurableRunConflict(
+                CODE_PROTOCOL_ERROR,
+                f"invalid cancellation settlement target={target_status!r}",
+            )
+        return self._commit(
+            _TransitionPlan(
+                run_id=run_id,
+                expected_revision=expected_revision,
+                target_status=target_status,
+                allowed_from=frozenset({STATUS_CANCELLING}),
+                rule_name=(
+                    "call_settlement_proven"
+                    if target_status == STATUS_CANCELLING
+                    else "call_settlement_unproven"
+                ),
+                events=tuple(events),
+                children=children,
+                allow_same_status=target_status == STATUS_CANCELLING,
+            )
+        )
+
     def commit_waiting_terminal_cancel(
         self,
         *,
@@ -908,6 +986,19 @@ class DurableRunRepository:
             self._require_main_agent(run)
             self._resolve_stop_request(run, plan)
             self._validate_cas(run, plan, now=now)
+
+            # Plan 08: cancellation may be sealed only after every call whose
+            # side effect started has a proven terminal outcome.  The Run row
+            # is already locked here, preserving the global Run-first lock
+            # order before inspecting CapabilityCall rows.
+            if plan.rule_name == "cancel_finalizer":
+                from app.assistant.capability_calls.settlement import (
+                    CapabilityCallSettlementRepository,
+                )
+
+                CapabilityCallSettlementRepository(
+                    self.db
+                ).refuse_cancel_finalizer_if_unproven(run.id)
 
             # Idempotent stop while already cancelling: no revision bump.
             if plan.rule_name == "stop_idempotent":
