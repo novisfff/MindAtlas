@@ -109,6 +109,8 @@ def _passing_gate_metrics() -> dict:
         "false_completion_pending_obligation": 0,
         "unresolved_obligation_falsely_completed": 0,
         "schema_escape": 0,
+        "secret_exposure": 0,
+        "duplicate_write": 0,
     }
 
 

@@ -428,6 +428,7 @@ class AgentSkillService:
             PublishGateError,
             PublishGateService,
             build_publish_gate_subject,
+            current_build_revision,
             current_gate_environment_pins,
             publish_gate_mode,
             skill_catalog_pin_digest,
@@ -534,11 +535,13 @@ class AgentSkillService:
                 published_version_id=package.published_version_id,
                 catalog_enabled=live_enabled,
             )
+            # Server-derived build pin only — never trust client gate_subject.build_revision
+            # (same contract as enable path via current_build_revision()).
             pins = current_gate_environment_pins(
                 self.db,
                 catalog_digest=catalog_digest,
                 dataset_version_ids=dataset_ids,
-                build_revision=self._gate_build_revision(command),
+                build_revision=current_build_revision(),
             )
             subject = build_publish_gate_subject(
                 kind=subject_kind,
@@ -740,16 +743,6 @@ class AgentSkillService:
                 if u not in seen:
                     seen.append(u)
         return tuple(seen) if seen else None
-
-    def _gate_build_revision(self, command: Any) -> str:
-        from app.assistant.evaluation.gates import current_build_revision
-
-        raw = getattr(command, "gate_subject", None) or {}
-        return str(
-            raw.get("build_revision")
-            or raw.get("buildRevision")
-            or current_build_revision()
-        )
 
     def _gate_subject_client_drifts(
         self, client: dict[str, Any], subject: Any

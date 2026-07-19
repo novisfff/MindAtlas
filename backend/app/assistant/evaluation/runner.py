@@ -725,10 +725,15 @@ class EvaluationRunner:
         live_evidence: dict[str, Any] | None,
     ) -> DatasetEvaluationOutcome:
         require_active_eval_scope()
-        delta = dict(production_delta or {})
-        # Prove zero production mutation.
-        nonzero = {k: v for k, v in delta.items() if int(v) != 0}
-        zero_mutation = not nonzero and not scope.breached
+        # Preserve None so missing production_delta evidence stays indeterminate.
+        # Only an explicit map (including empty {}) is proven zero/nonzero mutation.
+        delta = None if production_delta is None else dict(production_delta)
+        if delta is None:
+            zero_mutation = False
+            nonzero: dict[str, int] = {}
+        else:
+            nonzero = {k: v for k, v in delta.items() if int(v) != 0}
+            zero_mutation = not nonzero and not scope.breached
 
         summary = evaluate_dataset_assertions(
             case_outcomes=case_outcomes,
@@ -777,6 +782,11 @@ class EvaluationRunner:
         if scope.breached:
             terminal = "failed"
             failure_code = ISOLATION_BREACH
+            gate_eligible = False
+        elif delta is None:
+            # Missing production mutation evidence — fail closed / not gate-eligible.
+            terminal = "failed"
+            failure_code = "real_side_effect_in_test"
             gate_eligible = False
         elif not zero_mutation:
             terminal = "failed"

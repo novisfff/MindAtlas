@@ -413,6 +413,10 @@ def aggregate_dataset_metrics(
     completion_hits = 0
     legacy_completion_hits = 0
     unauthorized_count = 0
+    secret_exposure_count = 0
+    duplicate_write_count = 0
+    secret_exposure_seen = False
+    duplicate_write_seen = False
     all_cases = 0
 
     for raw in case_outcomes:
@@ -497,6 +501,29 @@ def aggregate_dataset_metrics(
         if raw.get("unauthorized") is True:
             unauthorized_count += 1
 
+        # Preserve hard-safety counters when present on case outcomes so gate
+        # aggregation cannot drop secret_exposure / duplicate_write evidence.
+        if "secret_exposure" in raw or "secretExposure" in raw:
+            secret_exposure_seen = True
+            val = raw.get("secret_exposure", raw.get("secretExposure", 0))
+            if val is True:
+                secret_exposure_count += 1
+            else:
+                try:
+                    secret_exposure_count += int(val or 0)
+                except (TypeError, ValueError):
+                    secret_exposure_count += 1
+        if "duplicate_write" in raw or "duplicateWrite" in raw:
+            duplicate_write_seen = True
+            val = raw.get("duplicate_write", raw.get("duplicateWrite", 0))
+            if val is True:
+                duplicate_write_count += 1
+            else:
+                try:
+                    duplicate_write_count += int(val or 0)
+                except (TypeError, ValueError):
+                    duplicate_write_count += 1
+
     metrics: dict[str, float | int] = {
         "all_cases": all_cases,
         "recall_at_8": _ratio(positive_recall_hits, positive_cases),
@@ -518,6 +545,10 @@ def aggregate_dataset_metrics(
     metrics["completion_success_delta_vs_legacy"] = float(
         metrics["legacy_completion_success"]
     ) - float(metrics["completion_success"])
+    if secret_exposure_seen:
+        metrics["secret_exposure"] = secret_exposure_count
+    if duplicate_write_seen:
+        metrics["duplicate_write"] = duplicate_write_count
     return metrics
 
 
@@ -676,6 +707,16 @@ PLAN_05_08_HARD_SAFETY_COUNTERS: tuple[tuple[str, str], ...] = (
     ("schema_escape", "schema_escape"),
 )
 
+# Secret exposure and duplicate write are required hard-safety zero-counters on
+# the dataset/gate path (same missing→indeterminate / nonzero→fail contract as
+# Plan 05–08). They are also asserted via evidence_payloads / logical_keys when
+# those are present; metrics/safety_counters alone must still fail closed.
+REQUIRED_HARD_SAFETY_ZERO_COUNTERS: tuple[tuple[str, str], ...] = (
+    *PLAN_05_08_HARD_SAFETY_COUNTERS,
+    ("secret_exposure", "secret_exposure"),
+    ("duplicate_write", "duplicate_write"),
+)
+
 
 def _derive_production_delta_evidence(
     *,
@@ -731,8 +772,9 @@ def evaluate_dataset_assertions(
     """Full dataset assertion aggregation for gates.
 
     Missing evidence is fail/indeterminate, never pass. Hard safety cannot be
-    waived or averaged away. Required Plan 05–08 counters absent from evidence
-    are indeterminate (not skipped).
+    waived or averaged away. Required hard-safety zero-counters (Plan 05–08 plus
+    secret_exposure / duplicate_write) absent from evidence are indeterminate
+    (not skipped). Nonzero counters fail even without evidence_payloads.
     """
     summary = DatasetAssertionSummary(isolation_breach=isolation_breached)
     th = dict(thresholds or RELEASE_THRESHOLDS)
@@ -753,8 +795,15 @@ def evaluate_dataset_assertions(
         )
 
     # Metrics first so production_delta can be derived from metric evidence.
+    # When both metrics and case_outcomes are supplied, preserve hard-safety
+    # zero-counters from case outcomes if the aggregate metrics omitted them.
     if metrics is not None:
         summary.metrics = dict(metrics)
+        if case_outcomes is not None:
+            from_cases = aggregate_dataset_metrics(case_outcomes)
+            for _code, key in REQUIRED_HARD_SAFETY_ZERO_COUNTERS:
+                if key not in summary.metrics and key in from_cases:
+                    summary.metrics[key] = from_cases[key]
     elif case_outcomes is not None:
         summary.metrics = aggregate_dataset_metrics(case_outcomes)
     else:
@@ -775,7 +824,7 @@ def evaluate_dataset_assertions(
                 missing_is_indeterminate=True,
             )
         )
-        for code, _key in PLAN_05_08_HARD_SAFETY_COUNTERS:
+        for code, _key in REQUIRED_HARD_SAFETY_ZERO_COUNTERS:
             summary.results.append(
                 assert_zero_counter(
                     code,
@@ -803,7 +852,7 @@ def evaluate_dataset_assertions(
                 missing_is_indeterminate=True,
             )
         )
-        for code, _key in PLAN_05_08_HARD_SAFETY_COUNTERS:
+        for code, _key in REQUIRED_HARD_SAFETY_ZERO_COUNTERS:
             summary.results.append(
                 assert_zero_counter(
                     code,
@@ -832,6 +881,10 @@ def evaluate_dataset_assertions(
     # None means not supplied — rely on metrics unauthorized counter instead.
     if call_outcomes is not None:
         summary.results.append(assert_no_unauthorized_calls(list(call_outcomes)))
+    # logical_keys_attempts / evidence_payloads remain supplementary evidence.
+    # Required secret_exposure / duplicate_write zero-counters are evaluated below
+    # from metrics/safety_counters so gate create cannot silent-pass when only
+    # aggregate metrics carry the counters.
     if logical_keys_attempts is not None:
         summary.results.append(
             assert_no_duplicate_logical_calls(list(logical_keys_attempts))
@@ -842,15 +895,15 @@ def evaluate_dataset_assertions(
         )
 
     counters = dict(safety_counters or {})
-    # Also accept Plan 05–08 counters nested under metrics (run aggregate_metrics).
-    for _code, key in PLAN_05_08_HARD_SAFETY_COUNTERS:
+    # Accept required hard-safety counters nested under metrics (run aggregate).
+    for _code, key in REQUIRED_HARD_SAFETY_ZERO_COUNTERS:
         if key not in counters and key in summary.metrics:
             try:
                 counters[key] = int(summary.metrics[key])  # type: ignore[arg-type]
             except (TypeError, ValueError):
                 counters[key] = None
     # Always evaluate required hard-safety counters — missing is indeterminate.
-    for code, key in PLAN_05_08_HARD_SAFETY_COUNTERS:
+    for code, key in REQUIRED_HARD_SAFETY_ZERO_COUNTERS:
         summary.results.append(
             assert_zero_counter(
                 code,
@@ -952,6 +1005,7 @@ __all__ = [
     "InteractiveAssertionSummary",
     "METRIC_ASSERTION_CODES",
     "PLAN_05_08_HARD_SAFETY_COUNTERS",
+    "REQUIRED_HARD_SAFETY_ZERO_COUNTERS",
     "SECRET_CANARY_VALUES",
     "THRESHOLD_POLICY_VERSION",
     "WAIVABLE_NON_SAFETY_CODES",
