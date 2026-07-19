@@ -82,6 +82,17 @@ class AssistantSkillPackage(UuidPrimaryKeyMixin, TimestampMixin, Base):
     legacy_source_digest = Column(String(64), nullable=True)
     catalog_enabled = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     is_system = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    # Plan 09 aggregate lifecycle (revision CAS + archive/catalog evidence).
+    aggregate_revision = Column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    archived_at = Column(DateTime(timezone=True), nullable=True)
+    archived_by = Column(String(128), nullable=True)
+    catalog_enabled_at = Column(DateTime(timezone=True), nullable=True)
+    catalog_enabled_by = Column(String(128), nullable=True)
+    # Durable last-mutation idempotency (requestId retry / altered reuse).
+    last_admin_request_id = Column(String(128), nullable=True)
+    last_admin_request_digest = Column(String(64), nullable=True)
 
     draft_version = relationship(
         "AssistantSkillVersion",
@@ -119,6 +130,19 @@ class AssistantSkillPackage(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "legacy_source_digest",
             name="ck_assistant_skill_package_legacy_source_digest",
         ),
+        CheckConstraint(
+            "aggregate_revision >= 0",
+            name="ck_assistant_skill_package_aggregate_revision",
+        ),
+        CheckConstraint(
+            "(archived_at IS NULL AND archived_by IS NULL) OR "
+            "(archived_at IS NOT NULL)",
+            name="ck_assistant_skill_package_archived_shape",
+        ),
+        _nullable_sha256_check(
+            "last_admin_request_digest",
+            name="ck_assistant_skill_package_last_admin_request_digest",
+        ),
     )
 
 
@@ -137,6 +161,9 @@ class AssistantSkillPackageAlias(UuidPrimaryKeyMixin, Base):
     normalized_alias = Column(String(512), nullable=False, unique=True, index=True)
     alias_type = Column(String(32), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    # Plan 09: soft-disable custom aliases; names remain reserved (never delete/reassign).
+    disabled_at = Column(DateTime(timezone=True), nullable=True)
+    disabled_by = Column(String(128), nullable=True)
 
     skill_package = relationship(
         "AssistantSkillPackage",
@@ -148,6 +175,11 @@ class AssistantSkillPackageAlias(UuidPrimaryKeyMixin, Base):
         CheckConstraint(
             "alias_type IN ('canonical','legacy','custom')",
             name="ck_assistant_skill_package_alias_type",
+        ),
+        CheckConstraint(
+            "(disabled_at IS NULL AND disabled_by IS NULL) OR "
+            "(disabled_at IS NOT NULL AND alias_type = 'custom')",
+            name="ck_assistant_skill_package_alias_disabled_shape",
         ),
     )
 

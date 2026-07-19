@@ -399,6 +399,12 @@ class AgentSkillService:
         """
         try:
             package = self._lock_package(package_id)
+            if getattr(package, "archived_at", None) is not None:
+                raise ApiException(
+                    status_code=409,
+                    code=40996,
+                    message="cannot publish an archived skill package; unarchive first",
+                )
             draft = (
                 self.db.query(AssistantSkillVersion)
                 .filter(
@@ -712,6 +718,12 @@ class AgentSkillService:
                 # cannot both observe an empty catalog and commit.
                 self._acquire_catalog_enable_lock()
             package = self._lock_package(package_id)
+            if enabled and getattr(package, "archived_at", None) is not None:
+                raise ApiException(
+                    status_code=409,
+                    code=40996,
+                    message="cannot enable catalog for an archived skill package",
+                )
             if enabled:
                 if package.published_version_id is None:
                     raise ApiException(
@@ -770,6 +782,16 @@ class AgentSkillService:
                     )
                 package.migration_state = migration_state
             package.catalog_enabled = bool(enabled)
+            if enabled:
+                if getattr(package, "catalog_enabled_at", None) is None:
+                    from app.common.time import utcnow
+
+                    package.catalog_enabled_at = utcnow()
+                    if getattr(package, "catalog_enabled_by", None) is None:
+                        package.catalog_enabled_by = "system"
+            else:
+                package.catalog_enabled_at = None
+                package.catalog_enabled_by = None
             self.db.commit()
             return self._package_summary(package)
         except ApiException:
@@ -809,6 +831,8 @@ class AgentSkillService:
                     normalized_alias=a.normalized_alias,
                     alias_type=a.alias_type,  # type: ignore[arg-type]
                     created_at=a.created_at,
+                    disabled_at=getattr(a, "disabled_at", None),
+                    disabled_by=getattr(a, "disabled_by", None),
                 )
                 for a in aliases
             ],
@@ -946,7 +970,7 @@ class AgentSkillService:
                 .filter(AssistantSkillPackageAlias.normalized_alias == normalized)
                 .one_or_none()
             )
-            if alias is None:
+            if alias is None or getattr(alias, "disabled_at", None) is not None:
                 raise ApiException(
                     status_code=404,
                     code=40490,
@@ -960,6 +984,13 @@ class AgentSkillService:
                 .one_or_none()
             )
             if package is None:
+                raise ApiException(
+                    status_code=404,
+                    code=40490,
+                    message=f"Skill package not found for name: {name!r}",
+                )
+            # Archived packages cannot be recalled via alias resolution.
+            if getattr(package, "archived_at", None) is not None:
                 raise ApiException(
                     status_code=404,
                     code=40490,
@@ -1372,6 +1403,11 @@ class AgentSkillService:
             migration_state=package.migration_state,  # type: ignore[arg-type]
             catalog_enabled=bool(package.catalog_enabled),
             is_system=bool(package.is_system),
+            aggregate_revision=int(getattr(package, "aggregate_revision", 0) or 0),
+            archived_at=getattr(package, "archived_at", None),
+            archived_by=getattr(package, "archived_by", None),
+            catalog_enabled_at=getattr(package, "catalog_enabled_at", None),
+            catalog_enabled_by=getattr(package, "catalog_enabled_by", None),
             draft_version=draft,
             published_version=published,
             created_at=package.created_at,

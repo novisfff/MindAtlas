@@ -37,6 +37,7 @@ from app.ai_provider.router import router as ai_provider_router
 from app.ai_registry.router import credential_router, model_router, binding_router
 from app.ai.router import router as ai_router
 from app.assistant.router import router as assistant_router
+from app.assistant.skills.admin_router import mount_skill_admin_router
 from app.assistant.skills.router import (
     main_agent_profile_router,
     skill_package_router,
@@ -150,6 +151,8 @@ app.include_router(assistant_router)
 app.include_router(assistant_config_router)
 app.include_router(skill_package_router)
 app.include_router(main_agent_profile_router)
+# Plan 09 admin surface: unmounted in staging/production; trusted-dev/test only.
+mount_skill_admin_router(app, app_env=get_settings().app_env)
 app.include_router(stats_router)
 app.include_router(graph_router)
 app.include_router(lightrag_router)

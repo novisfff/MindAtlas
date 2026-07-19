@@ -181,6 +181,8 @@ class SkillPackageAliasSummary(CamelModel):
     normalized_alias: str
     alias_type: AliasType
     created_at: datetime | None = None
+    disabled_at: datetime | None = None
+    disabled_by: str | None = None
 
 
 class SkillPackageSummary(CamelModel):
@@ -191,6 +193,11 @@ class SkillPackageSummary(CamelModel):
     migration_state: SkillPackageMigrationState
     catalog_enabled: bool
     is_system: bool
+    aggregate_revision: int = 0
+    archived_at: datetime | None = None
+    archived_by: str | None = None
+    catalog_enabled_at: datetime | None = None
+    catalog_enabled_by: str | None = None
     draft_version: SkillVersionSummary | None = None
     published_version: SkillVersionSummary | None = None
     created_at: datetime | None = None
@@ -201,6 +208,79 @@ class SkillPackageDetail(SkillPackageSummary):
     aliases: list[SkillPackageAliasSummary] = Field(default_factory=list)
     legacy_skill_id: UUID | None = None
     legacy_source_digest: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Plan 09 aggregate admin commands / DTOs
+# ---------------------------------------------------------------------------
+
+
+class UpdateSkillPackageMetadataCommand(CamelModel):
+    """Revision-CAS metadata update (display name / description only)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=128)
+    expected_aggregate_revision: int = Field(ge=0)
+    display_name: str | None = Field(default=None, max_length=128)
+    description: str | None = Field(default=None, max_length=1024)
+
+
+class AggregateRevisionCommand(CamelModel):
+    """Shared body for archive / unarchive / catalog / alias CAS mutations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=128)
+    expected_aggregate_revision: int = Field(ge=0)
+
+
+class AddSkillPackageAliasCommand(CamelModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=128)
+    expected_aggregate_revision: int = Field(ge=0)
+    alias: str = Field(min_length=1, max_length=512)
+
+
+class DisableSkillPackageAliasCommand(CamelModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=128)
+    expected_aggregate_revision: int = Field(ge=0)
+
+
+class RestoreSkillVersionAsDraftCommand(CamelModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=128)
+    expected_aggregate_revision: int = Field(ge=0)
+
+
+class SkillVersionDiffHunk(CamelModel):
+    """Bounded text hunk for version compare (no secrets / unbounded bodies)."""
+
+    path: str
+    kind: Literal["added", "removed", "changed", "unchanged_meta"]
+    left_digest: str | None = None
+    right_digest: str | None = None
+    left_preview: str | None = None
+    right_preview: str | None = None
+    truncated: bool = False
+
+
+class SkillVersionDiffResult(CamelModel):
+    package_id: UUID
+    left_version_id: UUID
+    right_version_id: UUID
+    left_content_digest: str
+    right_content_digest: str
+    left_metadata: dict[str, Any]
+    right_metadata: dict[str, Any]
+    hunks: list[SkillVersionDiffHunk] = Field(default_factory=list)
+    resource_bytes_excluded: bool = True
+    secrets_excluded: bool = True
+    unbounded_bodies_excluded: bool = True
 
 
 # ---------------------------------------------------------------------------
