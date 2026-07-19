@@ -1,7 +1,8 @@
-"""Skill evaluation workbench persistence (Plan 09 Task 3).
+"""Skill evaluation workbench (Plan 09 Tasks 3–4).
 
-Persistence + deterministic fixture import only. No Provider run, no publish
-gate enforcement, and no EvaluationRunner/worker execution loop (Tasks 4–5).
+Task 3: persistence + deterministic fixture import.
+Task 4: isolated interactive_scripted runtime (runner/worker/isolation).
+Publish gate enforcement remains Task 5.
 """
 
 from __future__ import annotations

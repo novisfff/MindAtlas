@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 from uuid import UUID, uuid4
 
-from sqlalchemy import Select, delete, exists, select, update
+from sqlalchemy import Select, and_, delete, exists, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -569,6 +569,267 @@ class EvaluationRepository:
         run.state_revision = int(run.state_revision) + 1
         self.session.flush()
         return run
+
+    # ------------------------------------------------------------------
+    # Claim / lease (SKIP LOCKED) — evaluation namespace only
+    # ------------------------------------------------------------------
+
+    def claim_next_run(
+        self,
+        *,
+        worker_id: str,
+        required_build_revision: str,
+        runtime_contract_version: int,
+        runner_contract_version: int = 1,
+        lease_ttl: timedelta | None = None,
+        max_attempts: int = 5,
+        now: datetime | None = None,
+    ) -> AssistantSkillEvalRun | None:
+        """Claim one compatible queued/stale Eval Run with SKIP LOCKED.
+
+        Never touches production AssistantChatRun rows. Compatibility requires
+        matching build revision, runtime contract, and runner contract.
+        """
+        owner = (worker_id or "").strip()
+        if not owner:
+            raise EvaluationRepositoryError(CODE_INVALID_INPUT, "worker_id required")
+        current = now or utcnow()
+        ttl = lease_ttl or timedelta(seconds=30)
+        expired_lease = or_(
+            AssistantSkillEvalRun.lease_expires_at.is_(None),
+            AssistantSkillEvalRun.lease_expires_at <= current,
+        )
+        status_predicate = or_(
+            AssistantSkillEvalRun.status == "queued",
+            and_(
+                AssistantSkillEvalRun.status.in_(("running", "cancelling")),
+                expired_lease,
+            ),
+        )
+        attempt_predicate = AssistantSkillEvalRun.attempt_count < int(max_attempts)
+        stmt = (
+            select(AssistantSkillEvalRun)
+            .where(
+                AssistantSkillEvalRun.required_build_revision == required_build_revision,
+                AssistantSkillEvalRun.runtime_contract_version
+                == int(runtime_contract_version),
+                AssistantSkillEvalRun.runner_contract_version
+                == int(runner_contract_version),
+                AssistantSkillEvalRun.owner_kind == EVAL_OWNER_KIND,
+                status_predicate,
+                attempt_predicate,
+            )
+            .order_by(
+                AssistantSkillEvalRun.created_at.asc(),
+            )
+            .limit(1)
+        )
+        try:
+            stmt = stmt.with_for_update(skip_locked=True)
+            run = self.session.execute(stmt).scalar_one_or_none()
+        except Exception:
+            # Dialect may not support skip_locked (SQLite).
+            self.session.rollback()
+            stmt = (
+                select(AssistantSkillEvalRun)
+                .where(
+                    AssistantSkillEvalRun.required_build_revision
+                    == required_build_revision,
+                    AssistantSkillEvalRun.runtime_contract_version
+                    == int(runtime_contract_version),
+                    AssistantSkillEvalRun.runner_contract_version
+                    == int(runner_contract_version),
+                    AssistantSkillEvalRun.owner_kind == EVAL_OWNER_KIND,
+                    status_predicate,
+                    attempt_predicate,
+                )
+                .order_by(AssistantSkillEvalRun.created_at.asc())
+                .limit(1)
+                .with_for_update()
+            )
+            run = self.session.execute(stmt).scalar_one_or_none()
+
+        if run is None:
+            return None
+
+        # Stale running/cancelling with expired lease → requeue then claim, or
+        # finalize cancel if cancelling.
+        if run.status == "cancelling":
+            run.status = "cancelled"
+            run.ended_at = current
+            run.lease_owner = None
+            run.lease_expires_at = None
+            run.state_revision = int(run.state_revision) + 1
+            run.heartbeat_at = current
+            self.session.flush()
+            return None
+
+        if run.status == "running":
+            # Deterministic stale-lease recovery: return to queued for reclaim.
+            run.status = "queued"
+            run.lease_owner = None
+            run.lease_expires_at = None
+            run.state_revision = int(run.state_revision) + 1
+            run.heartbeat_at = current
+            # Fall through to claim as queued in same transaction.
+
+        if run.status != "queued":
+            return None
+
+        run.status = "running"
+        if run.started_at is None:
+            run.started_at = current
+        run.attempt_count = int(run.attempt_count) + 1
+        run.lease_owner = owner
+        run.lease_generation = int(run.lease_generation) + 1
+        run.lease_expires_at = current + ttl
+        run.heartbeat_at = current
+        run.state_revision = int(run.state_revision) + 1
+        self.session.flush()
+        return run
+
+    def claim_run(
+        self,
+        *,
+        run_id: UUID,
+        worker_id: str,
+        required_build_revision: str,
+        runtime_contract_version: int,
+        runner_contract_version: int = 1,
+        lease_ttl: timedelta | None = None,
+        now: datetime | None = None,
+    ) -> AssistantSkillEvalRun | None:
+        """Claim a specific Eval Run if eligible and compatible (test helper)."""
+        owner = (worker_id or "").strip()
+        if not owner:
+            raise EvaluationRepositoryError(CODE_INVALID_INPUT, "worker_id required")
+        current = now or utcnow()
+        ttl = lease_ttl or timedelta(seconds=30)
+        run = self.session.execute(
+            select(AssistantSkillEvalRun)
+            .where(AssistantSkillEvalRun.id == run_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        if run is None:
+            return None
+        if str(run.required_build_revision or "") != required_build_revision:
+            return None
+        if int(run.runtime_contract_version or 0) != int(runtime_contract_version):
+            return None
+        if int(run.runner_contract_version or 0) != int(runner_contract_version):
+            return None
+        if str(run.owner_kind) != EVAL_OWNER_KIND:
+            return None
+        if run.status not in {"queued", "running"}:
+            return None
+        if run.status == "running":
+            expires = run.lease_expires_at
+            if expires is not None and _as_utc(expires) > _as_utc(current):
+                return None
+            # Stale recovery → requeue path equivalent.
+        run.status = "running"
+        if run.started_at is None:
+            run.started_at = current
+        run.attempt_count = int(run.attempt_count) + 1
+        run.lease_owner = owner
+        run.lease_generation = int(run.lease_generation) + 1
+        run.lease_expires_at = current + ttl
+        run.heartbeat_at = current
+        run.state_revision = int(run.state_revision) + 1
+        self.session.flush()
+        return run
+
+    def request_cancel_run(
+        self,
+        *,
+        run_id: UUID,
+        expected_revision: int | None = None,
+    ) -> AssistantSkillEvalRun:
+        """Request cancellation; worker observes before Provider/Capability boundaries."""
+        run = self.session.execute(
+            select(AssistantSkillEvalRun)
+            .where(AssistantSkillEvalRun.id == run_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        if run is None:
+            raise EvaluationRepositoryError(CODE_NOT_FOUND, "eval run not found")
+        if expected_revision is not None and int(run.state_revision) != int(
+            expected_revision
+        ):
+            raise EvaluationRepositoryError(CODE_STALE_REVISION, "stale revision")
+        if run.status in TERMINAL_RUN_STATUSES:
+            raise EvaluationRepositoryError(
+                CODE_IMMUTABLE, f"terminal run status {run.status} is immutable"
+            )
+        if run.status == "cancelling":
+            return run
+        if run.status not in {"queued", "running"}:
+            raise EvaluationRepositoryError(
+                CODE_FORBIDDEN_TRANSITION,
+                f"cannot request cancel from {run.status}",
+            )
+        run.status = "cancelling"
+        run.requested_cancel_at = utcnow()
+        run.state_revision = int(run.state_revision) + 1
+        run.heartbeat_at = utcnow()
+        self.session.flush()
+        return run
+
+    def list_events_after(
+        self,
+        *,
+        eval_run_id: UUID,
+        after_sequence: int = 0,
+        limit: int = 100,
+    ) -> list[AssistantSkillEvalEvent]:
+        """SSE replay: monotonic events after sequence (at-least-once; client dedups)."""
+        if limit <= 0 or limit > 1000:
+            raise EvaluationRepositoryError(CODE_INVALID_INPUT, "limit must be 1..1000")
+        stmt = (
+            select(AssistantSkillEvalEvent)
+            .where(
+                AssistantSkillEvalEvent.eval_run_id == eval_run_id,
+                AssistantSkillEvalEvent.sequence > int(after_sequence),
+            )
+            .order_by(AssistantSkillEvalEvent.sequence.asc())
+            .limit(int(limit))
+        )
+        return list(self.session.execute(stmt).scalars().all())
+
+    def list_capability_calls(
+        self, *, eval_run_id: UUID, eval_case_id: UUID | None = None
+    ) -> list[AssistantSkillEvalCapabilityCall]:
+        stmt = select(AssistantSkillEvalCapabilityCall).where(
+            AssistantSkillEvalCapabilityCall.eval_run_id == eval_run_id
+        )
+        if eval_case_id is not None:
+            stmt = stmt.where(
+                AssistantSkillEvalCapabilityCall.eval_case_id == eval_case_id
+            )
+        stmt = stmt.order_by(
+            AssistantSkillEvalCapabilityCall.child_ordinal.asc(),
+            AssistantSkillEvalCapabilityCall.attempt.asc(),
+        )
+        return list(self.session.execute(stmt).scalars().all())
+
+    def has_capability_call_attempt(
+        self,
+        *,
+        eval_run_id: UUID,
+        eval_case_id: UUID,
+        logical_call_key: str,
+        attempt: int,
+    ) -> bool:
+        """Recovery guard: prevent double-count of synthetic logical calls."""
+        row = self.session.execute(
+            select(AssistantSkillEvalCapabilityCall.id).where(
+                AssistantSkillEvalCapabilityCall.eval_run_id == eval_run_id,
+                AssistantSkillEvalCapabilityCall.eval_case_id == eval_case_id,
+                AssistantSkillEvalCapabilityCall.logical_call_key == logical_call_key,
+                AssistantSkillEvalCapabilityCall.attempt == int(attempt),
+            )
+        ).first()
+        return row is not None
 
     # ------------------------------------------------------------------
     # Case results / capability calls / events / artifacts

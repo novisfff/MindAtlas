@@ -224,6 +224,12 @@ class CapabilityCallRepository:
 
         Returns ``(call, created)``.
         """
+        # Plan 09 Task 4: hard tripwire when Eval scope reaches production ledger.
+        from app.assistant.evaluation.isolation import tripwire_production_writer
+
+        tripwire_production_writer(
+            "CapabilityCallRepository.create_or_verify_proposed"
+        )
         ts = now or utcnow()
         run = self.get_run(spec.run_id, for_update=True)
         self._verify_lease(run, spec.lease)

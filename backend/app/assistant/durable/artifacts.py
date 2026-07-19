@@ -823,6 +823,13 @@ class DurableArtifactService:
         artifact_id: UUID | None = None,
     ) -> AssistantRunArtifact:
         """Insert the Artifact row for a prepared payload (semantic txn boundary)."""
+        # Plan 09 Task 4: hard tripwire when Eval scope reaches production Artifact writer.
+        from app.assistant.evaluation.isolation import (
+            tripwire_production_object_key,
+            tripwire_production_writer,
+        )
+
+        tripwire_production_writer("DurableArtifactService.commit_row")
         if prepared.run_id is None:
             raise ArtifactStorageError(ARTIFACT_INVALID_INPUT, "run_id required")
         existing = self._find_by_content(
@@ -832,6 +839,7 @@ class DurableArtifactService:
             return existing
         # Defense-in-depth: never persist evaluation-namespace keys on production rows.
         if prepared.object_key is not None:
+            tripwire_production_object_key(prepared.object_key)
             assert_production_object_key(prepared.object_key)
         row = AssistantRunArtifact(
             id=artifact_id or uuid4(),
