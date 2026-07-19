@@ -45,7 +45,7 @@ from app.assistant.skills.schemas import (
     ImportPreviewToken,
     SkillPackageDetail,
 )
-from app.assistant.skills.service import AgentSkillService
+from app.assistant.skills.service import AgentSkillService, _display_name_for
 from app.common.exceptions import ApiException
 from app.common.time import utcnow
 
@@ -588,9 +588,15 @@ class ImportPreviewService:
         }
         digest = _request_digest("import_apply", apply_payload)
 
-        # Idempotent retry: same requestId + same payload → prior result.
-        if record.consumed and record.applied_request_id == request_id:
-            if record.applied_request_digest == digest and record.applied_package_id:
+        # Consumed preview: same requestId + same payload → prior result;
+        # any other requestId (or mismatched payload) → clean conflict.
+        # Do not fall through to re-parse raw_zip (cleared on consume).
+        if record.consumed:
+            if (
+                record.applied_request_id == request_id
+                and record.applied_request_digest == digest
+                and record.applied_package_id
+            ):
                 detail = self._packages.get_package(record.applied_package_id)
                 return ImportApplyResult(
                     mode=token.mode,  # type: ignore[arg-type]
@@ -601,14 +607,60 @@ class ImportPreviewService:
             raise ApiException(
                 status_code=409,
                 code=_CODE_CONFLICT_REQUEST,
-                message="requestId was reused with a different payload",
-                details={"requestId": request_id},
+                message=(
+                    "import preview already consumed"
+                    if record.applied_request_id != request_id
+                    else "requestId was reused with a different payload"
+                ),
+                details={
+                    "requestId": request_id,
+                    "previewId": str(preview_id),
+                },
             )
 
         # Global requestId CAS for create/fork (and first-time apply).
+        # Reserve under lock before the durable write so concurrent same
+        # requestId cannot double-import (process-local stamp-before-mutate).
+        reserved = False
         with _STORE_LOCK:
+            # Re-check consumed under lock (another thread may have finished).
+            if record.consumed:
+                if (
+                    record.applied_request_id == request_id
+                    and record.applied_request_digest == digest
+                    and record.applied_package_id
+                ):
+                    detail = self._packages.get_package(record.applied_package_id)
+                    return ImportApplyResult(
+                        mode=token.mode,  # type: ignore[arg-type]
+                        preview_id=preview_id,
+                        request_id=request_id,
+                        package=detail,
+                    )
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_REQUEST,
+                    message=(
+                        "import preview already consumed"
+                        if record.applied_request_id != request_id
+                        else "requestId was reused with a different payload"
+                    ),
+                    details={
+                        "requestId": request_id,
+                        "previewId": str(preview_id),
+                    },
+                )
+
             prior = _REQUEST_INDEX.get(request_id)
             if prior is not None:
+                status = prior.get("status")
+                if status == "pending":
+                    raise ApiException(
+                        status_code=409,
+                        code=_CODE_CONFLICT_REQUEST,
+                        message="requestId apply already in progress",
+                        details={"requestId": request_id},
+                    )
                 if prior.get("digest") == digest and prior.get("package_id"):
                     detail = self._packages.get_package(UUID(str(prior["package_id"])))
                     return ImportApplyResult(
@@ -624,86 +676,104 @@ class ImportPreviewService:
                     details={"requestId": request_id},
                 )
 
-        # Re-hash exact stored bytes and re-parse via Plan 01.
-        if sha256_bytes(record.raw_zip) != token.upload_digest:
-            raise ApiException(
-                status_code=409,
-                code=_CODE_CONFLICT_STALE,
-                message="upload bytes changed since preview",
-            )
-        try:
-            reparsed = parse_skill_zip(
-                io.BytesIO(record.raw_zip), compressed_size=len(record.raw_zip)
-            )
-        except ValueError as exc:
-            raise _map_package_io_error(exc) from exc
+            # Reserve before durable mutate so concurrent same requestId fails.
+            _REQUEST_INDEX[request_id] = {
+                "status": "pending",
+                "digest": digest,
+                "preview_id": str(preview_id),
+                "mode": token.mode,
+            }
+            reserved = True
 
-        candidate = reparsed
-        if token.mode == "fork_as_new":
-            if not record.fork_canonical_name:
+        try:
+            # Re-hash exact stored bytes and re-parse via Plan 01.
+            if not record.raw_zip or sha256_bytes(record.raw_zip) != token.upload_digest:
                 raise ApiException(
                     status_code=409,
                     code=_CODE_CONFLICT_STALE,
-                    message="fork preview missing fork name",
+                    message="upload bytes changed since preview",
                 )
             try:
-                rewritten_md = rewrite_skill_md_frontmatter_name(
-                    reparsed.skill_md_bytes, new_name=record.fork_canonical_name
-                )
-                files: dict[str, bytes] = {"SKILL.md": rewritten_md}
-                if reparsed.mindatlas_yaml_bytes is not None:
-                    files["mindatlas.yaml"] = reparsed.mindatlas_yaml_bytes
-                for resource in reparsed.resources:
-                    files[resource.path] = resource.content
-                candidate = parse_skill_directory_files(
-                    files, expected_root_name=record.fork_canonical_name
+                reparsed = parse_skill_zip(
+                    io.BytesIO(record.raw_zip), compressed_size=len(record.raw_zip)
                 )
             except ValueError as exc:
                 raise _map_package_io_error(exc) from exc
 
-        if candidate.content_digest != token.candidate_content_digest:
-            raise ApiException(
-                status_code=409,
-                code=_CODE_CONFLICT_STALE,
-                message="candidate content digest changed since preview",
-            )
-        if candidate.canonical_name != record.candidate_canonical_name:
-            raise ApiException(
-                status_code=409,
-                code=_CODE_CONFLICT_STALE,
-                message="candidate canonical name changed since preview",
-            )
+            candidate = reparsed
+            if token.mode == "fork_as_new":
+                if not record.fork_canonical_name:
+                    raise ApiException(
+                        status_code=409,
+                        code=_CODE_CONFLICT_STALE,
+                        message="fork preview missing fork name",
+                    )
+                try:
+                    rewritten_md = rewrite_skill_md_frontmatter_name(
+                        reparsed.skill_md_bytes, new_name=record.fork_canonical_name
+                    )
+                    files: dict[str, bytes] = {"SKILL.md": rewritten_md}
+                    if reparsed.mindatlas_yaml_bytes is not None:
+                        files["mindatlas.yaml"] = reparsed.mindatlas_yaml_bytes
+                    for resource in reparsed.resources:
+                        files[resource.path] = resource.content
+                    candidate = parse_skill_directory_files(
+                        files, expected_root_name=record.fork_canonical_name
+                    )
+                except ValueError as exc:
+                    raise _map_package_io_error(exc) from exc
 
-        try:
-            if token.mode == "create":
-                detail = self._apply_create(
-                    candidate, request_id=request_id, digest=digest
-                )
-            elif token.mode == "fork_as_new":
-                detail = self._apply_create(
-                    candidate, request_id=request_id, digest=digest
-                )
-            elif token.mode == "append_to_existing":
-                detail = self._apply_append(
-                    candidate,
-                    package_id=token.target_package_id,  # type: ignore[arg-type]
-                    expected_revision=token.expected_aggregate_revision,  # type: ignore[arg-type]
-                    request_id=request_id,
-                    digest=digest,
-                )
-            else:
+            if candidate.content_digest != token.candidate_content_digest:
                 raise ApiException(
-                    status_code=422,
-                    code=_CODE_VALIDATION,
-                    message=f"invalid import mode: {token.mode!r}",
+                    status_code=409,
+                    code=_CODE_CONFLICT_STALE,
+                    message="candidate content digest changed since preview",
                 )
-        except ApiException:
+            if candidate.canonical_name != record.candidate_canonical_name:
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_STALE,
+                    message="candidate canonical name changed since preview",
+                )
+
+            try:
+                if token.mode == "create":
+                    detail = self._apply_create(
+                        candidate, request_id=request_id, digest=digest
+                    )
+                elif token.mode == "fork_as_new":
+                    detail = self._apply_create(
+                        candidate, request_id=request_id, digest=digest
+                    )
+                elif token.mode == "append_to_existing":
+                    detail = self._apply_append(
+                        candidate,
+                        package_id=token.target_package_id,  # type: ignore[arg-type]
+                        expected_revision=token.expected_aggregate_revision,  # type: ignore[arg-type]
+                        request_id=request_id,
+                        digest=digest,
+                    )
+                else:
+                    raise ApiException(
+                        status_code=422,
+                        code=_CODE_VALIDATION,
+                        message=f"invalid import mode: {token.mode!r}",
+                    )
+            except ApiException:
+                raise
+            except IntegrityError as exc:
+                self.db.rollback()
+                raise self._packages._as_import_conflict(
+                    self._packages._translate_integrity_error(exc)
+                ) from exc
+        except Exception:
+            # Release reservation so retries with this requestId can proceed.
+            if reserved:
+                with _STORE_LOCK:
+                    cur = _REQUEST_INDEX.get(request_id)
+                    if cur is not None and cur.get("status") == "pending":
+                        _REQUEST_INDEX.pop(request_id, None)
             raise
-        except IntegrityError as exc:
-            self.db.rollback()
-            raise self._packages._as_import_conflict(
-                self._packages._translate_integrity_error(exc)
-            ) from exc
 
         with _STORE_LOCK:
             record.consumed = True
@@ -713,6 +783,7 @@ class ImportPreviewService:
             # Drop raw archive bytes after successful apply (safety).
             record.raw_zip = b""
             _REQUEST_INDEX[request_id] = {
+                "status": "done",
                 "digest": digest,
                 "package_id": str(detail.id),
                 "preview_id": str(preview_id),
@@ -842,12 +913,11 @@ class ImportPreviewService:
                 )
 
             package.draft_version_id = draft.id
-            from app.assistant.skills.service import _display_name_for
-
             package.display_name = _display_name_for(parsed)
             package.description = parsed.frontmatter.description
-            # Never auto-publish or catalog-enable on import append.
-            package.catalog_enabled = False
+            # Append only advances draft + revision. Leave published_version_id,
+            # catalog_enabled, and catalog evidence fields untouched (no
+            # auto-publish / auto-disable / auto-enable).
             package.aggregate_revision = current_rev + 1
             package.last_admin_request_id = request_id
             package.last_admin_request_digest = digest

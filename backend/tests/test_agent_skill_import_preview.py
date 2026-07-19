@@ -411,6 +411,78 @@ class TestImportPreviewApplyModes:
         assert refreshed.catalog_enabled is False
         assert refreshed.published_version is None
 
+    def test_append_on_catalog_enabled_package_keeps_catalog_enabled(self) -> None:
+        """Append must not force catalog_enabled=false or clear publish evidence."""
+        from app.assistant.skills.schemas import (
+            CreateSkillPackageCommand,
+            PublishSkillVersionCommand,
+        )
+        from app.assistant.skills.package_io import parse_skill_directory_files
+        from app.assistant.skills.models import AssistantSkillPackage
+
+        name = f"append-cat-{uuid4().hex[:8]}"
+        seed = parse_skill_directory_files(
+            {
+                "SKILL.md": _minimal_skill_md(name=name, body="# v1 published\n"),
+                "mindatlas.yaml": _mindatlas_yaml(legacy_aliases=[]),
+            },
+            expected_root_name=None,
+        )
+        detail = self.pkg_svc.create_native_package(
+            CreateSkillPackageCommand(parsed=seed, version_name="draft-1", origin="api")
+        )
+        published = self.pkg_svc.publish(
+            detail.id,
+            PublishSkillVersionCommand(draft_version_id=detail.draft_version.id),  # type: ignore[union-attr]
+        )
+        enabled = self.pkg_svc.set_catalog_enabled(
+            detail.id,
+            enabled=True,
+            expected_published_version_id=published.id,
+        )
+        assert enabled.catalog_enabled is True
+        # Capture evidence fields before append.
+        pkg_row = self.db.get(AssistantSkillPackage, detail.id)
+        assert pkg_row is not None
+        prior_enabled_at = pkg_row.catalog_enabled_at
+        prior_enabled_by = pkg_row.catalog_enabled_by
+        prior_published_id = pkg_row.published_version_id
+        rev = int(pkg_row.aggregate_revision or 0)
+
+        raw = _valid_zip(
+            name=name,
+            skill_md=_minimal_skill_md(name=name, body="# v2 append while catalog on\n"),
+            aliases=[],
+        )
+        preview = self.svc.preview(
+            raw_zip=raw,
+            mode="append_to_existing",
+            principal=self.principal,
+            target_package_id=detail.id,
+            expected_aggregate_revision=rev,
+        )
+        applied = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=f"req-append-cat-{name}",
+            principal=self.principal,
+        )
+        assert applied.package.catalog_enabled is True
+        assert applied.package.published_version is not None
+        assert applied.package.published_version.id == prior_published_id
+        assert applied.package.draft_version is not None
+        assert (
+            applied.package.draft_version.content_digest
+            == preview.candidate_content_digest
+        )
+        assert applied.package.aggregate_revision == rev + 1
+
+        refreshed_row = self.db.get(AssistantSkillPackage, detail.id)
+        assert refreshed_row is not None
+        assert refreshed_row.catalog_enabled is True
+        assert refreshed_row.catalog_enabled_at == prior_enabled_at
+        assert refreshed_row.catalog_enabled_by == prior_enabled_by
+        assert refreshed_row.published_version_id == prior_published_id
+
     def test_fork_rewrites_only_name_field_and_revalidates(self) -> None:
         source_name = f"src-{uuid4().hex[:8]}"
         fork_name = f"fork-{uuid4().hex[:8]}"
@@ -676,6 +748,95 @@ class TestPreviewTokenAndIdempotency:
             )
         assert ctx.value.status_code == 409
         assert ctx.value.code == 40997
+
+    def test_consumed_preview_different_request_id_conflicts_cleanly(self) -> None:
+        """After apply clears raw_zip, a new requestId must 40997 — not re-parse."""
+        from app.common.exceptions import ApiException
+
+        name = f"consumed-{uuid4().hex[:8]}"
+        raw = _valid_zip(name=name, aliases=[])
+        preview = self.svc.preview(
+            raw_zip=raw, mode="create", principal=self.principal
+        )
+        first = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=f"req-first-{name}",
+            principal=self.principal,
+        )
+        assert first.package.canonical_name == name
+        record = self.svc._get_record(preview.preview_id)
+        assert record.consumed is True
+        assert record.raw_zip == b""
+
+        with pytest.raises(ApiException) as ctx:
+            self.svc.apply(
+                preview_id=preview.preview_id,
+                request_id=f"req-second-{name}",
+                principal=self.principal,
+            )
+        assert ctx.value.status_code == 409
+        assert ctx.value.code == 40997
+        # Must not surface archive/validation errors from empty bytes.
+        msg = (ctx.value.message or "").lower()
+        assert "zip" not in msg
+        assert "archive" not in msg
+        assert "empty" not in msg
+
+    def test_stale_bytes_after_preview_rejected(self) -> None:
+        from app.common.exceptions import ApiException
+
+        name = f"stalebytes-{uuid4().hex[:8]}"
+        raw = _valid_zip(name=name, aliases=[])
+        preview = self.svc.preview(
+            raw_zip=raw, mode="create", principal=self.principal
+        )
+        record = self.svc._get_record(preview.preview_id)
+        # Mutate stored bytes after preview binding (digest no longer matches).
+        record.raw_zip = b"PK\x03\x04not-a-real-skill-zip-payload"
+
+        with pytest.raises(ApiException) as ctx:
+            self.svc.apply(
+                preview_id=preview.preview_id,
+                request_id=f"req-stalebytes-{name}",
+                principal=self.principal,
+            )
+        assert ctx.value.status_code == 409
+        assert ctx.value.code in {40993, 40997}
+
+    def test_request_id_reservation_released_on_failure(self) -> None:
+        """Failed apply releases pending requestId so a retry can proceed."""
+        from app.common.exceptions import ApiException
+        import app.assistant.skills.import_preview as ip
+
+        name = f"resfail-{uuid4().hex[:8]}"
+        raw = _valid_zip(name=name, aliases=[])
+        preview = self.svc.preview(
+            raw_zip=raw, mode="create", principal=self.principal
+        )
+        req = f"req-resfail-{name}"
+        record = self.svc._get_record(preview.preview_id)
+        # Force a stale-bytes failure after reservation is taken.
+        record.raw_zip = b"PK\x03\x04corrupted"
+
+        with pytest.raises(ApiException) as ctx:
+            self.svc.apply(
+                preview_id=preview.preview_id,
+                request_id=req,
+                principal=self.principal,
+            )
+        assert ctx.value.status_code == 409
+        # Reservation must be gone so the same requestId is not stuck pending.
+        with ip._STORE_LOCK:
+            assert req not in ip._REQUEST_INDEX
+
+        # Restore bytes and retry with same requestId succeeds.
+        record.raw_zip = raw
+        applied = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=req,
+            principal=self.principal,
+        )
+        assert applied.package.canonical_name == name
 
     def test_expired_preview_rejected(self, monkeypatch) -> None:
         from datetime import datetime, timedelta, timezone
