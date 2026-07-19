@@ -121,11 +121,20 @@ class SaveSkillDraftCommand(CamelModel):
 
 
 class PublishSkillVersionCommand(CamelModel):
-    """Publish requires an explicit draft version id; never resolves latest."""
+    """Publish requires an explicit draft version id; never resolves latest.
+
+    Plan 09: optional ``gate_id`` + ``gate_subject`` for publish-gate enforcement.
+    Client never supplies passed/decision/metrics — only evidence refs via gate.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     draft_version_id: UUID
+    gate_id: UUID | None = None
+    # Opaque server-recomputed subject closure (PublishGateSubject dict / model).
+    # When omitted, service rebuilds closure from draft digests under lock.
+    gate_subject: dict[str, Any] | None = None
+    request_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class PublishMainAgentProfileCommand(CamelModel):
@@ -134,6 +143,9 @@ class PublishMainAgentProfileCommand(CamelModel):
     model_config = ConfigDict(extra="forbid")
 
     draft_version_id: UUID
+    gate_id: UUID | None = None
+    gate_subject: dict[str, Any] | None = None
+    request_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class SkillResourceMetadata(CamelModel):
@@ -233,6 +245,9 @@ class AggregateRevisionCommand(CamelModel):
 
     request_id: str = Field(min_length=1, max_length=128)
     expected_aggregate_revision: int = Field(ge=0)
+    # Plan 09: required for catalog/runtime enable (never for archive/alias).
+    gate_id: UUID | None = None
+    gate_subject: dict[str, Any] | None = None
 
 
 class AddSkillPackageAliasCommand(CamelModel):

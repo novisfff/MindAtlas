@@ -66,6 +66,10 @@ class PublishDraftRequest(CamelModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     draft_version_id: UUID = Field(alias="draftVersionId")
+    # Plan 09: optional server-derived publish gate (required when live-enabled
+    # or ASSISTANT_SKILL_PUBLISH_GATE_MODE=enforce).
+    gate_id: UUID | None = Field(default=None, alias="gateId")
+    request_id: str | None = Field(default=None, alias="requestId", max_length=128)
 
 
 class MainAgentDraftSaveRequest(CamelModel):
@@ -576,7 +580,11 @@ def publish_skill_package(
     service = AgentSkillService(db)
     version = service.publish(
         package_id,
-        PublishSkillVersionCommand(draft_version_id=body.draft_version_id),
+        PublishSkillVersionCommand(
+            draft_version_id=body.draft_version_id,
+            gate_id=body.gate_id,
+            request_id=body.request_id,
+        ),
     )
     return ApiResponse.ok(_dto(version))
 
@@ -758,7 +766,11 @@ def publish_default_main_agent_profile(
 
     version = service.publish(
         profile.id,
-        PublishMainAgentProfileCommand(draft_version_id=body.draft_version_id),
+        PublishMainAgentProfileCommand(
+            draft_version_id=body.draft_version_id,
+            gate_id=body.gate_id,
+            request_id=body.request_id,
+        ),
     )
     return ApiResponse.ok(_dto(version))
 

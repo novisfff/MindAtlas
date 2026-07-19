@@ -323,17 +323,20 @@ class SkillAdminMigrationModelTests(unittest.TestCase):
         rev = rev_match.group(1)  # type: ignore[union-attr]
         self.assertNotEqual(rev, "b4c5d6e7f8a9")
         self.assertNotEqual(rev, "d7e8f9a0b1c3")
-        # Sole head: no other file should revise past this without being this file.
-        heads = []
+        # Descendants of Task 1 head (Plan 09 later tasks may chain from lifecycle).
+        children = []
         for path in versions.glob("*.py"):
             if path.name.startswith("__"):
                 continue
             content = path.read_text(encoding="utf-8")
             m = re.search(r"down_revision\s*=\s*[\"']([^\"']+)[\"']", content)
             if m and m.group(1) == rev:
-                heads.append(path.name)
-        # Nothing should already descend from Task 1 head in this task.
-        self.assertEqual(heads, [])
+                children.append(path.name)
+        # Task 3 evaluation workbench is the expected sole direct child of Task 1.
+        self.assertTrue(
+            any("add_skill_evaluation_workbench" in name for name in children),
+            f"expected evaluation migration to descend from Task 1 head; got {children}",
+        )
 
 
 if __name__ == "__main__":

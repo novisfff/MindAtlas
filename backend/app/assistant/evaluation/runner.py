@@ -1,4 +1,7 @@
-"""EvaluationRunner — interactive_scripted execution under isolation (Plan 09 Task 4).
+"""EvaluationRunner — isolated evaluation execution (Plan 09 Tasks 4–5).
+
+Task 4: interactive_scripted under RuntimeIsolationContext.
+Task 5: dataset_scripted deterministic aggregation + optional explicit live mode.
 
 Composes real planner/policy/orchestration *contracts* under RuntimeIsolationContext.
 Never imports production business adapters, EntryService, production Run/ledger/
@@ -7,6 +10,9 @@ memory/event/Artifact writers, or production write adapters.
 Side-effect adapters and data/memory/event/Artifact/call namespaces are replaced
 with evaluation-owned simulation. Planner and policy decision shapes remain
 byte-contract compatible with Plans 05/08.
+
+CI default is deterministic scripted evaluation (network-disabled). Optional
+live-model evaluation requires explicit mode, probe, and cost bounds.
 """
 
 from __future__ import annotations
@@ -19,12 +25,16 @@ from uuid import UUID, uuid4
 
 from app.assistant.domain.digests import sha256_canonical_json
 from app.assistant.evaluation.assertions import (
+    DatasetAssertionSummary,
     InteractiveAssertionSummary,
+    THRESHOLD_POLICY_VERSION,
+    evaluate_dataset_assertions,
     evaluate_interactive_safety,
 )
 from app.assistant.evaluation.contracts import (
     EVAL_OWNER_KIND,
     EvalExecutionIdentity,
+    EvalRunMode,
     EvalSubjectKind,
     RuntimeIsolationContext,
 )
@@ -109,6 +119,52 @@ class EvaluationCaseOutcome:
     aggregate_metrics: dict[str, Any]
     isolation_digest: str
     scope_namespace_id: UUID
+
+
+@dataclass
+class DatasetEvaluationOutcome:
+    """Aggregate outcome for dataset_scripted / dataset_live runs."""
+
+    eval_run_id: UUID
+    terminal: EvalRunTerminal
+    failure_code: str | None
+    gate_eligible: bool
+    mode: EvalRunMode
+    assertion_summary: DatasetAssertionSummary
+    aggregate_metrics: dict[str, Any]
+    isolation_digest: str
+    case_count: int
+    zero_production_mutation: bool
+    live_evidence: dict[str, Any] | None = None
+
+
+@dataclass
+class LiveEvalRequirements:
+    """Explicit live-mode admission. CI must not enable this by default."""
+
+    model_capability_probe_id: str
+    model_id: str
+    model_revision: str
+    actor_confirmed: bool
+    cost_bound_usd: float
+    deadline_at: datetime
+    prompt_digest: str
+    build_revision: str
+
+    def validate(self, *, now: datetime) -> None:
+        if not self.actor_confirmed:
+            raise ValueError("live evaluation requires actor confirmation")
+        if not (self.model_capability_probe_id or "").strip():
+            raise ValueError("live evaluation requires current compatible probe id")
+        if not (self.model_id or "").strip():
+            raise ValueError("live evaluation requires model_id")
+        if float(self.cost_bound_usd) <= 0:
+            raise ValueError("live evaluation requires positive cost_bound_usd")
+        deadline = self.deadline_at
+        if deadline.tzinfo is None and now.tzinfo is not None:
+            deadline = deadline.replace(tzinfo=now.tzinfo)
+        if now > deadline:
+            raise ValueError("live evaluation deadline has passed")
 
 
 class EvaluationRunner:
@@ -509,6 +565,269 @@ class EvaluationRunner:
         # Emit only the latest event to avoid re-sending full history.
         self.event_sink(dict(scope.events[-1]))
 
+    # ------------------------------------------------------------------
+    # Dataset scripted / live (Task 5)
+    # ------------------------------------------------------------------
+
+    def run_dataset_scripted(
+        self,
+        *,
+        isolation: RuntimeIsolationContext,
+        identity: EvalExecutionIdentity,
+        case_outcomes: Sequence[Mapping[str, Any]],
+        production_delta: Mapping[str, int] | None = None,
+        safety_counters: Mapping[str, int | float | None] | None = None,
+        metrics_override: Mapping[str, float | int] | None = None,
+        legacy_baseline_metrics: Mapping[str, float | int] | None = None,
+        evidence_payloads: Sequence[Any] | None = None,
+    ) -> DatasetEvaluationOutcome:
+        """Deterministic dataset evaluation for CI and publish gates.
+
+        Compares typed assertions/metrics (not prose equality). Proves zero
+        production mutation via production_delta. Does not call live Providers.
+        """
+        assert_isolation_snapshot_fields(isolation)
+        iso_digest = isolation_digest(isolation)
+        # Enter isolation scope so tripwires remain active even for pure aggregation.
+        try:
+            with eval_execution_scope(
+                isolation=isolation,
+                identity=identity,
+                fixture_store=self.fixture_store,
+                snapshot_store=self.snapshot_store,
+            ) as scope:
+                return self._dataset_in_scope(
+                    scope=scope,
+                    iso_digest=iso_digest,
+                    mode="dataset_scripted",
+                    case_outcomes=case_outcomes,
+                    production_delta=production_delta,
+                    safety_counters=safety_counters,
+                    metrics_override=metrics_override,
+                    legacy_baseline_metrics=legacy_baseline_metrics,
+                    evidence_payloads=evidence_payloads,
+                    live_evidence=None,
+                )
+        except IsolationError as exc:
+            summary = evaluate_dataset_assertions(
+                isolation_breached=(exc.code == ISOLATION_BREACH),
+                metrics=metrics_override,
+                case_outcomes=case_outcomes,
+            )
+            return DatasetEvaluationOutcome(
+                eval_run_id=identity.eval_run_id,
+                terminal="failed",
+                failure_code=exc.code,
+                gate_eligible=False,
+                mode="dataset_scripted",
+                assertion_summary=summary,
+                aggregate_metrics={
+                    "runner_contract_version": RUNNER_CONTRACT_VERSION,
+                    "threshold_policy_version": THRESHOLD_POLICY_VERSION,
+                    "error": exc.message,
+                },
+                isolation_digest=iso_digest,
+                case_count=len(case_outcomes),
+                zero_production_mutation=True,
+            )
+
+    def run_dataset_live(
+        self,
+        *,
+        isolation: RuntimeIsolationContext,
+        identity: EvalExecutionIdentity,
+        case_outcomes: Sequence[Mapping[str, Any]],
+        live: LiveEvalRequirements,
+        production_delta: Mapping[str, int] | None = None,
+        safety_counters: Mapping[str, int | float | None] | None = None,
+        metrics_override: Mapping[str, float | int] | None = None,
+        evidence_payloads: Sequence[Any] | None = None,
+        now: datetime | None = None,
+    ) -> DatasetEvaluationOutcome:
+        """Optional live-model evaluation. Explicit only; not CI default.
+
+        Records model probe/config evidence. Still zero production mutation.
+        This harness does not perform paid Provider calls; callers supply
+        observed case_outcomes from an external live driver.
+        """
+        from app.common.time import utcnow as _utcnow
+
+        current = now or _utcnow()
+        live.validate(now=current)
+        live_evidence = {
+            "model_capability_probe_id": live.model_capability_probe_id,
+            "model_id": live.model_id,
+            "model_revision": live.model_revision,
+            "cost_bound_usd": float(live.cost_bound_usd),
+            "deadline_at": live.deadline_at.isoformat(),
+            "prompt_digest": live.prompt_digest,
+            "build_revision": live.build_revision,
+            "actor_confirmed": True,
+        }
+        assert_isolation_snapshot_fields(isolation)
+        iso_digest = isolation_digest(isolation)
+        try:
+            with eval_execution_scope(
+                isolation=isolation,
+                identity=identity,
+                fixture_store=self.fixture_store,
+                snapshot_store=self.snapshot_store,
+            ) as scope:
+                return self._dataset_in_scope(
+                    scope=scope,
+                    iso_digest=iso_digest,
+                    mode="dataset_live",
+                    case_outcomes=case_outcomes,
+                    production_delta=production_delta,
+                    safety_counters=safety_counters,
+                    metrics_override=metrics_override,
+                    legacy_baseline_metrics=None,
+                    evidence_payloads=evidence_payloads,
+                    live_evidence=live_evidence,
+                )
+        except IsolationError as exc:
+            summary = evaluate_dataset_assertions(
+                isolation_breached=(exc.code == ISOLATION_BREACH),
+                metrics=metrics_override,
+                case_outcomes=case_outcomes,
+            )
+            return DatasetEvaluationOutcome(
+                eval_run_id=identity.eval_run_id,
+                terminal="failed",
+                failure_code=exc.code,
+                gate_eligible=False,
+                mode="dataset_live",
+                assertion_summary=summary,
+                aggregate_metrics={
+                    "runner_contract_version": RUNNER_CONTRACT_VERSION,
+                    "threshold_policy_version": THRESHOLD_POLICY_VERSION,
+                    "live": live_evidence,
+                    "error": exc.message,
+                },
+                isolation_digest=iso_digest,
+                case_count=len(case_outcomes),
+                zero_production_mutation=True,
+                live_evidence=live_evidence,
+            )
+
+    def _dataset_in_scope(
+        self,
+        *,
+        scope: EvalExecutionScope,
+        iso_digest: str,
+        mode: EvalRunMode,
+        case_outcomes: Sequence[Mapping[str, Any]],
+        production_delta: Mapping[str, int] | None,
+        safety_counters: Mapping[str, int | float | None] | None,
+        metrics_override: Mapping[str, float | int] | None,
+        legacy_baseline_metrics: Mapping[str, float | int] | None,
+        evidence_payloads: Sequence[Any] | None,
+        live_evidence: dict[str, Any] | None,
+    ) -> DatasetEvaluationOutcome:
+        require_active_eval_scope()
+        delta = dict(production_delta or {})
+        # Prove zero production mutation.
+        nonzero = {k: v for k, v in delta.items() if int(v) != 0}
+        zero_mutation = not nonzero and not scope.breached
+
+        summary = evaluate_dataset_assertions(
+            case_outcomes=case_outcomes,
+            metrics=metrics_override,
+            safety_counters=safety_counters,
+            isolation_breached=scope.breached,
+            evidence_payloads=evidence_payloads,
+            production_delta=delta,
+            call_outcomes=[r.outcome for r in scope.call_records],
+            logical_keys_attempts=[
+                (r.logical_call_key, r.attempt) for r in scope.call_records
+            ],
+            simulated_writes=scope.simulated_writes,
+        )
+
+        # Optional legacy baseline comparison (typed metrics, not prose).
+        if legacy_baseline_metrics:
+            base_completion = float(
+                legacy_baseline_metrics.get("completion_success", 0.0) or 0.0
+            )
+            cur_completion = float(summary.metrics.get("completion_success", 0.0) or 0.0)
+            summary.metrics.setdefault(
+                "legacy_completion_success",
+                base_completion,
+            )
+            summary.metrics["completion_success_delta_vs_legacy"] = (
+                base_completion - cur_completion
+            )
+            # Re-evaluate thresholds with updated delta.
+            summary = evaluate_dataset_assertions(
+                metrics=summary.metrics,
+                safety_counters=safety_counters,
+                isolation_breached=scope.breached,
+                evidence_payloads=evidence_payloads,
+                production_delta=delta,
+            )
+
+        gate_eligible = bool(summary.gate_eligible) and zero_mutation and not scope.breached
+        if not summary.all_passed and not summary.hard_safety_failed:
+            # Soft metric failures still allow gate create with failed decision,
+            # but gate_eligible on the run means evidence is usable (no hard safety).
+            gate_eligible = bool(summary.gate_eligible) and zero_mutation
+
+        terminal: EvalRunTerminal = "completed"
+        failure_code: str | None = None
+        if scope.breached:
+            terminal = "failed"
+            failure_code = ISOLATION_BREACH
+            gate_eligible = False
+        elif not zero_mutation:
+            terminal = "failed"
+            failure_code = "real_side_effect_in_test"
+            gate_eligible = False
+
+        metrics: dict[str, Any] = {
+            "runner_contract_version": RUNNER_CONTRACT_VERSION,
+            "threshold_policy_version": THRESHOLD_POLICY_VERSION,
+            "mode": mode,
+            "case_count": len(case_outcomes),
+            "zero_production_mutation": zero_mutation,
+            "production_write_mode_seen": self._write_mode_seen,
+            "production_write_mode_affects_result": False,
+            "metrics": dict(summary.metrics),
+            "safety_counters": dict(safety_counters or {}),
+            "gate_eligible": gate_eligible,
+            "assertion_summary": summary.as_dict(),
+        }
+        # Flatten primary metrics for gate aggregation.
+        for k, v in summary.metrics.items():
+            if k not in metrics:
+                metrics[k] = v
+        if live_evidence is not None:
+            metrics["live"] = dict(live_evidence)
+
+        scope.record_event(
+            "eval.dataset_completed" if terminal == "completed" else "eval.dataset_failed",
+            {
+                "mode": mode,
+                "gate_eligible": gate_eligible,
+                "case_count": len(case_outcomes),
+                "failure_code": failure_code,
+            },
+        )
+        self._emit(scope)
+
+        return DatasetEvaluationOutcome(
+            eval_run_id=scope.identity.eval_run_id,
+            terminal=terminal,
+            failure_code=failure_code,
+            gate_eligible=gate_eligible,
+            mode=mode,
+            assertion_summary=summary,
+            aggregate_metrics=metrics,
+            isolation_digest=iso_digest,
+            case_count=len(case_outcomes),
+            zero_production_mutation=zero_mutation,
+            live_evidence=live_evidence,
+        )
+
 
 def _safe_package_view(package: Any) -> dict[str, Any]:
     """Project package detail into an evaluation-safe, non-mutating view."""
@@ -595,10 +914,12 @@ def make_interactive_identity(
 
 __all__ = [
     "RUNNER_CONTRACT_VERSION",
+    "DatasetEvaluationOutcome",
     "EvaluationCaseOutcome",
     "EvaluationRunner",
     "EvaluationRunnerConfig",
     "InteractiveScript",
     "InteractiveScriptStep",
+    "LiveEvalRequirements",
     "make_interactive_identity",
 ]

@@ -90,6 +90,8 @@ class CatalogEnableBody(RevisionBody):
     expected_published_version_id: UUID | None = Field(
         default=None, alias="expectedPublishedVersionId"
     )
+    # Plan 09: required promotion gate for catalog enable (server-derived).
+    gate_id: UUID | None = Field(default=None, alias="gateId")
 
 
 def _dto(model: Any) -> Any:
@@ -221,9 +223,11 @@ def enable_skill_package_catalog(
         AggregateRevisionCommand(
             request_id=body.request_id,
             expected_aggregate_revision=body.expected_aggregate_revision,
+            gate_id=body.gate_id,
         ),
         principal=principal,
         expected_published_version_id=body.expected_published_version_id,
+        gate_id=body.gate_id,
     )
     return ApiResponse.ok(_dto(detail))
 

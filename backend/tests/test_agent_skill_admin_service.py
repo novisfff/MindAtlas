@@ -91,6 +91,104 @@ def _viewer(principal_id: str = "viewer-1") -> "OperatorPrincipal":
     return OperatorPrincipal(principal_id=principal_id, role="viewer")
 
 
+def _create_passing_enable_gate(db, *, package_id, version_id, content_digest, binding_digest):
+    """Create a completed dataset_scripted run + server-derived passing enable gate."""
+    from datetime import timedelta
+    import uuid as _uuid_mod
+
+    from app.assistant.evaluation.assertions import THRESHOLD_POLICY_VERSION
+    from app.assistant.evaluation.gates import (
+        PublishGateService,
+        build_publish_gate_subject,
+        make_create_gate_request,
+    )
+    from app.assistant.evaluation.repository import EvaluationRepository
+
+    repo = EvaluationRepository(db)
+    dataset = repo.create_dataset(
+        stable_key=f"ds-admin-{_uuid_mod.uuid4().hex[:8]}",
+        display_name="Admin Gate DS",
+        ownership="custom",
+    )
+    digest_e = "e" * 64
+    snapshot = [
+        {
+            "case_key": "c1",
+            "ordinal": 0,
+            "locale": "en",
+            "input_messages": [{"role": "user", "content": "hi"}],
+            "expected_mode": "golden_skill",
+            "case_digest": digest_e,
+        }
+    ]
+    repo.get_or_create_draft(dataset_id=dataset.id, cases_snapshot=snapshot)
+    published = repo.publish_dataset_version(
+        dataset_id=dataset.id,
+        expected_aggregate_revision=0,
+        expected_draft_revision=0,
+        version_name="v1",
+        actor="tester",
+    )
+    db.commit()
+    run = repo.create_run(
+        subject_kind="skill_version",
+        subject_aggregate_id=package_id,
+        subject_version_id=version_id,
+        subject_content_digest=content_digest,
+        subject_binding_digest=binding_digest or ("b" * 64),
+        dataset_version_ids=[published.version_id],
+        threshold_policy_version=THRESHOLD_POLICY_VERSION,
+        mode="dataset_scripted",
+        isolation_namespace_id=_uuid_mod.uuid4(),
+        runtime_contract_version=1,
+        required_build_revision="development",
+        isolation_digest="c" * 64,
+        actor_principal="tester",
+    )
+    repo.transition_run(run_id=run.id, expected_revision=0, to_status="running")
+    repo.transition_run(
+        run_id=run.id,
+        expected_revision=1,
+        to_status="completed",
+        gate_eligible=True,
+        aggregate_metrics={
+            "all_cases": 100,
+            "recall_at_8": 0.95,
+            "false_injection_rate": 0.01,
+            "direct_answer_accuracy": 0.95,
+            "capability_path_accuracy": 0.90,
+            "completion_success": 0.95,
+            "legacy_completion_success": 0.95,
+            "completion_success_delta_vs_legacy": 0.0,
+            "unauthorized_broader_side_effect_count": 0,
+            "positive_cases": 50,
+            "direct_answer_cases": 20,
+        },
+    )
+    db.commit()
+    subject = build_publish_gate_subject(
+        kind="skill_version",
+        aggregate_id=package_id,
+        version_id=version_id,
+        content_digest=content_digest,
+        binding_digest=binding_digest or ("b" * 64),
+        profile_digest="c" * 64,
+        catalog_digest="d" * 64,
+        dataset_version_ids=(published.version_id,),
+        runtime_contract_version=1,
+        policy_version="plan09-policy-v1",
+        threshold_version=THRESHOLD_POLICY_VERSION,
+        build_revision="development",
+    )
+    svc = PublishGateService(db)
+    result = svc.create_gate(
+        make_create_gate_request(subject=subject, qualifying_eval_run_ids=(run.id,)),
+        actor_principal="op-1",
+    )
+    db.commit()
+    return result.gate
+
+
 class SkillAdminServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()
@@ -210,7 +308,7 @@ class SkillAdminServiceTests(unittest.TestCase):
         from app.assistant.skills.models import AssistantSkillPackage
         from app.common.exceptions import ApiException
 
-        # Publish then enable catalog via admin operator path.
+        # Publish then enable catalog via admin operator path (requires gate).
         pub = self.pkg_svc.publish(
             self.package.id,
             PublishSkillVersionCommand(
@@ -220,14 +318,27 @@ class SkillAdminServiceTests(unittest.TestCase):
         self.assertEqual(pub.version_source, "publish")
         # refresh package
         detail = self.pkg_svc.get_package(self.package.id)
+        from app.assistant.skills.models import AssistantSkillVersion
+
+        version = self.db.get(AssistantSkillVersion, pub.id)
+        assert version is not None
+        gate = _create_passing_enable_gate(
+            self.db,
+            package_id=self.package.id,
+            version_id=pub.id,
+            content_digest=str(version.content_digest),
+            binding_digest=str(version.binding_set_digest or ("b" * 64)),
+        )
         enabled = self.admin.enable_catalog(
             self.package.id,
             AggregateRevisionCommand(
                 request_id="en-1",
                 expected_aggregate_revision=detail.aggregate_revision,
+                gate_id=gate.id,
             ),
             principal=_operator(),
             expected_published_version_id=pub.id,
+            gate_id=gate.id,
         )
         self.assertTrue(enabled.catalog_enabled)
         self.assertIsNotNone(enabled.catalog_enabled_at)

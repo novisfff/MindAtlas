@@ -302,6 +302,14 @@ class Settings(BaseSettings):
         default=30,
         alias="ASSISTANT_SKILL_GATE_EVIDENCE_GRACE_DAYS",
     )
+    # Plan 09 publish/catalog gate mode. observe at introduce; enforce before plan exit.
+    # observe: ungated publish only for live-disabled bootstrap; never ungated enable
+    # or ungated pointer advance on already-enabled aggregates.
+    # enforce: native packages/Profiles require gateId for every publish/promotion.
+    assistant_skill_publish_gate_mode: str = Field(
+        default="observe",
+        alias="ASSISTANT_SKILL_PUBLISH_GATE_MODE",
+    )
 
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
@@ -618,6 +626,12 @@ class Settings(BaseSettings):
                 "assistant_capability_reconciliation_evidence_secret must be at least "
                 "32 bytes when reconciliation is enabled"
             )
+        gate_mode = (self.assistant_skill_publish_gate_mode or "").strip().lower()
+        if gate_mode not in {"observe", "enforce"}:
+            raise ValueError(
+                "assistant_skill_publish_gate_mode must be 'observe' or 'enforce'"
+            )
+        self.assistant_skill_publish_gate_mode = gate_mode
         return self
 
     def cors_origins_list(self) -> list[str]:
