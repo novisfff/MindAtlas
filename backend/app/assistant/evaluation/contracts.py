@@ -9,7 +9,7 @@ Normative ownership:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
@@ -368,7 +368,8 @@ def reject_if_evaluation_id(
 
     Wired into production Run/Event/CapabilityCall get-by-id helpers so eval
     UUIDs that live only in eval tables surface as not-found style rejections
-    (ValueError; routers map to 404).
+    (ValueError; HTTP entrypoints map to 404 via
+    ``reraise_evaluation_id_as_not_found`` / ``is_evaluation_identifier_rejection``).
     """
     if value is None:
         return
@@ -388,3 +389,31 @@ def reject_if_evaluation_id(
     # Unknown entity: if it matches an eval run id, still reject (defense).
     if is_evaluation_run_id(session, value):
         assert_not_evaluation_id(entity=entity_key or "id", value=value)
+
+
+# Marker substring raised by assert_not_evaluation_id / reject_if_evaluation_id.
+# Production HTTP entrypoints match this to map rejection → 404 (not 500).
+EVALUATION_IDENTIFIER_REJECTION_MARKER = "evaluation identifiers"
+
+
+def is_evaluation_identifier_rejection(exc: BaseException) -> bool:
+    """True when ``exc`` is the production reject of an evaluation-namespace ID."""
+    return isinstance(exc, ValueError) and EVALUATION_IDENTIFIER_REJECTION_MARKER in str(
+        exc
+    )
+
+
+def reraise_evaluation_id_as_not_found(
+    exc: BaseException,
+    *,
+    not_found: BaseException,
+) -> NoReturn:
+    """If ``exc`` rejects an evaluation ID, raise ``not_found``; else re-raise ``exc``.
+
+    Shared by production HTTP entrypoints that call Run/Call get-by-id helpers
+    which raise ValueError for eval-namespace IDs. Callers supply a typed
+    404-style exception (ApiException, DurableInterruptApiError, …).
+    """
+    if is_evaluation_identifier_rejection(exc):
+        raise not_found from exc
+    raise exc

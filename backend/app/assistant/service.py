@@ -196,11 +196,16 @@ class AssistantService:
             existing = run_svc.get_run(conversation_id=conversation_id, run_id=run_id)
         except ValueError as exc:
             # Evaluation-namespace IDs must surface as production not-found.
-            if "evaluation identifiers" in str(exc):
-                raise ApiException(
+            from app.assistant.evaluation.contracts import (
+                reraise_evaluation_id_as_not_found,
+            )
+
+            reraise_evaluation_id_as_not_found(
+                exc,
+                not_found=ApiException(
                     status_code=404, code=40400, message=f"Run not found: {run_id}"
-                ) from exc
-            raise
+                ),
+            )
         if existing is None:
             raise ApiException(status_code=404, code=40400, message=f"Run not found: {run_id}")
 
@@ -559,11 +564,16 @@ class AssistantService:
                     conversation_id=conversation_id, run_id=run_id
                 )
             except ValueError as exc:
-                if "evaluation identifiers" in str(exc):
-                    raise ApiException(
+                from app.assistant.evaluation.contracts import (
+                    reraise_evaluation_id_as_not_found,
+                )
+
+                reraise_evaluation_id_as_not_found(
+                    exc,
+                    not_found=ApiException(
                         status_code=404, code=40400, message=f"Run not found: {run_id}"
-                    ) from exc
-                raise
+                    ),
+                )
             if run is None:
                 raise ApiException(status_code=404, code=40400, message=f"Run not found: {run_id}")
             runtime_kind = str(getattr(run, "runtime_kind", None) or "legacy")
