@@ -31,7 +31,13 @@ class WorkflowCodeExecutorRuntimeTests(unittest.TestCase):
         from app.config import get_settings
 
         settings = get_settings().model_copy(
-            update={"workflow_code_executor_max_timeout_ms": 15_000}
+            update={
+                "workflow_code_executor_max_timeout_ms": 15_000,
+                # RLIMIT_AS constrains V8's reserved virtual address space on
+                # Linux, not merely its resident memory.  This binding test is
+                # intentionally independent from resource-sandbox coverage.
+                "workflow_code_executor_memory_limit_mb": 4_096,
+            }
         )
         with patch(
             "app.assistant.workflow.code_executor.get_settings",
