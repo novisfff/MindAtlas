@@ -428,10 +428,10 @@ class AgentSkillService:
             PublishGateError,
             PublishGateService,
             build_publish_gate_subject,
+            current_gate_environment_pins,
             publish_gate_mode,
+            skill_catalog_pin_digest,
         )
-        from app.assistant.evaluation.assertions import THRESHOLD_POLICY_VERSION
-        from app.assistant.domain.digests import sha256_canonical_json
 
         try:
             package = self._lock_package(package_id)
@@ -515,58 +515,44 @@ class AgentSkillService:
             )
 
             # Rebuild candidate gate subject under lock (server-derived closure).
-            # Content/binding digests always come from the draft; other closure
-            # pins are taken from the gate row when gate_id is present so drift
-            # detection is exact on recomputed candidate bytes.
+            # Content/binding digests always come from the draft. Environment
+            # pins are recomputed independently (never copied from the gate row)
+            # so compare fails closed on env drift.
             gate_svc = PublishGateService(self.db)
             mode = publish_gate_mode()
             gate_id = getattr(command, "gate_id", None)
-            existing_gate = gate_svc.get_gate(gate_id) if gate_id is not None else None
-            placeholder = "0" * 64
-            if existing_gate is not None:
-                profile_digest = str(existing_gate.profile_digest)
-                catalog_digest = str(existing_gate.catalog_digest)
-                dataset_ids = tuple(
-                    UUID(str(x)) for x in (existing_gate.dataset_version_ids or [])
-                )
-                runtime_cv = int(existing_gate.runtime_contract_version)
-                policy_version = str(existing_gate.policy_version)
-                threshold_version = str(existing_gate.threshold_version)
-                build_revision = str(existing_gate.build_revision)
-                subject_kind = str(existing_gate.subject_kind)
-                subject_version_id = existing_gate.subject_version_id
-            else:
-                profile_digest = placeholder
-                catalog_digest = sha256_canonical_json(
-                    {
-                        "package_id": str(package.id),
-                        "canonical_name": package.canonical_name,
-                        "catalog_enabled": live_enabled,
-                        "published_version_id": str(package.published_version_id)
-                        if package.published_version_id
-                        else None,
-                    }
-                )
-                dataset_ids = self._gate_dataset_version_ids(command)
-                runtime_cv = 1
-                policy_version = "plan09-policy-v1"
-                threshold_version = THRESHOLD_POLICY_VERSION
-                build_revision = self._gate_build_revision(command)
-                subject_kind = "skill_draft"
-                subject_version_id = draft.id
+            subject_kind = "skill_draft"
+            subject_version_id = draft.id
+            # Dataset ids: client gate_subject pins if present; else recompute
+            # from qualifying eval runs (evidence), never from gate subject fields.
+            dataset_ids = self._gate_dataset_version_ids_from_command(command)
+            if dataset_ids is None and gate_id is not None:
+                dataset_ids = self._dataset_ids_from_gate_evidence(gate_svc, gate_id)
+            catalog_digest = skill_catalog_pin_digest(
+                package_id=package.id,
+                canonical_name=str(package.canonical_name),
+                published_version_id=package.published_version_id,
+                catalog_enabled=live_enabled,
+            )
+            pins = current_gate_environment_pins(
+                self.db,
+                catalog_digest=catalog_digest,
+                dataset_version_ids=dataset_ids,
+                build_revision=self._gate_build_revision(command),
+            )
             subject = build_publish_gate_subject(
                 kind=subject_kind,
                 aggregate_id=package.id,
                 version_id=subject_version_id,
                 content_digest=str(draft.content_digest),
                 binding_digest=str(set_digest),
-                profile_digest=profile_digest,
-                catalog_digest=catalog_digest,
-                dataset_version_ids=dataset_ids,
-                runtime_contract_version=runtime_cv,
-                policy_version=policy_version,
-                threshold_version=threshold_version,
-                build_revision=build_revision,
+                profile_digest=pins.profile_digest,
+                catalog_digest=pins.catalog_digest,
+                dataset_version_ids=pins.dataset_version_ids,
+                runtime_contract_version=pins.runtime_contract_version,
+                policy_version=pins.policy_version,
+                threshold_version=pins.threshold_version,
+                build_revision=pins.build_revision,
             )
             # Client-supplied subject (if any) must match recomputed content/binding.
             if getattr(command, "gate_subject", None):
@@ -727,24 +713,42 @@ class AgentSkillService:
             self.db.rollback()
             raise self._translate_integrity_error(exc) from exc
 
-    def _gate_dataset_version_ids(self, command: Any) -> tuple[UUID, ...]:
-        """Extract dataset version ids from optional gate_subject or placeholder."""
-        from uuid import uuid5, NAMESPACE_URL
-
+    def _gate_dataset_version_ids_from_command(
+        self, command: Any
+    ) -> tuple[UUID, ...] | None:
+        """Extract dataset version ids from optional client gate_subject, else None."""
         raw = getattr(command, "gate_subject", None) or {}
         ids = raw.get("dataset_version_ids") or raw.get("datasetVersionIds") or ()
         if ids:
             return tuple(UUID(str(x)) for x in ids)
-        # Placeholder dataset id for ungated/bootstrap path subject rebuild when
-        # client did not pin datasets (gate create always supplies real ids).
-        return (uuid5(NAMESPACE_URL, "mindatlas:plan09:gate-placeholder-dataset"),)
+        return None
+
+    def _dataset_ids_from_gate_evidence(
+        self, gate_svc: Any, gate_id: UUID
+    ) -> tuple[UUID, ...] | None:
+        """Recompute dataset pins from qualifying eval runs (not gate subject fields)."""
+        gate = gate_svc.get_gate(gate_id)
+        if gate is None:
+            return None
+        seen: list[UUID] = []
+        for rid in gate.qualifying_eval_run_ids or []:
+            run = gate_svc.repo.get_run(UUID(str(rid)))
+            if run is None:
+                continue
+            for ds in run.dataset_version_ids or []:
+                u = UUID(str(ds))
+                if u not in seen:
+                    seen.append(u)
+        return tuple(seen) if seen else None
 
     def _gate_build_revision(self, command: Any) -> str:
+        from app.assistant.evaluation.gates import current_build_revision
+
         raw = getattr(command, "gate_subject", None) or {}
         return str(
             raw.get("build_revision")
             or raw.get("buildRevision")
-            or "development"
+            or current_build_revision()
         )
 
     def _gate_subject_client_drifts(
@@ -880,12 +884,24 @@ class AgentSkillService:
         expected_published_version_id: UUID | None = None,
         expected_version_digest: str | None = None,
         migration_state: str | None = None,
+        gate_id: UUID | None = None,
+        request_id: str | None = None,
+        actor_principal: str | None = None,
     ) -> SkillPackageSummary:
         """Toggle package aggregate ``catalog_enabled`` without mutating versions.
 
-        Enabling requires a published version. Optional expected digests make the
-        operation fail closed on concurrent pointer/content drift.
+        Enabling requires a published version **and** a fresh matching promotion
+        gate (observe and enforce). Disabling remains ungated. Optional expected
+        digests make the operation fail closed on concurrent pointer/content drift.
         """
+        from app.assistant.evaluation.gates import (
+            PublishGateError,
+            PublishGateService,
+            build_publish_gate_subject,
+            current_gate_environment_pins,
+            skill_catalog_pin_digest,
+        )
+
         try:
             if enabled:
                 # All enable entrypoints share this mutex so concurrent enablers
@@ -936,6 +952,66 @@ class AgentSkillService:
                         code=40993,
                         message="published skill version_digest drifted during enable",
                     )
+                # Plan 09: close ungated enable path — require gate + consume.
+                if gate_id is None:
+                    raise ApiException(
+                        status_code=409,
+                        code=40980,
+                        message=(
+                            "matching promotion gate required for catalog enable; "
+                            "use admin gated enable_catalog or supply gate_id"
+                        ),
+                        details={
+                            "type": "gate_required",
+                            "details": {"action": "skill_catalog_enable"},
+                        },
+                    )
+                gate_svc = PublishGateService(self.db)
+                content_digest = str(version.content_digest or ("0" * 64))
+                binding_digest = str(version.binding_set_digest or ("0" * 64))
+                dataset_ids = self._dataset_ids_from_gate_evidence(gate_svc, gate_id)
+                catalog_digest = skill_catalog_pin_digest(
+                    package_id=package.id,
+                    canonical_name=str(package.canonical_name),
+                    published_version_id=package.published_version_id,
+                    content_digest=content_digest,
+                )
+                pins = current_gate_environment_pins(
+                    self.db,
+                    catalog_digest=catalog_digest,
+                    dataset_version_ids=dataset_ids,
+                )
+                subject = build_publish_gate_subject(
+                    kind="skill_version",
+                    aggregate_id=package.id,
+                    version_id=package.published_version_id,
+                    content_digest=content_digest,
+                    binding_digest=binding_digest,
+                    profile_digest=pins.profile_digest,
+                    catalog_digest=pins.catalog_digest,
+                    dataset_version_ids=pins.dataset_version_ids,
+                    runtime_contract_version=pins.runtime_contract_version,
+                    policy_version=pins.policy_version,
+                    threshold_version=pins.threshold_version,
+                    build_revision=pins.build_revision,
+                )
+                actor = actor_principal or "system:set-catalog-enabled"
+                rid = request_id or f"set-catalog-enabled:{package.id}:{gate_id}"
+                try:
+                    gate_svc.enforce_enable(
+                        gate_id=gate_id,
+                        subject=subject,
+                        action="skill_catalog_enable",
+                        aggregate_id=package.id,
+                        resulting_version_id=package.published_version_id,
+                        actor_principal=actor,
+                        request_id=str(rid),
+                        aggregate_revision=int(
+                            getattr(package, "aggregate_revision", 0) or 0
+                        ),
+                    )
+                except PublishGateError as exc:
+                    raise exc.to_api_exception() from exc
             if migration_state is not None:
                 allowed = {"shadow", "native", "cutover"}
                 if migration_state not in allowed:
@@ -962,15 +1038,12 @@ class AgentSkillService:
 
                     package.catalog_enabled_at = utcnow()
                     if getattr(package, "catalog_enabled_by", None) is None:
-                        package.catalog_enabled_by = "system"
+                        package.catalog_enabled_by = actor_principal or "system"
+                if hasattr(package, "aggregate_revision"):
+                    package.aggregate_revision = int(package.aggregate_revision or 0) + 1
             else:
                 package.catalog_enabled_at = None
                 package.catalog_enabled_by = None
-            # Plan 09 Task 1: production catalog CAS lives on SkillAdminService.
-            # This Plan 01 golden/rollout path does not bump aggregate_revision so
-            # we do not expand Plan 01 callers; operator admin CAS may not observe
-            # Plan 01 set_catalog_enabled until a future integrity task unifies it.
-            # TODO(plan-09): bump aggregate_revision here if Plan 01 path remains live.
             self.db.commit()
             return self._package_summary(package)
         except ApiException:
@@ -1958,14 +2031,14 @@ class MainAgentProfileService:
         Plan 09: already ``runtime_enabled`` requires a matching gate in both
         observe and enforce; live-disabled bootstrap may be ungated only in observe.
         """
-        from app.assistant.evaluation.assertions import THRESHOLD_POLICY_VERSION
         from app.assistant.evaluation.gates import (
             PublishGateError,
             PublishGateService,
             build_publish_gate_subject,
+            current_gate_environment_pins,
+            profile_catalog_pin_digest,
             publish_gate_mode,
         )
-        from app.assistant.domain.digests import sha256_canonical_json
 
         try:
             profile = self._lock_profile(profile_id)
@@ -2004,56 +2077,36 @@ class MainAgentProfileService:
             gate_svc = PublishGateService(self.db)
             mode = publish_gate_mode()
             gate_id = getattr(command, "gate_id", None)
-            existing_gate = gate_svc.get_gate(gate_id) if gate_id is not None else None
             placeholder = "0" * 64
-            if existing_gate is not None:
-                profile_digest = str(existing_gate.profile_digest)
-                catalog_digest = str(existing_gate.catalog_digest)
-                dataset_ids = tuple(
-                    UUID(str(x)) for x in (existing_gate.dataset_version_ids or [])
-                )
-                runtime_cv = int(existing_gate.runtime_contract_version)
-                policy_version = str(existing_gate.policy_version)
-                threshold_version = str(existing_gate.threshold_version)
-                build_revision = str(existing_gate.build_revision)
-                subject_kind = str(existing_gate.subject_kind)
-                subject_version_id = existing_gate.subject_version_id
-            else:
-                profile_digest = str(digest)
-                catalog_digest = sha256_canonical_json(
-                    {
-                        "profile_id": str(profile.id),
-                        "runtime_enabled": live_enabled,
-                        "published_version_id": str(profile.published_version_id)
-                        if profile.published_version_id
-                        else None,
-                    }
-                )
-                from uuid import NAMESPACE_URL, uuid5
-
-                dataset_ids = (
-                    uuid5(NAMESPACE_URL, "mindatlas:plan09:gate-placeholder-dataset"),
-                )
-                runtime_cv = 1
-                policy_version = "plan09-policy-v1"
-                threshold_version = THRESHOLD_POLICY_VERSION
-                build_revision = "development"
-                subject_kind = "main_agent_profile_draft"
-                subject_version_id = draft.id
-
+            subject_kind = "main_agent_profile_draft"
+            subject_version_id = draft.id
+            dataset_ids = None
+            if gate_id is not None:
+                dataset_ids = self._dataset_ids_from_gate_evidence(gate_svc, gate_id)
+            catalog_digest = profile_catalog_pin_digest(
+                profile_id=profile.id,
+                published_version_id=profile.published_version_id,
+                runtime_enabled=live_enabled,
+            )
+            pins = current_gate_environment_pins(
+                self.db,
+                profile_digest=str(digest),
+                catalog_digest=catalog_digest,
+                dataset_version_ids=dataset_ids,
+            )
             subject = build_publish_gate_subject(
                 kind=subject_kind,
                 aggregate_id=profile.id,
                 version_id=subject_version_id,
                 content_digest=str(digest),
                 binding_digest=placeholder,
-                profile_digest=profile_digest,
-                catalog_digest=catalog_digest,
-                dataset_version_ids=dataset_ids,
-                runtime_contract_version=runtime_cv,
-                policy_version=policy_version,
-                threshold_version=threshold_version,
-                build_revision=build_revision,
+                profile_digest=pins.profile_digest,
+                catalog_digest=pins.catalog_digest,
+                dataset_version_ids=pins.dataset_version_ids,
+                runtime_contract_version=pins.runtime_contract_version,
+                policy_version=pins.policy_version,
+                threshold_version=pins.threshold_version,
+                build_revision=pins.build_revision,
             )
 
             sequence_no = self._next_sequence(profile.id)
@@ -2076,8 +2129,11 @@ class MainAgentProfileService:
                 or f"profile-publish:{profile.id}:{publish_version.id}"
             )
             actor = actor_principal or "system:profile-publish"
+            # Profile has no aggregate_revision field; store 0 on gate_use.
+            # If the field is added later, bump it on gated publish.
+            agg_rev = int(getattr(profile, "aggregate_revision", 0) or 0)
             try:
-                gate_svc.enforce_or_bootstrap_publish(
+                consume = gate_svc.enforce_or_bootstrap_publish(
                     live_enabled=live_enabled,
                     gate_id=gate_id,
                     subject=subject,
@@ -2086,7 +2142,7 @@ class MainAgentProfileService:
                     resulting_version_id=publish_version.id,
                     actor_principal=actor,
                     request_id=str(request_id),
-                    aggregate_revision=0,
+                    aggregate_revision=agg_rev,
                     mode=mode,
                 )
             except PublishGateError as exc:
@@ -2095,6 +2151,8 @@ class MainAgentProfileService:
             profile.published_version_id = publish_version.id
             if not live_enabled:
                 profile.runtime_enabled = False
+            if consume is not None and hasattr(profile, "aggregate_revision"):
+                profile.aggregate_revision = agg_rev + 1
             self.db.commit()
             return self._version_summary(publish_version)
         except ApiException:
@@ -2122,13 +2180,13 @@ class MainAgentProfileService:
         (observe and enforce). Optional expected digests make the operation fail
         closed on concurrent pointer/content drift.
         """
-        from app.assistant.evaluation.assertions import THRESHOLD_POLICY_VERSION
         from app.assistant.evaluation.gates import (
             PublishGateError,
             PublishGateService,
             build_publish_gate_subject,
+            current_gate_environment_pins,
+            profile_catalog_pin_digest,
         )
-        from app.assistant.domain.digests import sha256_canonical_json
 
         try:
             profile = self._lock_profile(profile_id)
@@ -2182,59 +2240,36 @@ class MainAgentProfileService:
                     )
 
                 gate_svc = PublishGateService(self.db)
-                existing_gate = (
-                    gate_svc.get_gate(gate_id) if gate_id is not None else None
-                )
                 placeholder = "0" * 64
                 content_digest = str(version.content_digest or placeholder)
-                if existing_gate is not None:
-                    profile_digest = str(existing_gate.profile_digest)
-                    catalog_digest = str(existing_gate.catalog_digest)
-                    dataset_ids = tuple(
-                        UUID(str(x)) for x in (existing_gate.dataset_version_ids or [])
-                    )
-                    runtime_cv = int(existing_gate.runtime_contract_version)
-                    policy_version = str(existing_gate.policy_version)
-                    threshold_version = str(existing_gate.threshold_version)
-                    build_revision = str(existing_gate.build_revision)
-                    subject_kind = str(existing_gate.subject_kind)
-                    subject_version_id = existing_gate.subject_version_id
-                else:
-                    profile_digest = content_digest
-                    catalog_digest = sha256_canonical_json(
-                        {
-                            "profile_id": str(profile.id),
-                            "published_version_id": str(profile.published_version_id),
-                        }
-                    )
-                    from uuid import NAMESPACE_URL, uuid5
-
-                    dataset_ids = (
-                        uuid5(
-                            NAMESPACE_URL, "mindatlas:plan09:gate-placeholder-dataset"
-                        ),
-                    )
-                    runtime_cv = 1
-                    policy_version = "plan09-policy-v1"
-                    threshold_version = THRESHOLD_POLICY_VERSION
-                    build_revision = "development"
-                    subject_kind = "main_agent_profile_version"
-                    subject_version_id = profile.published_version_id
-
-                subject = build_publish_gate_subject(
-                    kind=subject_kind,
-                    aggregate_id=profile.id,
-                    version_id=subject_version_id,
-                    content_digest=content_digest,
-                    binding_digest=placeholder,
-                    profile_digest=profile_digest,
+                dataset_ids = None
+                if gate_id is not None:
+                    dataset_ids = self._dataset_ids_from_gate_evidence(gate_svc, gate_id)
+                catalog_digest = profile_catalog_pin_digest(
+                    profile_id=profile.id,
+                    published_version_id=profile.published_version_id,
+                )
+                pins = current_gate_environment_pins(
+                    self.db,
+                    profile_digest=content_digest,
                     catalog_digest=catalog_digest,
                     dataset_version_ids=dataset_ids,
-                    runtime_contract_version=runtime_cv,
-                    policy_version=policy_version,
-                    threshold_version=threshold_version,
-                    build_revision=build_revision,
                 )
+                subject = build_publish_gate_subject(
+                    kind="main_agent_profile_version",
+                    aggregate_id=profile.id,
+                    version_id=profile.published_version_id,
+                    content_digest=content_digest,
+                    binding_digest=placeholder,
+                    profile_digest=pins.profile_digest,
+                    catalog_digest=pins.catalog_digest,
+                    dataset_version_ids=pins.dataset_version_ids,
+                    runtime_contract_version=pins.runtime_contract_version,
+                    policy_version=pins.policy_version,
+                    threshold_version=pins.threshold_version,
+                    build_revision=pins.build_revision,
+                )
+                agg_rev = int(getattr(profile, "aggregate_revision", 0) or 0)
                 try:
                     gate_svc.enforce_enable(
                         gate_id=gate_id,
@@ -2246,10 +2281,12 @@ class MainAgentProfileService:
                         request_id=str(
                             request_id or f"profile-enable:{profile.id}:{version.id}"
                         ),
-                        aggregate_revision=0,
+                        aggregate_revision=agg_rev,
                     )
                 except PublishGateError as exc:
                     raise exc.to_api_exception() from exc
+                if hasattr(profile, "aggregate_revision"):
+                    profile.aggregate_revision = agg_rev + 1
             if migration_state is not None:
                 allowed = {"bootstrap", "shadow", "native", "cutover"}
                 if migration_state not in allowed:

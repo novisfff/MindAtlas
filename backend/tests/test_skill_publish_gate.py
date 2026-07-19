@@ -51,6 +51,12 @@ def _passing_metrics() -> dict:
         "unauthorized_broader_side_effect_count": 0,
         "positive_cases": 50,
         "direct_answer_cases": 20,
+        # Plan 05–08 hard-safety counters (required evidence; missing ≠ pass).
+        "real_side_effect_in_test": 0,
+        "budget_policy_bypass": 0,
+        "false_completion_pending_obligation": 0,
+        "unresolved_obligation_falsely_completed": 0,
+        "schema_escape": 0,
     }
 
 
@@ -125,6 +131,52 @@ class AssertionAggregationTests(unittest.TestCase):
             "unauthorized_broader_side_effect_count",
             summary.hard_safety_failing_codes(),
         )
+
+    def test_missing_hard_safety_counter_not_pass(self) -> None:
+        """Plan 05–08 counters absent from evidence → indeterminate, not pass."""
+        from app.assistant.evaluation.assertions import (
+            derive_gate_decision,
+            evaluate_dataset_assertions,
+            evaluate_interactive_safety,
+        )
+
+        metrics = dict(_passing_metrics())
+        for key in (
+            "budget_policy_bypass",
+            "false_completion_pending_obligation",
+            "unresolved_obligation_falsely_completed",
+            "schema_escape",
+            "real_side_effect_in_test",
+        ):
+            metrics.pop(key, None)
+        summary = evaluate_dataset_assertions(metrics=metrics)
+        self.assertFalse(summary.all_passed)
+        self.assertFalse(summary.gate_eligible)
+        hard = set(summary.hard_safety_failing_codes())
+        self.assertIn("budget_policy_bypass", hard)
+        self.assertIn("schema_escape", hard)
+        self.assertIn("real_side_effect_in_test", hard)
+        decision, _, _ = derive_gate_decision(summary)
+        self.assertEqual(decision, "failed")
+
+        # production_delta=None must not pass hard-safety.
+        interactive = evaluate_interactive_safety(
+            isolation_breached=False,
+            production_delta=None,
+            call_outcomes=None,
+        )
+        self.assertFalse(interactive.gate_eligible)
+        codes = {r.code: r.outcome for r in interactive.results}
+        self.assertEqual(codes.get("real_side_effect_in_test"), "indeterminate")
+        self.assertEqual(codes.get("unauthorized_call"), "indeterminate")
+
+        # Explicit empty production_delta + empty call_outcomes is proven clean.
+        clean = evaluate_interactive_safety(
+            isolation_breached=False,
+            production_delta={},
+            call_outcomes=[],
+        )
+        self.assertTrue(clean.gate_eligible)
 
 
 class PublishGateServiceUnitTests(unittest.TestCase):
@@ -216,21 +268,31 @@ class PublishGateServiceUnitTests(unittest.TestCase):
         return run, dataset_version_id, agg, ver
 
     def _subject(self, run, dataset_version_id, **overrides):
-        from app.assistant.evaluation.gates import build_publish_gate_subject
+        from app.assistant.evaluation.gates import (
+            build_publish_gate_subject,
+            current_gate_environment_pins,
+        )
 
+        pins = current_gate_environment_pins(
+            self.db,
+            dataset_version_ids=(dataset_version_id,),
+            build_revision=str(run.required_build_revision),
+            threshold_version=str(run.threshold_policy_version),
+            runtime_contract_version=int(run.runtime_contract_version),
+        )
         kwargs = dict(
             kind=str(run.subject_kind),
             aggregate_id=run.subject_aggregate_id,
             version_id=run.subject_version_id,
             content_digest=str(run.subject_content_digest),
             binding_digest=str(run.subject_binding_digest),
-            profile_digest=DIGEST_C,
-            catalog_digest=DIGEST_D,
-            dataset_version_ids=(dataset_version_id,),
-            runtime_contract_version=int(run.runtime_contract_version),
-            policy_version="plan09-policy-v1",
-            threshold_version=str(run.threshold_policy_version),
-            build_revision=str(run.required_build_revision),
+            profile_digest=pins.profile_digest,
+            catalog_digest=pins.catalog_digest,
+            dataset_version_ids=pins.dataset_version_ids,
+            runtime_contract_version=pins.runtime_contract_version,
+            policy_version=pins.policy_version,
+            threshold_version=pins.threshold_version,
+            build_revision=pins.build_revision,
         )
         kwargs.update(overrides)
         return build_publish_gate_subject(**kwargs)
@@ -501,6 +563,26 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
 
         return OperatorPrincipal(principal_id="op-gate", role="operator")
 
+    def _enable_catalog_digest(self, package, version) -> str:
+        from app.assistant.evaluation.gates import skill_catalog_pin_digest
+
+        return skill_catalog_pin_digest(
+            package_id=package.id,
+            canonical_name=str(package.canonical_name),
+            published_version_id=package.published_version_id or version.id,
+            content_digest=str(version.content_digest),
+        )
+
+    def _publish_catalog_digest(self, package, *, live_enabled: bool = False) -> str:
+        from app.assistant.evaluation.gates import skill_catalog_pin_digest
+
+        return skill_catalog_pin_digest(
+            package_id=package.id,
+            canonical_name=str(package.canonical_name),
+            published_version_id=package.published_version_id,
+            catalog_enabled=live_enabled,
+        )
+
     def _create_qualifying_gate(
         self,
         *,
@@ -510,6 +592,8 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         content_digest: str,
         binding_digest: str,
         action_hint: str = "skill_publish",
+        catalog_digest: str | None = None,
+        profile_digest: str | None = None,
     ):
         """Create completed eval run + server-derived passing gate."""
         from app.assistant.evaluation.assertions import THRESHOLD_POLICY_VERSION
@@ -517,6 +601,8 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
             PublishGateService,
             make_create_gate_request,
             build_publish_gate_subject,
+            current_build_revision,
+            current_gate_environment_pins,
         )
 
         del action_hint
@@ -545,6 +631,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         )
         self.db.commit()
 
+        build_rev = current_build_revision()
         run = self.repo.create_run(
             subject_kind=subject_kind,  # type: ignore[arg-type]
             subject_aggregate_id=aggregate_id,
@@ -556,7 +643,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
             mode="dataset_scripted",
             isolation_namespace_id=_uuid(),
             runtime_contract_version=1,
-            required_build_revision="development",
+            required_build_revision=build_rev,
             isolation_digest=DIGEST_C,
             actor_principal="tester",
         )
@@ -572,19 +659,26 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         )
         self.db.commit()
 
+        pins = current_gate_environment_pins(
+            self.db,
+            profile_digest=profile_digest,
+            catalog_digest=catalog_digest,
+            dataset_version_ids=(published.version_id,),
+            build_revision=build_rev,
+        )
         subject = build_publish_gate_subject(
             kind=subject_kind,
             aggregate_id=aggregate_id,
             version_id=version_id,
             content_digest=content_digest,
             binding_digest=binding_digest,
-            profile_digest=DIGEST_C,
-            catalog_digest=DIGEST_D,
-            dataset_version_ids=(published.version_id,),
-            runtime_contract_version=1,
-            policy_version="plan09-policy-v1",
-            threshold_version=THRESHOLD_POLICY_VERSION,
-            build_revision="development",
+            profile_digest=pins.profile_digest,
+            catalog_digest=pins.catalog_digest,
+            dataset_version_ids=pins.dataset_version_ids,
+            runtime_contract_version=pins.runtime_contract_version,
+            policy_version=pins.policy_version,
+            threshold_version=pins.threshold_version,
+            build_revision=pins.build_revision,
         )
         svc = PublishGateService(self.db)
         result = svc.create_gate(
@@ -646,12 +740,15 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
             pub1.id,
         )
         assert version is not None
+        pkg_row = self.db.get(AssistantSkillPackage, self.package.id)
+        assert pkg_row is not None
         gate, _, _ = self._create_qualifying_gate(
             subject_kind="skill_version",
             aggregate_id=self.package.id,
             version_id=pub1.id,
             content_digest=str(version.content_digest),
             binding_digest=str(version.binding_set_digest or DIGEST_B),
+            catalog_digest=self._enable_catalog_digest(pkg_row, version),
         )
         enabled = self.admin.enable_catalog(
             self.package.id,
@@ -828,6 +925,8 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         assert pub_ver is not None
         binding = str(pub_ver.binding_set_digest or DIGEST_B)
         content = str(draft2.content_digest)
+        pkg_row = self.db.get(AssistantSkillPackage, self.package.id)
+        assert pkg_row is not None
 
         gate, _, _ = self._create_qualifying_gate(
             subject_kind="skill_draft",
@@ -835,6 +934,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
             version_id=draft2.id,
             content_digest=content,
             binding_digest=binding,
+            catalog_digest=self._publish_catalog_digest(pkg_row, live_enabled=False),
         )
 
         os.environ["ASSISTANT_SKILL_PUBLISH_GATE_MODE"] = "enforce"
@@ -886,12 +986,20 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
             pub.id,
         )
         assert version is not None
+        pkg_row = self.db.get(
+            __import__(
+                "app.assistant.skills.models", fromlist=["AssistantSkillPackage"]
+            ).AssistantSkillPackage,
+            self.package.id,
+        )
+        assert pkg_row is not None
         gate, _, _ = self._create_qualifying_gate(
             subject_kind="skill_version",
             aggregate_id=self.package.id,
             version_id=pub.id,
             content_digest=str(version.content_digest),
             binding_digest=str(version.binding_set_digest or DIGEST_B),
+            catalog_digest=self._enable_catalog_digest(pkg_row, version),
         )
         detail = self.pkg_svc.get_package(self.package.id)
         enabled = self.admin.enable_catalog(
@@ -915,6 +1023,110 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
             .all()
         )
         self.assertEqual(len(uses), 1)
+
+    def test_env_pin_drift_fails_publish_closed(self) -> None:
+        """Gate created with pin A; current env pin B → publish fails drift."""
+        from app.assistant.skills.schemas import PublishSkillVersionCommand
+        from app.assistant.skills.models import AssistantSkillPackage
+        from app.common.exceptions import ApiException
+
+        os.environ["ASSISTANT_SKILL_PUBLISH_GATE_MODE"] = "enforce"
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+
+        assert self.package.draft_version is not None
+        draft_id = self.package.draft_version.id
+        # Observe bootstrap first to resolve binding.
+        os.environ["ASSISTANT_SKILL_PUBLISH_GATE_MODE"] = "observe"
+        get_settings.cache_clear()
+        pub_observe = self.pkg_svc.publish(
+            self.package.id,
+            PublishSkillVersionCommand(draft_version_id=draft_id),
+        )
+        from app.assistant.skills.schemas import SaveSkillDraftCommand
+        from app.assistant.skills.package_io import parse_skill_directory_files
+
+        draft = self.db.get(
+            __import__(
+                "app.assistant.skills.models", fromlist=["AssistantSkillVersion"]
+            ).AssistantSkillVersion,
+            draft_id,
+        )
+        assert draft is not None
+        skill_md = (draft.skill_md or "").encode("utf-8")
+        mindatlas = (draft.mindatlas_yaml or "").encode("utf-8")
+        parsed = parse_skill_directory_files(
+            {"SKILL.md": skill_md, "mindatlas.yaml": mindatlas},
+            expected_root_name="gate-skill",
+        )
+        draft2 = self.pkg_svc.save_draft(
+            SaveSkillDraftCommand(
+                package_id=self.package.id, parsed=parsed, origin="api"
+            ),
+        )
+        pub_ver = self.db.get(
+            __import__(
+                "app.assistant.skills.models", fromlist=["AssistantSkillVersion"]
+            ).AssistantSkillVersion,
+            pub_observe.id,
+        )
+        assert pub_ver is not None
+        pkg_row = self.db.get(AssistantSkillPackage, self.package.id)
+        assert pkg_row is not None
+        # Create gate with intentionally wrong catalog pin (stale pin A).
+        gate, _, _ = self._create_qualifying_gate(
+            subject_kind="skill_draft",
+            aggregate_id=self.package.id,
+            version_id=draft2.id,
+            content_digest=str(draft2.content_digest),
+            binding_digest=str(pub_ver.binding_set_digest or DIGEST_B),
+            catalog_digest=DIGEST_D,  # not current skill_catalog_pin_digest
+        )
+        os.environ["ASSISTANT_SKILL_PUBLISH_GATE_MODE"] = "enforce"
+        get_settings.cache_clear()
+        with self.assertRaises(ApiException) as ctx:
+            self.pkg_svc.publish(
+                self.package.id,
+                PublishSkillVersionCommand(
+                    draft_version_id=draft2.id,
+                    gate_id=gate.id,
+                    request_id="pub-env-drift",
+                ),
+            )
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.code, 40982)
+
+    def test_set_catalog_enabled_without_gate_fails(self) -> None:
+        """Plan 01 set_catalog_enabled(True) must not bypass the gate."""
+        from app.assistant.skills.schemas import PublishSkillVersionCommand
+        from app.common.exceptions import ApiException
+
+        os.environ["ASSISTANT_SKILL_PUBLISH_GATE_MODE"] = "observe"
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+
+        assert self.package.draft_version is not None
+        pub = self.pkg_svc.publish(
+            self.package.id,
+            PublishSkillVersionCommand(
+                draft_version_id=self.package.draft_version.id
+            ),
+        )
+        with self.assertRaises(ApiException) as ctx:
+            self.pkg_svc.set_catalog_enabled(
+                self.package.id,
+                enabled=True,
+                expected_published_version_id=pub.id,
+            )
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.code, 40980)
+        # Disable remains ungated.
+        disabled = self.pkg_svc.set_catalog_enabled(
+            self.package.id, enabled=False
+        )
+        self.assertFalse(disabled.catalog_enabled)
 
 
 class DatasetRunnerGateEligibilityTests(unittest.TestCase):

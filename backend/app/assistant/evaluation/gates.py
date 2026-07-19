@@ -8,6 +8,27 @@ assertions cannot be waived.
 Publish and Catalog/Profile enable re-verify the gate under the aggregate lock
 and append ``publish_gate_use`` in the same transaction as the pointer/state
 change.
+
+Two-gate lifecycle
+------------------
+Publish and enable are separate gated actions:
+
+1. **Publish** (``skill_publish`` / ``profile_publish``) advances the published
+   pointer for a draft/version. The gate subject targets the draft (or the
+   version being published) content/binding digests plus **current** environment
+   pins (profile/catalog/dataset/build/policy/threshold/runtime).
+2. **Enable** (``skill_catalog_enable`` / ``profile_runtime_enable``) flips the
+   live flag for the *already published* version. Enable requires a **fresh**
+   matching gate whose subject targets the published version id (content/binding
+   of that published row) plus current environment pins. A publish gate is not
+   reusable as an enable gate unless subject version/kind still match.
+
+Observe mode allows ungated publish only for live-disabled bootstrap; enable is
+always gated. Enforce mode requires a gate for both publish and enable.
+
+Environment pins are recomputed independently under the aggregate lock at
+consume time — never copied from the gate row into the candidate subject so the
+compare always matches.
 """
 
 from __future__ import annotations
@@ -55,6 +76,12 @@ logger = logging.getLogger(__name__)
 PublishGateMode = Literal["observe", "enforce"]
 
 DEFAULT_GATE_TTL_DAYS = 14
+DEFAULT_POLICY_VERSION = "plan09-policy-v1"
+DEFAULT_RUNTIME_CONTRACT_VERSION = 1
+# Stable env-pin placeholders used when full profile/catalog recompute is not
+# available as pure functions. Tests and create-time subjects share these so
+# independent recompute at consume still matches when the system has not drifted.
+DEFAULT_PROFILE_DIGEST_PLACEHOLDER = "0" * 64
 
 # Stable API / service error codes (int for ApiException).
 CODE_GATE_MISSING = 40980
@@ -69,6 +96,112 @@ GATE_ACTION_SKILL_PUBLISH: PublishGateAction = "skill_publish"
 GATE_ACTION_SKILL_CATALOG_ENABLE: PublishGateAction = "skill_catalog_enable"
 GATE_ACTION_PROFILE_PUBLISH: PublishGateAction = "profile_publish"
 GATE_ACTION_PROFILE_RUNTIME_ENABLE: PublishGateAction = "profile_runtime_enable"
+
+
+@dataclass(frozen=True, slots=True)
+class GateEnvironmentPins:
+    """Current system environment pins for publish-gate subject closure."""
+
+    profile_digest: str
+    catalog_digest: str
+    dataset_version_ids: tuple[UUID, ...]
+    runtime_contract_version: int
+    policy_version: str
+    threshold_version: str
+    build_revision: str
+
+
+def current_build_revision() -> str:
+    """Read APP_BUILD_REVISION / settings.app_build_revision (default development)."""
+    try:
+        settings = get_settings()
+        return str(getattr(settings, "app_build_revision", None) or "development")
+    except Exception:  # noqa: BLE001 — fail closed to development
+        return "development"
+
+
+def skill_catalog_pin_digest(
+    *,
+    package_id: UUID,
+    canonical_name: str,
+    published_version_id: UUID | None,
+    catalog_enabled: bool | None = None,
+    content_digest: str | None = None,
+) -> str:
+    """Canonical catalog pin digest for skill package enable/publish subjects."""
+    from app.assistant.domain.digests import sha256_canonical_json
+
+    payload: dict[str, Any] = {
+        "package_id": str(package_id),
+        "canonical_name": canonical_name,
+        "published_version_id": str(published_version_id) if published_version_id else None,
+    }
+    if catalog_enabled is not None:
+        payload["catalog_enabled"] = bool(catalog_enabled)
+    if content_digest is not None:
+        payload["content_digest"] = content_digest
+    return sha256_canonical_json(payload)
+
+
+def profile_catalog_pin_digest(
+    *,
+    profile_id: UUID,
+    published_version_id: UUID | None,
+    runtime_enabled: bool | None = None,
+) -> str:
+    """Canonical catalog pin digest for profile publish/enable subjects."""
+    from app.assistant.domain.digests import sha256_canonical_json
+
+    payload: dict[str, Any] = {
+        "profile_id": str(profile_id),
+        "published_version_id": str(published_version_id) if published_version_id else None,
+    }
+    if runtime_enabled is not None:
+        payload["runtime_enabled"] = bool(runtime_enabled)
+    return sha256_canonical_json(payload)
+
+
+def current_gate_environment_pins(
+    session: Session | None = None,
+    *,
+    profile_digest: str | None = None,
+    catalog_digest: str | None = None,
+    dataset_version_ids: Sequence[UUID] | None = None,
+    runtime_contract_version: int | None = None,
+    policy_version: str | None = None,
+    threshold_version: str | None = None,
+    build_revision: str | None = None,
+) -> GateEnvironmentPins:
+    """Return **current** system environment pins used at gate create/consume.
+
+    Call under the aggregate lock. Content/binding digests come from the draft
+    or published version independently; these pins must match the gate row for
+    the gate to remain valid.
+
+    When profile/catalog digests are not supplied, stable placeholders are used
+    (same as create-time defaults when no richer recompute is available). Callers
+    that can compute package/profile catalog digests should pass them explicitly
+    so drift of those closures is detected.
+    """
+    del session  # reserved for future pure DB recompute of global pins
+    from uuid import NAMESPACE_URL, uuid5
+
+    ds = tuple(dataset_version_ids) if dataset_version_ids is not None else (
+        uuid5(NAMESPACE_URL, "mindatlas:plan09:gate-placeholder-dataset"),
+    )
+    return GateEnvironmentPins(
+        profile_digest=(profile_digest or DEFAULT_PROFILE_DIGEST_PLACEHOLDER),
+        catalog_digest=(catalog_digest or DEFAULT_PROFILE_DIGEST_PLACEHOLDER),
+        dataset_version_ids=ds,
+        runtime_contract_version=int(
+            runtime_contract_version
+            if runtime_contract_version is not None
+            else DEFAULT_RUNTIME_CONTRACT_VERSION
+        ),
+        policy_version=str(policy_version or DEFAULT_POLICY_VERSION),
+        threshold_version=str(threshold_version or THRESHOLD_POLICY_VERSION),
+        build_revision=str(build_revision if build_revision is not None else current_build_revision()),
+    )
 
 
 class PublishGateError(Exception):
@@ -358,13 +491,12 @@ def summarize_qualifying_runs(
             thresholds=RELEASE_THRESHOLDS,
         )
     if not merged_metrics:
-        # Interactive-only evidence: still require hard-safety pass via counters.
+        # Interactive-only evidence without metrics/case outcomes: do NOT fabricate
+        # zero unauthorized counters as proven. Missing metrics → missing evidence.
+        # Hard-safety counters present on the run may still be evaluated; absent
+        # required keys remain indeterminate/fail via evaluate_dataset_assertions.
         return evaluate_dataset_assertions(
-            metrics={"all_cases": 0, "recall_at_8": 0.0, "false_injection_rate": 1.0,
-                     "direct_answer_accuracy": 0.0, "capability_path_accuracy": 0.0,
-                     "completion_success": 0.0, "legacy_completion_success": 0.0,
-                     "completion_success_delta_vs_legacy": 0.0,
-                     "unauthorized_broader_side_effect_count": 0},
+            metrics=None,
             safety_counters=merged_counters or None,
             isolation_breached=isolation,
             thresholds=RELEASE_THRESHOLDS,
@@ -905,21 +1037,29 @@ __all__ = [
     "CODE_GATE_MISSING",
     "CODE_GATE_NOT_QUALIFYING",
     "DEFAULT_GATE_TTL_DAYS",
+    "DEFAULT_POLICY_VERSION",
+    "DEFAULT_PROFILE_DIGEST_PLACEHOLDER",
+    "DEFAULT_RUNTIME_CONTRACT_VERSION",
     "GATE_ACTION_PROFILE_PUBLISH",
     "GATE_ACTION_PROFILE_RUNTIME_ENABLE",
     "GATE_ACTION_SKILL_CATALOG_ENABLE",
     "GATE_ACTION_SKILL_PUBLISH",
     "GateConsumeResult",
     "GateCreateResult",
+    "GateEnvironmentPins",
     "PublishGateError",
     "PublishGateMode",
     "PublishGateService",
     "build_publish_gate_subject",
     "compare_run_to_subject",
     "compare_subject_closure",
+    "current_build_revision",
+    "current_gate_environment_pins",
     "gate_required_for_enable",
     "gate_required_for_publish",
     "make_create_gate_request",
+    "profile_catalog_pin_digest",
     "publish_gate_mode",
+    "skill_catalog_pin_digest",
     "summarize_qualifying_runs",
 ]

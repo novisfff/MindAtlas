@@ -91,18 +91,50 @@ def _viewer(principal_id: str = "viewer-1") -> "OperatorPrincipal":
     return OperatorPrincipal(principal_id=principal_id, role="viewer")
 
 
-def _create_passing_enable_gate(db, *, package_id, version_id, content_digest, binding_digest):
+def _passing_gate_metrics() -> dict:
+    return {
+        "all_cases": 100,
+        "recall_at_8": 0.95,
+        "false_injection_rate": 0.01,
+        "direct_answer_accuracy": 0.95,
+        "capability_path_accuracy": 0.90,
+        "completion_success": 0.95,
+        "legacy_completion_success": 0.95,
+        "completion_success_delta_vs_legacy": 0.0,
+        "unauthorized_broader_side_effect_count": 0,
+        "positive_cases": 50,
+        "direct_answer_cases": 20,
+        "real_side_effect_in_test": 0,
+        "budget_policy_bypass": 0,
+        "false_completion_pending_obligation": 0,
+        "unresolved_obligation_falsely_completed": 0,
+        "schema_escape": 0,
+    }
+
+
+def _create_passing_enable_gate(
+    db,
+    *,
+    package_id,
+    version_id,
+    content_digest,
+    binding_digest,
+    package_canonical_name: str | None = None,
+):
     """Create a completed dataset_scripted run + server-derived passing enable gate."""
-    from datetime import timedelta
     import uuid as _uuid_mod
 
     from app.assistant.evaluation.assertions import THRESHOLD_POLICY_VERSION
     from app.assistant.evaluation.gates import (
         PublishGateService,
         build_publish_gate_subject,
+        current_build_revision,
+        current_gate_environment_pins,
         make_create_gate_request,
+        skill_catalog_pin_digest,
     )
     from app.assistant.evaluation.repository import EvaluationRepository
+    from app.assistant.skills.models import AssistantSkillPackage
 
     repo = EvaluationRepository(db)
     dataset = repo.create_dataset(
@@ -130,6 +162,7 @@ def _create_passing_enable_gate(db, *, package_id, version_id, content_digest, b
         actor="tester",
     )
     db.commit()
+    build_rev = current_build_revision()
     run = repo.create_run(
         subject_kind="skill_version",
         subject_aggregate_id=package_id,
@@ -141,7 +174,7 @@ def _create_passing_enable_gate(db, *, package_id, version_id, content_digest, b
         mode="dataset_scripted",
         isolation_namespace_id=_uuid_mod.uuid4(),
         runtime_contract_version=1,
-        required_build_revision="development",
+        required_build_revision=build_rev,
         isolation_digest="c" * 64,
         actor_principal="tester",
     )
@@ -151,34 +184,38 @@ def _create_passing_enable_gate(db, *, package_id, version_id, content_digest, b
         expected_revision=1,
         to_status="completed",
         gate_eligible=True,
-        aggregate_metrics={
-            "all_cases": 100,
-            "recall_at_8": 0.95,
-            "false_injection_rate": 0.01,
-            "direct_answer_accuracy": 0.95,
-            "capability_path_accuracy": 0.90,
-            "completion_success": 0.95,
-            "legacy_completion_success": 0.95,
-            "completion_success_delta_vs_legacy": 0.0,
-            "unauthorized_broader_side_effect_count": 0,
-            "positive_cases": 50,
-            "direct_answer_cases": 20,
-        },
+        aggregate_metrics=_passing_gate_metrics(),
     )
     db.commit()
+    package = db.get(AssistantSkillPackage, package_id)
+    canonical = package_canonical_name or (
+        str(package.canonical_name) if package is not None else "unknown"
+    )
+    catalog_digest = skill_catalog_pin_digest(
+        package_id=package_id,
+        canonical_name=canonical,
+        published_version_id=version_id,
+        content_digest=content_digest,
+    )
+    pins = current_gate_environment_pins(
+        db,
+        catalog_digest=catalog_digest,
+        dataset_version_ids=(published.version_id,),
+        build_revision=build_rev,
+    )
     subject = build_publish_gate_subject(
         kind="skill_version",
         aggregate_id=package_id,
         version_id=version_id,
         content_digest=content_digest,
         binding_digest=binding_digest or ("b" * 64),
-        profile_digest="c" * 64,
-        catalog_digest="d" * 64,
-        dataset_version_ids=(published.version_id,),
-        runtime_contract_version=1,
-        policy_version="plan09-policy-v1",
-        threshold_version=THRESHOLD_POLICY_VERSION,
-        build_revision="development",
+        profile_digest=pins.profile_digest,
+        catalog_digest=pins.catalog_digest,
+        dataset_version_ids=pins.dataset_version_ids,
+        runtime_contract_version=pins.runtime_contract_version,
+        policy_version=pins.policy_version,
+        threshold_version=pins.threshold_version,
+        build_revision=pins.build_revision,
     )
     svc = PublishGateService(db)
     result = svc.create_gate(

@@ -327,13 +327,13 @@ class SkillAdminService:
         Always requires a fresh matching non-expired promotion gate (observe and
         enforce). Gate-use is appended in the same transaction as the enable.
         """
-        from app.assistant.evaluation.assertions import THRESHOLD_POLICY_VERSION
         from app.assistant.evaluation.gates import (
             PublishGateError,
             PublishGateService,
             build_publish_gate_subject,
+            current_gate_environment_pins,
+            skill_catalog_pin_digest,
         )
-        from app.assistant.domain.digests import sha256_canonical_json
 
         principal = self._require_principal(principal, operator=True)
         resolved_gate_id = gate_id if gate_id is not None else getattr(command, "gate_id", None)
@@ -394,110 +394,71 @@ class SkillAdminService:
                     message="catalog enable requires version_source=publish",
                 )
 
-            # Server-derived subject for the exact current published version.
+            # Server-derived subject under lock: content/binding from published
+            # version; env pins recomputed independently (never copied from gate).
             gate_svc = PublishGateService(self.db)
-            existing_gate = (
-                gate_svc.get_gate(resolved_gate_id) if resolved_gate_id is not None else None
-            )
-            placeholder = "0" * 64
-            content_digest = str(version.content_digest or placeholder)
-            binding_digest = str(version.binding_set_digest or placeholder)
-            if existing_gate is not None:
-                profile_digest = str(existing_gate.profile_digest)
-                catalog_digest = str(existing_gate.catalog_digest)
-                dataset_ids = tuple(
-                    UUID(str(x)) for x in (existing_gate.dataset_version_ids or [])
+            content_digest = str(version.content_digest or ("0" * 64))
+            binding_digest = str(version.binding_set_digest or ("0" * 64))
+            dataset_ids = None
+            if resolved_gate_id is not None:
+                dataset_ids = self._packages._dataset_ids_from_gate_evidence(
+                    gate_svc, resolved_gate_id
                 )
-                runtime_cv = int(existing_gate.runtime_contract_version)
-                policy_version = str(existing_gate.policy_version)
-                threshold_version = str(existing_gate.threshold_version)
-                build_revision = str(existing_gate.build_revision)
-                subject_kind = str(existing_gate.subject_kind)
-                # Enable must target exact current published version id.
-                subject_version_id = package.published_version_id
-            else:
-                profile_digest = placeholder
-                catalog_digest = sha256_canonical_json(
-                    {
-                        "package_id": str(package.id),
-                        "canonical_name": package.canonical_name,
-                        "published_version_id": str(package.published_version_id),
-                        "content_digest": content_digest,
-                    }
-                )
-                from uuid import uuid5, NAMESPACE_URL
-
-                dataset_ids = (
-                    uuid5(NAMESPACE_URL, "mindatlas:plan09:gate-placeholder-dataset"),
-                )
-                runtime_cv = 1
-                policy_version = "plan09-policy-v1"
-                threshold_version = THRESHOLD_POLICY_VERSION
-                build_revision = "development"
-                subject_kind = "skill_version"
-                subject_version_id = package.published_version_id
-
-            subject = build_publish_gate_subject(
-                kind=subject_kind,
-                aggregate_id=package.id,
-                version_id=subject_version_id,
+            catalog_digest = skill_catalog_pin_digest(
+                package_id=package.id,
+                canonical_name=str(package.canonical_name),
+                published_version_id=package.published_version_id,
                 content_digest=content_digest,
-                binding_digest=binding_digest,
-                profile_digest=profile_digest,
+            )
+            pins = current_gate_environment_pins(
+                self.db,
                 catalog_digest=catalog_digest,
                 dataset_version_ids=dataset_ids,
-                runtime_contract_version=runtime_cv,
-                policy_version=policy_version,
-                threshold_version=threshold_version,
-                build_revision=build_revision,
             )
-            # If gate pins content/binding, recompute must match version bytes.
-            if existing_gate is not None:
-                if str(existing_gate.subject_content_digest).lower() != content_digest.lower():
-                    raise ApiException(
-                        status_code=409,
-                        code=40982,
-                        message="enable gate content_digest drifted from published version",
-                        details={
-                            "type": "gate_subject_drift",
-                            "details": {"drifts": ["subject_content_digest"]},
-                        },
-                    )
-                if (
-                    existing_gate.subject_binding_digest
-                    and str(existing_gate.subject_binding_digest).lower()
-                    != binding_digest.lower()
-                ):
-                    raise ApiException(
-                        status_code=409,
-                        code=40982,
-                        message="enable gate binding_digest drifted from published version",
-                        details={
-                            "type": "gate_subject_drift",
-                            "details": {"drifts": ["subject_binding_digest"]},
-                        },
-                    )
-                # Gate subject version must be the published version (or its draft source).
-                if str(existing_gate.subject_version_id) not in {
-                    str(package.published_version_id),
-                    str(getattr(version, "source_draft_version_id", None) or ""),
-                }:
-                    # Rebuild subject using gate's version_id only when it matches
-                    # content; otherwise drift.
-                    if str(existing_gate.subject_content_digest).lower() == content_digest.lower():
-                        subject = build_publish_gate_subject(
-                            kind=str(existing_gate.subject_kind),
-                            aggregate_id=package.id,
-                            version_id=existing_gate.subject_version_id,
-                            content_digest=content_digest,
-                            binding_digest=binding_digest,
-                            profile_digest=profile_digest,
-                            catalog_digest=catalog_digest,
-                            dataset_version_ids=dataset_ids,
-                            runtime_contract_version=runtime_cv,
-                            policy_version=policy_version,
-                            threshold_version=threshold_version,
-                            build_revision=build_revision,
+            subject = build_publish_gate_subject(
+                kind="skill_version",
+                aggregate_id=package.id,
+                version_id=package.published_version_id,
+                content_digest=content_digest,
+                binding_digest=binding_digest,
+                profile_digest=pins.profile_digest,
+                catalog_digest=pins.catalog_digest,
+                dataset_version_ids=pins.dataset_version_ids,
+                runtime_contract_version=pins.runtime_contract_version,
+                policy_version=pins.policy_version,
+                threshold_version=pins.threshold_version,
+                build_revision=pins.build_revision,
+            )
+            # Content/binding must still match gate subject when gate is present.
+            if resolved_gate_id is not None:
+                existing_gate = gate_svc.get_gate(resolved_gate_id)
+                if existing_gate is not None:
+                    if (
+                        str(existing_gate.subject_content_digest).lower()
+                        != content_digest.lower()
+                    ):
+                        raise ApiException(
+                            status_code=409,
+                            code=40982,
+                            message="enable gate content_digest drifted from published version",
+                            details={
+                                "type": "gate_subject_drift",
+                                "details": {"drifts": ["subject_content_digest"]},
+                            },
+                        )
+                    if (
+                        existing_gate.subject_binding_digest
+                        and str(existing_gate.subject_binding_digest).lower()
+                        != binding_digest.lower()
+                    ):
+                        raise ApiException(
+                            status_code=409,
+                            code=40982,
+                            message="enable gate binding_digest drifted from published version",
+                            details={
+                                "type": "gate_subject_drift",
+                                "details": {"drifts": ["subject_binding_digest"]},
+                            },
                         )
 
             try:

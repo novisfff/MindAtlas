@@ -435,10 +435,37 @@ class TestImportPreviewApplyModes:
             detail.id,
             PublishSkillVersionCommand(draft_version_id=detail.draft_version.id),  # type: ignore[union-attr]
         )
-        enabled = self.pkg_svc.set_catalog_enabled(
+        # Plan 09: catalog enable requires a matching gate (no Plan 01 bypass).
+        from app.assistant.skills.admin_service import SkillAdminService
+        from app.assistant.skills.schemas import AggregateRevisionCommand
+        from tests.test_agent_skill_admin_service import _create_passing_enable_gate
+
+        version = self.db.get(
+            __import__(
+                "app.assistant.skills.models", fromlist=["AssistantSkillVersion"]
+            ).AssistantSkillVersion,
+            published.id,
+        )
+        assert version is not None
+        gate = _create_passing_enable_gate(
+            self.db,
+            package_id=detail.id,
+            version_id=published.id,
+            content_digest=str(version.content_digest),
+            binding_digest=str(version.binding_set_digest or ("b" * 64)),
+            package_canonical_name=name,
+        )
+        admin = SkillAdminService(self.db)
+        enabled = admin.enable_catalog(
             detail.id,
-            enabled=True,
+            AggregateRevisionCommand(
+                request_id=f"en-append-cat-{name}",
+                expected_aggregate_revision=0,
+                gate_id=gate.id,
+            ),
+            principal=self.principal,
             expected_published_version_id=published.id,
+            gate_id=gate.id,
         )
         assert enabled.catalog_enabled is True
         # Capture evidence fields before append.
