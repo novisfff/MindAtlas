@@ -89,6 +89,7 @@ def admit_and_select_runtime(
             from app.assistant.durable.worker_registry import (
                 RUNTIME_CONTRACT_VERSION,
                 WorkerRegistry,
+                plan08_capability_ledger_feature_digest,
             )
 
             ttl = timedelta(
@@ -96,10 +97,35 @@ def admit_and_select_runtime(
                     getattr(settings, "assistant_worker_registration_ttl_sec", 20) or 20
                 )
             )
+            ledger_mode = (
+                str(
+                    getattr(
+                        settings,
+                        "assistant_capability_ledger_mode",
+                        "legacy_read_only",
+                    )
+                    or "legacy_read_only"
+                )
+                .strip()
+                .lower()
+            )
+            write_mode = (
+                str(
+                    getattr(settings, "assistant_main_agent_write_mode", "off") or "off"
+                )
+                .strip()
+                .lower()
+            )
+            required_feature_digest = (
+                plan08_capability_ledger_feature_digest()
+                if ledger_mode == "enforced" or write_mode == "golden"
+                else None
+            )
             ok = WorkerRegistry(db).has_compatible_worker(
                 app_build_revision=build,
                 runtime_contract_version=RUNTIME_CONTRACT_VERSION,
                 required_checkpoint_codec_version=1,
+                required_capability_feature_digest=required_feature_digest,
                 registration_ttl=ttl,
             )
             if not ok:

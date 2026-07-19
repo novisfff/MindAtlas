@@ -1,10 +1,10 @@
 # Plan 08 Task 9 Verification + Plan 09 Handoff
 
-**Recorded at (UTC):** 2026-07-17T09:42:34Z  
-**Branch:** `worktree-plan-08-capability-call-ledger`  
-**Worktree:** `/root/MindAtlas/.claude/worktrees/plan-08-capability-call-ledger`  
-**Tip commit at verification:** (this Task 9 commit)  
-**Base (Plan 07 on main):** `7f2c04c`  
+**Recorded at (UTC):** 2026-07-17T09:42:34Z
+**Branch:** `worktree-plan-08-capability-call-ledger`
+**Worktree:** `/root/MindAtlas/.claude/worktrees/plan-08-capability-call-ledger`
+**Tip commit at verification:** (this Task 9 commit)
+**Base (Plan 07 on main):** `7f2c04c`
 
 ---
 
@@ -12,8 +12,8 @@
 
 | Item | Value |
 |---|---|
-| Sole Alembic head | **`984c07876856`** (`984c07876856_add_capability_call_ledger.py`) |
-| Parent | `7a3dac0ac2a8` (Plan 07 interrupts) |
+| Sole Alembic head | **`d7e8f9a0b1c3`** (`d7e8f9a0b1c3_protect_reconciliation_evidence.py`) |
+| Plan 08 chain | `7a3dac0ac2a8 → 984c07876856 → f2c3a4b5d6e7 → d7e8f9a0b1c3` |
 | Checkpoint schemas | `{1, 2, 3}` (v3 persists ordered CapabilityCall state; older readers retained) |
 | `RUNTIME_CONTRACT_VERSION` | `1` |
 | Policy contract | v1 `AuthorizationDecision` (byte-compatible) + v2 `AuthorizationDecisionV2` |
@@ -93,7 +93,7 @@ backend/.venv/bin/python -m pytest \
 
 ```bash
 cd backend && .venv/bin/alembic heads
-# 984c07876856 (head)
+# d7e8f9a0b1c3 (head)
 ```
 
 ### 3.4 Not run in this environment (CI/ops gaps)
@@ -186,14 +186,14 @@ cd backend && .venv/bin/alembic heads
 
 ## 8. Plan 09 may start when
 
-- [x] One Alembic head + ledger revision recorded  
-- [x] Frozen call/attempt/reconciliation schemas + digest vectors  
-- [x] Plan 05 v1/v2 + call-owned approval + cancellation settlement matrix  
-- [x] Default-off ledger/write/reconciliation configuration  
-- [x] Focused PG-skippable race/recovery unit suite green  
-- [x] Golden create-only path + full-asset/update negatives  
-- [x] CLI-only/unmounted operator reconciliation path  
-- [x] Isolation seam notes for evaluation namespaces  
+- [x] One Alembic head + ledger revision recorded
+- [x] Frozen call/attempt/reconciliation schemas + digest vectors
+- [x] Plan 05 v1/v2 + call-owned approval + cancellation settlement matrix
+- [x] Default-off ledger/write/reconciliation configuration
+- [x] Focused PG-skippable race/recovery unit suite green
+- [x] Golden create-only path + full-asset/update negatives
+- [x] CLI-only/unmounted operator reconciliation path
+- [x] Isolation seam notes for evaluation namespaces
 
 **Plan 08 M3 backend contract is complete for handoff.** Production `golden` enablement still requires CI PG races, migration cycle, and full dual-wiring sign-off.
 
@@ -204,7 +204,7 @@ cd backend && .venv/bin/alembic heads
 | Area | Path |
 |---|---|
 | Package | `backend/app/assistant/capability_calls/` |
-| Migration | `backend/alembic/versions/984c07876856_add_capability_call_ledger.py` |
+| Migrations | `984c07876856_add_capability_call_ledger.py`, `f2c3a4b5d6e7_fix_capability_attempt_lifecycle.py`, `d7e8f9a0b1c3_protect_reconciliation_evidence.py` |
 | Policy v2 | `backend/app/assistant/policy/write_admission.py`, `contracts.py` |
 | Golden asset | `.../workflows/smart_capture_golden_create.json` |
 | Ops | `docs/operations/assistant-capability-reconciliation.md` |
@@ -212,7 +212,7 @@ cd backend && .venv/bin/alembic heads
 
 ---
 
-## 10. PR #55 completion-audit remediation (2026-07-18, supersedes §§4–8)
+## 10. PR #55 completion-audit remediation (2026-07-19, supersedes §§1–9)
 
 The earlier M3/Plan09-ready conclusion above is no longer authoritative. The
 completion audit found production and transaction-boundary gaps, and this
@@ -240,32 +240,50 @@ Fresh evidence from this branch:
   Tool Result, Checkpoint v3, event, and Run CAS;
 - the golden `create_entry` mutation, outbox, committed Attempt, result Artifact,
   Tool Result, Checkpoint, and Run revision commit or roll back as one set;
-- cancellation finalization is call-aware; reconciliation CLI opens an
-  application Session and defaults remain `legacy_read_only` / `off` in Compose;
-- Plan 08 migration head is `984c07876856`; parent→head→parent→head and the
-  PostgreSQL interrupt/event/fault suites passed against the configured test DB.
+- cancellation finalization is call-aware; settlement accepts only locked,
+  latest, Call-bound Attempt evidence and validates the real result codec;
+- reconciliation locks Run before Call/Attempt, requires an exact v3 Checkpoint
+  plus the sole pending reconciliation obligation, authenticates signed evidence,
+  closes Provider Tool-result transcripts (including unstarted pending siblings),
+  and revalidates bounded same-key retry authorization immediately before claim;
+- denied enforced calls use typed non-executable reservation evidence and persist
+  input Artifact + `proposed → denied` + ordered Checkpoint state without an
+  Attempt, Interrupt, Gateway verifier, or adapter call;
+- fresh enforced/golden admission and enforced Run claims require a compatible
+  worker advertising the Plan 08 feature digest; rollback keeps existing frozen
+  enforced Runs drainable by compatible workers;
+- reconciliation CLI opens an application Session and defaults remain
+  `legacy_read_only` / `off` / reconciliation-disabled in rendered Compose;
+- the linear migration chain is `7a3dac0ac2a8 → 984c07876856 →
+  f2c3a4b5d6e7 → d7e8f9a0b1c3`; the original ledger migration is unchanged,
+  the first child repairs Attempt lifecycle updates, and the second protects
+  referenced reconciliation evidence from UPDATE/DELETE.
 
 Observed verification:
 
 | Gate | Result |
 |---|---|
-| Plan08/prerequisite focused backend | 238 passed, 3 environment skips |
-| PostgreSQL migrations + interrupt/event/fault group | 47 passed |
-| PostgreSQL fault + Run-event races, three consecutive runs | 19 passed each run |
-| Checkpoint-v3/runtime-snapshot replacement-worker recovery | 121 passed |
+| All `test_capability_call_*` modules | 139 passed, 17 PostgreSQL/environment skips, 14 subtests |
+| Reconciliation + typed denial final follow-up | 26 passed, 6 subtests |
+| PostgreSQL Attempt lifecycle + evidence immutability + two-session conflict | 16 passed on an isolated disposable DB |
+| Worker/config/golden rollout group | 76 passed |
+| Former GitHub Backend CI failure files | 50 passed, 4 subtests |
 | Frontend Vitest | 63 passed |
 | Frontend production build | passed |
-| Alembic heads | one head: `984c07876856` |
-| Compose render with immutable test build revision | passed; ledger/write defaults dark |
-| Full backend | 2536 passed, 66 skipped; 20 failures before stale Plan08 assertions were corrected |
-| Backend excluding the two unrelated legacy StructuredTool files | 2540 passed, 66 skipped, 51 subtests |
+| Alembic heads | one head: `d7e8f9a0b1c3` |
+| Compose render with immutable test build revision | passed; ledger/write/reconciliation defaults dark |
+| Full backend | 2619 passed, 82 skipped, 69 subtests |
+| `git diff --check` | passed |
 
-The full-backend failures split into stale Plan07 assertions now corrected
-(v3 codec support/current migration target, durable interrupt ceiling, and the
-exact golden asset set) and 15 unrelated environment failures where the
-installed LangChain exposes `StructuredTool` as non-callable in legacy
-`entry_tools`/`stats_tools` tests. `pip check` independently reports existing
-Docling/Transformers/HuggingFace/Torch dependency incompatibilities.
+The previous GitHub Backend CI failures were reproduced from Actions logs and
+closed without changing production Tool semantics: legacy tests now invoke the
+underlying StructuredTool function explicitly, LightRAG tests own isolated
+SQLite Sessions, and the JavaScript success smoke has a test-only cold-start
+timeout. The full local Backend suite is now green. The current all-feature
+Python 3.12 development venv still reports pre-existing optional
+Docling/Transformers/HuggingFace/Torch `pip check` conflicts; this repository has
+no local Python 3.11 interpreter, so the clean Python 3.11 install remains a CI
+environment check rather than a locally reproduced result.
 
 Remaining release evidence: the replacement-worker recovery behavior is now
 covered in-process, but an OS-process API/default-worker kill-and-restart smoke

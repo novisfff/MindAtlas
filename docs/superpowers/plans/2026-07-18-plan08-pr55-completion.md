@@ -378,7 +378,7 @@ git commit -m "fix(ai): settle cancelling capability calls through CAS"
 - Modify: `deploy/.env.example`
 - Modify: `deploy/docker-compose.yml`
 - Modify: `docs/operations/assistant-capability-reconciliation.md`
-- Create: `backend/tests/test_capability_call_cli.py`
+- Extend: `backend/tests/test_capability_call_reconciliation.py::ReconciliationServiceTests::test_cli_contract_surface`
 
 **Interfaces:**
 - Produces `main(argv, session_factory=SessionLocal) -> int` with safe JSON and stable exits.
@@ -397,7 +397,7 @@ def test_cli_inspect_uses_session_and_redacts(cli_db, capsys):
 - [ ] **Step 2: Verify RED**
 
 ```bash
-backend/.venv/bin/python -m pytest backend/tests/test_capability_call_cli.py -q
+backend/.venv/bin/python -m pytest backend/tests/test_capability_call_reconciliation.py -k cli -q
 ```
 
 Expected: current CLI always exits 2.
@@ -413,8 +413,8 @@ Compose supplies ledger `legacy_read_only`, write `off`, empty secret/cohort. Go
 - [ ] **Step 5: Verify GREEN and commit**
 
 ```bash
-backend/.venv/bin/python -m pytest backend/tests/test_capability_call_cli.py backend/tests/test_capability_call_reconciliation.py backend/tests/test_config.py -q
-git add backend/app/assistant/capability_calls/cli.py backend/app/assistant/capability_calls/reconciliation.py backend/app/config.py backend/.env.example deploy/.env.example deploy/docker-compose.yml docs/operations/assistant-capability-reconciliation.md backend/tests/test_capability_call_cli.py
+backend/.venv/bin/python -m pytest backend/tests/test_capability_call_reconciliation.py backend/tests/test_config.py -q
+git add backend/app/assistant/capability_calls/cli.py backend/app/assistant/capability_calls/reconciliation.py backend/app/config.py backend/.env.example deploy/.env.example deploy/docker-compose.yml docs/operations/assistant-capability-reconciliation.md backend/tests/test_capability_call_reconciliation.py
 git commit -m "fix(ai): make capability reconciliation operable"
 ```
 
@@ -508,7 +508,7 @@ git commit -m "test(ai): repair Plan 08 migration and asset gates"
 - [ ] **Step 1: Run focused and prerequisite suites**
 
 ```bash
-backend/.venv/bin/python -m pytest backend/tests/test_capability_call_fault_matrix.py backend/tests/test_capability_call_idempotency.py backend/tests/test_capability_call_repository.py backend/tests/test_capability_call_dispatcher.py backend/tests/test_capability_call_production_wiring.py backend/tests/test_capability_call_approval.py backend/tests/test_capability_call_local_transaction.py backend/tests/test_capability_call_result_replay.py backend/tests/test_capability_call_write_admission.py backend/tests/test_capability_call_reconciliation.py backend/tests/test_capability_call_cli.py backend/tests/test_capability_call_external_uncertainty.py backend/tests/test_main_agent_golden_create_entry.py -q
+backend/.venv/bin/python -m pytest backend/tests/test_capability_call_fault_matrix.py backend/tests/test_capability_call_idempotency.py backend/tests/test_capability_call_repository.py backend/tests/test_capability_call_dispatcher.py backend/tests/test_capability_call_production_wiring.py backend/tests/test_capability_call_approval.py backend/tests/test_capability_call_local_transaction.py backend/tests/test_capability_call_result_replay.py backend/tests/test_capability_call_write_admission.py backend/tests/test_capability_call_reconciliation.py backend/tests/test_capability_call_external_uncertainty.py backend/tests/test_main_agent_golden_create_entry.py -q
 backend/.venv/bin/python -m pytest backend/tests/test_agent_policy_matrix.py backend/tests/test_agent_policy_evidence.py backend/tests/test_agent_policy_runtime.py backend/tests/test_durable_interrupt_api.py backend/tests/test_durable_crash_matrix.py backend/tests/test_provider_agent_loop.py backend/tests/test_entry_service.py -q
 ```
 

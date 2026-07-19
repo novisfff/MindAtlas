@@ -26,7 +26,9 @@ reset_caches()
 PLAN03_HEAD = "b666b11a5faa"
 PLAN06_HEAD = "6af373ef040f"
 PLAN07_HEAD = "7a3dac0ac2a8"
-PLAN08_HEAD = "984c07876856"
+PLAN08_LEDGER_REVISION = "984c07876856"
+PLAN08_LIFECYCLE_REVISION = "f2c3a4b5d6e7"
+PLAN08_HEAD = "d7e8f9a0b1c3"
 DOWNGRADE_BLOCKED_TOKEN = "MINDATLAS_PLAN04_DOWNGRADE_BLOCKED_ENABLED_AGGREGATES"
 
 CATALOG_CHECK = "ck_assistant_skill_package_catalog_disabled"
@@ -182,7 +184,13 @@ def _reset_to_plan03_parent() -> None:
             if plan04 is not None:
                 with engine.begin() as conn:
                     _clear_enabled_flags(conn)
-                    if current in {PLAN06_HEAD, PLAN07_HEAD, PLAN08_HEAD}:
+                    if current in {
+                        PLAN06_HEAD,
+                        PLAN07_HEAD,
+                        PLAN08_LEDGER_REVISION,
+                        PLAN08_LIFECYCLE_REVISION,
+                        PLAN08_HEAD,
+                    }:
                         from tests.test_durable_interrupt_repository_postgres import (
                             _purge_interrupt_and_active,
                         )

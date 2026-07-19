@@ -37,7 +37,9 @@ pytestmark = pytest.mark.skipif(
 
 PLAN06_HEAD = "6af373ef040f"
 PLAN07_INTERRUPT_REVISION = "7a3dac0ac2a8"
-PLAN08_HEAD = "984c07876856"
+PLAN08_LEDGER_REVISION = "984c07876856"
+PLAN08_LIFECYCLE_REVISION = "f2c3a4b5d6e7"
+PLAN08_HEAD = "d7e8f9a0b1c3"
 DOWNGRADE_BLOCKED_TOKEN = "MINDATLAS_PLAN07_DOWNGRADE_BLOCKED_INTERRUPT_DATA"
 DIGEST_A = "a" * 64
 PEPPER = "pg-test-interrupt-pepper-not-for-prod-32bxx"
@@ -354,6 +356,8 @@ def test_upgrade_creates_interrupt_schema_and_indexes() -> None:
     with _engine() as engine:
         assert _current_revision(engine) in {
             PLAN07_INTERRUPT_REVISION,
+            PLAN08_LEDGER_REVISION,
+            PLAN08_LIFECYCLE_REVISION,
             PLAN08_HEAD,
         }
         with engine.connect() as conn:

@@ -79,7 +79,8 @@ def test_result_corruption_fails_closed() -> None:
         )
 
 
-def test_durable_aggregate_replays_success_without_redispatch() -> None:
+@pytest.mark.parametrize("side_effect", ["read", "write_external"])
+def test_durable_aggregate_replays_success_without_redispatch(side_effect: str) -> None:
     from datetime import datetime, timedelta, timezone
     from types import SimpleNamespace
     import uuid
@@ -94,9 +95,10 @@ def test_durable_aggregate_replays_success_without_redispatch() -> None:
         AssistantRunObligationRevision,
         AssistantRunPolicyRevision,
     )
-    from app.assistant.durable.repository import LeaseToken
+    from app.assistant.durable.repository import DurableRunRepository, LeaseToken
     from app.assistant.policy import (
         create_initial_ledger_state,
+        create_initial_obligation_ledger_state,
         normalize_run_budget_limits,
     )
     from app.assistant.policy.budgets import pure_start_provider_round
@@ -155,11 +157,12 @@ def test_durable_aggregate_replays_success_without_redispatch() -> None:
             budget_digest=ledger.ledger_digest,
             payload=ledger.model_dump(mode="json", by_alias=True),
         )
+        obligation_state = create_initial_obligation_ledger_state()
         obligation = AssistantRunObligationRevision(
             run_id=run.id,
             revision=1,
-            obligation_digest="d" * 64,
-            payload={},
+            obligation_digest=obligation_state.ledger_digest,
+            payload=obligation_state.model_dump(mode="json", by_alias=True),
         )
         db.add_all([manifest, policy, budget, obligation])
         db.flush()
@@ -177,7 +180,7 @@ def test_durable_aggregate_replays_success_without_redispatch() -> None:
             entrypoint_policy_digest="a" * 64,
             global_policy_digest="a" * 64,
             owner_policy_digest="a" * 64,
-            allowed_side_effects=("none", "compute", "read"),
+            allowed_side_effects=("none", "compute", "read", "write_external"),
             grant_source_digest="b" * 64,
             exposure_digest="a" * 64,
             effective_policy_digest="a" * 64,
@@ -189,7 +192,9 @@ def test_durable_aggregate_replays_success_without_redispatch() -> None:
             execution_scope=SimpleNamespace(run_id=run.id),
             call=SimpleNamespace(
                 call_id="durable-read-1",
-                domain_key="search_entries",
+                domain_key=(
+                    "external_write" if side_effect == "write_external" else "search_entries"
+                ),
                 arguments={"q": "x"},
             ),
             current_manifest=SimpleNamespace(manifest_digest="a" * 64),
@@ -200,7 +205,7 @@ def test_durable_aggregate_replays_success_without_redispatch() -> None:
                 )
             ),
             descriptor=SimpleNamespace(
-                behavior=SimpleNamespace(side_effect="read"),
+                behavior=SimpleNamespace(side_effect=side_effect),
                 capability_type="tool",
                 target_id=None,
                 target_version_id=None,
@@ -217,7 +222,7 @@ def test_durable_aggregate_replays_success_without_redispatch() -> None:
         sibling_request = SimpleNamespace(**vars(request))
         sibling_request.call = SimpleNamespace(
             call_id="durable-read-2",
-            domain_key="search_entries",
+            domain_key=request.call.domain_key,
             arguments={"q": "y"},
         )
         runtime_snapshot = {
@@ -231,10 +236,7 @@ def test_durable_aggregate_replays_success_without_redispatch() -> None:
                 model_dump=lambda **_kwargs: {},
             ),
             "budget": live_ledger,
-            "obligation": SimpleNamespace(
-                ledger_digest=obligation.obligation_digest,
-                model_dump=lambda **_kwargs: {},
-            ),
+            "obligation": obligation_state,
         }
         aggregate = DurableCapabilityLedgerAggregate(
             db=db,
@@ -248,8 +250,8 @@ def test_durable_aggregate_replays_success_without_redispatch() -> None:
         tool_call = ProviderToolCall(
             call_id="durable-read-1",
             call_index=0,
-            provider_alias="search_entries",
-            domain_key="search_entries",
+            provider_alias=request.call.domain_key,
+            domain_key=request.call.domain_key,
             arguments={"q": "x"},
             arguments_digest=digest_arguments({"q": "x"}),
             binding_contract_digest="c" * 64,
@@ -308,6 +310,58 @@ def test_durable_aggregate_replays_success_without_redispatch() -> None:
         assert {item.status for item in reserved_state.capability_calls} == {"proposed"}
         prepared = aggregate.prepare(request)
         assert prepared.kind == "dispatch"
+        from app.assistant.capability_calls.models import AssistantCapabilityCallAttempt
+
+        prepared_call = db.get(AssistantCapabilityCall, prepared.call_id)
+        prepared_attempt = db.get(AssistantCapabilityCallAttempt, prepared.attempt_id)
+        assert prepared_call is not None
+        assert prepared_attempt is not None
+        if side_effect == "write_external":
+            assert prepared_call.side_effect_started_at is not None
+            assert prepared_attempt.side_effect_started is True
+            assert (
+                prepared_attempt.side_effect_started_at
+                == prepared_call.side_effect_started_at
+            )
+            from app.assistant.capability_calls.settlement import (
+                CapabilityCallSettlementRepository,
+                SettlementRequest,
+                compute_settlement_evidence_digest,
+            )
+
+            stopped = DurableRunRepository(db).request_stop(
+                run_id=run.id,
+                expected_revision=int(run.state_revision),
+            )
+            db.refresh(prepared_call)
+            db.refresh(prepared_attempt)
+            evidence_digest = compute_settlement_evidence_digest(
+                attempt=prepared_attempt,
+                outcome="unknown",
+                result_artifact=None,
+            )
+            settled = CapabilityCallSettlementRepository(db).settle_while_cancelling(
+                SettlementRequest(
+                    call_id=prepared_call.id,
+                    attempt_id=prepared_attempt.id,
+                    expected_call_revision=int(prepared_call.state_revision),
+                    expected_run_revision=int(stopped.state_revision),
+                    outcome="unknown",
+                    result_artifact_id=None,
+                    evidence_digest=evidence_digest,
+                )
+            )
+            db.commit()
+            db.refresh(prepared_call)
+            db.refresh(prepared_attempt)
+            assert settled.status == "needs_reconciliation"
+            assert prepared_call.status == "needs_reconciliation"
+            assert prepared_attempt.status == "uncertain"
+            return
+
+        assert prepared_call.side_effect_started_at is None
+        assert prepared_attempt.side_effect_started is False
+        assert prepared_attempt.side_effect_started_at is None
         db.refresh(run)
         started_checkpoint = db.get(AssistantRunCheckpoint, run.current_checkpoint_id)
         started_state = decode_checkpoint(started_checkpoint.state_payload)

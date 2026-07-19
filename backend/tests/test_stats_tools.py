@@ -88,7 +88,8 @@ class StatsToolsTests(unittest.TestCase):
 
         token = set_current_db(self.db)
         try:
-            return func(*args, **kwargs)
+            target = getattr(func, "func", None)
+            return (target if callable(target) else func)(*args, **kwargs)
         finally:
             reset_current_db(token)
 

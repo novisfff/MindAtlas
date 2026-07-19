@@ -46,6 +46,10 @@ _ATTEMPT_TRANSITIONS: dict[str, frozenset[str]] = {
     "abandoned": frozenset(),
 }
 
+_EXTERNAL_EFFECT_EXECUTION_MODES = frozenset(
+    {"external_idempotent", "external_reconcilable", "non_retriable"}
+)
+
 
 class CapabilityCallConflict(Exception):
     def __init__(
@@ -238,11 +242,16 @@ class CapabilityCallRepository:
                     call=existing,
                     run=run,
                 )
-            # Optional id check: if caller fixed call_id, it must match.
+            # A deterministic caller-owned id is part of replay identity.  A
+            # different stored id must never be adopted merely because the
+            # remaining logical-key fields happen to match.
             if existing.id != spec.call_id and spec.call_id is not None:
-                # Allow same logical key with same identity even if generated id differs
-                # only when the stored id is authoritative.
-                pass
+                raise CapabilityCallConflict(
+                    CODE_IDENTITY_MISMATCH,
+                    "replayed logical_call_key with mismatched call_id",
+                    call=existing,
+                    run=run,
+                )
             return existing, False
 
         call = AssistantCapabilityCall(
@@ -400,16 +409,32 @@ class CapabilityCallRepository:
         lease: LeaseToken,
         worker_id: str,
         dispatch_deadline_at: datetime | None = None,
+        mark_side_effect_started: bool = False,
         now: datetime | None = None,
     ) -> tuple[AssistantCapabilityCall, AssistantCapabilityCallAttempt]:
         """Transition authorized -> executing and append a claimed Attempt."""
         ts = now or utcnow()
+        side_effect_started_at = None
+        if mark_side_effect_started:
+            call_hint = self.get_call(call_id)
+            if call_hint is None:
+                raise CapabilityCallConflict(
+                    CODE_CALL_NOT_FOUND, f"call {call_id} not found"
+                )
+            if str(call_hint.execution_mode) not in _EXTERNAL_EFFECT_EXECUTION_MODES:
+                raise CapabilityCallConflict(
+                    CODE_INVALID_TRANSITION,
+                    "effect-start claim requires an external execution mode",
+                    call=call_hint,
+                )
+            side_effect_started_at = ts
         call = self.transition_call(
             call_id=call_id,
             expected_call_revision=expected_call_revision,
             expected_run_revision=expected_run_revision,
             to_status="executing",
             lease=lease,
+            side_effect_started_at=side_effect_started_at,
             now=ts,
         )
         attempt_number = int(call.attempt_count) + 1
@@ -427,6 +452,8 @@ class CapabilityCallRepository:
             status="claimed",
             started_at=ts,
             dispatch_deadline_at=dispatch_deadline_at,
+            side_effect_started=mark_side_effect_started,
+            side_effect_started_at=side_effect_started_at,
             created_at=ts,
         )
         self.db.add(attempt)

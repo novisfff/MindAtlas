@@ -358,10 +358,12 @@ class IndexerTests(unittest.TestCase):
 
     def setUp(self) -> None:
         # Ensure skip path is deterministic for unit tests.
+        self.db = make_session()
         os.environ["LIGHTRAG_ENABLED"] = "false"
         reset_caches()
 
     def tearDown(self) -> None:
+        self.db.close()
         os.environ.pop("LIGHTRAG_ENABLED", None)
         reset_caches()
 

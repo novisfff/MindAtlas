@@ -39,6 +39,7 @@ from app.assistant.provider_loop.contracts import (
     ProviderAdapter,
     ProviderCompletionDisposition,
     ProviderCompletionRequest,
+    ProviderDeniedLedgerReservationRequest,
     ProviderDispatchRequest,
     ProviderDispatchResult,
     ProviderExecutionScope,
@@ -2462,7 +2463,9 @@ def _reserve_ledger_siblings(
     ledger = ports.capability_ledger
     if ledger is None:
         return {}
-    requests: list[ProviderDispatchRequest] = []
+    requests: list[
+        ProviderDispatchRequest | ProviderDeniedLedgerReservationRequest
+    ] = []
     authorizations: dict[str, Any] = {}
     for call in calls:
         definition = lookup_tool_by_alias(surface, call.provider_alias)
@@ -2473,6 +2476,29 @@ def _reserve_ledger_siblings(
                 descriptor=definition.descriptor,
                 scope=scope,
             )
+        except AuthorizationEvidenceVerificationError:
+            denial_lookup = getattr(
+                ports.authorization_evidence,
+                "denial_reservation_for_call",
+                None,
+            )
+            if not callable(denial_lookup):
+                return {}
+            try:
+                denial_evidence = denial_lookup(call_id=call.call_id)
+                requests.append(
+                    ProviderDeniedLedgerReservationRequest(
+                        call=call,
+                        binding=definition.binding,
+                        descriptor=definition.descriptor,
+                        current_manifest=current_manifest,
+                        execution_scope=scope,
+                        denial_evidence=denial_evidence,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - invalid denial is not reserved
+                return {}
+            continue
         except Exception:  # noqa: BLE001 - normal dispatch projects the safe denial
             return {}
         if getattr(authorization, "call_id", None) not in {None, call.call_id}:

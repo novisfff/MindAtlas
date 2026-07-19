@@ -43,7 +43,10 @@ from app.assistant.durable.repository import (
     STATUS_RECOVERING,
     STATUS_RUNNING,
 )
-from app.assistant.durable.worker_registry import WorkerIdentity
+from app.assistant.durable.worker_registry import (
+    WorkerIdentity,
+    plan08_capability_ledger_feature_digest,
+)
 from app.common.time import utcnow
 from app.config import get_settings
 
@@ -186,6 +189,14 @@ class RunLeaseService:
             AssistantChatRun.next_attempt_at.is_(None),
             AssistantChatRun.next_attempt_at <= now,
         )
+        compatibility_predicates: list[Any] = []
+        if not self._supports_plan08_ledger():
+            compatibility_predicates.append(
+                or_(
+                    AssistantChatRun.capability_ledger_mode.is_(None),
+                    AssistantChatRun.capability_ledger_mode == "legacy_read_only",
+                )
+            )
 
         stmt = (
             select(AssistantChatRun)
@@ -197,6 +208,7 @@ class RunLeaseService:
                 == int(self.identity.runtime_contract_version),
                 status_predicate,
                 due_predicate,
+                *compatibility_predicates,
             )
             .order_by(
                 # Nulls first for next_attempt_at (treat as due-now priority).
@@ -223,6 +235,7 @@ class RunLeaseService:
                     == int(self.identity.runtime_contract_version),
                     status_predicate,
                     due_predicate,
+                    *compatibility_predicates,
                 )
                 .order_by(
                     AssistantChatRun.next_attempt_at.asc().nullsfirst(),
@@ -257,7 +270,18 @@ class RunLeaseService:
         # Plan 06 Checkpoint schema version is 1; worker must advertise it.
         if 1 not in {int(v) for v in self.identity.supported_checkpoint_codec_versions}:
             return False
+        if (
+            str(run.capability_ledger_mode or "legacy_read_only") == "enforced"
+            and not self._supports_plan08_ledger()
+        ):
+            return False
         return True
+
+    def _supports_plan08_ledger(self) -> bool:
+        return (
+            str(self.identity.capability_feature_digest)
+            == plan08_capability_ledger_feature_digest()
+        )
 
     def _is_eligible(self, run: AssistantChatRun, *, now: datetime) -> bool:
         if str(run.runtime_kind) != RUNTIME_KIND_MAIN_AGENT:

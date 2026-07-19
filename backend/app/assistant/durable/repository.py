@@ -101,6 +101,9 @@ ALLOWED_TRANSITIONS: dict[tuple[str, str], str] = {
     (STATUS_RUNNING, STATUS_NEEDS_RECONCILIATION): "reconcile",
     (STATUS_RECOVERING, STATUS_NEEDS_RECONCILIATION): "reconcile",
     (STATUS_NEEDS_RECONCILIATION, STATUS_CANCELLED): "abandon",
+    (STATUS_NEEDS_RECONCILIATION, STATUS_QUEUED): "reconciliation_resolved",
+    (STATUS_NEEDS_RECONCILIATION, STATUS_COMPLETED): "reconciliation_completed",
+    (STATUS_NEEDS_RECONCILIATION, STATUS_FAILED): "reconciliation_failed",
 }
 
 # Transitions that verify an existing lease token (not claim/takeover which set it).
@@ -677,6 +680,74 @@ class DurableRunRepository:
                 children=children,
                 set_deadline_at=set_deadline_at,
                 clear_lease=True,
+            )
+        )
+
+    def commit_reconciliation_resolution(
+        self,
+        *,
+        run_id: UUID,
+        expected_revision: int,
+        target_status: str,
+        events: Sequence[EventSpec] = (),
+        children: DurableChildBundle | None = None,
+        failure_code: str | None = None,
+    ) -> DurableCommitResult:
+        """Resolve a quiescent reconciliation Run through one aggregate CAS."""
+        if target_status not in {STATUS_QUEUED, STATUS_COMPLETED, STATUS_FAILED}:
+            raise DurableRunConflict(
+                CODE_PROTOCOL_ERROR,
+                f"invalid reconciliation target_status={target_status!r}",
+            )
+        return self._commit(
+            _TransitionPlan(
+                run_id=run_id,
+                expected_revision=expected_revision,
+                target_status=target_status,
+                allowed_from=frozenset({STATUS_NEEDS_RECONCILIATION}),
+                rule_name={
+                    STATUS_QUEUED: "reconciliation_resolved",
+                    STATUS_COMPLETED: "reconciliation_completed",
+                    STATUS_FAILED: "reconciliation_failed",
+                }[target_status],
+                events=tuple(events),
+                children=children,
+                clear_lease=True,
+                set_started_at_if_missing=target_status in TERMINAL_STATUSES,
+                set_ended_at=target_status in TERMINAL_STATUSES,
+                failure_code=failure_code,
+            )
+        )
+
+    def commit_cancellation_settlement(
+        self,
+        *,
+        run_id: UUID,
+        expected_revision: int,
+        target_status: str,
+        events: Sequence[EventSpec] = (),
+        children: DurableChildBundle | None = None,
+    ) -> DurableCommitResult:
+        """Commit a no-new-I/O Call settlement while the Run is cancelling."""
+        if target_status not in {STATUS_CANCELLING, STATUS_NEEDS_RECONCILIATION}:
+            raise DurableRunConflict(
+                CODE_PROTOCOL_ERROR,
+                f"invalid cancellation settlement target={target_status!r}",
+            )
+        return self._commit(
+            _TransitionPlan(
+                run_id=run_id,
+                expected_revision=expected_revision,
+                target_status=target_status,
+                allowed_from=frozenset({STATUS_CANCELLING}),
+                rule_name=(
+                    "call_settlement_proven"
+                    if target_status == STATUS_CANCELLING
+                    else "call_settlement_unproven"
+                ),
+                events=tuple(events),
+                children=children,
+                allow_same_status=target_status == STATUS_CANCELLING,
             )
         )
 

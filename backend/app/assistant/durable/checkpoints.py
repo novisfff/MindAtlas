@@ -156,9 +156,9 @@ def _build_provider_message_rows(
                 ),
                 obligation_revision_id=obl_id,
                 provider_message_id=getattr(msg, "provider_message_id", None),
-                tool_call_id=getattr(msg, "tool_call_id", None)
-                if role == "tool"
-                else None,
+                tool_call_id=(
+                    getattr(msg, "call_id", None) if role == "tool" else None
+                ),
             )
         )
     return rows

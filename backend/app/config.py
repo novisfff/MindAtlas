@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -281,6 +282,20 @@ class Settings(BaseSettings):
     assistant_main_agent_write_cohort_digest: str = Field(
         default="",
         alias="ASSISTANT_MAIN_AGENT_WRITE_COHORT_DIGEST",
+    )
+    # Guarded local reconciliation mutation path. Default-disabled; the actor
+    # identity is server-owned configuration, never request/CLI input.
+    assistant_capability_reconciliation_enabled: bool = Field(
+        default=False,
+        alias="ASSISTANT_CAPABILITY_RECONCILIATION_ENABLED",
+    )
+    assistant_capability_reconciliation_operator_id: UUID | None = Field(
+        default=None,
+        alias="ASSISTANT_CAPABILITY_RECONCILIATION_OPERATOR_ID",
+    )
+    assistant_capability_reconciliation_evidence_secret: str = Field(
+        default="",
+        alias="ASSISTANT_CAPABILITY_RECONCILIATION_EVIDENCE_SECRET",
     )
 
     # Logging
@@ -568,6 +583,14 @@ class Settings(BaseSettings):
                 "assistant_main_agent_write_mode=golden requires "
                 "assistant_capability_ledger_mode=enforced"
             )
+        if (
+            write_mode == "golden"
+            and not self.assistant_capability_reconciliation_enabled
+        ):
+            raise ValueError(
+                "assistant_main_agent_write_mode=golden requires the approved "
+                "capability reconciliation operator path to be enabled"
+            )
         if ledger_mode == "enforced" or write_mode == "golden":
             secret = (self.assistant_capability_call_idempotency_secret or "").strip()
             if len(secret.encode("utf-8")) < 32:
@@ -575,6 +598,21 @@ class Settings(BaseSettings):
                     "assistant_capability_call_idempotency_secret must be at least "
                     "32 bytes when ledger mode is enforced or write mode is golden"
                 )
+        if (
+            self.assistant_capability_reconciliation_enabled
+            and self.assistant_capability_reconciliation_operator_id is None
+        ):
+            raise ValueError(
+                "assistant_capability_reconciliation_operator_id is required when "
+                "assistant_capability_reconciliation_enabled is true"
+            )
+        if self.assistant_capability_reconciliation_enabled and len(
+            self.assistant_capability_reconciliation_evidence_secret.encode("utf-8")
+        ) < 32:
+            raise ValueError(
+                "assistant_capability_reconciliation_evidence_secret must be at least "
+                "32 bytes when reconciliation is enabled"
+            )
         return self
 
     def cors_origins_list(self) -> list[str]:

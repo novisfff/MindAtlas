@@ -63,6 +63,9 @@ class ConfigGateTests(unittest.TestCase):
             ASSISTANT_CAPABILITY_LEDGER_MODE="enforced",
             ASSISTANT_MAIN_AGENT_WRITE_MODE="golden",
             ASSISTANT_CAPABILITY_CALL_IDEMPOTENCY_SECRET=STRONG_SECRET,
+            ASSISTANT_CAPABILITY_RECONCILIATION_ENABLED=True,
+            ASSISTANT_CAPABILITY_RECONCILIATION_OPERATOR_ID=str(uuid.uuid4()),
+            ASSISTANT_CAPABILITY_RECONCILIATION_EVIDENCE_SECRET="e" * 32,
         )
         self.assertEqual(s.assistant_main_agent_write_mode, "golden")
         self.assertEqual(s.assistant_capability_ledger_mode, "enforced")
@@ -101,6 +104,9 @@ class LedgerAdmissionTests(unittest.TestCase):
             ASSISTANT_MAIN_AGENT_WRITE_MODE="golden",
             ASSISTANT_CAPABILITY_CALL_IDEMPOTENCY_SECRET=STRONG_SECRET,
             ASSISTANT_MAIN_AGENT_WRITE_COHORT_DIGEST=DIGEST_A,
+            ASSISTANT_CAPABILITY_RECONCILIATION_ENABLED=True,
+            ASSISTANT_CAPABILITY_RECONCILIATION_OPERATOR_ID=str(uuid.uuid4()),
+            ASSISTANT_CAPABILITY_RECONCILIATION_EVIDENCE_SECRET="e" * 32,
         )
         self.assertTrue(
             is_golden_write_eligible(

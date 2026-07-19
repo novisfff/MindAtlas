@@ -1,7 +1,8 @@
 """Guarded local CLI for capability reconciliation (Plan 08 Task 7).
 
 Not mounted as HTTP. Operators run this against an explicit database session
-with actor + reason + evidence. Never prints secrets or raw provider payloads.
+with a server-configured actor plus reason and evidence. Never prints secrets
+or raw provider payloads.
 """
 
 from __future__ import annotations
@@ -36,13 +37,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     decide_p.add_argument("--reason", required=True)
     decide_p.add_argument("--evidence-artifact-id", action="append", default=[])
-    decide_p.add_argument("--actor-admin-id", required=True)
     decide_p.add_argument("--resolution-request-id", default=None)
-    decide_p.add_argument(
-        "--status-lookup-not-accepted",
-        action="store_true",
-        help="Required for external_reconcilable retry_same_key",
+
+    success_p = sub.add_parser(
+        "issue-success",
+        help="Derive and sign success evidence from a captured result Artifact",
     )
+    success_p.add_argument("--call-id", required=True)
+    success_p.add_argument("--result-artifact-id", required=True)
+
+    failure_p = sub.add_parser(
+        "issue-failure-acceptance",
+        help="Record explicit authenticated product acceptance of unresolved failure",
+    )
+    failure_p.add_argument("--call-id", required=True)
+    failure_p.add_argument("--reason", required=True)
     return p
 
 
@@ -54,6 +63,7 @@ def main(
     argv: list[str] | None = None,
     *,
     session_factory: Callable[[], Session] | None = None,
+    settings: Any | None = None,
 ) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -66,11 +76,45 @@ def main(
     db = session_factory()
     try:
         from app.assistant.capability_calls.reconciliation import (
+            AuthorizedReconciliationActor,
             CapabilityReconciliationService,
+            HmacReconciliationEvidenceVerifier,
+            ReconciliationEvidenceIssuer,
             ReconciliationDecisionRequest,
         )
 
-        service = CapabilityReconciliationService(db)
+        if settings is None:
+            from app.config import get_settings
+
+            settings = get_settings()
+
+        operator_authorizer = None
+        evidence_verifier = None
+        if args.cmd in {"decide", "issue-success", "issue-failure-acceptance"}:
+            enabled = bool(
+                settings.assistant_capability_reconciliation_enabled
+            )
+            operator_id = settings.assistant_capability_reconciliation_operator_id
+            evidence_secret = (
+                settings.assistant_capability_reconciliation_evidence_secret
+            )
+            if not enabled or operator_id is None:
+                raise ValueError("capability reconciliation CLI is disabled")
+
+            def authorize(_request):
+                return AuthorizedReconciliationActor(
+                    actor_admin_id=operator_id,
+                    authorization_method="configured_cli_operator",
+                )
+
+            operator_authorizer = authorize
+            evidence_verifier = HmacReconciliationEvidenceVerifier(evidence_secret)
+
+        service = CapabilityReconciliationService(
+            db,
+            operator_authorizer=operator_authorizer,
+            evidence_verifier=evidence_verifier,
+        )
         call_id = UUID(args.call_id)
         if args.cmd == "inspect":
             call = service.get_call(call_id)
@@ -91,6 +135,37 @@ def main(
             )
             return 0
 
+        if args.cmd in {"issue-success", "issue-failure-acceptance"}:
+            assert evidence_verifier is not None
+            issuer = ReconciliationEvidenceIssuer(
+                db,
+                signer=evidence_verifier,
+                operator_authorizer=operator_authorizer,
+            )
+            if args.cmd == "issue-success":
+                artifact = issuer.issue_success_attestation(
+                    call_id=call_id,
+                    result_artifact_id=UUID(args.result_artifact_id),
+                )
+            else:
+                artifact = issuer.issue_failure_acceptance(
+                    call_id=call_id,
+                    reason=args.reason,
+                )
+            db.commit()
+            _emit(
+                {
+                    "ok": True,
+                    "callId": str(call_id),
+                    "evidenceArtifactId": str(artifact.id),
+                    "evidenceDigest": str(artifact.content_sha256),
+                    "evidenceType": str(
+                        (artifact.metadata_json or {}).get("evidenceType")
+                    ),
+                }
+            )
+            return 0
+
         resolution_request_id = (
             UUID(args.resolution_request_id)
             if args.resolution_request_id
@@ -107,8 +182,6 @@ def main(
                     UUID(value) for value in args.evidence_artifact_id
                 ),
                 resolution_request_id=resolution_request_id,
-                actor_admin_id=UUID(args.actor_admin_id),
-                status_lookup_proved_not_accepted=args.status_lookup_not_accepted,
             )
         )
         db.commit()

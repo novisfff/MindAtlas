@@ -38,6 +38,9 @@ class WorkflowCodeExecutorRuntimeTests(unittest.TestCase):
             entrypoint="main",
             inputs={"text": "mind", "suffix": "atlas"},
             output_fields=[{"name": "result", "type": "string", "nullable": False}],
+            # GitHub runners can spend more than the production default on a
+            # cold Node.js process start while the full backend suite is busy.
+            timeout_ms=15_000,
         )
 
         self.assertEqual(result.output, {"result": "MINDATLAS"})

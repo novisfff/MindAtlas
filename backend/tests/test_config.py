@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from contextlib import contextmanager
 
 import pytest
@@ -17,7 +18,12 @@ reset_caches()
 @contextmanager
 def _cleared_main_agent_env():
     """Temporarily remove ASSISTANT_MAIN_AGENT_* env so defaults are exercised."""
-    keys = [k for k in os.environ if k.startswith("ASSISTANT_MAIN_AGENT_")]
+    keys = [
+        k
+        for k in os.environ
+        if k.startswith("ASSISTANT_MAIN_AGENT_")
+        or k.startswith("ASSISTANT_CAPABILITY_")
+    ]
     saved = {k: os.environ.pop(k) for k in keys}
     try:
         yield
@@ -43,6 +49,44 @@ def test_main_agent_defaults_are_production_safe() -> None:
     assert s.assistant_main_agent_artifact_max_bytes == 1048576
     assert s.assistant_main_agent_artifact_run_max_bytes == 5242880
     assert s.assistant_main_agent_inline_result_bytes == 16384
+    assert s.assistant_capability_reconciliation_enabled is False
+    assert s.assistant_capability_reconciliation_operator_id is None
+    assert s.assistant_capability_reconciliation_evidence_secret == ""
+
+
+def test_reconciliation_cli_requires_configured_operator_when_enabled() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        _settings(ASSISTANT_CAPABILITY_RECONCILIATION_ENABLED=True)
+    assert "reconciliation_operator_id" in str(exc_info.value).lower()
+
+    operator_id = uuid.uuid4()
+    settings = _settings(
+        ASSISTANT_CAPABILITY_RECONCILIATION_ENABLED=True,
+        ASSISTANT_CAPABILITY_RECONCILIATION_OPERATOR_ID=str(operator_id),
+        ASSISTANT_CAPABILITY_RECONCILIATION_EVIDENCE_SECRET="e" * 32,
+    )
+    assert settings.assistant_capability_reconciliation_enabled is True
+    assert settings.assistant_capability_reconciliation_operator_id == operator_id
+
+
+def test_golden_write_requires_usable_reconciliation_operator_path() -> None:
+    common = {
+        "ASSISTANT_MAIN_AGENT_WRITE_MODE": "golden",
+        "ASSISTANT_CAPABILITY_LEDGER_MODE": "enforced",
+        "ASSISTANT_CAPABILITY_CALL_IDEMPOTENCY_SECRET": "i" * 32,
+    }
+    with pytest.raises(ValidationError, match="reconciliation"):
+        _settings(**common)
+
+    operator_id = uuid.uuid4()
+    settings = _settings(
+        **common,
+        ASSISTANT_CAPABILITY_RECONCILIATION_ENABLED=True,
+        ASSISTANT_CAPABILITY_RECONCILIATION_OPERATOR_ID=str(operator_id),
+        ASSISTANT_CAPABILITY_RECONCILIATION_EVIDENCE_SECRET="e" * 32,
+    )
+    assert settings.assistant_main_agent_write_mode == "golden"
+    assert settings.assistant_capability_reconciliation_enabled is True
 
 
 @pytest.mark.parametrize("mode", ["off", "shadow", "read_only"])

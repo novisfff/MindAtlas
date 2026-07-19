@@ -34,7 +34,10 @@ from app.assistant.domain.contracts import (
     ResolvedRunManifestRevision,
 )
 from app.assistant.domain.digests import sha256_canonical_json
-from app.assistant.provider_loop.contracts import ProviderExecutionScope
+from app.assistant.provider_loop.contracts import (
+    DeniedLedgerReservationEvidence,
+    ProviderExecutionScope,
+)
 from app.assistant.provider_loop.messages import ProviderToolCall
 
 LOCAL_ASSISTANT_PRINCIPAL = CapabilityPrincipal(
@@ -466,6 +469,9 @@ class MainAgentAuthorizationEvidenceFactory:
         self._issued_call_ids: set[str] = set()
         self._verifiers: dict[str, SkillPolicyAuthorizationEvidenceVerifier] = {}
         self._decisions: dict[str, Any] = {}
+        self._denied_ledger_reservations: dict[
+            str, DeniedLedgerReservationEvidence
+        ] = {}
         self._pending_verifier_material: dict[str, dict[str, Any]] = {}
 
     def rebind_manifest(
@@ -598,6 +604,19 @@ class MainAgentAuthorizationEvidenceFactory:
                 policy_contract_version=self.policy_contract_version,
             )
             if not decision.policy_allowed or decision.dispatch_disposition == "deny":
+                denial_evidence = DeniedLedgerReservationEvidence(
+                    call_id=call.call_id,
+                    owner=owner,
+                    decision_digest=decision.decision_digest,
+                    reason_code=decision.reason_code,
+                    scope_digest=scope.scope_digest,
+                    manifest_digest=self.manifest.manifest_digest,
+                    binding_contract_digest=binding.ref.binding_contract_digest,
+                    descriptor_digest=descriptor.descriptor_digest,
+                )
+                with self._lock:
+                    self._decisions[call.call_id] = decision
+                    self._denied_ledger_reservations[call.call_id] = denial_evidence
                 raise AuthorizationEvidenceVerificationError(decision.reason_code)
         else:
             decision = evaluate_authorization(
@@ -674,6 +693,18 @@ class MainAgentAuthorizationEvidenceFactory:
         if decision is None:
             raise AuthorizationEvidenceVerificationError("ledger_decision_required")
         return decision
+
+    def denial_reservation_for_call(
+        self, *, call_id: str
+    ) -> DeniedLedgerReservationEvidence:
+        """Return server-frozen, non-executable denial reservation evidence."""
+        with self._lock:
+            evidence = self._denied_ledger_reservations.get(call_id)
+        if evidence is None:
+            raise AuthorizationEvidenceVerificationError(
+                "denied_ledger_reservation_not_found"
+            )
+        return evidence
 
     def authorize_pending_call(
         self, *, call_id: str, approval_binding_digest: str

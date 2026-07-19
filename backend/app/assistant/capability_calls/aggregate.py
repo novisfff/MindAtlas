@@ -385,6 +385,58 @@ class DurableCapabilityLedgerAggregate:
             expected_descriptor_digest=request.descriptor.descriptor_digest,
         )
 
+    def _trusted_denial_owner(self, request: Any, decision: Any) -> Any:
+        """Validate ledger-only denial evidence and return its frozen owner.
+
+        A policy denial must never be represented by executable authorization
+        evidence.  Only the server-issued, non-executable reservation contract
+        can cross this persistence boundary.
+        """
+        from app.assistant.provider_loop.contracts import (
+            ProviderDeniedLedgerReservationRequest,
+        )
+
+        if not isinstance(request, ProviderDeniedLedgerReservationRequest):
+            raise CapabilityCallConflict(
+                "denial_reservation_non_executable_required",
+                "denied call requires non-executable ledger reservation evidence",
+            )
+        if getattr(request, "authorization", None) is not None:
+            raise CapabilityCallConflict(
+                "denial_reservation_non_executable_required",
+                "denied call cannot carry executable authorization evidence",
+            )
+        denial_evidence = request.denial_evidence
+        denial_lookup = getattr(
+            self.authorization_factory,
+            "denial_reservation_for_call",
+            None,
+        )
+        if not callable(denial_lookup):
+            raise CapabilityCallConflict(
+                "denial_reservation_untrusted",
+                "denied call lacks a trusted reservation issuer",
+            )
+        try:
+            trusted_denial = denial_lookup(call_id=request.call.call_id)
+        except Exception as exc:
+            raise CapabilityCallConflict(
+                "denial_reservation_untrusted",
+                "denied call lacks trusted frozen reservation evidence",
+            ) from exc
+        if (
+            trusted_denial != denial_evidence
+            or str(denial_evidence.decision_digest)
+            != str(decision.decision_digest)
+            or str(denial_evidence.reason_code)
+            != str(decision.reason_code)
+        ):
+            raise CapabilityCallConflict(
+                "denial_reservation_mismatch",
+                "denied reservation evidence does not match the frozen decision",
+            )
+        return denial_evidence.owner
+
     def reserve_siblings(
         self, requests: Any, provider_messages: Any = ()
     ) -> None:
@@ -426,7 +478,26 @@ class DurableCapabilityLedgerAggregate:
                         "tagged v2 ledger decision is required",
                     )
                 if disposition == "deny":
-                    continue
+                    owner = self._trusted_denial_owner(request, decision)
+                else:
+                    if getattr(request, "denial_evidence", None) is not None:
+                        raise CapabilityCallConflict(
+                            "denial_reservation_forbidden",
+                            "non-denied sibling cannot carry denial reservation evidence",
+                        )
+                    authorization = getattr(request, "authorization", None)
+                    if authorization is None:
+                        raise CapabilityCallConflict(
+                            "ledger_authorization_required",
+                            "non-denied sibling requires executable authorization evidence",
+                        )
+                    owner = authorization.owner
+
+                if owner is None:
+                    raise CapabilityCallConflict(
+                        "ledger_authorization_required",
+                        "ledger reservation requires a frozen owner",
+                    )
 
                 logical_key = f"provider:{request.call.call_id}"
                 call_id = _stable_uuid(f"mindatlas:{run.id}:{logical_key}")
@@ -450,7 +521,7 @@ class DurableCapabilityLedgerAggregate:
                         principal_digest=decision.principal_digest,
                         request_revision=1,
                     ).approval_binding_digest
-                elif side_effect == "write_local":
+                elif disposition != "deny" and side_effect == "write_local":
                     raise CapabilityCallConflict(
                         "call_approval_required",
                         "local write requires call-owned approval",
@@ -459,8 +530,7 @@ class DurableCapabilityLedgerAggregate:
                 manifest = self._manifest_row(request)
                 artifact = self._input_artifact(request)
                 reserved_artifacts.append(artifact)
-                owner = request.authorization.owner
-                _call, created = self.calls.create_or_verify_proposed(
+                call, created = self.calls.create_or_verify_proposed(
                     ProposeCallSpec(
                         call_id=call_id,
                         run_id=run.id,
@@ -492,7 +562,28 @@ class DurableCapabilityLedgerAggregate:
                         approval_binding_digest=approval_binding_digest,
                     )
                 )
-                created_any = created_any or created
+                mutated = created
+                if disposition == "deny":
+                    reason_code = str(decision.reason_code or "policy_denied")
+                    if str(call.status) == "proposed":
+                        call = self.calls.transition_call(
+                            call_id=call.id,
+                            expected_call_revision=int(call.state_revision),
+                            expected_run_revision=expected_run_revision,
+                            to_status="denied",
+                            lease=self.lease,
+                            failure_code=reason_code,
+                        )
+                        mutated = True
+                    elif (
+                        str(call.status) != "denied"
+                        or str(call.failure_code or "") != reason_code
+                    ):
+                        raise CapabilityCallConflict(
+                            "denial_replay_mismatch",
+                            "stored denial does not match the frozen policy decision",
+                        )
+                created_any = created_any or mutated
 
             from app.assistant.capability_calls.models import (
                 AssistantCapabilityCall,
@@ -726,12 +817,83 @@ class DurableCapabilityLedgerAggregate:
         approval_satisfied = False
 
         if disposition == "deny":
+            owner = self._trusted_denial_owner(request, decision)
+            existing = self.calls.get_call_by_logical_key(
+                run_id=run.id,
+                logical_call_key=logical_key,
+                for_update=True,
+            )
+            if existing is None:
+                self.db.rollback()
+                raise CapabilityCallConflict(
+                    "call_reservation_required",
+                    "denied call requires a durable sibling reservation",
+                )
+            artifact = self.db.get(AssistantRunArtifact, existing.input_artifact_id)
+            if (
+                existing.id != call_id
+                or artifact is None
+                or artifact.run_id != run.id
+                or str(artifact.kind) != "capability_call_input"
+                or str(artifact.storage_kind) != "inline"
+                or artifact.inline_bytes is None
+                or bytes(artifact.inline_bytes) != input_payload
+                or str(artifact.content_sha256) != input_digest
+                or int(artifact.byte_size) != len(input_payload)
+            ):
+                self.db.rollback()
+                raise CapabilityCallConflict(
+                    "denial_identity_mismatch",
+                    "stored denial input Artifact does not match the frozen request",
+                )
+            manifest = self._manifest_row(request)
+            expected = ProposeCallSpec(
+                call_id=call_id,
+                run_id=run.id,
+                expected_run_revision=int(run.state_revision),
+                lease=self.lease,
+                manifest_revision_id=manifest.id,
+                logical_call_key=logical_key,
+                owner_kind=str(owner.owner_kind),
+                owner_id=_uuid_or_none(owner.owner_id),
+                owner_version_id=owner.owner_version_id,
+                capability_type=str(request.descriptor.capability_type),
+                domain_key=request.call.domain_key,
+                target_id=request.descriptor.target_id,
+                target_version_id=request.descriptor.target_version_id,
+                descriptor_digest=request.descriptor.descriptor_digest,
+                authorization_digest=decision.decision_digest,
+                input_artifact_id=artifact.id,
+                input_digest=input_digest,
+                side_effect_class=side_effect,
+                execution_mode=_execution_mode(side_effect),
+                idempotency_key=make_server_idempotency_key(
+                    secret=self.idempotency_secret,
+                    run_id=run.id,
+                    logical_call_key=logical_key,
+                    frozen_target_digest=request.binding.ref.resolution_digest,
+                    canonical_input_digest=input_digest,
+                ),
+                provider_tool_call_id=request.call.call_id,
+            )
+            call, _ = self.calls.create_or_verify_proposed(expected)
+            reason_code = str(decision.reason_code or "policy_denied")
+            if (
+                str(call.status) != "denied"
+                or str(call.failure_code or "") != reason_code
+            ):
+                self.db.rollback()
+                raise CapabilityCallConflict(
+                    "denial_replay_mismatch",
+                    "stored denial does not match the frozen policy decision",
+                )
+            revision = int(call.state_revision)
             self.db.rollback()
             return LedgerPrepareOutcome(
                 kind="deny",
-                call_id=call_id,
-                call_revision=0,
-                reason_code=str(decision.reason_code),
+                call_id=call.id,
+                call_revision=revision,
+                reason_code=reason_code,
             )
 
         if disposition == "awaiting_call_approval":
@@ -928,6 +1090,16 @@ class DurableCapabilityLedgerAggregate:
                 to_status="authorized",
                 lease=self.lease,
             )
+        from app.assistant.capability_calls.reconciliation import (
+            validate_retry_authorization_for_dispatch,
+        )
+
+        claim_now = utcnow()
+        validate_retry_authorization_for_dispatch(
+            self.db,
+            call=call,
+            now=claim_now,
+        )
         worker_id = self.lease.worker_id
         call, attempt = self.calls.claim_attempt(
             call_id=call.id,
@@ -935,6 +1107,13 @@ class DurableCapabilityLedgerAggregate:
             expected_run_revision=int(run.state_revision),
             lease=self.lease,
             worker_id=worker_id,
+            now=claim_now,
+            mark_side_effect_started=str(call.execution_mode)
+            in {
+                "external_idempotent",
+                "external_reconcilable",
+                "non_retriable",
+            },
         )
         attempt = self.calls.transition_attempt(
             attempt_id=attempt.id,

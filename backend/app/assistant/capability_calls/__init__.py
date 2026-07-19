@@ -51,8 +51,11 @@ from app.assistant.capability_calls.release_admission import (  # noqa: F401
     gateway_allows_write,
 )
 from app.assistant.capability_calls.reconciliation import (  # noqa: F401
+    AuthorizedReconciliationActor,
     CapabilityReconciliationService,
+    HmacReconciliationEvidenceVerifier,
     ReconciliationDecisionRequest,
+    ReconciliationEvidenceIssuer,
     ScriptedExternalAdapter,
 )
 from app.assistant.capability_calls.local_write import (  # noqa: F401
@@ -126,6 +129,9 @@ __all__ = [
     "create_entry_local_transactional",
     "CapabilityUnitOfWork",
     "CapabilityReconciliationService",
+    "HmacReconciliationEvidenceVerifier",
+    "ReconciliationEvidenceIssuer",
+    "AuthorizedReconciliationActor",
     "ReconciliationDecisionRequest",
     "ScriptedExternalAdapter",
     "freeze_capability_ledger_mode_for_run",

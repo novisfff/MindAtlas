@@ -206,53 +206,87 @@ class FaultMatrixUnitTests(unittest.TestCase):
         from app.assistant.capability_calls.settlement import (
             CapabilityCallSettlementRepository,
             SettlementRequest,
+            compute_settlement_evidence_digest,
         )
-        from app.assistant.capability_calls.models import AssistantCapabilityCall
+        from tests.test_capability_call_reconciliation import _seed_external_call
+        from app.assistant.capability_calls.models import (
+            AssistantCapabilityCallAttempt,
+        )
         from tests._db import make_session
 
         db = make_session()
         try:
-            run, lease, manifest, art = _seed_run(db, status="cancelling", revision=2)
-            call = AssistantCapabilityCall(
-                id=uuid.uuid4(),
-                run_id=run.id,
-                manifest_revision_id=manifest.id,
-                logical_call_key="provider:0:0:f11",
-                owner_kind="main_agent",
-                capability_type="tool",
-                domain_key="external_write",
-                descriptor_digest=DIGEST_A,
-                authorization_digest=DIGEST_A,
-                input_artifact_id=art.id,
-                input_digest=DIGEST_A,
-                side_effect_class="write_external",
-                execution_mode="external_idempotent",
-                idempotency_key="idem-f11",
-                status="executing",
-                state_revision=2,
-                attempt_count=1,
-                side_effect_started_at=datetime.now(timezone.utc),
-                created_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc),
+            run, call, _ = _seed_external_call(db)
+            attempt = (
+                db.query(AssistantCapabilityCallAttempt)
+                .filter(AssistantCapabilityCallAttempt.call_id == call.id)
+                .one()
             )
-            db.add(call)
+            run.status = "cancelling"
+            run.state_revision = 2
+            call.status = "executing"
+            call.state_revision = 2
+            attempt.status = "dispatched"
+            attempt.error_code = None
+            from app.assistant.durable.codec import (
+                checkpoint_state_digest,
+                decode_checkpoint,
+                encode_checkpoint_v3,
+            )
+            from app.assistant.durable.contracts import (
+                DurableCapabilityCallStateV1,
+                DurableNextActionV2,
+            )
+            from app.assistant.durable.models import AssistantRunCheckpoint
+
+            checkpoint_row = db.get(
+                AssistantRunCheckpoint, run.current_checkpoint_id
+            )
+            checkpoint = decode_checkpoint(checkpoint_row.state_payload)
+            old = checkpoint.capability_calls[0]
+            executing = DurableCapabilityCallStateV1(
+                call_id=old.call_id,
+                logical_call_key=old.logical_call_key,
+                provider_tool_call_id=old.provider_tool_call_id,
+                provider_order=old.provider_order,
+                status="executing",
+                attempt_id=attempt.id,
+            )
+            checkpoint = checkpoint.model_copy(
+                update={
+                    "phase": "dispatching_calls",
+                    "next_action": DurableNextActionV2(kind="dispatch_calls"),
+                    "capability_calls": (executing,),
+                }
+            )
+            checkpoint_row.phase = "dispatching_calls"
+            checkpoint_row.state_payload = encode_checkpoint_v3(checkpoint)
+            checkpoint_row.state_digest = checkpoint_state_digest(checkpoint)
             db.commit()
+            evidence_digest = compute_settlement_evidence_digest(
+                attempt=attempt,
+                outcome="unknown",
+                result_artifact=None,
+            )
             settlement = CapabilityCallSettlementRepository(db)
             run2 = settlement.settle_while_cancelling(
                 SettlementRequest(
                     call_id=call.id,
-                    attempt_id=uuid.uuid4(),
+                    attempt_id=attempt.id,
                     expected_call_revision=2,
                     expected_run_revision=2,
                     outcome="unknown",
                     result_artifact_id=None,
-                    evidence_digest=DIGEST_A,
+                    evidence_digest=evidence_digest,
                 )
             )
             db.commit()
             db.refresh(call)
+            db.refresh(attempt)
             self.assertEqual(run2.status, "needs_reconciliation")
             self.assertEqual(call.status, "needs_reconciliation")
+            self.assertEqual(attempt.status, "uncertain")
+            self.assertEqual(attempt.error_code, "settlement_outcome_unknown")
         finally:
             db.close()
 

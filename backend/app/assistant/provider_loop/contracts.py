@@ -17,6 +17,7 @@ from typing_extensions import Annotated
 from app.assistant.capabilities.contracts import (
     CapabilityAuthorizationEvidence,
     CapabilityDescriptor,
+    CapabilityOwnerRef,
     CapabilityPrincipal,
     CapabilityResult,
     ContinuationRef,
@@ -1013,6 +1014,69 @@ class ProviderDispatchRequest(FrozenContract):
         return self
 
 
+class DeniedLedgerReservationEvidence(FrozenContract):
+    """Typed non-executable evidence for persisting a frozen policy denial."""
+
+    contract_version: Literal[1] = 1
+    kind: Literal["denied_ledger_reservation"] = "denied_ledger_reservation"
+    call_id: str
+    owner: CapabilityOwnerRef
+    decision_digest: str
+    reason_code: str
+    scope_digest: str
+    manifest_digest: str
+    binding_contract_digest: str
+    descriptor_digest: str
+
+    @field_validator("call_id", "reason_code")
+    @classmethod
+    def _ids(cls, value: str, info: Any) -> str:
+        return _require_non_empty_str(value, field_name=info.field_name)
+
+    @field_validator(
+        "decision_digest",
+        "scope_digest",
+        "manifest_digest",
+        "binding_contract_digest",
+        "descriptor_digest",
+    )
+    @classmethod
+    def _evidence_digests(cls, value: str, info: Any) -> str:
+        return _require_digest(value, field_name=info.field_name)
+
+
+class ProviderDeniedLedgerReservationRequest(FrozenContract):
+    """Ledger-only request; deliberately cannot enter ToolDispatcher/Gateway."""
+
+    call: ProviderToolCall
+    binding: FrozenCapabilityBinding
+    descriptor: CapabilityDescriptor
+    current_manifest: ResolvedRunManifestRevision
+    execution_scope: ProviderExecutionScope
+    denial_evidence: DeniedLedgerReservationEvidence
+
+    @model_validator(mode="after")
+    def _identity(self) -> ProviderDeniedLedgerReservationRequest:
+        evidence = self.denial_evidence
+        if self.call.binding_contract_digest != self.binding.ref.binding_contract_digest:
+            raise ValueError("denied reservation binding digest mismatch")
+        if self.call.descriptor_digest != self.descriptor.descriptor_digest:
+            raise ValueError("denied reservation descriptor digest mismatch")
+        if self.execution_scope.run_id != self.current_manifest.run_id:
+            raise ValueError("denied reservation scope run_id mismatch")
+        if evidence.call_id != self.call.call_id:
+            raise ValueError("denied reservation call_id mismatch")
+        if evidence.scope_digest != self.execution_scope.scope_digest:
+            raise ValueError("denied reservation scope digest mismatch")
+        if evidence.manifest_digest != self.current_manifest.manifest_digest:
+            raise ValueError("denied reservation manifest digest mismatch")
+        if evidence.binding_contract_digest != self.binding.ref.binding_contract_digest:
+            raise ValueError("denied reservation evidence binding mismatch")
+        if evidence.descriptor_digest != self.descriptor.descriptor_digest:
+            raise ValueError("denied reservation evidence descriptor mismatch")
+        return self
+
+
 class ProviderDispatchResult(FrozenContract):
     capability_result: CapabilityResult
     next_manifest: ResolvedRunManifestRevision
@@ -1060,7 +1124,9 @@ class CapabilityLedgerAggregatePort(Protocol):
 
     def reserve_siblings(
         self,
-        requests: Sequence[ProviderDispatchRequest],
+        requests: Sequence[
+            ProviderDispatchRequest | ProviderDeniedLedgerReservationRequest
+        ],
         provider_messages: Sequence[ProviderMessage] = (),
     ) -> None: ...
 
@@ -1725,6 +1791,7 @@ __all__ = [
     "CapabilityCallReservationItem",
     "CapabilityCallReservationPort",
     "CurrentCapabilityDescriptorVerifier",
+    "DeniedLedgerReservationEvidence",
     "ManifestEffectLifecyclePort",
     "NoOpCapabilityCallOwnerResolver",
     "NoOpCapabilityCallReservationPort",
@@ -1739,6 +1806,7 @@ __all__ = [
     "ProviderCompletionGuard",
     "ProviderCompletionRequest",
     "ProviderDispatchRequest",
+    "ProviderDeniedLedgerReservationRequest",
     "ProviderDispatchResult",
     "ProviderExecutionScope",
     "ProviderGenerationOptions",
