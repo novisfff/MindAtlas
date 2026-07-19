@@ -12,12 +12,14 @@ import os
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, File, Form, Header, UploadFile
 from pydantic import ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.assistant.skills.admin_service import SkillAdminService
 from app.assistant.skills.diff import diff_skill_versions
+from app.assistant.skills.import_preview import ImportPreviewService
+from app.assistant.skills.package_io import MAX_ZIP_UPLOAD_BYTES, STREAM_CHUNK_SIZE
 from app.assistant.skills.principal import OperatorPrincipal
 from app.assistant.skills.schemas import (
     AddSkillPackageAliasCommand,
@@ -329,6 +331,81 @@ def restore_skill_package_version_as_draft(
         principal=principal,
     )
     return ApiResponse.ok(_dto(summary))
+
+
+# ---------------------------------------------------------------------------
+# Import preview / apply (two-step; create | append | fork)
+# ---------------------------------------------------------------------------
+
+
+class ImportApplyBody(CamelModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    preview_id: UUID = Field(alias="previewId")
+    request_id: str = Field(alias="requestId", min_length=1, max_length=128)
+
+
+async def _read_upload_bounded(file: UploadFile, *, max_bytes: int) -> bytes:
+    buf = bytearray()
+    while True:
+        chunk = await file.read(STREAM_CHUNK_SIZE)
+        if not chunk:
+            break
+        remaining = max_bytes - len(buf)
+        if len(chunk) > remaining:
+            raise ApiException(
+                status_code=413,
+                code=41390,
+                message=f"ZIP upload exceeds {max_bytes} bytes",
+                details={
+                    "type": "payload_too_large",
+                    "details": {"maxBytes": max_bytes},
+                },
+            )
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+@skill_admin_parent_router.post("/skill-packages/import/preview")
+async def preview_skill_package_import(
+    file: UploadFile = File(...),
+    mode: str = Form(...),
+    target_package_id: UUID | None = Form(None, alias="targetPackageId"),
+    expected_aggregate_revision: int | None = Form(
+        None, alias="expectedAggregateRevision"
+    ),
+    fork_canonical_name: str | None = Form(None, alias="forkCanonicalName"),
+    db: Session = Depends(get_db),
+    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+) -> ApiResponse:
+    """Dry-run ZIP import preview. Never persists a package/version row."""
+    raw = await _read_upload_bounded(file, max_bytes=MAX_ZIP_UPLOAD_BYTES)
+    svc = ImportPreviewService(db)
+    result = svc.preview(
+        raw_zip=raw,
+        mode=mode,
+        principal=principal,
+        target_package_id=target_package_id,
+        expected_aggregate_revision=expected_aggregate_revision,
+        fork_canonical_name=fork_canonical_name,
+    )
+    return ApiResponse.ok(_dto(result))
+
+
+@skill_admin_parent_router.post("/skill-packages/import/apply")
+def apply_skill_package_import(
+    body: ImportApplyBody,
+    db: Session = Depends(get_db),
+    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+) -> ApiResponse:
+    """Consume a preview token into one unpublished, catalog-disabled draft."""
+    svc = ImportPreviewService(db)
+    result = svc.apply(
+        preview_id=body.preview_id,
+        request_id=body.request_id,
+        principal=principal,
+    )
+    return ApiResponse.ok(_dto(result))
 
 
 def mount_skill_admin_router(app: Any, *, app_env: str | None = None) -> bool:

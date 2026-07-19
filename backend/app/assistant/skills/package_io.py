@@ -330,6 +330,59 @@ def parse_skill_md(skill_md_bytes: bytes) -> AgentSkillFrontmatter:
         raise ValueError(f"invalid SKILL.md frontmatter: {exc}") from exc
 
 
+def rewrite_skill_md_frontmatter_name(
+    skill_md_bytes: bytes,
+    *,
+    new_name: str,
+) -> bytes:
+    """Rewrite only the standard frontmatter ``name`` field; leave body intact.
+
+    Used by import ``fork_as_new``. Callers must re-run full package validation
+    on the returned bytes. Does not touch description, license, or any other field.
+    """
+    try:
+        canonical = validate_canonical_skill_name(new_name)
+    except ValueError as exc:
+        raise ValueError(f"invalid fork name: {exc}") from exc
+
+    if not isinstance(skill_md_bytes, (bytes, bytearray)) or not skill_md_bytes:
+        raise ValueError("skill_md must be non-empty bytes")
+    raw = bytes(skill_md_bytes)
+    if len(raw) > MAX_SKILL_MD_BYTES:
+        raise ValueError("SKILL.md exceeds size limit")
+
+    # Validate the source package frontmatter first.
+    parse_skill_md(raw)
+
+    match = _FRONTMATTER_RE.match(raw)
+    if match is None:
+        raise ValueError("SKILL.md must begin with a closed YAML frontmatter document")
+    fm_text = _decode_utf8(match.group(1), source_name="SKILL.md frontmatter")
+    lines = fm_text.split("\n")
+    out_lines: list[str] = []
+    replaced = False
+    for line in lines:
+        if not replaced and re.match(r"^name\s*:", line):
+            out_lines.append(f"name: {canonical}")
+            replaced = True
+        else:
+            out_lines.append(line)
+    if not replaced:
+        raise ValueError("SKILL.md frontmatter missing name field")
+
+    new_fm = "\n".join(out_lines)
+    # Preserve body bytes exactly after the original closing frontmatter fence.
+    rest = raw[match.end() :]
+    rewritten = f"---\n{new_fm}\n---\n".encode("utf-8") + rest
+    if len(rewritten) > MAX_SKILL_MD_BYTES:
+        raise ValueError("SKILL.md exceeds size limit after name rewrite")
+    # Ensure the rewrite still parses and carries the new name.
+    fm = parse_skill_md(rewritten)
+    if fm.name != canonical:
+        raise ValueError("SKILL.md name rewrite failed to apply")
+    return rewritten
+
+
 def parse_mindatlas_yaml(yaml_bytes: bytes) -> MindAtlasSkillManifestV1:
     if len(yaml_bytes) > MAX_MINDATLAS_YAML_BYTES:
         raise ValueError("mindatlas.yaml exceeds size limit")
@@ -787,4 +840,5 @@ __all__ = [
     "normalize_package_path",
     "parse_skill_directory_files",
     "parse_skill_zip",
+    "rewrite_skill_md_frontmatter_name",
 ]

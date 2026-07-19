@@ -257,6 +257,67 @@ class RestoreSkillVersionAsDraftCommand(CamelModel):
     expected_aggregate_revision: int = Field(ge=0)
 
 
+# ---------------------------------------------------------------------------
+# Plan 09 import preview / apply contracts
+# ---------------------------------------------------------------------------
+
+
+ImportMode = Literal["create", "append_to_existing", "fork_as_new"]
+
+
+class ImportPreviewToken(FrozenContract):
+    """Opaque server-side preview binding (never echoes raw archive bytes)."""
+
+    preview_id: UUID
+    actor_scope_digest: str
+    mode: ImportMode
+    target_package_id: UUID | None = None
+    expected_aggregate_revision: int | None = None
+    upload_digest: str
+    candidate_content_digest: str
+    expires_at: datetime
+
+
+class ImportPreviewResult(CamelModel):
+    """Bounded dry-run preview for create / append / fork import."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    preview_id: UUID
+    mode: ImportMode
+    upload_digest: str
+    candidate_content_digest: str
+    candidate_canonical_name: str
+    target_package_id: UUID | None = None
+    expected_aggregate_revision: int | None = None
+    expires_at: datetime
+    resource_index: list[dict[str, Any]] = Field(default_factory=list)
+    capability_keys: list[str] = Field(default_factory=list)
+    findings: list[dict[str, Any]] = Field(default_factory=list)
+    structural_diff: list[dict[str, Any]] = Field(default_factory=list)
+    # Explicit safety flags for clients / audits.
+    resource_bytes_excluded: bool = True
+    raw_archive_excluded: bool = True
+
+
+class ImportApplyResult(CamelModel):
+    """Result of consuming a preview token into an unpublished draft."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: ImportMode
+    preview_id: UUID
+    request_id: str
+    package: SkillPackageDetail
+
+
+class ImportApplyCommand(CamelModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preview_id: UUID
+    request_id: str = Field(min_length=1, max_length=128)
+
+
 class SkillVersionDiffHunk(CamelModel):
     """Bounded text hunk for version compare (no secrets / unbounded bodies)."""
 
@@ -735,6 +796,11 @@ __all__ = [
     "DEFAULT_MAIN_AGENT_PROFILE_KEY",
     "FallbackPolicyV1",
     "GlobalSafetyPolicyV1",
+    "ImportApplyCommand",
+    "ImportApplyResult",
+    "ImportMode",
+    "ImportPreviewResult",
+    "ImportPreviewToken",
     "KNOWN_MAIN_AGENT_ENTRYPOINTS",
     "MainAgentEntrypoint",
     "MainAgentProfileSnapshotV1",
