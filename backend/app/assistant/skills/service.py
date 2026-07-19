@@ -792,6 +792,11 @@ class AgentSkillService:
             else:
                 package.catalog_enabled_at = None
                 package.catalog_enabled_by = None
+            # Plan 09 Task 1: production catalog CAS lives on SkillAdminService.
+            # This Plan 01 golden/rollout path does not bump aggregate_revision so
+            # we do not expand Plan 01 callers; operator admin CAS may not observe
+            # Plan 01 set_catalog_enabled until a future integrity task unifies it.
+            # TODO(plan-09): bump aggregate_revision here if Plan 01 path remains live.
             self.db.commit()
             return self._package_summary(package)
         except ApiException:
@@ -1202,7 +1207,19 @@ class AgentSkillService:
         version_name: str,
         origin: str,
         sequence_no: int,
+        extension_manifest_extra: dict[str, Any] | None = None,
     ) -> AssistantSkillVersion:
+        """Insert a new immutable save-row draft.
+
+        ``extension_manifest_extra`` is merged into the parsed extension manifest
+        at INSERT time only (e.g. restore provenance). Never used to UPDATE an
+        existing version row — Plan 01 immutability rejects version UPDATE on PG.
+        """
+        manifest = _manifest_json(parsed)
+        if extension_manifest_extra:
+            base = dict(manifest or {})
+            base.update(extension_manifest_extra)
+            manifest = base
         version = AssistantSkillVersion(
             skill_package_id=package.id,
             sequence_no=sequence_no,
@@ -1213,7 +1230,7 @@ class AgentSkillService:
             skill_md=_decode_text(parsed.skill_md_bytes) or "",
             mindatlas_yaml=_decode_text(parsed.mindatlas_yaml_bytes),
             frontmatter=_frontmatter_json(parsed),
-            extension_manifest=_manifest_json(parsed),
+            extension_manifest=manifest,
             resource_index=_resource_index_json(parsed),
             skill_md_digest=parsed.skill_md_digest,
             manifest_digest=parsed.manifest_digest,

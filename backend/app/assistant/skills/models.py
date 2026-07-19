@@ -93,6 +93,10 @@ class AssistantSkillPackage(UuidPrimaryKeyMixin, TimestampMixin, Base):
     # Durable last-mutation idempotency (requestId retry / altered reuse).
     last_admin_request_id = Column(String(128), nullable=True)
     last_admin_request_digest = Column(String(64), nullable=True)
+    # Restore provenance lives on the package aggregate so content-digest reuse
+    # never mutates immutable version rows (Plan 01 PG UPDATE triggers).
+    # UUID only (no FK): avoids circular FK with assistant_skill_version.
+    last_restored_from_version_id = Column(UUID(as_uuid=True), nullable=True)
 
     draft_version = relationship(
         "AssistantSkillVersion",

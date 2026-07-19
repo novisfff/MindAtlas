@@ -177,7 +177,15 @@ class SkillDiffRestoreTests(unittest.TestCase):
             PublishSkillVersionCommand,
             RestoreSkillVersionAsDraftCommand,
         )
-        from app.assistant.skills.models import AssistantSkillVersion
+        from app.assistant.skills.models import (
+            AssistantSkillPackage,
+            AssistantSkillVersion,
+        )
+
+        # Snapshot v1 extension_manifest before restore — must stay immutable.
+        v1_row_before = self.db.get(AssistantSkillVersion, self.v1.id)
+        assert v1_row_before is not None
+        v1_manifest_before = dict(v1_row_before.extension_manifest or {})
 
         # Publish v2 so published pointer exists and must remain stable.
         published = self.pkg_svc.publish(
@@ -197,9 +205,11 @@ class SkillDiffRestoreTests(unittest.TestCase):
             principal=_operator(),
         )
         self.assertEqual(restored.version_source, "save")
-        # Plan 01 content-digest uniqueness may re-point draft to the original
-        # save row; either way content must match the restored source.
+        # Plan 01 content-digest uniqueness re-points draft to the original
+        # save row; content must match the restored source.
         self.assertEqual(restored.content_digest, self.v1.content_digest)
+        # Reuse path: draft is the existing save row, not a brand-new insert.
+        self.assertEqual(restored.id, self.v1.id)
 
         detail_after = self.pkg_svc.get_package(self.package.id)
         # Published pointer untouched.
@@ -211,10 +221,22 @@ class SkillDiffRestoreTests(unittest.TestCase):
             detail_after.aggregate_revision, detail_before.aggregate_revision + 1
         )
 
-        row = self.db.get(AssistantSkillVersion, restored.id)
-        assert row is not None
-        manifest = dict(row.extension_manifest or {})
-        self.assertEqual(manifest.get("restoredFromVersionId"), str(self.v1.id))
+        # Historical version row is immutable — extension_manifest unchanged.
+        self.db.expire_all()
+        v1_row_after = self.db.get(AssistantSkillVersion, self.v1.id)
+        assert v1_row_after is not None
+        self.assertEqual(
+            dict(v1_row_after.extension_manifest or {}), v1_manifest_before
+        )
+        self.assertNotIn(
+            "restoredFromVersionId",
+            dict(v1_row_after.extension_manifest or {}),
+        )
+
+        # Provenance lives on the package aggregate when reusing a save row.
+        pkg_row = self.db.get(AssistantSkillPackage, self.package.id)
+        assert pkg_row is not None
+        self.assertEqual(pkg_row.last_restored_from_version_id, self.v1.id)
 
         # History still contains original versions — no pointer rewind.
         versions = self.pkg_svc.list_versions(self.package.id)
@@ -224,8 +246,9 @@ class SkillDiffRestoreTests(unittest.TestCase):
         self.assertIn(published.id, ids)
         self.assertIn(restored.id, ids)
 
-        # Restore from the published version (different content than v1 save)
-        # appends a fresh draft when content is not already a save row.
+        # Restore from the published version: content_digest matches the v2
+        # save row (publish copies content), so draft re-points to that save
+        # row and package provenance advances to the published version id.
         restored_pub = self.admin.restore_as_new_draft(
             self.package.id,
             published.id,
@@ -237,12 +260,22 @@ class SkillDiffRestoreTests(unittest.TestCase):
         )
         self.assertEqual(restored_pub.version_source, "save")
         self.assertEqual(restored_pub.content_digest, published.content_digest)
-        # v2 was the draft behind publish — same content_digest as publish source.
         detail_final = self.pkg_svc.get_package(self.package.id)
         self.assertEqual(
             detail_final.published_version.id, published.id  # type: ignore[union-attr]
         )
         self.assertEqual(detail_final.draft_version.id, restored_pub.id)  # type: ignore[union-attr]
+        self.db.expire_all()
+        pkg_row2 = self.db.get(AssistantSkillPackage, self.package.id)
+        assert pkg_row2 is not None
+        self.assertEqual(pkg_row2.last_restored_from_version_id, published.id)
+        # Reused save rows still must not grow restore provenance in-place.
+        reused = self.db.get(AssistantSkillVersion, restored_pub.id)
+        assert reused is not None
+        self.assertNotIn(
+            "restoredFromVersionId",
+            dict(reused.extension_manifest or {}),
+        )
 
     def test_restore_requires_principal(self) -> None:
         from app.common.exceptions import ApiException
@@ -285,6 +318,33 @@ class SkillDiffRestoreTests(unittest.TestCase):
         )
         self.assertEqual(first.id, second.id)
         self.assertEqual(first.content_digest, second.content_digest)
+
+    def test_insert_draft_stamps_restore_provenance_at_insert_time(self) -> None:
+        """Brand-new save rows may carry restoredFromVersionId at INSERT only."""
+        from app.assistant.skills.models import AssistantSkillVersion
+        from app.assistant.skills.models import AssistantSkillPackage
+
+        package = self.db.get(AssistantSkillPackage, self.package.id)
+        assert package is not None
+        parsed = _parse(
+            name=package.canonical_name,
+            body="# Brand new restore body never saved before.\n",
+        )
+        source_id = self.v1.id
+        next_seq = self.pkg_svc._next_sequence(package.id)  # noqa: SLF001
+        draft = self.pkg_svc._insert_draft_version(  # noqa: SLF001
+            package=package,
+            parsed=parsed,
+            version_name="restore-fresh",
+            origin="api",
+            sequence_no=next_seq,
+            extension_manifest_extra={"restoredFromVersionId": str(source_id)},
+        )
+        self.db.commit()
+        row = self.db.get(AssistantSkillVersion, draft.id)
+        assert row is not None
+        manifest = dict(row.extension_manifest or {})
+        self.assertEqual(manifest.get("restoredFromVersionId"), str(source_id))
 
 
 if __name__ == "__main__":

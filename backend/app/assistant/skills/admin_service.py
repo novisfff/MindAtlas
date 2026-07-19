@@ -248,7 +248,11 @@ class SkillAdminService:
                 return reused
             self._assert_revision(package, command.expected_aggregate_revision)
             if package.archived_at is not None:
-                # Already archived: still bump? Treat as idempotent no-op under CAS.
+                # Already archived under a *new* requestId: intentional audit bump.
+                # Identical requestId retry is handled above as a pure no-op (no
+                # revision bump). Re-archive with a distinct requestId still CAS-
+                # advances aggregate_revision so concurrent observers see the
+                # admin action, even though archive state is unchanged.
                 self._bump_revision(package)
                 self.db.commit()
                 return self._detail(package.id)
@@ -570,11 +574,14 @@ class SkillAdminService:
     ) -> SkillVersionSummary:
         """Copy an owned immutable version into a new draft; leave published pointer.
 
-        Plan 01 ``save_draft`` reuses an existing ``version_source=save`` row when
-        content digests match. Restore must still record provenance and advance
-        the draft pointer under CAS; when content already exists as a save row we
-        re-point to it and stamp restore provenance only if absent. When content
-        is new we append a fresh draft via Plan 01 insert helpers.
+        Plan 01 content-digest uniqueness may re-point ``draft_version_id`` to an
+        existing ``version_source=save`` row. Version rows are immutable (Plan 01
+        PG triggers reject UPDATE), so restore NEVER mutates historical version
+        data — including ``extension_manifest``. Provenance
+        ``restoredFromVersionId`` is recorded on the package aggregate
+        (``last_restored_from_version_id``). When a brand-new save row is
+        inserted, provenance is also stamped into that row's
+        ``extension_manifest`` at INSERT time only.
         """
         principal = self._require_principal(principal, operator=False)
         try:
@@ -644,6 +651,7 @@ class SkillAdminService:
                 .one_or_none()
             )
             if existing is not None:
+                # Re-point only — never mutate the immutable historical save row.
                 draft = existing
             else:
                 next_seq = self._packages._next_sequence(package.id)
@@ -653,14 +661,14 @@ class SkillAdminService:
                     version_name=f"restore-from-{version.sequence_no}",
                     origin="api",
                     sequence_no=next_seq,
+                    # Stamp provenance at INSERT time only (never UPDATE later).
+                    extension_manifest_extra={
+                        "restoredFromVersionId": str(version.id),
+                    },
                 )
 
-            # Stamp restore provenance on the draft row (append-only content is
-            # identical; provenance is admin metadata on the draft pointer target).
-            manifest = dict(draft.extension_manifest or {})
-            manifest["restoredFromVersionId"] = str(version.id)
-            draft.extension_manifest = manifest
-
+            # Aggregate-level provenance (always; survives content-digest reuse).
+            package.last_restored_from_version_id = version.id
             package.draft_version_id = draft.id
             package.display_name = draft.frontmatter.get("name") or package.display_name
             if isinstance(draft.frontmatter, dict):

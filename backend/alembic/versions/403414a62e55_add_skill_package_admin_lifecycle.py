@@ -60,6 +60,13 @@ def upgrade() -> None:
         "assistant_skill_package",
         sa.Column("last_admin_request_digest", sa.String(length=64), nullable=True),
     )
+    # Restore provenance on the package aggregate (no FK — avoids circular
+    # dependency with assistant_skill_version). Never written onto immutable
+    # version rows when content-digest reuses an existing save row.
+    op.add_column(
+        "assistant_skill_package",
+        sa.Column("last_restored_from_version_id", sa.UUID(), nullable=True),
+    )
 
     op.add_column(
         "assistant_skill_package_alias",
@@ -163,6 +170,7 @@ def downgrade() -> None:
 
     op.drop_column("assistant_skill_package_alias", "disabled_by")
     op.drop_column("assistant_skill_package_alias", "disabled_at")
+    op.drop_column("assistant_skill_package", "last_restored_from_version_id")
     op.drop_column("assistant_skill_package", "last_admin_request_digest")
     op.drop_column("assistant_skill_package", "last_admin_request_id")
     op.drop_column("assistant_skill_package", "catalog_enabled_by")

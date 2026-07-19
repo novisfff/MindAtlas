@@ -382,6 +382,63 @@ class SkillAdminServiceTests(unittest.TestCase):
         self.assertFalse(hasattr(self.admin, "delete_package"))
         self.assertFalse(hasattr(self.admin, "hard_delete"))
 
+    def test_metadata_vs_archive_stale_revision_conflicts(self) -> None:
+        """Sequential dual-mutation CAS: archive after metadata at same expected rev fails.
+
+        True two-session concurrency is covered by the PG-gated tests in
+        ``test_agent_skill_admin_postgres_migration.py`` (skipped without URL).
+        """
+        from app.common.exceptions import ApiException
+        from app.assistant.skills.schemas import (
+            AggregateRevisionCommand,
+            UpdateSkillPackageMetadataCommand,
+        )
+
+        detail = self.admin.update_metadata(
+            self.package.id,
+            UpdateSkillPackageMetadataCommand(
+                request_id="meta-race-1",
+                expected_aggregate_revision=0,
+                display_name="MetaFirst",
+            ),
+            principal=_operator(),
+        )
+        self.assertEqual(detail.aggregate_revision, 1)
+
+        with self.assertRaises(ApiException) as ctx:
+            self.admin.archive(
+                self.package.id,
+                AggregateRevisionCommand(
+                    request_id="arch-race-1",
+                    expected_aggregate_revision=0,  # stale
+                ),
+                principal=_operator(),
+            )
+        self.assertEqual(ctx.exception.code, 40994)
+
+        archived = self.admin.archive(
+            self.package.id,
+            AggregateRevisionCommand(
+                request_id="arch-race-2",
+                expected_aggregate_revision=1,
+            ),
+            principal=_operator(),
+        )
+        self.assertEqual(archived.aggregate_revision, 2)
+        self.assertIsNotNone(archived.archived_at)
+
+        # Re-archive under a new requestId intentionally bumps revision (audit).
+        re_archived = self.admin.archive(
+            self.package.id,
+            AggregateRevisionCommand(
+                request_id="arch-race-3",
+                expected_aggregate_revision=2,
+            ),
+            principal=_operator(),
+        )
+        self.assertEqual(re_archived.aggregate_revision, 3)
+        self.assertIsNotNone(re_archived.archived_at)
+
 
 if __name__ == "__main__":
     unittest.main()
