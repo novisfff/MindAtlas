@@ -192,7 +192,15 @@ class AssistantService:
     def stop_run(self, *, conversation_id: UUID, run_id: UUID) -> dict[str, Any]:
         self.get_conversation_basic(conversation_id)
         run_svc = AssistantChatRunService(self.db)
-        existing = run_svc.get_run(conversation_id=conversation_id, run_id=run_id)
+        try:
+            existing = run_svc.get_run(conversation_id=conversation_id, run_id=run_id)
+        except ValueError as exc:
+            # Evaluation-namespace IDs must surface as production not-found.
+            if "evaluation identifiers" in str(exc):
+                raise ApiException(
+                    status_code=404, code=40400, message=f"Run not found: {run_id}"
+                ) from exc
+            raise
         if existing is None:
             raise ApiException(status_code=404, code=40400, message=f"Run not found: {run_id}")
 
@@ -546,7 +554,16 @@ class AssistantService:
         bind = self.db.bind or self.db.get_bind()
         read_session_factory = sessionmaker(bind=bind, future=True, expire_on_commit=False)
         with read_session_factory() as read_db:
-            run = AssistantChatRunService(read_db).get_run(conversation_id=conversation_id, run_id=run_id)
+            try:
+                run = AssistantChatRunService(read_db).get_run(
+                    conversation_id=conversation_id, run_id=run_id
+                )
+            except ValueError as exc:
+                if "evaluation identifiers" in str(exc):
+                    raise ApiException(
+                        status_code=404, code=40400, message=f"Run not found: {run_id}"
+                    ) from exc
+                raise
             if run is None:
                 raise ApiException(status_code=404, code=40400, message=f"Run not found: {run_id}")
             runtime_kind = str(getattr(run, "runtime_kind", None) or "legacy")

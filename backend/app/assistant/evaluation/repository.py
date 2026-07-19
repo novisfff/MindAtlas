@@ -831,6 +831,52 @@ class EvaluationRepository:
         ).first()
         return row is not None
 
+    def has_event_sequence(
+        self,
+        *,
+        eval_run_id: UUID,
+        sequence: int,
+    ) -> bool:
+        """Recovery guard: skip re-append when (eval_run_id, sequence) already exists."""
+        row = self.session.execute(
+            select(AssistantSkillEvalEvent.id).where(
+                AssistantSkillEvalEvent.eval_run_id == eval_run_id,
+                AssistantSkillEvalEvent.sequence == int(sequence),
+            )
+        ).first()
+        return row is not None
+
+    def has_event_digest(
+        self,
+        *,
+        eval_run_id: UUID,
+        event_type: str,
+        payload: Mapping[str, Any] | None,
+    ) -> bool:
+        """Optional digest-based recovery guard for events without known sequence."""
+        digest = sha256_canonical_json(
+            {
+                "event_type": str(event_type),
+                "payload": dict(payload or {}),
+            }
+        )
+        rows = self.session.execute(
+            select(AssistantSkillEvalEvent).where(
+                AssistantSkillEvalEvent.eval_run_id == eval_run_id,
+                AssistantSkillEvalEvent.event_type == str(event_type),
+            )
+        ).scalars().all()
+        for row in rows:
+            existing = sha256_canonical_json(
+                {
+                    "event_type": str(row.event_type),
+                    "payload": dict(row.payload or {}),
+                }
+            )
+            if existing == digest:
+                return True
+        return False
+
     # ------------------------------------------------------------------
     # Case results / capability calls / events / artifacts
     # ------------------------------------------------------------------

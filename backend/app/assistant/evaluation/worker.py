@@ -257,6 +257,10 @@ class EvaluationWorker:
             isolation, identity, script = self._materialize_run(run)
             runner = self.runner_factory()
 
+            # In-run heartbeat at execute entry (lease keep-alive).
+            self._heartbeat(repo, run_id=run_id)
+            db.commit()
+
             # Cancellation check before Provider/Capability boundary.
             run = repo.get_run(run_id)
             if run is not None and run.status == "cancelling":
@@ -264,12 +268,37 @@ class EvaluationWorker:
                 db.commit()
                 return None
 
+            last_hb = self._monotonic()
+            hb_interval = float(self.cfg.heartbeat_interval_sec)
+
+            def _on_step_boundary() -> None:
+                nonlocal last_hb
+                now = self._monotonic()
+                if now - last_hb < hb_interval:
+                    return
+                try:
+                    self._heartbeat(repo, run_id=run_id)
+                    db.commit()
+                    last_hb = now
+                except Exception:
+                    logger.exception("in-run heartbeat failed run_id=%s", run_id)
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+
             outcome = runner.run_interactive_scripted(
                 isolation=isolation,
                 identity=identity,
                 script=script,
                 production_delta_probe=lambda: {},
+                step_boundary_hook=_on_step_boundary,
             )
+            # Final heartbeat after execution before persist.
+            try:
+                self._heartbeat(repo, run_id=run_id)
+            except Exception:
+                logger.exception("post-execute heartbeat failed run_id=%s", run_id)
             self._persist_outcome(repo, run_id=run_id, outcome=outcome)
             db.commit()
             return outcome
@@ -295,6 +324,22 @@ class EvaluationWorker:
             return None
         finally:
             db.close()
+
+    def _heartbeat(self, repo: EvaluationRepository, *, run_id: UUID) -> None:
+        """Extend lease + touch heartbeat_at under CAS for the owning worker."""
+        run = repo.get_run(run_id)
+        if run is None:
+            return
+        if run.lease_owner != self.worker_id:
+            return
+        if run.status in {"completed", "failed", "cancelled"}:
+            return
+        repo.heartbeat_run(
+            run_id=run_id,
+            expected_revision=int(run.state_revision),
+            lease_owner=self.worker_id,
+            lease_expires_at=utcnow() + timedelta(seconds=self.cfg.lease_ttl_sec),
+        )
 
     def _materialize_run(
         self, run: Any
@@ -386,25 +431,41 @@ class EvaluationWorker:
                 return None
             return int(current.state_revision)
 
-        # Append events (monotonic). Safe redaction already applied by runner.
+        # Append events (monotonic). Idempotent recovery: skip sequences already
+        # present (mirrors capability-call attempt skip). Key by
+        # (eval_run_id, sequence) when known; fall back to digest match.
         for event in outcome.events:
+            payload = {
+                k: v
+                for k, v in dict(event.get("payload") or {}).items()
+                if k not in {"raw", "credentials", "authorization"}
+            }
+            event_type = str(event.get("event_type") or "eval.event")
+            seq = event.get("seq") or event.get("sequence")
+            if seq is not None and repo.has_event_sequence(
+                eval_run_id=run_id, sequence=int(seq)
+            ):
+                continue
+            if seq is None and repo.has_event_digest(
+                eval_run_id=run_id,
+                event_type=event_type,
+                payload=payload,
+            ):
+                continue
             try:
                 repo.append_event(
                     eval_run_id=run_id,
                     expected_run_revision=rev,
-                    event_type=str(event.get("event_type") or "eval.event"),
-                    payload={
-                        k: v
-                        for k, v in dict(event.get("payload") or {}).items()
-                        if k not in {"raw", "credentials", "authorization"}
-                    },
+                    event_type=event_type,
+                    payload=payload,
                 )
                 refreshed = _refresh_rev()
                 if refreshed is None:
                     return
                 rev = refreshed
             except EvaluationRepositoryError as exc:
-                if exc.code == CODE_STALE_REVISION:
+                if exc.code in {CODE_STALE_REVISION, CODE_CONFLICT}:
+                    # Conflict on unique (run, sequence) is recovery replay.
                     refreshed = _refresh_rev()
                     if refreshed is None:
                         return

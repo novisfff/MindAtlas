@@ -42,6 +42,10 @@ class AssistantChatRunService:
         self.db = db
 
     def get_run(self, *, conversation_id: UUID, run_id: UUID) -> AssistantChatRun | None:
+        # Plan 09 Task 4: production Run lookup rejects evaluation-namespace IDs.
+        from app.assistant.evaluation.contracts import reject_if_evaluation_id
+
+        reject_if_evaluation_id(self.db, entity="run", value=run_id)
         run = self.db.get(AssistantChatRun, run_id)
         if run is None:
             return None
@@ -192,6 +196,10 @@ class AssistantChatRunService:
         after_seq: int,
         limit: int = 200,
     ) -> list[AssistantChatRunEvent]:
+        # Plan 09 Task 4: production event lookup rejects evaluation-namespace IDs.
+        from app.assistant.evaluation.contracts import reject_if_evaluation_id
+
+        reject_if_evaluation_id(self.db, entity="run", value=run_id)
         return (
             self.db.query(AssistantChatRunEvent)
             .filter(

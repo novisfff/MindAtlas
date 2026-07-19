@@ -285,13 +285,106 @@ def assert_not_evaluation_object_key(object_key: str | None) -> None:
 
 
 def assert_not_evaluation_id(*, entity: str, value: UUID | str | None) -> None:
-    """Hook for production Run/CapabilityCall/Event APIs to reject eval IDs.
+    """Reject an identifier already known to be evaluation-scoped.
 
-    Evaluation IDs are ordinary UUIDs; production codepaths must refuse any
-    identifier known to belong to the evaluation namespace via repository lookup
-    or explicit prefix metadata. This helper documents the contract for callers
-    that already know the value is evaluation-scoped.
+    Callers that have already determined the value belongs to the evaluation
+    namespace (via repository lookup or explicit metadata) use this helper to
+    raise a uniform production-side rejection. Prefer
+    ``reject_if_evaluation_id`` when a Session is available and membership is
+    not yet known.
     """
     if value is None:
         return
     raise ValueError(f"production {entity} APIs reject evaluation identifiers")
+
+
+def is_evaluation_run_id(session: Any, run_id: UUID | str | None) -> bool:
+    """Return True when ``run_id`` exists in evaluation run tables."""
+    if run_id is None:
+        return False
+    try:
+        from uuid import UUID as _UUID
+
+        rid = run_id if isinstance(run_id, _UUID) else _UUID(str(run_id))
+    except Exception:
+        return False
+    try:
+        from app.assistant.evaluation.models import AssistantSkillEvalRun
+
+        row = session.get(AssistantSkillEvalRun, rid)
+        return row is not None
+    except Exception:
+        # Fail open for membership probe only when session/model is unavailable
+        # (e.g. unit tests without models). Callers that already know membership
+        # should use assert_not_evaluation_id instead.
+        return False
+
+
+def is_evaluation_capability_call_id(session: Any, call_id: UUID | str | None) -> bool:
+    """Return True when ``call_id`` exists in evaluation capability-call tables."""
+    if call_id is None:
+        return False
+    try:
+        from uuid import UUID as _UUID
+
+        cid = call_id if isinstance(call_id, _UUID) else _UUID(str(call_id))
+    except Exception:
+        return False
+    try:
+        from app.assistant.evaluation.models import AssistantSkillEvalCapabilityCall
+
+        row = session.get(AssistantSkillEvalCapabilityCall, cid)
+        return row is not None
+    except Exception:
+        return False
+
+
+def is_evaluation_event_id(session: Any, event_id: UUID | str | None) -> bool:
+    """Return True when ``event_id`` exists in evaluation event tables."""
+    if event_id is None:
+        return False
+    try:
+        from uuid import UUID as _UUID
+
+        eid = event_id if isinstance(event_id, _UUID) else _UUID(str(event_id))
+    except Exception:
+        return False
+    try:
+        from app.assistant.evaluation.models import AssistantSkillEvalEvent
+
+        row = session.get(AssistantSkillEvalEvent, eid)
+        return row is not None
+    except Exception:
+        return False
+
+
+def reject_if_evaluation_id(
+    session: Any,
+    *,
+    entity: str,
+    value: UUID | str | None,
+) -> None:
+    """Raise when ``value`` is an evaluation-namespace ID for production APIs.
+
+    Wired into production Run/Event/CapabilityCall get-by-id helpers so eval
+    UUIDs that live only in eval tables surface as not-found style rejections
+    (ValueError; routers map to 404).
+    """
+    if value is None:
+        return
+    entity_key = str(entity or "run").strip().lower()
+    if entity_key in {"run", "eval_run", "assistant_chat_run"}:
+        if is_evaluation_run_id(session, value):
+            assert_not_evaluation_id(entity="run", value=value)
+        return
+    if entity_key in {"event", "run_event", "eval_event"}:
+        if is_evaluation_event_id(session, value):
+            assert_not_evaluation_id(entity="event", value=value)
+        return
+    if entity_key in {"capability_call", "call", "eval_capability_call"}:
+        if is_evaluation_capability_call_id(session, value):
+            assert_not_evaluation_id(entity="capability_call", value=value)
+        return
+    # Unknown entity: if it matches an eval run id, still reject (defense).
+    if is_evaluation_run_id(session, value):
+        assert_not_evaluation_id(entity=entity_key or "id", value=value)

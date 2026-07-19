@@ -527,8 +527,11 @@ def _resolve_read_fixture(
 class IsolationWrappedGateway:
     """Wraps CapabilityGateway so every top-level + nested dispatch is isolated.
 
-    Does not import production business adapters. Nested Workflow/Agent children
-    re-enter through this same wrapper; raw Tool invoke shortcuts are rejected.
+    For allowlisted ``none|compute|read`` side effects, delegates to a real
+    inner ``CapabilityGateway`` (or thin adapter) after isolation checks when
+    provided. Draft/write_* are always simulated; unknown is denied. Nested
+    Workflow/Agent children re-enter through this same wrapper; raw Tool invoke
+    shortcuts are rejected.
     """
 
     def __init__(
@@ -536,9 +539,13 @@ class IsolationWrappedGateway:
         *,
         inner: Any | None = None,
         scope: EvalExecutionScope | None = None,
+        memory_provider: Any | None = None,
+        data_provider: Any | None = None,
     ) -> None:
         self._inner = inner
         self._scope = scope
+        self._memory_provider = memory_provider
+        self._data_provider = data_provider
 
     def execute(
         self,
@@ -555,6 +562,7 @@ class IsolationWrappedGateway:
         attempt: int = 1,
         parent_ordinal: int | None = None,
         allow_inner: bool = False,
+        nested: bool = False,
     ) -> Any:
         scope = self._scope or require_active_eval_scope()
         if scope.breached:
@@ -587,6 +595,11 @@ class IsolationWrappedGateway:
             # Prefer descriptor side_effect if available via ports/registry later.
             if effect is None and hasattr(request, "side_effect"):
                 effect = getattr(request, "side_effect")
+            # Classify from descriptor when request carries one.
+            if effect is None:
+                descriptor = getattr(request, "descriptor", None)
+                if descriptor is not None:
+                    effect = classify_side_effect(descriptor)
 
         cap_key = str(cap_key or "unknown.capability")
         if isinstance(args, Mapping):
@@ -607,8 +620,11 @@ class IsolationWrappedGateway:
                     detail="raw inner gateway invoke forbidden under eval",
                 )
 
+            effect_str = str(effect or EVAL_SIDE_EFFECT_UNKNOWN)
+
+            # Route through isolation classification first (deny/simulate/allow).
             record = resolve_eval_dispatch(
-                side_effect=str(effect or EVAL_SIDE_EFFECT_UNKNOWN),
+                side_effect=effect_str,
                 capability_key=cap_key,
                 arguments=arg_map,
                 scope=scope,
@@ -619,16 +635,150 @@ class IsolationWrappedGateway:
                 attempt=attempt,
                 parent_ordinal=parent_ordinal,
             )
-            return {
+
+            # For allowlisted isolated effects, optionally delegate to a real
+            # inner CapabilityGateway after isolation checks. Draft/write are
+            # never delegated; unknown is never delegated.
+            inner_result: Any | None = None
+            if (
+                record.outcome == "succeeded_isolated"
+                and self._inner is not None
+                and effect_str in ALLOWED_ISOLATED_SIDE_EFFECTS
+            ):
+                inner_result = self._delegate_isolated_to_inner(
+                    request=request,
+                    ports=ports,
+                    capability_key=cap_key,
+                    arguments=arg_map,
+                    side_effect=effect_str,
+                    scope=scope,
+                )
+
+            result: dict[str, Any] = {
                 "status": record.outcome,
                 "eval_call_id": str(record.eval_call_id),
                 "logical_call_key": record.logical_call_key,
                 "side_effect": record.side_effect,
                 "decision": dict(record.decision),
                 "nested_depth": scope.nested_depth,
+                "nested": bool(nested) or parent_ordinal is not None,
             }
+            if inner_result is not None:
+                result["inner"] = inner_result
+                result["delegated_to_inner"] = True
+            else:
+                result["delegated_to_inner"] = False
+            return result
         finally:
             scope.nested_depth = max(0, scope.nested_depth - 1)
+
+    def _delegate_isolated_to_inner(
+        self,
+        *,
+        request: Any,
+        ports: Any | None,
+        capability_key: str,
+        arguments: Mapping[str, Any] | None,
+        side_effect: str,
+        scope: EvalExecutionScope,
+    ) -> Any:
+        """Delegate allowlisted isolated dispatch to real Gateway / thin adapter.
+
+        Never mutates production state: memory/data ports are eval-scoped
+        fixture/empty providers. Failures are recorded as isolated adapter
+        errors without escaping isolation.
+        """
+        # Prefer memory/data provider seams when present.
+        if side_effect == EVAL_SIDE_EFFECT_READ and self._data_provider is not None:
+            try:
+                return self._data_provider.read(
+                    capability_key=capability_key,
+                    arguments=dict(arguments or {}),
+                    scope=scope,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "status": "failed",
+                    "safe_code": "eval_data_provider_error",
+                    "error_type": type(exc).__name__,
+                }
+        if self._memory_provider is not None and str(capability_key).startswith(
+            ("memory.", "l1.", "l2.")
+        ):
+            try:
+                return self._memory_provider.read(
+                    capability_key=capability_key,
+                    arguments=dict(arguments or {}),
+                    scope=scope,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "status": "failed",
+                    "safe_code": "eval_memory_provider_error",
+                    "error_type": type(exc).__name__,
+                }
+
+        inner = self._inner
+        if inner is None:
+            return None
+        # Thin adapter: record the call shape for tests / scripted paths.
+        if callable(getattr(inner, "execute", None)):
+            try:
+                if request is not None and ports is not None:
+                    return inner.execute(request, ports=ports)
+                if request is not None:
+                    # Some fakes accept request only.
+                    try:
+                        return inner.execute(request, ports=ports)
+                    except TypeError:
+                        return inner.execute(
+                            request,
+                            capability_key=capability_key,
+                            arguments=dict(arguments or {}),
+                            side_effect=side_effect,
+                        )
+                # Scripted path without full CapabilityExecutionRequest.
+                execute = inner.execute
+                try:
+                    return execute(
+                        None,
+                        capability_key=capability_key,
+                        arguments=dict(arguments or {}),
+                        side_effect=side_effect,
+                        ports=ports,
+                    )
+                except TypeError:
+                    return execute(
+                        {
+                            "capability_key": capability_key,
+                            "arguments": dict(arguments or {}),
+                            "side_effect": side_effect,
+                            "namespace_id": str(scope.isolation.namespace_id),
+                        }
+                    )
+            except IsolationBreach:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("isolation-wrapped inner gateway failed")
+                return {
+                    "status": "failed",
+                    "safe_code": "eval_inner_gateway_error",
+                    "error_type": type(exc).__name__,
+                }
+        if callable(inner):
+            try:
+                return inner(
+                    capability_key=capability_key,
+                    arguments=dict(arguments or {}),
+                    side_effect=side_effect,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "status": "failed",
+                    "safe_code": "eval_inner_callable_error",
+                    "error_type": type(exc).__name__,
+                }
+        return None
 
     def execute_nested_child(
         self,
@@ -639,14 +789,100 @@ class IsolationWrappedGateway:
         parent_ordinal: int | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Nested Workflow/Agent child must re-enter isolation wrapper."""
-        return self.execute(
+        """Nested Workflow/Agent child must re-enter isolation wrapper.
+
+        Re-enters the same IsolationWrappedGateway (same isolation scope) rather
+        than only flipping a boolean flag.
+        """
+        # Explicit re-entry: construct a same-scope nested gateway so child
+        # dispatch cannot bypass isolation classification/policy.
+        nested_gw = IsolationWrappedGateway(
+            inner=self._inner,
+            scope=self._scope or require_active_eval_scope(),
+            memory_provider=self._memory_provider,
+            data_provider=self._data_provider,
+        )
+        return nested_gw.execute(
             None,
             side_effect=side_effect,
             capability_key=capability_key,
             arguments=arguments,
             parent_ordinal=parent_ordinal,
+            nested=True,
             **kwargs,
+        )
+
+
+@dataclass
+class EvalMemoryProvider:
+    """Narrow eval memory seam — fixture/empty modes only; never production writers."""
+
+    mode: Literal["empty", "fixture"] = "empty"
+    fixture_store: dict[str, Any] = field(default_factory=dict)
+
+    def read(
+        self,
+        *,
+        capability_key: str,
+        arguments: Mapping[str, Any] | None = None,
+        scope: EvalExecutionScope | None = None,
+    ) -> Any:
+        if self.mode == "empty":
+            return {"mode": "empty", "items": [], "capability_key": capability_key}
+        key = str((arguments or {}).get("fixture_key") or capability_key)
+        store = self.fixture_store
+        if scope is not None:
+            store = {**scope.fixture_store, **store}
+        return {
+            "mode": "fixture",
+            "capability_key": capability_key,
+            "value": store.get(key),
+        }
+
+    def write(self, *args: Any, **kwargs: Any) -> None:
+        tripwire_production_writer(
+            "L1MemoryWriter",
+            detail="eval memory provider forbids production writes",
+        )
+
+
+@dataclass
+class EvalDataProvider:
+    """Narrow eval data seam — fixture/read_snapshot only; never production writers."""
+
+    mode: Literal["fixture", "read_snapshot"] = "fixture"
+    fixture_store: dict[str, Any] = field(default_factory=dict)
+    snapshot_store: dict[str, Any] = field(default_factory=dict)
+
+    def read(
+        self,
+        *,
+        capability_key: str,
+        arguments: Mapping[str, Any] | None = None,
+        scope: EvalExecutionScope | None = None,
+    ) -> Any:
+        if self.mode == "fixture":
+            key = str((arguments or {}).get("fixture_key") or capability_key)
+            store = self.fixture_store
+            if scope is not None:
+                store = {**scope.fixture_store, **store}
+            return store.get(key)
+        # read_snapshot
+        if scope is not None and scope.isolation.data_snapshot_id is not None:
+            snap_key = str(scope.isolation.data_snapshot_id)
+            store = {**scope.snapshot_store, **self.snapshot_store}
+            if snap_key not in store:
+                raise IsolationError(
+                    "snapshot_missing",
+                    "read_snapshot projection not prebuilt in evaluation namespace",
+                )
+            return store[snap_key]
+        raise IsolationError("invalid_data_mode", "read_snapshot requires data_snapshot_id")
+
+    def write(self, *args: Any, **kwargs: Any) -> None:
+        tripwire_production_writer(
+            "production_write_adapter",
+            detail="eval data provider forbids production writes",
         )
 
 
@@ -718,7 +954,9 @@ __all__ = [
     "EVAL_SIDE_EFFECT_WRITE_EXTERNAL",
     "EVAL_SIDE_EFFECT_WRITE_LOCAL",
     "EvalCallRecord",
+    "EvalDataProvider",
     "EvalExecutionScope",
+    "EvalMemoryProvider",
     "ISOLATION_BREACH",
     "IsolationBreach",
     "IsolationError",

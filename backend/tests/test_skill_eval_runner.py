@@ -73,6 +73,143 @@ class EvaluationRunnerIdentityTests(unittest.TestCase):
         self.assertFalse(view["catalog_mutated"])
         self.assertEqual(view["resolved_by"], "evaluation_runner")
 
+    def test_resolve_candidate_draft_uses_package_port_when_available(self) -> None:
+        """When package/version IDs are present, resolve via real package port."""
+        from app.assistant.evaluation.runner import EvaluationRunner
+
+        package_id = uuid.uuid4()
+        version_id = uuid.uuid4()
+        dig_b = "b" * 64
+
+        class FakePackagePort:
+            def __init__(self) -> None:
+                self.get_package_calls: list = []
+                self.get_version_calls: list = []
+                self.mutated = False
+
+            def get_package(self, pid):  # type: ignore[no-untyped-def]
+                self.get_package_calls.append(pid)
+                return {
+                    "id": str(pid),
+                    "name": "demo-skill",
+                    "canonical_name": "demo-skill",
+                    "status": "draft",
+                }
+
+            def get_version(self, pid, vid):  # type: ignore[no-untyped-def]
+                self.get_version_calls.append((pid, vid))
+                return {
+                    "id": str(vid),
+                    "content_digest": dig_b,
+                    "binding_digest": dig_b,
+                    "status": "draft",
+                    "sequence_no": 1,
+                }
+
+            def mutate(self) -> None:
+                self.mutated = True
+
+        port = FakePackagePort()
+        runner = EvaluationRunner(package_port=port)
+        view = runner.resolve_candidate_draft(
+            subject_kind="skill_draft",
+            subject_aggregate_id=package_id,
+            subject_version_id=version_id,
+            content_digest=DIGEST_A,
+            binding_digest=DIGEST_A,
+        )
+        self.assertTrue(view["package_resolved"])
+        self.assertEqual(view["resolved_by"], "package_port")
+        self.assertFalse(view["catalog_mutated"])
+        self.assertFalse(port.mutated)
+        self.assertEqual(port.get_package_calls, [package_id])
+        self.assertEqual(port.get_version_calls, [(package_id, version_id)])
+        # Authoritative digests from version preferred when present.
+        self.assertEqual(view["content_digest"], dig_b)
+        self.assertEqual(view["binding_digest"], dig_b)
+        self.assertIn("package", view)
+        self.assertIn("version", view)
+
+    def test_step_boundary_hook_invoked_per_step(self) -> None:
+        from app.assistant.evaluation.runner import (
+            EvaluationRunner,
+            InteractiveScript,
+            InteractiveScriptStep,
+            make_interactive_identity,
+        )
+
+        isolation, identity = make_interactive_identity()
+        hits: list[int] = []
+
+        def hook() -> None:
+            hits.append(1)
+
+        outcome = EvaluationRunner().run_interactive_scripted(
+            isolation=isolation,
+            identity=identity,
+            script=InteractiveScript(
+                steps=(
+                    InteractiveScriptStep(
+                        capability_key="a", side_effect="none", logical_call_key="a1"
+                    ),
+                    InteractiveScriptStep(
+                        capability_key="b", side_effect="none", logical_call_key="b1"
+                    ),
+                )
+            ),
+            step_boundary_hook=hook,
+        )
+        self.assertEqual(outcome.terminal, "completed")
+        self.assertEqual(len(hits), 2)
+
+    def test_runner_delegates_allowlisted_to_inner_gateway(self) -> None:
+        from app.assistant.evaluation.runner import (
+            EvaluationRunner,
+            InteractiveScript,
+            InteractiveScriptStep,
+            make_interactive_identity,
+        )
+
+        class FakeInner:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def execute(self, request, **kwargs):  # type: ignore[no-untyped-def]
+                self.calls.append(
+                    {
+                        "capability_key": kwargs.get("capability_key"),
+                        "side_effect": kwargs.get("side_effect"),
+                    }
+                )
+                return {"status": "completed", "via": "inner"}
+
+        inner = FakeInner()
+        isolation, identity = make_interactive_identity()
+        outcome = EvaluationRunner(inner_gateway=inner).run_interactive_scripted(
+            isolation=isolation,
+            identity=identity,
+            script=InteractiveScript(
+                steps=(
+                    InteractiveScriptStep(
+                        capability_key="n", side_effect="none", logical_call_key="n1"
+                    ),
+                    InteractiveScriptStep(
+                        capability_key="w",
+                        side_effect="write_local",
+                        logical_call_key="w1",
+                    ),
+                )
+            ),
+        )
+        self.assertEqual(outcome.terminal, "completed")
+        self.assertEqual(
+            [r.outcome for r in outcome.call_records],
+            ["succeeded_isolated", "simulated"],
+        )
+        # Only allowlisted none/compute/read should hit inner.
+        self.assertEqual(len(inner.calls), 1)
+        self.assertEqual(inner.calls[0]["side_effect"], "none")
+
 
 class EvaluationRunnerDispatchTests(unittest.TestCase):
     def test_none_compute_read_succeeded_isolated(self) -> None:

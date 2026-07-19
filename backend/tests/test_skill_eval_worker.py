@@ -541,6 +541,136 @@ class EvalWorkerExecuteTests(unittest.TestCase):
         finally:
             s.close()
 
+    def test_heartbeat_called_during_execute(self) -> None:
+        """In-run heartbeat must run from _execute_claimed / step boundaries."""
+        from unittest.mock import patch
+
+        run, _ = self._seed_run(
+            script_steps=[
+                {
+                    "capability_key": "eval.noop",
+                    "side_effect": "none",
+                    "logical_call_key": "hb1",
+                },
+                {
+                    "capability_key": "eval.noop",
+                    "side_effect": "none",
+                    "logical_call_key": "hb2",
+                },
+            ]
+        )
+        # Force heartbeat interval to 0 so every step boundary fires.
+        self.worker.cfg.heartbeat_interval_sec = 0
+        with patch.object(
+            self.worker, "_heartbeat", wraps=self.worker._heartbeat
+        ) as hb_spy:
+            outcome = self.worker.execute_run(run.id)
+        self.assertIsNotNone(outcome)
+        self.assertGreaterEqual(hb_spy.call_count, 1)
+
+        s = self._session()
+        try:
+            from app.assistant.evaluation.repository import EvaluationRepository
+
+            repo = EvaluationRepository(s)
+            stored = repo.get_run(run.id)
+            assert stored is not None
+            self.assertIsNotNone(stored.heartbeat_at)
+        finally:
+            s.close()
+
+    def test_recovery_does_not_duplicate_events(self) -> None:
+        """Idempotent event recovery: re-execute must not re-append same sequences."""
+        run, case_id = self._seed_run(
+            script_steps=[
+                {
+                    "capability_key": "eval.noop",
+                    "side_effect": "none",
+                    "logical_call_key": "evt-once",
+                }
+            ]
+        )
+        outcome1 = self.worker.execute_run(run.id)
+        self.assertIsNotNone(outcome1)
+
+        s = self._session()
+        try:
+            from app.assistant.evaluation.repository import EvaluationRepository
+
+            repo = EvaluationRepository(s)
+            events_first = repo.list_events_after(eval_run_id=run.id, after_sequence=0)
+            first_count = len(events_first)
+            self.assertGreaterEqual(first_count, 1)
+            first_seqs = [e.sequence for e in events_first]
+
+            # Force re-queue for recovery.
+            stored = repo.get_run(run.id)
+            assert stored is not None
+            stored.status = "queued"
+            stored.lease_owner = None
+            stored.lease_expires_at = None
+            stored.ended_at = None
+            s.commit()
+        finally:
+            s.close()
+
+        self.worker.execute_run(run.id)
+
+        s = self._session()
+        try:
+            from app.assistant.evaluation.repository import EvaluationRepository
+
+            repo = EvaluationRepository(s)
+            events_second = repo.list_events_after(eval_run_id=run.id, after_sequence=0)
+            second_seqs = [e.sequence for e in events_second]
+            # Sequences remain unique; no duplicate (run_id, sequence) rows.
+            self.assertEqual(len(second_seqs), len(set(second_seqs)))
+            # Existing sequences from first run must still be present exactly once.
+            for seq in first_seqs:
+                self.assertEqual(second_seqs.count(seq), 1)
+            # Capability call still unique.
+            calls = repo.list_capability_calls(eval_run_id=run.id, eval_case_id=case_id)
+            keys = [(c.logical_call_key, c.attempt) for c in calls]
+            self.assertEqual(len(keys), len(set(keys)))
+        finally:
+            s.close()
+
+    def test_production_get_run_rejects_eval_ids(self) -> None:
+        """Real production Run lookup helpers 404/reject evaluation-namespace IDs."""
+        run, _ = self._seed_run()
+        self.db.commit()
+
+        from app.assistant.evaluation.contracts import reject_if_evaluation_id
+        from app.assistant.run_service import AssistantChatRunService
+
+        # Shared reject helper detects membership via eval tables.
+        with self.assertRaises(ValueError) as ctx:
+            reject_if_evaluation_id(self.db, entity="run", value=run.id)
+        self.assertIn("evaluation identifiers", str(ctx.exception))
+
+        # Real production service get_run path.
+        run_svc = AssistantChatRunService(self.db)
+        with self.assertRaises(ValueError) as ctx2:
+            run_svc.get_run(conversation_id=uuid.uuid4(), run_id=run.id)
+        self.assertIn("evaluation identifiers", str(ctx2.exception))
+
+        # Durable repository get_run path.
+        from app.assistant.durable.repository import DurableRunRepository
+
+        durable = DurableRunRepository(self.db)
+        with self.assertRaises(ValueError) as ctx3:
+            durable.get_run(run.id)
+        self.assertIn("evaluation identifiers", str(ctx3.exception))
+
+        # list_events_after also rejects eval run ids.
+        with self.assertRaises(ValueError):
+            run_svc.list_events_after(run_id=run.id, after_seq=0)
+
+        # Unknown (non-eval) UUID is not rejected by membership probe.
+        unknown = uuid.uuid4()
+        reject_if_evaluation_id(self.db, entity="run", value=unknown)  # no raise
+        self.assertIsNone(run_svc.get_run(conversation_id=uuid.uuid4(), run_id=unknown))
+
 
 if __name__ == "__main__":
     unittest.main()

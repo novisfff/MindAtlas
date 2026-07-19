@@ -284,6 +284,10 @@ class DurableRunRepository:
         for_update: bool = False,
         nowait: bool = False,
     ) -> AssistantChatRun | None:
+        # Plan 09 Task 4: production durable Run lookup rejects evaluation IDs.
+        from app.assistant.evaluation.contracts import reject_if_evaluation_id
+
+        reject_if_evaluation_id(self.db, entity="run", value=run_id)
         stmt = select(AssistantChatRun).where(AssistantChatRun.id == run_id)
         if for_update:
             # A caller may already have loaded the Run into this Session before
@@ -977,6 +981,10 @@ class DurableRunRepository:
     # ------------------------------------------------------------------
 
     def _commit(self, plan: _TransitionPlan) -> DurableCommitResult:
+        # Plan 09 Task 4: hard tripwire when Eval scope reaches durable Run commit.
+        from app.assistant.evaluation.isolation import tripwire_production_writer
+
+        tripwire_production_writer("DurableRunRepository.commit")
         now = self._db_now()
         run = self.get_run(plan.run_id, for_update=True)
         if run is None:

@@ -31,7 +31,9 @@ from app.assistant.evaluation.contracts import (
 from app.assistant.evaluation.isolation import (
     ISOLATION_BREACH,
     EvalCallRecord,
+    EvalDataProvider,
     EvalExecutionScope,
+    EvalMemoryProvider,
     IsolationBreach,
     IsolationError,
     IsolationWrappedGateway,
@@ -115,6 +117,10 @@ class EvaluationRunner:
     Architecture ban: this module must not import EntryService, production
     CapabilityCall repository writers, production Run repositories, production
     event/Artifact/memory writers, or production write adapters.
+
+    Composes real Gateway dispatch contracts under isolation via an optional
+    inner CapabilityGateway (or thin adapter). Full Main Agent/Provider loop
+    composition is deferred to Task 5.
     """
 
     def __init__(
@@ -124,11 +130,19 @@ class EvaluationRunner:
         fixture_store: Mapping[str, Any] | None = None,
         snapshot_store: Mapping[str, Any] | None = None,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
+        inner_gateway: Any | None = None,
+        package_port: Any | None = None,
+        memory_provider: EvalMemoryProvider | None = None,
+        data_provider: EvalDataProvider | None = None,
     ) -> None:
         self.config = config or EvaluationRunnerConfig()
         self.fixture_store = dict(fixture_store or {})
         self.snapshot_store = dict(snapshot_store or {})
         self.event_sink = event_sink
+        self.inner_gateway = inner_gateway
+        self.package_port = package_port
+        self.memory_provider = memory_provider
+        self.data_provider = data_provider
         # production_write_mode is recorded but MUST NOT affect simulation.
         self._write_mode_seen = self.config.production_write_mode
 
@@ -164,9 +178,11 @@ class EvaluationRunner:
     ) -> dict[str, Any]:
         """Resolve a candidate draft explicitly without Catalog mutation.
 
-        Returns an evaluation-owned view. Does not write package/catalog rows.
+        When ``package_port`` is injected and package/version IDs are present,
+        resolves via the real package/version read surface (get_package /
+        get_version). Catalog is never mutated.
         """
-        return {
+        view: dict[str, Any] = {
             "subject_kind": subject_kind,
             "aggregate_id": str(subject_aggregate_id),
             "version_id": str(subject_version_id),
@@ -175,7 +191,56 @@ class EvaluationRunner:
             "draft_files": list(draft_files or ()),
             "catalog_mutated": False,
             "resolved_by": "evaluation_runner",
+            "package_resolved": False,
         }
+        port = self.package_port
+        if port is None:
+            return view
+        # Prefer real package/version resolution when IDs are present.
+        try:
+            package = None
+            version = None
+            if hasattr(port, "get_package"):
+                try:
+                    package = port.get_package(subject_aggregate_id)
+                except Exception:
+                    package = None
+            if hasattr(port, "get_version"):
+                try:
+                    # AgentSkillService signature: get_version(package_id, version_id)
+                    version = port.get_version(subject_aggregate_id, subject_version_id)
+                except TypeError:
+                    try:
+                        version = port.get_version(subject_version_id)
+                    except Exception:
+                        version = None
+                except Exception:
+                    version = None
+            if package is not None or version is not None:
+                view["package_resolved"] = True
+                view["resolved_by"] = "package_port"
+                if package is not None:
+                    view["package"] = _safe_package_view(package)
+                if version is not None:
+                    view["version"] = _safe_version_view(version)
+                    # Prefer authoritative digests from the version when present.
+                    for attr, key in (
+                        ("content_digest", "content_digest"),
+                        ("contentDigest", "content_digest"),
+                        ("binding_digest", "binding_digest"),
+                        ("bindingDigest", "binding_digest"),
+                    ):
+                        val = getattr(version, attr, None)
+                        if val is None and isinstance(version, Mapping):
+                            val = version.get(attr)
+                        if val is not None and key in view:
+                            view[key] = str(val)
+        except Exception:
+            # Fail soft: keep evaluation-owned draft view; do not mutate catalog.
+            view["package_resolved"] = False
+            view["resolved_by"] = "evaluation_runner"
+        view["catalog_mutated"] = False
+        return view
 
     def run_interactive_scripted(
         self,
@@ -184,11 +249,15 @@ class EvaluationRunner:
         identity: EvalExecutionIdentity,
         script: InteractiveScript,
         production_delta_probe: Callable[[], Mapping[str, int]] | None = None,
+        step_boundary_hook: Callable[[], None] | None = None,
     ) -> EvaluationCaseOutcome:
         """Run one interactive_scripted case under isolation.
 
         Requires RuntimeIsolationContext + EvalExecutionIdentity before any
         Gateway construction. Missing/mismatched identity fails closed.
+
+        ``step_boundary_hook`` is invoked at loop boundaries (per step) so the
+        worker can heartbeat the lease during long executes.
         """
         assert_isolation_snapshot_fields(isolation)
         iso_digest = isolation_digest(isolation)
@@ -206,6 +275,7 @@ class EvaluationRunner:
                     script=script,
                     iso_digest=iso_digest,
                     production_delta_probe=production_delta_probe,
+                    step_boundary_hook=step_boundary_hook,
                 )
         except IsolationError as exc:
             # Scope failed to install — no Gateway was constructed.
@@ -244,10 +314,25 @@ class EvaluationRunner:
         script: InteractiveScript,
         iso_digest: str,
         production_delta_probe: Callable[[], Mapping[str, int]] | None,
+        step_boundary_hook: Callable[[], None] | None = None,
     ) -> EvaluationCaseOutcome:
         # Gateway construction only after scope is active.
         require_active_eval_scope()
-        gateway = IsolationWrappedGateway(scope=scope)
+        memory = self.memory_provider or EvalMemoryProvider(
+            mode=scope.isolation.memory_mode,  # type: ignore[arg-type]
+            fixture_store=self.fixture_store,
+        )
+        data = self.data_provider or EvalDataProvider(
+            mode=scope.isolation.data_mode,  # type: ignore[arg-type]
+            fixture_store=self.fixture_store,
+            snapshot_store=self.snapshot_store,
+        )
+        gateway = IsolationWrappedGateway(
+            scope=scope,
+            inner=self.inner_gateway,
+            memory_provider=memory,
+            data_provider=data,
+        )
         scope.record_event(
             "eval.run_started",
             {
@@ -255,6 +340,7 @@ class EvaluationRunner:
                 "runner_contract_version": RUNNER_CONTRACT_VERSION,
                 "production_write_mode_ignored": True,
                 "production_write_mode_seen": self._write_mode_seen,
+                "inner_gateway": self.inner_gateway is not None,
             },
         )
         self._emit(scope)
@@ -263,6 +349,11 @@ class EvaluationRunner:
         failure_code: str | None = None
 
         for idx, step in enumerate(script.steps):
+            if step_boundary_hook is not None:
+                try:
+                    step_boundary_hook()
+                except Exception:
+                    logger.exception("step_boundary_hook failed")
             if scope.cancelled:
                 terminal = "cancelled"
                 break
@@ -417,6 +508,48 @@ class EvaluationRunner:
             return
         # Emit only the latest event to avoid re-sending full history.
         self.event_sink(dict(scope.events[-1]))
+
+
+def _safe_package_view(package: Any) -> dict[str, Any]:
+    """Project package detail into an evaluation-safe, non-mutating view."""
+    if isinstance(package, Mapping):
+        keys = ("id", "name", "canonical_name", "display_name", "status")
+        return {k: package.get(k) for k in keys if k in package or package.get(k) is not None}
+    out: dict[str, Any] = {}
+    for attr in ("id", "name", "canonical_name", "display_name", "status"):
+        val = getattr(package, attr, None)
+        if val is not None:
+            out[attr] = str(val) if not isinstance(val, (str, int, bool)) else val
+    return out
+
+
+def _safe_version_view(version: Any) -> dict[str, Any]:
+    """Project version detail into an evaluation-safe, non-mutating view."""
+    if isinstance(version, Mapping):
+        keys = (
+            "id",
+            "content_digest",
+            "contentDigest",
+            "binding_digest",
+            "bindingDigest",
+            "sequence_no",
+            "status",
+        )
+        return {k: version.get(k) for k in keys if version.get(k) is not None}
+    out: dict[str, Any] = {}
+    for attr in (
+        "id",
+        "content_digest",
+        "contentDigest",
+        "binding_digest",
+        "bindingDigest",
+        "sequence_no",
+        "status",
+    ):
+        val = getattr(version, attr, None)
+        if val is not None:
+            out[attr] = str(val) if not isinstance(val, (str, int, bool)) else val
+    return out
 
 
 def make_interactive_identity(

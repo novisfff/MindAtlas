@@ -508,5 +508,142 @@ class CancelAndCrashIsolationTests(unittest.TestCase):
         self.assertEqual(len(outcome.call_records), 1)
 
 
+class IsolationWrappedGatewayDelegationTests(unittest.TestCase):
+    def test_delegates_to_real_gateway_for_allowlisted_read_none(self) -> None:
+        """IsolationWrappedGateway must call inner gateway for none|compute|read."""
+        from app.assistant.evaluation.isolation import (
+            IsolationWrappedGateway,
+            eval_execution_scope,
+            build_isolation_context,
+        )
+        from app.assistant.evaluation.contracts import EvalExecutionIdentity
+
+        class FakeInnerGateway:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def execute(self, request, **kwargs):  # type: ignore[no-untyped-def]
+                self.calls.append(
+                    {
+                        "request": request,
+                        "capability_key": kwargs.get("capability_key"),
+                        "side_effect": kwargs.get("side_effect"),
+                        "arguments": kwargs.get("arguments"),
+                    }
+                )
+                return {"status": "completed", "output": {"ok": True}}
+
+        ns = _uuid()
+        isolation = build_isolation_context(
+            namespace_id=ns,
+            subject_digest=DIGEST_A,
+            dataset_version_ids=(_uuid(),),
+        )
+        identity = EvalExecutionIdentity(
+            eval_run_id=_uuid(),
+            eval_case_id=_uuid(),
+            namespace_id=ns,
+            owner_kind="test",
+            subject_kind="skill_draft",
+            subject_aggregate_id=_uuid(),
+            subject_version_id=_uuid(),
+        )
+        inner = FakeInnerGateway()
+        with eval_execution_scope(isolation=isolation, identity=identity) as scope:
+            gw = IsolationWrappedGateway(inner=inner, scope=scope)
+            r_none = gw.execute(
+                None,
+                side_effect="none",
+                capability_key="tool.compute_local",
+                arguments={"x": 1},
+            )
+            r_read = gw.execute(
+                None,
+                side_effect="read",
+                capability_key="tool.read_fixture",
+                arguments={"fixture_key": "k"},
+            )
+            r_write = gw.execute(
+                None,
+                side_effect="write_local",
+                capability_key="tool.write",
+                arguments={"title": "x"},
+            )
+            r_unknown = gw.execute(
+                None,
+                side_effect="unknown",
+                capability_key="tool.mystery",
+            )
+
+        self.assertEqual(r_none["status"], "succeeded_isolated")
+        self.assertTrue(r_none.get("delegated_to_inner"))
+        self.assertEqual(r_read["status"], "succeeded_isolated")
+        self.assertTrue(r_read.get("delegated_to_inner"))
+        # draft/write must simulate, never delegate.
+        self.assertEqual(r_write["status"], "simulated")
+        self.assertFalse(r_write.get("delegated_to_inner"))
+        self.assertEqual(r_unknown["status"], "denied")
+        self.assertFalse(r_unknown.get("delegated_to_inner"))
+        # Inner saw only allowlisted isolated dispatches.
+        self.assertEqual(len(inner.calls), 2)
+        self.assertEqual(
+            {c["side_effect"] for c in inner.calls},
+            {"none", "read"},
+        )
+
+    def test_nested_child_reenters_isolation_wrapped_gateway(self) -> None:
+        from app.assistant.evaluation.isolation import (
+            IsolationWrappedGateway,
+            eval_execution_scope,
+            build_isolation_context,
+        )
+        from app.assistant.evaluation.contracts import EvalExecutionIdentity
+
+        class FakeInnerGateway:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def execute(self, request, **kwargs):  # type: ignore[no-untyped-def]
+                self.calls.append(dict(kwargs))
+                return {"status": "completed"}
+
+        ns = _uuid()
+        isolation = build_isolation_context(
+            namespace_id=ns,
+            subject_digest=DIGEST_A,
+            dataset_version_ids=(_uuid(),),
+        )
+        identity = EvalExecutionIdentity(
+            eval_run_id=_uuid(),
+            eval_case_id=_uuid(),
+            namespace_id=ns,
+            owner_kind="test",
+            subject_kind="skill_draft",
+            subject_aggregate_id=_uuid(),
+            subject_version_id=_uuid(),
+        )
+        inner = FakeInnerGateway()
+        with eval_execution_scope(isolation=isolation, identity=identity) as scope:
+            gw = IsolationWrappedGateway(inner=inner, scope=scope)
+            parent = gw.execute(
+                None,
+                side_effect="none",
+                capability_key="workflow.parent",
+                logical_call_key="p1",
+            )
+            child = gw.execute_nested_child(
+                side_effect="compute",
+                capability_key="agent.child",
+                parent_ordinal=1,
+                logical_call_key="c1",
+            )
+        self.assertEqual(parent["status"], "succeeded_isolated")
+        self.assertEqual(child["status"], "succeeded_isolated")
+        self.assertTrue(child.get("nested"))
+        self.assertEqual(len(inner.calls), 2)
+        self.assertEqual(len(scope.call_records), 2)
+        self.assertEqual(scope.call_records[1].parent_ordinal, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
