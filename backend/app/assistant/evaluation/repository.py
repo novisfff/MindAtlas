@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from typing import Any, Mapping, Sequence
 from uuid import UUID, uuid4
 
-from sqlalchemy import Select, delete, select, update
+from sqlalchemy import Select, delete, exists, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -863,6 +863,10 @@ class EvaluationRepository:
         aggregate_revision: int,
         use_id: UUID | None = None,
     ) -> AssistantSkillPublishGateUse:
+        """Append a publication use row. Does not mutate the immutable gate row.
+
+        Pinning is derived from existence of gate_use rows (not publication_pin_count).
+        """
         gate = self.session.execute(
             select(AssistantSkillPublishGate)
             .where(AssistantSkillPublishGate.id == gate_id)
@@ -890,11 +894,19 @@ class EvaluationRepository:
             aggregate_revision=int(aggregate_revision),
             created_at=utcnow(),
         )
+        # Insert use only — never UPDATE the immutable gate (including pin count).
         self._add_unique(row, message="gate-use request/action uniqueness")
-        # Publication use pins the gate evidence closure.
-        gate.publication_pin_count = int(gate.publication_pin_count) + 1
-        self.session.flush()
         return row
+
+    def _gate_has_publication_use(self, gate_id: UUID) -> bool:
+        """True when any gate_use row pins this gate (EXISTS, not pin_count column)."""
+        return bool(
+            self.session.execute(
+                select(
+                    exists().where(AssistantSkillPublishGateUse.gate_id == gate_id)
+                )
+            ).scalar()
+        )
 
     def is_gate_evidence_pinned(
         self,
@@ -903,8 +915,8 @@ class EvaluationRepository:
         now: datetime | None = None,
         grace_days: int = DEFAULT_GATE_EVIDENCE_GRACE_DAYS,
     ) -> bool:
-        """Pin when publication-used OR within grace after expiry for failed/unused."""
-        if int(gate.publication_pin_count) > 0:
+        """Pin when publication-used (gate_use exists) OR within grace after expiry."""
+        if self._gate_has_publication_use(gate.id):
             # Publication-used evidence remains pinned even after gate expiry.
             return True
         current = now or utcnow()
@@ -921,6 +933,7 @@ class EvaluationRepository:
         """Delete only unreferenced high-volume events/non-assertion Artifacts.
 
         Locks/rechecks gate and publication references in the same transaction.
+        Pinning is derived from gate_use existence (not publication_pin_count).
         """
         current = now or utcnow()
         run = self.session.execute(
@@ -931,7 +944,8 @@ class EvaluationRepository:
         if run is None:
             raise EvaluationRepositoryError(CODE_NOT_FOUND, "eval run not found")
 
-        # Find gates that reference this run.
+        # Find gates that reference this run. JSON array membership is checked in
+        # Python because dataset/run id lists are JSON (portable across SQLite/PG).
         gates = list(
             self.session.execute(select(AssistantSkillPublishGate)).scalars().all()
         )
@@ -942,7 +956,7 @@ class EvaluationRepository:
         ]
         skipped = 0
         for gate in referencing:
-            # Re-lock gate rows.
+            # Re-lock gate rows (FOR SHARE/UPDATE of gate is fine; pin is via use rows).
             locked = self.session.execute(
                 select(AssistantSkillPublishGate)
                 .where(AssistantSkillPublishGate.id == gate.id)

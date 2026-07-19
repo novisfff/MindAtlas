@@ -584,6 +584,16 @@ class EvalRepositorySqliteTests(unittest.TestCase):
             request_id=f"gate-{uuid.uuid4().hex}",
         )
         self.assertEqual(gate.publication_pin_count, 0)
+        # Snapshot immutable gate fields before use — append_gate_use must not mutate gate.
+        pre_fields = {
+            "id": gate.id,
+            "decision": gate.decision,
+            "expires_at": gate.expires_at,
+            "publication_pin_count": int(gate.publication_pin_count),
+            "request_id": gate.request_id,
+            "subject_content_digest": gate.subject_content_digest,
+            "assertion_snapshot": dict(gate.assertion_snapshot or {}),
+        }
         use1 = self.repo.append_gate_use(
             gate_id=gate.id,
             action="skill_publish",
@@ -604,8 +614,89 @@ class EvalRepositorySqliteTests(unittest.TestCase):
         )
         self.assertEqual(use1.id, use2.id)
         self.db.refresh(gate)
-        self.assertGreaterEqual(gate.publication_pin_count, 1)
+        # Pin is derived from gate_use existence; legacy pin_count stays 0 / unchanged.
+        self.assertEqual(
+            int(gate.publication_pin_count), pre_fields["publication_pin_count"]
+        )
+        self.assertEqual(gate.decision, pre_fields["decision"])
+        # SQLite may drop tzinfo on refresh; compare as naive UTC wall times.
+        self.assertEqual(
+            gate.expires_at.replace(tzinfo=None),
+            pre_fields["expires_at"].replace(tzinfo=None),
+        )
+        self.assertEqual(gate.request_id, pre_fields["request_id"])
+        self.assertEqual(
+            gate.subject_content_digest, pre_fields["subject_content_digest"]
+        )
         self.assertTrue(self.repo.is_gate_evidence_pinned(gate))
+
+    def test_pin_without_gate_mutation_and_cleanup_retains_past_grace(self) -> None:
+        """Pin works via gate_use only; cleanup retains past grace when uses exist."""
+        from app.common.time import utcnow
+
+        _, published, _ = self._publish_minimal_dataset()
+        run = self._create_run(published.version_id)
+        self.repo.transition_run(
+            run_id=run.id, expected_revision=0, to_status="running"
+        )
+        self.repo.transition_run(
+            run_id=run.id, expected_revision=1, to_status="completed"
+        )
+        # After two transitions, state_revision is 2.
+        self.repo.append_event(
+            eval_run_id=run.id,
+            expected_run_revision=2,
+            event_type="noise",
+            payload={"i": 1},
+        )
+        gate = self.repo.append_publish_gate(
+            subject_kind="skill_version",
+            subject_aggregate_id=run.subject_aggregate_id,
+            subject_version_id=run.subject_version_id,
+            subject_content_digest=DIGEST_A,
+            subject_binding_digest=DIGEST_B,
+            profile_digest=DIGEST_C,
+            catalog_digest=DIGEST_D,
+            dataset_version_ids=[published.version_id],
+            qualifying_eval_run_ids=[run.id],
+            runtime_contract_version=1,
+            policy_version="p1",
+            threshold_version="t1",
+            build_revision="build-1",
+            decision="passed",
+            expires_at=utcnow() - timedelta(days=1),
+            request_id=f"gate-{uuid.uuid4().hex}",
+        )
+        pin_before = int(gate.publication_pin_count)
+        # Past grace and unused → not pinned.
+        far_future = utcnow() + timedelta(days=90)
+        self.assertFalse(
+            self.repo.is_gate_evidence_pinned(
+                gate, now=far_future, grace_days=30
+            )
+        )
+        self.repo.append_gate_use(
+            gate_id=gate.id,
+            action="skill_publish",
+            aggregate_id=run.subject_aggregate_id,
+            resulting_version_id=run.subject_version_id,
+            actor_principal="op",
+            request_id="req-pin-no-mutate",
+            aggregate_revision=1,
+        )
+        self.db.refresh(gate)
+        self.assertEqual(int(gate.publication_pin_count), pin_before)
+        self.assertTrue(
+            self.repo.is_gate_evidence_pinned(
+                gate, now=far_future, grace_days=30
+            )
+        )
+        # Cleanup must retain evidence past grace when gate_use exists.
+        cleaned = self.repo.cleanup_unreferenced_evidence(
+            eval_run_id=run.id, now=far_future, grace_days=30
+        )
+        self.assertEqual(cleaned.deleted_events, 0)
+        self.assertGreaterEqual(cleaned.skipped_pinned, 1)
 
     def test_retention_expiry_does_not_unpin_publication_used(self) -> None:
         from app.common.time import utcnow
@@ -832,6 +923,25 @@ class ProductionNamespaceRejectionTests(unittest.TestCase):
         self.assertIsNone(parsed)
         self.assertFalse(eval_key.startswith(f"{durable_artifacts.OBJECT_KEY_PREFIX}/"))
         self.assertTrue(eval_key.startswith(f"{EVAL_OBJECT_KEY_PREFIX}/"))
+        # Real production entrypoint: backend put_bytes rejects eval keys.
+        with self.assertRaises(durable_artifacts.ArtifactStorageError) as ctx:
+            durable_artifacts.InMemoryArtifactObjectBackend().put_bytes(
+                bucket="assistant-artifacts",
+                object_key=eval_key,
+                data=b"x",
+                content_type="application/octet-stream",
+                metadata={durable_artifacts.META_CONTENT_SHA256: DIGEST_A},
+            )
+        self.assertEqual(ctx.exception.code, durable_artifacts.ARTIFACT_KEY_REJECTED)
+        with self.assertRaises(durable_artifacts.ArtifactStorageError):
+            durable_artifacts.assert_production_object_key(eval_key)
+        # Production keys are accepted by the same helper.
+        prod_key = durable_artifacts.build_object_key(
+            run_id=_uuid(), content_sha256=DIGEST_A
+        )
+        self.assertEqual(
+            durable_artifacts.assert_production_object_key(prod_key), prod_key
+        )
 
 
 class ArchitectureImportBanTests(unittest.TestCase):

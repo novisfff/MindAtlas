@@ -392,6 +392,8 @@ def test_immutable_triggers_and_uniqueness() -> None:
                 expires_at=utcnow() + timedelta(days=1),
                 request_id=f"g-{uuid.uuid4().hex}",
             )
+            # append_gate_use must succeed without UPDATE on immutable gate.
+            pin_before = int(gate.publication_pin_count)
             use = repo.append_gate_use(
                 gate_id=gate.id,
                 action="skill_publish",
@@ -402,6 +404,10 @@ def test_immutable_triggers_and_uniqueness() -> None:
                 aggregate_revision=1,
             )
             session.flush()
+            session.refresh(gate)
+            assert int(gate.publication_pin_count) == pin_before
+            assert use.gate_id == gate.id
+            assert repo.is_gate_evidence_pinned(gate) is True
 
             # Immutable UPDATE rejected by triggers.
             for table, pk in (

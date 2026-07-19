@@ -711,6 +711,11 @@ class AssistantSkillEvalArtifact(UuidPrimaryKeyMixin, Base):
             "content_digest",
             name="ck_assistant_skill_eval_artifact_content_digest",
         ),
+        # Must match migration: evaluation-namespace keys only when present.
+        CheckConstraint(
+            "object_key IS NULL OR object_key LIKE 'skill-eval/%'",
+            name="ck_assistant_skill_eval_artifact_object_key_namespace",
+        ),
         Index(
             "uq_assistant_skill_eval_artifact_content",
             "eval_run_id",
@@ -747,7 +752,8 @@ class AssistantSkillPublishGate(UuidPrimaryKeyMixin, Base):
     waiver_codes = Column(JSON, nullable=False, default=list)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     expires_at = Column(DateTime(timezone=True), nullable=False)
-    # Retention pin: publication-used evidence remains pinned even after expiry.
+    # Legacy column: pin correctness is derived from gate_use existence, not this.
+    # Left at default 0; never relied on for retention/pin decisions.
     publication_pin_count = Column(
         Integer, nullable=False, default=0, server_default=text("0")
     )

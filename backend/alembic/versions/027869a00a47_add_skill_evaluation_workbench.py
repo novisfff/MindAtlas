@@ -1006,7 +1006,7 @@ def downgrade() -> None:
     Preconditions (enforced when evidence present):
     - MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK=1 (workers stopped / evidence exported)
     - no queued/running eval runs
-    - no publication-pinned gates (publication_pin_count > 0)
+    - no publication-pinned gates (EXISTS gate_use rows)
     """
     conn = op.get_bind()
 
@@ -1036,18 +1036,26 @@ def downgrade() -> None:
                 "(stop workers; no queued/running runs allowed)"
             )
 
-    if "assistant_skill_publish_gate" in tables:
+    # Pin correctness is derived from gate_use existence (not publication_pin_count).
+    if "assistant_skill_publish_gate_use" in tables:
         pinned = _count(
-            "SELECT COUNT(*) FROM assistant_skill_publish_gate "
-            "WHERE publication_pin_count > 0"
+            "SELECT COUNT(DISTINCT gate_id) FROM assistant_skill_publish_gate_use"
         )
         if pinned:
             raise RuntimeError(
                 f"{DOWNGRADE_BLOCKED_TOKEN}: {pinned} publication-pinned gates remain "
                 "(export retained evidence; no published/catalog dependency)"
             )
+    elif "assistant_skill_publish_gate" in tables:
+        # Table presence without gate_use is fine; fall through to evidence ack.
+        pass
 
-        total_gates = _count("SELECT COUNT(*) FROM assistant_skill_publish_gate")
+    if "assistant_skill_publish_gate" in tables or "assistant_skill_eval_run" in tables:
+        total_gates = (
+            _count("SELECT COUNT(*) FROM assistant_skill_publish_gate")
+            if "assistant_skill_publish_gate" in tables
+            else 0
+        )
         total_runs = (
             _count("SELECT COUNT(*) FROM assistant_skill_eval_run")
             if "assistant_skill_eval_run" in tables
@@ -1061,6 +1069,7 @@ def downgrade() -> None:
             )
 
     # Drop triggers/functions then tables (children first).
+    # Always use DROP TRIGGER IF EXISTS ... ON <table> for safe partial downgrades.
     op.execute(
         "DROP TRIGGER IF EXISTS trg_assistant_skill_eval_run_transition "
         "ON assistant_skill_eval_run"
