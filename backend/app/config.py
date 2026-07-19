@@ -297,6 +297,11 @@ class Settings(BaseSettings):
         default="",
         alias="ASSISTANT_CAPABILITY_RECONCILIATION_EVIDENCE_SECRET",
     )
+    # Plan 09 evaluation: failed/unused gate evidence retention grace after expiry.
+    assistant_skill_gate_evidence_grace_days: int = Field(
+        default=30,
+        alias="ASSISTANT_SKILL_GATE_EVIDENCE_GRACE_DAYS",
+    )
 
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
