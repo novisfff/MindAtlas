@@ -464,8 +464,124 @@ class EvalWorkerExecuteTests(unittest.TestCase):
         finally:
             s.close()
 
+    def test_dataset_scripted_runs_from_published_cases(self) -> None:
+        """Worker admits dataset_scripted and materializes cases (not MA loop)."""
+        dataset = self.repo.create_dataset(
+            stable_key=f"ds-{uuid.uuid4().hex[:8]}",
+            display_name="scripted",
+            ownership="custom",
+        )
+        snapshot = [
+            {
+                "case_key": "c1",
+                "ordinal": 0,
+                "locale": "en",
+                "input_messages": [{"role": "user", "content": "hi"}],
+                "expected_mode": "direct_answer",
+                "case_digest": DIGEST_A,
+            }
+        ]
+        self.repo.get_or_create_draft(dataset_id=dataset.id, cases_snapshot=snapshot)
+        published = self.repo.publish_dataset_version(
+            dataset_id=dataset.id,
+            expected_aggregate_revision=0,
+            expected_draft_revision=0,
+            version_name="v1",
+        )
+        run = self.repo.create_run(
+            subject_kind="skill_draft",
+            subject_aggregate_id=uuid.uuid4(),
+            subject_version_id=uuid.uuid4(),
+            subject_content_digest=DIGEST_A,
+            subject_binding_digest=DIGEST_A,
+            dataset_version_ids=[published.version_id],
+            threshold_policy_version="t1",
+            mode="dataset_scripted",
+            isolation_namespace_id=uuid.uuid4(),
+            runtime_contract_version=1,
+            required_build_revision="development",
+            isolation_digest=DIGEST_A,
+        )
+        self.db.commit()
+        outcome = self.worker.execute_run(run.id)
+        # Dataset path returns None from execute_run after persist (not InteractiveOutcome).
+        self.assertIsNone(outcome)
+        s = self._session()
+        try:
+            from app.assistant.evaluation.repository import EvaluationRepository
+
+            repo = EvaluationRepository(s)
+            stored = repo.get_run(run.id)
+            assert stored is not None
+            self.assertIn(stored.status, {"completed", "failed"})
+            self.assertNotEqual(stored.failure_code, "mode_not_supported")
+            metrics = dict(stored.aggregate_metrics or {})
+            self.assertEqual(metrics.get("mode"), "dataset_scripted")
+            self.assertEqual(int(metrics.get("case_count") or 0), 1)
+        finally:
+            s.close()
+
+    def test_dataset_scripted_empty_cases_fails_missing(self) -> None:
+        """Empty materialization must fail as dataset_cases_missing (not mode_not_supported)."""
+        from unittest.mock import patch
+
+        dataset = self.repo.create_dataset(
+            stable_key=f"ds-{uuid.uuid4().hex[:8]}",
+            display_name="empty",
+            ownership="custom",
+        )
+        snapshot = [
+            {
+                "case_key": "c1",
+                "ordinal": 0,
+                "locale": "en",
+                "input_messages": [{"role": "user", "content": "hi"}],
+                "expected_mode": "direct_answer",
+                "case_digest": DIGEST_A,
+            }
+        ]
+        self.repo.get_or_create_draft(dataset_id=dataset.id, cases_snapshot=snapshot)
+        published = self.repo.publish_dataset_version(
+            dataset_id=dataset.id,
+            expected_aggregate_revision=0,
+            expected_draft_revision=0,
+            version_name="v1",
+        )
+        run = self.repo.create_run(
+            subject_kind="skill_draft",
+            subject_aggregate_id=uuid.uuid4(),
+            subject_version_id=uuid.uuid4(),
+            subject_content_digest=DIGEST_A,
+            subject_binding_digest=DIGEST_A,
+            dataset_version_ids=[published.version_id],
+            threshold_policy_version="t1",
+            mode="dataset_scripted",
+            isolation_namespace_id=uuid.uuid4(),
+            runtime_contract_version=1,
+            required_build_revision="development",
+            isolation_digest=DIGEST_A,
+        )
+        self.db.commit()
+        with patch.object(
+            self.worker, "_materialize_dataset_case_outcomes", return_value=[]
+        ):
+            outcome = self.worker.execute_run(run.id)
+        self.assertIsNone(outcome)
+        s = self._session()
+        try:
+            from app.assistant.evaluation.repository import EvaluationRepository
+
+            repo = EvaluationRepository(s)
+            stored = repo.get_run(run.id)
+            assert stored is not None
+            self.assertEqual(stored.status, "failed")
+            self.assertEqual(stored.failure_code, "dataset_cases_missing")
+            self.assertFalse(stored.gate_eligible)
+        finally:
+            s.close()
+
     def test_non_interactive_mode_fails_without_production_fallback(self) -> None:
-        # dataset_live is Task 5; worker must fail closed, not fall back.
+        # dataset_live remains unsupported on worker; fail closed, not production fallback.
         dataset = self.repo.create_dataset(
             stable_key=f"ds-{uuid.uuid4().hex[:8]}",
             display_name="live",

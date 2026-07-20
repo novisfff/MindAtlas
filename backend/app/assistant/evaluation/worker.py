@@ -289,6 +289,13 @@ class EvaluationWorker:
                         pass
 
             if mode == "dataset_scripted":
+                # Deterministic CI/gate path: materialize case_outcomes from
+                # published dataset case definitions (typed expected_mode /
+                # acceptable skills), then run_dataset_scripted assertions.
+                # This is NOT a full Main Agent / Provider execution loop —
+                # live MA orchestration remains deferred. production_delta and
+                # safety_counters are explicit zeros for this synthetic path;
+                # hard-safety still fails closed if counters/metrics are missing.
                 case_outcomes = self._materialize_dataset_case_outcomes(repo, run)
                 if not case_outcomes:
                     rev = int(run.state_revision)
@@ -390,8 +397,12 @@ class EvaluationWorker:
     ) -> list[dict[str, Any]]:
         """Build deterministic scripted case outcomes from published dataset cases.
 
-        CI/gate path: typed assertions over case definitions with zero production
-        mutation. Full Main Agent/Provider execution remains live-mode work.
+        CI/gate path only: synthesizes ``activated_skills`` / ``execution_kind``
+        from each case's expected_mode and acceptable_skill_keys so
+        ``run_dataset_scripted`` can evaluate typed assertions with proven-zero
+        production_delta counters. This does **not** run the real Main Agent
+        planner or Provider loop — those remain Task 5+ live-mode work.
+        Empty case lists must fail the run as ``dataset_cases_missing``.
         """
         outcomes: list[dict[str, Any]] = []
         for vid in list(run.dataset_version_ids or []):
