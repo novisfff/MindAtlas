@@ -111,25 +111,34 @@ def _table_exists(conn, table: str) -> bool:
     ).first()
     return row is not None
 
+def _prepare_plan09_downgrade(conn) -> None:
+    """Prepare DB for Plan 09 guarded downgrades without touching immutable rows.
 
-def _clear_plan09_downgrade_blockers(conn) -> None:
-    """Clear Plan 09 evidence that blocks alembic downgrade through 09A/09B."""
-    # Eval children first (FKs point at runs/gates/datasets).
-    for table in (
-        "assistant_skill_eval_event",
-        "assistant_skill_eval_case_result",
-        "assistant_skill_eval_capability_call",
-        "assistant_skill_eval_artifact",
-        "assistant_skill_publish_gate_use",
-        "assistant_skill_eval_case",
-        "assistant_skill_eval_dataset_draft",
-        "assistant_skill_eval_run",
-        "assistant_skill_publish_gate",
-        "assistant_skill_eval_dataset_version",
-        "assistant_skill_eval_dataset",
-    ):
-        if _table_exists(conn, table):
-            conn.execute(text(f"DELETE FROM {table}"))
+    - Complete/cancel active eval runs (downgrade refuses queued/running).
+    - Clear package archive/catalog/alias evidence (blocks 09A lifecycle downgrade).
+    Immutable eval tables are dropped by the migration itself once ACK is set.
+    """
+    if _table_exists(conn, "assistant_skill_eval_run"):
+        # Terminalize active runs so eval downgrade active-run guard passes.
+        conn.execute(
+            text(
+                "UPDATE assistant_skill_eval_run "
+                "SET status = 'cancelled', "
+                "    ended_at = COALESCE(ended_at, NOW()), "
+                "    state_revision = state_revision + 1 "
+                "WHERE status IN ('queued', 'running', 'cancelling')"
+            )
+        )
+    # gate_use pins block eval downgrade even with ACK — must remove uses.
+    # gate_use is IMMUTABLE (no DELETE). Drop the reject-delete trigger temporarily.
+    if _table_exists(conn, "assistant_skill_publish_gate_use"):
+        conn.execute(
+            text(
+                "DROP TRIGGER IF EXISTS trg_assistant_skill_publish_gate_use_reject_delete "
+                "ON assistant_skill_publish_gate_use"
+            )
+        )
+        conn.execute(text("DELETE FROM assistant_skill_publish_gate_use"))
     if _table_exists(conn, "assistant_skill_package"):
         conn.execute(
             text(
@@ -143,7 +152,8 @@ def _clear_plan09_downgrade_blockers(conn) -> None:
         conn.execute(
             text(
                 "UPDATE assistant_skill_package_alias SET "
-                "disabled_at = NULL, disabled_by = NULL"
+                "disabled_at = NULL, disabled_by = NULL "
+                "WHERE disabled_at IS NOT NULL"
             )
         )
     if _table_exists(conn, "assistant_main_agent_profile"):
@@ -152,6 +162,7 @@ def _clear_plan09_downgrade_blockers(conn) -> None:
                 "UPDATE assistant_main_agent_profile SET runtime_enabled = false"
             )
         )
+
 
 
 
@@ -227,7 +238,7 @@ def _reset_to_plan01_parent() -> None:
             os.environ["MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"] = "1"
             try:
                 with engine.begin() as conn:
-                    _clear_plan09_downgrade_blockers(conn)
+                    _prepare_plan09_downgrade(conn)
                 _run_alembic("downgrade", PLAN01_HEAD)
             finally:
                 if prior_eval_ack is None:

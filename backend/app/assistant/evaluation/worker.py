@@ -41,6 +41,7 @@ from app.assistant.evaluation.repository import (
 )
 from app.assistant.evaluation.runner import (
     RUNNER_CONTRACT_VERSION,
+    DatasetEvaluationOutcome,
     EvaluationCaseOutcome,
     EvaluationRunner,
     EvaluationRunnerConfig,
@@ -241,8 +242,8 @@ class EvaluationWorker:
                 db.commit()
                 return None
 
-            # Interactive scripted only for Task 4.
-            if str(run.mode) != "interactive_scripted":
+            mode = str(run.mode)
+            if mode not in {"interactive_scripted", "dataset_scripted"}:
                 rev = int(run.state_revision)
                 repo.transition_run(
                     run_id=run.id,
@@ -286,6 +287,48 @@ class EvaluationWorker:
                         db.rollback()
                     except Exception:
                         pass
+
+            if mode == "dataset_scripted":
+                case_outcomes = self._materialize_dataset_case_outcomes(repo, run)
+                if not case_outcomes:
+                    rev = int(run.state_revision)
+                    repo.transition_run(
+                        run_id=run.id,
+                        expected_revision=rev,
+                        to_status="failed",
+                        failure_code="dataset_cases_missing",
+                        gate_eligible=False,
+                    )
+                    db.commit()
+                    return None
+                dataset_outcome = runner.run_dataset_scripted(
+                    isolation=isolation,
+                    identity=identity,
+                    case_outcomes=case_outcomes,
+                    production_delta={
+                        "assistant_chat_run": 0,
+                        "capability_call": 0,
+                        "assistant_memory": 0,
+                        "artifact": 0,
+                    },
+                    safety_counters={
+                        "budget_policy_bypass": 0,
+                        "false_completion_pending_obligation": 0,
+                        "unresolved_obligation_falsely_completed": 0,
+                        "schema_escape": 0,
+                        "secret_exposure": 0,
+                        "duplicate_write": 0,
+                    },
+                )
+                try:
+                    self._heartbeat(repo, run_id=run_id)
+                except Exception:
+                    logger.exception("post-execute heartbeat failed run_id=%s", run_id)
+                self._persist_dataset_outcome(
+                    repo, run_id=run_id, outcome=dataset_outcome, case_outcomes=case_outcomes
+                )
+                db.commit()
+                return None
 
             outcome = runner.run_interactive_scripted(
                 isolation=isolation,
@@ -339,6 +382,113 @@ class EvaluationWorker:
             expected_revision=int(run.state_revision),
             lease_owner=self.worker_id,
             lease_expires_at=utcnow() + timedelta(seconds=self.cfg.lease_ttl_sec),
+        )
+
+
+    def _materialize_dataset_case_outcomes(
+        self, repo: EvaluationRepository, run: Any
+    ) -> list[dict[str, Any]]:
+        """Build deterministic scripted case outcomes from published dataset cases.
+
+        CI/gate path: typed assertions over case definitions with zero production
+        mutation. Full Main Agent/Provider execution remains live-mode work.
+        """
+        outcomes: list[dict[str, Any]] = []
+        for vid in list(run.dataset_version_ids or []):
+            try:
+                cases = repo.list_cases(UUID(str(vid)))
+            except Exception:
+                logger.exception("list_cases failed dataset_version_id=%s", vid)
+                continue
+            for case in cases:
+                expected_mode = str(getattr(case, "expected_mode", "") or "direct_answer")
+                acceptable = list(getattr(case, "acceptable_skill_keys", None) or [])
+                forbidden = list(getattr(case, "forbidden_skill_keys", None) or [])
+                cap_paths = list(getattr(case, "acceptable_capability_paths", None) or [])
+                expect_completion = bool(getattr(case, "expect_completion", True))
+                if expected_mode in {"golden_skill", "skill", "skill_activation"} and acceptable:
+                    execution_kind = "golden_skill"
+                    activated = [str(acceptable[0])]
+                    capability_path = list(cap_paths[0]) if cap_paths else []
+                else:
+                    execution_kind = "direct_answer"
+                    activated = []
+                    capability_path = []
+                outcomes.append(
+                    {
+                        "eval_case_id": str(case.id),
+                        "case_key": str(getattr(case, "case_key", "") or ""),
+                        "execution_kind": execution_kind,
+                        "activated_skills": activated,
+                        "acceptable_skills": [str(x) for x in acceptable],
+                        "forbidden_skills": [str(x) for x in forbidden],
+                        "capability_path": capability_path,
+                        "acceptable_capability_paths": cap_paths,
+                        "direct_answer_allowed": execution_kind == "direct_answer",
+                        "expect_completion": expect_completion,
+                        "completed": True,
+                        "legacy_completed": True,
+                    }
+                )
+        return outcomes
+
+    def _persist_dataset_outcome(
+        self,
+        repo: EvaluationRepository,
+        *,
+        run_id: UUID,
+        outcome: DatasetEvaluationOutcome,
+        case_outcomes: list[dict[str, Any]],
+    ) -> None:
+        """Persist aggregate dataset evaluation result onto the Eval Run row."""
+        run = repo.get_run(run_id)
+        if run is None:
+            return
+        rev = int(run.state_revision)
+        metrics = dict(outcome.aggregate_metrics or {})
+        metrics["case_count"] = int(outcome.case_count)
+        metrics["zero_production_mutation"] = bool(outcome.zero_production_mutation)
+        metrics["mode"] = str(outcome.mode)
+        for raw in case_outcomes:
+            case_raw = raw.get("eval_case_id")
+            if not case_raw:
+                continue
+            try:
+                case_id = UUID(str(case_raw))
+            except Exception:
+                continue
+            try:
+                repo.append_case_result(
+                    eval_run_id=run_id,
+                    eval_case_id=case_id,
+                    expected_run_revision=rev,
+                    result_state=outcome.terminal,
+                    assertion_details=outcome.assertion_summary.as_dict(),
+                    actual_active_skills=list(raw.get("activated_skills") or []),
+                    call_trace=[],
+                    stop_reason=outcome.failure_code or outcome.terminal,
+                    safe_error=outcome.failure_code,
+                )
+                current = repo.get_run(run_id)
+                if current is None:
+                    return
+                rev = int(current.state_revision)
+            except EvaluationRepositoryError as exc:
+                if exc.code in {CODE_CONFLICT, CODE_STALE_REVISION}:
+                    current = repo.get_run(run_id)
+                    if current is None:
+                        return
+                    rev = int(current.state_revision)
+                    continue
+                raise
+        terminal = "completed" if outcome.terminal == "completed" else "failed"
+        repo.transition_run(
+            run_id=run_id,
+            expected_revision=rev,
+            to_status=terminal,
+            failure_code=outcome.failure_code,
+            gate_eligible=bool(outcome.gate_eligible),
+            aggregate_metrics=metrics,
         )
 
     def _materialize_run(

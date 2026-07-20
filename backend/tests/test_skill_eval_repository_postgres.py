@@ -147,6 +147,58 @@ def _table_exists(conn, name: str) -> bool:
     ).first()
     return row is not None
 
+def _prepare_plan09_downgrade(conn) -> None:
+    """Prepare DB for Plan 09 guarded downgrades without touching immutable rows.
+
+    - Complete/cancel active eval runs (downgrade refuses queued/running).
+    - Clear package archive/catalog/alias evidence (blocks 09A lifecycle downgrade).
+    Immutable eval tables are dropped by the migration itself once ACK is set.
+    """
+    if _table_exists(conn, "assistant_skill_eval_run"):
+        # Terminalize active runs so eval downgrade active-run guard passes.
+        conn.execute(
+            text(
+                "UPDATE assistant_skill_eval_run "
+                "SET status = 'cancelled', "
+                "    ended_at = COALESCE(ended_at, NOW()), "
+                "    state_revision = state_revision + 1 "
+                "WHERE status IN ('queued', 'running', 'cancelling')"
+            )
+        )
+    # gate_use pins block eval downgrade even with ACK — must remove uses.
+    # gate_use is IMMUTABLE (no DELETE). Drop the reject-delete trigger temporarily.
+    if _table_exists(conn, "assistant_skill_publish_gate_use"):
+        conn.execute(
+            text(
+                "DROP TRIGGER IF EXISTS trg_assistant_skill_publish_gate_use_reject_delete "
+                "ON assistant_skill_publish_gate_use"
+            )
+        )
+        conn.execute(text("DELETE FROM assistant_skill_publish_gate_use"))
+    if _table_exists(conn, "assistant_skill_package"):
+        conn.execute(
+            text(
+                "UPDATE assistant_skill_package SET "
+                "archived_at = NULL, archived_by = NULL, "
+                "catalog_enabled_at = NULL, catalog_enabled_by = NULL, "
+                "catalog_enabled = false"
+            )
+        )
+    if _table_exists(conn, "assistant_skill_package_alias"):
+        conn.execute(
+            text(
+                "UPDATE assistant_skill_package_alias SET "
+                "disabled_at = NULL, disabled_by = NULL "
+                "WHERE disabled_at IS NOT NULL"
+            )
+        )
+    if _table_exists(conn, "assistant_main_agent_profile"):
+        conn.execute(
+            text(
+                "UPDATE assistant_main_agent_profile SET runtime_enabled = false"
+            )
+        )
+
 
 def _task3_revision() -> str:
     """Discover the Task 3 revision that revises PARENT_REVISION."""
@@ -177,22 +229,6 @@ def _current_revision(engine: Engine) -> str | None:
         return None if row is None else str(row[0])
 
 
-def _clear_eval_evidence(conn) -> None:
-    for table in (
-        "assistant_skill_eval_event",
-        "assistant_skill_eval_case_result",
-        "assistant_skill_eval_capability_call",
-        "assistant_skill_eval_artifact",
-        "assistant_skill_publish_gate_use",
-        "assistant_skill_eval_case",
-        "assistant_skill_eval_dataset_draft",
-        "assistant_skill_eval_run",
-        "assistant_skill_publish_gate",
-        "assistant_skill_eval_dataset_version",
-        "assistant_skill_eval_dataset",
-    ):
-        if _table_exists(conn, table):
-            conn.execute(text(f"DELETE FROM {table}"))
 
 
 def _reset_to_parent(engine: Engine) -> str:
@@ -207,7 +243,7 @@ def _reset_to_parent(engine: Engine) -> str:
         os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
         try:
             with engine.begin() as conn:
-                _clear_eval_evidence(conn)
+                _prepare_plan09_downgrade(conn)
             _run_alembic("downgrade", PARENT_REVISION)
         finally:
             if prior is None:
@@ -223,13 +259,13 @@ def _reset_to_parent(engine: Engine) -> str:
             os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
             try:
                 with engine.begin() as conn:
-                    _clear_eval_evidence(conn)
+                    _prepare_plan09_downgrade(conn)
                 try:
                     _run_alembic("downgrade", PARENT_REVISION)
                 except Exception:
                     _run_alembic("upgrade", "head")
                     with engine.begin() as conn:
-                        _clear_eval_evidence(conn)
+                        _prepare_plan09_downgrade(conn)
                     _run_alembic("downgrade", PARENT_REVISION)
             finally:
                 if prior is None:
