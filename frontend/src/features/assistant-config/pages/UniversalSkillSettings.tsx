@@ -56,6 +56,8 @@ export function UniversalSkillSettings() {
   const applyMutation = useApplySkillPackageImportMutation()
   const fileRef = useRef<HTMLInputElement>(null)
   const [importMode, setImportMode] = useState<ImportMode>('create')
+  const [importTargetPackageId, setImportTargetPackageId] = useState('')
+  const [importForkCanonicalName, setImportForkCanonicalName] = useState('')
   const [actionError, setActionError] = useState<string | null>(null)
   const [filter, setFilter] = useState('')
 
@@ -141,7 +143,34 @@ export function UniversalSkillSettings() {
   async function handleImportFile(file: File) {
     setActionError(null)
     try {
-      const preview = await previewMutation.mutateAsync({ file, mode: importMode })
+      if (importMode === 'append_to_existing') {
+        if (!importTargetPackageId) {
+          setActionError(t('settings.universalSkills.importTargetRequired'))
+          return
+        }
+      }
+      if (importMode === 'fork_as_new') {
+        if (!importForkCanonicalName.trim()) {
+          setActionError(t('settings.universalSkills.importForkNameRequired'))
+          return
+        }
+      }
+      const targetPkg =
+        importMode === 'append_to_existing'
+          ? items.find((p) => p.id === importTargetPackageId)
+          : undefined
+      if (importMode === 'append_to_existing' && !targetPkg) {
+        setActionError(t('settings.universalSkills.importTargetRequired'))
+        return
+      }
+      const preview = await previewMutation.mutateAsync({
+        file,
+        mode: importMode,
+        targetPackageId: targetPkg?.id,
+        expectedAggregateRevision: targetPkg?.aggregateRevision,
+        forkCanonicalName:
+          importMode === 'fork_as_new' ? importForkCanonicalName.trim() : undefined,
+      })
       const applied = await applyMutation.mutateAsync({
         previewId: preview.previewId,
         requestId: newRequestId('import'),
@@ -180,6 +209,30 @@ export function UniversalSkillSettings() {
             <option value="append_to_existing">append_to_existing</option>
             <option value="fork_as_new">fork_as_new</option>
           </select>
+          {importMode === 'append_to_existing' ? (
+            <select
+              className="h-9 min-w-[12rem] rounded-md border bg-background px-2 text-sm"
+              value={importTargetPackageId}
+              onChange={(e) => setImportTargetPackageId(e.target.value)}
+              aria-label={t('settings.universalSkills.importTarget')}
+            >
+              <option value="">{t('settings.universalSkills.importTargetPlaceholder')}</option>
+              {items.map((pkg) => (
+                <option key={pkg.id} value={pkg.id}>
+                  {pkg.displayName || pkg.canonicalName} (rev {pkg.aggregateRevision})
+                </option>
+              ))}
+            </select>
+          ) : null}
+          {importMode === 'fork_as_new' ? (
+            <input
+              className={cn(uiField.input, 'h-9 max-w-xs')}
+              value={importForkCanonicalName}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => setImportForkCanonicalName(e.target.value)}
+              placeholder={t('settings.universalSkills.importForkNamePlaceholder')}
+              aria-label={t('settings.universalSkills.importForkName')}
+            />
+          ) : null}
           <input
             ref={fileRef}
             type="file"
