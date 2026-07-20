@@ -6,6 +6,7 @@ import * as workflowsApi from './api/workflows'
 import * as agentsApi from './api/agents'
 import * as systemBehaviorsApi from './api/system-behaviors'
 import * as targetFoldersApi from './api/target-folders'
+import * as skillPackagesApi from './api/skill-packages'
 
 function upsertById<T extends { id: string }>(items: T[] | undefined, item: T): T[] {
   if (!items || items.length === 0) return [item]
@@ -497,6 +498,219 @@ export const useCreateSystemBehaviorExampleWorkflowMutation = () => {
         qc.invalidateQueries({ queryKey: ['assistant-callable-workflows'] }),
         qc.invalidateQueries({ queryKey: ['assistant-workflow'] }),
       ])
+    },
+  })
+}
+
+
+// ==================== Universal Skill Packages (Plan 09 Task 6) ====================
+
+export const skillAdminSurfaceQueryKey = ['skill-admin-surface'] as const
+
+export function skillPackagesQueryKey(params?: skillPackagesApi.ListSkillPackagesParams) {
+  if (!params || Object.keys(params).length === 0) return ['skill-packages'] as const
+  return ['skill-packages', params] as const
+}
+
+export function skillPackageQueryKey(packageId: string) {
+  return ['skill-package', packageId] as const
+}
+
+export function skillPackageVersionsQueryKey(packageId: string) {
+  return ['skill-package-versions', packageId] as const
+}
+
+export function skillPackageVersionQueryKey(packageId: string, versionId: string) {
+  return ['skill-package-version', packageId, versionId] as const
+}
+
+export function skillPackageResourceQueryKey(
+  packageId: string,
+  versionId: string,
+  path: string,
+) {
+  return ['skill-package-resource', packageId, versionId, path] as const
+}
+
+export function invalidateSkillPackageCaches(qc: QueryClient, packageId?: string) {
+  qc.invalidateQueries({ queryKey: ['skill-packages'] })
+  if (packageId) {
+    qc.invalidateQueries({ queryKey: skillPackageQueryKey(packageId) })
+    qc.invalidateQueries({ queryKey: skillPackageVersionsQueryKey(packageId) })
+    qc.invalidateQueries({ queryKey: ['skill-package-version', packageId] })
+    qc.invalidateQueries({ queryKey: ['skill-package-resource', packageId] })
+  } else {
+    qc.invalidateQueries({ queryKey: ['skill-package'] })
+    qc.invalidateQueries({ queryKey: ['skill-package-versions'] })
+    qc.invalidateQueries({ queryKey: ['skill-package-version'] })
+    qc.invalidateQueries({ queryKey: ['skill-package-resource'] })
+  }
+}
+
+export const useSkillAdminSurfaceQuery = () =>
+  useQuery({
+    queryKey: skillAdminSurfaceQueryKey,
+    queryFn: skillPackagesApi.probeSkillAdminSurface,
+    staleTime: 30_000,
+    retry: false,
+  })
+
+export const useSkillPackagesQuery = (
+  params: skillPackagesApi.ListSkillPackagesParams = { limit: 50, offset: 0 },
+  enabled = true,
+) =>
+  useQuery({
+    queryKey: skillPackagesQueryKey(params),
+    queryFn: () => skillPackagesApi.listSkillPackages(params),
+    enabled,
+  })
+
+export const useSkillPackageQuery = (packageId: string | null | undefined, enabled = true) =>
+  useQuery({
+    queryKey: skillPackageQueryKey(String(packageId)),
+    queryFn: () => skillPackagesApi.getSkillPackage(String(packageId)),
+    enabled: enabled && !!packageId,
+  })
+
+export const useSkillPackageVersionsQuery = (
+  packageId: string | null | undefined,
+  params: skillPackagesApi.ListSkillVersionsParams = { limit: 50, offset: 0 },
+  enabled = true,
+) =>
+  useQuery({
+    queryKey: [...skillPackageVersionsQueryKey(String(packageId)), params],
+    queryFn: () => skillPackagesApi.listSkillPackageVersions(String(packageId), params),
+    enabled: enabled && !!packageId,
+  })
+
+export const useSkillPackageVersionQuery = (
+  packageId: string | null | undefined,
+  versionId: string | null | undefined,
+  enabled = true,
+) =>
+  useQuery({
+    queryKey: skillPackageVersionQueryKey(String(packageId), String(versionId)),
+    queryFn: () => skillPackagesApi.getSkillPackageVersion(String(packageId), String(versionId)),
+    enabled: enabled && !!packageId && !!versionId,
+  })
+
+export const useCreateSkillPackageMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: skillPackagesApi.createSkillPackage,
+    onSuccess: (created) => {
+      invalidateSkillPackageCaches(qc, created.id)
+    },
+  })
+}
+
+export const useSaveSkillPackageDraftMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      packageId,
+      body,
+    }: {
+      packageId: string
+      body: skillPackagesApi.SaveSkillDraftRequest
+    }) => skillPackagesApi.saveSkillPackageDraft(packageId, body),
+    onSuccess: (_data, variables) => {
+      invalidateSkillPackageCaches(qc, variables.packageId)
+    },
+  })
+}
+
+export const useArchiveSkillPackageMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      packageId,
+      body,
+    }: {
+      packageId: string
+      body: skillPackagesApi.AggregateRevisionBody
+    }) => skillPackagesApi.archiveSkillPackage(packageId, body),
+    onSuccess: (_data, variables) => {
+      invalidateSkillPackageCaches(qc, variables.packageId)
+    },
+  })
+}
+
+export const useUnarchiveSkillPackageMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      packageId,
+      body,
+    }: {
+      packageId: string
+      body: skillPackagesApi.AggregateRevisionBody
+    }) => skillPackagesApi.unarchiveSkillPackage(packageId, body),
+    onSuccess: (_data, variables) => {
+      invalidateSkillPackageCaches(qc, variables.packageId)
+    },
+  })
+}
+
+export const useEnableSkillPackageCatalogMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      packageId,
+      body,
+    }: {
+      packageId: string
+      body: skillPackagesApi.CatalogEnableRequest
+    }) => skillPackagesApi.enableSkillPackageCatalog(packageId, body),
+    onSuccess: (_data, variables) => {
+      invalidateSkillPackageCaches(qc, variables.packageId)
+    },
+  })
+}
+
+export const useDisableSkillPackageCatalogMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      packageId,
+      body,
+    }: {
+      packageId: string
+      body: skillPackagesApi.AggregateRevisionBody
+    }) => skillPackagesApi.disableSkillPackageCatalog(packageId, body),
+    onSuccess: (_data, variables) => {
+      invalidateSkillPackageCaches(qc, variables.packageId)
+    },
+  })
+}
+
+export const usePatchSkillPackageMetadataMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      packageId,
+      body,
+    }: {
+      packageId: string
+      body: skillPackagesApi.MetadataPatchRequest
+    }) => skillPackagesApi.patchSkillPackageMetadata(packageId, body),
+    onSuccess: (_data, variables) => {
+      invalidateSkillPackageCaches(qc, variables.packageId)
+    },
+  })
+}
+
+export const usePreviewSkillPackageImportMutation = () =>
+  useMutation({
+    mutationFn: skillPackagesApi.previewSkillPackageImport,
+  })
+
+export const useApplySkillPackageImportMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: skillPackagesApi.applySkillPackageImport,
+    onSuccess: (result) => {
+      invalidateSkillPackageCaches(qc, result.package.id)
     },
   })
 }

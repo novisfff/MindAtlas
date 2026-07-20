@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { FileType, Tags, ChevronRight, Bot, Wrench, BrainCircuit, Network, Sparkles, Settings2, Clock3, PlugZap } from 'lucide-react'
+import { FileType, Tags, ChevronRight, Bot, Wrench, BrainCircuit, Network, Sparkles, Settings2, Clock3, PlugZap, Package } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { uiChrome, uiRadius } from '@/components/ui/styles'
 import {
@@ -53,6 +53,15 @@ export function SettingsPage() {
       path: '/settings/assistant-tools',
       color: 'text-blue-500',
       bgColor: 'bg-blue-500/10'
+    },
+    {
+      id: 'universal-skills',
+      titleKey: 'pages.settings.universalSkills',
+      descKey: 'pages.settings.universalSkillsDesc',
+      icon: Package,
+      path: '/settings/universal-skills',
+      color: 'text-indigo-500',
+      bgColor: 'bg-indigo-500/10'
     },
     {
       id: 'assistant-skills',
