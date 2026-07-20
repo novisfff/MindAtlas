@@ -101,6 +101,60 @@ def _current_revision(engine: Engine) -> str | None:
         return None if row is None else str(row[0])
 
 
+def _table_exists(conn, table: str) -> bool:
+    row = conn.execute(
+        text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = :t"
+        ),
+        {"t": table},
+    ).first()
+    return row is not None
+
+
+def _clear_plan09_downgrade_blockers(conn) -> None:
+    """Clear Plan 09 evidence that blocks alembic downgrade through 09A/09B."""
+    # Eval children first (FKs point at runs/gates/datasets).
+    for table in (
+        "assistant_skill_eval_event",
+        "assistant_skill_eval_case_result",
+        "assistant_skill_eval_capability_call",
+        "assistant_skill_eval_artifact",
+        "assistant_skill_publish_gate_use",
+        "assistant_skill_eval_case",
+        "assistant_skill_eval_dataset_draft",
+        "assistant_skill_eval_run",
+        "assistant_skill_publish_gate",
+        "assistant_skill_eval_dataset_version",
+        "assistant_skill_eval_dataset",
+    ):
+        if _table_exists(conn, table):
+            conn.execute(text(f"DELETE FROM {table}"))
+    if _table_exists(conn, "assistant_skill_package"):
+        conn.execute(
+            text(
+                "UPDATE assistant_skill_package SET "
+                "archived_at = NULL, archived_by = NULL, "
+                "catalog_enabled_at = NULL, catalog_enabled_by = NULL, "
+                "catalog_enabled = false"
+            )
+        )
+    if _table_exists(conn, "assistant_skill_package_alias"):
+        conn.execute(
+            text(
+                "UPDATE assistant_skill_package_alias SET "
+                "disabled_at = NULL, disabled_by = NULL"
+            )
+        )
+    if _table_exists(conn, "assistant_main_agent_profile"):
+        conn.execute(
+            text(
+                "UPDATE assistant_main_agent_profile SET runtime_enabled = false"
+            )
+        )
+
+
+
 def _err_text(exc: BaseException) -> str:
     parts = [str(exc)]
     orig = getattr(exc, "orig", None)
@@ -150,8 +204,8 @@ def _reset_to_plan01_parent() -> None:
                     PLAN08_LEDGER_REVISION,
                     PLAN08_LIFECYCLE_REVISION,
                     PLAN08_HEAD,
-            PLAN09_LIFECYCLE_REVISION,
-            PLAN09_HEAD,
+                    PLAN09_LIFECYCLE_REVISION,
+                    PLAN09_HEAD,
                 }:
                     conn.execute(
                         text(
@@ -165,7 +219,29 @@ def _reset_to_plan01_parent() -> None:
                             "SET runtime_enabled = false"
                         )
                     )
-            _run_alembic("downgrade", PLAN01_HEAD)
+            prior_eval_ack = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
+            prior_ledger_ack = os.environ.get(
+                "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"
+            )
+            os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
+            os.environ["MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"] = "1"
+            try:
+                with engine.begin() as conn:
+                    _clear_plan09_downgrade_blockers(conn)
+                _run_alembic("downgrade", PLAN01_HEAD)
+            finally:
+                if prior_eval_ack is None:
+                    os.environ.pop("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK", None)
+                else:
+                    os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = prior_eval_ack
+                if prior_ledger_ack is None:
+                    os.environ.pop(
+                        "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA", None
+                    )
+                else:
+                    os.environ[
+                        "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"
+                    ] = prior_ledger_ack
         elif current != PLAN01_HEAD:
             # The guarded test only supports its parent and known descendants.
             raise AssertionError(f"unsupported migration state: {current}")

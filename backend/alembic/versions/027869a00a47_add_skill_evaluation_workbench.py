@@ -1019,8 +1019,9 @@ def downgrade() -> None:
         for row in conn.execute(
             sa.text(
                 "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = 'public' AND table_name LIKE 'assistant_skill_eval%' "
-                "OR table_name LIKE 'assistant_skill_publish_gate%'"
+                "WHERE table_schema = 'public' AND ("
+                "table_name LIKE 'assistant_skill_eval%' "
+                "OR table_name LIKE 'assistant_skill_publish_gate%')"
             )
         )
     }

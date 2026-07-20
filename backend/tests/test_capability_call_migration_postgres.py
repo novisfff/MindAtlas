@@ -96,6 +96,85 @@ def _alembic_config():
     return cfg
 
 
+
+def _table_exists(conn, table: str) -> bool:
+    row = conn.execute(
+        text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = :t"
+        ),
+        {"t": table},
+    ).first()
+    return row is not None
+
+
+def _clear_plan09_downgrade_blockers(conn) -> None:
+    """Clear Plan 09 evidence that blocks alembic downgrade through 09A/09B."""
+    for table in (
+        "assistant_skill_eval_event",
+        "assistant_skill_eval_case_result",
+        "assistant_skill_eval_capability_call",
+        "assistant_skill_eval_artifact",
+        "assistant_skill_publish_gate_use",
+        "assistant_skill_eval_case",
+        "assistant_skill_eval_dataset_draft",
+        "assistant_skill_eval_run",
+        "assistant_skill_publish_gate",
+        "assistant_skill_eval_dataset_version",
+        "assistant_skill_eval_dataset",
+    ):
+        if _table_exists(conn, table):
+            conn.execute(text(f"DELETE FROM {table}"))
+    if _table_exists(conn, "assistant_skill_package"):
+        conn.execute(
+            text(
+                "UPDATE assistant_skill_package SET "
+                "archived_at = NULL, archived_by = NULL, "
+                "catalog_enabled_at = NULL, catalog_enabled_by = NULL, "
+                "catalog_enabled = false"
+            )
+        )
+    if _table_exists(conn, "assistant_skill_package_alias"):
+        conn.execute(
+            text(
+                "UPDATE assistant_skill_package_alias SET "
+                "disabled_at = NULL, disabled_by = NULL"
+            )
+        )
+    if _table_exists(conn, "assistant_main_agent_profile"):
+        conn.execute(
+            text(
+                "UPDATE assistant_main_agent_profile SET runtime_enabled = false"
+            )
+        )
+
+
+
+def _downgrade_to_ledger_revision() -> None:
+    """Downgrade to Plan 08 ledger revision, clearing Plan 09 blockers first."""
+    from alembic import command
+
+    prior_eval_ack = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
+    prior_ledger_ack = os.environ.get("MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA")
+    os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
+    os.environ["MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"] = "1"
+    try:
+        with _engine() as engine:
+            with engine.begin() as conn:
+                _clear_plan09_downgrade_blockers(conn)
+        command.downgrade(_alembic_config(), PLAN08_LEDGER_REVISION)
+    finally:
+        if prior_eval_ack is None:
+            os.environ.pop("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK", None)
+        else:
+            os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = prior_eval_ack
+        if prior_ledger_ack is None:
+            os.environ.pop("MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA", None)
+        else:
+            os.environ["MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"] = prior_ledger_ack
+
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _upgrade_to_ledger_revision() -> Iterator[None]:
     from alembic import command
@@ -119,7 +198,7 @@ def _upgrade_to_ledger_revision() -> Iterator[None]:
         PLAN09_HEAD,
     }:
         # Descend Plan 09 → Plan 08 tip → ledger revision used by this suite.
-        command.downgrade(_alembic_config(), PLAN08_LEDGER_REVISION)
+        _downgrade_to_ledger_revision()
     elif current != PLAN08_LEDGER_REVISION:
         command.upgrade(_alembic_config(), PLAN08_LEDGER_REVISION)
     yield
@@ -372,7 +451,7 @@ def test_external_effect_boundary_survives_claim_and_dispatch_trigger() -> None:
 def test_attempt_lifecycle_downgrade_restores_unconditional_rejection() -> None:
     from alembic import command
 
-    command.downgrade(_alembic_config(), PLAN08_LEDGER_REVISION)
+    _downgrade_to_ledger_revision()
     with _engine() as engine, _session(engine) as session:
         repo, attempt = _seed_claimed_attempt(session)
         with pytest.raises(DBAPIError) as exc_info:
