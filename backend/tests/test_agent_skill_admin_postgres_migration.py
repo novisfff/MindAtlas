@@ -35,7 +35,7 @@ PARENT_REVISION = "d7e8f9a0b1c3"
 TASK1_HEAD = "403414a62e55"
 # After Task 3 the sole Alembic head is the evaluation workbench revision.
 # Task 1 lifecycle remains a reachable intermediate (parent of Task 3).
-PLAN09_HEAD = "027869a00a47"
+PLAN09_HEAD = "24f1e06fdd9e"
 DOWNGRADE_BLOCKED_TOKEN = (
     "MINDATLAS_PLAN09_DOWNGRADE_BLOCKED_ARCHIVED_OR_CATALOG_EVIDENCE"
 )
@@ -244,7 +244,7 @@ def _reset_to_parent() -> None:
             current = _current_revision(engine)
         except Exception:
             current = None
-        if current in {TASK1_HEAD, PLAN09_HEAD}:
+        if current in {TASK1_HEAD, "027869a00a47", PLAN09_HEAD}:
             prior_eval_ack = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
             prior_ledger_ack = os.environ.get(
                 "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"
@@ -347,7 +347,7 @@ def _insert_pre_task1_alias(
 
 
 def test_task1_revises_plan08_parent_and_is_sole_head() -> None:
-    """Task 1 revises Plan 08 tip; sole head is Plan 09 Task 3 after chain."""
+    """Task 1 revises Plan 08 tip; sole head is Plan 09 residual after chain."""
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(_alembic_config())
@@ -356,9 +356,13 @@ def test_task1_revises_plan08_parent_and_is_sole_head() -> None:
     assert rev.down_revision == PARENT_REVISION
     heads = script.get_heads()
     assert heads == [PLAN09_HEAD], f"expected sole head {PLAN09_HEAD}, got {heads}"
-    task3 = script.get_revision(PLAN09_HEAD)
-    assert task3 is not None
-    assert task3.down_revision == TASK1_HEAD
+    head_rev = script.get_revision(PLAN09_HEAD)
+    assert head_rev is not None
+    # Head is alias soft-disable residual; workbench revises Task 1 lifecycle.
+    assert head_rev.down_revision == "027869a00a47"
+    workbench = script.get_revision("027869a00a47")
+    assert workbench is not None
+    assert workbench.down_revision == TASK1_HEAD
 
 
 def test_upgrade_adds_columns_defaults_checks_and_backfills() -> None:

@@ -238,13 +238,22 @@ def _reset_to_parent(engine: Engine) -> str:
         current = _current_revision(engine)
     except Exception:
         current = None
-    if current == task3:
+    # Head may be residual after workbench (or the workbench itself). Whenever we
+    # are above PARENT_REVISION, prepare guarded Plan 09 downgrade then descend.
+    if current is not None and current != PARENT_REVISION:
         prior = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
         os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
         try:
             with engine.begin() as conn:
                 _prepare_plan09_downgrade(conn)
-            _run_alembic("downgrade", PARENT_REVISION)
+            try:
+                _run_alembic("downgrade", PARENT_REVISION)
+            except Exception:
+                # Last resort: upgrade to head then prepare+downgrade again.
+                _run_alembic("upgrade", "head")
+                with engine.begin() as conn:
+                    _prepare_plan09_downgrade(conn)
+                _run_alembic("downgrade", PARENT_REVISION)
         finally:
             if prior is None:
                 os.environ.pop("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK", None)
@@ -254,19 +263,12 @@ def _reset_to_parent(engine: Engine) -> str:
         try:
             _run_alembic("upgrade", PARENT_REVISION)
         except Exception:
-            # Last resort: clear + downgrade from head, never stamp over child schema.
             prior = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
             os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
             try:
                 with engine.begin() as conn:
                     _prepare_plan09_downgrade(conn)
-                try:
-                    _run_alembic("downgrade", PARENT_REVISION)
-                except Exception:
-                    _run_alembic("upgrade", "head")
-                    with engine.begin() as conn:
-                        _prepare_plan09_downgrade(conn)
-                    _run_alembic("downgrade", PARENT_REVISION)
+                _run_alembic("downgrade", PARENT_REVISION)
             finally:
                 if prior is None:
                     os.environ.pop("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK", None)
@@ -286,10 +288,22 @@ def test_sole_alembic_head_is_task3() -> None:
     heads = script.get_heads()
     assert len(heads) == 1, heads
     task3 = _task3_revision()
-    assert heads[0] == task3
-    rev = script.get_revision(task3)
-    assert rev is not None
-    assert rev.down_revision == PARENT_REVISION
+    # Sole head is residual after workbench (alias soft-disable); workbench
+    # still revises PARENT_REVISION and remains on the linear chain.
+    head = heads[0]
+    head_rev = script.get_revision(head)
+    assert head_rev is not None
+    # Walk down until Task3 workbench; ensure it revises PARENT_REVISION.
+    cur = head_rev
+    seen = {cur.revision}
+    while cur.revision != task3:
+        parent = cur.down_revision
+        assert parent, f"reached root without finding task3={task3} from head={head}"
+        cur = script.get_revision(parent)
+        assert cur is not None
+        assert cur.revision not in seen
+        seen.add(cur.revision)
+    assert cur.down_revision == PARENT_REVISION
 
 
 def test_migration_cycle_parent_task3_parent_task3() -> None:
