@@ -1,0 +1,179 @@
+"""Plan 09 Task 8 — evaluation HTTP mount, auth, and client-authored gate rejection."""
+
+from __future__ import annotations
+
+import os
+import unittest
+import uuid
+
+from tests._bootstrap import bootstrap_backend_imports, reset_caches
+
+bootstrap_backend_imports()
+reset_caches()
+
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from app.assistant.evaluation.router import (  # noqa: E402
+    PLAN09_EVAL_PREFIX,
+    mount_skill_eval_router,
+    skill_eval_router,
+)
+from app.assistant.skills.admin_router import TRUSTED_MOUNT_ENV  # noqa: E402
+from app.assistant.skills.router import skill_package_router  # noqa: E402
+from app.common.exceptions import register_exception_handlers  # noqa: E402
+from app.database import get_db  # noqa: E402
+from tests._db import make_session  # noqa: E402
+
+
+def _digest(ch: str = "a") -> str:
+    return (ch * 64)[:64]
+
+
+class SkillEvalApiMountTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        os.environ.pop(TRUSTED_MOUNT_ENV, None)
+        os.environ.pop("APP_ENV", None)
+
+    def _client(self, *, mount: bool) -> TestClient:
+        app = FastAPI()
+        register_exception_handlers(app)
+        session = make_session()
+
+        def _override_db():
+            try:
+                yield session
+            finally:
+                pass
+
+        app.dependency_overrides[get_db] = _override_db
+        app.include_router(skill_package_router)
+        if mount:
+            os.environ[TRUSTED_MOUNT_ENV] = "1"
+            mounted = mount_skill_eval_router(app, app_env="development")
+            self.assertTrue(mounted)
+        else:
+            os.environ.pop(TRUSTED_MOUNT_ENV, None)
+            mounted = mount_skill_eval_router(app, app_env="production")
+            self.assertFalse(mounted)
+        return TestClient(app)
+
+    def test_openapi_absent_when_unmounted(self) -> None:
+        client = self._client(mount=False)
+        paths = (client.get("/openapi.json").json().get("paths") or {})
+        for path in paths:
+            self.assertNotIn("/skill-eval", path)
+            self.assertNotIn(PLAN09_EVAL_PREFIX, path)
+
+    def test_openapi_present_when_trusted_mount(self) -> None:
+        client = self._client(mount=True)
+        paths = client.get("/openapi.json").json().get("paths") or {}
+        eval_paths = [p for p in paths if PLAN09_EVAL_PREFIX in p or "/skill-eval" in p]
+        self.assertGreaterEqual(len(eval_paths), 4)
+        # No DELETE on eval routes.
+        for path, methods in paths.items():
+            if "/skill-eval" not in path:
+                continue
+            self.assertNotIn("delete", {m.lower() for m in methods.keys()})
+
+    def test_eval_routes_require_principal_when_mounted(self) -> None:
+        client = self._client(mount=True)
+        r = client.get(f"{PLAN09_EVAL_PREFIX}/datasets")
+        self.assertIn(r.status_code, {401, 403}, r.text)
+
+        r2 = client.post(
+            f"{PLAN09_EVAL_PREFIX}/runs",
+            json={
+                "subjectKind": "skill_draft",
+                "subjectAggregateId": str(uuid.uuid4()),
+                "subjectVersionId": str(uuid.uuid4()),
+                "subjectContentDigest": _digest("1"),
+                "subjectBindingDigest": _digest("2"),
+                "mode": "interactive_scripted",
+            },
+        )
+        self.assertIn(r2.status_code, {401, 403}, r2.text)
+
+    def test_client_authored_gate_decision_fields_rejected(self) -> None:
+        client = self._client(mount=True)
+        headers = {
+            "X-MindAtlas-Operator-Id": "operator-task8",
+            "X-MindAtlas-Operator-Role": "operator",
+        }
+        body = {
+            "requestId": str(uuid.uuid4()),
+            "subject": {
+                "schemaVersion": 1,
+                "subject": {
+                    "schemaVersion": 1,
+                    "kind": "skill_draft",
+                    "aggregateId": str(uuid.uuid4()),
+                    "versionId": str(uuid.uuid4()),
+                    "contentDigest": _digest("c"),
+                    "resolvedBindingDigest": _digest("b"),
+                },
+                "profileDigest": _digest("p"),
+                "catalogDigest": _digest("k"),
+                "runtimeContractVersion": 1,
+                "policyVersion": "plan09-policy-v1",
+                "thresholdVersion": "plan09-policy-v1",
+                "datasetVersionIds": [str(uuid.uuid4())],
+                "buildRevision": "development",
+            },
+            "qualifyingEvalRunIds": [str(uuid.uuid4())],
+            # Forbidden client-authored decision fields:
+            "passed": True,
+            "decision": "passed",
+            "metrics": {"score": 1.0},
+            "assertions": [{"code": "x", "passed": True}],
+        }
+        r = client.post(f"{PLAN09_EVAL_PREFIX}/gates", json=body, headers=headers)
+        self.assertIn(r.status_code, {422, 400}, r.text)
+        # Must not create a gate with a client-supplied pass.
+        self.assertNotIn('"decision":"passed"', r.text.replace(" ", ""))
+
+    def test_create_run_with_operator_headers(self) -> None:
+        client = self._client(mount=True)
+        headers = {
+            "X-MindAtlas-Operator-Id": "operator-task8",
+            "X-MindAtlas-Operator-Role": "operator",
+        }
+        r = client.post(
+            f"{PLAN09_EVAL_PREFIX}/runs",
+            headers=headers,
+            json={
+                "requestId": f"req-{uuid.uuid4().hex[:8]}",
+                "subjectKind": "skill_draft",
+                "subjectAggregateId": str(uuid.uuid4()),
+                "subjectVersionId": str(uuid.uuid4()),
+                "subjectContentDigest": _digest("3"),
+                "subjectBindingDigest": _digest("4"),
+                "mode": "interactive_scripted",
+                "datasetVersionIds": [str(uuid.uuid4())],
+                "isolationDigest": _digest("5"),
+            },
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        data = r.json()["data"]
+        self.assertEqual(data["status"], "queued")
+        self.assertEqual(data["mode"], "interactive_scripted")
+        run_id = data["id"]
+
+        # Events endpoint exists and requires principal (already have headers).
+        events = client.get(
+            f"{PLAN09_EVAL_PREFIX}/runs/{run_id}/events",
+            headers=headers,
+            params={"afterSequence": 0},
+        )
+        self.assertEqual(events.status_code, 200, events.text)
+        self.assertIn("items", events.json()["data"])
+
+
+class SkillEvalRouterContractTests(unittest.TestCase):
+    def test_router_prefix_and_route_count(self) -> None:
+        self.assertEqual(PLAN09_EVAL_PREFIX, "/api/assistant-config/skill-eval")
+        self.assertGreaterEqual(len(skill_eval_router.routes), 6)
+
+
+if __name__ == "__main__":
+    unittest.main()
