@@ -398,10 +398,20 @@ def test_migration_cycle_parent_task3_parent_task3() -> None:
             assert again.content_digest == result.content_digest
 
 
+def _err_text(exc: BaseException) -> str:
+    parts = [str(exc)]
+    orig = getattr(exc, "orig", None)
+    if orig is not None:
+        parts.append(str(orig))
+    return " ".join(parts)
+
+
 def test_immutable_triggers_and_uniqueness() -> None:
     with _engine() as engine:
-        task3 = _task3_revision()
-        _run_alembic("upgrade", task3)
+        # Upgrade to sole head so residual alias migration is present; eval
+        # immutability triggers land at the workbench revision.
+        _run_alembic("upgrade", "head")
+        ids: dict[str, uuid.UUID] = {}
         with _session(engine) as session:
             from app.assistant.evaluation.repository import EvaluationRepository
             from app.common.time import utcnow
@@ -519,28 +529,85 @@ def test_immutable_triggers_and_uniqueness() -> None:
             assert use.gate_id == gate.id
             assert repo.is_gate_evidence_pinned(gate) is True
 
-            # Immutable UPDATE rejected by triggers.
-            for table, pk in (
-                ("assistant_skill_eval_dataset_version", published.version_id),
-                ("assistant_skill_eval_case", case.id),
-                ("assistant_skill_eval_case_result", result.id),
-                ("assistant_skill_eval_event", event.id),
-                ("assistant_skill_eval_capability_call", call.id),
-                ("assistant_skill_eval_artifact", art.id),
-                ("assistant_skill_publish_gate", gate.id),
-                ("assistant_skill_publish_gate_use", use.id),
-            ):
-                with pytest.raises((DBAPIError, IntegrityError)):
-                    session.execute(
-                        text(f"UPDATE {table} SET id = id WHERE id = :id"),
-                        {"id": str(pk)},
-                    )
-                    session.flush()
-                session.rollback()
+            ids = {
+                "version": published.version_id,
+                "case": case.id,
+                "result": result.id,
+                "event": event.id,
+                "call": call.id,
+                "artifact": art.id,
+                "gate": gate.id,
+                "use": use.id,
+                "run": run.id,
+            }
 
-            # Artifact XOR enforced.
+        # Immutable UPDATE/DELETE rejected by triggers. Use engine.begin() + real
+        # column mutations (Plan 01 pattern) — Session + SET id=id was fragile.
+        immutable_updates = [
+            (
+                "assistant_skill_eval_dataset_version",
+                ids["version"],
+                "version_name",
+                "mutated",
+            ),
+            ("assistant_skill_eval_case", ids["case"], "notes", "mutated"),
+            (
+                "assistant_skill_eval_case_result",
+                ids["result"],
+                "result_state",
+                "failed",
+            ),
+            ("assistant_skill_eval_event", ids["event"], "event_type", "mutated"),
+            (
+                "assistant_skill_eval_capability_call",
+                ids["call"],
+                "outcome",
+                "mutated",
+            ),
+            ("assistant_skill_eval_artifact", ids["artifact"], "kind", "mutated"),
+            (
+                "assistant_skill_publish_gate",
+                ids["gate"],
+                "policy_version",
+                "mutated",
+            ),
+            (
+                "assistant_skill_publish_gate_use",
+                ids["use"],
+                "actor_principal",
+                "mutated",
+            ),
+        ]
+        for table, row_id, col, val in immutable_updates:
+            with engine.begin() as conn:
+                with pytest.raises((DBAPIError, IntegrityError)) as exc_info:
+                    conn.execute(
+                        text(f"UPDATE {table} SET {col} = :val WHERE id = :id"),
+                        {"id": row_id, "val": val},
+                    )
+                assert "MINDATLAS_PLAN09_EVAL_IMMUTABLE" in _err_text(exc_info.value), (
+                    table,
+                    _err_text(exc_info.value),
+                )
+            # Fully immutable tables also reject DELETE.
+            if table not in {
+                "assistant_skill_eval_event",
+                "assistant_skill_eval_artifact",
+            }:
+                with engine.begin() as conn:
+                    with pytest.raises((DBAPIError, IntegrityError)) as exc_info:
+                        conn.execute(
+                            text(f"DELETE FROM {table} WHERE id = :id"),
+                            {"id": row_id},
+                        )
+                    assert "MINDATLAS_PLAN09_EVAL_IMMUTABLE" in _err_text(
+                        exc_info.value
+                    ), (table, _err_text(exc_info.value))
+
+        # Artifact XOR enforced.
+        with engine.begin() as conn:
             with pytest.raises((DBAPIError, IntegrityError)):
-                session.execute(
+                conn.execute(
                     text(
                         "INSERT INTO assistant_skill_eval_artifact "
                         "(id, eval_run_id, kind, media_type, byte_size, content_digest, "
@@ -549,15 +616,14 @@ def test_immutable_triggers_and_uniqueness() -> None:
                     ),
                     {
                         "id": str(uuid.uuid4()),
-                        "run": str(run.id),
+                        "run": str(ids["run"]),
                         "d": _DIGEST_B,
                     },
                 )
-                session.flush()
-            session.rollback()
 
-            # No FK from eval capability call to production ledger.
-            row = session.execute(
+        # No FK from eval capability call to production ledger.
+        with engine.connect() as conn:
+            row = conn.execute(
                 text(
                     "SELECT conname, pg_get_constraintdef(oid) "
                     "FROM pg_constraint "
