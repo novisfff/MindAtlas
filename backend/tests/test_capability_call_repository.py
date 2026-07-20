@@ -587,6 +587,7 @@ class CapabilityCallModelTests(unittest.TestCase):
 
 class CapabilityCallMigrationMetaTests(unittest.TestCase):
     def test_revision_parent_and_sole_head(self) -> None:
+        """Plan 08 ledger chain remains ancestors of the sole Plan 09 head."""
         from pathlib import Path
         from alembic.config import Config
         from alembic.script import ScriptDirectory
@@ -598,11 +599,23 @@ class CapabilityCallMigrationMetaTests(unittest.TestCase):
         heads = script.get_heads()
         self.assertEqual(len(heads), 1, heads)
         head = heads[0]
-        self.assertEqual(head, "d7e8f9a0b1c3")
-        rev = script.get_revision(head)
-        self.assertEqual(rev.down_revision, "f2c3a4b5d6e7")
-        self.assertIn("reconciliation_evidence", rev.path)
-        lifecycle = script.get_revision(rev.down_revision)
+        # Plan 09 evaluation workbench is the sole head after Tasks 1+3.
+        self.assertEqual(head, "027869a00a47")
+
+        plan09_eval = script.get_revision(head)
+        self.assertEqual(plan09_eval.down_revision, "403414a62e55")
+        self.assertIn("skill_evaluation_workbench", plan09_eval.path)
+
+        plan09_lifecycle = script.get_revision(plan09_eval.down_revision)
+        self.assertEqual(plan09_lifecycle.down_revision, "d7e8f9a0b1c3")
+        self.assertIn("skill_package_admin_lifecycle", plan09_lifecycle.path)
+
+        # Plan 08 tip remains the parent of Plan 09 Task 1.
+        plan08_evidence = script.get_revision(plan09_lifecycle.down_revision)
+        self.assertEqual(plan08_evidence.revision, "d7e8f9a0b1c3")
+        self.assertEqual(plan08_evidence.down_revision, "f2c3a4b5d6e7")
+        self.assertIn("reconciliation_evidence", plan08_evidence.path)
+        lifecycle = script.get_revision(plan08_evidence.down_revision)
         self.assertEqual(lifecycle.down_revision, "984c07876856")
         self.assertIn("capability_attempt_lifecycle", lifecycle.path)
         ledger = script.get_revision(lifecycle.down_revision)

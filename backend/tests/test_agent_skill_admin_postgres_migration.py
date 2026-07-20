@@ -33,6 +33,9 @@ reset_caches()
 
 PARENT_REVISION = "d7e8f9a0b1c3"
 TASK1_HEAD = "403414a62e55"
+# After Task 3 the sole Alembic head is the evaluation workbench revision.
+# Task 1 lifecycle remains a reachable intermediate (parent of Task 3).
+PLAN09_HEAD = "027869a00a47"
 DOWNGRADE_BLOCKED_TOKEN = (
     "MINDATLAS_PLAN09_DOWNGRADE_BLOCKED_ARCHIVED_OR_CATALOG_EVIDENCE"
 )
@@ -270,6 +273,7 @@ def _insert_pre_task1_alias(
 
 
 def test_task1_revises_plan08_parent_and_is_sole_head() -> None:
+    """Task 1 revises Plan 08 tip; sole head is Plan 09 Task 3 after chain."""
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(_alembic_config())
@@ -277,7 +281,10 @@ def test_task1_revises_plan08_parent_and_is_sole_head() -> None:
     assert rev is not None
     assert rev.down_revision == PARENT_REVISION
     heads = script.get_heads()
-    assert heads == [TASK1_HEAD], f"expected sole head {TASK1_HEAD}, got {heads}"
+    assert heads == [PLAN09_HEAD], f"expected sole head {PLAN09_HEAD}, got {heads}"
+    task3 = script.get_revision(PLAN09_HEAD)
+    assert task3 is not None
+    assert task3.down_revision == TASK1_HEAD
 
 
 def test_upgrade_adds_columns_defaults_checks_and_backfills() -> None:
@@ -441,7 +448,7 @@ def test_downgrade_blocked_when_archive_or_catalog_or_disable_evidence() -> None
 
 
 def test_parent_head_parent_head_cycle_and_sole_head() -> None:
-    """parent → Task1 head → parent → head; sole head remains Task1."""
+    """parent → Task1 → parent → Task1; script sole head remains Plan 09 tip."""
     from alembic.script import ScriptDirectory
 
     _reset_to_parent()
@@ -460,7 +467,7 @@ def test_parent_head_parent_head_cycle_and_sole_head() -> None:
     with _engine() as engine:
         assert _current_revision(engine) == TASK1_HEAD
         heads = ScriptDirectory.from_config(_alembic_config()).get_heads()
-        assert heads == [TASK1_HEAD]
+        assert heads == [PLAN09_HEAD]
 
 
 # ---------------------------------------------------------------------------

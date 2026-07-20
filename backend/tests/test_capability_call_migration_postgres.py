@@ -47,6 +47,8 @@ WORKER_ID = "plan08-attempt-pg-worker"
 PLAN08_LEDGER_REVISION = "984c07876856"
 PLAN08_LIFECYCLE_REVISION = "f2c3a4b5d6e7"
 PLAN08_EVIDENCE_REVISION = "d7e8f9a0b1c3"
+PLAN09_LIFECYCLE_REVISION = "403414a62e55"
+PLAN09_HEAD = "027869a00a47"
 DISPOSABLE_DATABASE_PREFIX = "mindatlas_test_plan08_"
 DESTRUCTIVE_OPT_IN_ENV = "MINDATLAS_TEST_POSTGRES_DESTRUCTIVE"
 
@@ -110,7 +112,13 @@ def _upgrade_to_ledger_revision() -> Iterator[None]:
                 current = None if row is None else str(row[0])
             except DBAPIError:
                 current = None
-    if current in {PLAN08_LIFECYCLE_REVISION, PLAN08_EVIDENCE_REVISION}:
+    if current in {
+        PLAN08_LIFECYCLE_REVISION,
+        PLAN08_EVIDENCE_REVISION,
+        PLAN09_LIFECYCLE_REVISION,
+        PLAN09_HEAD,
+    }:
+        # Descend Plan 09 → Plan 08 tip → ledger revision used by this suite.
         command.downgrade(_alembic_config(), PLAN08_LEDGER_REVISION)
     elif current != PLAN08_LEDGER_REVISION:
         command.upgrade(_alembic_config(), PLAN08_LEDGER_REVISION)

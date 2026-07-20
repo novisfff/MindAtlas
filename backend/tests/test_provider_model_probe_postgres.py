@@ -31,6 +31,8 @@ PLAN07_HEAD = "7a3dac0ac2a8"
 PLAN08_LEDGER_REVISION = "984c07876856"
 PLAN08_LIFECYCLE_REVISION = "f2c3a4b5d6e7"
 PLAN08_HEAD = "d7e8f9a0b1c3"
+PLAN09_LIFECYCLE_REVISION = "403414a62e55"
+PLAN09_HEAD = "027869a00a47"
 DOWNGRADE_BLOCKED_TOKEN = "MINDATLAS_PLAN03_DOWNGRADE_BLOCKED_PROBE_DATA"
 
 _POSTGRES_URL = os.environ.get("MINDATLAS_TEST_POSTGRES_URL", "").strip()
@@ -130,6 +132,8 @@ def _reset_to_plan01_parent() -> None:
             PLAN08_LEDGER_REVISION,
             PLAN08_LIFECYCLE_REVISION,
             PLAN08_HEAD,
+            PLAN09_LIFECYCLE_REVISION,
+            PLAN09_HEAD,
         }:
             # Satisfy both descendant downgrade guards, then let Alembic restore
             # every intermediate schema object in revision order. Hand-written
@@ -146,6 +150,8 @@ def _reset_to_plan01_parent() -> None:
                     PLAN08_LEDGER_REVISION,
                     PLAN08_LIFECYCLE_REVISION,
                     PLAN08_HEAD,
+            PLAN09_LIFECYCLE_REVISION,
+            PLAN09_HEAD,
                 }:
                     conn.execute(
                         text(
@@ -270,6 +276,8 @@ def test_upgrade_preserves_plan01_revisions_and_null_pointer() -> None:
             PLAN04_HEAD,
             PLAN06_HEAD,
             PLAN08_HEAD,
+            PLAN09_LIFECYCLE_REVISION,
+            PLAN09_HEAD,
         }
         with engine.connect() as conn:
             row = conn.execute(
@@ -552,6 +560,8 @@ def test_downgrade_with_probe_rows_refuses_then_upgrade_cycle() -> None:
             PLAN04_HEAD,
             PLAN06_HEAD,
             PLAN08_HEAD,
+            PLAN09_LIFECYCLE_REVISION,
+            PLAN09_HEAD,
         }
         with engine.connect() as conn:
             row = conn.execute(
