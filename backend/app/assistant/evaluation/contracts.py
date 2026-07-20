@@ -298,64 +298,77 @@ def assert_not_evaluation_id(*, entity: str, value: UUID | str | None) -> None:
     raise ValueError(f"production {entity} APIs reject evaluation identifiers")
 
 
-def is_evaluation_run_id(session: Any, run_id: UUID | str | None) -> bool:
-    """Return True when ``run_id`` exists in evaluation run tables."""
-    if run_id is None:
-        return False
+def _as_uuid(value: UUID | str | None) -> UUID | None:
+    if value is None:
+        return None
     try:
         from uuid import UUID as _UUID
 
-        rid = run_id if isinstance(run_id, _UUID) else _UUID(str(run_id))
+        return value if isinstance(value, _UUID) else _UUID(str(value))
     except Exception:
+        return None
+
+
+def _probe_eval_row(session: Any, model: Any, row_id: UUID) -> bool:
+    """Membership probe that must not poison the outer DB transaction.
+
+    PostgreSQL aborts the current transaction on ``relation does not exist``.
+    Plan 08-ledger suites (and any DB without Plan 09 eval tables) hit that
+    path when production writers call ``reject_if_evaluation_id``. Catching
+    the exception alone is insufficient — use a SAVEPOINT so only the nested
+    transaction rolls back and the outer session remains usable.
+    """
+    begin_nested = getattr(session, "begin_nested", None)
+    if callable(begin_nested):
+        try:
+            with begin_nested():
+                row = session.get(model, row_id)
+                return row is not None
+        except Exception:
+            # Nested rollback already restored outer txn usability.
+            return False
+    # Session without nested-transaction support (tests/mocks): best-effort.
+    try:
+        row = session.get(model, row_id)
+        return row is not None
+    except Exception:
+        return False
+
+
+def is_evaluation_run_id(session: Any, run_id: UUID | str | None) -> bool:
+    """Return True when ``run_id`` exists in evaluation run tables."""
+    rid = _as_uuid(run_id)
+    if rid is None:
         return False
     try:
         from app.assistant.evaluation.models import AssistantSkillEvalRun
-
-        row = session.get(AssistantSkillEvalRun, rid)
-        return row is not None
     except Exception:
-        # Fail open for membership probe only when session/model is unavailable
-        # (e.g. unit tests without models). Callers that already know membership
-        # should use assert_not_evaluation_id instead.
         return False
+    return _probe_eval_row(session, AssistantSkillEvalRun, rid)
 
 
 def is_evaluation_capability_call_id(session: Any, call_id: UUID | str | None) -> bool:
     """Return True when ``call_id`` exists in evaluation capability-call tables."""
-    if call_id is None:
-        return False
-    try:
-        from uuid import UUID as _UUID
-
-        cid = call_id if isinstance(call_id, _UUID) else _UUID(str(call_id))
-    except Exception:
+    cid = _as_uuid(call_id)
+    if cid is None:
         return False
     try:
         from app.assistant.evaluation.models import AssistantSkillEvalCapabilityCall
-
-        row = session.get(AssistantSkillEvalCapabilityCall, cid)
-        return row is not None
     except Exception:
         return False
+    return _probe_eval_row(session, AssistantSkillEvalCapabilityCall, cid)
 
 
 def is_evaluation_event_id(session: Any, event_id: UUID | str | None) -> bool:
     """Return True when ``event_id`` exists in evaluation event tables."""
-    if event_id is None:
-        return False
-    try:
-        from uuid import UUID as _UUID
-
-        eid = event_id if isinstance(event_id, _UUID) else _UUID(str(event_id))
-    except Exception:
+    eid = _as_uuid(event_id)
+    if eid is None:
         return False
     try:
         from app.assistant.evaluation.models import AssistantSkillEvalEvent
-
-        row = session.get(AssistantSkillEvalEvent, eid)
-        return row is not None
     except Exception:
         return False
+    return _probe_eval_row(session, AssistantSkillEvalEvent, eid)
 
 
 def reject_if_evaluation_id(
