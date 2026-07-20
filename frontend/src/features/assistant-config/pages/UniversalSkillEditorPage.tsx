@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 
+import { Button } from '@/components/ui/button'
 import {
   SettingsPageHeader,
   SettingsPageShell,
@@ -13,6 +14,15 @@ import {
 
 import { isConflictError, mapSkillPackageError, newRequestId } from '../api/skill-packages'
 import { UniversalSkillEditor } from '../components/UniversalSkillEditor'
+import { SkillVersionHistory } from '../components/SkillVersionHistory'
+import { SkillVersionDiff } from '../components/SkillVersionDiff'
+import { SkillPublishGateDialog } from '../components/SkillPublishGateDialog'
+import {
+  useDiffSkillPackageVersionsMutation,
+  useRestoreSkillPackageVersionMutation,
+  useSkillPackageVersionsQuery,
+} from '../queries'
+import type { SkillVersionDiffResult } from '../components/SkillVersionDiff'
 import {
   usePatchSkillPackageMetadataMutation,
   useSaveSkillPackageDraftMutation,
@@ -42,6 +52,13 @@ export function UniversalSkillEditorPage() {
   const workingCopy = useSkillEditorStore((s) => s.workingCopy)
   const isDirty = useSkillEditorStore((s) => s.isDirty)
   const [pageError, setPageError] = useState<string | null>(null)
+  const [leftVersionId, setLeftVersionId] = useState<string | null>(null)
+  const [rightVersionId, setRightVersionId] = useState<string | null>(null)
+  const [diff, setDiff] = useState<SkillVersionDiffResult | null>(null)
+  const [gateOpen, setGateOpen] = useState(false)
+  const versionsQuery = useSkillPackageVersionsQuery(packageId)
+  const restoreMutation = useRestoreSkillPackageVersionMutation()
+  const diffMutation = useDiffSkillPackageVersionsMutation()
 
   useEffect(() => {
     return () => clear()
@@ -171,6 +188,54 @@ export function UniversalSkillEditorPage() {
         {pageError ? (
           <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">{pageError}</div>
         ) : null}
+
+        <div className="space-y-4 border-t pt-4">
+          <SkillVersionHistory
+            packageId={packageId}
+            versions={versionsQuery.data?.items ?? []}
+            draftVersionId={packageQuery.data?.draftVersion?.id}
+            publishedVersionId={packageQuery.data?.publishedVersion?.id}
+            selectedLeftId={leftVersionId}
+            selectedRightId={rightVersionId}
+            onSelectLeft={setLeftVersionId}
+            onSelectRight={setRightVersionId}
+            restoring={restoreMutation.isPending}
+            onCompare={() => {
+              if (!leftVersionId || !rightVersionId) return
+              void diffMutation
+                .mutateAsync({ packageId, leftVersionId, rightVersionId })
+                .then((result) => setDiff(result as SkillVersionDiffResult))
+                .catch((err) => setPageError(mapSkillPackageError(err).message))
+            }}
+            onRestore={(versionId) => {
+              void restoreMutation
+                .mutateAsync({
+                  packageId,
+                  versionId,
+                  body: {
+                    requestId: newRequestId('restore'),
+                    expectedAggregateRevision,
+                  },
+                })
+                .then(async () => {
+                  await packageQuery.refetch()
+                  await versionsQuery.refetch()
+                })
+                .catch((err) => setPageError(mapSkillPackageError(err).message))
+            }}
+          />
+          <SkillVersionDiff diff={diff} />
+          <Button type="button" variant="outline" onClick={() => setGateOpen(true)}>
+            {t('settings.universalSkills.openGateDialog')}
+          </Button>
+          <SkillPublishGateDialog
+            open={gateOpen}
+            onClose={() => setGateOpen(false)}
+            subject={null}
+            qualifyingEvalRunIds={[]}
+          />
+        </div>
+
         <UniversalSkillEditor
           onSaveDraft={handleSaveDraft}
           onSaveMetadata={surface.data.adminMounted ? handleSaveMetadata : undefined}

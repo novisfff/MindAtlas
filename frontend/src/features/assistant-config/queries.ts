@@ -714,3 +714,35 @@ export const useApplySkillPackageImportMutation = () => {
     },
   })
 }
+
+
+export const useRestoreSkillPackageVersionMutation = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      packageId,
+      versionId,
+      body,
+    }: {
+      packageId: string
+      versionId: string
+      body: skillPackagesApi.AggregateRevisionBody
+    }) => skillPackagesApi.restoreSkillPackageVersionAsDraft(packageId, versionId, body),
+    onSuccess: (_data, variables) => {
+      invalidateSkillPackageCaches(qc, variables.packageId)
+    },
+  })
+}
+
+export const useDiffSkillPackageVersionsMutation = () =>
+  useMutation({
+    mutationFn: ({
+      packageId,
+      leftVersionId,
+      rightVersionId,
+    }: {
+      packageId: string
+      leftVersionId: string
+      rightVersionId: string
+    }) => skillPackagesApi.diffSkillPackageVersions(packageId, leftVersionId, rightVersionId),
+  })

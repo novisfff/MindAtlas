@@ -615,3 +615,15 @@ export function isScriptResourcePath(path: string): boolean {
   const normalized = path.replace(/^\/+/, '')
   return normalized === 'scripts' || normalized.startsWith('scripts/')
 }
+
+
+export function diffSkillPackageVersions(
+  packageId: string,
+  leftVersionId: string,
+  rightVersionId: string,
+): Promise<Record<string, unknown>> {
+  return apiClient.get<Record<string, unknown>>(
+    `${SKILL_ADMIN_BASE}/skill-packages/${packageId}/versions/${leftVersionId}/diff/${rightVersionId}`,
+    { headers: skillAdminOperatorHeaders() },
+  )
+}

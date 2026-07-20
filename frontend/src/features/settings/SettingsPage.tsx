@@ -64,6 +64,15 @@ export function SettingsPage() {
       bgColor: 'bg-indigo-500/10'
     },
     {
+      id: 'main-agent-profile',
+      titleKey: 'pages.settings.mainAgentProfile',
+      descKey: 'pages.settings.mainAgentProfileDesc',
+      icon: Bot,
+      path: '/settings/main-agent-profile',
+      color: 'text-violet-500',
+      bgColor: 'bg-violet-500/10'
+    },
+    {
       id: 'assistant-skills',
       titleKey: 'pages.settings.assistantSkills',
       descKey: 'pages.settings.assistantSkillsDesc',

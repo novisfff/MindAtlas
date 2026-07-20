@@ -44,6 +44,7 @@ const ToolSettings = lazyNamed(() => import('@/features/assistant-config/pages/T
 const SkillSettings = lazyNamed(() => import('@/features/assistant-config/pages/SkillSettings'), 'SkillSettings')
 const UniversalSkillSettings = lazyNamed(() => import('@/features/assistant-config/pages/UniversalSkillSettings'), 'UniversalSkillSettings')
 const UniversalSkillEditorPage = lazyNamed(() => import('@/features/assistant-config/pages/UniversalSkillEditorPage'), 'UniversalSkillEditorPage')
+const MainAgentProfileEditorPage = lazyNamed(() => import('@/features/assistant-config/pages/MainAgentProfileEditorPage'), 'MainAgentProfileEditorPage')
 const AssistantTargetsSettings = lazyNamed(
   () => import('@/features/assistant-config/pages/AssistantTargetsSettings'),
   'AssistantTargetsSettings',
@@ -131,6 +132,7 @@ export default function App() {
               <Route path="/settings/assistant-skills" element={withPageFallback(<SkillSettings />)} />
               <Route path="/settings/universal-skills" element={withPageFallback(<UniversalSkillSettings />)} />
               <Route path="/settings/universal-skills/:packageId" element={withPageFallback(<UniversalSkillEditorPage />)} />
+              <Route path="/settings/main-agent-profile" element={withPageFallback(<MainAgentProfileEditorPage />)} />
               <Route
                 path="/settings/assistant-targets"
                 element={withPageFallback(<AssistantTargetsSettings />)}

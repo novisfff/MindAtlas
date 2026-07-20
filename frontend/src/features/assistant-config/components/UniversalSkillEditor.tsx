@@ -14,6 +14,7 @@ import { cn } from '@/lib/utils'
 import { extractCapabilityKeys, SkillCapabilityEditor } from './SkillCapabilityEditor'
 import { SkillPolicyEditor } from './SkillPolicyEditor'
 import { SkillResourceBrowser } from './SkillResourceBrowser'
+import { SkillTestWorkbench } from './SkillTestWorkbench'
 import { useSkillEditorStore } from '../stores/skill-editor-store'
 import type { SkillResourceMetadata } from '../api/skill-packages'
 
@@ -285,11 +286,19 @@ export function UniversalSkillEditor({
         ) : null}
 
         {tab === 'versions' ? (
-          <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
-            <p>{t('settings.universalSkills.versionsShell')}</p>
-            <p className="mt-2 font-mono text-xs">
-              draft={draftVersionId ?? '—'} published={packageDetail.publishedVersion?.id ?? '—'}
-            </p>
+          <div className="space-y-4">
+            <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+              <p>{t('settings.universalSkills.versionsShell')}</p>
+              <p className="mt-2 font-mono text-xs">
+                draft={draftVersionId ?? '—'} published={packageDetail.publishedVersion?.id ?? '—'}
+              </p>
+            </div>
+            <SkillTestWorkbench
+              packageId={packageDetail.id}
+              versionId={draftVersionId}
+              contentDigest={draftDetail?.contentDigest ?? packageDetail.draftVersion?.contentDigest ?? null}
+              bindingDigest={draftDetail?.bindingSetDigest ?? packageDetail.draftVersion?.bindingSetDigest ?? null}
+            />
           </div>
         ) : null}
       </div>
