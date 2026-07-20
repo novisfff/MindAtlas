@@ -168,17 +168,77 @@ def _task3_revision() -> str:
     return matches[0][0]
 
 
+def _current_revision(engine: Engine) -> str | None:
+    with engine.connect() as conn:
+        try:
+            row = conn.execute(text("SELECT version_num FROM alembic_version")).first()
+        except Exception:
+            return None
+        return None if row is None else str(row[0])
+
+
+def _clear_eval_evidence(conn) -> None:
+    for table in (
+        "assistant_skill_eval_event",
+        "assistant_skill_eval_case_result",
+        "assistant_skill_eval_capability_call",
+        "assistant_skill_eval_artifact",
+        "assistant_skill_publish_gate_use",
+        "assistant_skill_eval_case",
+        "assistant_skill_eval_dataset_draft",
+        "assistant_skill_eval_run",
+        "assistant_skill_publish_gate",
+        "assistant_skill_eval_dataset_version",
+        "assistant_skill_eval_dataset",
+    ):
+        if _table_exists(conn, table):
+            conn.execute(text(f"DELETE FROM {table}"))
+
+
 def _reset_to_parent(engine: Engine) -> str:
+    """Bring DB to Task1 head (parent of evaluation workbench)."""
     task3 = _task3_revision()
-    # Stamp/force to parent if needed by cycling.
-    with engine.begin() as conn:
-        # Ensure clean: drop eval tables if partially present without alembic state.
-        pass
     try:
-        _run_alembic("upgrade", PARENT_REVISION)
+        current = _current_revision(engine)
     except Exception:
-        _run_alembic("stamp", PARENT_REVISION)
-        _run_alembic("upgrade", PARENT_REVISION)
+        current = None
+    if current == task3:
+        prior = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
+        os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
+        try:
+            with engine.begin() as conn:
+                _clear_eval_evidence(conn)
+            _run_alembic("downgrade", PARENT_REVISION)
+        finally:
+            if prior is None:
+                os.environ.pop("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK", None)
+            else:
+                os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = prior
+    elif current != PARENT_REVISION:
+        try:
+            _run_alembic("upgrade", PARENT_REVISION)
+        except Exception:
+            # Last resort: clear + downgrade from head, never stamp over child schema.
+            prior = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
+            os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
+            try:
+                with engine.begin() as conn:
+                    _clear_eval_evidence(conn)
+                try:
+                    _run_alembic("downgrade", PARENT_REVISION)
+                except Exception:
+                    _run_alembic("upgrade", "head")
+                    with engine.begin() as conn:
+                        _clear_eval_evidence(conn)
+                    _run_alembic("downgrade", PARENT_REVISION)
+            finally:
+                if prior is None:
+                    os.environ.pop("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK", None)
+                else:
+                    os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = prior
+    assert _current_revision(engine) == PARENT_REVISION, (
+        f"expected parent {PARENT_REVISION}, got {_current_revision(engine)}"
+    )
     return task3
 
 

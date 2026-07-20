@@ -170,27 +170,57 @@ def _column_info(conn, table: str) -> dict[str, dict]:
     }
 
 
+def _table_exists(conn, table: str) -> bool:
+    row = conn.execute(
+        text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = :t"
+        ),
+        {"t": table},
+    ).first()
+    return row is not None
+
+
 def _clear_plan09_evidence(conn) -> None:
-    conn.execute(
-        text(
-            """
-            UPDATE assistant_skill_package
-            SET archived_at = NULL,
-                archived_by = NULL,
-                catalog_enabled_at = NULL,
-                catalog_enabled_by = NULL
-            """
+    """Clear Plan 09A lifecycle evidence and Plan 09B eval evidence."""
+    for table in (
+        "assistant_skill_eval_event",
+        "assistant_skill_eval_case_result",
+        "assistant_skill_eval_capability_call",
+        "assistant_skill_eval_artifact",
+        "assistant_skill_publish_gate_use",
+        "assistant_skill_eval_case",
+        "assistant_skill_eval_dataset_draft",
+        "assistant_skill_eval_run",
+        "assistant_skill_publish_gate",
+        "assistant_skill_eval_dataset_version",
+        "assistant_skill_eval_dataset",
+    ):
+        if _table_exists(conn, table):
+            conn.execute(text(f"DELETE FROM {table}"))
+    if _table_exists(conn, "assistant_skill_package"):
+        conn.execute(
+            text(
+                """
+                UPDATE assistant_skill_package
+                SET archived_at = NULL,
+                    archived_by = NULL,
+                    catalog_enabled_at = NULL,
+                    catalog_enabled_by = NULL,
+                    catalog_enabled = false
+                """
+            )
         )
-    )
-    conn.execute(
-        text(
-            """
-            UPDATE assistant_skill_package_alias
-            SET disabled_at = NULL, disabled_by = NULL
-            WHERE disabled_at IS NOT NULL
-            """
+    if _table_exists(conn, "assistant_skill_package_alias"):
+        conn.execute(
+            text(
+                """
+                UPDATE assistant_skill_package_alias
+                SET disabled_at = NULL, disabled_by = NULL
+                WHERE disabled_at IS NOT NULL
+                """
+            )
         )
-    )
 
 
 def _reset_to_parent() -> None:
@@ -202,16 +232,48 @@ def _reset_to_parent() -> None:
             current = _current_revision(engine)
         except Exception:
             current = None
-        if current == TASK1_HEAD:
-            with engine.begin() as conn:
-                _clear_plan09_evidence(conn)
-            _run_alembic("downgrade", PARENT_REVISION)
+        if current in {TASK1_HEAD, PLAN09_HEAD}:
+            prior_eval_ack = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
+            prior_ledger_ack = os.environ.get(
+                "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"
+            )
+            os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
+            os.environ["MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"] = "1"
+            try:
+                with engine.begin() as conn:
+                    _clear_plan09_evidence(conn)
+                _run_alembic("downgrade", PARENT_REVISION)
+            finally:
+                if prior_eval_ack is None:
+                    os.environ.pop("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK", None)
+                else:
+                    os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = prior_eval_ack
+                if prior_ledger_ack is None:
+                    os.environ.pop(
+                        "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA", None
+                    )
+                else:
+                    os.environ[
+                        "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"
+                    ] = prior_ledger_ack
         elif current != PARENT_REVISION:
-            # Prefer upgrade to parent when possible; fall back to stamp.
+            # Prefer real upgrade/downgrade; stamp only as last resort.
             try:
                 _run_alembic("upgrade", PARENT_REVISION)
             except Exception:
-                _run_alembic("stamp", PARENT_REVISION)
+                # If already past parent but not recognized, force cycle via head.
+                try:
+                    prior_eval_ack = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
+                    os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
+                    with engine.begin() as conn:
+                        _clear_plan09_evidence(conn)
+                    _run_alembic("downgrade", PARENT_REVISION)
+                    if prior_eval_ack is None:
+                        os.environ.pop("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK", None)
+                    else:
+                        os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = prior_eval_ack
+                except Exception:
+                    _run_alembic("stamp", PARENT_REVISION)
     finally:
         engine.dispose()
     with _engine() as eng:
