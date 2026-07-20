@@ -117,3 +117,11 @@ export function assertNoSingleTargetFields(snapshot: Record<string, unknown>): s
   const forbidden = ['skillId', 'workflowId', 'agentProfileId', 'targetType', 'targetId']
   return forbidden.filter((k) => k in snapshot && snapshot[k] != null)
 }
+
+export function getDefaultMainAgentVersion(
+  versionId: string,
+): Promise<MainAgentProfileVersionDetail> {
+  return apiClient.get<MainAgentProfileVersionDetail>(
+    `${MAIN_AGENT_PROFILES_BASE}/default/versions/${versionId}`,
+  )
+}

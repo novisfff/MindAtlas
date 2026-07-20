@@ -50,18 +50,29 @@ describe('skill-editor-store', () => {
     expect(state.isDirty).toBe(false)
   })
 
-  it('marks dirty on edits and builds a complete save body', () => {
+  it('marks dirty on edits and builds a save body that omits resources unless dirty', () => {
     useSkillEditorStore.getState().loadPackage(pkg, draft)
     useSkillEditorStore.getState().setSkillMd('# changed')
     useSkillEditorStore.getState().setMindatlasYaml('capabilities: []\n')
     const state = useSkillEditorStore.getState()
     expect(state.isDirty).toBe(true)
-    expect(state.buildSaveBody()).toEqual({
-      skillMd: '# changed',
-      mindatlasYaml: 'capabilities: []\n',
-      resources: [],
-      versionName: 'v1',
-    })
+    const body = state.buildSaveBody()
+    expect(body.skillMd).toBe('# changed')
+    expect(body.mindatlasYaml).toBe('capabilities: []\n')
+    expect(body.versionName).toBe('v1')
+    expect(body.expectedAggregateRevision).toBe(3)
+    expect(body.requestId).toBeTruthy()
+    // Content-only edit must not send resources (server preserves previous).
+    expect(body.resources).toBeUndefined()
+  })
+
+  it('includes resources only after explicit resource mutation', () => {
+    useSkillEditorStore.getState().loadPackage(pkg, draft)
+    useSkillEditorStore.getState().setResources([
+      { path: 'references/a.md', contentBase64: 'YQ==' },
+    ])
+    const body = useSkillEditorStore.getState().buildSaveBody()
+    expect(body.resources).toEqual([{ path: 'references/a.md', contentBase64: 'YQ==' }])
   })
 
   it('preserves local work on conflict and clears dirty on markSaved', () => {

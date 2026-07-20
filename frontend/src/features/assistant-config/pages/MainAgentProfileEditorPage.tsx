@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils'
 import {
   assertNoSingleTargetFields,
   getDefaultMainAgentProfile,
+  getDefaultMainAgentVersion,
   listDefaultMainAgentVersions,
   publishDefaultMainAgent,
   saveDefaultMainAgentDraft,
@@ -92,6 +93,30 @@ export function MainAgentProfileEditorPage() {
     setProfile(summary)
     const page = await listDefaultMainAgentVersions({ limit: 50, offset: 0 })
     setVersions(page.items || [])
+    // Load the actual draft/published snapshot — never save DEFAULT_SNAPSHOT over server state.
+    const versionId = summary.draftVersion?.id || summary.publishedVersion?.id
+    if (versionId) {
+      const detail = await getDefaultMainAgentVersion(versionId)
+      const snap = detail.snapshot as MainAgentProfileSnapshot
+      if (snap && typeof snap === 'object' && snap.basePrompt) {
+        setSnapshot({
+          ...DEFAULT_SNAPSHOT,
+          ...snap,
+          schemaVersion: 1,
+          controlCapabilityKeys: snap.controlCapabilityKeys || [],
+          skillCatalogScope: snap.skillCatalogScope || DEFAULT_SNAPSHOT.skillCatalogScope,
+          modelRequirements: snap.modelRequirements || DEFAULT_SNAPSHOT.modelRequirements,
+          contextBudget: snap.contextBudget || DEFAULT_SNAPSHOT.contextBudget,
+          outputBudget: snap.outputBudget || DEFAULT_SNAPSHOT.outputBudget,
+          globalSafetyPolicy: snap.globalSafetyPolicy || DEFAULT_SNAPSHOT.globalSafetyPolicy,
+          fallbackPolicy: snap.fallbackPolicy || DEFAULT_SNAPSHOT.fallbackPolicy,
+          responseStyle: snap.responseStyle || {},
+          supportedEntrypoints: snap.supportedEntrypoints || ['assistant_chat'],
+        })
+        setControlKeysText((snap.controlCapabilityKeys || []).join(', '))
+        setDirty(false)
+      }
+    }
   }
 
   useEffect(() => {

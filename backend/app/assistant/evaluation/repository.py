@@ -431,9 +431,10 @@ class EvaluationRepository:
                 CODE_OWNERSHIP,
                 "Eval Run owner_kind must be 'test' (execution namespace)",
             )
-        if not dataset_version_ids:
+        if not dataset_version_ids and mode != "interactive_scripted":
             raise EvaluationRepositoryError(
-                CODE_INVALID_INPUT, "dataset_version_ids required"
+                CODE_INVALID_INPUT,
+                "dataset_version_ids required for dataset evaluation modes",
             )
         row = AssistantSkillEvalRun(
             id=run_id or uuid4(),

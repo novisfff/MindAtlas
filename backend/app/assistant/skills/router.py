@@ -269,7 +269,7 @@ def _files_from_json_request(
     if body.mindatlas_yaml is not None:
         files["mindatlas.yaml"] = body.mindatlas_yaml.encode("utf-8")
 
-    for resource in body.resources:
+    for resource in (body.resources or []):
         try:
             path = normalize_package_path(resource.path, field="resource path")
         except ValueError as exc:
@@ -514,6 +514,10 @@ async def save_skill_package_draft(
             parsed=parsed,
             version_name=body.version_name,
             origin="api",
+            expected_aggregate_revision=body.expected_aggregate_revision,
+            request_id=body.request_id,
+            # Omit resources ⇒ preserve previous draft resource bytes.
+            preserve_previous_resources=body.resources is None,
         )
     )
     return ApiResponse.ok(_dto(version))
@@ -749,6 +753,23 @@ def list_default_main_agent_versions(
             offset=offset,
         )
     )
+
+
+
+@main_agent_profile_router.get("/default/versions/{version_id}")
+def get_default_main_agent_version(
+    version_id: UUID,
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    service = MainAgentProfileService(db)
+    try:
+        profile = service.get_default()
+    except ApiException as exc:
+        if exc.code != 40493:
+            raise
+        profile = service.ensure_default()
+    detail = service.get_version(profile.id, version_id)
+    return ApiResponse.ok(_dto(detail))
 
 
 @main_agent_profile_router.post("/default/publish")

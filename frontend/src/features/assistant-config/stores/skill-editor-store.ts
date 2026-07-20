@@ -40,6 +40,7 @@ interface SkillEditorState {
   draftDetail: SkillVersionDetail | null
   workingCopy: SkillWorkingCopy
   isDirty: boolean
+  resourcesDirty: boolean
   lastRequestId: string | null
   lastConflict: SkillEditorConflict | null
   validationDiagnostics: SkillValidationDiagnostic[]
@@ -68,8 +69,10 @@ interface SkillEditorState {
   buildSaveBody: () => {
     skillMd: string
     mindatlasYaml: string | null
-    resources: SkillResourceInput[]
+    resources?: SkillResourceInput[]
     versionName: string | null
+    expectedAggregateRevision: number
+    requestId: string
   }
 }
 
@@ -104,6 +107,7 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
   draftDetail: null,
   workingCopy: { ...EMPTY_WORKING_COPY },
   isDirty: false,
+      resourcesDirty: false,
   lastRequestId: null,
   lastConflict: null,
   validationDiagnostics: [],
@@ -117,6 +121,7 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
       draftDetail: draft,
       workingCopy: workingCopyFromServer(pkg, draft),
       isDirty: false,
+      resourcesDirty: false,
       lastConflict: null,
       validationDiagnostics: [],
     }),
@@ -157,6 +162,7 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
     set((state) => ({
       workingCopy: { ...state.workingCopy, resources: [...resources] },
       isDirty: true,
+      resourcesDirty: true,
     })),
 
   upsertResource: (resource) =>
@@ -165,6 +171,7 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
       return {
         workingCopy: { ...state.workingCopy, resources: [...without, resource] },
         isDirty: true,
+        resourcesDirty: true,
       }
     }),
 
@@ -175,6 +182,7 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
         resources: state.workingCopy.resources.filter((r) => r.path !== path),
       },
       isDirty: true,
+      resourcesDirty: true,
     })),
 
   setValidationDiagnostics: (items) => set({ validationDiagnostics: items }),
@@ -188,6 +196,7 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
         expectedAggregateRevision ?? state.expectedAggregateRevision,
       lastRequestId: requestId ?? state.lastRequestId,
       isDirty: false,
+      resourcesDirty: false,
       lastConflict: null,
     })),
 
@@ -201,6 +210,7 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
     set({
       workingCopy: workingCopyFromServer(packageDetail, draftDetail),
       isDirty: false,
+      resourcesDirty: false,
       lastConflict: null,
       expectedAggregateRevision: packageDetail.aggregateRevision ?? 0,
       draftVersionId: draftDetail?.id ?? packageDetail.draftVersion?.id ?? null,
@@ -216,18 +226,37 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
       draftDetail: null,
       workingCopy: { ...EMPTY_WORKING_COPY },
       isDirty: false,
+      resourcesDirty: false,
       lastRequestId: null,
       lastConflict: null,
       validationDiagnostics: [],
     }),
 
   buildSaveBody: () => {
-    const { workingCopy } = get()
-    return {
+    const { workingCopy, resourcesDirty, expectedAggregateRevision, lastRequestId } = get()
+    const body: {
+      skillMd: string
+      mindatlasYaml: string | null
+      resources?: { path: string; contentBase64: string }[]
+      versionName: string | null
+      expectedAggregateRevision: number
+      requestId: string
+    } = {
       skillMd: workingCopy.skillMd,
       mindatlasYaml: workingCopy.mindatlasYaml.trim() ? workingCopy.mindatlasYaml : null,
-      resources: workingCopy.resources,
       versionName: workingCopy.versionName.trim() ? workingCopy.versionName : null,
+      expectedAggregateRevision,
+      requestId:
+        lastRequestId ||
+        (typeof crypto !== 'undefined' && crypto.randomUUID
+          ? `save-${crypto.randomUUID()}`
+          : `save-${Date.now()}`),
     }
+    // Omit resources unless the user explicitly changed them — server then
+    // preserves previous draft resource bytes (Plan 09 P1 data-safety).
+    if (resourcesDirty) {
+      body.resources = workingCopy.resources
+    }
+    return body
   },
 }))

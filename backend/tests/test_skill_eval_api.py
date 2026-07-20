@@ -133,23 +133,64 @@ class SkillEvalApiMountTests(unittest.TestCase):
         self.assertNotIn('"decision":"passed"', r.text.replace(" ", ""))
 
     def test_create_run_with_operator_headers(self) -> None:
+        import base64
+        import json
+
         client = self._client(mount=True)
         headers = {
             "X-MindAtlas-Operator-Id": "operator-task8",
             "X-MindAtlas-Operator-Role": "operator",
         }
+        # Create a real package so server can resolve digests from the version row.
+        name = f"eval-run-{uuid.uuid4().hex[:8]}"
+        skill_md = (
+            f"---\nname: {name}\n"
+            "description: Evaluation run admission regression package for Plan 09.\n"
+            "---\n\n# Body\n"
+        )
+        mindatlas = (
+            "version: 1\n"
+            "display_name: Eval\n"
+            "legacy_aliases: []\n\n"
+            "routing:\n  include_examples: []\n  exclude_examples: []\n  conflict_rules: []\n\n"
+            "capabilities: []\n\n"
+            "policy:\n  allowed_side_effects:\n    - read\n    - compute\n"
+            "  max_skill_calls: 16\n  max_same_read_calls: 3\n"
+            "  requires_terminal_output: true\n  terminal_text_allowed: true\n\n"
+            "provider_aliases: {}\n"
+        )
+        created = client.post(
+            "/api/assistant-config/skill-packages",
+            content=json.dumps(
+                {
+                    "skillMd": skill_md,
+                    "mindatlasYaml": mindatlas,
+                    "resources": [
+                        {
+                            "path": "references/a.md",
+                            "contentBase64": base64.b64encode(b"a\n").decode("ascii"),
+                        }
+                    ],
+                }
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        pkg = created.json()["data"]
+        draft = pkg["draftVersion"]
+        # Client may send garbage digests — server must recompute from version row.
         r = client.post(
             f"{PLAN09_EVAL_PREFIX}/runs",
             headers=headers,
             json={
                 "requestId": f"req-{uuid.uuid4().hex[:8]}",
                 "subjectKind": "skill_draft",
-                "subjectAggregateId": str(uuid.uuid4()),
-                "subjectVersionId": str(uuid.uuid4()),
+                "subjectAggregateId": pkg["id"],
+                "subjectVersionId": draft["id"],
                 "subjectContentDigest": _digest("3"),
                 "subjectBindingDigest": _digest("4"),
                 "mode": "interactive_scripted",
-                "datasetVersionIds": [str(uuid.uuid4())],
+                "datasetVersionIds": [],
                 "isolationDigest": _digest("5"),
             },
         )
@@ -159,7 +200,6 @@ class SkillEvalApiMountTests(unittest.TestCase):
         self.assertEqual(data["mode"], "interactive_scripted")
         run_id = data["id"]
 
-        # Events endpoint exists and requires principal (already have headers).
         events = client.get(
             f"{PLAN09_EVAL_PREFIX}/runs/{run_id}/events",
             headers=headers,
@@ -167,6 +207,27 @@ class SkillEvalApiMountTests(unittest.TestCase):
         )
         self.assertEqual(events.status_code, 200, events.text)
         self.assertIn("items", events.json()["data"])
+
+    def test_create_run_rejects_unknown_skill_version(self) -> None:
+        client = self._client(mount=True)
+        headers = {
+            "X-MindAtlas-Operator-Id": "operator-task8",
+            "X-MindAtlas-Operator-Role": "operator",
+        }
+        r = client.post(
+            f"{PLAN09_EVAL_PREFIX}/runs",
+            headers=headers,
+            json={
+                "subjectKind": "skill_draft",
+                "subjectAggregateId": str(uuid.uuid4()),
+                "subjectVersionId": str(uuid.uuid4()),
+                "subjectContentDigest": _digest("3"),
+                "subjectBindingDigest": _digest("4"),
+                "mode": "interactive_scripted",
+                "isolationDigest": _digest("5"),
+            },
+        )
+        self.assertEqual(r.status_code, 404, r.text)
 
 
 class SkillEvalRouterContractTests(unittest.TestCase):

@@ -6,6 +6,8 @@ in ordinary list/detail serialization.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from typing import Any, Sequence
 from uuid import UUID
@@ -27,7 +29,7 @@ from app.assistant.skills.contracts import (
     normalize_skill_lookup_name,
     validate_canonical_skill_name,
 )
-from app.assistant.skills.package_io import export_skill_package
+from app.assistant.skills.package_io import export_skill_package, parse_skill_directory_files
 from app.assistant.skills.models import (
     AssistantMainAgentProfile,
     AssistantMainAgentProfileVersion,
@@ -68,6 +70,9 @@ from app.assistant.skills.schemas import (
 from app.common.exceptions import ApiException
 
 logger = logging.getLogger(__name__)
+
+_CODE_CONFLICT_REVISION = 40994
+_CODE_CONFLICT_REQUEST = 40997
 
 # Aggregate-locked distinct referenced blob budget (in addition to per-version 25 MiB).
 MAX_PACKAGE_DISTINCT_BLOB_BYTES = 256 * 1024 * 1024
@@ -333,17 +338,120 @@ class AgentSkillService:
         )
 
     def save_draft(self, command: SaveSkillDraftCommand) -> SkillVersionSummary:
-        parsed = command.parsed
-        try:
-            canonical = validate_canonical_skill_name(parsed.canonical_name)
-        except ValueError as exc:
-            raise ApiException(status_code=422, code=42290, message=str(exc)) from exc
+        """Append or re-point a draft with optional aggregate revision CAS.
 
+        When ``preserve_previous_resources`` is True, skill.md/yaml from the
+        command are merged with bytes copied from the current draft version so
+        a content-only edit cannot wipe package resources.
+        """
         version_name = command.version_name or "draft"
         origin = command.origin
 
         try:
             package = self._lock_package(command.package_id)
+
+            request_id = (command.request_id or "").strip() or None
+            cas_payload = {
+                "package_id": str(command.package_id),
+                "version_name": version_name,
+                "origin": origin,
+                "content_digest": command.parsed.content_digest,
+                "preserve_previous_resources": bool(
+                    command.preserve_previous_resources
+                ),
+                "expected_aggregate_revision": command.expected_aggregate_revision,
+            }
+            digest: str | None = None
+            if request_id is not None:
+                body = json.dumps(
+                    {"operation": "save_draft", "payload": cas_payload},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                )
+                digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+                last_id = getattr(package, "last_admin_request_id", None)
+                last_digest = getattr(package, "last_admin_request_digest", None)
+                # Identical retry must short-circuit before revision CAS: the first
+                # successful call already advanced aggregate_revision.
+                if last_id == request_id:
+                    if last_digest == digest and package.draft_version_id is not None:
+                        draft = (
+                            self.db.query(AssistantSkillVersion)
+                            .filter(
+                                AssistantSkillVersion.id == package.draft_version_id
+                            )
+                            .one_or_none()
+                        )
+                        if draft is not None:
+                            return self._version_summary(draft)
+                    raise ApiException(
+                        status_code=409,
+                        code=_CODE_CONFLICT_REQUEST,
+                        message="requestId was reused with a different payload",
+                        details={"requestId": request_id},
+                    )
+
+            # Optional Plan 09 revision CAS (after idempotent requestId check).
+            if command.expected_aggregate_revision is not None:
+                current_rev = int(package.aggregate_revision or 0)
+                if current_rev != int(command.expected_aggregate_revision):
+                    raise ApiException(
+                        status_code=409,
+                        code=_CODE_CONFLICT_REVISION,
+                        message=(
+                            f"aggregate revision conflict: expected "
+                            f"{command.expected_aggregate_revision}, current {current_rev}"
+                        ),
+                        details={
+                            "expectedAggregateRevision": int(
+                                command.expected_aggregate_revision
+                            ),
+                            "currentAggregateRevision": current_rev,
+                            "packageId": str(package.id),
+                        },
+                    )
+
+            parsed = command.parsed
+            if command.preserve_previous_resources and package.draft_version_id is not None:
+                prev = (
+                    self.db.query(AssistantSkillVersion)
+                    .filter(
+                        AssistantSkillVersion.id == package.draft_version_id,
+                        AssistantSkillVersion.skill_package_id == package.id,
+                    )
+                    .one_or_none()
+                )
+                if prev is not None:
+                    files: dict[str, bytes] = {
+                        "SKILL.md": parsed.skill_md_bytes
+                        if parsed.skill_md_bytes
+                        else (prev.skill_md or "").encode("utf-8"),
+                    }
+                    yaml_bytes = parsed.mindatlas_yaml_bytes
+                    if yaml_bytes is None and prev.mindatlas_yaml:
+                        yaml_bytes = prev.mindatlas_yaml.encode("utf-8")
+                    if yaml_bytes is not None:
+                        files["mindatlas.yaml"] = yaml_bytes
+                    for resource in self._load_stored_resources(version_id=prev.id):
+                        # Client-supplied parsed resources (if any) win by path.
+                        if resource.path not in {
+                            r.path for r in (parsed.resources or ())
+                        }:
+                            files[resource.path] = resource.content
+                    for resource in parsed.resources or ():
+                        files[resource.path] = resource.content
+                    parsed = parse_skill_directory_files(
+                        files,
+                        expected_root_name=package.canonical_name,
+                    )
+
+            try:
+                canonical = validate_canonical_skill_name(parsed.canonical_name)
+            except ValueError as exc:
+                raise ApiException(
+                    status_code=422, code=42290, message=str(exc)
+                ) from exc
 
             if package.canonical_name != canonical:
                 raise ApiException(
@@ -359,7 +467,6 @@ class AgentSkillService:
             if package.migration_state == "shadow" and origin == "api":
                 package.migration_state = "native"
 
-            # Append any new legacy aliases (append-only; never rewrite).
             if parsed.manifest and parsed.manifest.legacy_aliases:
                 self._append_legacy_aliases(
                     package_id=package.id,
@@ -379,6 +486,13 @@ class AgentSkillService:
                 package.draft_version_id = existing.id
                 package.display_name = _display_name_for(parsed)
                 package.description = parsed.frontmatter.description
+                if command.expected_aggregate_revision is not None:
+                    package.aggregate_revision = (
+                        int(package.aggregate_revision or 0) + 1
+                    )
+                if request_id is not None:
+                    package.last_admin_request_id = request_id
+                    package.last_admin_request_digest = digest  # type: ignore[name-defined]
                 self.db.commit()
                 return self._version_summary(existing)
 
@@ -393,6 +507,20 @@ class AgentSkillService:
             package.draft_version_id = version.id
             package.display_name = _display_name_for(parsed)
             package.description = parsed.frontmatter.description
+            if command.expected_aggregate_revision is not None:
+                package.aggregate_revision = int(package.aggregate_revision or 0) + 1
+            if request_id is not None:
+                # Stamp client-request digest (pre-merge) for identical-retry.
+                body = json.dumps(
+                    {"operation": "save_draft", "payload": cas_payload},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                )
+                package.last_admin_request_id = request_id
+                package.last_admin_request_digest = hashlib.sha256(
+                    body.encode("utf-8")
+                ).hexdigest()
             self.db.commit()
             return self._version_summary(version)
         except ApiException:

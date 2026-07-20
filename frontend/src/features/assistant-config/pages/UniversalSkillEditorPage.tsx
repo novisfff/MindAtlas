@@ -12,13 +12,20 @@ import {
   SettingsSection,
 } from '@/features/settings/components/SettingsShell'
 
-import { isConflictError, mapSkillPackageError, newRequestId } from '../api/skill-packages'
+import {
+  isConflictError,
+  mapSkillPackageError,
+  newRequestId,
+  publishSkillPackageVersion,
+} from '../api/skill-packages'
+import type { PublishGateSubject } from '../api/skill-evaluations'
 import { UniversalSkillEditor } from '../components/UniversalSkillEditor'
 import { SkillVersionHistory } from '../components/SkillVersionHistory'
 import { SkillVersionDiff } from '../components/SkillVersionDiff'
 import { SkillPublishGateDialog } from '../components/SkillPublishGateDialog'
 import {
   useDiffSkillPackageVersionsMutation,
+  useEnableSkillPackageCatalogMutation,
   useRestoreSkillPackageVersionMutation,
   useSkillPackageVersionsQuery,
 } from '../queries'
@@ -31,6 +38,7 @@ import {
   useSkillPackageVersionQuery,
 } from '../queries'
 import { useSkillEditorStore } from '../stores/skill-editor-store'
+import { useSkillTestRunStore } from '../stores/skill-test-run-store'
 
 export function UniversalSkillEditorPage() {
   const { t } = useTranslation()
@@ -56,9 +64,82 @@ export function UniversalSkillEditorPage() {
   const [rightVersionId, setRightVersionId] = useState<string | null>(null)
   const [diff, setDiff] = useState<SkillVersionDiffResult | null>(null)
   const [gateOpen, setGateOpen] = useState(false)
+  const [lastGateId, setLastGateId] = useState<string | null>(null)
+  const [lastGateDecision, setLastGateDecision] = useState<string | null>(null)
   const versionsQuery = useSkillPackageVersionsQuery(packageId)
   const restoreMutation = useRestoreSkillPackageVersionMutation()
   const diffMutation = useDiffSkillPackageVersionsMutation()
+  const enableCatalogMutation = useEnableSkillPackageCatalogMutation()
+  const evalRun = useSkillTestRunStore((s) => s.run)
+
+  function buildGateSubject(): PublishGateSubject | null {
+    const draft = packageQuery.data?.draftVersion
+    const digest = draftQuery.data?.contentDigest || draft?.contentDigest
+    const binding = draftQuery.data?.bindingSetDigest || draft?.bindingSetDigest || digest
+    if (!packageQuery.data || !draft?.id || !digest || !binding) return null
+    if (digest.length !== 64 || binding.length !== 64) return null
+    const zero = '0'.repeat(64)
+    return {
+      schemaVersion: 1,
+      subject: {
+        schemaVersion: 1,
+        kind: 'skill_draft',
+        aggregateId: packageId,
+        versionId: draft.id,
+        contentDigest: digest,
+        resolvedBindingDigest: binding,
+      },
+      profileDigest: zero,
+      catalogDigest: zero,
+      runtimeContractVersion: 1,
+      policyVersion: 'plan09-policy-v1',
+      thresholdVersion: 'plan09-policy-v1',
+      // Server revalidates dataset pins; interactive-only gates may still need a real dataset later.
+      datasetVersionIds: [],
+      buildRevision: 'development',
+    }
+  }
+
+  async function handlePublish() {
+    const draftId = packageQuery.data?.draftVersion?.id
+    if (!draftId) {
+      setPageError(t('settings.universalSkills.noDraftVersion'))
+      return
+    }
+    setPageError(null)
+    try {
+      await publishSkillPackageVersion(packageId, {
+        draftVersionId: draftId,
+        gateId: lastGateId,
+        requestId: newRequestId('publish'),
+      })
+      await packageQuery.refetch()
+      await versionsQuery.refetch()
+    } catch (err) {
+      setPageError(mapSkillPackageError(err).message)
+    }
+  }
+
+  async function handleEnableCatalog() {
+    if (!lastGateId) {
+      setPageError(t('settings.universalSkills.gateNeedsRuns'))
+      return
+    }
+    setPageError(null)
+    try {
+      await enableCatalogMutation.mutateAsync({
+        packageId,
+        body: {
+          requestId: newRequestId('catalog-en'),
+          expectedAggregateRevision,
+          gateId: lastGateId,
+        },
+      })
+      await packageQuery.refetch()
+    } catch (err) {
+      setPageError(mapSkillPackageError(err).message)
+    }
+  }
 
   useEffect(() => {
     return () => clear()
@@ -225,14 +306,41 @@ export function UniversalSkillEditorPage() {
             }}
           />
           <SkillVersionDiff diff={diff} />
-          <Button type="button" variant="outline" onClick={() => setGateOpen(true)}>
-            {t('settings.universalSkills.openGateDialog')}
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="outline" onClick={() => setGateOpen(true)}>
+              {t('settings.universalSkills.openGateDialog')}
+            </Button>
+            <Button type="button" variant="outline" onClick={() => void handlePublish()}>
+              Publish draft
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!lastGateId || enableCatalogMutation.isPending}
+              onClick={() => void handleEnableCatalog()}
+            >
+              {t('settings.universalSkills.catalogEnabled')}
+            </Button>
+            {lastGateId ? (
+              <span className="font-mono text-xs text-muted-foreground">
+                gate={lastGateId.slice(0, 8)}… {lastGateDecision}
+              </span>
+            ) : null}
+            {evalRun?.id ? (
+              <span className="font-mono text-xs text-muted-foreground">
+                eval={evalRun.id.slice(0, 8)}…
+              </span>
+            ) : null}
+          </div>
           <SkillPublishGateDialog
             open={gateOpen}
             onClose={() => setGateOpen(false)}
-            subject={null}
-            qualifyingEvalRunIds={[]}
+            subject={buildGateSubject()}
+            qualifyingEvalRunIds={evalRun?.id ? [evalRun.id] : []}
+            onCreated={(result) => {
+              setLastGateId(result.gate.id)
+              setLastGateDecision(result.decision)
+            }}
           />
         </div>
 

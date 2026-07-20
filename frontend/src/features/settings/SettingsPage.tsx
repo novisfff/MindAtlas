@@ -9,10 +9,13 @@ import {
   SettingsSectionHeader,
 } from '@/features/settings/components/SettingsShell'
 import { cn } from '@/lib/utils'
+import { useSkillAdminSurfaceQuery } from '@/features/assistant-config/queries'
 
 export function SettingsPage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
+  const surface = useSkillAdminSurfaceQuery()
+  const universalAvailable = Boolean(surface.data?.available)
 
   const contentCategories = [
     {
@@ -110,6 +113,13 @@ export function SettingsPage() {
     }
   ]
 
+  const visibleAiCategories = aiCategories.filter((category) => {
+    if (category.id === 'universal-skills' || category.id === 'main-agent-profile') {
+      return universalAvailable
+    }
+    return true
+  })
+
   const runtimeCategories = [
     {
       id: 'lightrag',
@@ -162,7 +172,7 @@ export function SettingsPage() {
       titleKey: 'pages.settings.aiSection',
       descKey: 'pages.settings.aiSectionDesc',
       gridClassName: 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3',
-      categories: aiCategories
+      categories: visibleAiCategories
     },
     {
       id: 'runtime',

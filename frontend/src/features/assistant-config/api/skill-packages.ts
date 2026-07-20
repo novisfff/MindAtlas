@@ -132,8 +132,11 @@ export interface CreateSkillPackageRequest {
 export interface SaveSkillDraftRequest {
   skillMd: string
   mindatlasYaml?: string | null
+  /** Omit to preserve previous draft resources server-side. Explicit [] clears. */
   resources?: SkillResourceInput[]
   versionName?: string | null
+  expectedAggregateRevision?: number
+  requestId?: string
 }
 
 export interface AggregateRevisionBody {
@@ -537,53 +540,44 @@ export async function probeSkillAdminSurface(): Promise<SkillAdminSurfaceProbe> 
     }
   }
 
-  let packagesReadable = false
-  try {
-    await listSkillPackages({ limit: 1, offset: 0 })
-    packagesReadable = true
-  } catch (error) {
-    if (isNotFoundError(error)) {
-      return {
-        available: false,
-        packagesReadable: false,
-        adminMounted: false,
-        reason: 'packages_unmounted',
-      }
-    }
-    if (!isApiError(error) || (error.status != null && error.status >= 500)) {
-      return {
-        available: false,
-        packagesReadable: false,
-        adminMounted: false,
-        reason: 'packages_unavailable',
-      }
-    }
-    // Other client errors still mean the route exists.
-    packagesReadable = true
-  }
-
+  // Non-mutating probe: admin-only GET. Mounted+no principal → 401/403.
+  // Unmounted → 404. Never treat 404 as mounted.
   let adminMounted = false
   try {
-    await apiClient.post(
-      `${SKILL_ADMIN_BASE}/skill-packages/00000000-0000-4000-8000-000000000000/archive`,
-      {
-        body: { requestId: 'probe', expectedAggregateRevision: 0 },
-        headers: skillAdminOperatorHeaders(),
-      },
+    await apiClient.get(
+      `${SKILL_ADMIN_BASE}/skill-packages/00000000-0000-4000-8000-000000000000/versions/00000000-0000-4000-8000-000000000001/diff/00000000-0000-4000-8000-000000000002`,
+      { headers: skillAdminOperatorHeaders() },
     )
+    // Unexpected success still means the router is mounted.
     adminMounted = true
   } catch (error) {
     if (isApiError(error) && error.status != null) {
-      // 401/403/404/409/422 all imply the admin router handled the request.
-      adminMounted = [401, 403, 404, 409, 422].includes(error.status)
+      adminMounted = error.status === 401 || error.status === 403 || error.status === 409 || error.status === 422
+      // 404 / 405 / 5xx → unmounted or unavailable
+      if (error.status === 404 || error.status === 405 || error.status >= 500) {
+        adminMounted = false
+      }
+    } else {
+      adminMounted = false
+    }
+  }
+
+  let packagesReadable = false
+  if (adminMounted) {
+    try {
+      await listSkillPackages({ limit: 1, offset: 0 })
+      packagesReadable = true
+    } catch {
+      packagesReadable = false
     }
   }
 
   return {
-    available: packagesReadable,
+    // Fail-closed: Universal UI requires the Plan 09 admin surface, not merely Plan 01 list.
+    available: adminMounted,
     packagesReadable,
     adminMounted,
-    reason: packagesReadable ? undefined : 'packages_unreadable',
+    reason: adminMounted ? undefined : 'admin_unmounted',
   }
 }
 

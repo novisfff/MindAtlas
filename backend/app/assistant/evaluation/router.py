@@ -18,6 +18,7 @@ from app.assistant.evaluation.models import (
     AssistantSkillEvalDataset,
     AssistantSkillPublishGate,
 )
+from app.assistant.skills.models import AssistantSkillVersion
 from app.assistant.evaluation.repository import (
     EvaluationRepository,
     EvaluationRepositoryError,
@@ -144,15 +145,71 @@ def create_eval_run(
     db: Session = Depends(get_db),
     principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
 ) -> ApiResponse:
+    """Admit an evaluation run with server-resolved subject digests.
+
+    Client-supplied content/binding digests are ignored for skill subjects —
+    values are recomputed from the immutable version row. Unknown dataset
+    version IDs are rejected; interactive runs may omit datasets (empty list)
+    and never invent random dataset UUIDs.
+    """
     repo = EvaluationRepository(db)
+    content_digest = body.subject_content_digest
+    binding_digest = body.subject_binding_digest
+    dataset_ids = list(body.dataset_version_ids or [])
+
+    # Server-side subject resolution for skill packages.
+    if body.subject_kind in {"skill_draft", "skill_version"}:
+        version = (
+            db.query(AssistantSkillVersion)
+            .filter(
+                AssistantSkillVersion.id == body.subject_version_id,
+                AssistantSkillVersion.skill_package_id == body.subject_aggregate_id,
+            )
+            .one_or_none()
+        )
+        if version is None:
+            raise ApiException(
+                status_code=404,
+                code=40491,
+                message=f"skill version not found: {body.subject_version_id}",
+            )
+        content_digest = str(version.content_digest or "")
+        binding_digest = str(
+            version.binding_set_digest or version.content_digest or ""
+        )
+        if len(content_digest) != 64 or len(binding_digest) != 64:
+            raise ApiException(
+                status_code=422,
+                code=42293,
+                message="skill version digests are incomplete; re-save the draft",
+            )
+
+    if dataset_ids:
+        from app.assistant.evaluation.models import AssistantSkillEvalDatasetVersion
+
+        for dv_id in dataset_ids:
+            row = db.get(AssistantSkillEvalDatasetVersion, dv_id)
+            if row is None:
+                raise ApiException(
+                    status_code=422,
+                    code=42293,
+                    message=f"unknown dataset version id: {dv_id}",
+                )
+    elif body.mode != "interactive_scripted":
+        raise ApiException(
+            status_code=422,
+            code=42293,
+            message="dataset_version_ids required for dataset evaluation modes",
+        )
+
     try:
         run = repo.create_run(
             subject_kind=body.subject_kind,
             subject_aggregate_id=body.subject_aggregate_id,
             subject_version_id=body.subject_version_id,
-            subject_content_digest=body.subject_content_digest,
-            subject_binding_digest=body.subject_binding_digest,
-            dataset_version_ids=body.dataset_version_ids or [uuid4()],
+            subject_content_digest=content_digest,
+            subject_binding_digest=binding_digest,
+            dataset_version_ids=dataset_ids,
             threshold_policy_version=body.threshold_policy_version,
             mode=body.mode,
             isolation_namespace_id=body.isolation_namespace_id or uuid4(),
@@ -166,6 +223,10 @@ def create_eval_run(
     except EvaluationRepositoryError as exc:
         db.rollback()
         raise _map_repo_error(exc) from exc
+    except ValueError as exc:
+        db.rollback()
+        # repository may still require non-empty dataset list
+        raise ApiException(status_code=422, code=42293, message=str(exc)) from exc
     return ApiResponse.ok(_dto(_run_summary(run)))
 
 
