@@ -182,8 +182,14 @@ class MainAgentProfileApiTests(unittest.TestCase):
         joined = " ".join(main_paths).lower()
         self.assertNotIn("activate", joined)
         self.assertNotIn("enable", joined)
-        # Only the four locked relative routes under /default.
-        self.assertEqual(len(main_paths), 4)
+        # Locked relative routes under /default:
+        # GET /default, PUT /default/draft, GET /default/versions,
+        # GET /default/versions/{version_id}, POST /default/publish.
+        self.assertEqual(len(main_paths), 5)
+        self.assertTrue(
+            any("/default/versions/{version_id}" in p for p in main_paths),
+            main_paths,
+        )
 
     def test_legacy_skills_still_present(self) -> None:
         schema = self.client.get("/openapi.json").json()
