@@ -131,4 +131,97 @@ describe('skill-editor-store', () => {
     expect(useSkillEditorStore.getState().isDirty).toBe(false)
     expect(useSkillEditorStore.getState().workingCopy.skillMd).toContain('demo-skill')
   })
+
+  it('blocks resource mutation and empty-seed CAS until hydrate succeeds', () => {
+    const draftWithResources: SkillVersionDetail = {
+      ...draft,
+      resources: [
+        {
+          path: 'references/a.md',
+          resourceKind: 'references',
+          mediaType: 'text/markdown',
+          byteSize: 1,
+          sha256: 'aa',
+        },
+        {
+          path: 'references/b.md',
+          resourceKind: 'references',
+          mediaType: 'text/markdown',
+          byteSize: 1,
+          sha256: 'bb',
+        },
+      ],
+    }
+    useSkillEditorStore.getState().loadPackage(pkg, draftWithResources)
+    const state = useSkillEditorStore.getState()
+    expect(state.resourcesHydrated).toBe(false)
+    expect(state.resourcesHydrationStatus).toBe('pending')
+    expect(state.workingCopy.resources.map((r) => r.contentBase64)).toEqual(['', ''])
+
+    // Mutations blocked before hydrate.
+    state.removeResource('references/a.md')
+    state.upsertResource({ path: 'references/c.md', contentBase64: 'Yw==' })
+    expect(useSkillEditorStore.getState().resourcesDirty).toBe(false)
+    expect(useSkillEditorStore.getState().workingCopy.resources.map((r) => r.path)).toEqual([
+      'references/a.md',
+      'references/b.md',
+    ])
+
+    // Empty placeholder hydrate fails closed (does not invent readiness).
+    useSkillEditorStore.getState().hydrateResources([
+      { path: 'references/a.md', contentBase64: '' },
+      { path: 'references/b.md', contentBase64: 'Yg==' },
+    ])
+    expect(useSkillEditorStore.getState().resourcesHydrationStatus).toBe('error')
+    expect(useSkillEditorStore.getState().resourcesHydrated).toBe(false)
+
+    // Even if dirty were forced, buildSaveBody must refuse empty seeds.
+    useSkillEditorStore.setState({
+      resourcesDirty: true,
+      resourcesHydrated: false,
+      resourcesHydrationStatus: 'pending',
+    })
+    expect(() => useSkillEditorStore.getState().buildSaveBody()).toThrow(
+      /before hydrate completes|empty contentBase64/i,
+    )
+
+    // Successful hydrate unlocks mutations; remove serializes remaining bytes only.
+    useSkillEditorStore.setState({
+      resourcesDirty: false,
+      resourcesHydrated: false,
+      resourcesHydrationStatus: 'pending',
+      resourcesHydrationError: null,
+    })
+    useSkillEditorStore.getState().hydrateResources([
+      { path: 'references/a.md', contentBase64: 'YQ==' },
+      { path: 'references/b.md', contentBase64: 'Yg==' },
+    ])
+    expect(useSkillEditorStore.getState().resourcesHydrated).toBe(true)
+    useSkillEditorStore.getState().removeResource('references/a.md')
+    const body = useSkillEditorStore.getState().buildSaveBody()
+    expect(body.resources).toEqual([{ path: 'references/b.md', contentBase64: 'Yg==' }])
+  })
+
+  it('failed hydrate does not invent empty bytes as ready', () => {
+    const draftWithResources: SkillVersionDetail = {
+      ...draft,
+      resources: [
+        {
+          path: 'references/a.md',
+          resourceKind: 'references',
+          mediaType: 'text/markdown',
+          byteSize: 1,
+          sha256: 'aa',
+        },
+      ],
+    }
+    useSkillEditorStore.getState().loadPackage(pkg, draftWithResources)
+    useSkillEditorStore.getState().setResourcesHydrationError('fetch failed')
+    expect(useSkillEditorStore.getState().resourcesHydrationStatus).toBe('error')
+    expect(useSkillEditorStore.getState().canMutateResources()).toBe(false)
+    expect(() => {
+      useSkillEditorStore.setState({ resourcesDirty: true })
+      useSkillEditorStore.getState().buildSaveBody()
+    }).toThrow()
+  })
 })

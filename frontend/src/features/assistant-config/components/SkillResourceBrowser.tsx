@@ -31,8 +31,15 @@ export interface SkillResourceBrowserProps {
   resources: SkillResourceMetadata[]
   /** Working-copy resource bytes for draft save (complete snapshot). */
   workingCopyResources?: SkillResourceInput[]
+  /**
+   * When true, list from workingCopyResources even if empty (intentional remove-all).
+   * Do not key off workingCopyResources.length — empty is a valid intended list.
+   */
+  useWorkingCopy?: boolean
   /** When true, show add/replace/remove controls that mutate the working copy. */
   editable?: boolean
+  /** When false, mutation controls are disabled (e.g. hydrate pending/error). */
+  mutationsEnabled?: boolean
   onUpsertResource?: (resource: SkillResourceInput) => void
   onRemoveResource?: (path: string) => void
   className?: string
@@ -89,7 +96,9 @@ export function SkillResourceBrowser({
   versionId,
   resources,
   workingCopyResources = [],
+  useWorkingCopy = false,
   editable = false,
+  mutationsEnabled = true,
   onUpsertResource,
   onRemoveResource,
   className,
@@ -104,22 +113,30 @@ export function SkillResourceBrowser({
   const [loading, setLoading] = useState(false)
   const [pathDraft, setPathDraft] = useState('references/new.txt')
 
+  // Prefer working-copy when editable+useWorkingCopy, even if empty (remove-all).
+  // Never fall back to server list solely because workingCopyResources.length === 0.
   const displayResources: SkillResourceMetadata[] = useMemo(() => {
-    if (!editable || workingCopyResources.length === 0) return resources
-    // Prefer working-copy paths once the user has mutated resources.
+    if (!(editable && useWorkingCopy)) return resources
     const byPath = new Map(resources.map((r) => [r.path, r]))
     return workingCopyResources.map((wc) => {
       const existing = byPath.get(wc.path)
-      if (existing) return existing
+      // Prefer server metadata for still-present paths that have real sha256,
+      // but once content is local-only (new/replaced) use working-copy metadata.
+      if (existing && wc.contentBase64.length === 0) return existing
       return {
         path: wc.path,
-        resourceKind: guessResourceKind(wc.path),
-        mediaType: guessMediaType(wc.path),
-        byteSize: Math.floor((wc.contentBase64.length * 3) / 4),
-        sha256: 'working-copy',
+        resourceKind: existing?.resourceKind ?? guessResourceKind(wc.path),
+        mediaType: existing?.mediaType ?? guessMediaType(wc.path),
+        byteSize:
+          wc.contentBase64.length > 0
+            ? Math.floor((wc.contentBase64.length * 3) / 4)
+            : existing?.byteSize ?? 0,
+        sha256: wc.contentBase64.length > 0 ? 'working-copy' : existing?.sha256 ?? 'working-copy',
       }
     })
-  }, [editable, resources, workingCopyResources])
+  }, [editable, useWorkingCopy, resources, workingCopyResources])
+
+  const canMutate = editable && mutationsEnabled
 
   const selected = useMemo(
     () => displayResources.find((r) => r.path === selectedPath) ?? null,
@@ -269,6 +286,7 @@ export function SkillResourceBrowser({
             <input
               value={pathDraft}
               onChange={(e) => setPathDraft(e.target.value)}
+              disabled={!canMutate}
               className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm"
               placeholder="references/example.md"
             />
@@ -277,6 +295,7 @@ export function SkillResourceBrowser({
             type="button"
             size="sm"
             variant="outline"
+            disabled={!canMutate}
             onClick={() => {
               replacePathRef.current = null
               fileInputRef.current?.click()
@@ -289,6 +308,7 @@ export function SkillResourceBrowser({
             ref={fileInputRef}
             type="file"
             className="hidden"
+            disabled={!canMutate}
             onChange={(e) => void handleFileSelected(e.target.files)}
           />
         </div>
@@ -338,6 +358,7 @@ export function SkillResourceBrowser({
                         type="button"
                         size="sm"
                         variant="ghost"
+                        disabled={!canMutate}
                         onClick={() => {
                           replacePathRef.current = resource.path
                           fileInputRef.current?.click()
@@ -349,6 +370,7 @@ export function SkillResourceBrowser({
                         type="button"
                         size="sm"
                         variant="ghost"
+                        disabled={!canMutate}
                         aria-label={t('settings.universalSkills.removeResource')}
                         onClick={() => onRemoveResource(resource.path)}
                       >

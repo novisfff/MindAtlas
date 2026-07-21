@@ -102,6 +102,25 @@ describe('Plan09RouteGate', () => {
     expect(screen.queryByText('protected package content')).toBeNull()
   })
 
+  it('principal unauthorized (401/403) fails closed without protected package fetch', async () => {
+    // Probe maps 401/403 → available=false + principal_unauthorized (admin may still be mounted).
+    vi.mocked(skillPackagesApi.probeSkillAdminSurface).mockResolvedValue({
+      available: false,
+      packagesReadable: false,
+      adminMounted: true,
+      reason: 'principal_unauthorized',
+    })
+
+    renderAt('/settings/universal-skills/package-1')
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Universal Skills unavailable')
+    await waitFor(() => {
+      expect(protectedPackageRequests).toHaveLength(0)
+    })
+    expect(skillPackagesApi.getSkillPackage).not.toHaveBeenCalled()
+    expect(screen.queryByText('protected package content')).toBeNull()
+  })
+
   it('renders children only after feature/principal probe succeeds', async () => {
     vi.mocked(skillPackagesApi.probeSkillAdminSurface).mockResolvedValue({
       available: true,

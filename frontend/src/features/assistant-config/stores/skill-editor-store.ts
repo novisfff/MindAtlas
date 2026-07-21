@@ -32,6 +32,9 @@ export interface SkillValidationDiagnostic {
   severity: 'error' | 'warning' | 'info'
 }
 
+/** Resource byte hydrate lifecycle for CAS-safe working-copy mutations. */
+export type ResourcesHydrationStatus = 'idle' | 'pending' | 'ready' | 'error'
+
 interface SkillEditorState {
   packageId: string | null
   draftVersionId: string | null
@@ -41,6 +44,14 @@ interface SkillEditorState {
   workingCopy: SkillWorkingCopy
   isDirty: boolean
   resourcesDirty: boolean
+  /**
+   * True only after every server resource path has non-empty bytes hydrated,
+   * or when the draft has no resources (nothing to hydrate).
+   * Resource mutations and resource CAS snapshots are blocked until ready.
+   */
+  resourcesHydrated: boolean
+  resourcesHydrationStatus: ResourcesHydrationStatus
+  resourcesHydrationError: string | null
   lastRequestId: string | null
   lastConflict: SkillEditorConflict | null
   validationDiagnostics: SkillValidationDiagnostic[]
@@ -54,8 +65,15 @@ interface SkillEditorState {
   setResources: (resources: SkillResourceInput[]) => void
   upsertResource: (resource: SkillResourceInput) => void
   removeResource: (path: string) => void
-  /** Seed resource bytes from server without marking dirty (pre-mutation hydrate). */
+  /**
+   * Seed resource bytes from server without marking dirty (pre-mutation hydrate).
+   * Rejects incomplete snapshots (missing paths or empty contentBase64).
+   */
   hydrateResources: (resources: SkillResourceInput[]) => void
+  /** Mark hydrate failed; blocks resource mutations/saves until reload. */
+  setResourcesHydrationError: (message: string) => void
+  /** True when resource working-copy mutations are allowed. */
+  canMutateResources: () => boolean
   setValidationDiagnostics: (items: SkillValidationDiagnostic[]) => void
   markSaved: (params: {
     packageDetail?: SkillPackageDetail | null
@@ -90,8 +108,8 @@ const EMPTY_WORKING_COPY: SkillWorkingCopy = {
 /**
  * Hydrate working copy from server draft metadata.
  * Resource bytes are not inlined in version detail; paths seed the working-copy
- * list so explicit remove/replace can produce a complete CAS snapshot.
- * Content-only saves omit resources until the first mutation.
+ * list as placeholders until hydrateResources fills real base64.
+ * Placeholders must never be sent as a CAS replacement snapshot.
  */
 function workingCopyFromServer(
   pkg: SkillPackageDetail,
@@ -99,8 +117,8 @@ function workingCopyFromServer(
 ): SkillWorkingCopy {
   const resourceSeeds: SkillResourceInput[] = (draft?.resources ?? []).map((r) => ({
     path: r.path,
-    // Empty base64 marks "path known; bytes still on server until mutated".
-    // buildSaveBody only sends resources after an explicit mutation.
+    // Empty base64 marks "path known; bytes still on server until hydrated".
+    // buildSaveBody only sends resources after an explicit mutation AND hydrate.
     contentBase64: '',
   }))
   return {
@@ -113,6 +131,30 @@ function workingCopyFromServer(
   }
 }
 
+function initialHydrationState(draft?: SkillVersionDetail | null): {
+  resourcesHydrated: boolean
+  resourcesHydrationStatus: ResourcesHydrationStatus
+  resourcesHydrationError: string | null
+} {
+  const hasServerResources = (draft?.resources?.length ?? 0) > 0
+  if (!hasServerResources) {
+    return {
+      resourcesHydrated: true,
+      resourcesHydrationStatus: 'ready',
+      resourcesHydrationError: null,
+    }
+  }
+  return {
+    resourcesHydrated: false,
+    resourcesHydrationStatus: 'pending',
+    resourcesHydrationError: null,
+  }
+}
+
+function hasEmptyResourceBytes(resources: SkillResourceInput[]): boolean {
+  return resources.some((r) => !r.contentBase64 || r.contentBase64.length === 0)
+}
+
 export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
   packageId: null,
   draftVersionId: null,
@@ -121,7 +163,10 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
   draftDetail: null,
   workingCopy: { ...EMPTY_WORKING_COPY },
   isDirty: false,
-      resourcesDirty: false,
+  resourcesDirty: false,
+  resourcesHydrated: true,
+  resourcesHydrationStatus: 'idle',
+  resourcesHydrationError: null,
   lastRequestId: null,
   lastConflict: null,
   validationDiagnostics: [],
@@ -136,6 +181,7 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
       workingCopy: workingCopyFromServer(pkg, draft),
       isDirty: false,
       resourcesDirty: false,
+      ...initialHydrationState(draft),
       lastConflict: null,
       validationDiagnostics: [],
     }),
@@ -172,15 +218,34 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
       isDirty: true,
     })),
 
+  canMutateResources: () => {
+    const state = get()
+    return state.resourcesHydrated && state.resourcesHydrationStatus === 'ready'
+  },
+
   setResources: (resources) =>
-    set((state) => ({
-      workingCopy: { ...state.workingCopy, resources: [...resources] },
-      isDirty: true,
-      resourcesDirty: true,
-    })),
+    set((state) => {
+      if (!state.resourcesHydrated || state.resourcesHydrationStatus !== 'ready') {
+        return state
+      }
+      if (hasEmptyResourceBytes(resources)) {
+        return state
+      }
+      return {
+        workingCopy: { ...state.workingCopy, resources: [...resources] },
+        isDirty: true,
+        resourcesDirty: true,
+      }
+    }),
 
   upsertResource: (resource) =>
     set((state) => {
+      if (!state.resourcesHydrated || state.resourcesHydrationStatus !== 'ready') {
+        return state
+      }
+      if (!resource.contentBase64 || resource.contentBase64.length === 0) {
+        return state
+      }
       const without = state.workingCopy.resources.filter((r) => r.path !== resource.path)
       return {
         workingCopy: { ...state.workingCopy, resources: [...without, resource] },
@@ -190,38 +255,81 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
     }),
 
   removeResource: (path) =>
-    set((state) => ({
-      workingCopy: {
-        ...state.workingCopy,
-        resources: state.workingCopy.resources.filter((r) => r.path !== path),
-      },
-      isDirty: true,
-      resourcesDirty: true,
-    })),
+    set((state) => {
+      if (!state.resourcesHydrated || state.resourcesHydrationStatus !== 'ready') {
+        return state
+      }
+      return {
+        workingCopy: {
+          ...state.workingCopy,
+          resources: state.workingCopy.resources.filter((r) => r.path !== path),
+        },
+        isDirty: true,
+        resourcesDirty: true,
+      }
+    }),
 
   hydrateResources: (resources) =>
     set((state) => {
       // Never overwrite an in-progress working-copy mutation.
       if (state.resourcesDirty) return state
+      // Incomplete hydrate (empty placeholder base64) must fail closed.
+      if (hasEmptyResourceBytes(resources)) {
+        return {
+          resourcesHydrated: false,
+          resourcesHydrationStatus: 'error',
+          resourcesHydrationError:
+            'Resource hydrate incomplete: empty contentBase64 is not allowed',
+        }
+      }
+      // If server paths exist, require every path to be present in the hydrate payload.
+      const serverPaths = (state.draftDetail?.resources ?? []).map((r) => r.path)
+      if (serverPaths.length > 0) {
+        const hydratedPaths = new Set(resources.map((r) => r.path))
+        const missing = serverPaths.filter((p) => !hydratedPaths.has(p))
+        if (missing.length > 0) {
+          return {
+            resourcesHydrated: false,
+            resourcesHydrationStatus: 'error',
+            resourcesHydrationError: `Resource hydrate incomplete: missing ${missing.join(', ')}`,
+          }
+        }
+      }
       return {
         workingCopy: { ...state.workingCopy, resources: [...resources] },
+        resourcesHydrated: true,
+        resourcesHydrationStatus: 'ready',
+        resourcesHydrationError: null,
       }
+    }),
+
+  setResourcesHydrationError: (message) =>
+    set({
+      resourcesHydrated: false,
+      resourcesHydrationStatus: 'error',
+      resourcesHydrationError: message,
     }),
 
   setValidationDiagnostics: (items) => set({ validationDiagnostics: items }),
 
   markSaved: ({ packageDetail, draftVersionId, draftDetail, expectedAggregateRevision, requestId }) =>
-    set((state) => ({
-      packageDetail: packageDetail ?? state.packageDetail,
-      draftVersionId: draftVersionId ?? state.draftVersionId,
-      draftDetail: draftDetail ?? state.draftDetail,
-      expectedAggregateRevision:
-        expectedAggregateRevision ?? state.expectedAggregateRevision,
-      lastRequestId: requestId ?? state.lastRequestId,
-      isDirty: false,
-      resourcesDirty: false,
-      lastConflict: null,
-    })),
+    set((state) => {
+      const nextDraft = draftDetail ?? state.draftDetail
+      return {
+        packageDetail: packageDetail ?? state.packageDetail,
+        draftVersionId: draftVersionId ?? state.draftVersionId,
+        draftDetail: nextDraft,
+        expectedAggregateRevision:
+          expectedAggregateRevision ?? state.expectedAggregateRevision,
+        lastRequestId: requestId ?? state.lastRequestId,
+        isDirty: false,
+        resourcesDirty: false,
+        // After a resource-mutating save the server is authoritative again;
+        // re-hydrate if the next draft still lists resources.
+        ...initialHydrationState(nextDraft),
+        lastConflict: null,
+      }
+    }),
 
   setConflict: (conflict) => set({ lastConflict: conflict }),
 
@@ -234,6 +342,7 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
       workingCopy: workingCopyFromServer(packageDetail, draftDetail),
       isDirty: false,
       resourcesDirty: false,
+      ...initialHydrationState(draftDetail),
       lastConflict: null,
       expectedAggregateRevision: packageDetail.aggregateRevision ?? 0,
       draftVersionId: draftDetail?.id ?? packageDetail.draftVersion?.id ?? null,
@@ -250,13 +359,23 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
       workingCopy: { ...EMPTY_WORKING_COPY },
       isDirty: false,
       resourcesDirty: false,
+      resourcesHydrated: true,
+      resourcesHydrationStatus: 'idle',
+      resourcesHydrationError: null,
       lastRequestId: null,
       lastConflict: null,
       validationDiagnostics: [],
     }),
 
   buildSaveBody: () => {
-    const { workingCopy, resourcesDirty, expectedAggregateRevision, lastRequestId } = get()
+    const {
+      workingCopy,
+      resourcesDirty,
+      resourcesHydrated,
+      resourcesHydrationStatus,
+      expectedAggregateRevision,
+      lastRequestId,
+    } = get()
     // Always include requestId + expected revision (mandatory CAS).
     // When resources were mutated, send the complete intended snapshot.
     // Content-only edits omit resources so the server preserves prior bytes.
@@ -279,6 +398,17 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
           : `save-${Date.now()}`),
     }
     if (resourcesDirty) {
+      // Never ship empty placeholder base64 — that would wipe sibling bytes.
+      if (!resourcesHydrated || resourcesHydrationStatus !== 'ready') {
+        throw new Error(
+          'Cannot save resource snapshot before hydrate completes for all existing paths',
+        )
+      }
+      if (hasEmptyResourceBytes(workingCopy.resources)) {
+        throw new Error(
+          'Cannot save resource snapshot containing empty contentBase64 placeholders',
+        )
+      }
       // Explicit complete replacement snapshot (add/replace/remove).
       body.resources = workingCopy.resources.map((r) => ({
         path: r.path,

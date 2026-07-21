@@ -81,6 +81,9 @@ export function UniversalSkillEditor({
   const workingCopy = useSkillEditorStore((s) => s.workingCopy)
   const isDirty = useSkillEditorStore((s) => s.isDirty)
   const resourcesDirty = useSkillEditorStore((s) => s.resourcesDirty)
+  const resourcesHydrated = useSkillEditorStore((s) => s.resourcesHydrated)
+  const resourcesHydrationStatus = useSkillEditorStore((s) => s.resourcesHydrationStatus)
+  const resourcesHydrationError = useSkillEditorStore((s) => s.resourcesHydrationError)
   const lastConflict = useSkillEditorStore((s) => s.lastConflict)
   const validationDiagnostics = useSkillEditorStore((s) => s.validationDiagnostics)
   const expectedAggregateRevision = useSkillEditorStore((s) => s.expectedAggregateRevision)
@@ -93,7 +96,13 @@ export function UniversalSkillEditor({
   const upsertResource = useSkillEditorStore((s) => s.upsertResource)
   const removeResource = useSkillEditorStore((s) => s.removeResource)
   const hydrateResources = useSkillEditorStore((s) => s.hydrateResources)
+  const setResourcesHydrationError = useSkillEditorStore((s) => s.setResourcesHydrationError)
   const resetFromServer = useSkillEditorStore((s) => s.resetFromServer)
+
+  // useWorkingCopy once draft is loaded so empty working-copy (remove-all) never falls back to server.
+  const useWorkingCopyResources =
+    Boolean(packageDetail) && (resourcesDirty || resourcesHydrationStatus !== 'idle')
+  const canMutateResources = resourcesHydrated && resourcesHydrationStatus === 'ready'
 
   const capabilityKeys = useMemo(
     () => extractCapabilityKeys(workingCopy.mindatlasYaml),
@@ -117,34 +126,44 @@ export function UniversalSkillEditor({
   }, [])
 
   // Hydrate resource bytes once so remove/replace can send a complete CAS snapshot.
+  // Failed fetch fails hydrate (does not invent empty base64 as ready).
   useEffect(() => {
     if (!packageDetail || !draftVersionId || resourcesDirty) return
+    if (resourcesHydrationStatus === 'ready' || resourcesHydrationStatus === 'error') return
     if (serverResources.length === 0) return
     let cancelled = false
     void (async () => {
       try {
         const loaded: SkillResourceInput[] = []
         for (const meta of serverResources) {
-          try {
-            const blob = await fetchSkillPackageResourceBlob(
-              packageDetail.id,
-              draftVersionId,
-              meta.path,
-            )
-            loaded.push({ path: meta.path, contentBase64: await blobToBase64(blob) })
-          } catch {
-            loaded.push({ path: meta.path, contentBase64: '' })
-          }
+          const blob = await fetchSkillPackageResourceBlob(
+            packageDetail.id,
+            draftVersionId,
+            meta.path,
+          )
+          loaded.push({ path: meta.path, contentBase64: await blobToBase64(blob) })
         }
         if (!cancelled) hydrateResources(loaded)
-      } catch {
-        // Non-fatal: user can still add resources from empty working copy.
+      } catch (error) {
+        if (!cancelled) {
+          setResourcesHydrationError(
+            error instanceof Error ? error.message : 'Failed to hydrate resource bytes',
+          )
+        }
       }
     })()
     return () => {
       cancelled = true
     }
-  }, [packageDetail, draftVersionId, serverResources, resourcesDirty, hydrateResources])
+  }, [
+    packageDetail,
+    draftVersionId,
+    serverResources,
+    resourcesDirty,
+    resourcesHydrationStatus,
+    hydrateResources,
+    setResourcesHydrationError,
+  ])
 
   function replaceCapabilityKeys(keys: string[]) {
     const yaml = workingCopy.mindatlasYaml
@@ -204,6 +223,10 @@ export function UniversalSkillEditor({
   }
 
   const archived = Boolean(packageDetail.archivedAt)
+  // Block save while resource mutation is pending hydrate — empty seeds must never CAS.
+  const resourceSaveBlocked =
+    resourcesDirty && (!resourcesHydrated || resourcesHydrationStatus !== 'ready')
+  const saveDisabled = saving || archived || !isDirty || resourceSaveBlocked
 
   return (
     <div className={cn('space-y-4', className)}>
@@ -241,12 +264,36 @@ export function UniversalSkillEditor({
               {t('settings.universalSkills.saveMetadata')}
             </Button>
           ) : null}
-          <Button type="button" disabled={saving || archived || !isDirty} onClick={() => void onSaveDraft()}>
+          <Button type="button" disabled={saveDisabled} onClick={() => void onSaveDraft()}>
             <Save className="mr-1.5 h-4 w-4" />
             {t('settings.universalSkills.saveDraft')}
           </Button>
         </div>
       </div>
+
+      {resourcesHydrationStatus === 'pending' && serverResources.length > 0 ? (
+        <div role="status" className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+          {t('settings.universalSkills.resourcesHydrating', {
+            defaultValue: 'Loading resource bytes before edit…',
+          })}
+        </div>
+      ) : null}
+
+      {resourcesHydrationStatus === 'error' ? (
+        <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
+          <div className="font-medium">
+            {t('settings.universalSkills.resourcesHydrateFailed', {
+              defaultValue: 'Resource hydrate failed',
+            })}
+          </div>
+          <p className="mt-1 text-muted-foreground">
+            {resourcesHydrationError ||
+              t('settings.universalSkills.resourcesHydrateFailedHint', {
+                defaultValue: 'Reload the package before mutating resources to avoid wiping bytes.',
+              })}
+          </p>
+        </div>
+      ) : null}
 
       {lastConflict ? (
         <div role="alert" className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
@@ -381,7 +428,9 @@ export function UniversalSkillEditor({
             versionId={draftVersionId}
             resources={serverResources}
             workingCopyResources={workingCopy.resources}
+            useWorkingCopy={useWorkingCopyResources}
             editable={!archived}
+            mutationsEnabled={canMutateResources}
             onUpsertResource={(resource) => upsertResource(resource)}
             onRemoveResource={(path) => removeResource(path)}
           />

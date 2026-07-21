@@ -532,8 +532,14 @@ export function applySkillPackageImport(body: {
 
 /**
  * Fail-closed surface probe for Universal Skills UI.
- * Plan 01 list success => packages available.
- * Admin mount is inferred from response codes on a probe mutation path.
+ *
+ * Plan 09 route gate requires BOTH:
+ * - admin router mounted, and
+ * - trusted principal authorized (probe succeeds as 2xx/404-for-missing-entity/409/422).
+ *
+ * 401/403 means principal missing/unauthorized → available=false (fail closed).
+ * 404/405/5xx on the admin probe path → unmounted or unavailable → available=false.
+ * Never treat auth failures as "available".
  */
 export async function probeSkillAdminSurface(): Promise<SkillAdminSurfaceProbe> {
   const hardOff = String(readViteEnv('VITE_ASSISTANT_UNIVERSAL_SKILLS') ?? '').trim() === '0'
@@ -546,30 +552,60 @@ export async function probeSkillAdminSurface(): Promise<SkillAdminSurfaceProbe> 
     }
   }
 
-  // Non-mutating probe: admin-only GET. Mounted+no principal → 401/403.
-  // Unmounted → 404. Never treat 404 as mounted.
+  // Non-mutating probe: admin-only GET.
+  // Mounted+authorized+missing entity → 404 on this synthetic id (still "mounted").
+  // Mounted+no principal → 401/403 (principal fail-closed).
+  // Unmounted → typically 404/405, but 404 alone is ambiguous; we treat only
+  // success / validation / conflict as authorized mount for availability.
   let adminMounted = false
+  let principalAuthorized = false
+  let reason: string | undefined
+
   try {
     await apiClient.get(
       `${SKILL_ADMIN_BASE}/skill-packages/00000000-0000-4000-8000-000000000000/versions/00000000-0000-4000-8000-000000000001/diff/00000000-0000-4000-8000-000000000002`,
       { headers: skillAdminOperatorHeaders() },
     )
-    // Unexpected success still means the router is mounted.
+    // Unexpected success still means the router is mounted and principal passed.
     adminMounted = true
+    principalAuthorized = true
   } catch (error) {
     if (isApiError(error) && error.status != null) {
-      adminMounted = error.status === 401 || error.status === 403 || error.status === 409 || error.status === 422
-      // 404 / 405 / 5xx → unmounted or unavailable
-      if (error.status === 404 || error.status === 405 || error.status >= 500) {
+      if (error.status === 401 || error.status === 403) {
+        // Router may be mounted, but principal is missing/unauthorized → fail closed.
+        adminMounted = true
+        principalAuthorized = false
+        reason = 'principal_unauthorized'
+      } else if (error.status === 409 || error.status === 422) {
+        // Mounted + authorized; business/validation rejection on synthetic ids.
+        adminMounted = true
+        principalAuthorized = true
+      } else if (error.status === 404) {
+        // Ambiguous: unmounted OR mounted missing entity. Prefer fail-closed for
+        // availability unless Plan 01 list also proves packages surface is readable
+        // after a later check — treat as unmounted for Plan 09 gate.
         adminMounted = false
+        principalAuthorized = false
+        reason = 'admin_unmounted'
+      } else if (error.status === 405 || error.status >= 500) {
+        adminMounted = false
+        principalAuthorized = false
+        reason = 'admin_unavailable'
+      } else {
+        adminMounted = false
+        principalAuthorized = false
+        reason = 'admin_unavailable'
       }
     } else {
       adminMounted = false
+      principalAuthorized = false
+      reason = 'admin_unavailable'
     }
   }
 
   let packagesReadable = false
-  if (adminMounted) {
+  // Only attempt package list when principal is authorized for Plan 09 surface.
+  if (principalAuthorized) {
     try {
       await listSkillPackages({ limit: 1, offset: 0 })
       packagesReadable = true
@@ -578,12 +614,12 @@ export async function probeSkillAdminSurface(): Promise<SkillAdminSurfaceProbe> 
     }
   }
 
+  const available = principalAuthorized
   return {
-    // Fail-closed: Universal UI requires the Plan 09 admin surface, not merely Plan 01 list.
-    available: adminMounted,
+    available,
     packagesReadable,
     adminMounted,
-    reason: adminMounted ? undefined : 'admin_unmounted',
+    reason: available ? undefined : reason ?? (adminMounted ? 'principal_unauthorized' : 'admin_unmounted'),
   }
 }
 

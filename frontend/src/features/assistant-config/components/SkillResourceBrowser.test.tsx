@@ -100,6 +100,7 @@ describe('SkillResourceBrowser working-copy mutations', () => {
           resource({ path: 'references/b.md', mediaType: 'text/markdown', resourceKind: 'references' }),
         ]}
         workingCopyResources={workingCopy}
+        useWorkingCopy
         editable
         onUpsertResource={onUpsert}
         onRemoveResource={onRemove}
@@ -109,5 +110,46 @@ describe('SkillResourceBrowser working-copy mutations', () => {
     expect(screen.getByRole('button', { name: 'Add resource' })).toBeVisible()
     fireEvent.click(screen.getAllByRole('button', { name: 'Remove resource' })[0])
     expect(onRemove).toHaveBeenCalledWith('references/a.md')
+  })
+
+  it('empty working copy does not fall back to server resource list', () => {
+    render(
+      <SkillResourceBrowser
+        packageId="pkg-1"
+        versionId="ver-1"
+        resources={[
+          resource({ path: 'references/a.md', mediaType: 'text/markdown', resourceKind: 'references' }),
+          resource({ path: 'references/b.md', mediaType: 'text/markdown', resourceKind: 'references' }),
+        ]}
+        workingCopyResources={[]}
+        useWorkingCopy
+        editable
+      />,
+    )
+
+    expect(screen.getByText('No resources on this version.')).toBeVisible()
+    expect(screen.queryByText('references/a.md')).toBeNull()
+    expect(screen.queryByText('references/b.md')).toBeNull()
+  })
+
+  it('disables mutation controls when mutationsEnabled is false', () => {
+    render(
+      <SkillResourceBrowser
+        packageId="pkg-1"
+        versionId="ver-1"
+        resources={[
+          resource({ path: 'references/a.md', mediaType: 'text/markdown', resourceKind: 'references' }),
+        ]}
+        workingCopyResources={[{ path: 'references/a.md', contentBase64: 'YQ==' }]}
+        useWorkingCopy
+        editable
+        mutationsEnabled={false}
+        onUpsertResource={vi.fn()}
+        onRemoveResource={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: 'Add resource' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Remove resource' })).toBeDisabled()
   })
 })
