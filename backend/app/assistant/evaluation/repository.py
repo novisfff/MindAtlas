@@ -934,9 +934,14 @@ class EvaluationRepository:
         self,
         *,
         run_id: UUID,
-        expected_revision: int | None = None,
+        expected_revision: int,
     ) -> AssistantSkillEvalRun:
-        """Request cancellation; worker observes before Provider/Capability boundaries."""
+        """Request cancellation with mandatory state-revision CAS.
+
+        Worker observes cancel before Provider/Capability boundaries.
+        When the run is already cancelling and the CAS matches, returns the
+        current row as an idempotent no-op (no further revision bump).
+        """
         run = self.session.execute(
             select(AssistantSkillEvalRun)
             .where(AssistantSkillEvalRun.id == run_id)
@@ -944,9 +949,7 @@ class EvaluationRepository:
         ).scalar_one_or_none()
         if run is None:
             raise EvaluationRepositoryError(CODE_NOT_FOUND, "eval run not found")
-        if expected_revision is not None and int(run.state_revision) != int(
-            expected_revision
-        ):
+        if int(run.state_revision) != int(expected_revision):
             raise EvaluationRepositoryError(CODE_STALE_REVISION, "stale revision")
         if run.status in TERMINAL_RUN_STATUSES:
             raise EvaluationRepositoryError(

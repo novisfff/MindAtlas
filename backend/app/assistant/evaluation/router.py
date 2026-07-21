@@ -300,6 +300,11 @@ def _resolve_subject_digests(
 def _resolve_fixture_pins(
     *, mode: str, provider_fixture_revision: str | None
 ) -> tuple[str | None, str | None]:
+    """Resolve fixture pins from the real registry only.
+
+    Fail closed on unknown revisions — never invent digests for opaque strings
+    and never promote unknown pins to real_orchestration.
+    """
     if mode != "dataset_scripted":
         return None, None
     revision = (provider_fixture_revision or "").strip()
@@ -309,19 +314,23 @@ def _resolve_fixture_pins(
             code=42293,
             message="dataset_scripted requires providerFixtureRevision",
         )
-    # Revision may be "script_key@rev" or bare script key / bare revision for builtins.
+    # Revision may be "script_key@rev" or bare script key for builtins.
     script_key = revision
     rev: str | None = None
     if "@" in revision:
         script_key, rev = revision.split("@", 1)
     try:
         fixture = resolve_provider_fixture(script_key=script_key, revision=rev)
-    except KeyError:
-        # Accept opaque revision strings (fixture digest from revision identity).
-        digest = sha256_canonical_json(
-            {"provider_fixture_revision": revision, "scope": "eval_admission"}
-        )
-        return revision, digest
+    except KeyError as exc:
+        raise ApiException(
+            status_code=422,
+            code=42293,
+            message=(
+                "unknown providerFixtureRevision: must resolve from the "
+                f"built-in fixture registry ({revision!r})"
+            ),
+            details={"providerFixtureRevision": revision},
+        ) from exc
     digest = sha256_canonical_json(
         {
             "script_key": fixture.script_key,
@@ -647,6 +656,13 @@ def create_eval_run(
     _require_operator(principal)
     repo = EvaluationRepository(db)
 
+    # Fail closed on unknown fixture pins before subject/dataset resolution so
+    # opaque revision strings never invent digests or promote real_orchestration.
+    fixture_rev, fixture_dig = _resolve_fixture_pins(
+        mode=body.mode,
+        provider_fixture_revision=body.provider_fixture_revision,
+    )
+
     # Validate profile version exists (admission pin).
     _resolve_profile_version(db, body.profile_version_id)
 
@@ -674,12 +690,9 @@ def create_eval_run(
             message="dataset_version_ids required for dataset evaluation modes",
         )
 
-    fixture_rev, fixture_dig = _resolve_fixture_pins(
-        mode=body.mode,
-        provider_fixture_revision=body.provider_fixture_revision,
-    )
-
     if body.mode == "dataset_scripted":
+        # Only reachable after _resolve_fixture_pins succeeded against the
+        # real registry — never promote invented digests.
         evidence_provenance = "real_orchestration"
         provider_evidence_digest = None
     elif body.mode == "dataset_live":
@@ -962,16 +975,24 @@ def stream_eval_run_events(
 @skill_eval_router.post("/runs/{run_id}/cancel")
 def cancel_eval_run(
     run_id: UUID,
-    body: CancelEvalRunBody | None = None,
+    body: CancelEvalRunBody,
     db: Session = Depends(get_db),
     principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
 ) -> ApiResponse:
+    """Cancel requires CAS body: requestId + expectedStateRevision.
+
+    Repository cancel CAS is revision-based; requestId is required for client
+    idempotency contracts even though cancel does not stamp a durable cancel
+    request-id column yet. Identical retries after status becomes cancelling
+    are handled as a no-op by the repository when CAS matches.
+    """
     _require_operator(principal)
+    _ = body.request_id  # required for client contract / future durable cancel CAS
     repo = EvaluationRepository(db)
     try:
         run = repo.request_cancel_run(
             run_id=run_id,
-            expected_revision=None if body is None else body.expected_state_revision,
+            expected_revision=body.expected_state_revision,
         )
         db.commit()
     except EvaluationRepositoryError as exc:

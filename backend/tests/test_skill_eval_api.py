@@ -353,6 +353,106 @@ class SkillEvalApiMountTests(unittest.TestCase):
         )
         self.assertEqual(r.status_code, 422, r.text)
 
+    def test_unknown_fixture_revision_fails_closed(self) -> None:
+        """Opaque fixture strings must not invent digests or promote real_orchestration."""
+        client, _session = self._client(mount=True)
+        headers = {
+            "X-MindAtlas-Operator-Id": "operator-task8",
+            "X-MindAtlas-Operator-Role": "operator",
+        }
+        # Fixture resolution fails closed before subject/dataset checks.
+        r = client.post(
+            f"{PLAN09_EVAL_PREFIX}/runs",
+            headers=headers,
+            json={
+                "requestId": f"req-{uuid.uuid4().hex[:8]}",
+                "subjectKind": "skill_draft",
+                "subjectAggregateId": str(uuid.uuid4()),
+                "subjectVersionId": str(uuid.uuid4()),
+                "prompt": "x",
+                "locale": "en",
+                "profileVersionId": str(uuid.uuid4()),
+                "mode": "dataset_scripted",
+                "datasetVersionIds": [str(uuid.uuid4())],
+                "providerFixtureRevision": "opaque-unknown-fixture-rev",
+            },
+        )
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertIn("unknown providerFixtureRevision", r.text)
+
+    def test_cancel_requires_request_id_and_expected_revision(self) -> None:
+        client, session = self._client(mount=True)
+        from app.assistant.evaluation.repository import EvaluationRepository
+        from app.assistant.domain.digests import sha256_canonical_json
+        from app.assistant.evaluation.gates import current_build_revision
+        from app.assistant.evaluation.orchestration import EVAL_POLICY_DIGEST
+
+        headers = {
+            "X-MindAtlas-Operator-Id": "operator-task8",
+            "X-MindAtlas-Operator-Role": "operator",
+        }
+        repo = EvaluationRepository(session)
+        iso = uuid.uuid4()
+        run = repo.create_run(
+            subject_kind="skill_draft",
+            subject_aggregate_id=uuid.uuid4(),
+            subject_version_id=uuid.uuid4(),
+            subject_content_digest=_digest("1"),
+            subject_binding_digest=_digest("2"),
+            dataset_version_ids=[],
+            threshold_policy_version="v1",
+            mode="interactive_scripted",
+            isolation_namespace_id=iso,
+            runtime_contract_version=1,
+            required_build_revision=current_build_revision(),
+            isolation_digest=sha256_canonical_json({"iso": str(iso)}),
+            policy_digest=EVAL_POLICY_DIGEST,
+            evidence_provenance="structural_synthetic",
+            actor_principal="operator-task8",
+            request_id=f"create-{uuid.uuid4().hex[:8]}",
+        )
+        session.commit()
+        run_id = str(run.id)
+        rev = int(run.state_revision)
+
+        # Missing body → 422.
+        missing = client.post(
+            f"{PLAN09_EVAL_PREFIX}/runs/{run_id}/cancel",
+            headers=headers,
+        )
+        self.assertEqual(missing.status_code, 422, missing.text)
+
+        # Partial body (no expectedStateRevision) → 422.
+        partial = client.post(
+            f"{PLAN09_EVAL_PREFIX}/runs/{run_id}/cancel",
+            headers=headers,
+            json={"requestId": "cancel-only-req"},
+        )
+        self.assertEqual(partial.status_code, 422, partial.text)
+
+        # Stale CAS → 409.
+        stale = client.post(
+            f"{PLAN09_EVAL_PREFIX}/runs/{run_id}/cancel",
+            headers=headers,
+            json={
+                "requestId": "cancel-stale",
+                "expectedStateRevision": rev + 99,
+            },
+        )
+        self.assertEqual(stale.status_code, 409, stale.text)
+
+        # Valid CAS cancels.
+        ok = client.post(
+            f"{PLAN09_EVAL_PREFIX}/runs/{run_id}/cancel",
+            headers=headers,
+            json={
+                "requestId": "cancel-ok",
+                "expectedStateRevision": rev,
+            },
+        )
+        self.assertEqual(ok.status_code, 200, ok.text)
+        self.assertEqual(ok.json()["data"]["status"], "cancelling")
+
     def test_dataset_publish_requires_principal(self) -> None:
         client, session = self._client(mount=True)
         from app.assistant.evaluation.repository import EvaluationRepository
@@ -396,6 +496,22 @@ class SkillEvalRouterContractTests(unittest.TestCase):
                     "subjectContentDigest": _digest("x"),
                 }
             )
+
+    def test_cancel_body_requires_cas_fields(self) -> None:
+        from app.assistant.evaluation.schemas import CancelEvalRunBody
+        from pydantic import ValidationError
+
+        with self.assertRaises(ValidationError):
+            CancelEvalRunBody.model_validate({})
+        with self.assertRaises(ValidationError):
+            CancelEvalRunBody.model_validate({"requestId": "only"})
+        with self.assertRaises(ValidationError):
+            CancelEvalRunBody.model_validate({"expectedStateRevision": 0})
+        body = CancelEvalRunBody.model_validate(
+            {"requestId": "c1", "expectedStateRevision": 0}
+        )
+        self.assertEqual(body.request_id, "c1")
+        self.assertEqual(body.expected_state_revision, 0)
 
 
 if __name__ == "__main__":

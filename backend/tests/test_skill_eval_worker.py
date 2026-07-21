@@ -236,7 +236,10 @@ class EvalWorkerClaimTests(unittest.TestCase):
             runtime_contract_version=1,
         )
         assert claimed is not None
-        cancelled = self.repo.request_cancel_run(run_id=claimed.id)
+        cancelled = self.repo.request_cancel_run(
+            run_id=claimed.id,
+            expected_revision=int(claimed.state_revision),
+        )
         self.assertEqual(cancelled.status, "cancelling")
         self.assertIsNotNone(cancelled.requested_cancel_at)
         final = self.repo.transition_run(

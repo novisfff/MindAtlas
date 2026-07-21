@@ -66,14 +66,12 @@ class CreateEvalRunBody(CamelModel):
 
 
 class CancelEvalRunBody(CamelModel):
+    """Cancel requires CAS: requestId + expectedStateRevision are mandatory."""
+
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    request_id: str | None = Field(
-        default=None, alias="requestId", max_length=128
-    )
-    expected_state_revision: int | None = Field(
-        default=None, alias="expectedStateRevision", ge=0
-    )
+    request_id: str = Field(alias="requestId", min_length=1, max_length=128)
+    expected_state_revision: int = Field(alias="expectedStateRevision", ge=0)
 
 
 class CreateGateBody(CamelModel):
