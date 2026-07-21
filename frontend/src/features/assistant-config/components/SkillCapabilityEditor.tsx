@@ -85,6 +85,93 @@ export function isRegistryCapabilityKey(
   return registryKeys.includes(normalized)
 }
 
+/**
+ * Rewrite the `capabilities:` block with the given ordered identity keys.
+ * Used by SkillCapabilityEditor multi-select; free YAML must not invent keys.
+ */
+export function replaceCapabilityKeysInYaml(yaml: string, keys: string[]): string {
+  const lines = yaml.split(/\r?\n/)
+  const out: string[] = []
+  let inCaps = false
+  let replaced = false
+  for (const raw of lines) {
+    const trimmedStart = raw.trimStart()
+    if (/^capabilities\s*:/.test(trimmedStart) && !trimmedStart.startsWith('#')) {
+      const indent = raw.match(/^\s*/)?.[0] ?? ''
+      out.push(`${indent}capabilities:`)
+      for (const key of keys) {
+        const [type, ...rest] = key.split(':')
+        const name = rest.join(':') || key
+        if (rest.length > 0 && (type === 'tool' || type === 'workflow' || type === 'agent')) {
+          out.push(`${indent}  - type: ${type}`)
+          out.push(`${indent}    key: ${name}`)
+        } else {
+          out.push(`${indent}  - ${key}`)
+        }
+      }
+      inCaps = true
+      replaced = true
+      continue
+    }
+    if (inCaps) {
+      if (/^\S/.test(raw) && !trimmedStart.startsWith('#')) {
+        inCaps = false
+        out.push(raw)
+      }
+      continue
+    }
+    out.push(raw)
+  }
+  if (!replaced) {
+    if (out.length > 0 && out[out.length - 1] !== '') {
+      // keep trailing newline semantics when appending a new block
+    }
+    out.push('capabilities:')
+    for (const key of keys) {
+      const [type, ...rest] = key.split(':')
+      const name = rest.join(':') || key
+      if (rest.length > 0 && (type === 'tool' || type === 'workflow' || type === 'agent')) {
+        out.push(`  - type: ${type}`)
+        out.push(`    key: ${name}`)
+      } else {
+        out.push(`  - ${key}`)
+      }
+    }
+  }
+  return out.join('\n')
+}
+
+/**
+ * Keep only capability keys that appear in the published Registry, preserving order.
+ * When registryKeys is empty (registry not loaded / empty), strip all capability keys
+ * so free-text cannot backdoor unknown identities.
+ */
+export function sanitizeMindatlasYamlCapabilities(
+  yaml: string,
+  registryKeys: string[],
+): string {
+  if (!yaml.trim()) return yaml
+  const allowed = new Set(registryKeys.map((k) => k.trim()).filter(Boolean))
+  const existing = extractCapabilityKeys(yaml)
+  const filtered = existing.filter((key) => allowed.has(key))
+  // Skip rewrite when the ordered key set is already registry-clean.
+  if (filtered.length === existing.length && existing.every((k, i) => k === filtered[i])) {
+    return yaml
+  }
+  return replaceCapabilityKeysInYaml(yaml, filtered)
+}
+
+/**
+ * Freeze the `capabilities:` block from free-text YAML edits.
+ * Policy/budgets/completion/full modes may change other sections, but capability
+ * identities are edited only via SkillCapabilityEditor.
+ */
+export function preserveCapabilitiesBlock(previousYaml: string, nextYaml: string): string {
+  const previousKeys = extractCapabilityKeys(previousYaml)
+  // Always rewrite next's capabilities from previous — drops free-text injection.
+  return replaceCapabilityKeysInYaml(nextYaml, previousKeys)
+}
+
 export function SkillCapabilityEditor({
   capabilityKeys,
   onChange,

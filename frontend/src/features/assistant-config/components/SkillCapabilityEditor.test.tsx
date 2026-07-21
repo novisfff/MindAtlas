@@ -1,7 +1,13 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
-import { SkillCapabilityEditor } from './SkillCapabilityEditor'
+import {
+  extractCapabilityKeys,
+  preserveCapabilitiesBlock,
+  replaceCapabilityKeysInYaml,
+  sanitizeMindatlasYamlCapabilities,
+  SkillCapabilityEditor,
+} from './SkillCapabilityEditor'
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -92,5 +98,46 @@ describe('SkillCapabilityEditor', () => {
     expect(screen.getByText(/v3/)).toBeVisible()
     expect(screen.getByText(/pinned/)).toBeVisible()
     expect(screen.getByText(/read/)).toBeVisible()
+  })
+
+  it('sanitizeMindatlasYamlCapabilities drops non-registry keys and preserves order', () => {
+    const yaml = [
+      'capabilities:',
+      '  - tool:alpha',
+      '  - tool:unknown',
+      '  - tool:beta',
+      'policy:',
+      '  risk: low',
+    ].join('\n')
+    const sanitized = sanitizeMindatlasYamlCapabilities(yaml, ['tool:alpha', 'tool:beta'])
+    expect(extractCapabilityKeys(sanitized)).toEqual(['tool:alpha', 'tool:beta'])
+    expect(sanitized).not.toMatch(/tool:unknown/)
+    expect(sanitized).toMatch(/policy:/)
+  })
+
+  it('preserveCapabilitiesBlock freezes free-text capability injection', () => {
+    const previous = ['capabilities:', '  - tool:alpha', 'policy:', '  risk: low'].join('\n')
+    const next = [
+      'capabilities:',
+      '  - tool:unknown',
+      '  - tool:injected',
+      'policy:',
+      '  risk: high',
+    ].join('\n')
+    const frozen = preserveCapabilitiesBlock(previous, next)
+    expect(extractCapabilityKeys(frozen)).toEqual(['tool:alpha'])
+    expect(frozen).not.toMatch(/tool:unknown/)
+    expect(frozen).toMatch(/risk:\s*high/)
+  })
+
+  it('replaceCapabilityKeysInYaml rewrites structured capability entries', () => {
+    const yaml = ['capabilities:', '  - tool:old', 'budgets:', '  max_tokens: 1'].join('\n')
+    const next = replaceCapabilityKeysInYaml(yaml, ['tool:alpha', 'workflow:beta'])
+    expect(extractCapabilityKeys(next)).toEqual(['tool:alpha', 'workflow:beta'])
+    expect(next).toMatch(/type:\s*tool/)
+    expect(next).toMatch(/key:\s*alpha/)
+    expect(next).toMatch(/type:\s*workflow/)
+    expect(next).toMatch(/key:\s*beta/)
+    expect(next).toMatch(/max_tokens:\s*1/)
   })
 })

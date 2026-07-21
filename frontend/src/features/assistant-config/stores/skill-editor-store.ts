@@ -5,6 +5,7 @@
  */
 import { create } from 'zustand'
 
+import { sanitizeMindatlasYamlCapabilities } from '../components/SkillCapabilityEditor'
 import type {
   SkillPackageDetail,
   SkillResourceInput,
@@ -52,6 +53,12 @@ interface SkillEditorState {
   resourcesHydrated: boolean
   resourcesHydrationStatus: ResourcesHydrationStatus
   resourcesHydrationError: string | null
+  /**
+   * Published Capability Registry identity keys.
+   * `null` = registry not loaded yet (do not strip on save).
+   * `string[]` (possibly empty) = registry loaded; save filters capabilities to this set.
+   */
+  capabilityRegistryKeys: string[] | null
   lastRequestId: string | null
   lastConflict: SkillEditorConflict | null
   validationDiagnostics: SkillValidationDiagnostic[]
@@ -59,6 +66,11 @@ interface SkillEditorState {
   loadPackage: (pkg: SkillPackageDetail, draft?: SkillVersionDetail | null) => void
   setSkillMd: (value: string) => void
   setMindatlasYaml: (value: string) => void
+  /**
+   * Publish Registry identity keys used to sanitize capabilities on save.
+   * Pass an array (including empty) after a load attempt; null resets to not-loaded.
+   */
+  setCapabilityRegistryKeys: (keys: string[] | null) => void
   setVersionName: (value: string) => void
   setDisplayName: (value: string) => void
   setDescription: (value: string) => void
@@ -167,6 +179,7 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
   resourcesHydrated: true,
   resourcesHydrationStatus: 'idle',
   resourcesHydrationError: null,
+  capabilityRegistryKeys: null,
   lastRequestId: null,
   lastConflict: null,
   validationDiagnostics: [],
@@ -199,6 +212,11 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
       isDirty: true,
       lastConflict: null,
     })),
+
+  setCapabilityRegistryKeys: (keys) =>
+    set({
+      capabilityRegistryKeys: keys === null ? null : keys.map((k) => k.trim()).filter(Boolean),
+    }),
 
   setVersionName: (value) =>
     set((state) => ({
@@ -362,6 +380,7 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
       resourcesHydrated: true,
       resourcesHydrationStatus: 'idle',
       resourcesHydrationError: null,
+      capabilityRegistryKeys: null,
       lastRequestId: null,
       lastConflict: null,
       validationDiagnostics: [],
@@ -373,12 +392,20 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
       resourcesDirty,
       resourcesHydrated,
       resourcesHydrationStatus,
+      capabilityRegistryKeys,
       expectedAggregateRevision,
       lastRequestId,
     } = get()
     // Always include requestId + expected revision (mandatory CAS).
     // When resources were mutated, send the complete intended snapshot.
     // Content-only edits omit resources so the server preserves prior bytes.
+    // Registry-only: once Registry is loaded, drop free-text capability keys.
+    // While null (not loaded), leave YAML as-is — UI freezes capabilities on free-text edits.
+    const rawYaml = workingCopy.mindatlasYaml
+    const sanitizedYaml =
+      rawYaml.trim() && capabilityRegistryKeys !== null
+        ? sanitizeMindatlasYamlCapabilities(rawYaml, capabilityRegistryKeys)
+        : rawYaml
     const body: {
       skillMd: string
       mindatlasYaml: string | null
@@ -388,7 +415,7 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
       requestId: string
     } = {
       skillMd: workingCopy.skillMd,
-      mindatlasYaml: workingCopy.mindatlasYaml.trim() ? workingCopy.mindatlasYaml : null,
+      mindatlasYaml: sanitizedYaml.trim() ? sanitizedYaml : null,
       versionName: workingCopy.versionName.trim() ? workingCopy.versionName : null,
       expectedAggregateRevision,
       requestId:

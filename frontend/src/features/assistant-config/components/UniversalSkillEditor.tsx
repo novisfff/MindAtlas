@@ -11,7 +11,12 @@ import { Button } from '@/components/ui/button'
 import { uiField } from '@/components/ui/styles'
 import { cn } from '@/lib/utils'
 
-import { extractCapabilityKeys, SkillCapabilityEditor } from './SkillCapabilityEditor'
+import {
+  extractCapabilityKeys,
+  preserveCapabilitiesBlock,
+  replaceCapabilityKeysInYaml,
+  SkillCapabilityEditor,
+} from './SkillCapabilityEditor'
 import { SkillPolicyEditor } from './SkillPolicyEditor'
 import { SkillResourceBrowser } from './SkillResourceBrowser'
 import { SkillTestWorkbench } from './SkillTestWorkbench'
@@ -96,6 +101,7 @@ export function UniversalSkillEditor({
 
   const setSkillMd = useSkillEditorStore((s) => s.setSkillMd)
   const setMindatlasYaml = useSkillEditorStore((s) => s.setMindatlasYaml)
+  const setCapabilityRegistryKeys = useSkillEditorStore((s) => s.setCapabilityRegistryKeys)
   const setVersionName = useSkillEditorStore((s) => s.setVersionName)
   const setDisplayName = useSkillEditorStore((s) => s.setDisplayName)
   const setDescription = useSkillEditorStore((s) => s.setDescription)
@@ -121,15 +127,21 @@ export function UniversalSkillEditor({
     let cancelled = false
     void listPublishedCapabilityIdentities()
       .then((items) => {
-        if (!cancelled) setRegistry(items)
+        if (cancelled) return
+        setRegistry(items)
+        // Drive save-path filtering from the same published Registry identities.
+        setCapabilityRegistryKeys(items.map((r) => r.key))
       })
       .catch(() => {
-        if (!cancelled) setRegistry([])
+        if (cancelled) return
+        setRegistry([])
+        // Fail closed: empty registry means no free-text capability keys survive save.
+        setCapabilityRegistryKeys([])
       })
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [setCapabilityRegistryKeys])
 
   // Hydrate resource bytes once so remove/replace can send a complete CAS snapshot.
   // Failed fetch fails hydrate (does not invent empty base64 as ready).
@@ -171,53 +183,25 @@ export function UniversalSkillEditor({
     setResourcesHydrationError,
   ])
 
+  const registryKeys = useMemo(() => registry.map((r) => r.key), [registry])
+
+  /** Ordered multi-select only accepts published Registry identities (enforced in SkillCapabilityEditor). */
   function replaceCapabilityKeys(keys: string[]) {
-    const yaml = workingCopy.mindatlasYaml
-    const lines = yaml.split(/\r?\n/)
-    const out: string[] = []
-    let inCaps = false
-    let replaced = false
-    for (const raw of lines) {
-      const trimmedStart = raw.trimStart()
-      if (/^capabilities\s*:/.test(trimmedStart) && !trimmedStart.startsWith('#')) {
-        out.push((raw.match(/^\s*/)?.[0] ?? '') + 'capabilities:')
-        for (const key of keys) {
-          const [type, ...rest] = key.split(':')
-          const name = rest.join(':') || key
-          if (rest.length > 0 && (type === 'tool' || type === 'workflow' || type === 'agent')) {
-            out.push(`${raw.match(/^\s*/)?.[0] || ''}  - type: ${type}`)
-            out.push(`${raw.match(/^\s*/)?.[0] || ''}    key: ${name}`)
-          } else {
-            out.push(`${raw.match(/^\s*/)?.[0] || ''}  - ${key}`)
-          }
-        }
-        inCaps = true
-        replaced = true
-        continue
-      }
-      if (inCaps) {
-        if (/^\S/.test(raw) && !trimmedStart.startsWith('#')) {
-          inCaps = false
-          out.push(raw)
-        }
-        continue
-      }
-      out.push(raw)
-    }
-    if (!replaced) {
-      out.push('capabilities:')
-      for (const key of keys) {
-        const [type, ...rest] = key.split(':')
-        const name = rest.join(':') || key
-        if (rest.length > 0 && (type === 'tool' || type === 'workflow' || type === 'agent')) {
-          out.push(`  - type: ${type}`)
-          out.push(`    key: ${name}`)
-        } else {
-          out.push(`  - ${key}`)
-        }
-      }
-    }
-    setMindatlasYaml(out.join('\n'))
+    // When registry is loaded, drop any non-registry identities that may have been
+    // hydrated from a prior free-text / server snapshot before multi-select edits.
+    const allowed =
+      registryKeys.length > 0
+        ? keys.filter((key) => registryKeys.includes(key.trim()))
+        : keys
+    setMindatlasYaml(replaceCapabilityKeysInYaml(workingCopy.mindatlasYaml, allowed))
+  }
+
+  /**
+   * Free-text YAML / policy modes must not backdoor capability identities.
+   * Freeze the capabilities block to the previous working-copy value.
+   */
+  function handlePolicyYamlChange(nextYaml: string) {
+    setMindatlasYaml(preserveCapabilitiesBlock(workingCopy.mindatlasYaml, nextYaml))
   }
 
   if (!packageDetail) {
@@ -394,7 +378,12 @@ export function UniversalSkillEditor({
         ) : null}
 
         {tab === 'applicability' ? (
-          <SkillPolicyEditor mode="applicability" mindatlasYaml={workingCopy.mindatlasYaml} onChange={setMindatlasYaml} disabled={archived} />
+          <SkillPolicyEditor
+            mode="applicability"
+            mindatlasYaml={workingCopy.mindatlasYaml}
+            onChange={handlePolicyYamlChange}
+            disabled={archived}
+          />
         ) : null}
 
         {tab === 'capabilities' ? (
@@ -402,7 +391,7 @@ export function UniversalSkillEditor({
             <SkillCapabilityEditor
               capabilityKeys={capabilityKeys}
               onChange={replaceCapabilityKeys}
-              registryKeys={registry.map((r) => r.key)}
+              registryKeys={registryKeys}
               registry={registry.map((r) => ({
                 key: r.key,
                 target: r.target,
@@ -412,20 +401,40 @@ export function UniversalSkillEditor({
               }))}
               disabled={archived}
             />
-            <SkillPolicyEditor mode="full" mindatlasYaml={workingCopy.mindatlasYaml} onChange={setMindatlasYaml} disabled={archived} />
+            <SkillPolicyEditor
+              mode="full"
+              mindatlasYaml={workingCopy.mindatlasYaml}
+              onChange={handlePolicyYamlChange}
+              disabled={archived}
+            />
           </div>
         ) : null}
 
         {tab === 'policy' ? (
-          <SkillPolicyEditor mode="policy" mindatlasYaml={workingCopy.mindatlasYaml} onChange={setMindatlasYaml} disabled={archived} />
+          <SkillPolicyEditor
+            mode="policy"
+            mindatlasYaml={workingCopy.mindatlasYaml}
+            onChange={handlePolicyYamlChange}
+            disabled={archived}
+          />
         ) : null}
 
         {tab === 'budgets' ? (
-          <SkillPolicyEditor mode="budgets" mindatlasYaml={workingCopy.mindatlasYaml} onChange={setMindatlasYaml} disabled={archived} />
+          <SkillPolicyEditor
+            mode="budgets"
+            mindatlasYaml={workingCopy.mindatlasYaml}
+            onChange={handlePolicyYamlChange}
+            disabled={archived}
+          />
         ) : null}
 
         {tab === 'completion' ? (
-          <SkillPolicyEditor mode="completion" mindatlasYaml={workingCopy.mindatlasYaml} onChange={setMindatlasYaml} disabled={archived} />
+          <SkillPolicyEditor
+            mode="completion"
+            mindatlasYaml={workingCopy.mindatlasYaml}
+            onChange={handlePolicyYamlChange}
+            disabled={archived}
+          />
         ) : null}
 
         {tab === 'resources' ? (

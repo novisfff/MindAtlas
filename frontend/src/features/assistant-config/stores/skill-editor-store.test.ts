@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 
+import { extractCapabilityKeys } from '../components/SkillCapabilityEditor'
 import { useSkillEditorStore } from './skill-editor-store'
 import type { SkillPackageDetail, SkillVersionDetail } from '../api/skill-packages'
 
@@ -64,6 +65,39 @@ describe('skill-editor-store', () => {
     expect(body.requestId).toBeTruthy()
     // Content-only edit preserves prior resources by omitting the field.
     expect(body.resources).toBeUndefined()
+  })
+
+  it('strips free-text capability keys outside the Registry from save body', () => {
+    useSkillEditorStore.getState().loadPackage(pkg, draft)
+    useSkillEditorStore.getState().setCapabilityRegistryKeys([
+      'tool:published',
+      'tool:alpha',
+    ])
+    // Free-text YAML injects a non-registry key alongside a valid one (and preserves order of registry keys).
+    useSkillEditorStore.getState().setMindatlasYaml(
+      [
+        'policy:',
+        '  risk: low',
+        'capabilities:',
+        '  - tool:published',
+        '  - tool:unknown',
+        '  - tool:alpha',
+        'budgets:',
+        '  max_tokens: 100',
+        '',
+      ].join('\n'),
+    )
+    const body = useSkillEditorStore.getState().buildSaveBody()
+    expect(body.mindatlasYaml).toBeTruthy()
+    // Structured form uses type/key fields; assert via identity extraction.
+    expect(extractCapabilityKeys(body.mindatlasYaml!)).toEqual([
+      'tool:published',
+      'tool:alpha',
+    ])
+    expect(body.mindatlasYaml).not.toMatch(/unknown/)
+    // Non-capability YAML sections survive sanitization.
+    expect(body.mindatlasYaml).toMatch(/policy:/)
+    expect(body.mindatlasYaml).toMatch(/max_tokens:\s*100/)
   })
 
   it('includes complete resource snapshot after explicit resource mutation', () => {
