@@ -1,9 +1,11 @@
 /**
- * Main Agent Profile editor (Plan 09 Task 7/10).
+ * Main Agent Profile editor (Plan 09 Task 7/10 + Residual 1).
  * Prompt layers, catalog scope, control capabilities, budgets, versions.
+ * Two-gate lifecycle: profile_publish (draft) then profile_runtime_enable (published).
  * Distinct draft / publish / promotion / enable / disable commands.
  * Must not embed a single Skill as the execution target.
  * Saving draft never demotes live/published UI state.
+ * Client never authors digests/decisions/metrics.
  */
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -31,7 +33,14 @@ import {
   type MainAgentProfileSummary,
   type MainAgentProfileVersionSummary,
 } from '../api/main-agent-profiles'
+import {
+  gateUiStateFromResponse,
+  listQualifyingEvidence,
+  type GateUiState,
+  type QualifyingEvidenceSummary,
+} from '../api/skill-evaluations'
 import { mapSkillPackageError, newRequestId } from '../api/skill-packages'
+import { SkillPublishGateDialog } from '../components/SkillPublishGateDialog'
 
 const DEFAULT_SNAPSHOT: MainAgentProfileSnapshot = {
   schemaVersion: 1,
@@ -73,6 +82,18 @@ const DEFAULT_SNAPSHOT: MainAgentProfileSnapshot = {
 }
 
 type MutationKind = 'draft' | 'publish' | 'enable' | 'disable' | null
+type GateDialogMode = 'publish' | 'promotion' | null
+
+function gateMatches(
+  gate: GateUiState | null,
+  action: GateUiState['action'],
+  subjectVersionId: string | null | undefined,
+): boolean {
+  if (!gate || !subjectVersionId) return false
+  if (gate.action !== action) return false
+  if (gate.subjectVersionId !== subjectVersionId) return false
+  return gate.decision === 'passed' || gate.decision === 'waived_non_safety'
+}
 
 function ProfileEditorBody() {
   const { t } = useTranslation()
@@ -85,18 +106,72 @@ function ProfileEditorBody() {
   const [busy, setBusy] = useState<MutationKind>(null)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
-  const [promotionGateId, setPromotionGateId] = useState('')
+  // Separate action/subject-keyed gate records — never share publish ↔ promotion.
+  const [publishGate, setPublishGate] = useState<GateUiState | null>(null)
+  const [promotionGate, setPromotionGate] = useState<GateUiState | null>(null)
+  const [gateDialogMode, setGateDialogMode] = useState<GateDialogMode>(null)
+  const [draftEvidence, setDraftEvidence] = useState<QualifyingEvidenceSummary[]>([])
+  const [promotionEvidence, setPromotionEvidence] = useState<QualifyingEvidenceSummary[]>([])
 
   // Live-state UI mirrors server only; draft save never mutates these locally.
   const runtimeEnabled = Boolean(profile?.runtimeEnabled)
   const publishedVersionId = profile?.publishedVersion?.id ?? null
   const draftVersionId = profile?.draftVersion?.id ?? null
   const aggregateRevision = profile?.aggregateRevision ?? 0
+  const profileId = profile?.id ?? null
+
+  const publishGateValid = gateMatches(publishGate, 'profile_publish', draftVersionId)
+  const promotionGateValid = gateMatches(
+    promotionGate,
+    'profile_runtime_enable',
+    publishedVersionId,
+  )
+
+  const draftQualifyingRunIds = useMemo(
+    () => draftEvidence.map((row) => row.evalRunId).filter(Boolean),
+    [draftEvidence],
+  )
+  const promotionQualifyingRunIds = useMemo(
+    () => promotionEvidence.map((row) => row.evalRunId).filter(Boolean),
+    [promotionEvidence],
+  )
+
+  const canEnableRuntime =
+    Boolean(publishedVersionId) &&
+    promotionGateValid &&
+    promotionQualifyingRunIds.length > 0 &&
+    !runtimeEnabled &&
+    busy === null
+
+  const needsPublishedEvalHint =
+    Boolean(publishedVersionId) &&
+    !runtimeEnabled &&
+    (!promotionGateValid || promotionQualifyingRunIds.length === 0)
 
   const singleTargetIssues = useMemo(
     () => assertNoSingleTargetFields(snapshot as unknown as Record<string, unknown>),
     [snapshot],
   )
+
+  async function loadQualifyingEvidence(
+    subjectKind: 'main_agent_profile_draft' | 'main_agent_profile_version',
+    subjectAggregateId: string,
+    subjectVersionId: string,
+  ): Promise<QualifyingEvidenceSummary[]> {
+    const page = await listQualifyingEvidence({
+      subjectKind,
+      subjectAggregateId,
+      subjectVersionId,
+      limit: 50,
+    })
+    return (page.items || []).filter(
+      (row) =>
+        row.gateEligible &&
+        row.evidenceProvenance === 'real_orchestration' &&
+        row.subjectKind === subjectKind &&
+        row.subjectVersionId === subjectVersionId,
+    )
+  }
 
   async function reload() {
     setError(null)
@@ -127,11 +202,56 @@ function ProfileEditorBody() {
         setDirty(false)
       }
     }
+
+    // Evidence is server-listed only; client never fabricates run eligibility.
+    if (summary.id && summary.draftVersion?.id) {
+      try {
+        setDraftEvidence(
+          await loadQualifyingEvidence(
+            'main_agent_profile_draft',
+            summary.id,
+            summary.draftVersion.id,
+          ),
+        )
+      } catch {
+        setDraftEvidence([])
+      }
+    } else {
+      setDraftEvidence([])
+    }
+    if (summary.id && summary.publishedVersion?.id) {
+      try {
+        setPromotionEvidence(
+          await loadQualifyingEvidence(
+            'main_agent_profile_version',
+            summary.id,
+            summary.publishedVersion.id,
+          ),
+        )
+      } catch {
+        setPromotionEvidence([])
+      }
+    } else {
+      setPromotionEvidence([])
+    }
   }
 
   useEffect(() => {
     void reload().catch((err) => setError(mapSkillPackageError(err).message))
   }, [])
+
+  // Drop stale gates when the subject pointer they target no longer matches.
+  useEffect(() => {
+    if (publishGate && publishGate.subjectVersionId !== draftVersionId) {
+      setPublishGate(null)
+    }
+  }, [draftVersionId, publishGate])
+
+  useEffect(() => {
+    if (promotionGate && promotionGate.subjectVersionId !== publishedVersionId) {
+      setPromotionGate(null)
+    }
+  }, [publishedVersionId, promotionGate])
 
   async function handleSaveDraft() {
     // Draft save is isolated: only mutates draft content; never sends enable/disable.
@@ -157,6 +277,8 @@ function ProfileEditorBody() {
         requestId: newRequestId('profile-draft'),
       })
       setDirty(false)
+      // Content drift invalidates draft gate for prior subject.
+      setPublishGate(null)
       setMessage(`${t('settings.universalSkills.saveDraft')}: ${version.id}`)
       // Reload authoritative summary; draft save does not demote live flags server-side.
       await reload()
@@ -172,14 +294,21 @@ function ProfileEditorBody() {
       setError(t('settings.universalSkills.noDraftVersion'))
       return
     }
+    if (!publishGateValid || !publishGate) {
+      setError(t('settings.universalSkills.gateNeedsRuns'))
+      return
+    }
     setBusy('publish')
     setError(null)
     try {
       await publishProtectedDefaultMainAgent({
         draftVersionId,
         expectedAggregateRevision: aggregateRevision,
+        gateId: publishGate.gateId,
         requestId: newRequestId('profile-pub'),
       })
+      // Publish invalidates draft gate; promotion must be re-earned on published subject.
+      setPublishGate(null)
       setMessage(t('settings.universalSkills.profilePublished'))
       await reload()
     } catch (err) {
@@ -194,7 +323,7 @@ function ProfileEditorBody() {
       setError(t('settings.universalSkills.profileNeedsPublished'))
       return
     }
-    if (!promotionGateId.trim()) {
+    if (!promotionGateValid || !promotionGate) {
       setError(t('settings.universalSkills.profileNeedsPromotionGate'))
       return
     }
@@ -204,7 +333,7 @@ function ProfileEditorBody() {
       const summary = await enableProtectedDefaultMainAgentRuntime({
         expectedAggregateRevision: aggregateRevision,
         expectedPublishedVersionId: publishedVersionId,
-        gateId: promotionGateId.trim(),
+        gateId: promotionGate.gateId,
         requestId: newRequestId('profile-en'),
       })
       setProfile(summary)
@@ -328,16 +457,6 @@ function ProfileEditorBody() {
           </select>
         </label>
 
-        <label className="block space-y-1 text-sm">
-          <span>{t('settings.universalSkills.promotionGateId')}</span>
-          <input
-            className={uiField.input}
-            value={promotionGateId}
-            onChange={(e) => setPromotionGateId(e.target.value)}
-            placeholder="gate-uuid"
-          />
-        </label>
-
         <div className="flex flex-wrap gap-2">
           <Button type="button" disabled={busy !== null || !dirty} onClick={() => void handleSaveDraft()}>
             {busy === 'draft' ? t('messages.loading') : t('settings.universalSkills.saveDraft')}
@@ -345,7 +464,23 @@ function ProfileEditorBody() {
           <Button
             type="button"
             variant="outline"
-            disabled={busy !== null || !draftVersionId}
+            disabled={!draftVersionId || busy !== null}
+            onClick={() => setGateDialogMode('publish')}
+          >
+            {t('settings.universalSkills.openGateDialog')}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!publishedVersionId || busy !== null}
+            onClick={() => setGateDialogMode('promotion')}
+          >
+            {t('settings.universalSkills.openPromotionGateDialog')}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={busy !== null || !publishGateValid}
             onClick={() => void handlePublish()}
           >
             {busy === 'publish' ? t('messages.loading') : t('settings.universalSkills.publishProfile')}
@@ -353,7 +488,7 @@ function ProfileEditorBody() {
           <Button
             type="button"
             variant="outline"
-            disabled={busy !== null || !publishedVersionId || runtimeEnabled}
+            disabled={!canEnableRuntime}
             onClick={() => void handleEnableRuntime()}
           >
             {busy === 'enable' ? t('messages.loading') : t('settings.universalSkills.enableRuntime')}
@@ -366,7 +501,47 @@ function ProfileEditorBody() {
           >
             {busy === 'disable' ? t('messages.loading') : t('settings.universalSkills.disableRuntime')}
           </Button>
+          {publishGateValid && publishGate ? (
+            <span className="font-mono text-xs text-muted-foreground">
+              publish-gate={publishGate.gateId.slice(0, 8)}… {publishGate.decision}
+            </span>
+          ) : null}
+          {promotionGateValid && promotionGate ? (
+            <span className="font-mono text-xs text-muted-foreground">
+              promo-gate={promotionGate.gateId.slice(0, 8)}… {promotionGate.decision}
+            </span>
+          ) : null}
         </div>
+        {needsPublishedEvalHint ? (
+          <p className="text-sm text-muted-foreground">
+            {t('settings.universalSkills.evaluatePublishedBeforeEnable')}
+          </p>
+        ) : null}
+
+        <SkillPublishGateDialog
+          open={gateDialogMode === 'publish'}
+          onClose={() => setGateDialogMode(null)}
+          action="profile_publish"
+          subjectAggregateId={profileId}
+          subjectVersionId={draftVersionId}
+          subjectKind="main_agent_profile_draft"
+          qualifyingEvalRunIds={draftQualifyingRunIds}
+          onCreated={(result) => {
+            setPublishGate(gateUiStateFromResponse(result, 'profile_publish'))
+          }}
+        />
+        <SkillPublishGateDialog
+          open={gateDialogMode === 'promotion'}
+          onClose={() => setGateDialogMode(null)}
+          action="profile_runtime_enable"
+          subjectAggregateId={profileId}
+          subjectVersionId={publishedVersionId}
+          subjectKind="main_agent_profile_version"
+          qualifyingEvalRunIds={promotionQualifyingRunIds}
+          onCreated={(result) => {
+            setPromotionGate(gateUiStateFromResponse(result, 'profile_runtime_enable'))
+          }}
+        />
 
         <div className="space-y-2">
           <h3 className="text-sm font-medium">{t('settings.universalSkills.versionHistory')}</h3>

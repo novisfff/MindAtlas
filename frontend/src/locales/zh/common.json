@@ -2161,8 +2161,7 @@
       "profileRuntimeDisabled": "配置运行时已禁用",
       "profileNeedsPublished": "启用运行时前请先发布配置版本。",
       "profileNeedsPromotionGate": "启用运行时需要晋升门禁。",
-      "profileDisableConfirm": "确认禁用主代理配置运行时？这是显式的线上状态变更，不会修改草稿或已发布内容。",
-      "promotionGateId": "晋升门禁 ID"
+      "profileDisableConfirm": "确认禁用主代理配置运行时？这是显式的线上状态变更，不会修改草稿或已发布内容。"
     }
   },
   "aiProvider": {

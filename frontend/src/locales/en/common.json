@@ -2171,8 +2171,7 @@
       "profileRuntimeDisabled": "Profile runtime disabled",
       "profileNeedsPublished": "Publish a profile version before enabling runtime.",
       "profileNeedsPromotionGate": "A promotion gate is required to enable runtime.",
-      "profileDisableConfirm": "Disable Main Agent Profile runtime? This is an explicit live-state change and does not alter draft or published content.",
-      "promotionGateId": "Promotion gate ID"
+      "profileDisableConfirm": "Disable Main Agent Profile runtime? This is an explicit live-state change and does not alter draft or published content."
     }
   },
   "aiProvider": {
