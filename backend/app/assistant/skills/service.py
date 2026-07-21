@@ -41,11 +41,13 @@ from app.assistant.skills.models import (
     AssistantSkillVersion,
     AssistantSkillVersionResource,
 )
+from app.assistant.skills.candidate_closure import (
+    CandidateClosureError,
+    resolve_skill_candidate_closure,
+    resolved_bindings_from_closure,
+)
 from app.assistant.skills.resolution import (
-    CapabilityReferenceResolver,
-    binding_set_digest_from_bindings,
     reconstruct_binding_snapshot,
-    version_digest_from_parts,
 )
 from app.assistant.skills.schemas import (
     CreateSkillPackageCommand,
@@ -667,14 +669,33 @@ class AgentSkillService:
                     ),
                 )
 
-            # Reconstruct declarations from the immutable draft payload.
-            from app.assistant.skills.package_io import parse_skill_directory_files
+            # Shared pure resolver — same closure evaluation admits against.
+            # Flushes/commits nothing; durable keys freeze plan extensions when set.
+            try:
+                closure = resolve_skill_candidate_closure(
+                    self.db,
+                    package_id=package.id,
+                    version_id=draft.id,
+                    subject_kind="skill_draft",
+                    durable_capability_keys=tuple(durable_capability_keys or ()),
+                )
+            except CandidateClosureError as exc:
+                if exc.code == "skill_content_digest_drift":
+                    raise ApiException(
+                        status_code=409,
+                        code=40993,
+                        message="draft content digest mismatch during publish reconstruction",
+                    ) from exc
+                raise ApiException(
+                    status_code=404 if "not_found" in exc.code else 422,
+                    code=40491 if "not_found" in exc.code else 42291,
+                    message=str(exc),
+                ) from exc
+            ordered_bindings = resolved_bindings_from_closure(closure)
+            set_digest = closure.binding_set_digest
+            ver_digest = closure.version_digest
 
-            files: dict[str, bytes] = {
-                "SKILL.md": (draft.skill_md or "").encode("utf-8"),
-            }
-            if draft.mindatlas_yaml:
-                files["mindatlas.yaml"] = draft.mindatlas_yaml.encode("utf-8")
+            # Resource rows still needed to copy blob refs onto the publish version.
             resource_rows = (
                 self.db.query(AssistantSkillVersionResource, AssistantSkillResourceBlob)
                 .join(
@@ -683,41 +704,6 @@ class AgentSkillService:
                 )
                 .filter(AssistantSkillVersionResource.skill_version_id == draft.id)
                 .all()
-            )
-            for resource, blob in resource_rows:
-                files[resource.path] = bytes(blob.content)
-
-            parsed = parse_skill_directory_files(
-                files,
-                expected_root_name=package.canonical_name,
-            )
-            if parsed.content_digest != draft.content_digest:
-                raise ApiException(
-                    status_code=409,
-                    code=40993,
-                    message="draft content digest mismatch during publish reconstruction",
-                )
-
-            declarations = (
-                tuple(parsed.manifest.capabilities) if parsed.manifest is not None else ()
-            )
-            # Resolve complete closures before inserting any publish row.
-            resolver = CapabilityReferenceResolver(self.db)
-            resolved_bindings = resolver.resolve_many(declarations)
-            ordered_bindings = sorted(
-                resolved_bindings,
-                key=lambda b: (b.capability_type, b.capability_key),
-            )
-            # Plan 07: optionally freeze durable plan extensions on new bindings.
-            if durable_capability_keys:
-                ordered_bindings = self._apply_durable_plan_extensions(
-                    ordered_bindings,
-                    durable_capability_keys=tuple(durable_capability_keys),
-                )
-            set_digest = binding_set_digest_from_bindings(ordered_bindings)
-            ver_digest = version_digest_from_parts(
-                content_digest=draft.content_digest,
-                binding_set_digest=set_digest,
             )
 
             # Rebuild candidate gate subject under lock (server-derived closure).
@@ -966,97 +952,6 @@ class AgentSkillService:
                         drifts.append(snake)
                         break
         return sorted(set(drifts))
-
-    def _apply_durable_plan_extensions(
-        self,
-        ordered_bindings: list[Any],
-        *,
-        durable_capability_keys: Sequence[str],
-    ) -> list[Any]:
-        """Attach validated durable plan extensions to matching workflow/agent bindings.
-
-        Fail-closed: unknown keys, non-workflow/agent targets, or planner denials
-        abort publish. Does not mutate the input list items in place.
-        """
-        from app.assistant.capabilities.contracts import (
-            FrozenBindingProvenance,
-            project_frozen_capability_binding,
-        )
-        from app.assistant.capabilities.registry import CapabilityRegistry
-        from app.assistant.domain.digests import sha256_canonical_json
-        from app.assistant.workflow.durable.planner import (
-            DurablePlanError,
-            plan_durable_execution_from_surface,
-            publish_durable_binding_snapshot,
-        )
-
-        wanted = {str(k) for k in durable_capability_keys if str(k).strip()}
-        if not wanted:
-            return list(ordered_bindings)
-
-        matched: set[str] = set()
-        registry = CapabilityRegistry(self.db)
-        out: list[Any] = []
-        for resolved in ordered_bindings:
-            key = str(resolved.capability_key)
-            if key not in wanted:
-                out.append(resolved)
-                continue
-            if resolved.capability_type not in {"workflow", "agent"}:
-                raise ApiException(
-                    status_code=422,
-                    code=42291,
-                    message=(
-                        f"durable publish requires workflow/agent capability: {key}"
-                    ),
-                )
-            matched.add(key)
-            # Provenance digest is publish-time only; not stored on the binding row.
-            provenance_digest = sha256_canonical_json(
-                {
-                    "capabilityKey": key,
-                    "resolutionDigest": str(resolved.resolution_digest or ""),
-                    "bindingContractDigest": str(resolved.binding_contract_digest or ""),
-                }
-            )
-            frozen = project_frozen_capability_binding(
-                resolved=resolved,
-                provenance=FrozenBindingProvenance(
-                    origin="skill_version",
-                    binding_row_id=None,
-                    owner_version_id=None,
-                    source_snapshot_digest=provenance_digest,
-                ),
-            )
-            try:
-                surface = registry.resolve_surface(frozen)
-                plan = plan_durable_execution_from_surface(surface)
-                new_resolved = publish_durable_binding_snapshot(resolved, plan=plan)
-            except DurablePlanError as exc:
-                raise ApiException(
-                    status_code=422,
-                    code=42291,
-                    message=f"durable plan denied for {key}: {exc}",
-                ) from exc
-            except Exception as exc:  # noqa: BLE001
-                raise ApiException(
-                    status_code=422,
-                    code=42291,
-                    message=f"durable plan publish failed for {key}: {exc}",
-                ) from exc
-            out.append(new_resolved)
-
-        missing = wanted - matched
-        if missing:
-            raise ApiException(
-                status_code=422,
-                code=42291,
-                message=(
-                    "durable_capability_keys not present in package declarations: "
-                    + ", ".join(sorted(missing))
-                ),
-            )
-        return out
 
     def _acquire_catalog_enable_lock(self) -> None:
         """Serialize catalog-enable across sessions (PostgreSQL advisory xact lock)."""

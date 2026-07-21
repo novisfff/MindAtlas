@@ -35,7 +35,7 @@ class SkillEvalApiMountTests(unittest.TestCase):
         os.environ.pop(TRUSTED_MOUNT_ENV, None)
         os.environ.pop("APP_ENV", None)
 
-    def _client(self, *, mount: bool) -> TestClient:
+    def _client(self, *, mount: bool) -> tuple[TestClient, object]:
         app = FastAPI()
         register_exception_handlers(app)
         session = make_session()
@@ -56,17 +56,17 @@ class SkillEvalApiMountTests(unittest.TestCase):
             os.environ.pop(TRUSTED_MOUNT_ENV, None)
             mounted = mount_skill_eval_router(app, app_env="production")
             self.assertFalse(mounted)
-        return TestClient(app)
+        return TestClient(app), session
 
     def test_openapi_absent_when_unmounted(self) -> None:
-        client = self._client(mount=False)
+        client, _session = self._client(mount=False)
         paths = (client.get("/openapi.json").json().get("paths") or {})
         for path in paths:
             self.assertNotIn("/skill-eval", path)
             self.assertNotIn(PLAN09_EVAL_PREFIX, path)
 
     def test_openapi_present_when_trusted_mount(self) -> None:
-        client = self._client(mount=True)
+        client, _session = self._client(mount=True)
         paths = client.get("/openapi.json").json().get("paths") or {}
         eval_paths = [p for p in paths if PLAN09_EVAL_PREFIX in p or "/skill-eval" in p]
         self.assertGreaterEqual(len(eval_paths), 4)
@@ -77,7 +77,7 @@ class SkillEvalApiMountTests(unittest.TestCase):
             self.assertNotIn("delete", {m.lower() for m in methods.keys()})
 
     def test_eval_routes_require_principal_when_mounted(self) -> None:
-        client = self._client(mount=True)
+        client, _session = self._client(mount=True)
         r = client.get(f"{PLAN09_EVAL_PREFIX}/datasets")
         self.assertIn(r.status_code, {401, 403}, r.text)
 
@@ -95,7 +95,7 @@ class SkillEvalApiMountTests(unittest.TestCase):
         self.assertIn(r2.status_code, {401, 403}, r2.text)
 
     def test_client_authored_gate_decision_fields_rejected(self) -> None:
-        client = self._client(mount=True)
+        client, _session = self._client(mount=True)
         headers = {
             "X-MindAtlas-Operator-Id": "operator-task8",
             "X-MindAtlas-Operator-Role": "operator",
@@ -136,7 +136,7 @@ class SkillEvalApiMountTests(unittest.TestCase):
         import base64
         import json
 
-        client = self._client(mount=True)
+        client, session = self._client(mount=True)
         headers = {
             "X-MindAtlas-Operator-Id": "operator-task8",
             "X-MindAtlas-Operator-Role": "operator",
@@ -200,6 +200,27 @@ class SkillEvalApiMountTests(unittest.TestCase):
         self.assertEqual(data["mode"], "interactive_scripted")
         run_id = data["id"]
 
+        # Server must ignore client-authored digests and admit the shared
+        # candidate-closure resolver's content/binding digests.
+        from app.assistant.evaluation.models import AssistantSkillEvalRun
+        from app.assistant.skills.candidate_closure import resolve_skill_candidate_closure
+
+        # Expire identity map so we re-read committed admission digests.
+        session.expire_all()
+        closure = resolve_skill_candidate_closure(
+            session,
+            package_id=uuid.UUID(pkg["id"]),
+            version_id=uuid.UUID(draft["id"]),
+            subject_kind="skill_draft",
+        )
+        run_row = session.get(AssistantSkillEvalRun, uuid.UUID(run_id))
+        self.assertIsNotNone(run_row)
+        assert run_row is not None
+        self.assertEqual(run_row.subject_content_digest, closure.content_digest)
+        self.assertEqual(run_row.subject_binding_digest, closure.binding_set_digest)
+        self.assertNotEqual(run_row.subject_content_digest, _digest("3"))
+        self.assertNotEqual(run_row.subject_binding_digest, _digest("4"))
+
         events = client.get(
             f"{PLAN09_EVAL_PREFIX}/runs/{run_id}/events",
             headers=headers,
@@ -209,7 +230,7 @@ class SkillEvalApiMountTests(unittest.TestCase):
         self.assertIn("items", events.json()["data"])
 
     def test_create_run_rejects_unknown_skill_version(self) -> None:
-        client = self._client(mount=True)
+        client, _session = self._client(mount=True)
         headers = {
             "X-MindAtlas-Operator-Id": "operator-task8",
             "X-MindAtlas-Operator-Role": "operator",

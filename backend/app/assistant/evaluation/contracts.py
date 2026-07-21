@@ -67,7 +67,12 @@ def _require_sha256(value: str, *, field_name: str) -> str:
 
 
 class EvalSubjectRef(FrozenContract):
-    """Immutable subject identity for evaluation and publish gates."""
+    """Immutable subject identity for evaluation and publish gates.
+
+    ``content_digest`` / ``resolved_binding_digest`` are always server-resolved
+    (for skill subjects: via ``resolve_skill_candidate_closure``). Clients never
+    author these digests; admission ignores any client-supplied values.
+    """
 
     schema_version: Literal[1] = 1
     kind: EvalSubjectKind

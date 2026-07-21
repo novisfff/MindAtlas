@@ -26,8 +26,21 @@ class CreateEvalRunBody(CamelModel):
     subject_kind: EvalSubjectKind = Field(alias="subjectKind")
     subject_aggregate_id: UUID = Field(alias="subjectAggregateId")
     subject_version_id: UUID = Field(alias="subjectVersionId")
-    subject_content_digest: str = Field(alias="subjectContentDigest", min_length=64, max_length=64)
-    subject_binding_digest: str = Field(alias="subjectBindingDigest", min_length=64, max_length=64)
+    # Optional and ignored for skill subjects — server resolves via
+    # resolve_skill_candidate_closure. Kept optional for non-skill subjects
+    # and backward-compatible request payloads until Tasks 5–8 refine further.
+    subject_content_digest: str | None = Field(
+        default=None,
+        alias="subjectContentDigest",
+        min_length=64,
+        max_length=64,
+    )
+    subject_binding_digest: str | None = Field(
+        default=None,
+        alias="subjectBindingDigest",
+        min_length=64,
+        max_length=64,
+    )
     dataset_version_ids: list[UUID] = Field(default_factory=list, alias="datasetVersionIds")
     threshold_policy_version: str = Field(default="plan09-policy-v1", alias="thresholdPolicyVersion")
     mode: EvalRunMode = "interactive_scripted"

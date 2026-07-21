@@ -18,10 +18,13 @@ from app.assistant.evaluation.models import (
     AssistantSkillEvalDataset,
     AssistantSkillPublishGate,
 )
-from app.assistant.skills.models import AssistantSkillVersion
 from app.assistant.evaluation.repository import (
     EvaluationRepository,
     EvaluationRepositoryError,
+)
+from app.assistant.skills.candidate_closure import (
+    CandidateClosureError,
+    resolve_skill_candidate_closure,
 )
 from app.assistant.evaluation.schemas import (
     CancelEvalRunBody,
@@ -148,41 +151,46 @@ def create_eval_run(
     """Admit an evaluation run with server-resolved subject digests.
 
     Client-supplied content/binding digests are ignored for skill subjects —
-    values are recomputed from the immutable version row. Unknown dataset
-    version IDs are rejected; interactive runs may omit datasets (empty list)
-    and never invent random dataset UUIDs.
+    values come from ``resolve_skill_candidate_closure`` (same pure path as
+    publish). Unknown dataset version IDs are rejected; interactive runs may
+    omit datasets (empty list) and never invent random dataset UUIDs.
     """
     repo = EvaluationRepository(db)
-    content_digest = body.subject_content_digest
-    binding_digest = body.subject_binding_digest
+    # Client digests are never trusted. Non-skill subjects still require
+    # explicit digests until their own pure resolvers land.
+    content_digest = body.subject_content_digest or ""
+    binding_digest = body.subject_binding_digest or ""
     dataset_ids = list(body.dataset_version_ids or [])
 
-    # Server-side subject resolution for skill packages.
+    # Server-side subject resolution for skill packages via shared closure.
     if body.subject_kind in {"skill_draft", "skill_version"}:
-        version = (
-            db.query(AssistantSkillVersion)
-            .filter(
-                AssistantSkillVersion.id == body.subject_version_id,
-                AssistantSkillVersion.skill_package_id == body.subject_aggregate_id,
+        try:
+            closure = resolve_skill_candidate_closure(
+                db,
+                package_id=body.subject_aggregate_id,
+                version_id=body.subject_version_id,
+                subject_kind=body.subject_kind,  # type: ignore[arg-type]
             )
-            .one_or_none()
-        )
-        if version is None:
-            raise ApiException(
-                status_code=404,
-                code=40491,
-                message=f"skill version not found: {body.subject_version_id}",
-            )
-        content_digest = str(version.content_digest or "")
-        binding_digest = str(
-            version.binding_set_digest or version.content_digest or ""
-        )
-        if len(content_digest) != 64 or len(binding_digest) != 64:
+        except CandidateClosureError as exc:
+            if exc.code in {"skill_package_not_found", "skill_version_not_found"}:
+                raise ApiException(
+                    status_code=404,
+                    code=40491,
+                    message=f"skill version not found: {body.subject_version_id}",
+                ) from exc
+            if exc.code == "skill_content_digest_drift":
+                raise ApiException(
+                    status_code=409,
+                    code=40993,
+                    message="skill content digest drift during candidate closure",
+                ) from exc
             raise ApiException(
                 status_code=422,
                 code=42293,
-                message="skill version digests are incomplete; re-save the draft",
-            )
+                message=str(exc),
+            ) from exc
+        content_digest = closure.content_digest
+        binding_digest = closure.binding_set_digest
 
     if dataset_ids:
         from app.assistant.evaluation.models import AssistantSkillEvalDatasetVersion
