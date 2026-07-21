@@ -63,6 +63,25 @@ describe('skill-test-run-store', () => {
     expect(useSkillTestRunStore.getState().lastSequence).toBe(3)
   })
 
+  it('pins cancel attempt once and clears it on terminal reconcile', () => {
+    useSkillTestRunStore.getState().beginRun(run)
+    useSkillTestRunStore.getState().pinCancelAttempt({
+      requestId: 'cancel-1',
+      expectedStateRevision: 4,
+    })
+    // Second pin is ignored so retries keep the original pair.
+    useSkillTestRunStore.getState().pinCancelAttempt({
+      requestId: 'cancel-2',
+      expectedStateRevision: 9,
+    })
+    expect(useSkillTestRunStore.getState().cancelAttempt).toEqual({
+      requestId: 'cancel-1',
+      expectedStateRevision: 4,
+    })
+    useSkillTestRunStore.getState().reconcileRun({ ...run, status: 'cancelled', lastEventSeq: 3 })
+    expect(useSkillTestRunStore.getState().cancelAttempt).toBeNull()
+  })
+
   it('transport notice does not mark run as terminal error', () => {
     useSkillTestRunStore.getState().beginRun(run)
     useSkillTestRunStore.getState().markTransportNotice('sse dropped')

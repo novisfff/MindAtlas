@@ -36,6 +36,12 @@ export interface SkillTestHeartbeat {
   terminal?: boolean
 }
 
+/** Pinned cancel CAS pair for one cancel attempt (durable idempotency). */
+export interface SkillTestCancelAttempt {
+  requestId: string
+  expectedStateRevision: number
+}
+
 interface SkillTestRunState {
   status: SkillTestRunStatus
   activeRunId: string | null
@@ -48,6 +54,8 @@ interface SkillTestRunState {
   seenKeys: Record<string, true>
   lastHeartbeat: SkillTestHeartbeat | null
   transportMode: SkillTestTransportMode
+  /** One cancel requestId + original expectedStateRevision for retries. */
+  cancelAttempt: SkillTestCancelAttempt | null
 
   beginRun: (run: EvalRunSummary) => void
   ingestEvents: (runId: string, events: EvalEventSummary[]) => void
@@ -57,6 +65,9 @@ interface SkillTestRunState {
   mergeMetrics: (metrics: Record<string, unknown>) => void
   reconcileRun: (run: EvalRunSummary) => void
   markCancelRequested: () => void
+  /** Pin cancel requestId + expected revision once per cancel attempt. */
+  pinCancelAttempt: (attempt: SkillTestCancelAttempt) => void
+  clearCancelAttempt: () => void
   markError: (message: string) => void
   /** Non-terminal transport notice — does not unlock Start / freeze Cancel. */
   markTransportNotice: (message: string | null) => void
@@ -119,6 +130,8 @@ function createInitialState(): Omit<
   | 'mergeMetrics'
   | 'reconcileRun'
   | 'markCancelRequested'
+  | 'pinCancelAttempt'
+  | 'clearCancelAttempt'
   | 'markError'
   | 'markTransportNotice'
   | 'clearForSubjectChange'
@@ -136,6 +149,7 @@ function createInitialState(): Omit<
     seenKeys: {},
     lastHeartbeat: null,
     transportMode: 'idle',
+    cancelAttempt: null,
   }
 }
 
@@ -243,6 +257,8 @@ function createStoreApi() {
           lastSequence: Math.max(state.lastSequence, run.lastEventSeq || 0),
           // Prefer server failureCode; drop transport notices once the run is terminal.
           errorMessage: run.failureCode || (terminal ? null : state.errorMessage),
+          // Drop cancel pin once the run reaches a terminal state.
+          cancelAttempt: terminal ? null : state.cancelAttempt,
         }
       }),
 
@@ -253,6 +269,17 @@ function createStoreApi() {
             ? state.status
             : 'cancelling',
       })),
+
+    pinCancelAttempt: (attempt) =>
+      set((state) => ({
+        // Never replace a pin mid-attempt — retries must reuse the same pair.
+        cancelAttempt: state.cancelAttempt ?? {
+          requestId: attempt.requestId,
+          expectedStateRevision: attempt.expectedStateRevision,
+        },
+      })),
+
+    clearCancelAttempt: () => set({ cancelAttempt: null }),
 
     markError: (message) => set({ status: 'error', errorMessage: message }),
 

@@ -132,6 +132,7 @@ export function SkillTestWorkbench({
   const generationRef = useRef(0)
   const sseReconnectsRef = useRef(0)
   const sseReconnectTimerRef = useRef<number | null>(null)
+  const cancelInFlightRef = useRef(false)
 
   const status = useSkillTestRunStore((s) => s.status)
   const activeRunId = useSkillTestRunStore((s) => s.activeRunId)
@@ -142,6 +143,7 @@ export function SkillTestWorkbench({
   const assertions = useSkillTestRunStore((s) => s.assertions)
   const transportMode = useSkillTestRunStore((s) => s.transportMode)
   const errorMessage = useSkillTestRunStore((s) => s.errorMessage)
+  const cancelAttempt = useSkillTestRunStore((s) => s.cancelAttempt)
   const beginRun = useSkillTestRunStore((s) => s.beginRun)
   const ingestEvents = useSkillTestRunStore((s) => s.ingestEvents)
   const ingestHeartbeat = useSkillTestRunStore((s) => s.ingestHeartbeat)
@@ -149,6 +151,7 @@ export function SkillTestWorkbench({
   const setMetrics = useSkillTestRunStore((s) => s.setMetrics)
   const reconcileRun = useSkillTestRunStore((s) => s.reconcileRun)
   const markCancelRequested = useSkillTestRunStore((s) => s.markCancelRequested)
+  const pinCancelAttempt = useSkillTestRunStore((s) => s.pinCancelAttempt)
   const markError = useSkillTestRunStore((s) => s.markError)
   const markTransportNotice = useSkillTestRunStore((s) => s.markTransportNotice)
   const reset = useSkillTestRunStore((s) => s.reset)
@@ -512,37 +515,72 @@ export function SkillTestWorkbench({
   }
 
   async function handleCancel() {
-    if (!activeRunId) return
+    if (!activeRunId || busy || cancelInFlightRef.current) return
+    const pre = useSkillTestRunStore.getState()
+    // Server already in cancelling and we have no local pin to retry — do not mint a new id.
+    if (pre.status === 'cancelling' && !pre.cancelAttempt) return
+    // Cancel already accepted (no local transport error) — do not re-POST.
+    if (pre.status === 'cancelling' && pre.cancelAttempt && !localError) return
+
+    cancelInFlightRef.current = true
     setBusy(true)
+    setLocalError(null)
     markCancelRequested()
     try {
-      // Always fetch a fresh revision for CAS — heartbeats/events can leave store stale.
-      const latest = await getEvalRun(activeRunId)
-      if (useSkillTestRunStore.getState().activeRunId !== activeRunId) return
-      reconcileRun(latest)
-      if (TERMINAL_RUN_STATUSES.has(latest.status)) {
-        await loadTerminalEvidence(activeRunId, generationRef.current)
-        return
+      const existing = useSkillTestRunStore.getState().cancelAttempt
+      let requestId: string
+      let expectedStateRevision: number
+
+      if (existing) {
+        // Retry: reuse the original requestId + expectedStateRevision for durable CAS.
+        requestId = existing.requestId
+        expectedStateRevision = existing.expectedStateRevision
+      } else {
+        // First click: refresh revision once, pin the pair for any later retry.
+        const latest = await getEvalRun(activeRunId)
+        if (useSkillTestRunStore.getState().activeRunId !== activeRunId) return
+        reconcileRun(latest)
+        if (TERMINAL_RUN_STATUSES.has(latest.status)) {
+          await loadTerminalEvidence(activeRunId, generationRef.current)
+          return
+        }
+        // Server reconcile already cancelling without our pin — short-circuit (no new id).
+        if (latest.status === 'cancelling') {
+          return
+        }
+        const revision = latest.stateRevision
+        if (revision == null) {
+          setLocalError(t('settings.universalSkills.workbenchMissingRevision'))
+          return
+        }
+        requestId = newRequestId('cancel')
+        expectedStateRevision = revision
+        pinCancelAttempt({ requestId, expectedStateRevision })
       }
-      const revision = latest.stateRevision
-      if (revision == null) {
-        setLocalError(t('settings.universalSkills.workbenchMissingRevision'))
-        return
-      }
+
       const cancelled = await cancelEvalRun(activeRunId, {
-        requestId: newRequestId('cancel'),
-        expectedStateRevision: revision,
+        requestId,
+        expectedStateRevision,
       })
+      if (useSkillTestRunStore.getState().activeRunId !== activeRunId) return
       reconcileRun(cancelled)
       // Keep stream/poll alive until terminal status lands, then evidence loads.
     } catch (error) {
+      // Keep cancelAttempt so a retry reuses the same requestId + revision.
       setLocalError(mapSkillPackageError(error).message)
     } finally {
+      cancelInFlightRef.current = false
       setBusy(false)
     }
   }
 
   const running = status === 'queued' || status === 'running' || status === 'cancelling'
+  // Disable while busy, after accepted cancel (cancelling without retry error), or no active run.
+  // After a transport failure, localError + cancelAttempt re-enables Cancel for a durable retry.
+  const cancelDisabled =
+    !activeRunId ||
+    busy ||
+    !(status === 'queued' || status === 'running' || (status === 'cancelling' && Boolean(cancelAttempt) && Boolean(localError)))
   const datasetOptions = datasetVersionsQuery.data ?? []
 
   return (
@@ -689,7 +727,12 @@ export function SkillTestWorkbench({
           {busy ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Play className="mr-1.5 h-4 w-4" />}
           {t('settings.universalSkills.startEval')}
         </Button>
-        <Button type="button" variant="outline" disabled={!running || busy} onClick={() => void handleCancel()}>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={cancelDisabled}
+          onClick={() => void handleCancel()}
+        >
           <Square className="mr-1.5 h-4 w-4" />
           {t('settings.universalSkills.cancelEval')}
         </Button>

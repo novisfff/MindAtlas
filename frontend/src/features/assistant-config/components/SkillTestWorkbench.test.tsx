@@ -342,6 +342,141 @@ describe('SkillTestWorkbench', () => {
         expect.objectContaining({ expectedStateRevision: 4 }),
       )
     })
+    const firstBody = vi.mocked(skillEvaluations.cancelEvalRun).mock.calls[0][1]
+    expect(firstBody.requestId).toMatch(/^cancel-/)
+    expect(useSkillTestRunStore.getState().cancelAttempt).toEqual({
+      requestId: firstBody.requestId,
+      expectedStateRevision: 4,
+    })
+  })
+
+  it('does not mint a new cancel requestId or re-post while cancelling', async () => {
+    useSkillTestRunStore.getState().beginRun({
+      id: 'run-cancel-once',
+      subjectKind: 'skill_draft',
+      subjectAggregateId: 'pkg-1',
+      subjectVersionId: 'ver-1',
+      mode: 'interactive_scripted',
+      status: 'running',
+      stateRevision: 1,
+      lastEventSeq: 0,
+    })
+
+    vi.mocked(skillEvaluations.getEvalRun).mockResolvedValue({
+      id: 'run-cancel-once',
+      subjectKind: 'skill_draft',
+      subjectAggregateId: 'pkg-1',
+      subjectVersionId: 'ver-1',
+      mode: 'interactive_scripted',
+      status: 'running',
+      stateRevision: 3,
+      lastEventSeq: 1,
+    })
+    vi.mocked(skillEvaluations.cancelEvalRun).mockResolvedValue({
+      id: 'run-cancel-once',
+      subjectKind: 'skill_draft',
+      subjectAggregateId: 'pkg-1',
+      subjectVersionId: 'ver-1',
+      mode: 'interactive_scripted',
+      status: 'cancelling',
+      stateRevision: 4,
+      lastEventSeq: 1,
+    })
+
+    renderWorkbench()
+    await vi.waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    await vi.waitFor(() => {
+      expect(skillEvaluations.cancelEvalRun).toHaveBeenCalledTimes(1)
+    })
+    const pinned = vi.mocked(skillEvaluations.cancelEvalRun).mock.calls[0][1]
+    expect(pinned.requestId).toMatch(/^cancel-/)
+    expect(pinned.expectedStateRevision).toBe(3)
+
+    await vi.waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled()
+      expect(useSkillTestRunStore.getState().status).toBe('cancelling')
+    })
+
+    // Second click must not re-post or mint another requestId.
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(skillEvaluations.cancelEvalRun).toHaveBeenCalledTimes(1)
+    expect(useSkillTestRunStore.getState().cancelAttempt?.requestId).toBe(pinned.requestId)
+  })
+
+  it('retries cancel with the same requestId and original revision after transport failure', async () => {
+    useSkillTestRunStore.getState().beginRun({
+      id: 'run-cancel-retry',
+      subjectKind: 'skill_draft',
+      subjectAggregateId: 'pkg-1',
+      subjectVersionId: 'ver-1',
+      mode: 'interactive_scripted',
+      status: 'running',
+      stateRevision: 2,
+      lastEventSeq: 0,
+    })
+
+    vi.mocked(skillEvaluations.getEvalRun).mockResolvedValue({
+      id: 'run-cancel-retry',
+      subjectKind: 'skill_draft',
+      subjectAggregateId: 'pkg-1',
+      subjectVersionId: 'ver-1',
+      mode: 'interactive_scripted',
+      status: 'running',
+      stateRevision: 7,
+      lastEventSeq: 4,
+    })
+    vi.mocked(skillEvaluations.cancelEvalRun)
+      .mockRejectedValueOnce(new Error('network down'))
+      .mockResolvedValueOnce({
+        id: 'run-cancel-retry',
+        subjectKind: 'skill_draft',
+        subjectAggregateId: 'pkg-1',
+        subjectVersionId: 'ver-1',
+        mode: 'interactive_scripted',
+        status: 'cancelling',
+        stateRevision: 8,
+        lastEventSeq: 4,
+      })
+
+    renderWorkbench()
+    await vi.waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    await vi.waitFor(() => {
+      expect(skillEvaluations.cancelEvalRun).toHaveBeenCalledTimes(1)
+      expect(screen.getByRole('alert')).toHaveTextContent('network down')
+    })
+    const first = vi.mocked(skillEvaluations.cancelEvalRun).mock.calls[0][1]
+    expect(first).toEqual({
+      requestId: expect.stringMatching(/^cancel-/),
+      expectedStateRevision: 7,
+    })
+    expect(useSkillTestRunStore.getState().cancelAttempt).toEqual({
+      requestId: first.requestId,
+      expectedStateRevision: 7,
+    })
+
+    // Retry is allowed after transport failure; reuses the pinned CAS pair.
+    await vi.waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    await vi.waitFor(() => {
+      expect(skillEvaluations.cancelEvalRun).toHaveBeenCalledTimes(2)
+    })
+    expect(vi.mocked(skillEvaluations.cancelEvalRun).mock.calls[1][1]).toEqual({
+      requestId: first.requestId,
+      expectedStateRevision: 7,
+    })
+    // Fresh revision fetch only on first cancel attempt.
+    expect(skillEvaluations.getEvalRun).toHaveBeenCalledTimes(1)
   })
 
   it('uses exponential SSE reconnect backoff capped at 1000ms', () => {
