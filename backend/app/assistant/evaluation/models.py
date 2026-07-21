@@ -356,6 +356,9 @@ class AssistantSkillEvalRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
     actor_principal = Column(String(128), nullable=True)
     request_id = Column(String(128), nullable=True)
+    # Durable cancel CAS evidence (Plan 09 residual 3).
+    last_cancel_request_id = Column(String(128), nullable=True)
+    last_cancel_request_digest = Column(String(64), nullable=True)
 
     case_results = relationship(
         "AssistantSkillEvalCaseResult",
@@ -478,6 +481,23 @@ class AssistantSkillEvalRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
             # Structural synthetic runs can never be gate-eligible (DB defense).
             "evidence_provenance <> 'structural_synthetic' OR gate_eligible = false",
             name="ck_assistant_skill_eval_run_synthetic_gate_ineligible",
+        ),
+        _nullable_sha256_check(
+            "last_cancel_request_digest",
+            name="ck_assistant_skill_eval_run_last_cancel_request_digest",
+        ),
+        CheckConstraint(
+            # Cancel stamp is all-or-nothing: both null, or both present.
+            "("
+            "last_cancel_request_id IS NULL AND last_cancel_request_digest IS NULL"
+            ") OR ("
+            "last_cancel_request_id IS NOT NULL "
+            "AND length(last_cancel_request_id) > 0 "
+            "AND length(last_cancel_request_id) <= 128 "
+            "AND last_cancel_request_digest IS NOT NULL "
+            "AND length(last_cancel_request_digest) = 64"
+            ")",
+            name="ck_assistant_skill_eval_run_last_cancel_request_shape",
         ),
         Index(
             "ix_assistant_skill_eval_run_status_created",

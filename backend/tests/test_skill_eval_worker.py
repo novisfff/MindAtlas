@@ -239,6 +239,7 @@ class EvalWorkerClaimTests(unittest.TestCase):
         cancelled = self.repo.request_cancel_run(
             run_id=claimed.id,
             expected_revision=int(claimed.state_revision),
+            request_id="cancel-worker-1",
         )
         self.assertEqual(cancelled.status, "cancelling")
         self.assertIsNotNone(cancelled.requested_cancel_at)

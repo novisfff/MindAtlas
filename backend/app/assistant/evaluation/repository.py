@@ -935,13 +935,30 @@ class EvaluationRepository:
         *,
         run_id: UUID,
         expected_revision: int,
+        request_id: str,
     ) -> AssistantSkillEvalRun:
-        """Request cancellation with mandatory state-revision CAS.
+        """Request cancellation with durable requestId CAS + state-revision CAS.
+
+        Order under row lock:
+        1. same requestId + digest → idempotent return (no further revision bump)
+        2. same requestId + different digest → conflict
+        3. else revision CAS + stamp last_cancel_request_* + transition to cancelling
 
         Worker observes cancel before Provider/Capability boundaries.
-        When the run is already cancelling and the CAS matches, returns the
-        current row as an idempotent no-op (no further revision bump).
         """
+        rid = (request_id or "").strip()
+        if not rid or len(rid) > 128:
+            raise EvaluationRepositoryError(
+                CODE_INVALID_INPUT, "request_id must be 1..128 chars"
+            )
+        digest = sha256_canonical_json(
+            {
+                "operation": "cancel_eval_run",
+                "runId": str(run_id),
+                "requestId": rid,
+                "expectedStateRevision": int(expected_revision),
+            }
+        )
         run = self.session.execute(
             select(AssistantSkillEvalRun)
             .where(AssistantSkillEvalRun.id == run_id)
@@ -949,6 +966,17 @@ class EvaluationRepository:
         ).scalar_one_or_none()
         if run is None:
             raise EvaluationRepositoryError(CODE_NOT_FOUND, "eval run not found")
+
+        last_id = getattr(run, "last_cancel_request_id", None)
+        last_digest = getattr(run, "last_cancel_request_digest", None)
+        if last_id == rid:
+            if last_digest == digest:
+                return run
+            raise EvaluationRepositoryError(
+                CODE_CONFLICT,
+                "requestId was reused with a different cancel payload",
+            )
+
         if int(run.state_revision) != int(expected_revision):
             raise EvaluationRepositoryError(CODE_STALE_REVISION, "stale revision")
         if run.status in TERMINAL_RUN_STATUSES:
@@ -956,7 +984,12 @@ class EvaluationRepository:
                 CODE_IMMUTABLE, f"terminal run status {run.status} is immutable"
             )
         if run.status == "cancelling":
-            return run
+            # Already cancelling under a different requestId; stamp is exclusive.
+            # Revision matched but another cancel owns the stamp → conflict.
+            raise EvaluationRepositoryError(
+                CODE_CONFLICT,
+                "cancel already requested under a different requestId",
+            )
         if run.status not in {"queued", "running"}:
             raise EvaluationRepositoryError(
                 CODE_FORBIDDEN_TRANSITION,
@@ -964,6 +997,8 @@ class EvaluationRepository:
             )
         run.status = "cancelling"
         run.requested_cancel_at = utcnow()
+        run.last_cancel_request_id = rid
+        run.last_cancel_request_digest = digest
         run.state_revision = int(run.state_revision) + 1
         run.heartbeat_at = utcnow()
         self.session.flush()

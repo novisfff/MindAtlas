@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { SkillTestWorkbench } from './SkillTestWorkbench'
+import { SkillTestWorkbench, sseReconnectDelayMs } from './SkillTestWorkbench'
 import * as skillEvaluations from '../api/skill-evaluations'
 import * as mainAgentProfiles from '../api/main-agent-profiles'
 import { useSkillTestRunStore } from '../stores/skill-test-run-store'
@@ -344,6 +344,13 @@ describe('SkillTestWorkbench', () => {
     })
   })
 
+  it('uses exponential SSE reconnect backoff capped at 1000ms', () => {
+    expect(sseReconnectDelayMs(1)).toBe(250)
+    expect(sseReconnectDelayMs(2)).toBe(500)
+    expect(sseReconnectDelayMs(3)).toBe(1000)
+    expect(sseReconnectDelayMs(4)).toBe(1000)
+  })
+
   it('keeps Start locked and falls back to polling on SSE transport failure', async () => {
     vi.mocked(skillEvaluations.createEvalRun).mockResolvedValue({
       id: 'run-poll',
@@ -378,23 +385,48 @@ describe('SkillTestWorkbench', () => {
       lastEventSeq: 0,
     })
 
-    renderWorkbench()
-    await screen.findByLabelText('Profile version')
-    await vi.waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Start evaluation' })).toBeEnabled()
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Start evaluation' }))
+    const scheduledDelays: number[] = []
+    const realSetTimeout = window.setTimeout.bind(window)
+    const setTimeoutSpy = vi
+      .spyOn(window, 'setTimeout')
+      .mockImplementation(((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+        if (typeof timeout === 'number' && (timeout === 250 || timeout === 500 || timeout === 1000)) {
+          scheduledDelays.push(timeout)
+        }
+        return realSetTimeout(handler as never, timeout as never, ...(args as never[]))
+      }) as typeof setTimeout)
 
-    await vi.waitFor(() => {
-      expect(skillEvaluations.createEvalRun).toHaveBeenCalled()
-      expect(skillEvaluations.streamEvalRunEvents).toHaveBeenCalled()
-    })
-    await vi.waitFor(() => {
-      expect(useSkillTestRunStore.getState().transportMode).toBe('polling')
-      expect(useSkillTestRunStore.getState().status).toBe('running')
-    })
-    expect(screen.getByRole('button', { name: 'Start evaluation' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled()
+    try {
+      renderWorkbench()
+      await screen.findByLabelText('Profile version')
+      await vi.waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Start evaluation' })).toBeEnabled()
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'Start evaluation' }))
+
+      await vi.waitFor(() => {
+        expect(skillEvaluations.createEvalRun).toHaveBeenCalled()
+        expect(skillEvaluations.streamEvalRunEvents).toHaveBeenCalled()
+      })
+
+      // Reconnects are delayed (250ms then 500ms), not immediate tight loop.
+      await vi.waitFor(() => {
+        expect(skillEvaluations.streamEvalRunEvents).toHaveBeenCalledTimes(3)
+      })
+      // Ignore unrelated timers (e.g. query-client); reconnects are 250 then 500.
+      const reconnectDelays = scheduledDelays.filter((d) => d === 250 || d === 500)
+      expect(reconnectDelays).toEqual([250, 500])
+
+      await vi.waitFor(() => {
+        expect(useSkillTestRunStore.getState().transportMode).toBe('polling')
+        expect(useSkillTestRunStore.getState().status).toBe('running')
+      })
+      expect(skillEvaluations.streamEvalRunEvents).toHaveBeenCalledTimes(3)
+      expect(screen.getByRole('button', { name: 'Start evaluation' })).toBeDisabled()
+      expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled()
+    } finally {
+      setTimeoutSpy.mockRestore()
+    }
   })
 
   it('populates aggregate metrics from terminal case results', async () => {

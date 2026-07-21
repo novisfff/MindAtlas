@@ -453,6 +453,33 @@ class SkillEvalApiMountTests(unittest.TestCase):
         self.assertEqual(ok.status_code, 200, ok.text)
         self.assertEqual(ok.json()["data"]["status"], "cancelling")
 
+        # Identical requestId retry is durable-idempotent (no 409 on stale rev).
+        retry = client.post(
+            f"{PLAN09_EVAL_PREFIX}/runs/{run_id}/cancel",
+            headers=headers,
+            json={
+                "requestId": "cancel-ok",
+                "expectedStateRevision": rev,
+            },
+        )
+        self.assertEqual(retry.status_code, 200, retry.text)
+        self.assertEqual(retry.json()["data"]["status"], "cancelling")
+        self.assertEqual(
+            retry.json()["data"]["stateRevision"],
+            ok.json()["data"]["stateRevision"],
+        )
+
+        # Same requestId with different expectedStateRevision → conflict.
+        altered = client.post(
+            f"{PLAN09_EVAL_PREFIX}/runs/{run_id}/cancel",
+            headers=headers,
+            json={
+                "requestId": "cancel-ok",
+                "expectedStateRevision": rev + 1,
+            },
+        )
+        self.assertEqual(altered.status_code, 409, altered.text)
+
     def test_dataset_publish_requires_principal(self) -> None:
         client, session = self._client(mount=True)
         from app.assistant.evaluation.repository import EvaluationRepository

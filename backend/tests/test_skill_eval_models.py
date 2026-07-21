@@ -413,6 +413,56 @@ class EvalRepositorySqliteTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.code, "immutable")
 
+    def test_request_cancel_is_request_id_idempotent_and_conflicts_on_reuse(self) -> None:
+        """Durable cancel CAS: same requestId+digest is idempotent; altered reuse conflicts."""
+        from app.assistant.evaluation.models import AssistantSkillEvalRun
+        from app.assistant.evaluation.repository import EvaluationRepositoryError
+
+        table = AssistantSkillEvalRun.__table__
+        self.assertIn("last_cancel_request_id", table.c)
+        self.assertIn("last_cancel_request_digest", table.c)
+
+        _, published, _ = self._publish_minimal_dataset()
+        run = self._create_run(published.version_id)
+        self.assertIsNone(run.last_cancel_request_id)
+        self.assertIsNone(run.last_cancel_request_digest)
+        rev0 = int(run.state_revision)
+
+        first = self.repo.request_cancel_run(
+            run_id=run.id,
+            expected_revision=rev0,
+            request_id="cancel-req-1",
+        )
+        self.assertEqual(first.status, "cancelling")
+        self.assertEqual(int(first.state_revision), rev0 + 1)
+        self.assertEqual(first.last_cancel_request_id, "cancel-req-1")
+        self.assertIsNotNone(first.last_cancel_request_digest)
+        self.assertEqual(len(first.last_cancel_request_digest), 64)
+        stamped_digest = first.last_cancel_request_digest
+        stamped_rev = int(first.state_revision)
+
+        # Identical retry (same requestId + same expected revision) is a no-op
+        # even with a stale expected revision after the first success.
+        retry = self.repo.request_cancel_run(
+            run_id=run.id,
+            expected_revision=rev0,
+            request_id="cancel-req-1",
+        )
+        self.assertEqual(retry.status, "cancelling")
+        self.assertEqual(int(retry.state_revision), stamped_rev)
+        self.assertEqual(retry.last_cancel_request_id, "cancel-req-1")
+        self.assertEqual(retry.last_cancel_request_digest, stamped_digest)
+
+        # Same requestId with a different expected revision → conflict.
+        with self.assertRaises(EvaluationRepositoryError) as ctx:
+            self.repo.request_cancel_run(
+                run_id=run.id,
+                expected_revision=stamped_rev,
+                request_id="cancel-req-1",
+            )
+        self.assertEqual(ctx.exception.code, "conflict")
+        self.assertIn("requestid", str(ctx.exception).lower())
+
     def test_monotonic_event_sequence(self) -> None:
         _, published, _ = self._publish_minimal_dataset()
         run = self._create_run(published.version_id)

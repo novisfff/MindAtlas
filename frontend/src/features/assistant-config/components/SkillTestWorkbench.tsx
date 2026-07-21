@@ -55,6 +55,11 @@ const BUILTIN_FIXTURES = [
 const POLL_INTERVAL_MS = 1500
 const POLL_MAX_TICKS = 120
 const SSE_MAX_RECONNECTS = 2
+/** Backoff before reconnect attempt n (1-based): 250ms, 500ms, then 1000ms cap. */
+export function sseReconnectDelayMs(attempt: number): number {
+  const n = Math.max(1, Math.floor(attempt))
+  return Math.min(1000, 250 * 2 ** (n - 1))
+}
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled'])
 
 function deriveAggregateMetrics(input: {
@@ -126,6 +131,7 @@ export function SkillTestWorkbench({
   const pollInFlightRef = useRef(false)
   const generationRef = useRef(0)
   const sseReconnectsRef = useRef(0)
+  const sseReconnectTimerRef = useRef<number | null>(null)
 
   const status = useSkillTestRunStore((s) => s.status)
   const activeRunId = useSkillTestRunStore((s) => s.activeRunId)
@@ -245,10 +251,18 @@ export function SkillTestWorkbench({
     pollTicksRef.current = 0
   }, [])
 
+  const clearSseReconnectTimer = useCallback(() => {
+    if (sseReconnectTimerRef.current != null) {
+      window.clearTimeout(sseReconnectTimerRef.current)
+      sseReconnectTimerRef.current = null
+    }
+  }, [])
+
   const stopStream = useCallback(() => {
+    clearSseReconnectTimer()
     abortRef.current?.abort()
     abortRef.current = null
-  }, [])
+  }, [clearSseReconnectTimer])
 
   useEffect(
     () => () => {
@@ -385,15 +399,25 @@ export function SkillTestWorkbench({
         return
       }
 
-      if (reason === 'transport_failure') {
-        // Prefer a bounded SSE reconnect from last sequence before polling.
-        if (sseReconnectsRef.current < SSE_MAX_RECONNECTS) {
-          sseReconnectsRef.current += 1
-          markTransportNotice(t('settings.universalSkills.workbenchSseReconnecting'))
-          void attachEventStream(runId, generation)
+      const scheduleReconnect = () => {
+        if (sseReconnectsRef.current >= SSE_MAX_RECONNECTS) {
+          startPollingFallback(runId, generation)
           return
         }
-        startPollingFallback(runId, generation)
+        sseReconnectsRef.current += 1
+        const delayMs = sseReconnectDelayMs(sseReconnectsRef.current)
+        markTransportNotice(t('settings.universalSkills.workbenchSseReconnecting'))
+        clearSseReconnectTimer()
+        sseReconnectTimerRef.current = window.setTimeout(() => {
+          sseReconnectTimerRef.current = null
+          if (generation !== generationRef.current) return
+          void attachEventStream(runId, generation)
+        }, delayMs)
+      }
+
+      if (reason === 'transport_failure') {
+        // Prefer a bounded SSE reconnect with backoff before polling.
+        scheduleReconnect()
         return
       }
 
@@ -408,14 +432,8 @@ export function SkillTestWorkbench({
           await loadTerminalEvidence(runId, generation)
           return
         }
-        // Non-terminal run with EOF — reconnect or fall back to poll.
-        if (sseReconnectsRef.current < SSE_MAX_RECONNECTS) {
-          sseReconnectsRef.current += 1
-          markTransportNotice(t('settings.universalSkills.workbenchSseReconnecting'))
-          void attachEventStream(runId, generation)
-          return
-        }
-        startPollingFallback(runId, generation)
+        // Non-terminal run with EOF — reconnect with backoff or fall back to poll.
+        scheduleReconnect()
       } catch (error) {
         if (generation !== generationRef.current) return
         markTransportNotice(mapSkillPackageError(error).message)
@@ -423,6 +441,7 @@ export function SkillTestWorkbench({
       }
     },
     [
+      clearSseReconnectTimer,
       ingestEvents,
       ingestHeartbeat,
       loadTerminalEvidence,
@@ -455,6 +474,7 @@ export function SkillTestWorkbench({
     generationRef.current += 1
     const generation = generationRef.current
     sseReconnectsRef.current = 0
+    clearSseReconnectTimer()
     pollInFlightRef.current = false
     reset()
 

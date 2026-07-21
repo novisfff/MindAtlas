@@ -981,18 +981,17 @@ def cancel_eval_run(
 ) -> ApiResponse:
     """Cancel requires CAS body: requestId + expectedStateRevision.
 
-    Repository cancel CAS is revision-based; requestId is required for client
-    idempotency contracts even though cancel does not stamp a durable cancel
-    request-id column yet. Identical retries after status becomes cancelling
-    are handled as a no-op by the repository when CAS matches.
+    Repository performs durable requestId+digest idempotency first, then
+    state-revision CAS. Identical retries (same requestId + same expected
+    revision) return the stamped cancelling row without further bumps.
     """
     _require_operator(principal)
-    _ = body.request_id  # required for client contract / future durable cancel CAS
     repo = EvaluationRepository(db)
     try:
         run = repo.request_cancel_run(
             run_id=run_id,
             expected_revision=body.expected_state_revision,
+            request_id=body.request_id,
         )
         db.commit()
     except EvaluationRepositoryError as exc:

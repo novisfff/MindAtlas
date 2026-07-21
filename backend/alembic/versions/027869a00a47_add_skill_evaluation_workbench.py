@@ -391,6 +391,8 @@ def upgrade() -> None:
         ),
         sa.Column("actor_principal", sa.String(length=128), nullable=True),
         sa.Column("request_id", sa.String(length=128), nullable=True),
+        sa.Column("last_cancel_request_id", sa.String(length=128), nullable=True),
+        sa.Column("last_cancel_request_digest", sa.String(length=64), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint(
@@ -488,6 +490,22 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "evidence_provenance <> 'structural_synthetic' OR gate_eligible = false",
             name="ck_assistant_skill_eval_run_synthetic_gate_ineligible",
+        ),
+        sa.CheckConstraint(
+            "last_cancel_request_digest IS NULL OR length(last_cancel_request_digest) = 64",
+            name="ck_assistant_skill_eval_run_last_cancel_request_digest",
+        ),
+        sa.CheckConstraint(
+            "("
+            "last_cancel_request_id IS NULL AND last_cancel_request_digest IS NULL"
+            ") OR ("
+            "last_cancel_request_id IS NOT NULL "
+            "AND length(last_cancel_request_id) > 0 "
+            "AND length(last_cancel_request_id) <= 128 "
+            "AND last_cancel_request_digest IS NOT NULL "
+            "AND length(last_cancel_request_digest) = 64"
+            ")",
+            name="ck_assistant_skill_eval_run_last_cancel_request_shape",
         ),
     )
     op.create_index(
