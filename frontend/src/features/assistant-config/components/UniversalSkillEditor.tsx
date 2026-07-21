@@ -1,9 +1,9 @@
 import type { ChangeEvent } from 'react'
 /**
- * Universal Skill package editor sections (Plan 09 Task 6).
+ * Universal Skill package editor sections (Plan 09 Task 6/10).
  * Working copy is local; save posts a complete normalized snapshot.
  */
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { AlertTriangle, Save } from 'lucide-react'
 
@@ -16,7 +16,13 @@ import { SkillPolicyEditor } from './SkillPolicyEditor'
 import { SkillResourceBrowser } from './SkillResourceBrowser'
 import { SkillTestWorkbench } from './SkillTestWorkbench'
 import { useSkillEditorStore } from '../stores/skill-editor-store'
-import type { SkillResourceMetadata } from '../api/skill-packages'
+import {
+  fetchSkillPackageResourceBlob,
+  listPublishedCapabilityIdentities,
+  type CapabilityRegistryIdentity,
+  type SkillResourceInput,
+  type SkillResourceMetadata,
+} from '../api/skill-packages'
 
 type EditorTab =
   | 'overview'
@@ -48,6 +54,17 @@ export interface UniversalSkillEditorProps {
   className?: string
 }
 
+async function blobToBase64(blob: Blob): Promise<string> {
+  const buffer = await blob.arrayBuffer()
+  let binary = ''
+  const bytes = new Uint8Array(buffer)
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
+  }
+  return btoa(binary)
+}
+
 export function UniversalSkillEditor({
   onSaveDraft,
   onSaveMetadata,
@@ -56,12 +73,14 @@ export function UniversalSkillEditor({
 }: UniversalSkillEditorProps) {
   const { t } = useTranslation()
   const [tab, setTab] = useState<EditorTab>('overview')
+  const [registry, setRegistry] = useState<CapabilityRegistryIdentity[]>([])
 
   const packageDetail = useSkillEditorStore((s) => s.packageDetail)
   const draftDetail = useSkillEditorStore((s) => s.draftDetail)
   const draftVersionId = useSkillEditorStore((s) => s.draftVersionId)
   const workingCopy = useSkillEditorStore((s) => s.workingCopy)
   const isDirty = useSkillEditorStore((s) => s.isDirty)
+  const resourcesDirty = useSkillEditorStore((s) => s.resourcesDirty)
   const lastConflict = useSkillEditorStore((s) => s.lastConflict)
   const validationDiagnostics = useSkillEditorStore((s) => s.validationDiagnostics)
   const expectedAggregateRevision = useSkillEditorStore((s) => s.expectedAggregateRevision)
@@ -71,6 +90,9 @@ export function UniversalSkillEditor({
   const setVersionName = useSkillEditorStore((s) => s.setVersionName)
   const setDisplayName = useSkillEditorStore((s) => s.setDisplayName)
   const setDescription = useSkillEditorStore((s) => s.setDescription)
+  const upsertResource = useSkillEditorStore((s) => s.upsertResource)
+  const removeResource = useSkillEditorStore((s) => s.removeResource)
+  const hydrateResources = useSkillEditorStore((s) => s.hydrateResources)
   const resetFromServer = useSkillEditorStore((s) => s.resetFromServer)
 
   const capabilityKeys = useMemo(
@@ -79,6 +101,50 @@ export function UniversalSkillEditor({
   )
 
   const serverResources: SkillResourceMetadata[] = draftDetail?.resources ?? []
+
+  useEffect(() => {
+    let cancelled = false
+    void listPublishedCapabilityIdentities()
+      .then((items) => {
+        if (!cancelled) setRegistry(items)
+      })
+      .catch(() => {
+        if (!cancelled) setRegistry([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Hydrate resource bytes once so remove/replace can send a complete CAS snapshot.
+  useEffect(() => {
+    if (!packageDetail || !draftVersionId || resourcesDirty) return
+    if (serverResources.length === 0) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const loaded: SkillResourceInput[] = []
+        for (const meta of serverResources) {
+          try {
+            const blob = await fetchSkillPackageResourceBlob(
+              packageDetail.id,
+              draftVersionId,
+              meta.path,
+            )
+            loaded.push({ path: meta.path, contentBase64: await blobToBase64(blob) })
+          } catch {
+            loaded.push({ path: meta.path, contentBase64: '' })
+          }
+        }
+        if (!cancelled) hydrateResources(loaded)
+      } catch {
+        // Non-fatal: user can still add resources from empty working copy.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [packageDetail, draftVersionId, serverResources, resourcesDirty, hydrateResources])
 
   function replaceCapabilityKeys(keys: string[]) {
     const yaml = workingCopy.mindatlasYaml
@@ -91,7 +157,14 @@ export function UniversalSkillEditor({
       if (/^capabilities\s*:/.test(trimmedStart) && !trimmedStart.startsWith('#')) {
         out.push((raw.match(/^\s*/)?.[0] ?? '') + 'capabilities:')
         for (const key of keys) {
-          out.push(`${raw.match(/^\s*/)?.[0] || ''}  - ${key}`)
+          const [type, ...rest] = key.split(':')
+          const name = rest.join(':') || key
+          if (rest.length > 0 && (type === 'tool' || type === 'workflow' || type === 'agent')) {
+            out.push(`${raw.match(/^\s*/)?.[0] || ''}  - type: ${type}`)
+            out.push(`${raw.match(/^\s*/)?.[0] || ''}    key: ${name}`)
+          } else {
+            out.push(`${raw.match(/^\s*/)?.[0] || ''}  - ${key}`)
+          }
         }
         inCaps = true
         replaced = true
@@ -108,7 +181,16 @@ export function UniversalSkillEditor({
     }
     if (!replaced) {
       out.push('capabilities:')
-      for (const key of keys) out.push(`  - ${key}`)
+      for (const key of keys) {
+        const [type, ...rest] = key.split(':')
+        const name = rest.join(':') || key
+        if (rest.length > 0 && (type === 'tool' || type === 'workflow' || type === 'agent')) {
+          out.push(`  - type: ${type}`)
+          out.push(`    key: ${name}`)
+        } else {
+          out.push(`  - ${key}`)
+        }
+      }
     }
     setMindatlasYaml(out.join('\n'))
   }
@@ -217,7 +299,7 @@ export function UniversalSkillEditor({
             </label>
             <label className="space-y-1 text-sm">
               <span>{t('settings.universalSkills.descriptionField')}</span>
-              <textarea value={workingCopy.description} disabled={archived} onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setDescription(e.target.value)} className={cn(uiField.textarea, "min-h-[100px]")} />
+              <textarea value={workingCopy.description} disabled={archived} onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setDescription(e.target.value)} className={cn(uiField.textarea, 'min-h-[100px]')} />
             </label>
             <label className="space-y-1 text-sm">
               <span>{t('settings.universalSkills.versionName')}</span>
@@ -264,7 +346,19 @@ export function UniversalSkillEditor({
 
         {tab === 'capabilities' ? (
           <div className="space-y-4">
-            <SkillCapabilityEditor capabilityKeys={capabilityKeys} onChange={replaceCapabilityKeys} disabled={archived} />
+            <SkillCapabilityEditor
+              capabilityKeys={capabilityKeys}
+              onChange={replaceCapabilityKeys}
+              registryKeys={registry.map((r) => r.key)}
+              registry={registry.map((r) => ({
+                key: r.key,
+                target: r.target,
+                version: r.version,
+                resolution: r.resolution,
+                risk: r.risk,
+              }))}
+              disabled={archived}
+            />
             <SkillPolicyEditor mode="full" mindatlasYaml={workingCopy.mindatlasYaml} onChange={setMindatlasYaml} disabled={archived} />
           </div>
         ) : null}
@@ -282,7 +376,15 @@ export function UniversalSkillEditor({
         ) : null}
 
         {tab === 'resources' ? (
-          <SkillResourceBrowser packageId={packageDetail.id} versionId={draftVersionId} resources={serverResources} />
+          <SkillResourceBrowser
+            packageId={packageDetail.id}
+            versionId={draftVersionId}
+            resources={serverResources}
+            workingCopyResources={workingCopy.resources}
+            editable={!archived}
+            onUpsertResource={(resource) => upsertResource(resource)}
+            onRemoveResource={(path) => removeResource(path)}
+          />
         ) : null}
 
         {tab === 'versions' ? (

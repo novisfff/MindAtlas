@@ -616,6 +616,89 @@ export function isScriptResourcePath(path: string): boolean {
   return normalized === 'scripts' || normalized.startsWith('scripts/')
 }
 
+/** Published Capability identity for Registry-only selection in the Skill editor. */
+export interface CapabilityRegistryIdentity {
+  key: string
+  target: string
+  version: string
+  resolution: string
+  risk: string
+  capabilityType: 'tool' | 'workflow' | 'agent'
+}
+
+/**
+ * Load published capability identities from the shared assistant-config surface.
+ * Keys use `{type}:{name}` so free-text outside this set is rejected by the editor.
+ * Does not embed Tool/Workflow/Agent editors.
+ */
+export async function listPublishedCapabilityIdentities(): Promise<CapabilityRegistryIdentity[]> {
+  type ToolRow = { name?: string; enabled?: boolean; isSystem?: boolean }
+  type WorkflowRow = {
+    name?: string
+    enabled?: boolean
+    publishedVersionId?: string | null
+    draftVersionId?: string | null
+  }
+  type AgentRow = {
+    name?: string
+    enabled?: boolean
+    publishedVersionId?: string | null
+    draftVersionId?: string | null
+  }
+
+  const [tools, workflows, agents] = await Promise.all([
+    apiClient.get<ToolRow[]>('/api/assistant-config/tools').catch(() => [] as ToolRow[]),
+    apiClient
+      .get<WorkflowRow[]>('/api/assistant-config/workflows')
+      .catch(() => [] as WorkflowRow[]),
+    apiClient
+      .get<AgentRow[]>('/api/assistant-config/agents')
+      .catch(() => [] as AgentRow[]),
+  ])
+
+  const out: CapabilityRegistryIdentity[] = []
+
+  for (const tool of tools || []) {
+    if (!tool?.name || tool.enabled === false) continue
+    out.push({
+      key: `tool:${tool.name}`,
+      target: tool.name,
+      version: tool.isSystem ? 'system' : 'config',
+      resolution: 'published',
+      risk: 'read',
+      capabilityType: 'tool',
+    })
+  }
+
+  for (const workflow of workflows || []) {
+    if (!workflow?.name || workflow.enabled === false) continue
+    if (!workflow.publishedVersionId) continue
+    out.push({
+      key: `workflow:${workflow.name}`,
+      target: workflow.name,
+      version: workflow.publishedVersionId,
+      resolution: 'pinned',
+      risk: 'compute',
+      capabilityType: 'workflow',
+    })
+  }
+
+  for (const agent of agents || []) {
+    if (!agent?.name || agent.enabled === false) continue
+    if (!agent.publishedVersionId) continue
+    out.push({
+      key: `agent:${agent.name}`,
+      target: agent.name,
+      version: agent.publishedVersionId,
+      resolution: 'pinned',
+      risk: 'compute',
+      capabilityType: 'agent',
+    })
+  }
+
+  out.sort((a, b) => a.key.localeCompare(b.key))
+  return out
+}
 
 export function diffSkillPackageVersions(
   packageId: string,

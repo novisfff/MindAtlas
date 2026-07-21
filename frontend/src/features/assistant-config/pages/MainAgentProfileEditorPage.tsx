@@ -1,7 +1,9 @@
 /**
- * Main Agent Profile editor (Plan 09 Task 7).
+ * Main Agent Profile editor (Plan 09 Task 7/10).
  * Prompt layers, catalog scope, control capabilities, budgets, versions.
+ * Distinct draft / publish / promotion / enable / disable commands.
  * Must not embed a single Skill as the execution target.
+ * Saving draft never demotes live/published UI state.
  */
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -18,17 +20,18 @@ import { cn } from '@/lib/utils'
 
 import {
   assertNoSingleTargetFields,
-  getDefaultMainAgentProfile,
-  getDefaultMainAgentVersion,
-  listDefaultMainAgentVersions,
-  publishDefaultMainAgent,
-  saveDefaultMainAgentDraft,
+  disableProtectedDefaultMainAgentRuntime,
+  enableProtectedDefaultMainAgentRuntime,
+  getProtectedDefaultMainAgentProfile,
+  getProtectedDefaultMainAgentVersion,
+  listProtectedDefaultMainAgentVersions,
+  publishProtectedDefaultMainAgent,
+  saveProtectedDefaultMainAgentDraft,
   type MainAgentProfileSnapshot,
   type MainAgentProfileSummary,
   type MainAgentProfileVersionSummary,
 } from '../api/main-agent-profiles'
 import { mapSkillPackageError, newRequestId } from '../api/skill-packages'
-import { useSkillAdminSurfaceQuery } from '../queries'
 
 const DEFAULT_SNAPSHOT: MainAgentProfileSnapshot = {
   schemaVersion: 1,
@@ -69,18 +72,26 @@ const DEFAULT_SNAPSHOT: MainAgentProfileSnapshot = {
   fallbackPolicy: { legacyRuntimeAllowed: true, beforeSideEffectsOnly: true },
 }
 
-export function MainAgentProfileEditorPage() {
+type MutationKind = 'draft' | 'publish' | 'enable' | 'disable' | null
+
+function ProfileEditorBody() {
   const { t } = useTranslation()
   const navigate = useNavigate()
-  const surface = useSkillAdminSurfaceQuery()
   const [profile, setProfile] = useState<MainAgentProfileSummary | null>(null)
   const [versions, setVersions] = useState<MainAgentProfileVersionSummary[]>([])
   const [snapshot, setSnapshot] = useState<MainAgentProfileSnapshot>(DEFAULT_SNAPSHOT)
   const [controlKeysText, setControlKeysText] = useState('')
   const [dirty, setDirty] = useState(false)
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusy] = useState<MutationKind>(null)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
+  const [promotionGateId, setPromotionGateId] = useState('')
+
+  // Live-state UI mirrors server only; draft save never mutates these locally.
+  const runtimeEnabled = Boolean(profile?.runtimeEnabled)
+  const publishedVersionId = profile?.publishedVersion?.id ?? null
+  const draftVersionId = profile?.draftVersion?.id ?? null
+  const aggregateRevision = profile?.aggregateRevision ?? 0
 
   const singleTargetIssues = useMemo(
     () => assertNoSingleTargetFields(snapshot as unknown as Record<string, unknown>),
@@ -89,14 +100,13 @@ export function MainAgentProfileEditorPage() {
 
   async function reload() {
     setError(null)
-    const summary = await getDefaultMainAgentProfile()
+    const summary = await getProtectedDefaultMainAgentProfile()
     setProfile(summary)
-    const page = await listDefaultMainAgentVersions({ limit: 50, offset: 0 })
+    const page = await listProtectedDefaultMainAgentVersions()
     setVersions(page.items || [])
-    // Load the actual draft/published snapshot — never save DEFAULT_SNAPSHOT over server state.
     const versionId = summary.draftVersion?.id || summary.publishedVersion?.id
     if (versionId) {
-      const detail = await getDefaultMainAgentVersion(versionId)
+      const detail = await getProtectedDefaultMainAgentVersion(versionId)
       const snap = detail.snapshot as MainAgentProfileSnapshot
       if (snap && typeof snap === 'object' && snap.basePrompt) {
         setSnapshot({
@@ -123,32 +133,10 @@ export function MainAgentProfileEditorPage() {
     void reload().catch((err) => setError(mapSkillPackageError(err).message))
   }, [])
 
-  if (surface.isLoading) {
-    return (
-      <SettingsPageShell>
-        <SettingsPageHeader
-          title={t('settings.universalSkills.profileTitle')}
-          description={t('messages.loading')}
-          backAction={{ label: t('common.back'), onClick: () => navigate('/settings') }}
-        />
-      </SettingsPageShell>
-    )
-  }
-
-  if (!surface.data?.available) {
-    return (
-      <SettingsPageShell>
-        <SettingsPageHeader
-          title={t('settings.universalSkills.profileTitle')}
-          description={t('settings.universalSkills.unavailableDesc')}
-          backAction={{ label: t('common.back'), onClick: () => navigate('/settings') }}
-        />
-      </SettingsPageShell>
-    )
-  }
-
-  async function handleSave() {
-    setBusy(true)
+  async function handleSaveDraft() {
+    // Draft save is isolated: only mutates draft content; never sends enable/disable.
+    // Live runtimeEnabled / published pointer come only from server reload.
+    setBusy('draft')
     setError(null)
     setMessage(null)
     try {
@@ -163,28 +151,33 @@ export function MainAgentProfileEditorPage() {
       if (assertNoSingleTargetFields(next as unknown as Record<string, unknown>).length) {
         throw new Error(t('settings.universalSkills.profileNoSingleTarget'))
       }
-      const version = await saveDefaultMainAgentDraft({ snapshot: next })
+      const version = await saveProtectedDefaultMainAgentDraft({
+        snapshot: next,
+        expectedAggregateRevision: aggregateRevision,
+        requestId: newRequestId('profile-draft'),
+      })
       setDirty(false)
       setMessage(`${t('settings.universalSkills.saveDraft')}: ${version.id}`)
+      // Reload authoritative summary; draft save does not demote live flags server-side.
       await reload()
     } catch (err) {
       setError(mapSkillPackageError(err).message)
     } finally {
-      setBusy(false)
+      setBusy(null)
     }
   }
 
   async function handlePublish() {
-    if (!profile?.draftVersion?.id) {
+    if (!draftVersionId) {
       setError(t('settings.universalSkills.noDraftVersion'))
       return
     }
-    setBusy(true)
+    setBusy('publish')
     setError(null)
     try {
-      await publishDefaultMainAgent({
-        draftVersionId: profile.draftVersion.id,
-        expectedAggregateRevision: profile.aggregateRevision ?? 0,
+      await publishProtectedDefaultMainAgent({
+        draftVersionId,
+        expectedAggregateRevision: aggregateRevision,
         requestId: newRequestId('profile-pub'),
       })
       setMessage(t('settings.universalSkills.profilePublished'))
@@ -192,7 +185,60 @@ export function MainAgentProfileEditorPage() {
     } catch (err) {
       setError(mapSkillPackageError(err).message)
     } finally {
-      setBusy(false)
+      setBusy(null)
+    }
+  }
+
+  async function handleEnableRuntime() {
+    if (!publishedVersionId) {
+      setError(t('settings.universalSkills.profileNeedsPublished'))
+      return
+    }
+    if (!promotionGateId.trim()) {
+      setError(t('settings.universalSkills.profileNeedsPromotionGate'))
+      return
+    }
+    setBusy('enable')
+    setError(null)
+    try {
+      const summary = await enableProtectedDefaultMainAgentRuntime({
+        expectedAggregateRevision: aggregateRevision,
+        expectedPublishedVersionId: publishedVersionId,
+        gateId: promotionGateId.trim(),
+        requestId: newRequestId('profile-en'),
+      })
+      setProfile(summary)
+      setMessage(t('settings.universalSkills.profileRuntimeEnabled'))
+      await reload()
+    } catch (err) {
+      setError(mapSkillPackageError(err).message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function handleDisableRuntime() {
+    if (
+      !window.confirm(t('settings.universalSkills.profileDisableConfirm'))
+    ) {
+      return
+    }
+    setBusy('disable')
+    setError(null)
+    try {
+      // Explicit disable: request ID + confirmation; no promotion gate.
+      const summary = await disableProtectedDefaultMainAgentRuntime({
+        expectedAggregateRevision: aggregateRevision,
+        expectedPublishedVersionId: publishedVersionId,
+        requestId: newRequestId('profile-dis'),
+      })
+      setProfile(summary)
+      setMessage(t('settings.universalSkills.profileRuntimeDisabled'))
+      await reload()
+    } catch (err) {
+      setError(mapSkillPackageError(err).message)
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -218,13 +264,16 @@ export function MainAgentProfileEditorPage() {
 
         <div className="flex flex-wrap gap-2 text-xs">
           <span className="rounded-full border px-2 py-0.5">
-            runtime={profile?.runtimeEnabled ? 'enabled' : 'disabled'}
+            runtime={runtimeEnabled ? 'enabled' : 'disabled'}
           </span>
           <span className="rounded-full border px-2 py-0.5">
-            draft={profile?.draftVersion?.id ?? '—'}
+            draft={draftVersionId ?? '—'}
           </span>
           <span className="rounded-full border px-2 py-0.5">
-            published={profile?.publishedVersion?.id ?? '—'}
+            published={publishedVersionId ?? '—'}
+          </span>
+          <span className="rounded-full border px-2 py-0.5">
+            rev={aggregateRevision}
           </span>
           {dirty ? (
             <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-blue-700 dark:text-blue-300">
@@ -279,12 +328,43 @@ export function MainAgentProfileEditorPage() {
           </select>
         </label>
 
+        <label className="block space-y-1 text-sm">
+          <span>{t('settings.universalSkills.promotionGateId')}</span>
+          <input
+            className={uiField.input}
+            value={promotionGateId}
+            onChange={(e) => setPromotionGateId(e.target.value)}
+            placeholder="gate-uuid"
+          />
+        </label>
+
         <div className="flex flex-wrap gap-2">
-          <Button type="button" disabled={busy || !dirty} onClick={() => void handleSave()}>
-            {t('settings.universalSkills.saveDraft')}
+          <Button type="button" disabled={busy !== null || !dirty} onClick={() => void handleSaveDraft()}>
+            {busy === 'draft' ? t('messages.loading') : t('settings.universalSkills.saveDraft')}
           </Button>
-          <Button type="button" variant="outline" disabled={busy} onClick={() => void handlePublish()}>
-            {t('settings.universalSkills.publishProfile')}
+          <Button
+            type="button"
+            variant="outline"
+            disabled={busy !== null || !draftVersionId}
+            onClick={() => void handlePublish()}
+          >
+            {busy === 'publish' ? t('messages.loading') : t('settings.universalSkills.publishProfile')}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={busy !== null || !publishedVersionId || runtimeEnabled}
+            onClick={() => void handleEnableRuntime()}
+          >
+            {busy === 'enable' ? t('messages.loading') : t('settings.universalSkills.enableRuntime')}
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            disabled={busy !== null || !runtimeEnabled}
+            onClick={() => void handleDisableRuntime()}
+          >
+            {busy === 'disable' ? t('messages.loading') : t('settings.universalSkills.disableRuntime')}
           </Button>
         </div>
 
@@ -309,4 +389,9 @@ export function MainAgentProfileEditorPage() {
       </SettingsSection>
     </SettingsPageShell>
   )
+}
+
+export function MainAgentProfileEditorPage() {
+  // Route-level Plan09RouteGate in App.tsx fails closed before this mounts.
+  return <ProfileEditorBody />
 }

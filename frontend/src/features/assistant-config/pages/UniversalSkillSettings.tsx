@@ -48,7 +48,11 @@ export function UniversalSkillSettings() {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const surface = useSkillAdminSurfaceQuery()
-  const packagesQuery = useSkillPackagesQuery({ limit: 100, offset: 0 })
+  // Fail closed: do not list packages until Plan 09 surface is available.
+  const packagesQuery = useSkillPackagesQuery(
+    { limit: 100, offset: 0 },
+    Boolean(surface.data?.available),
+  )
   const createMutation = useCreateSkillPackageMutation()
   const archiveMutation = useArchiveSkillPackageMutation()
   const unarchiveMutation = useUnarchiveSkillPackageMutation()

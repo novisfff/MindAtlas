@@ -45,6 +45,10 @@ const SkillSettings = lazyNamed(() => import('@/features/assistant-config/pages/
 const UniversalSkillSettings = lazyNamed(() => import('@/features/assistant-config/pages/UniversalSkillSettings'), 'UniversalSkillSettings')
 const UniversalSkillEditorPage = lazyNamed(() => import('@/features/assistant-config/pages/UniversalSkillEditorPage'), 'UniversalSkillEditorPage')
 const MainAgentProfileEditorPage = lazyNamed(() => import('@/features/assistant-config/pages/MainAgentProfileEditorPage'), 'MainAgentProfileEditorPage')
+const Plan09RouteGate = lazyNamed(
+  () => import('@/features/assistant-config/components/Plan09RouteGate'),
+  'Plan09RouteGate',
+)
 const AssistantTargetsSettings = lazyNamed(
   () => import('@/features/assistant-config/pages/AssistantTargetsSettings'),
   'AssistantTargetsSettings',
@@ -129,10 +133,32 @@ export default function App() {
               <Route path="/settings/lightrag" element={withPageFallback(<LightRagSettingsPage />)} />
               <Route path="/settings/docling" element={withPageFallback(<DoclingSettingsPage />)} />
               <Route path="/settings/assistant-tools" element={withPageFallback(<ToolSettings />)} />
+              {/* Legacy Skill Library remains routed regardless of Plan 09 probe. */}
               <Route path="/settings/assistant-skills" element={withPageFallback(<SkillSettings />)} />
-              <Route path="/settings/universal-skills" element={withPageFallback(<UniversalSkillSettings />)} />
-              <Route path="/settings/universal-skills/:packageId" element={withPageFallback(<UniversalSkillEditorPage />)} />
-              <Route path="/settings/main-agent-profile" element={withPageFallback(<MainAgentProfileEditorPage />)} />
+              <Route
+                path="/settings/universal-skills"
+                element={withPageFallback(
+                  <Plan09RouteGate>
+                    <UniversalSkillSettings />
+                  </Plan09RouteGate>,
+                )}
+              />
+              <Route
+                path="/settings/universal-skills/:packageId"
+                element={withPageFallback(
+                  <Plan09RouteGate>
+                    <UniversalSkillEditorPage />
+                  </Plan09RouteGate>,
+                )}
+              />
+              <Route
+                path="/settings/main-agent-profile"
+                element={withPageFallback(
+                  <Plan09RouteGate titleKey="settings.universalSkills.profileTitle">
+                    <MainAgentProfileEditorPage />
+                  </Plan09RouteGate>,
+                )}
+              />
               <Route
                 path="/settings/assistant-targets"
                 element={withPageFallback(<AssistantTargetsSettings />)}

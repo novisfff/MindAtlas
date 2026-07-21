@@ -2149,7 +2149,23 @@
       "controlCapabilities": "Control capability keys",
       "catalogScopeMode": "Catalog scope mode",
       "publishProfile": "Publish profile",
-      "profilePublished": "Profile publish requested"
+      "profilePublished": "Profile publish requested",
+      "addResource": "Add resource",
+      "replaceResource": "Replace",
+      "removeResource": "Remove resource",
+      "workingCopyResources": "Working-copy resources",
+      "capabilityTarget": "Target",
+      "capabilityVersion": "Version",
+      "capabilityResolution": "Resolution",
+      "capabilityRisk": "Risk",
+      "enableRuntime": "Enable runtime",
+      "disableRuntime": "Disable runtime",
+      "profileRuntimeEnabled": "Profile runtime enabled",
+      "profileRuntimeDisabled": "Profile runtime disabled",
+      "profileNeedsPublished": "Publish a profile version before enabling runtime.",
+      "profileNeedsPromotionGate": "A promotion gate is required to enable runtime.",
+      "profileDisableConfirm": "Disable Main Agent Profile runtime? This is an explicit live-state change and does not alter draft or published content.",
+      "promotionGateId": "Promotion gate ID"
     }
   },
   "aiProvider": {

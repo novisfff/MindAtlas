@@ -54,6 +54,8 @@ interface SkillEditorState {
   setResources: (resources: SkillResourceInput[]) => void
   upsertResource: (resource: SkillResourceInput) => void
   removeResource: (path: string) => void
+  /** Seed resource bytes from server without marking dirty (pre-mutation hydrate). */
+  hydrateResources: (resources: SkillResourceInput[]) => void
   setValidationDiagnostics: (items: SkillValidationDiagnostic[]) => void
   markSaved: (params: {
     packageDetail?: SkillPackageDetail | null
@@ -85,14 +87,26 @@ const EMPTY_WORKING_COPY: SkillWorkingCopy = {
   description: '',
 }
 
+/**
+ * Hydrate working copy from server draft metadata.
+ * Resource bytes are not inlined in version detail; paths seed the working-copy
+ * list so explicit remove/replace can produce a complete CAS snapshot.
+ * Content-only saves omit resources until the first mutation.
+ */
 function workingCopyFromServer(
   pkg: SkillPackageDetail,
   draft?: SkillVersionDetail | null,
 ): SkillWorkingCopy {
+  const resourceSeeds: SkillResourceInput[] = (draft?.resources ?? []).map((r) => ({
+    path: r.path,
+    // Empty base64 marks "path known; bytes still on server until mutated".
+    // buildSaveBody only sends resources after an explicit mutation.
+    contentBase64: '',
+  }))
   return {
     skillMd: draft?.skillMd ?? '',
     mindatlasYaml: draft?.mindatlasYaml ?? '',
-    resources: [],
+    resources: resourceSeeds,
     versionName: draft?.versionName ?? '',
     displayName: pkg.displayName ?? '',
     description: pkg.description ?? '',
@@ -185,6 +199,15 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
       resourcesDirty: true,
     })),
 
+  hydrateResources: (resources) =>
+    set((state) => {
+      // Never overwrite an in-progress working-copy mutation.
+      if (state.resourcesDirty) return state
+      return {
+        workingCopy: { ...state.workingCopy, resources: [...resources] },
+      }
+    }),
+
   setValidationDiagnostics: (items) => set({ validationDiagnostics: items }),
 
   markSaved: ({ packageDetail, draftVersionId, draftDetail, expectedAggregateRevision, requestId }) =>
@@ -234,6 +257,9 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
 
   buildSaveBody: () => {
     const { workingCopy, resourcesDirty, expectedAggregateRevision, lastRequestId } = get()
+    // Always include requestId + expected revision (mandatory CAS).
+    // When resources were mutated, send the complete intended snapshot.
+    // Content-only edits omit resources so the server preserves prior bytes.
     const body: {
       skillMd: string
       mindatlasYaml: string | null
@@ -252,10 +278,12 @@ export const useSkillEditorStore = create<SkillEditorState>()((set, get) => ({
           ? `save-${crypto.randomUUID()}`
           : `save-${Date.now()}`),
     }
-    // Omit resources unless the user explicitly changed them — server then
-    // preserves previous draft resource bytes (Plan 09 P1 data-safety).
     if (resourcesDirty) {
-      body.resources = workingCopy.resources
+      // Explicit complete replacement snapshot (add/replace/remove).
+      body.resources = workingCopy.resources.map((r) => ({
+        path: r.path,
+        contentBase64: r.contentBase64,
+      }))
     }
     return body
   },

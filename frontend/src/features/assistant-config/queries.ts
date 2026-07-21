@@ -734,6 +734,14 @@ export const useRestoreSkillPackageVersionMutation = () => {
   })
 }
 
+export const usePublishedCapabilityIdentitiesQuery = (enabled = true) =>
+  useQuery({
+    queryKey: ['capability-registry-identities'] as const,
+    queryFn: skillPackagesApi.listPublishedCapabilityIdentities,
+    enabled,
+    staleTime: 60_000,
+  })
+
 export const useDiffSkillPackageVersionsMutation = () =>
   useMutation({
     mutationFn: ({

@@ -2139,7 +2139,23 @@
       "controlCapabilities": "控制能力键",
       "catalogScopeMode": "目录范围模式",
       "publishProfile": "发布配置",
-      "profilePublished": "已请求发布配置"
+      "profilePublished": "已请求发布配置",
+      "addResource": "添加资源",
+      "replaceResource": "替换",
+      "removeResource": "移除资源",
+      "workingCopyResources": "工作副本资源",
+      "capabilityTarget": "目标",
+      "capabilityVersion": "版本",
+      "capabilityResolution": "解析",
+      "capabilityRisk": "风险",
+      "enableRuntime": "启用运行时",
+      "disableRuntime": "禁用运行时",
+      "profileRuntimeEnabled": "配置运行时已启用",
+      "profileRuntimeDisabled": "配置运行时已禁用",
+      "profileNeedsPublished": "启用运行时前请先发布配置版本。",
+      "profileNeedsPromotionGate": "启用运行时需要晋升门禁。",
+      "profileDisableConfirm": "确认禁用主代理配置运行时？这是显式的线上状态变更，不会修改草稿或已发布内容。",
+      "promotionGateId": "晋升门禁 ID"
     }
   },
   "aiProvider": {

@@ -358,7 +358,7 @@ describe('SkillTestWorkbench', () => {
     // Exhaust reconnects then fall through to polling.
     vi.mocked(skillEvaluations.streamEvalRunEvents).mockImplementation(
       async (_runId, options) => {
-        options.onError?.(new Error('network down'))
+        options?.onError?.(new Error('network down'))
         return 'transport_failure'
       },
     )

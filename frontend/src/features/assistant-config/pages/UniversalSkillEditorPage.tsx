@@ -44,10 +44,13 @@ export function UniversalSkillEditorPage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const { packageId = '' } = useParams<{ packageId: string }>()
+  // Defense in depth: even if mounted outside the route gate, never fetch
+  // protected packages until the surface probe reports available.
   const surface = useSkillAdminSurfaceQuery()
-  const packageQuery = useSkillPackageQuery(packageId)
+  const surfaceReady = Boolean(surface.data?.available)
+  const packageQuery = useSkillPackageQuery(packageId, surfaceReady)
   const draftVersionId = packageQuery.data?.draftVersion?.id ?? null
-  const draftQuery = useSkillPackageVersionQuery(packageId, draftVersionId)
+  const draftQuery = useSkillPackageVersionQuery(packageId, draftVersionId, surfaceReady)
   const saveDraftMutation = useSaveSkillPackageDraftMutation()
   const patchMetadataMutation = usePatchSkillPackageMetadataMutation()
   const loadPackage = useSkillEditorStore((s) => s.loadPackage)
@@ -66,7 +69,7 @@ export function UniversalSkillEditorPage() {
   const [gateOpen, setGateOpen] = useState(false)
   const [lastGateId, setLastGateId] = useState<string | null>(null)
   const [lastGateDecision, setLastGateDecision] = useState<string | null>(null)
-  const versionsQuery = useSkillPackageVersionsQuery(packageId)
+  const versionsQuery = useSkillPackageVersionsQuery(packageId, { limit: 50, offset: 0 }, surfaceReady)
   const restoreMutation = useRestoreSkillPackageVersionMutation()
   const diffMutation = useDiffSkillPackageVersionsMutation()
   const enableCatalogMutation = useEnableSkillPackageCatalogMutation()

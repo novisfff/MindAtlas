@@ -50,7 +50,7 @@ describe('skill-editor-store', () => {
     expect(state.isDirty).toBe(false)
   })
 
-  it('marks dirty on edits and builds a save body that omits resources unless dirty', () => {
+  it('marks dirty on edits and always includes requestId + expected revision', () => {
     useSkillEditorStore.getState().loadPackage(pkg, draft)
     useSkillEditorStore.getState().setSkillMd('# changed')
     useSkillEditorStore.getState().setMindatlasYaml('capabilities: []\n')
@@ -62,17 +62,46 @@ describe('skill-editor-store', () => {
     expect(body.versionName).toBe('v1')
     expect(body.expectedAggregateRevision).toBe(3)
     expect(body.requestId).toBeTruthy()
-    // Content-only edit must not send resources (server preserves previous).
+    // Content-only edit preserves prior resources by omitting the field.
     expect(body.resources).toBeUndefined()
   })
 
-  it('includes resources only after explicit resource mutation', () => {
+  it('includes complete resource snapshot after explicit resource mutation', () => {
     useSkillEditorStore.getState().loadPackage(pkg, draft)
     useSkillEditorStore.getState().setResources([
       { path: 'references/a.md', contentBase64: 'YQ==' },
     ])
     const body = useSkillEditorStore.getState().buildSaveBody()
     expect(body.resources).toEqual([{ path: 'references/a.md', contentBase64: 'YQ==' }])
+    expect(body.requestId).toBeTruthy()
+    expect(body.expectedAggregateRevision).toBe(3)
+  })
+
+  it('resource removal is serialized as an explicit replacement snapshot', () => {
+    useSkillEditorStore.getState().loadPackage(pkg, draft)
+    useSkillEditorStore.getState().setResources([
+      { path: 'a.txt', contentBase64: 'YQ==' },
+      { path: 'b.txt', contentBase64: 'Yg==' },
+    ])
+    useSkillEditorStore.getState().removeResource('a.txt')
+    const body = useSkillEditorStore.getState().buildSaveBody()
+    expect(body.resources?.map((r) => r.path)).toEqual(['b.txt'])
+    expect(body.requestId).toBeTruthy()
+    expect(body.expectedAggregateRevision).toBe(3)
+  })
+
+  it('upsertResource replaces by path and preserves other resources', () => {
+    useSkillEditorStore.getState().loadPackage(pkg, draft)
+    useSkillEditorStore.getState().setResources([
+      { path: 'a.txt', contentBase64: 'YQ==' },
+      { path: 'b.txt', contentBase64: 'Yg==' },
+    ])
+    useSkillEditorStore.getState().upsertResource({ path: 'a.txt', contentBase64: 'YQEy' })
+    const body = useSkillEditorStore.getState().buildSaveBody()
+    expect(body.resources).toEqual([
+      { path: 'b.txt', contentBase64: 'Yg==' },
+      { path: 'a.txt', contentBase64: 'YQEy' },
+    ])
   })
 
   it('preserves local work on conflict and clears dirty on markSaved', () => {
