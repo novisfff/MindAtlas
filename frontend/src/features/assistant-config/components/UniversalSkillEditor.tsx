@@ -296,8 +296,7 @@ export function UniversalSkillEditor({
             <SkillTestWorkbench
               packageId={packageDetail.id}
               versionId={draftVersionId}
-              contentDigest={draftDetail?.contentDigest ?? packageDetail.draftVersion?.contentDigest ?? null}
-              bindingDigest={draftDetail?.bindingSetDigest ?? packageDetail.draftVersion?.bindingSetDigest ?? null}
+              subjectKind="skill_draft"
             />
           </div>
         ) : null}

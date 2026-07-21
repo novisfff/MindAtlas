@@ -1,9 +1,10 @@
 /**
- * Evaluation workbench event store (Plan 09 Task 7).
+ * Evaluation workbench event store (Plan 09 Task 9).
  * Replay after sequence, dedupe by runId+sequence, cancel, terminal reconcile.
+ * Heartbeats are tracked separately and never enter the trace.
  * Traces are owner-qualified and never hold raw secrets/provider payloads.
  */
-import { create } from 'zustand'
+import { create, type StoreApi, type UseBoundStore } from 'zustand'
 import type { EvalEventSummary, EvalRunSummary } from '../api/skill-evaluations'
 
 const TRACE_LIMIT = 400
@@ -18,12 +19,21 @@ export type SkillTestRunStatus =
   | 'cancelled'
   | 'error'
 
+export type SkillTestTransportMode = 'idle' | 'sse' | 'polling' | 'closed'
+
 export interface SkillTestTraceEvent {
   runId: string
   sequence: number
   eventType: string
   payload: Record<string, unknown>
   createdAt?: string | null
+}
+
+export interface SkillTestHeartbeat {
+  afterSequence: number
+  status?: string
+  ts?: number
+  terminal?: boolean
 }
 
 interface SkillTestRunState {
@@ -36,9 +46,13 @@ interface SkillTestRunState {
   metrics: Record<string, unknown>
   errorMessage: string | null
   seenKeys: Record<string, true>
+  lastHeartbeat: SkillTestHeartbeat | null
+  transportMode: SkillTestTransportMode
 
   beginRun: (run: EvalRunSummary) => void
   ingestEvents: (runId: string, events: EvalEventSummary[]) => void
+  ingestHeartbeat: (runId: string, payload: Record<string, unknown>) => void
+  setTransportMode: (mode: SkillTestTransportMode) => void
   reconcileRun: (run: EvalRunSummary) => void
   markCancelRequested: () => void
   markError: (message: string) => void
@@ -57,6 +71,9 @@ function sanitizePayload(payload: Record<string, unknown>): Record<string, unkno
     'token',
     'rawProviderPayload',
     'providerPayload',
+    'credentials',
+    'rawBytes',
+    'resourceBytes',
   ])
   const out: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(payload || {})) {
@@ -84,95 +101,128 @@ function mapStatus(status: string): SkillTestRunStatus {
   }
 }
 
-export const useSkillTestRunStore = create<SkillTestRunState>()((set, get) => ({
-  status: 'idle',
-  activeRunId: null,
-  lastSequence: 0,
-  run: null,
-  events: [],
-  assertions: [],
-  metrics: {},
-  errorMessage: null,
-  seenKeys: {},
+function createInitialState(): Omit<
+  SkillTestRunState,
+  | 'beginRun'
+  | 'ingestEvents'
+  | 'ingestHeartbeat'
+  | 'setTransportMode'
+  | 'reconcileRun'
+  | 'markCancelRequested'
+  | 'markError'
+  | 'reset'
+> {
+  return {
+    status: 'idle',
+    activeRunId: null,
+    lastSequence: 0,
+    run: null,
+    events: [],
+    assertions: [],
+    metrics: {},
+    errorMessage: null,
+    seenKeys: {},
+    lastHeartbeat: null,
+    transportMode: 'idle',
+  }
+}
 
-  beginRun: (run) =>
-    set({
-      status: mapStatus(run.status),
-      activeRunId: run.id,
-      lastSequence: 0,
-      run,
-      events: [],
-      assertions: [],
-      metrics: {},
-      errorMessage: null,
-      seenKeys: {},
-    }),
+function createStoreApi() {
+  return create<SkillTestRunState>()((set, get) => ({
+    ...createInitialState(),
 
-  ingestEvents: (runId, events) => {
-    const state = get()
-    if (state.activeRunId && state.activeRunId !== runId) return
-    const seen = { ...state.seenKeys }
-    const nextEvents = [...state.events]
-    let lastSequence = state.lastSequence
-    let assertions = [...state.assertions]
-    let metrics = { ...state.metrics }
+    beginRun: (run) =>
+      set({
+        ...createInitialState(),
+        status: mapStatus(run.status),
+        activeRunId: run.id,
+        run,
+      }),
 
-    for (const event of events) {
-      const key = `${runId}:${event.sequence}`
-      if (seen[key]) continue
-      seen[key] = true
-      const safePayload = sanitizePayload(event.payload || {})
-      nextEvents.push({
-        runId,
-        sequence: event.sequence,
-        eventType: event.eventType,
-        payload: safePayload,
-        createdAt: event.createdAt,
+    ingestEvents: (runId, events) => {
+      const state = get()
+      if (state.activeRunId && state.activeRunId !== runId) return
+      const seen = { ...state.seenKeys }
+      const nextEvents = [...state.events]
+      let lastSequence = state.lastSequence
+      let assertions = [...state.assertions]
+      let metrics = { ...state.metrics }
+
+      for (const event of events) {
+        const key = `${runId}:${event.sequence}`
+        if (seen[key]) continue
+        seen[key] = true
+        const safePayload = sanitizePayload(event.payload || {})
+        nextEvents.push({
+          runId,
+          sequence: event.sequence,
+          eventType: event.eventType,
+          payload: safePayload,
+          createdAt: event.createdAt,
+        })
+        lastSequence = Math.max(lastSequence, event.sequence)
+        if (event.eventType === 'assertion' || event.eventType === 'case_result') {
+          assertions.push(safePayload)
+        }
+        if (event.eventType === 'metrics' && safePayload && typeof safePayload === 'object') {
+          metrics = { ...metrics, ...safePayload }
+        }
+      }
+
+      set({
+        activeRunId: state.activeRunId ?? runId,
+        events: nextEvents.length > TRACE_LIMIT ? nextEvents.slice(-TRACE_LIMIT) : nextEvents,
+        lastSequence,
+        assertions,
+        metrics,
+        seenKeys: seen,
       })
-      lastSequence = Math.max(lastSequence, event.sequence)
-      if (event.eventType === 'assertion' || event.eventType === 'case_result') {
-        assertions.push(safePayload)
-      }
-      if (event.eventType === 'metrics' && safePayload && typeof safePayload === 'object') {
-        metrics = { ...metrics, ...safePayload }
-      }
-    }
+    },
 
-    set({
-      events: nextEvents.length > TRACE_LIMIT ? nextEvents.slice(-TRACE_LIMIT) : nextEvents,
-      lastSequence,
-      assertions,
-      metrics,
-      seenKeys: seen,
-    })
-  },
+    ingestHeartbeat: (runId, payload) => {
+      const state = get()
+      if (state.activeRunId && state.activeRunId !== runId) return
+      const afterSequence =
+        typeof payload.afterSequence === 'number'
+          ? payload.afterSequence
+          : Number(payload.afterSequence ?? state.lastSequence)
+      set({
+        lastHeartbeat: {
+          afterSequence: Number.isFinite(afterSequence) ? afterSequence : state.lastSequence,
+          status: typeof payload.status === 'string' ? payload.status : undefined,
+          ts: typeof payload.ts === 'number' ? payload.ts : undefined,
+          terminal: payload.terminal === true,
+        },
+      })
+    },
 
-  reconcileRun: (run) =>
-    set((state) => ({
-      run,
-      status: mapStatus(run.status),
-      activeRunId: run.id,
-      lastSequence: Math.max(state.lastSequence, run.lastEventSeq || 0),
-      errorMessage: run.failureCode || state.errorMessage,
-    })),
+    setTransportMode: (mode) => set({ transportMode: mode }),
 
-  markCancelRequested: () =>
-    set((state) => ({
-      status: state.status === 'completed' || state.status === 'failed' ? state.status : 'cancelling',
-    })),
+    reconcileRun: (run) =>
+      set((state) => ({
+        run,
+        status: mapStatus(run.status),
+        activeRunId: run.id,
+        lastSequence: Math.max(state.lastSequence, run.lastEventSeq || 0),
+        errorMessage: run.failureCode || state.errorMessage,
+      })),
 
-  markError: (message) => set({ status: 'error', errorMessage: message }),
+    markCancelRequested: () =>
+      set((state) => ({
+        status: state.status === 'completed' || state.status === 'failed' ? state.status : 'cancelling',
+      })),
 
-  reset: () =>
-    set({
-      status: 'idle',
-      activeRunId: null,
-      lastSequence: 0,
-      run: null,
-      events: [],
-      assertions: [],
-      metrics: {},
-      errorMessage: null,
-      seenKeys: {},
-    }),
-}))
+    markError: (message) => set({ status: 'error', errorMessage: message }),
+
+    reset: () => set(createInitialState()),
+  }))
+}
+
+export type SkillTestRunStore = UseBoundStore<StoreApi<SkillTestRunState>>
+
+/** Factory for isolated store instances (tests / multi-panel). */
+export function createSkillTestRunStore(): SkillTestRunStore {
+  return createStoreApi()
+}
+
+export const useSkillTestRunStore = createStoreApi()

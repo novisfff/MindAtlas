@@ -62,9 +62,12 @@ export function SkillPublishGateDialog({
     setBusy(true)
     setError(null)
     try {
+      // Server builds authoritative subject; client only sends action + identity + evidence refs.
       const created = await createPublishGate({
         requestId: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : newRequestId('gate'),
-        subject,
+        action: 'skill_publish',
+        subjectAggregateId: subject.subject.aggregateId,
+        subjectVersionId: subject.subject.versionId,
         qualifyingEvalRunIds,
         requestedNonSafetyWaiverCodes: codes,
         waiverReason: codes.length ? waiverReason.trim() : null,
