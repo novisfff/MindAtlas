@@ -53,9 +53,13 @@ interface SkillTestRunState {
   ingestEvents: (runId: string, events: EvalEventSummary[]) => void
   ingestHeartbeat: (runId: string, payload: Record<string, unknown>) => void
   setTransportMode: (mode: SkillTestTransportMode) => void
+  setMetrics: (metrics: Record<string, unknown>) => void
+  mergeMetrics: (metrics: Record<string, unknown>) => void
   reconcileRun: (run: EvalRunSummary) => void
   markCancelRequested: () => void
   markError: (message: string) => void
+  /** Non-terminal transport notice — does not unlock Start / freeze Cancel. */
+  markTransportNotice: (message: string | null) => void
   reset: () => void
 }
 
@@ -101,15 +105,20 @@ function mapStatus(status: string): SkillTestRunStatus {
   }
 }
 
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled'])
+
 function createInitialState(): Omit<
   SkillTestRunState,
   | 'beginRun'
   | 'ingestEvents'
   | 'ingestHeartbeat'
   | 'setTransportMode'
+  | 'setMetrics'
+  | 'mergeMetrics'
   | 'reconcileRun'
   | 'markCancelRequested'
   | 'markError'
+  | 'markTransportNotice'
   | 'reset'
 > {
   return {
@@ -186,33 +195,65 @@ function createStoreApi() {
         typeof payload.afterSequence === 'number'
           ? payload.afterSequence
           : Number(payload.afterSequence ?? state.lastSequence)
-      set({
+      const heartbeatStatus =
+        typeof payload.status === 'string' ? payload.status : undefined
+      const next: Partial<SkillTestRunState> = {
         lastHeartbeat: {
           afterSequence: Number.isFinite(afterSequence) ? afterSequence : state.lastSequence,
-          status: typeof payload.status === 'string' ? payload.status : undefined,
+          status: heartbeatStatus,
           ts: typeof payload.ts === 'number' ? payload.ts : undefined,
-          terminal: payload.terminal === true,
+          terminal: payload.terminal === true || Boolean(heartbeatStatus && TERMINAL_STATUSES.has(heartbeatStatus)),
         },
-      })
+      }
+      // Heartbeat may carry a fresher non-conflicting status while transport is live.
+      // Never demote a terminal status, and never invent an 'error' from unknown values.
+      if (
+        heartbeatStatus &&
+        !TERMINAL_STATUSES.has(state.status) &&
+        (heartbeatStatus === 'queued' ||
+          heartbeatStatus === 'running' ||
+          heartbeatStatus === 'cancelling' ||
+          TERMINAL_STATUSES.has(heartbeatStatus))
+      ) {
+        next.status = mapStatus(heartbeatStatus)
+      }
+      set(next)
     },
 
     setTransportMode: (mode) => set({ transportMode: mode }),
 
-    reconcileRun: (run) =>
+    setMetrics: (metrics) => set({ metrics: { ...metrics } }),
+
+    mergeMetrics: (metrics) =>
       set((state) => ({
-        run,
-        status: mapStatus(run.status),
-        activeRunId: run.id,
-        lastSequence: Math.max(state.lastSequence, run.lastEventSeq || 0),
-        errorMessage: run.failureCode || state.errorMessage,
+        metrics: { ...state.metrics, ...metrics },
       })),
+
+    reconcileRun: (run) =>
+      set((state) => {
+        const nextStatus = mapStatus(run.status)
+        const terminal = TERMINAL_STATUSES.has(nextStatus)
+        return {
+          run,
+          status: nextStatus,
+          activeRunId: run.id,
+          lastSequence: Math.max(state.lastSequence, run.lastEventSeq || 0),
+          // Prefer server failureCode; drop transport notices once the run is terminal.
+          errorMessage: run.failureCode || (terminal ? null : state.errorMessage),
+        }
+      }),
 
     markCancelRequested: () =>
       set((state) => ({
-        status: state.status === 'completed' || state.status === 'failed' ? state.status : 'cancelling',
+        status:
+          state.status === 'completed' || state.status === 'failed' || state.status === 'cancelled'
+            ? state.status
+            : 'cancelling',
       })),
 
     markError: (message) => set({ status: 'error', errorMessage: message }),
+
+    markTransportNotice: (message) => set({ errorMessage: message }),
 
     reset: () => set(createInitialState()),
   }))

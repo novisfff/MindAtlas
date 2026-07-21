@@ -62,4 +62,24 @@ describe('skill-test-run-store', () => {
     expect(useSkillTestRunStore.getState().status).toBe('cancelled')
     expect(useSkillTestRunStore.getState().lastSequence).toBe(3)
   })
+
+  it('transport notice does not mark run as terminal error', () => {
+    useSkillTestRunStore.getState().beginRun(run)
+    useSkillTestRunStore.getState().markTransportNotice('sse dropped')
+    const state = useSkillTestRunStore.getState()
+    expect(state.status).toBe('running')
+    expect(state.errorMessage).toBe('sse dropped')
+  })
+
+  it('merges aggregate metrics without wiping event metrics', () => {
+    useSkillTestRunStore.getState().beginRun(run)
+    useSkillTestRunStore.getState().ingestEvents('run-1', [
+      { sequence: 1, eventType: 'metrics', payload: { score: 0.8 } },
+    ])
+    useSkillTestRunStore.getState().mergeMetrics({ caseCount: 3, tokens: 42 })
+    const metrics = useSkillTestRunStore.getState().metrics
+    expect(metrics.score).toBe(0.8)
+    expect(metrics.caseCount).toBe(3)
+    expect(metrics.tokens).toBe(42)
+  })
 })

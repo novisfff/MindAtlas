@@ -73,8 +73,8 @@ function collectAssertionFailures(
 function hasMissingSafety(caseResults: CaseResultSummary[], evidence: EvalRunEvidence | null): boolean {
   if (!evidence) return false
   if (evidence.gateEligible) return false
-  const provenance = (evidence.evidenceProvenance || '').toLowerCase()
-  if (provenance.includes('synthetic') || provenance === 'structural_synthetic') return true
+  // structural_synthetic is intentionally non-gate-eligible; that alone is not "missing safety".
+  // Only surface missing-safety when case assertions or explicit safety counters say so.
   return caseResults.some((row) => {
     const details = row.assertionDetails || {}
     return (

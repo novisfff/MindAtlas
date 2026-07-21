@@ -48,14 +48,30 @@ vi.mock('react-i18next', () => ({
         'settings.universalSkills.evalLocale': 'Locale',
         'settings.universalSkills.profileVersion': 'Profile version',
         'settings.universalSkills.providerFixture': 'Provider fixture',
+        'settings.universalSkills.providerFixtureStructuralDefault':
+          'Structural default (no fixture pin)',
         'settings.universalSkills.liveModelId': 'Live model',
         'settings.universalSkills.selectDatasetVersion': 'Select published dataset version…',
         'settings.universalSkills.loadingProfiles': 'Loading profiles…',
         'settings.universalSkills.workbenchNeedsDraft':
           'A draft version is required to start evaluation.',
+        'settings.universalSkills.workbenchTransportFallback':
+          'Event stream interrupted; falling back to polling.',
+        'settings.universalSkills.workbenchSseReconnecting':
+          'Event stream interrupted; reconnecting…',
+        'settings.universalSkills.workbenchPollTimeout':
+          'Polling timed out while waiting for a terminal run status.',
         'settings.universalSkills.noEvalEvents': 'No evaluation events yet.',
         'settings.universalSkills.evalTrace': 'Evaluation trace',
         'settings.universalSkills.evidenceTitle': 'Evaluation evidence',
+        'settings.universalSkills.aggregateMetrics': 'Aggregate metrics',
+        'settings.universalSkills.actualSkills': 'Actual active skills',
+        'settings.universalSkills.capabilityTraces': 'Capability traces',
+        'settings.universalSkills.completionObligations': 'Completion and obligations',
+        'settings.universalSkills.assertionFailures': 'Assertion failures',
+        'settings.universalSkills.missingSafety': 'Missing safety evidence',
+        'settings.universalSkills.promotionEligible': 'Promotion eligible',
+        'settings.universalSkills.retentionExpiry': 'Retention / expiry',
       }
       return map[key] ?? key
     },
@@ -231,5 +247,224 @@ describe('SkillTestWorkbench', () => {
     expect(body).not.toHaveProperty('subjectBindingDigest')
     expect(body.prompt).toBe('evaluate this skill')
     expect(body.profileVersionId).toBe('profile-ver-1')
+    // interactive default keeps fixture optional (structural_synthetic path).
+    expect(body.providerFixtureRevision).toBeNull()
+  })
+
+  it('allows optional provider fixture pin for interactive_scripted', async () => {
+    vi.mocked(skillEvaluations.createEvalRun).mockResolvedValue({
+      id: 'run-2',
+      subjectKind: 'skill_draft',
+      subjectAggregateId: 'pkg-1',
+      subjectVersionId: 'ver-1',
+      mode: 'interactive_scripted',
+      status: 'queued',
+      stateRevision: 0,
+      lastEventSeq: 0,
+    })
+    vi.mocked(skillEvaluations.streamEvalRunEvents).mockResolvedValue('closed')
+    vi.mocked(skillEvaluations.getEvalRun).mockResolvedValue({
+      id: 'run-2',
+      subjectKind: 'skill_draft',
+      subjectAggregateId: 'pkg-1',
+      subjectVersionId: 'ver-1',
+      mode: 'interactive_scripted',
+      status: 'completed',
+      stateRevision: 1,
+      lastEventSeq: 0,
+    })
+    vi.mocked(skillEvaluations.listEvalRunCaseResults).mockResolvedValue({ items: [], total: 0 })
+    vi.mocked(skillEvaluations.listEvalRunEvidence).mockResolvedValue({
+      runId: 'run-2',
+      gateEligible: true,
+      evidenceProvenance: 'real_orchestration',
+      artifacts: [],
+      capabilityCalls: [],
+    })
+
+    renderWorkbench()
+    await screen.findByLabelText('Provider fixture')
+    fireEvent.change(screen.getByLabelText('Provider fixture'), {
+      target: { value: 'provider-direct-answer@eval-v1' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Start evaluation' }))
+
+    await vi.waitFor(() => {
+      expect(skillEvaluations.createEvalRun).toHaveBeenCalled()
+    })
+    const body = vi.mocked(skillEvaluations.createEvalRun).mock.calls[0][0]
+    expect(body.providerFixtureRevision).toBe('provider-direct-answer@eval-v1')
+  })
+
+  it('refreshes stateRevision before cancel CAS', async () => {
+    useSkillTestRunStore.getState().beginRun({
+      id: 'run-cancel',
+      subjectKind: 'skill_draft',
+      subjectAggregateId: 'pkg-1',
+      subjectVersionId: 'ver-1',
+      mode: 'interactive_scripted',
+      status: 'running',
+      stateRevision: 1,
+      lastEventSeq: 0,
+    })
+
+    vi.mocked(skillEvaluations.getEvalRun).mockResolvedValue({
+      id: 'run-cancel',
+      subjectKind: 'skill_draft',
+      subjectAggregateId: 'pkg-1',
+      subjectVersionId: 'ver-1',
+      mode: 'interactive_scripted',
+      status: 'running',
+      stateRevision: 4,
+      lastEventSeq: 2,
+    })
+    vi.mocked(skillEvaluations.cancelEvalRun).mockResolvedValue({
+      id: 'run-cancel',
+      subjectKind: 'skill_draft',
+      subjectAggregateId: 'pkg-1',
+      subjectVersionId: 'ver-1',
+      mode: 'interactive_scripted',
+      status: 'cancelling',
+      stateRevision: 5,
+      lastEventSeq: 2,
+    })
+
+    renderWorkbench()
+    await vi.waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    await vi.waitFor(() => {
+      expect(skillEvaluations.getEvalRun).toHaveBeenCalledWith('run-cancel')
+      expect(skillEvaluations.cancelEvalRun).toHaveBeenCalledWith(
+        'run-cancel',
+        expect.objectContaining({ expectedStateRevision: 4 }),
+      )
+    })
+  })
+
+  it('keeps Start locked and falls back to polling on SSE transport failure', async () => {
+    vi.mocked(skillEvaluations.createEvalRun).mockResolvedValue({
+      id: 'run-poll',
+      subjectKind: 'skill_draft',
+      subjectAggregateId: 'pkg-1',
+      subjectVersionId: 'ver-1',
+      mode: 'interactive_scripted',
+      status: 'running',
+      stateRevision: 1,
+      lastEventSeq: 0,
+    })
+    // Exhaust reconnects then fall through to polling.
+    vi.mocked(skillEvaluations.streamEvalRunEvents).mockImplementation(
+      async (_runId, options) => {
+        options.onError?.(new Error('network down'))
+        return 'transport_failure'
+      },
+    )
+    vi.mocked(skillEvaluations.listEvalRunEvents).mockResolvedValue({
+      items: [],
+      afterSequence: 0,
+      nextSequence: 0,
+    })
+    vi.mocked(skillEvaluations.getEvalRun).mockResolvedValue({
+      id: 'run-poll',
+      subjectKind: 'skill_draft',
+      subjectAggregateId: 'pkg-1',
+      subjectVersionId: 'ver-1',
+      mode: 'interactive_scripted',
+      status: 'running',
+      stateRevision: 1,
+      lastEventSeq: 0,
+    })
+
+    renderWorkbench()
+    await screen.findByLabelText('Profile version')
+    await vi.waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Start evaluation' })).toBeEnabled()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Start evaluation' }))
+
+    await vi.waitFor(() => {
+      expect(skillEvaluations.createEvalRun).toHaveBeenCalled()
+      expect(skillEvaluations.streamEvalRunEvents).toHaveBeenCalled()
+    })
+    await vi.waitFor(() => {
+      expect(useSkillTestRunStore.getState().transportMode).toBe('polling')
+      expect(useSkillTestRunStore.getState().status).toBe('running')
+    })
+    expect(screen.getByRole('button', { name: 'Start evaluation' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled()
+  })
+
+  it('populates aggregate metrics from terminal case results', async () => {
+    vi.mocked(skillEvaluations.createEvalRun).mockResolvedValue({
+      id: 'run-metrics',
+      subjectKind: 'skill_draft',
+      subjectAggregateId: 'pkg-1',
+      subjectVersionId: 'ver-1',
+      mode: 'interactive_scripted',
+      status: 'queued',
+      stateRevision: 0,
+      lastEventSeq: 0,
+    })
+    vi.mocked(skillEvaluations.streamEvalRunEvents).mockResolvedValue('closed')
+    vi.mocked(skillEvaluations.getEvalRun).mockResolvedValue({
+      id: 'run-metrics',
+      subjectKind: 'skill_draft',
+      subjectAggregateId: 'pkg-1',
+      subjectVersionId: 'ver-1',
+      mode: 'interactive_scripted',
+      status: 'completed',
+      stateRevision: 2,
+      lastEventSeq: 1,
+      gateEligible: false,
+    })
+    vi.mocked(skillEvaluations.listEvalRunCaseResults).mockResolvedValue({
+      items: [
+        {
+          id: 'cr-1',
+          evalRunId: 'run-metrics',
+          evalCaseId: 'case-1',
+          resultState: 'passed',
+          assertionDetails: {},
+          actualActiveSkills: ['skill.a'],
+          stopReason: 'completed',
+          outputArtifactIds: [],
+          evidenceArtifactIds: [],
+          rounds: 2,
+          calls: 3,
+          tokens: 11,
+          latencyMs: 40,
+          resultDigest: 'd'.repeat(64),
+        },
+      ],
+      total: 1,
+    })
+    vi.mocked(skillEvaluations.listEvalRunEvidence).mockResolvedValue({
+      runId: 'run-metrics',
+      gateEligible: false,
+      evidenceProvenance: 'structural_synthetic',
+      artifacts: [],
+      capabilityCalls: [],
+    })
+
+    renderWorkbench()
+    await screen.findByLabelText('Profile version')
+    await vi.waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Start evaluation' })).toBeEnabled()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Start evaluation' }))
+
+    await vi.waitFor(() => {
+      expect(skillEvaluations.createEvalRun).toHaveBeenCalled()
+    })
+    await vi.waitFor(() => {
+      const metrics = useSkillTestRunStore.getState().metrics
+      expect(metrics.caseCount).toBe(1)
+      expect(metrics.passedCount).toBe(1)
+      expect(metrics.tokens).toBe(11)
+      expect(metrics.calls).toBe(3)
+    })
   })
 })

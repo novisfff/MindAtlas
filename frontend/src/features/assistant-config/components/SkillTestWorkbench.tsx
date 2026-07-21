@@ -54,6 +54,51 @@ const BUILTIN_FIXTURES = [
 
 const POLL_INTERVAL_MS = 1500
 const POLL_MAX_TICKS = 120
+const SSE_MAX_RECONNECTS = 2
+const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled'])
+
+function deriveAggregateMetrics(input: {
+  caseResults: CaseResultSummary[]
+  evidence: EvalRunEvidence | null
+  existing?: Record<string, unknown>
+}): Record<string, unknown> {
+  const metrics: Record<string, unknown> = { ...(input.existing || {}) }
+  const cases = input.caseResults
+  if (cases.length > 0) {
+    let rounds = 0
+    let calls = 0
+    let tokens = 0
+    let latencyMs = 0
+    let passed = 0
+    let failed = 0
+    for (const row of cases) {
+      if (typeof row.rounds === 'number') rounds += row.rounds
+      if (typeof row.calls === 'number') calls += row.calls
+      if (typeof row.tokens === 'number') tokens += row.tokens
+      if (typeof row.latencyMs === 'number') latencyMs += row.latencyMs
+      const state = (row.resultState || '').toLowerCase()
+      if (state.includes('pass') || state === 'completed') passed += 1
+      if (state.includes('fail') || state.includes('error')) failed += 1
+    }
+    metrics.caseCount = cases.length
+    metrics.passedCount = passed
+    metrics.failedCount = failed
+    if (rounds) metrics.rounds = rounds
+    if (calls) metrics.calls = calls
+    if (tokens) metrics.tokens = tokens
+    if (latencyMs) metrics.latencyMs = latencyMs
+  }
+  if (input.evidence?.capabilityCalls?.length) {
+    metrics.capabilityCallCount = input.evidence.capabilityCalls.length
+  }
+  if (input.evidence?.artifacts?.length) {
+    metrics.artifactCount = input.evidence.artifacts.length
+  }
+  if (input.evidence?.evidenceProvenance) {
+    metrics.evidenceProvenance = input.evidence.evidenceProvenance
+  }
+  return metrics
+}
 
 export function SkillTestWorkbench({
   packageId,
@@ -67,9 +112,8 @@ export function SkillTestWorkbench({
   const [locale, setLocale] = useState(() => i18n?.language?.slice(0, 2) || 'en')
   const [profileVersionId, setProfileVersionId] = useState('')
   const [datasetVersionId, setDatasetVersionId] = useState('')
-  const [providerFixtureRevision, setProviderFixtureRevision] = useState<string>(
-    BUILTIN_FIXTURES[0],
-  )
+  // Empty = structural_synthetic default for interactive; pin enables real_orchestration.
+  const [providerFixtureRevision, setProviderFixtureRevision] = useState<string>('')
   const [liveModelId, setLiveModelId] = useState('')
   const [busy, setBusy] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
@@ -79,7 +123,9 @@ export function SkillTestWorkbench({
   const abortRef = useRef<AbortController | null>(null)
   const pollRef = useRef<number | null>(null)
   const pollTicksRef = useRef(0)
+  const pollInFlightRef = useRef(false)
   const generationRef = useRef(0)
+  const sseReconnectsRef = useRef(0)
 
   const status = useSkillTestRunStore((s) => s.status)
   const activeRunId = useSkillTestRunStore((s) => s.activeRunId)
@@ -89,13 +135,16 @@ export function SkillTestWorkbench({
   const metrics = useSkillTestRunStore((s) => s.metrics)
   const assertions = useSkillTestRunStore((s) => s.assertions)
   const transportMode = useSkillTestRunStore((s) => s.transportMode)
+  const errorMessage = useSkillTestRunStore((s) => s.errorMessage)
   const beginRun = useSkillTestRunStore((s) => s.beginRun)
   const ingestEvents = useSkillTestRunStore((s) => s.ingestEvents)
   const ingestHeartbeat = useSkillTestRunStore((s) => s.ingestHeartbeat)
   const setTransportMode = useSkillTestRunStore((s) => s.setTransportMode)
+  const setMetrics = useSkillTestRunStore((s) => s.setMetrics)
   const reconcileRun = useSkillTestRunStore((s) => s.reconcileRun)
   const markCancelRequested = useSkillTestRunStore((s) => s.markCancelRequested)
   const markError = useSkillTestRunStore((s) => s.markError)
+  const markTransportNotice = useSkillTestRunStore((s) => s.markTransportNotice)
   const reset = useSkillTestRunStore((s) => s.reset)
 
   const datasetsQuery = useQuery({
@@ -173,6 +222,8 @@ export function SkillTestWorkbench({
 
   const needsDataset = mode === 'dataset_scripted' || mode === 'dataset_live'
   const needsFixture = mode === 'dataset_scripted'
+  // interactive_scripted: fixture is optional (empty → structural_synthetic default).
+  const offersFixture = mode === 'dataset_scripted' || mode === 'interactive_scripted'
   const needsLiveModel = mode === 'dataset_live'
 
   const canStart = Boolean(
@@ -208,49 +259,79 @@ export function SkillTestWorkbench({
     [stopPolling, stopStream],
   )
 
-  const loadTerminalEvidence = useCallback(async (runId: string) => {
-    try {
-      const [latest, cases, ev] = await Promise.all([
-        getEvalRun(runId),
-        listEvalRunCaseResults(runId),
-        listEvalRunEvidence(runId),
-      ])
-      reconcileRun(latest)
-      setCaseResults(cases.items)
-      setEvidence(ev)
-    } catch (error) {
-      markError(mapSkillPackageError(error).message)
-    }
-  }, [markError, reconcileRun])
+  const loadTerminalEvidence = useCallback(
+    async (runId: string, generation: number) => {
+      if (generation !== generationRef.current) return
+      try {
+        const [latest, cases, ev] = await Promise.all([
+          getEvalRun(runId),
+          listEvalRunCaseResults(runId),
+          listEvalRunEvidence(runId),
+        ])
+        // Superseded stream must not overwrite newer run evidence.
+        if (generation !== generationRef.current) return
+        const active = useSkillTestRunStore.getState().activeRunId
+        if (active && active !== runId) return
+
+        reconcileRun(latest)
+        setCaseResults(cases.items)
+        setEvidence(ev)
+        const derived = deriveAggregateMetrics({
+          caseResults: cases.items,
+          evidence: ev,
+          existing: useSkillTestRunStore.getState().metrics,
+        })
+        setMetrics(derived)
+      } catch (error) {
+        if (generation !== generationRef.current) return
+        markError(mapSkillPackageError(error).message)
+      }
+    },
+    [markError, reconcileRun, setMetrics],
+  )
 
   const startPollingFallback = useCallback(
     (runId: string, generation: number) => {
       stopPolling()
       setTransportMode('polling')
       pollTicksRef.current = 0
+      pollInFlightRef.current = false
+      // Keep run status non-terminal; only note transport degradation.
+      markTransportNotice(t('settings.universalSkills.workbenchTransportFallback'))
+
       const tick = async () => {
         if (generation !== generationRef.current) return
+        if (pollInFlightRef.current) return
+        pollInFlightRef.current = true
         pollTicksRef.current += 1
-        if (pollTicksRef.current > POLL_MAX_TICKS) {
-          stopPolling()
-          setTransportMode('closed')
-          return
-        }
         try {
-          const seq = useSkillTestRunStore.getState().lastSequence
-          const page = await listEvalRunEvents(runId, { afterSequence: seq, limit: 100 })
-          if (page.items.length) ingestEvents(runId, page.items)
-          const latest = await getEvalRun(runId)
-          reconcileRun(latest)
-          if (['completed', 'failed', 'cancelled'].includes(latest.status)) {
+          if (pollTicksRef.current > POLL_MAX_TICKS) {
             stopPolling()
             setTransportMode('closed')
-            await loadTerminalEvidence(runId)
+            markTransportNotice(t('settings.universalSkills.workbenchPollTimeout'))
+            return
+          }
+          const seq = useSkillTestRunStore.getState().lastSequence
+          const page = await listEvalRunEvents(runId, { afterSequence: seq, limit: 100 })
+          if (generation !== generationRef.current) return
+          if (page.items.length) ingestEvents(runId, page.items)
+          const latest = await getEvalRun(runId)
+          if (generation !== generationRef.current) return
+          reconcileRun(latest)
+          if (TERMINAL_RUN_STATUSES.has(latest.status)) {
+            stopPolling()
+            setTransportMode('closed')
+            markTransportNotice(null)
+            await loadTerminalEvidence(runId, generation)
           }
         } catch (error) {
-          markError(mapSkillPackageError(error).message)
+          if (generation !== generationRef.current) return
+          // Keep cancel available; only fail hard if we cannot observe the run at all.
+          markTransportNotice(mapSkillPackageError(error).message)
           stopPolling()
           setTransportMode('closed')
+        } finally {
+          pollInFlightRef.current = false
         }
       }
       void tick()
@@ -261,10 +342,11 @@ export function SkillTestWorkbench({
     [
       ingestEvents,
       loadTerminalEvidence,
-      markError,
+      markTransportNotice,
       reconcileRun,
       setTransportMode,
       stopPolling,
+      t,
     ],
   )
 
@@ -290,9 +372,9 @@ export function SkillTestWorkbench({
         },
         onError: (error) => {
           if (generation !== generationRef.current) return
-          // Transport errors fall through to polling; do not hard-fail yet.
+          // Transport errors fall through to reconnect/polling; do not mark terminal error.
           if (controller.signal.aborted) return
-          markError(error.message)
+          markTransportNotice(error.message)
         },
       })
 
@@ -304,23 +386,53 @@ export function SkillTestWorkbench({
       }
 
       if (reason === 'transport_failure') {
+        // Prefer a bounded SSE reconnect from last sequence before polling.
+        if (sseReconnectsRef.current < SSE_MAX_RECONNECTS) {
+          sseReconnectsRef.current += 1
+          markTransportNotice(t('settings.universalSkills.workbenchSseReconnecting'))
+          void attachEventStream(runId, generation)
+          return
+        }
         startPollingFallback(runId, generation)
         return
       }
 
-      // Stream closed cleanly — fetch terminal run + evidence.
-      setTransportMode('closed')
-      await loadTerminalEvidence(runId)
+      // Clean body EOF: only treat as terminal when the run is actually terminal.
+      try {
+        const latest = await getEvalRun(runId)
+        if (generation !== generationRef.current) return
+        reconcileRun(latest)
+        if (TERMINAL_RUN_STATUSES.has(latest.status)) {
+          setTransportMode('closed')
+          markTransportNotice(null)
+          await loadTerminalEvidence(runId, generation)
+          return
+        }
+        // Non-terminal run with EOF — reconnect or fall back to poll.
+        if (sseReconnectsRef.current < SSE_MAX_RECONNECTS) {
+          sseReconnectsRef.current += 1
+          markTransportNotice(t('settings.universalSkills.workbenchSseReconnecting'))
+          void attachEventStream(runId, generation)
+          return
+        }
+        startPollingFallback(runId, generation)
+      } catch (error) {
+        if (generation !== generationRef.current) return
+        markTransportNotice(mapSkillPackageError(error).message)
+        startPollingFallback(runId, generation)
+      }
     },
     [
       ingestEvents,
       ingestHeartbeat,
       loadTerminalEvidence,
-      markError,
+      markTransportNotice,
+      reconcileRun,
       setTransportMode,
       startPollingFallback,
       stopPolling,
       stopStream,
+      t,
     ],
   )
 
@@ -342,9 +454,18 @@ export function SkillTestWorkbench({
     stopStream()
     generationRef.current += 1
     const generation = generationRef.current
+    sseReconnectsRef.current = 0
+    pollInFlightRef.current = false
     reset()
 
     try {
+      // interactive_scripted: optional fixture pin → real_orchestration when set.
+      const fixturePin =
+        mode === 'dataset_scripted'
+          ? providerFixtureRevision
+          : mode === 'interactive_scripted'
+            ? providerFixtureRevision.trim() || null
+            : null
       const request: CreateEvalRunRequest = {
         requestId: newRequestId('eval'),
         subjectKind,
@@ -355,7 +476,7 @@ export function SkillTestWorkbench({
         profileVersionId,
         mode,
         datasetVersionIds: needsDataset && datasetVersionId ? [datasetVersionId] : [],
-        providerFixtureRevision: needsFixture ? providerFixtureRevision : null,
+        providerFixtureRevision: fixturePin,
         liveModelId: needsLiveModel ? liveModelId.trim() : null,
       }
       const created = await createEvalRun(request)
@@ -372,14 +493,22 @@ export function SkillTestWorkbench({
 
   async function handleCancel() {
     if (!activeRunId) return
-    const revision = run?.stateRevision
-    if (revision == null) {
-      setLocalError(t('settings.universalSkills.workbenchMissingRevision'))
-      return
-    }
     setBusy(true)
     markCancelRequested()
     try {
+      // Always fetch a fresh revision for CAS — heartbeats/events can leave store stale.
+      const latest = await getEvalRun(activeRunId)
+      if (useSkillTestRunStore.getState().activeRunId !== activeRunId) return
+      reconcileRun(latest)
+      if (TERMINAL_RUN_STATUSES.has(latest.status)) {
+        await loadTerminalEvidence(activeRunId, generationRef.current)
+        return
+      }
+      const revision = latest.stateRevision
+      if (revision == null) {
+        setLocalError(t('settings.universalSkills.workbenchMissingRevision'))
+        return
+      }
       const cancelled = await cancelEvalRun(activeRunId, {
         requestId: newRequestId('cancel'),
         expectedStateRevision: revision,
@@ -457,6 +586,7 @@ export function SkillTestWorkbench({
               if (next === 'interactive_scripted') {
                 setDatasetVersionId('')
                 setLiveModelId('')
+                // Keep prior fixture pin if any; empty means structural default.
               }
               if (next === 'dataset_live') {
                 setProviderFixtureRevision('')
@@ -493,7 +623,7 @@ export function SkillTestWorkbench({
           </label>
         ) : null}
 
-        {needsFixture ? (
+        {offersFixture ? (
           <label className="space-y-1 text-sm">
             <span>{t('settings.universalSkills.providerFixture')}</span>
             <select
@@ -503,6 +633,11 @@ export function SkillTestWorkbench({
               aria-label={t('settings.universalSkills.providerFixture')}
               onChange={(e) => setProviderFixtureRevision(e.target.value)}
             >
+              {mode === 'interactive_scripted' ? (
+                <option value="">
+                  {t('settings.universalSkills.providerFixtureStructuralDefault')}
+                </option>
+              ) : null}
               {BUILTIN_FIXTURES.map((fixture) => (
                 <option key={fixture} value={fixture}>
                   {fixture}
@@ -543,6 +678,15 @@ export function SkillTestWorkbench({
       {localError ? (
         <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
           {localError}
+        </div>
+      ) : null}
+
+      {errorMessage && !localError ? (
+        <div
+          role="status"
+          className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-sm"
+        >
+          {errorMessage}
         </div>
       ) : null}
 
