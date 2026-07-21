@@ -48,6 +48,15 @@ jobs:
       - name: Run backend tests
         run: python -m pytest -q
 
+      - name: Plan 09 lifecycle process harness
+        run: |
+          python -m pytest -q \
+            tests/test_plan09_lifecycle_e2e.py \
+            tests/test_skill_two_gate_lifecycle.py \
+            tests/test_skill_eval_real_orchestration.py \
+            tests/test_skill_publish_gate.py \
+            tests/test_skill_eval_api.py
+
   agent-skill-migration:
     name: Agent Skill PostgreSQL Migration Gate
     runs-on: ubuntu-latest
@@ -185,7 +194,7 @@ jobs:
           # Do NOT set PLAN09_EVAL / PLAN08 ledger ACKs here — guarded-downgrade
           # tests must observe blocked paths. Suites set ACKs only around intentional
           # cleanup/downgrade helpers.
-        run: python -m pytest tests/test_agent_skill_postgres_migration.py tests/test_provider_model_probe_postgres.py tests/test_main_agent_postgres_migration.py tests/test_capability_call_migration_postgres.py tests/test_agent_skill_admin_postgres_migration.py tests/test_skill_eval_repository_postgres.py -q
+        run: python -m pytest tests/test_agent_skill_postgres_migration.py tests/test_provider_model_probe_postgres.py tests/test_main_agent_postgres_migration.py tests/test_capability_call_migration_postgres.py tests/test_agent_skill_admin_postgres_migration.py tests/test_skill_eval_repository_postgres.py tests/test_plan09_lifecycle_postgres.py -q
 
       - name: System tool golden digest smoke
         run: python -m pytest tests/test_binding_json_schema.py::test_system_tool_golden_schemas_and_contract_set_digest_are_stable -q
@@ -212,6 +221,13 @@ jobs:
 
       - name: Run frontend tests
         run: npm run test
+
+      - name: Plan 09 lifecycle frontend component evidence
+        run: |
+          npm run test -- --run \
+            src/features/assistant-config/plan09-lifecycle.e2e.test.tsx \
+            src/features/assistant-config/pages/UniversalSkillEditorPage.test.tsx \
+            src/features/assistant-config/components/Plan09RouteGate.test.tsx
 
       - name: Run frontend build
         run: npm run build
