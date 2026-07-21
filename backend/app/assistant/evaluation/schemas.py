@@ -14,7 +14,6 @@ from app.assistant.evaluation.contracts import (
     EvalSubjectKind,
     PublishGateAction,
     PublishGateDecision,
-    PublishGateSubject,
 )
 from app.common.schemas import CamelModel
 
@@ -64,12 +63,18 @@ class CancelEvalRunBody(CamelModel):
 
 
 class CreateGateBody(CamelModel):
-    """Client may only supply subject/evidence refs + optional non-safety waivers."""
+    """Client may only supply action, subject identity, evidence refs, and waivers.
+
+    ``extra="forbid"`` rejects client-authored subject closure digests,
+    decisions, metrics, assertions, policy, threshold, or build fields.
+    """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     request_id: UUID = Field(alias="requestId")
-    subject: PublishGateSubject
+    action: PublishGateAction
+    subject_aggregate_id: UUID = Field(alias="subjectAggregateId")
+    subject_version_id: UUID = Field(alias="subjectVersionId")
     qualifying_eval_run_ids: list[UUID] = Field(alias="qualifyingEvalRunIds", min_length=1)
     requested_non_safety_waiver_codes: list[str] = Field(
         default_factory=list,
@@ -80,7 +85,9 @@ class CreateGateBody(CamelModel):
     def to_service_request(self) -> CreatePublishGateRequest:
         return CreatePublishGateRequest(
             request_id=self.request_id,
-            subject=self.subject,
+            action=self.action,
+            subject_aggregate_id=self.subject_aggregate_id,
+            subject_version_id=self.subject_version_id,
             qualifying_eval_run_ids=tuple(self.qualifying_eval_run_ids),
             requested_non_safety_waiver_codes=tuple(self.requested_non_safety_waiver_codes),
             waiver_reason=self.waiver_reason,

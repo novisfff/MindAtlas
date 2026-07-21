@@ -102,35 +102,40 @@ class SkillEvalApiMountTests(unittest.TestCase):
         }
         body = {
             "requestId": str(uuid.uuid4()),
-            "subject": {
-                "schemaVersion": 1,
-                "subject": {
-                    "schemaVersion": 1,
-                    "kind": "skill_draft",
-                    "aggregateId": str(uuid.uuid4()),
-                    "versionId": str(uuid.uuid4()),
-                    "contentDigest": _digest("c"),
-                    "resolvedBindingDigest": _digest("b"),
-                },
-                "profileDigest": _digest("p"),
-                "catalogDigest": _digest("k"),
-                "runtimeContractVersion": 1,
-                "policyVersion": "plan09-policy-v1",
-                "thresholdVersion": "plan09-policy-v1",
-                "datasetVersionIds": [str(uuid.uuid4())],
-                "buildRevision": "development",
-            },
+            "action": "skill_publish",
+            "subjectAggregateId": str(uuid.uuid4()),
+            "subjectVersionId": str(uuid.uuid4()),
             "qualifyingEvalRunIds": [str(uuid.uuid4())],
-            # Forbidden client-authored decision fields:
+            # Forbidden client-authored decision / closure fields:
             "passed": True,
             "decision": "passed",
             "metrics": {"score": 1.0},
             "assertions": [{"code": "x", "passed": True}],
+            "subject": {
+                "catalogDigest": _digest("k"),
+            },
         }
         r = client.post(f"{PLAN09_EVAL_PREFIX}/gates", json=body, headers=headers)
         self.assertIn(r.status_code, {422, 400}, r.text)
         # Must not create a gate with a client-supplied pass.
         self.assertNotIn('"decision":"passed"', r.text.replace(" ", ""))
+
+    def test_gate_api_rejects_client_authored_subject(self) -> None:
+        client, _session = self._client(mount=True)
+        headers = {
+            "X-MindAtlas-Operator-Id": "operator-task8",
+            "X-MindAtlas-Operator-Role": "operator",
+        }
+        body = {
+            "requestId": str(uuid.uuid4()),
+            "action": "skill_publish",
+            "subjectAggregateId": str(uuid.uuid4()),
+            "subjectVersionId": str(uuid.uuid4()),
+            "qualifyingEvalRunIds": [str(uuid.uuid4())],
+            "subject": {"catalogDigest": "0" * 64},
+        }
+        r = client.post(f"{PLAN09_EVAL_PREFIX}/gates", json=body, headers=headers)
+        self.assertEqual(r.status_code, 422, r.text)
 
     def test_create_run_with_operator_headers(self) -> None:
         import base64

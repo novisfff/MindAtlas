@@ -1224,6 +1224,7 @@ class EvaluationRepository:
         threshold_version: str,
         build_revision: str,
         decision: PublishGateDecision,
+        action: PublishGateAction = "skill_publish",
         assertion_snapshot: Mapping[str, Any] | None = None,
         metric_snapshot: Mapping[str, Any] | None = None,
         actor_principal: str | None = None,
@@ -1233,10 +1234,17 @@ class EvaluationRepository:
         request_id: str | None = None,
         gate_id: UUID | None = None,
     ) -> AssistantSkillPublishGate:
-        # Server-derived decision only — callers (PublishGateService in Task 5)
+        # Server-derived decision only — callers (PublishGateService)
         # recompute evidence; repository still refuses client-shaped blanks.
         if decision not in ("passed", "failed", "waived_non_safety"):
             raise EvaluationRepositoryError(CODE_INVALID_INPUT, "invalid decision")
+        if action not in (
+            "skill_publish",
+            "skill_catalog_enable",
+            "profile_publish",
+            "profile_runtime_enable",
+        ):
+            raise EvaluationRepositoryError(CODE_INVALID_INPUT, "invalid gate action")
         if not qualifying_eval_run_ids:
             raise EvaluationRepositoryError(
                 CODE_INVALID_INPUT, "qualifying_eval_run_ids required"
@@ -1261,6 +1269,7 @@ class EvaluationRepository:
             policy_version=policy_version,
             threshold_version=threshold_version,
             build_revision=build_revision,
+            action=action,
             decision=decision,
             assertion_snapshot=dict(assertion_snapshot or {}),
             metric_snapshot=dict(metric_snapshot or {}),
@@ -1307,6 +1316,18 @@ class EvaluationRepository:
         ).scalar_one_or_none()
         if existing is not None:
             return existing
+        # Action-specific single consumption: a gate may only be used once for its action.
+        prior_use = self.session.execute(
+            select(AssistantSkillPublishGateUse).where(
+                AssistantSkillPublishGateUse.gate_id == gate.id,
+                AssistantSkillPublishGateUse.action == action,
+            )
+        ).scalar_one_or_none()
+        if prior_use is not None:
+            raise EvaluationRepositoryError(
+                CODE_CONFLICT,
+                f"gate already consumed for action={action}",
+            )
         row = AssistantSkillPublishGateUse(
             id=use_id or uuid4(),
             gate_id=gate.id,

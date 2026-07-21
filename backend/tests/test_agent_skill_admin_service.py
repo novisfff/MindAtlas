@@ -224,8 +224,13 @@ def _create_passing_enable_gate(
     )
     svc = PublishGateService(db)
     result = svc.create_gate(
-        make_create_gate_request(subject=subject, qualifying_eval_run_ids=(run.id,)),
+        make_create_gate_request(
+            action="skill_catalog_enable",
+            subject=subject,
+            qualifying_eval_run_ids=(run.id,),
+        ),
         actor_principal="op-1",
+        subject=subject,
     )
     db.commit()
     return result.gate

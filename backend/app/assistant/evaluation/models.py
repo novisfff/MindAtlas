@@ -785,6 +785,8 @@ class AssistantSkillPublishGate(UuidPrimaryKeyMixin, Base):
     policy_version = Column(String(64), nullable=False)
     threshold_version = Column(String(64), nullable=False)
     build_revision = Column(String(160), nullable=False)
+    # Server-stored action this gate authorizes (publish vs enable are distinct).
+    action = Column(String(64), nullable=False, default="skill_publish")
     decision = Column(String(32), nullable=False)
     assertion_snapshot = Column(JSON, nullable=False, default=dict)
     metric_snapshot = Column(JSON, nullable=False, default=dict)
@@ -814,6 +816,13 @@ class AssistantSkillPublishGate(UuidPrimaryKeyMixin, Base):
             "'legacy_baseline'"
             ")",
             name="ck_assistant_skill_publish_gate_subject_kind",
+        ),
+        CheckConstraint(
+            "action IN ("
+            "'skill_publish','skill_catalog_enable',"
+            "'profile_publish','profile_runtime_enable'"
+            ")",
+            name="ck_assistant_skill_publish_gate_action",
         ),
         CheckConstraint(
             "decision IN ('passed','failed','waived_non_safety')",

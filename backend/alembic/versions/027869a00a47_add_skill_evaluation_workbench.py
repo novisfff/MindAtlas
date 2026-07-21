@@ -815,6 +815,12 @@ def upgrade() -> None:
         sa.Column("policy_version", sa.String(length=64), nullable=False),
         sa.Column("threshold_version", sa.String(length=64), nullable=False),
         sa.Column("build_revision", sa.String(length=160), nullable=False),
+        sa.Column(
+            "action",
+            sa.String(length=64),
+            nullable=False,
+            server_default="skill_publish",
+        ),
         sa.Column("decision", sa.String(length=32), nullable=False),
         sa.Column("assertion_snapshot", sa.JSON(), nullable=False),
         sa.Column("metric_snapshot", sa.JSON(), nullable=False),
@@ -837,6 +843,13 @@ def upgrade() -> None:
             "'legacy_baseline'"
             ")",
             name="ck_assistant_skill_publish_gate_subject_kind",
+        ),
+        sa.CheckConstraint(
+            "action IN ("
+            "'skill_publish','skill_catalog_enable',"
+            "'profile_publish','profile_runtime_enable'"
+            ")",
+            name="ck_assistant_skill_publish_gate_action",
         ),
         sa.CheckConstraint(
             "decision IN ('passed','failed','waived_non_safety')",

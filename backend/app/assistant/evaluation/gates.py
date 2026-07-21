@@ -91,11 +91,21 @@ CODE_GATE_FAILED = 40983
 CODE_GATE_INVALID_REQUEST = 42280
 CODE_GATE_HARD_SAFETY = 42281
 CODE_GATE_NOT_QUALIFYING = 42282
+CODE_GATE_ACTION_MISMATCH = 40984
+CODE_GATE_ALREADY_USED = 40985
 
 GATE_ACTION_SKILL_PUBLISH: PublishGateAction = "skill_publish"
 GATE_ACTION_SKILL_CATALOG_ENABLE: PublishGateAction = "skill_catalog_enable"
 GATE_ACTION_PROFILE_PUBLISH: PublishGateAction = "profile_publish"
 GATE_ACTION_PROFILE_RUNTIME_ENABLE: PublishGateAction = "profile_runtime_enable"
+
+# Action → required subject kind for two-gate lifecycle.
+ACTION_REQUIRED_SUBJECT_KIND: dict[PublishGateAction, str] = {
+    "skill_publish": "skill_draft",
+    "skill_catalog_enable": "skill_version",
+    "profile_publish": "main_agent_profile_draft",
+    "profile_runtime_enable": "main_agent_profile_version",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -533,16 +543,180 @@ class PublishGateService:
     # Create (server-derived decision)
     # ------------------------------------------------------------------
 
+    def build_authoritative_subject(
+        self,
+        action: PublishGateAction,
+        aggregate_id: UUID,
+        version_id: UUID,
+        qualifying_run_ids: Sequence[UUID],
+        *,
+        catalog_digest: str | None = None,
+        profile_digest: str | None = None,
+    ) -> PublishGateSubject:
+        """Server-own the full gate subject closure for ``action``.
+
+        Loads subject version, Task 4 candidate closure (skills), qualifying
+        real-orchestration runs, exact dataset/fixture pins, and current
+        environment pins. Clients never author digests or decisions.
+        """
+        required_kind = ACTION_REQUIRED_SUBJECT_KIND.get(action)
+        if required_kind is None:
+            raise PublishGateError(
+                "invalid_gate_action",
+                f"unknown publish gate action: {action}",
+                http_status=422,
+                http_code=CODE_GATE_INVALID_REQUEST,
+                details={"action": action},
+            )
+
+        # Load runs first so dataset pins come from real evidence (not client).
+        runs = self._load_runs_for_authoritative_subject(
+            qualifying_run_ids,
+            expected_aggregate_id=aggregate_id,
+            expected_version_id=version_id,
+            expected_kind=required_kind,
+        )
+        dataset_ids = self._dataset_ids_from_runs(runs)
+        if not dataset_ids:
+            raise PublishGateError(
+                "missing_dataset_pins",
+                "qualifying runs must pin at least one dataset version",
+                http_status=422,
+                http_code=CODE_GATE_NOT_QUALIFYING,
+            )
+
+        content_digest: str
+        binding_digest: str
+        kind = required_kind
+
+        if action in ("skill_publish", "skill_catalog_enable"):
+            from app.assistant.skills.candidate_closure import (
+                CandidateClosureError,
+                resolve_skill_candidate_closure,
+            )
+
+            try:
+                closure = resolve_skill_candidate_closure(
+                    self.session,
+                    package_id=aggregate_id,
+                    version_id=version_id,
+                    subject_kind=kind,  # type: ignore[arg-type]
+                )
+            except CandidateClosureError as exc:
+                raise PublishGateError(
+                    "subject_not_found",
+                    str(exc) or "skill subject not found for gate",
+                    http_status=404,
+                    http_code=40490,
+                    details={
+                        "action": action,
+                        "aggregate_id": str(aggregate_id),
+                        "version_id": str(version_id),
+                        "code": getattr(exc, "code", None),
+                    },
+                ) from exc
+            content_digest = str(closure.content_digest)
+            binding_digest = str(closure.binding_set_digest)
+            if catalog_digest is None:
+                from app.assistant.skills.models import AssistantSkillPackage
+
+                package = self.session.get(AssistantSkillPackage, aggregate_id)
+                if package is None:
+                    raise PublishGateError(
+                        "subject_not_found",
+                        "skill package not found for gate",
+                        http_status=404,
+                        http_code=40490,
+                    )
+                if action == "skill_publish":
+                    catalog_digest = skill_catalog_pin_digest(
+                        package_id=package.id,
+                        canonical_name=str(package.canonical_name),
+                        published_version_id=package.published_version_id,
+                        catalog_enabled=bool(package.catalog_enabled),
+                    )
+                else:
+                    catalog_digest = skill_catalog_pin_digest(
+                        package_id=package.id,
+                        canonical_name=str(package.canonical_name),
+                        published_version_id=version_id,
+                        content_digest=content_digest,
+                    )
+        else:
+            # Profile publish / runtime enable.
+            from app.assistant.skills.models import (
+                AssistantMainAgentProfile,
+                AssistantMainAgentProfileVersion,
+            )
+
+            profile = self.session.get(AssistantMainAgentProfile, aggregate_id)
+            version = self.session.get(AssistantMainAgentProfileVersion, version_id)
+            if profile is None or version is None or version.profile_id != profile.id:
+                raise PublishGateError(
+                    "subject_not_found",
+                    "profile subject not found for gate",
+                    http_status=404,
+                    http_code=40490,
+                    details={
+                        "action": action,
+                        "aggregate_id": str(aggregate_id),
+                        "version_id": str(version_id),
+                    },
+                )
+            content_digest = str(version.content_digest or ("0" * 64))
+            binding_digest = "0" * 64
+            if profile_digest is None:
+                profile_digest = content_digest
+            if catalog_digest is None:
+                catalog_digest = profile_catalog_pin_digest(
+                    profile_id=profile.id,
+                    published_version_id=(
+                        profile.published_version_id
+                        if action == "profile_publish"
+                        else version_id
+                    ),
+                    runtime_enabled=(
+                        bool(profile.runtime_enabled)
+                        if action == "profile_publish"
+                        else None
+                    ),
+                )
+
+        pins = current_gate_environment_pins(
+            self.session,
+            profile_digest=profile_digest,
+            catalog_digest=catalog_digest,
+            dataset_version_ids=dataset_ids,
+            build_revision=current_build_revision(),
+        )
+        return build_publish_gate_subject(
+            kind=kind,
+            aggregate_id=aggregate_id,
+            version_id=version_id,
+            content_digest=content_digest,
+            binding_digest=binding_digest,
+            profile_digest=pins.profile_digest,
+            catalog_digest=pins.catalog_digest,
+            dataset_version_ids=pins.dataset_version_ids,
+            runtime_contract_version=pins.runtime_contract_version,
+            policy_version=pins.policy_version,
+            threshold_version=pins.threshold_version,
+            build_revision=pins.build_revision,
+        )
+
     def create_gate(
         self,
         request: CreatePublishGateRequest,
         *,
         actor_principal: str,
+        catalog_digest: str | None = None,
+        profile_digest: str | None = None,
+        subject: PublishGateSubject | None = None,
     ) -> GateCreateResult:
-        """Accept only subject/evidence refs + optional non-safety waivers.
+        """Accept action + subject identity + evidence refs + optional waivers.
 
-        Rejects any client attempt to supply decision/metrics/assertions
-        (enforced by CreatePublishGateRequest schema + this service).
+        Server builds the authoritative subject closure. Client-authored
+        digests/decisions/metrics are rejected by the request contract.
         """
         # Validate waiver codes early for hard-safety names.
         for code in request.requested_non_safety_waiver_codes:
@@ -555,7 +729,50 @@ class PublishGateService:
                     details={"code": code},
                 )
 
-        subject = request.subject
+        # Idempotent retry on request_id before expensive recompute.
+        if request.request_id is not None:
+            existing = (
+                self.session.query(AssistantSkillPublishGate)
+                .filter(AssistantSkillPublishGate.request_id == str(request.request_id))
+                .one_or_none()
+            )
+            if existing is not None:
+                return GateCreateResult(
+                    gate=existing,
+                    decision=existing.decision,  # type: ignore[arg-type]
+                    assertion_snapshot=dict(existing.assertion_snapshot or {}),
+                    metric_snapshot=dict(existing.metric_snapshot or {}),
+                    accepted_waiver_codes=tuple(existing.waiver_codes or ()),
+                )
+
+        if subject is None:
+            subject = self.build_authoritative_subject(
+                request.action,
+                request.subject_aggregate_id,
+                request.subject_version_id,
+                request.qualifying_eval_run_ids,
+                catalog_digest=catalog_digest,
+                profile_digest=profile_digest,
+            )
+        else:
+            # Service/test path supplying a pre-built subject still verifies
+            # action ↔ kind mapping so publish/enable cannot be confused.
+            self._assert_action_subject_kind(request.action, subject.subject.kind)
+            if str(subject.subject.aggregate_id) != str(request.subject_aggregate_id):
+                raise PublishGateError(
+                    "gate_action_subject_mismatch",
+                    "subject aggregate does not match request",
+                    http_status=409,
+                    http_code=CODE_GATE_ACTION_MISMATCH,
+                )
+            if str(subject.subject.version_id) != str(request.subject_version_id):
+                raise PublishGateError(
+                    "gate_action_subject_mismatch",
+                    "subject version does not match request",
+                    http_status=409,
+                    http_code=CODE_GATE_ACTION_MISMATCH,
+                )
+
         runs = self._load_qualifying_runs(
             request.qualifying_eval_run_ids,
             subject=subject,
@@ -588,22 +805,6 @@ class PublishGateService:
         metric_snapshot = dict(summary.metrics)
         expires_at = self._utcnow() + timedelta(days=self.ttl_days)
 
-        # Idempotent retry on request_id.
-        if request.request_id is not None:
-            existing = (
-                self.session.query(AssistantSkillPublishGate)
-                .filter(AssistantSkillPublishGate.request_id == str(request.request_id))
-                .one_or_none()
-            )
-            if existing is not None:
-                return GateCreateResult(
-                    gate=existing,
-                    decision=existing.decision,  # type: ignore[arg-type]
-                    assertion_snapshot=dict(existing.assertion_snapshot or {}),
-                    metric_snapshot=dict(existing.metric_snapshot or {}),
-                    accepted_waiver_codes=tuple(existing.waiver_codes or ()),
-                )
-
         try:
             gate = self.repo.append_publish_gate(
                 subject_kind=subject.subject.kind,
@@ -619,6 +820,7 @@ class PublishGateService:
                 policy_version=subject.policy_version,
                 threshold_version=subject.threshold_version,
                 build_revision=subject.build_revision,
+                action=request.action,
                 decision=decision,
                 assertion_snapshot=assertion_snapshot,
                 metric_snapshot=metric_snapshot,
@@ -644,6 +846,142 @@ class PublishGateService:
             metric_snapshot=metric_snapshot,
             accepted_waiver_codes=accepted,
         )
+
+    def _assert_action_subject_kind(
+        self,
+        action: PublishGateAction,
+        subject_kind: str,
+    ) -> None:
+        required = ACTION_REQUIRED_SUBJECT_KIND.get(action)
+        if required is None:
+            raise PublishGateError(
+                "invalid_gate_action",
+                f"unknown publish gate action: {action}",
+                http_status=422,
+                http_code=CODE_GATE_INVALID_REQUEST,
+                details={"action": action},
+            )
+        if str(subject_kind) != required:
+            raise PublishGateError(
+                "gate_action_subject_mismatch",
+                (
+                    f"action {action} requires subject kind {required}, "
+                    f"got {subject_kind}"
+                ),
+                http_status=409,
+                http_code=CODE_GATE_ACTION_MISMATCH,
+                details={
+                    "action": action,
+                    "required_subject_kind": required,
+                    "subject_kind": subject_kind,
+                },
+            )
+
+    def _dataset_ids_from_runs(
+        self,
+        runs: Sequence[AssistantSkillEvalRun],
+    ) -> tuple[UUID, ...]:
+        seen: list[UUID] = []
+        for run in runs:
+            for raw in run.dataset_version_ids or []:
+                rid = _as_uuid(raw)
+                if rid not in seen:
+                    seen.append(rid)
+        return tuple(seen)
+
+    def _load_runs_for_authoritative_subject(
+        self,
+        run_ids: Sequence[UUID],
+        *,
+        expected_aggregate_id: UUID,
+        expected_version_id: UUID,
+        expected_kind: str,
+    ) -> list[AssistantSkillEvalRun]:
+        if not run_ids:
+            raise PublishGateError(
+                "missing_eval_runs",
+                "qualifying_eval_run_ids must be non-empty",
+                http_status=422,
+                http_code=CODE_GATE_INVALID_REQUEST,
+            )
+        runs: list[AssistantSkillEvalRun] = []
+        for rid in run_ids:
+            run = self.repo.get_run(_as_uuid(rid))
+            if run is None:
+                raise PublishGateError(
+                    "eval_run_not_found",
+                    f"qualifying eval run not found: {rid}",
+                    http_status=404,
+                    http_code=40490,
+                    details={"eval_run_id": str(rid)},
+                )
+            if str(run.status) != "completed":
+                raise PublishGateError(
+                    "eval_run_not_completed",
+                    f"qualifying eval run not completed: {rid}",
+                    http_status=422,
+                    http_code=CODE_GATE_NOT_QUALIFYING,
+                    details={"eval_run_id": str(rid), "status": run.status},
+                )
+            if not bool(run.gate_eligible):
+                raise PublishGateError(
+                    "eval_run_not_gate_eligible",
+                    f"qualifying eval run is not gate-eligible: {rid}",
+                    http_status=422,
+                    http_code=CODE_GATE_NOT_QUALIFYING,
+                    details={
+                        "eval_run_id": str(rid),
+                        "failure_code": run.failure_code,
+                    },
+                )
+            provenance = str(getattr(run, "evidence_provenance", "") or "")
+            if provenance != "real_orchestration":
+                raise PublishGateError(
+                    "eval_run_not_real_orchestration",
+                    (
+                        f"qualifying eval run must be real_orchestration, "
+                        f"got {provenance or 'missing'}: {rid}"
+                    ),
+                    http_status=422,
+                    http_code=CODE_GATE_NOT_QUALIFYING,
+                    details={
+                        "eval_run_id": str(rid),
+                        "evidence_provenance": provenance,
+                    },
+                )
+            if str(run.subject_kind) != str(expected_kind):
+                raise PublishGateError(
+                    "gate_action_subject_mismatch",
+                    (
+                        f"eval run subject kind {run.subject_kind} does not match "
+                        f"required {expected_kind}"
+                    ),
+                    http_status=409,
+                    http_code=CODE_GATE_ACTION_MISMATCH,
+                    details={
+                        "eval_run_id": str(rid),
+                        "subject_kind": run.subject_kind,
+                        "required_subject_kind": expected_kind,
+                    },
+                )
+            if str(run.subject_aggregate_id) != str(expected_aggregate_id):
+                raise PublishGateError(
+                    "gate_action_subject_mismatch",
+                    "eval run aggregate does not match gate subject",
+                    http_status=409,
+                    http_code=CODE_GATE_ACTION_MISMATCH,
+                    details={"eval_run_id": str(rid)},
+                )
+            if str(run.subject_version_id) != str(expected_version_id):
+                raise PublishGateError(
+                    "gate_action_subject_mismatch",
+                    "eval run version does not match gate subject",
+                    http_status=409,
+                    http_code=CODE_GATE_ACTION_MISMATCH,
+                    details={"eval_run_id": str(rid)},
+                )
+            runs.append(run)
+        return runs
 
     def _load_qualifying_runs(
         self,
@@ -688,6 +1026,21 @@ class PublishGateService:
                         "failure_code": run.failure_code,
                     },
                 )
+            provenance = str(getattr(run, "evidence_provenance", "") or "")
+            if provenance != "real_orchestration":
+                raise PublishGateError(
+                    "eval_run_not_real_orchestration",
+                    (
+                        f"qualifying eval run must be real_orchestration, "
+                        f"got {provenance or 'missing'}: {rid}"
+                    ),
+                    http_status=422,
+                    http_code=CODE_GATE_NOT_QUALIFYING,
+                    details={
+                        "eval_run_id": str(rid),
+                        "evidence_provenance": provenance,
+                    },
+                )
             drifts = compare_run_to_subject(run, subject)
             if drifts:
                 raise PublishGateError(
@@ -727,8 +1080,7 @@ class PublishGateService:
         action: PublishGateAction,
         require_passed: bool = True,
     ) -> None:
-        """Verify non-expired, decision, and exact subject closure match."""
-        del action  # action checked at consume for aggregate ownership
+        """Verify non-expired, decision, action match, and exact subject closure."""
         now = self._utcnow()
         exp = gate.expires_at
         if exp is not None:
@@ -753,6 +1105,41 @@ class PublishGateService:
                 http_status=409,
                 http_code=CODE_GATE_FAILED,
                 details={"gate_id": str(gate.id), "decision": gate.decision},
+            )
+
+        # Stored gate action must match the consume action (two-gate lifecycle).
+        gate_action = str(getattr(gate, "action", "") or "")
+        if gate_action and gate_action != str(action):
+            raise PublishGateError(
+                "gate_action_subject_mismatch",
+                (
+                    f"gate action {gate_action} cannot be consumed as {action}"
+                ),
+                http_status=409,
+                http_code=CODE_GATE_ACTION_MISMATCH,
+                details={
+                    "gate_id": str(gate.id),
+                    "gate_action": gate_action,
+                    "action": action,
+                },
+            )
+        # Subject kind must match the action's required kind.
+        self._assert_action_subject_kind(action, subject.subject.kind)
+        if str(gate.subject_kind) != str(subject.subject.kind):
+            raise PublishGateError(
+                "gate_action_subject_mismatch",
+                (
+                    f"gate subject kind {gate.subject_kind} does not match "
+                    f"required {subject.subject.kind}"
+                ),
+                http_status=409,
+                http_code=CODE_GATE_ACTION_MISMATCH,
+                details={
+                    "gate_id": str(gate.id),
+                    "gate_subject_kind": gate.subject_kind,
+                    "subject_kind": subject.subject.kind,
+                    "action": action,
+                },
             )
 
         drifts = compare_subject_closure(gate, subject)
@@ -809,7 +1196,7 @@ class PublishGateService:
         request_id: str,
         aggregate_revision: int,
     ) -> GateConsumeResult:
-        """Recompute under lock, append gate_use. Caller owns aggregate lock/tx."""
+        """Recompute under lock, append action-specific gate_use. Caller owns tx."""
         gate = self.recompute_and_verify(gate_id, subject=subject, action=action)
         if str(gate.subject_aggregate_id) != str(aggregate_id):
             raise PublishGateError(
@@ -833,6 +1220,14 @@ class PublishGateService:
                 aggregate_revision=int(aggregate_revision),
             )
         except EvaluationRepositoryError as exc:
+            if CODE_CONFLICT in (exc.code, str(exc.code)) or "already consumed" in str(exc):
+                raise PublishGateError(
+                    "gate_already_used",
+                    str(exc),
+                    http_status=409,
+                    http_code=CODE_GATE_ALREADY_USED,
+                    details={"gate_id": str(gate_id), "action": action},
+                ) from exc
             raise PublishGateError(
                 exc.code if exc.code != CODE_NOT_FOUND else "gate_not_found",
                 str(exc),
@@ -947,6 +1342,37 @@ class PublishGateService:
                 details={"action": action},
             )
         gate = self.require_gate(gate_id)
+        # Action mismatch is the primary two-gate rejection (publish gate ≠ enable).
+        gate_action = str(getattr(gate, "action", "") or "")
+        if gate_action and gate_action != str(action):
+            raise PublishGateError(
+                "gate_action_subject_mismatch",
+                f"gate action {gate_action} cannot be consumed as {action}",
+                http_status=409,
+                http_code=CODE_GATE_ACTION_MISMATCH,
+                details={
+                    "gate_id": str(gate.id),
+                    "gate_action": gate_action,
+                    "action": action,
+                },
+            )
+        self._assert_action_subject_kind(action, subject.subject.kind)
+        if str(gate.subject_kind) != str(subject.subject.kind):
+            raise PublishGateError(
+                "gate_action_subject_mismatch",
+                (
+                    f"gate subject kind {gate.subject_kind} does not match "
+                    f"required {subject.subject.kind}"
+                ),
+                http_status=409,
+                http_code=CODE_GATE_ACTION_MISMATCH,
+                details={
+                    "gate_id": str(gate.id),
+                    "gate_subject_kind": gate.subject_kind,
+                    "subject_kind": subject.subject.kind,
+                    "action": action,
+                },
+            )
         # Prefer exact published version id; allow gate subject version when
         # content/binding still match (server rebuilt subject from gate pins).
         if str(gate.subject_version_id) not in {
@@ -1013,15 +1439,36 @@ def build_publish_gate_subject(
 
 def make_create_gate_request(
     *,
-    subject: PublishGateSubject,
+    action: PublishGateAction = "skill_publish",
+    subject_aggregate_id: UUID | None = None,
+    subject_version_id: UUID | None = None,
     qualifying_eval_run_ids: Sequence[UUID],
     request_id: UUID | None = None,
     requested_non_safety_waiver_codes: Sequence[str] = (),
     waiver_reason: str | None = None,
+    # Backward-compat: accept a pre-built subject and derive identity fields.
+    subject: PublishGateSubject | None = None,
 ) -> CreatePublishGateRequest:
+    if subject is not None:
+        subject_aggregate_id = subject.subject.aggregate_id
+        subject_version_id = subject.subject.version_id
+        # Infer action from subject kind when caller only passed subject.
+        if action == "skill_publish" and subject.subject.kind != "skill_draft":
+            # Prefer explicit action when provided; otherwise map kind → action.
+            for act, kind in ACTION_REQUIRED_SUBJECT_KIND.items():
+                if kind == subject.subject.kind:
+                    action = act  # type: ignore[assignment]
+                    break
+    if subject_aggregate_id is None or subject_version_id is None:
+        raise ValueError(
+            "subject_aggregate_id and subject_version_id required "
+            "(or pass subject= for identity)"
+        )
     return CreatePublishGateRequest(
         request_id=request_id or uuid4(),
-        subject=subject,
+        action=action,
+        subject_aggregate_id=subject_aggregate_id,
+        subject_version_id=subject_version_id,
         qualifying_eval_run_ids=tuple(qualifying_eval_run_ids),
         requested_non_safety_waiver_codes=tuple(requested_non_safety_waiver_codes),
         waiver_reason=waiver_reason,
@@ -1029,6 +1476,9 @@ def make_create_gate_request(
 
 
 __all__ = [
+    "ACTION_REQUIRED_SUBJECT_KIND",
+    "CODE_GATE_ACTION_MISMATCH",
+    "CODE_GATE_ALREADY_USED",
     "CODE_GATE_DRIFT",
     "CODE_GATE_EXPIRED",
     "CODE_GATE_FAILED",

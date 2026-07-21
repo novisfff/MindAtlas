@@ -358,6 +358,7 @@ class PublishGateServiceUnitTests(unittest.TestCase):
                 qualifying_eval_run_ids=(run.id,),
             ),
             actor_principal="op-1",
+            subject=subject,
         )
         self.db.commit()
         self.assertEqual(result.decision, "passed")
@@ -385,6 +386,7 @@ class PublishGateServiceUnitTests(unittest.TestCase):
                     waiver_reason="please",
                 ),
                 actor_principal="op-1",
+                subject=subject,
             )
         self.assertEqual(ctx.exception.code, "hard_safety_not_waivable")
 
@@ -407,6 +409,7 @@ class PublishGateServiceUnitTests(unittest.TestCase):
                 qualifying_eval_run_ids=(run.id,),
             ),
             actor_principal="op-1",
+            subject=subject,
         )
         self.db.commit()
         self.assertEqual(result.decision, "failed")
@@ -433,6 +436,7 @@ class PublishGateServiceUnitTests(unittest.TestCase):
                 qualifying_eval_run_ids=(run.id,),
             ),
             actor_principal="op-1",
+            subject=subject,
         )
         self.db.commit()
         self.assertEqual(result.decision, "failed")
@@ -448,25 +452,25 @@ class PublishGateServiceUnitTests(unittest.TestCase):
             CreatePublishGateRequest.model_validate(
                 {
                     "requestId": str(_uuid()),
-                    "subject": {
-                        "subject": {
-                            "kind": "skill_draft",
-                            "aggregateId": str(_uuid()),
-                            "versionId": str(_uuid()),
-                            "contentDigest": DIGEST_A,
-                            "resolvedBindingDigest": DIGEST_B,
-                        },
-                        "profileDigest": DIGEST_C,
-                        "catalogDigest": DIGEST_D,
-                        "runtimeContractVersion": 1,
-                        "policyVersion": "p",
-                        "thresholdVersion": "t",
-                        "datasetVersionIds": [str(_uuid())],
-                        "buildRevision": "b",
-                    },
+                    "action": "skill_publish",
+                    "subjectAggregateId": str(_uuid()),
+                    "subjectVersionId": str(_uuid()),
                     "qualifyingEvalRunIds": [str(_uuid())],
                     "passed": True,
                     "decision": "passed",
+                }
+            )
+        with self.assertRaises(ValidationError):
+            CreatePublishGateRequest.model_validate(
+                {
+                    "requestId": str(_uuid()),
+                    "action": "skill_publish",
+                    "subjectAggregateId": str(_uuid()),
+                    "subjectVersionId": str(_uuid()),
+                    "qualifyingEvalRunIds": [str(_uuid())],
+                    "subject": {
+                        "catalogDigest": DIGEST_D,
+                    },
                 }
             )
 
@@ -485,6 +489,7 @@ class PublishGateServiceUnitTests(unittest.TestCase):
                 subject=subject, qualifying_eval_run_ids=(run.id,)
             ),
             actor_principal="op",
+            subject=subject,
         )
         self.db.commit()
 
@@ -531,6 +536,7 @@ class PublishGateServiceUnitTests(unittest.TestCase):
                 subject=subject, qualifying_eval_run_ids=(run.id,)
             ),
             actor_principal="op",
+            subject=subject,
         )
         result.gate.expires_at = utcnow() - timedelta(hours=1)
         self.db.commit()
@@ -569,6 +575,7 @@ class PublishGateServiceUnitTests(unittest.TestCase):
                 subject=subject, qualifying_eval_run_ids=(run.id,)
             ),
             actor_principal="op",
+            subject=subject,
         )
         self.db.commit()
         consume = svc.consume_gate(
@@ -703,7 +710,6 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
             current_gate_environment_pins,
         )
 
-        del action_hint
         dataset = self.repo.create_dataset(
             stable_key=f"ds-{uuid.uuid4().hex[:8]}",
             display_name="Gate DS",
@@ -784,9 +790,12 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         svc = PublishGateService(self.db)
         result = svc.create_gate(
             make_create_gate_request(
-                subject=subject, qualifying_eval_run_ids=(run.id,)
+                action=action_hint,  # type: ignore[arg-type]
+                subject=subject,
+                qualifying_eval_run_ids=(run.id,),
             ),
             actor_principal="op-gate",
+            subject=subject,
         )
         self.db.commit()
         return result.gate, subject, run
@@ -849,6 +858,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
             version_id=pub1.id,
             content_digest=str(version.content_digest),
             binding_digest=str(version.binding_set_digest or DIGEST_B),
+            action_hint="skill_catalog_enable",
             catalog_digest=self._enable_catalog_digest(pkg_row, version),
         )
         enabled = self.admin.enable_catalog(
@@ -1099,6 +1109,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
             version_id=pub.id,
             content_digest=str(version.content_digest),
             binding_digest=str(version.binding_set_digest or DIGEST_B),
+            action_hint="skill_catalog_enable",
             catalog_digest=self._enable_catalog_digest(pkg_row, version),
         )
         detail = self.pkg_svc.get_package(self.package.id)

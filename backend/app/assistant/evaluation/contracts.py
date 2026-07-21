@@ -153,14 +153,18 @@ class EvalExecutionIdentity(FrozenContract):
 
 
 class CreatePublishGateRequest(FrozenContract):
-    """Client gate request: evidence refs + optional non-safety waiver only.
+    """Client gate request: action + subject identity + evidence refs only.
 
-    No passed/decision/metric/assertion fields — server derives the decision.
+    Clients never author subject closure digests, decisions, metrics, or
+    assertions. The server builds the authoritative PublishGateSubject under
+    the aggregate lock from action, version identity, and qualifying runs.
     """
 
     schema_version: Literal[1] = 1
     request_id: UUID
-    subject: PublishGateSubject
+    action: PublishGateAction
+    subject_aggregate_id: UUID
+    subject_version_id: UUID
     qualifying_eval_run_ids: tuple[UUID, ...]
     requested_non_safety_waiver_codes: tuple[str, ...] = ()
     waiver_reason: str | None = None

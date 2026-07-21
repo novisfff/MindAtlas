@@ -206,14 +206,18 @@ class EvalContractTests(unittest.TestCase):
         )
         CreatePublishGateRequest(
             request_id=_uuid(),
-            subject=subject,
+            action="skill_catalog_enable",
+            subject_aggregate_id=subject.subject.aggregate_id,
+            subject_version_id=subject.subject.version_id,
             qualifying_eval_run_ids=(_uuid(),),
         )
         with self.assertRaises(ValidationError):
             CreatePublishGateRequest.model_validate(
                 {
                     "requestId": str(_uuid()),
-                    "subject": subject.model_dump(by_alias=True),
+                    "action": "skill_catalog_enable",
+                    "subjectAggregateId": str(subject.subject.aggregate_id),
+                    "subjectVersionId": str(subject.subject.version_id),
                     "qualifyingEvalRunIds": [str(_uuid())],
                     "passed": True,
                 }
