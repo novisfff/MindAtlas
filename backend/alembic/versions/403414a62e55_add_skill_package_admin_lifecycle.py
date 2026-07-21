@@ -152,6 +152,15 @@ def upgrade() -> None:
         "assistant_skill_package",
         "last_admin_request_digest IS NULL OR length(last_admin_request_digest) = 64",
     )
+    # Global requestId CAS for package-stamped admin mutations (create/fork/append).
+    op.execute(
+        sa.text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "uq_assistant_skill_package_last_admin_request_id "
+            "ON assistant_skill_package (last_admin_request_id) "
+            "WHERE last_admin_request_id IS NOT NULL"
+        )
+    )
     op.create_check_constraint(
         "ck_assistant_skill_package_alias_disabled_shape",
         "assistant_skill_package_alias",
@@ -404,6 +413,12 @@ def downgrade() -> None:
         if_exists=True,
     )
     op.drop_table(IMPORT_PREVIEW_TABLE, if_exists=True)
+
+    op.drop_index(
+        "uq_assistant_skill_package_last_admin_request_id",
+        table_name="assistant_skill_package",
+        if_exists=True,
+    )
 
     # IF EXISTS: disposable DBs may be mid-rewrite with partial 09A objects.
     def _drop_check(table: str, name: str) -> None:

@@ -1068,6 +1068,143 @@ class TestDurableImportPreviewStore:
             assert preview_row.preview_digest is not None
             assert preview_row.consumed is False
 
+    def test_apply_package_and_preview_consume_are_same_transaction(self) -> None:
+        """Package insert + preview stamp share one commit; failure rolls both back."""
+        from app.assistant.skills.import_preview import ImportPreviewService
+        from app.assistant.skills.models import (
+            AssistantSkillImportPreview,
+            AssistantSkillPackage,
+        )
+        from app.common.exceptions import ApiException
+
+        name = f"atomic-{uuid4().hex[:8]}"
+        archive = _valid_zip(name=name, aliases=[])
+        with self._factory() as session:
+            preview = ImportPreviewService(session).preview(
+                raw_zip=archive,
+                mode="create",
+                principal=self.principal,
+            )
+
+        with self._factory() as session:
+            svc = ImportPreviewService(session)
+            real_commit = session.commit
+            calls = {"n": 0}
+
+            def boom_commit() -> None:
+                calls["n"] += 1
+                # Fail the apply unit-of-work commit only (preview() already committed).
+                raise RuntimeError("simulated crash before durable apply commit")
+
+            session.commit = boom_commit  # type: ignore[method-assign]
+            with pytest.raises(RuntimeError, match="simulated crash"):
+                svc.apply(
+                    preview_id=preview.preview_id,
+                    preview_digest=preview.preview_digest,
+                    request_id=f"req-atomic-{name}",
+                    principal=self.principal,
+                )
+            session.commit = real_commit  # type: ignore[method-assign]
+            session.rollback()
+
+        with self._factory() as session:
+            packages = (
+                session.query(AssistantSkillPackage)
+                .filter(AssistantSkillPackage.canonical_name == name)
+                .all()
+            )
+            assert packages == []
+            row = session.get(AssistantSkillImportPreview, preview.preview_id)
+            assert row is not None
+            assert row.consumed is False
+            assert row.applied_request_id is None
+            assert row.archive_bytes is not None
+
+            # Recovery: same requestId applies cleanly after the failed attempt.
+            result = ImportPreviewService(session).apply(
+                preview_id=preview.preview_id,
+                preview_digest=preview.preview_digest,
+                request_id=f"req-atomic-{name}",
+                principal=self.principal,
+            )
+            assert result.package.canonical_name == name
+            session.refresh(row)
+            assert row.consumed is True
+            assert row.archive_bytes is None
+            assert row.applied_request_id == f"req-atomic-{name}"
+
+    def test_concurrent_same_request_id_create_conflicts_or_idempotent(
+        self,
+    ) -> None:
+        """Two workers, same requestId: at most one package; conflict or identical retry."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from app.assistant.skills.import_preview import ImportPreviewService
+        from app.assistant.skills.models import AssistantSkillPackage
+        from app.common.exceptions import ApiException
+
+        name_a = f"cna-{uuid4().hex[:8]}"
+        name_b = f"cnb-{uuid4().hex[:8]}"
+        raw_a = _valid_zip(name=name_a, aliases=[])
+        raw_b = _valid_zip(name=name_b, aliases=[])
+        req = f"shared-conc-{uuid4().hex[:8]}"
+
+        with self._factory() as session:
+            p_a = ImportPreviewService(session).preview(
+                raw_zip=raw_a, mode="create", principal=self.principal
+            )
+            p_b = ImportPreviewService(session).preview(
+                raw_zip=raw_b, mode="create", principal=self.principal
+            )
+
+        def _apply(preview_id, preview_digest):
+            with self._factory() as session:
+                try:
+                    result = ImportPreviewService(session).apply(
+                        preview_id=preview_id,
+                        preview_digest=preview_digest,
+                        request_id=req,
+                        principal=self.principal,
+                    )
+                    return ("ok", str(result.package.id), result.package.canonical_name)
+                except ApiException as exc:
+                    return ("err", exc.code, exc.status_code)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futs = [
+                pool.submit(_apply, p_a.preview_id, p_a.preview_digest),
+                pool.submit(_apply, p_b.preview_id, p_b.preview_digest),
+            ]
+            outcomes = [f.result() for f in as_completed(futs)]
+
+        oks = [o for o in outcomes if o[0] == "ok"]
+        errs = [o for o in outcomes if o[0] == "err"]
+        # Different payloads: exactly one success and one 40997, or both conflict
+        # if the second also races after rollback (must never double-create).
+        assert len(oks) <= 1
+        if len(oks) == 1:
+            assert len(errs) == 1
+            assert errs[0][1] == 40997
+            assert errs[0][2] == 409
+        else:
+            assert all(o[1] == 40997 for o in errs)
+
+        with self._factory() as session:
+            rows = (
+                session.query(AssistantSkillPackage)
+                .filter(AssistantSkillPackage.last_admin_request_id == req)
+                .all()
+            )
+            assert len(rows) <= 1
+            # Never both namespaces under the same requestId.
+            names = {
+                r.canonical_name
+                for r in session.query(AssistantSkillPackage)
+                .filter(AssistantSkillPackage.canonical_name.in_([name_a, name_b]))
+                .all()
+            }
+            assert len(names) <= 1
+
 
 # ---------------------------------------------------------------------------
 # Deterministic export after import; scripts non-executable

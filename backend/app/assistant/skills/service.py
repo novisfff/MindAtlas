@@ -191,6 +191,7 @@ class AgentSkillService:
         origin: str,
         admin_request_id: str | None = None,
         admin_request_digest: str | None = None,
+        commit: bool = True,
     ) -> SkillPackageDetail:
         """Create-only import of a parsed package as a disabled native draft.
 
@@ -202,6 +203,11 @@ class AgentSkillService:
         Optional ``admin_request_id`` / ``admin_request_digest`` are stamped on
         the aggregate in the same transaction as package insert so Plan 09
         create/fork apply retries remain idempotent after durable success.
+
+        When ``commit=False``, the package mutation is only flushed so a caller
+        (ImportPreviewService.apply) can stamp preview consume fields in the
+        same unit of work. On failure with ``commit=False`` this method does
+        not roll back — the outer unit of work owns abort.
         """
         if origin != "import":
             raise ApiException(
@@ -287,12 +293,21 @@ class AgentSkillService:
             if admin_request_id is not None and admin_request_digest is not None:
                 package.last_admin_request_id = admin_request_id
                 package.last_admin_request_digest = admin_request_digest
-            self.db.commit()
+            if commit:
+                self.db.commit()
+            else:
+                self.db.flush()
         except ApiException as exc:
-            self.db.rollback()
+            if commit:
+                self.db.rollback()
             raise self._as_import_conflict(exc) from exc
         except IntegrityError as exc:
-            self.db.rollback()
+            if commit:
+                self.db.rollback()
+            # Preserve IntegrityError for flush-only callers so they can map
+            # global requestId unique conflicts after outer rollback.
+            if not commit:
+                raise
             raise self._as_import_conflict(self._translate_integrity_error(exc)) from exc
 
         return self.get_package(package.id)
@@ -1977,6 +1992,15 @@ class AgentSkillService:
 
     def _translate_integrity_error(self, exc: IntegrityError) -> ApiException:
         msg = str(getattr(exc, "orig", exc)).lower()
+        if (
+            "last_admin_request_id" in msg
+            or "uq_assistant_skill_package_last_admin_request_id" in msg
+        ):
+            return ApiException(
+                status_code=409,
+                code=40997,
+                message="requestId was reused with a different payload",
+            )
         if "canonical_name" in msg and "unique" in msg:
             return ApiException(
                 status_code=409,

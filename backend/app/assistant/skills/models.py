@@ -147,6 +147,14 @@ class AssistantSkillPackage(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "last_admin_request_digest",
             name="ck_assistant_skill_package_last_admin_request_digest",
         ),
+        # Global admin requestId CAS for create/fork (and package-stamped append).
+        Index(
+            "uq_assistant_skill_package_last_admin_request_id",
+            "last_admin_request_id",
+            unique=True,
+            postgresql_where=text("last_admin_request_id IS NOT NULL"),
+            sqlite_where=text("last_admin_request_id IS NOT NULL"),
+        ),
     )
 
 

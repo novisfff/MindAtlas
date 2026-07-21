@@ -435,6 +435,19 @@ def test_upgrade_adds_columns_defaults_checks_and_backfills() -> None:
             assert "ck_assistant_skill_package_aggregate_revision" in checks
             assert "ck_assistant_skill_package_archived_shape" in checks
             assert "ck_assistant_skill_package_last_admin_request_digest" in checks
+            package_indexes = {
+                row[0]
+                for row in conn.execute(
+                    text(
+                        """
+                        SELECT indexname
+                        FROM pg_indexes
+                        WHERE tablename = 'assistant_skill_package'
+                        """
+                    )
+                ).fetchall()
+            }
+            assert "uq_assistant_skill_package_last_admin_request_id" in package_indexes
             alias_checks = _check_names(conn, "assistant_skill_package_alias")
             assert "ck_assistant_skill_package_alias_disabled_shape" in alias_checks
 

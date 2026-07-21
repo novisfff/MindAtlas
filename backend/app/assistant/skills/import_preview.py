@@ -713,7 +713,7 @@ class ImportPreviewService:
                 details={"previewId": str(preview_id)},
             )
 
-        # Global requestId CAS via durable package stamps + unique applied_request_id.
+        # Global requestId CAS via unique package.last_admin_request_id (+ preview applied_request_id).
         durable = self._lookup_by_admin_request(request_id, digest)
         if durable is not None:
             row.consumed = True
@@ -781,6 +781,9 @@ class ImportPreviewService:
                 message="candidate canonical name changed since preview",
             )
 
+        # Single transaction: package mutate (flush-only) + preview consume stamp.
+        # Durable requestId reservation is the package unique last_admin_request_id
+        # stamp, flushed before/with create/append and committed with consume.
         try:
             if row.mode in {"create", "fork_as_new"}:
                 detail = self._apply_create(
@@ -800,12 +803,66 @@ class ImportPreviewService:
                     code=_CODE_VALIDATION,
                     message=f"invalid import mode: {row.mode!r}",
                 )
+
+            row.consumed = True
+            row.applied_package_id = detail.id
+            row.applied_request_id = request_id
+            row.applied_request_digest = digest
+            row.applied_at = utcnow()
+            row.archive_bytes = None
+            self.db.commit()
         except ApiException:
-            # Package services may have rolled back; re-raise as-is.
+            self.db.rollback()
             raise
         except IntegrityError as exc:
             self.db.rollback()
-            # Unique applied_request_id collision or package uniqueness.
+            # Unique last_admin_request_id / applied_request_id collision.
+            durable = self._lookup_by_admin_request(request_id, digest)
+            if durable is not None:
+                # Identical concurrent winner — stamp this preview if still open.
+                try:
+                    row = self._lock_preview(preview_id)
+                    if not row.consumed:
+                        row.consumed = True
+                        row.applied_package_id = durable.id
+                        row.applied_request_id = request_id
+                        row.applied_request_digest = digest
+                        row.applied_at = utcnow()
+                        row.archive_bytes = None
+                        self.db.commit()
+                    elif (
+                        row.applied_request_id != request_id
+                        or row.applied_request_digest != digest
+                    ):
+                        raise ApiException(
+                            status_code=409,
+                            code=_CODE_CONFLICT_REQUEST,
+                            message="import preview already consumed",
+                            details={
+                                "requestId": request_id,
+                                "previewId": str(preview_id),
+                            },
+                        ) from exc
+                except ApiException:
+                    raise
+                except IntegrityError as stamp_exc:
+                    self.db.rollback()
+                    raise ApiException(
+                        status_code=409,
+                        code=_CODE_CONFLICT_REQUEST,
+                        message="requestId was reused with a different payload",
+                        details={"requestId": request_id},
+                    ) from stamp_exc
+                return ImportApplyResult(
+                    mode=row.mode,  # type: ignore[arg-type]
+                    preview_id=preview_id,
+                    request_id=request_id,
+                    package=durable,
+                )
+            # Different payload already owns this requestId (or other uniqueness).
+            mapped = self._packages._translate_integrity_error(exc)
+            if mapped.code == _CODE_CONFLICT_REQUEST:
+                raise mapped from exc
             other = (
                 self.db.query(AssistantSkillImportPreview)
                 .filter(AssistantSkillImportPreview.applied_request_id == request_id)
@@ -818,63 +875,7 @@ class ImportPreviewService:
                     message="requestId was reused with a different payload",
                     details={"requestId": request_id},
                 ) from exc
-            raise self._packages._as_import_conflict(
-                self._packages._translate_integrity_error(exc)
-            ) from exc
-
-        # Stamp consume/request fields and drop archive in same transaction as
-        # package mutation. import_package / append already committed the package
-        # mutation; stamp preview consume as a follow-up commit that retains the
-        # durable package evidence even if this stamp fails (retry reloads package).
-        try:
-            # Re-lock after nested commits may have released the row lock.
-            row = self._lock_preview(preview_id)
-            if row.consumed:
-                if (
-                    row.applied_request_id == request_id
-                    and row.applied_request_digest == digest
-                    and row.applied_package_id
-                ):
-                    detail = self._packages.get_package(row.applied_package_id)
-                    return ImportApplyResult(
-                        mode=row.mode,  # type: ignore[arg-type]
-                        preview_id=preview_id,
-                        request_id=request_id,
-                        package=detail,
-                    )
-                raise ApiException(
-                    status_code=409,
-                    code=_CODE_CONFLICT_REQUEST,
-                    message="import preview already consumed",
-                    details={
-                        "requestId": request_id,
-                        "previewId": str(preview_id),
-                    },
-                )
-            row.consumed = True
-            row.applied_package_id = detail.id
-            row.applied_request_id = request_id
-            row.applied_request_digest = digest
-            row.applied_at = utcnow()
-            row.archive_bytes = None
-            self.db.commit()
-        except IntegrityError as exc:
-            self.db.rollback()
-            # Another preview already claimed this requestId.
-            durable = self._lookup_by_admin_request(request_id, digest)
-            if durable is not None and durable.id == detail.id:
-                return ImportApplyResult(
-                    mode=row.mode,  # type: ignore[arg-type]
-                    preview_id=preview_id,
-                    request_id=request_id,
-                    package=detail,
-                )
-            raise ApiException(
-                status_code=409,
-                code=_CODE_CONFLICT_REQUEST,
-                message="requestId was reused with a different payload",
-                details={"requestId": request_id},
-            ) from exc
+            raise self._packages._as_import_conflict(mapped) from exc
 
         return ImportApplyResult(
             mode=row.mode,  # type: ignore[arg-type]
@@ -912,9 +913,8 @@ class ImportPreviewService:
         digest: str,
     ) -> SkillPackageDetail:
         # Plan 01 create-only import: unpublished + catalog disabled.
-        # Stamp requestId/digest in the same transaction as package insert so a
-        # crash cannot leave a durable package without CAS evidence (retry would
-        # otherwise 40995 on namespace instead of returning the existing row).
+        # Flush-only so preview consume stamps share one commit with package insert.
+        # Unique last_admin_request_id is the durable global requestId reservation.
         try:
             return self._packages.import_package(
                 parsed,
@@ -922,10 +922,11 @@ class ImportPreviewService:
                 origin="import",
                 admin_request_id=request_id,
                 admin_request_digest=digest,
+                commit=False,
             )
         except ApiException as exc:
             # Race / cold-index: package may already exist with this requestId.
-            if exc.code == 40995:
+            if exc.code in {40995, _CODE_CONFLICT_REQUEST}:
                 durable = self._lookup_by_admin_request(request_id, digest)
                 if durable is not None:
                     return durable
@@ -940,106 +941,120 @@ class ImportPreviewService:
         request_id: str,
         digest: str,
     ) -> SkillPackageDetail:
-        try:
-            package = (
-                self.db.query(AssistantSkillPackage)
-                .filter(AssistantSkillPackage.id == package_id)
-                .with_for_update()
-                .one_or_none()
+        # Flush-only: outer apply() stamps preview consume and commits once.
+        package = (
+            self.db.query(AssistantSkillPackage)
+            .filter(AssistantSkillPackage.id == package_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if package is None:
+            raise ApiException(
+                status_code=404,
+                code=40490,
+                message=f"Skill package not found: {package_id}",
             )
-            if package is None:
-                raise ApiException(
-                    status_code=404,
-                    code=40490,
-                    message=f"Skill package not found: {package_id}",
-                )
 
-            # Package-level requestId CAS (append targets an existing aggregate).
-            last_id = getattr(package, "last_admin_request_id", None)
-            last_digest = getattr(package, "last_admin_request_digest", None)
-            if last_id == request_id:
-                if last_digest == digest:
-                    return self._packages.get_package(package.id)
-                raise ApiException(
-                    status_code=409,
-                    code=_CODE_CONFLICT_REQUEST,
-                    message="requestId was reused with a different payload",
-                    details={"requestId": request_id},
-                )
-
-            current_rev = int(package.aggregate_revision or 0)
-            if current_rev != int(expected_revision):
-                raise ApiException(
-                    status_code=409,
-                    code=_CODE_CONFLICT_REVISION,
-                    message=(
-                        f"aggregate revision conflict: expected {expected_revision}, "
-                        f"current {current_rev}"
-                    ),
-                    details={
-                        "expectedAggregateRevision": expected_revision,
-                        "currentAggregateRevision": current_rev,
-                        "packageId": str(package.id),
-                    },
-                )
-
-            if package.canonical_name != parsed.canonical_name:
-                raise ApiException(
-                    status_code=409,
-                    code=40990,
-                    message=(
-                        f"canonical name is immutable: package has "
-                        f"{package.canonical_name!r}, payload has "
-                        f"{parsed.canonical_name!r}"
-                    ),
-                )
-
-            # Complete snapshot replace as new draft (Plan 01 content-digest reuse).
-            existing = (
-                self.db.query(AssistantSkillVersion)
-                .filter(
-                    AssistantSkillVersion.skill_package_id == package.id,
-                    AssistantSkillVersion.version_source == "save",
-                    AssistantSkillVersion.content_digest == parsed.content_digest,
-                )
-                .one_or_none()
+        # Package-level requestId CAS (append targets an existing aggregate).
+        last_id = getattr(package, "last_admin_request_id", None)
+        last_digest = getattr(package, "last_admin_request_digest", None)
+        if last_id == request_id:
+            if last_digest == digest:
+                return self._packages.get_package(package.id)
+            raise ApiException(
+                status_code=409,
+                code=_CODE_CONFLICT_REQUEST,
+                message="requestId was reused with a different payload",
+                details={"requestId": request_id},
             )
-            if existing is not None:
-                draft = existing
-            else:
-                next_seq = self._packages._next_sequence(package.id)
-                draft = self._packages._insert_draft_version(
-                    package=package,
-                    parsed=parsed,
-                    version_name=f"import-append-{next_seq}",
-                    origin="import",
-                    sequence_no=next_seq,
-                )
 
-            # Append any new legacy aliases (append-only; never rewrite).
-            if parsed.manifest and parsed.manifest.legacy_aliases:
-                self._packages._append_legacy_aliases(
-                    package_id=package.id,
-                    legacy_aliases=list(parsed.manifest.legacy_aliases),
-                )
+        # Global uniqueness: another package may already own this requestId.
+        other = (
+            self.db.query(AssistantSkillPackage)
+            .filter(
+                AssistantSkillPackage.last_admin_request_id == request_id,
+                AssistantSkillPackage.id != package.id,
+            )
+            .one_or_none()
+        )
+        if other is not None:
+            other_digest = getattr(other, "last_admin_request_digest", None)
+            if other_digest == digest:
+                return self._packages.get_package(other.id)
+            raise ApiException(
+                status_code=409,
+                code=_CODE_CONFLICT_REQUEST,
+                message="requestId was reused with a different payload",
+                details={"requestId": request_id},
+            )
 
-            package.draft_version_id = draft.id
-            package.display_name = _display_name_for(parsed)
-            package.description = parsed.frontmatter.description
-            # Append only advances draft + revision. Leave published_version_id,
-            # catalog_enabled, and catalog evidence fields untouched (no
-            # auto-publish / auto-disable / auto-enable).
-            package.aggregate_revision = current_rev + 1
-            package.last_admin_request_id = request_id
-            package.last_admin_request_digest = digest
-            self.db.commit()
-            return self._packages.get_package(package.id)
-        except ApiException:
-            self.db.rollback()
-            raise
-        except IntegrityError as exc:
-            self.db.rollback()
-            raise self._packages._translate_integrity_error(exc) from exc
+        current_rev = int(package.aggregate_revision or 0)
+        if current_rev != int(expected_revision):
+            raise ApiException(
+                status_code=409,
+                code=_CODE_CONFLICT_REVISION,
+                message=(
+                    f"aggregate revision conflict: expected {expected_revision}, "
+                    f"current {current_rev}"
+                ),
+                details={
+                    "expectedAggregateRevision": expected_revision,
+                    "currentAggregateRevision": current_rev,
+                    "packageId": str(package.id),
+                },
+            )
+
+        if package.canonical_name != parsed.canonical_name:
+            raise ApiException(
+                status_code=409,
+                code=40990,
+                message=(
+                    f"canonical name is immutable: package has "
+                    f"{package.canonical_name!r}, payload has "
+                    f"{parsed.canonical_name!r}"
+                ),
+            )
+
+        # Complete snapshot replace as new draft (Plan 01 content-digest reuse).
+        existing = (
+            self.db.query(AssistantSkillVersion)
+            .filter(
+                AssistantSkillVersion.skill_package_id == package.id,
+                AssistantSkillVersion.version_source == "save",
+                AssistantSkillVersion.content_digest == parsed.content_digest,
+            )
+            .one_or_none()
+        )
+        if existing is not None:
+            draft = existing
+        else:
+            next_seq = self._packages._next_sequence(package.id)
+            draft = self._packages._insert_draft_version(
+                package=package,
+                parsed=parsed,
+                version_name=f"import-append-{next_seq}",
+                origin="import",
+                sequence_no=next_seq,
+            )
+
+        # Append any new legacy aliases (append-only; never rewrite).
+        if parsed.manifest and parsed.manifest.legacy_aliases:
+            self._packages._append_legacy_aliases(
+                package_id=package.id,
+                legacy_aliases=list(parsed.manifest.legacy_aliases),
+            )
+
+        package.draft_version_id = draft.id
+        package.display_name = _display_name_for(parsed)
+        package.description = parsed.frontmatter.description
+        # Append only advances draft + revision. Leave published_version_id,
+        # catalog_enabled, and catalog evidence fields untouched (no
+        # auto-publish / auto-disable / auto-enable).
+        package.aggregate_revision = current_rev + 1
+        package.last_admin_request_id = request_id
+        package.last_admin_request_digest = digest
+        self.db.flush()
+        return self._packages.get_package(package.id)
 
 
 def clear_import_preview_store_for_tests() -> None:
