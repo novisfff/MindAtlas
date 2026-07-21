@@ -60,6 +60,8 @@ interface SkillTestRunState {
   markError: (message: string) => void
   /** Non-terminal transport notice — does not unlock Start / freeze Cancel. */
   markTransportNotice: (message: string | null) => void
+  /** Clear run/trace after subject pointer changes (e.g. draft → published). */
+  clearForSubjectChange: () => void
   reset: () => void
 }
 
@@ -119,6 +121,7 @@ function createInitialState(): Omit<
   | 'markCancelRequested'
   | 'markError'
   | 'markTransportNotice'
+  | 'clearForSubjectChange'
   | 'reset'
 > {
   return {
@@ -254,6 +257,8 @@ function createStoreApi() {
     markError: (message) => set({ status: 'error', errorMessage: message }),
 
     markTransportNotice: (message) => set({ errorMessage: message }),
+
+    clearForSubjectChange: () => set(createInitialState()),
 
     reset: () => set(createInitialState()),
   }))

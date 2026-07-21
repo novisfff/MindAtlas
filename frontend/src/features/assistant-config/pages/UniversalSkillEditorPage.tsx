@@ -1,7 +1,9 @@
 /**
- * Universal Skill package editor page (Plan 09 Task 6).
+ * Universal Skill package editor page (Plan 09 Task 6 / remediation Task 11).
+ * Two-gate lifecycle: skill_publish (draft) then skill_catalog_enable (published).
+ * Client never authors digests/decisions/metrics; gates are action+subject-version keyed.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 
@@ -18,7 +20,11 @@ import {
   newRequestId,
   publishSkillPackageVersion,
 } from '../api/skill-packages'
-import type { PublishGateSubject } from '../api/skill-evaluations'
+import {
+  gateUiStateFromResponse,
+  isQualifyingGateRun,
+  type GateUiState,
+} from '../api/skill-evaluations'
 import { UniversalSkillEditor } from '../components/UniversalSkillEditor'
 import { SkillVersionHistory } from '../components/SkillVersionHistory'
 import { SkillVersionDiff } from '../components/SkillVersionDiff'
@@ -40,6 +46,19 @@ import {
 import { useSkillEditorStore } from '../stores/skill-editor-store'
 import { useSkillTestRunStore } from '../stores/skill-test-run-store'
 
+type GateDialogMode = 'publish' | 'promotion' | null
+
+function gateMatches(
+  gate: GateUiState | null,
+  action: GateUiState['action'],
+  subjectVersionId: string | null | undefined,
+): boolean {
+  if (!gate || !subjectVersionId) return false
+  if (gate.action !== action) return false
+  if (gate.subjectVersionId !== subjectVersionId) return false
+  return gate.decision === 'passed' || gate.decision === 'waived_non_safety'
+}
+
 export function UniversalSkillEditorPage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
@@ -50,6 +69,7 @@ export function UniversalSkillEditorPage() {
   const surfaceReady = Boolean(surface.data?.available)
   const packageQuery = useSkillPackageQuery(packageId, surfaceReady)
   const draftVersionId = packageQuery.data?.draftVersion?.id ?? null
+  const publishedVersionId = packageQuery.data?.publishedVersion?.id ?? null
   const draftQuery = useSkillPackageVersionQuery(packageId, draftVersionId, surfaceReady)
   const saveDraftMutation = useSaveSkillPackageDraftMutation()
   const patchMetadataMutation = usePatchSkillPackageMetadataMutation()
@@ -66,42 +86,75 @@ export function UniversalSkillEditorPage() {
   const [leftVersionId, setLeftVersionId] = useState<string | null>(null)
   const [rightVersionId, setRightVersionId] = useState<string | null>(null)
   const [diff, setDiff] = useState<SkillVersionDiffResult | null>(null)
-  const [gateOpen, setGateOpen] = useState(false)
-  const [lastGateId, setLastGateId] = useState<string | null>(null)
-  const [lastGateDecision, setLastGateDecision] = useState<string | null>(null)
+  // Separate action/subject-keyed gate records — never share publish ↔ promotion.
+  const [publishGate, setPublishGate] = useState<GateUiState | null>(null)
+  const [promotionGate, setPromotionGate] = useState<GateUiState | null>(null)
+  const [gateDialogMode, setGateDialogMode] = useState<GateDialogMode>(null)
   const versionsQuery = useSkillPackageVersionsQuery(packageId, { limit: 50, offset: 0 }, surfaceReady)
   const restoreMutation = useRestoreSkillPackageVersionMutation()
   const diffMutation = useDiffSkillPackageVersionsMutation()
   const enableCatalogMutation = useEnableSkillPackageCatalogMutation()
   const evalRun = useSkillTestRunStore((s) => s.run)
+  const clearEvalForSubjectChange = useSkillTestRunStore((s) => s.clearForSubjectChange)
 
-  function buildGateSubject(): PublishGateSubject | null {
-    const draft = packageQuery.data?.draftVersion
-    const digest = draftQuery.data?.contentDigest || draft?.contentDigest
-    const binding = draftQuery.data?.bindingSetDigest || draft?.bindingSetDigest || digest
-    if (!packageQuery.data || !draft?.id || !digest || !binding) return null
-    if (digest.length !== 64 || binding.length !== 64) return null
-    const zero = '0'.repeat(64)
-    return {
-      schemaVersion: 1,
-      subject: {
-        schemaVersion: 1,
-        kind: 'skill_draft',
-        aggregateId: packageId,
-        versionId: draft.id,
-        contentDigest: digest,
-        resolvedBindingDigest: binding,
-      },
-      profileDigest: zero,
-      catalogDigest: zero,
-      runtimeContractVersion: 1,
-      policyVersion: 'plan09-policy-v1',
-      thresholdVersion: 'plan09-policy-v1',
-      // Server revalidates dataset pins; interactive-only gates may still need a real dataset later.
-      datasetVersionIds: [],
-      buildRevision: 'development',
+  // After publish, evaluate the published pointer; otherwise evaluate the draft.
+  const workbenchSubjectKind = publishedVersionId && !draftVersionId ? 'skill_version' : 'skill_draft'
+  const workbenchVersionId =
+    workbenchSubjectKind === 'skill_version' ? publishedVersionId : draftVersionId
+
+  const publishGateValid = gateMatches(publishGate, 'skill_publish', draftVersionId)
+  const promotionGateValid = gateMatches(promotionGate, 'skill_catalog_enable', publishedVersionId)
+
+  const draftQualifyingRunIds = useMemo(() => {
+    if (
+      isQualifyingGateRun(evalRun, {
+        subjectKind: 'skill_draft',
+        subjectAggregateId: packageId,
+        subjectVersionId: draftVersionId ?? '',
+      })
+    ) {
+      return [evalRun!.id]
     }
-  }
+    return []
+  }, [evalRun, packageId, draftVersionId])
+
+  const promotionQualifyingRunIds = useMemo(() => {
+    if (
+      isQualifyingGateRun(evalRun, {
+        subjectKind: 'skill_version',
+        subjectAggregateId: packageId,
+        subjectVersionId: publishedVersionId ?? '',
+      })
+    ) {
+      return [evalRun!.id]
+    }
+    return []
+  }, [evalRun, packageId, publishedVersionId])
+
+  const canEnableCatalog =
+    Boolean(publishedVersionId) &&
+    promotionGateValid &&
+    promotionQualifyingRunIds.length > 0 &&
+    !enableCatalogMutation.isPending &&
+    !packageQuery.data?.catalogEnabled
+
+  const needsPublishedEvalHint =
+    Boolean(publishedVersionId) &&
+    !packageQuery.data?.catalogEnabled &&
+    (!promotionGateValid || promotionQualifyingRunIds.length === 0)
+
+  // Drop stale gates when the subject pointer they target no longer matches.
+  useEffect(() => {
+    if (publishGate && publishGate.subjectVersionId !== draftVersionId) {
+      setPublishGate(null)
+    }
+  }, [draftVersionId, publishGate])
+
+  useEffect(() => {
+    if (promotionGate && promotionGate.subjectVersionId !== publishedVersionId) {
+      setPromotionGate(null)
+    }
+  }, [publishedVersionId, promotionGate])
 
   async function handlePublish() {
     const draftId = packageQuery.data?.draftVersion?.id
@@ -109,14 +162,21 @@ export function UniversalSkillEditorPage() {
       setPageError(t('settings.universalSkills.noDraftVersion'))
       return
     }
+    if (!publishGateValid || !publishGate) {
+      setPageError(t('settings.universalSkills.gateNeedsRuns'))
+      return
+    }
     setPageError(null)
     try {
       await publishSkillPackageVersion(packageId, {
         draftVersionId: draftId,
         expectedAggregateRevision: packageQuery.data?.aggregateRevision ?? 0,
-        gateId: lastGateId,
+        gateId: publishGate.gateId,
         requestId: newRequestId('publish'),
       })
+      // Publish invalidates draft evidence: clear draft run/gate and switch to published subject.
+      setPublishGate(null)
+      clearEvalForSubjectChange()
       await packageQuery.refetch()
       await versionsQuery.refetch()
     } catch (err) {
@@ -125,8 +185,12 @@ export function UniversalSkillEditorPage() {
   }
 
   async function handleEnableCatalog() {
-    if (!lastGateId) {
-      setPageError(t('settings.universalSkills.gateNeedsRuns'))
+    if (!publishedVersionId) {
+      setPageError(t('settings.universalSkills.evaluatePublishedBeforeEnable'))
+      return
+    }
+    if (!promotionGateValid || !promotionGate) {
+      setPageError(t('settings.universalSkills.evaluatePublishedBeforeEnable'))
       return
     }
     setPageError(null)
@@ -136,7 +200,8 @@ export function UniversalSkillEditorPage() {
         body: {
           requestId: newRequestId('catalog-en'),
           expectedAggregateRevision,
-          gateId: lastGateId,
+          gateId: promotionGate.gateId,
+          expectedPublishedVersionId: publishedVersionId,
         },
       })
       await packageQuery.refetch()
@@ -205,6 +270,9 @@ export function UniversalSkillEditorPage() {
     try {
       const body = buildSaveBody()
       const version = await saveDraftMutation.mutateAsync({ packageId, body })
+      // Content/binding drift invalidates draft gate + draft evidence for prior subject.
+      setPublishGate(null)
+      clearEvalForSubjectChange()
       const refreshed = await packageQuery.refetch()
       markSaved({
         packageDetail: refreshed.data ?? null,
@@ -303,6 +371,8 @@ export function UniversalSkillEditorPage() {
                   },
                 })
                 .then(async () => {
+                  setPublishGate(null)
+                  clearEvalForSubjectChange()
                   await packageQuery.refetch()
                   await versionsQuery.refetch()
                 })
@@ -311,39 +381,81 @@ export function UniversalSkillEditorPage() {
           />
           <SkillVersionDiff diff={diff} />
           <div className="flex flex-wrap gap-2">
-            <Button type="button" variant="outline" onClick={() => setGateOpen(true)}>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!draftVersionId}
+              onClick={() => setGateDialogMode('publish')}
+            >
               {t('settings.universalSkills.openGateDialog')}
-            </Button>
-            <Button type="button" variant="outline" onClick={() => void handlePublish()}>
-              Publish draft
             </Button>
             <Button
               type="button"
               variant="outline"
-              disabled={!lastGateId || enableCatalogMutation.isPending}
+              disabled={!publishedVersionId}
+              onClick={() => setGateDialogMode('promotion')}
+            >
+              {t('settings.universalSkills.openPromotionGateDialog')}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!publishGateValid}
+              onClick={() => void handlePublish()}
+            >
+              {t('settings.universalSkills.publishDraft')}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!canEnableCatalog}
               onClick={() => void handleEnableCatalog()}
             >
-              {t('settings.universalSkills.catalogEnabled')}
+              {t('settings.universalSkills.enableCatalog')}
             </Button>
-            {lastGateId ? (
+            {publishGateValid && publishGate ? (
               <span className="font-mono text-xs text-muted-foreground">
-                gate={lastGateId.slice(0, 8)}… {lastGateDecision}
+                publish-gate={publishGate.gateId.slice(0, 8)}… {publishGate.decision}
+              </span>
+            ) : null}
+            {promotionGateValid && promotionGate ? (
+              <span className="font-mono text-xs text-muted-foreground">
+                promo-gate={promotionGate.gateId.slice(0, 8)}… {promotionGate.decision}
               </span>
             ) : null}
             {evalRun?.id ? (
               <span className="font-mono text-xs text-muted-foreground">
-                eval={evalRun.id.slice(0, 8)}…
+                eval={evalRun.id.slice(0, 8)}… {evalRun.subjectKind}
               </span>
             ) : null}
           </div>
+          {needsPublishedEvalHint ? (
+            <p className="text-sm text-muted-foreground">
+              {t('settings.universalSkills.evaluatePublishedBeforeEnable')}
+            </p>
+          ) : null}
           <SkillPublishGateDialog
-            open={gateOpen}
-            onClose={() => setGateOpen(false)}
-            subject={buildGateSubject()}
-            qualifyingEvalRunIds={evalRun?.id ? [evalRun.id] : []}
+            open={gateDialogMode === 'publish'}
+            onClose={() => setGateDialogMode(null)}
+            action="skill_publish"
+            subjectAggregateId={packageId || null}
+            subjectVersionId={draftVersionId}
+            subjectKind="skill_draft"
+            qualifyingEvalRunIds={draftQualifyingRunIds}
             onCreated={(result) => {
-              setLastGateId(result.gate.id)
-              setLastGateDecision(result.decision)
+              setPublishGate(gateUiStateFromResponse(result, 'skill_publish'))
+            }}
+          />
+          <SkillPublishGateDialog
+            open={gateDialogMode === 'promotion'}
+            onClose={() => setGateDialogMode(null)}
+            action="skill_catalog_enable"
+            subjectAggregateId={packageId || null}
+            subjectVersionId={publishedVersionId}
+            subjectKind="skill_version"
+            qualifyingEvalRunIds={promotionQualifyingRunIds}
+            onCreated={(result) => {
+              setPromotionGate(gateUiStateFromResponse(result, 'skill_catalog_enable'))
             }}
           />
         </div>
@@ -352,6 +464,8 @@ export function UniversalSkillEditorPage() {
           onSaveDraft={handleSaveDraft}
           onSaveMetadata={surface.data.adminMounted ? handleSaveMetadata : undefined}
           saving={saveDraftMutation.isPending || patchMetadataMutation.isPending}
+          evalSubjectKind={workbenchSubjectKind}
+          evalVersionId={workbenchVersionId}
         />
         <p className="text-xs text-muted-foreground">
           <Link to="/settings/assistant-skills" className="underline">{t('settings.universalSkills.openLegacy')}</Link>

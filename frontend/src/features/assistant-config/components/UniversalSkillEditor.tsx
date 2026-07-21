@@ -52,6 +52,10 @@ export interface UniversalSkillEditorProps {
   onSaveMetadata?: () => Promise<void>
   saving?: boolean
   className?: string
+  /** Workbench subject kind — draft for publish evidence, version for promotion. */
+  evalSubjectKind?: 'skill_draft' | 'skill_version'
+  /** Workbench subject version id (draft or published pointer). */
+  evalVersionId?: string | null
 }
 
 async function blobToBase64(blob: Blob): Promise<string> {
@@ -70,6 +74,8 @@ export function UniversalSkillEditor({
   onSaveMetadata,
   saving = false,
   className,
+  evalSubjectKind = 'skill_draft',
+  evalVersionId,
 }: UniversalSkillEditorProps) {
   const { t } = useTranslation()
   const [tab, setTab] = useState<EditorTab>('overview')
@@ -446,8 +452,8 @@ export function UniversalSkillEditor({
             </div>
             <SkillTestWorkbench
               packageId={packageDetail.id}
-              versionId={draftVersionId}
-              subjectKind="skill_draft"
+              versionId={evalVersionId ?? draftVersionId}
+              subjectKind={evalSubjectKind}
             />
           </div>
         ) : null}

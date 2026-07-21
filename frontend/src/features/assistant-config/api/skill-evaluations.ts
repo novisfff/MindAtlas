@@ -178,6 +178,8 @@ export interface PublishGateSummary {
   subjectKind: string
   subjectAggregateId: string
   subjectVersionId: string
+  /** Server-stored action this gate authorizes (publish vs enable are distinct). */
+  action?: PublishGateAction | string | null
   expiresAt?: string | null
   waiverCodes: string[]
   requestId?: string | null
@@ -190,6 +192,62 @@ export interface CreateGateResponse {
   acceptedWaiverCodes: string[]
   assertionSnapshot: Record<string, unknown>
   metricSnapshot: Record<string, unknown>
+}
+
+/** UI record for a single action+subject-version gate, never reused across actions. */
+export interface GateUiState {
+  gateId: string
+  action: PublishGateAction
+  subjectAggregateId: string
+  subjectVersionId: string
+  subjectKind: string
+  decision: PublishGateDecision
+  requestId?: string | null
+  assertionSnapshot: Record<string, unknown>
+  metricSnapshot: Record<string, unknown>
+  createdAt?: string | null
+}
+
+export function gateUiStateFromResponse(
+  result: CreateGateResponse,
+  action: PublishGateAction,
+): GateUiState {
+  return {
+    gateId: result.gate.id,
+    action: (result.gate.action as PublishGateAction | undefined) ?? action,
+    subjectAggregateId: result.gate.subjectAggregateId,
+    subjectVersionId: result.gate.subjectVersionId,
+    subjectKind: result.gate.subjectKind,
+    decision: result.decision,
+    requestId: result.gate.requestId,
+    assertionSnapshot: { ...(result.assertionSnapshot || {}) },
+    metricSnapshot: { ...(result.metricSnapshot || {}) },
+    createdAt: result.gate.createdAt,
+  }
+}
+
+/** True when a completed run is usable as gate evidence for the exact subject. */
+export function isQualifyingGateRun(run: {
+  id?: string | null
+  status?: string | null
+  gateEligible?: boolean | null
+  evidenceProvenance?: string | null
+  subjectKind?: string | null
+  subjectAggregateId?: string | null
+  subjectVersionId?: string | null
+} | null | undefined, subject: {
+  subjectKind: string
+  subjectAggregateId: string
+  subjectVersionId: string
+}): boolean {
+  if (!run?.id) return false
+  if (run.status !== 'completed') return false
+  if (!run.gateEligible) return false
+  if (run.evidenceProvenance !== 'real_orchestration') return false
+  if (run.subjectKind !== subject.subjectKind) return false
+  if (run.subjectAggregateId !== subject.subjectAggregateId) return false
+  if (run.subjectVersionId !== subject.subjectVersionId) return false
+  return true
 }
 
 export type EvalStreamTerminalReason = 'closed' | 'transport_failure' | 'aborted'
