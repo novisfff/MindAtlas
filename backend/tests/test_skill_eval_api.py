@@ -84,12 +84,15 @@ class SkillEvalApiMountTests(unittest.TestCase):
         r2 = client.post(
             f"{PLAN09_EVAL_PREFIX}/runs",
             json={
+                "requestId": f"auth-{uuid.uuid4().hex[:8]}",
                 "subjectKind": "skill_draft",
                 "subjectAggregateId": str(uuid.uuid4()),
                 "subjectVersionId": str(uuid.uuid4()),
-                "subjectContentDigest": _digest("1"),
-                "subjectBindingDigest": _digest("2"),
+                "prompt": "hello",
+                "locale": "en",
+                "profileVersionId": str(uuid.uuid4()),
                 "mode": "interactive_scripted",
+                "datasetVersionIds": [],
             },
         )
         self.assertIn(r2.status_code, {401, 403}, r2.text)
@@ -137,11 +140,51 @@ class SkillEvalApiMountTests(unittest.TestCase):
         r = client.post(f"{PLAN09_EVAL_PREFIX}/gates", json=body, headers=headers)
         self.assertEqual(r.status_code, 422, r.text)
 
+    def _bootstrap_profile_version(self, client, headers: dict[str, str]) -> str:
+        from app.assistant.skills.admin_router import (
+            PLAN09_ADMIN_PREFIX,
+            mount_skill_admin_router,
+        )
+
+        # Ensure protected profile routes are available on the same app when needed.
+        # The eval mount already shares the trusted guard; profile bootstrap uses
+        # the always-mounted main-agent profile router instead.
+        from app.assistant.skills.router import main_agent_profile_router
+
+        # Create default profile + draft via always-mounted routes (no principal).
+        profile = client.get("/api/assistant-config/main-agent-profiles/default")
+        if profile.status_code != 200:
+            # When main-agent router is not mounted in this client, mint via service.
+            return str(uuid.uuid4())  # will 422 on profile pin — tests mount package only
+        data = profile.json()["data"]
+        rev = int(data.get("aggregateRevision") or 0)
+        from app.assistant.skills.schemas import default_main_agent_profile_snapshot
+        import copy
+
+        snap = copy.deepcopy(default_main_agent_profile_snapshot().normalized_payload())
+        snap["basePrompt"] = "eval admission profile"
+        draft = client.put(
+            "/api/assistant-config/main-agent-profiles/default/draft",
+            json={
+                "snapshot": snap,
+                "requestId": f"prof-draft-{uuid.uuid4().hex[:8]}",
+                "expectedAggregateRevision": rev,
+            },
+        )
+        if draft.status_code != 200:
+            return str(uuid.uuid4())
+        return draft.json()["data"]["id"]
+
     def test_create_run_with_operator_headers(self) -> None:
         import base64
         import json
 
         client, session = self._client(mount=True)
+        # Always-mounted profile routes for profileVersionId pin.
+        from app.assistant.skills.router import main_agent_profile_router
+
+        client.app.include_router(main_agent_profile_router)
+
         headers = {
             "X-MindAtlas-Operator-Id": "operator-task8",
             "X-MindAtlas-Operator-Role": "operator",
@@ -183,7 +226,9 @@ class SkillEvalApiMountTests(unittest.TestCase):
         self.assertEqual(created.status_code, 200, created.text)
         pkg = created.json()["data"]
         draft = pkg["draftVersion"]
-        # Client may send garbage digests — server must recompute from version row.
+        profile_version_id = self._bootstrap_profile_version(client, headers)
+
+        # Client must not author digests — only identity + workbench inputs.
         r = client.post(
             f"{PLAN09_EVAL_PREFIX}/runs",
             headers=headers,
@@ -192,11 +237,11 @@ class SkillEvalApiMountTests(unittest.TestCase):
                 "subjectKind": "skill_draft",
                 "subjectAggregateId": pkg["id"],
                 "subjectVersionId": draft["id"],
-                "subjectContentDigest": _digest("3"),
-                "subjectBindingDigest": _digest("4"),
+                "prompt": "evaluate this skill draft",
+                "locale": "en",
+                "profileVersionId": profile_version_id,
                 "mode": "interactive_scripted",
                 "datasetVersionIds": [],
-                "isolationDigest": _digest("5"),
             },
         )
         self.assertEqual(r.status_code, 200, r.text)
@@ -205,12 +250,10 @@ class SkillEvalApiMountTests(unittest.TestCase):
         self.assertEqual(data["mode"], "interactive_scripted")
         run_id = data["id"]
 
-        # Server must ignore client-authored digests and admit the shared
-        # candidate-closure resolver's content/binding digests.
+        # Server must resolve digests via shared candidate-closure path.
         from app.assistant.evaluation.models import AssistantSkillEvalRun
         from app.assistant.skills.candidate_closure import resolve_skill_candidate_closure
 
-        # Expire identity map so we re-read committed admission digests.
         session.expire_all()
         closure = resolve_skill_candidate_closure(
             session,
@@ -223,8 +266,9 @@ class SkillEvalApiMountTests(unittest.TestCase):
         assert run_row is not None
         self.assertEqual(run_row.subject_content_digest, closure.content_digest)
         self.assertEqual(run_row.subject_binding_digest, closure.binding_set_digest)
+        self.assertEqual(run_row.actor_principal, "operator-task8")
+        # Client digests are not accepted on the body (extra=forbid).
         self.assertNotEqual(run_row.subject_content_digest, _digest("3"))
-        self.assertNotEqual(run_row.subject_binding_digest, _digest("4"))
 
         events = client.get(
             f"{PLAN09_EVAL_PREFIX}/runs/{run_id}/events",
@@ -236,6 +280,33 @@ class SkillEvalApiMountTests(unittest.TestCase):
 
     def test_create_run_rejects_unknown_skill_version(self) -> None:
         client, _session = self._client(mount=True)
+        from app.assistant.skills.router import main_agent_profile_router
+
+        client.app.include_router(main_agent_profile_router)
+        headers = {
+            "X-MindAtlas-Operator-Id": "operator-task8",
+            "X-MindAtlas-Operator-Role": "operator",
+        }
+        profile_version_id = self._bootstrap_profile_version(client, headers)
+        r = client.post(
+            f"{PLAN09_EVAL_PREFIX}/runs",
+            headers=headers,
+            json={
+                "requestId": f"req-{uuid.uuid4().hex[:8]}",
+                "subjectKind": "skill_draft",
+                "subjectAggregateId": str(uuid.uuid4()),
+                "subjectVersionId": str(uuid.uuid4()),
+                "prompt": "missing skill",
+                "locale": "en",
+                "profileVersionId": profile_version_id,
+                "mode": "interactive_scripted",
+                "datasetVersionIds": [],
+            },
+        )
+        self.assertEqual(r.status_code, 404, r.text)
+
+    def test_create_run_rejects_client_digests(self) -> None:
+        client, _session = self._client(mount=True)
         headers = {
             "X-MindAtlas-Operator-Id": "operator-task8",
             "X-MindAtlas-Operator-Role": "operator",
@@ -244,22 +315,87 @@ class SkillEvalApiMountTests(unittest.TestCase):
             f"{PLAN09_EVAL_PREFIX}/runs",
             headers=headers,
             json={
+                "requestId": f"req-{uuid.uuid4().hex[:8]}",
                 "subjectKind": "skill_draft",
                 "subjectAggregateId": str(uuid.uuid4()),
                 "subjectVersionId": str(uuid.uuid4()),
-                "subjectContentDigest": _digest("3"),
-                "subjectBindingDigest": _digest("4"),
+                "prompt": "x",
+                "locale": "en",
+                "profileVersionId": str(uuid.uuid4()),
                 "mode": "interactive_scripted",
-                "isolationDigest": _digest("5"),
+                "datasetVersionIds": [],
+                "subjectContentDigest": _digest("3"),
+                "actorPrincipal": "forged",
             },
         )
-        self.assertEqual(r.status_code, 404, r.text)
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_dataset_scripted_requires_fixture_and_dataset(self) -> None:
+        client, _session = self._client(mount=True)
+        headers = {
+            "X-MindAtlas-Operator-Id": "operator-task8",
+            "X-MindAtlas-Operator-Role": "operator",
+        }
+        r = client.post(
+            f"{PLAN09_EVAL_PREFIX}/runs",
+            headers=headers,
+            json={
+                "requestId": f"req-{uuid.uuid4().hex[:8]}",
+                "subjectKind": "skill_draft",
+                "subjectAggregateId": str(uuid.uuid4()),
+                "subjectVersionId": str(uuid.uuid4()),
+                "prompt": "x",
+                "locale": "en",
+                "profileVersionId": str(uuid.uuid4()),
+                "mode": "dataset_scripted",
+                "datasetVersionIds": [],
+            },
+        )
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_dataset_publish_requires_principal(self) -> None:
+        client, session = self._client(mount=True)
+        from app.assistant.evaluation.repository import EvaluationRepository
+
+        repo = EvaluationRepository(session)
+        ds = repo.create_dataset(
+            stable_key=f"api-ds-{uuid.uuid4().hex[:8]}",
+            display_name="API DS",
+            ownership="custom",
+        )
+        session.commit()
+        r = client.post(
+            f"{PLAN09_EVAL_PREFIX}/datasets/{ds.id}/publish",
+            json={"requestId": "ds-1", "expectedRevision": 0},
+        )
+        self.assertEqual(r.status_code, 401, r.text)
 
 
 class SkillEvalRouterContractTests(unittest.TestCase):
     def test_router_prefix_and_route_count(self) -> None:
         self.assertEqual(PLAN09_EVAL_PREFIX, "/api/assistant-config/skill-eval")
-        self.assertGreaterEqual(len(skill_eval_router.routes), 6)
+        # Task 8 expands the surface: datasets CRUD, results, evidence, SSE.
+        self.assertGreaterEqual(len(skill_eval_router.routes), 12)
+
+    def test_create_eval_run_body_forbids_client_digests(self) -> None:
+        from app.assistant.evaluation.schemas import CreateEvalRunBody
+        from pydantic import ValidationError
+
+        with self.assertRaises(ValidationError):
+            CreateEvalRunBody.model_validate(
+                {
+                    "requestId": "r1",
+                    "subjectKind": "skill_draft",
+                    "subjectAggregateId": str(uuid.uuid4()),
+                    "subjectVersionId": str(uuid.uuid4()),
+                    "prompt": "p",
+                    "locale": "en",
+                    "profileVersionId": str(uuid.uuid4()),
+                    "mode": "interactive_scripted",
+                    "datasetVersionIds": [],
+                    "subjectContentDigest": _digest("x"),
+                }
+            )
 
 
 if __name__ == "__main__":

@@ -25,7 +25,10 @@ from app.assistant.skills.schemas import (
     AddSkillPackageAliasCommand,
     AggregateRevisionCommand,
     DisableSkillPackageAliasCommand,
+    MainAgentProfileSnapshotV1,
+    PublishMainAgentProfileCommand,
     RestoreSkillVersionAsDraftCommand,
+    SaveMainAgentProfileDraftCommand,
     UpdateSkillPackageMetadataCommand,
 )
 from app.assistant.skills.service import MainAgentProfileService
@@ -92,6 +95,29 @@ class CatalogEnableBody(RevisionBody):
         default=None, alias="expectedPublishedVersionId"
     )
     # Plan 09: required promotion gate for catalog enable (server-derived).
+    gate_id: UUID | None = Field(default=None, alias="gateId")
+
+
+class ProfileDraftSaveBody(CamelModel):
+    """Protected Profile draft save (CAS + principal)."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    request_id: str = Field(alias="requestId", min_length=1, max_length=128)
+    expected_aggregate_revision: int = Field(alias="expectedAggregateRevision", ge=0)
+    snapshot: dict[str, Any]
+    version_name: str | None = Field(default=None, alias="versionName")
+
+
+class ProfilePublishBody(RevisionBody):
+    draft_version_id: UUID = Field(alias="draftVersionId")
+    gate_id: UUID | None = Field(default=None, alias="gateId")
+
+
+class ProfileRuntimeBody(RevisionBody):
+    expected_published_version_id: UUID | None = Field(
+        default=None, alias="expectedPublishedVersionId"
+    )
     gate_id: UUID | None = Field(default=None, alias="gateId")
 
 
@@ -425,6 +451,81 @@ def apply_skill_package_import(
     return ApiResponse.ok(_dto(result))
 
 
+def _require_operator(principal: OperatorPrincipal) -> None:
+    if not principal.is_operator:
+        raise ApiException(
+            status_code=403,
+            code=40391,
+            message="operator role is required for this transition",
+        )
+
+
+def _default_profile(service: MainAgentProfileService):
+    try:
+        return service.get_default()
+    except ApiException as exc:
+        if exc.code != 40493:
+            raise
+        return service.ensure_default()
+
+
+@skill_admin_parent_router.get("/main-agent-profiles/default")
+def get_protected_default_main_agent_profile(
+    db: Session = Depends(get_db),
+    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+) -> ApiResponse:
+    """Protected Profile summary read (principal required)."""
+    _ = principal
+    service = MainAgentProfileService(db)
+    return ApiResponse.ok(_dto(_default_profile(service)))
+
+
+@skill_admin_parent_router.put("/main-agent-profiles/default/draft")
+def put_protected_default_main_agent_draft(
+    body: ProfileDraftSaveBody,
+    db: Session = Depends(get_db),
+    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+) -> ApiResponse:
+    """Protected Profile draft mutation — does not touch runtime_enabled."""
+    _require_operator(principal)
+    service = MainAgentProfileService(db)
+    profile = _default_profile(service)
+    try:
+        snapshot = MainAgentProfileSnapshotV1.model_validate(body.snapshot)
+    except Exception as exc:
+        raise ApiException(
+            status_code=422,
+            code=42294,
+            message="invalid main agent profile snapshot",
+            details={"error": str(exc)},
+        ) from exc
+    version = service.save_draft(
+        profile.id,
+        SaveMainAgentProfileDraftCommand(
+            snapshot=snapshot,
+            version_name=body.version_name,
+            origin="api",
+            expected_aggregate_revision=body.expected_aggregate_revision,
+            request_id=body.request_id,
+        ),
+    )
+    return ApiResponse.ok(_dto(version))
+
+
+@skill_admin_parent_router.get("/main-agent-profiles/default/versions")
+def list_protected_default_main_agent_versions(
+    db: Session = Depends(get_db),
+    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+) -> ApiResponse:
+    _ = principal
+    service = MainAgentProfileService(db)
+    profile = _default_profile(service)
+    items = service.list_versions(profile.id)
+    return ApiResponse.ok(
+        {"items": [_dto(item) for item in items], "total": len(items)}
+    )
+
+
 @skill_admin_parent_router.get(
     "/main-agent-profiles/default/versions/{version_id}"
 )
@@ -436,14 +537,76 @@ def get_default_main_agent_version(
     """Protected Profile version detail (Plan 09 trusted mount only)."""
     _ = principal  # principal required; viewer/operator both may read.
     service = MainAgentProfileService(db)
-    try:
-        profile = service.get_default()
-    except ApiException as exc:
-        if exc.code != 40493:
-            raise
-        profile = service.ensure_default()
+    profile = _default_profile(service)
     detail = service.get_version(profile.id, version_id)
     return ApiResponse.ok(_dto(detail))
+
+
+@skill_admin_parent_router.post("/main-agent-profiles/default/publish")
+def publish_protected_default_main_agent_profile(
+    body: ProfilePublishBody,
+    db: Session = Depends(get_db),
+    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+) -> ApiResponse:
+    """Protected Profile publish (content stage; not runtime enable)."""
+    _require_operator(principal)
+    service = MainAgentProfileService(db)
+    profile = _default_profile(service)
+    version = service.publish(
+        profile.id,
+        PublishMainAgentProfileCommand(
+            draft_version_id=body.draft_version_id,
+            gate_id=body.gate_id,
+            request_id=body.request_id,
+            expected_aggregate_revision=body.expected_aggregate_revision,
+        ),
+        actor_principal=principal.principal_id,
+    )
+    return ApiResponse.ok(_dto(version))
+
+
+@skill_admin_parent_router.post("/main-agent-profiles/default/runtime/enable")
+def enable_protected_default_main_agent_runtime(
+    body: ProfileRuntimeBody,
+    db: Session = Depends(get_db),
+    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+) -> ApiResponse:
+    """Protected Profile live-state enable (promotion gate required)."""
+    _require_operator(principal)
+    service = MainAgentProfileService(db)
+    profile = _default_profile(service)
+    summary = service.set_runtime_enabled(
+        profile.id,
+        enabled=True,
+        expected_published_version_id=body.expected_published_version_id,
+        gate_id=body.gate_id,
+        request_id=body.request_id,
+        expected_aggregate_revision=body.expected_aggregate_revision,
+        actor_principal=principal.principal_id,
+    )
+    return ApiResponse.ok(_dto(summary))
+
+
+@skill_admin_parent_router.post("/main-agent-profiles/default/runtime/disable")
+def disable_protected_default_main_agent_runtime(
+    body: ProfileRuntimeBody,
+    db: Session = Depends(get_db),
+    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+) -> ApiResponse:
+    """Protected Profile live-state disable (explicit; not draft demotion)."""
+    _require_operator(principal)
+    service = MainAgentProfileService(db)
+    profile = _default_profile(service)
+    summary = service.set_runtime_enabled(
+        profile.id,
+        enabled=False,
+        expected_published_version_id=body.expected_published_version_id,
+        gate_id=body.gate_id,
+        request_id=body.request_id,
+        expected_aggregate_revision=body.expected_aggregate_revision,
+        actor_principal=principal.principal_id,
+    )
+    return ApiResponse.ok(_dto(summary))
 
 
 def mount_skill_admin_router(app: Any, *, app_env: str | None = None) -> bool:

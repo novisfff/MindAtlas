@@ -479,6 +479,87 @@ class EvaluationRepository:
         )
         return list(self.session.execute(stmt).scalars().all())
 
+    def get_draft(
+        self, dataset_id: UUID
+    ) -> AssistantSkillEvalDatasetDraft | None:
+        return self.session.execute(
+            select(AssistantSkillEvalDatasetDraft).where(
+                AssistantSkillEvalDatasetDraft.dataset_id == dataset_id
+            )
+        ).scalar_one_or_none()
+
+    def list_dataset_versions(
+        self, dataset_id: UUID
+    ) -> list[AssistantSkillEvalDatasetVersion]:
+        stmt = (
+            select(AssistantSkillEvalDatasetVersion)
+            .where(AssistantSkillEvalDatasetVersion.dataset_id == dataset_id)
+            .order_by(AssistantSkillEvalDatasetVersion.sequence.desc())
+        )
+        return list(self.session.execute(stmt).scalars().all())
+
+    def list_case_results(
+        self, *, eval_run_id: UUID, limit: int = 200
+    ) -> list[AssistantSkillEvalCaseResult]:
+        if limit <= 0 or limit > 1000:
+            raise EvaluationRepositoryError(CODE_INVALID_INPUT, "limit must be 1..1000")
+        stmt = (
+            select(AssistantSkillEvalCaseResult)
+            .where(AssistantSkillEvalCaseResult.eval_run_id == eval_run_id)
+            .order_by(AssistantSkillEvalCaseResult.created_at.asc())
+            .limit(int(limit))
+        )
+        return list(self.session.execute(stmt).scalars().all())
+
+    def list_artifacts(
+        self, *, eval_run_id: UUID, limit: int = 200
+    ) -> list[AssistantSkillEvalArtifact]:
+        if limit <= 0 or limit > 1000:
+            raise EvaluationRepositoryError(CODE_INVALID_INPUT, "limit must be 1..1000")
+        stmt = (
+            select(AssistantSkillEvalArtifact)
+            .where(AssistantSkillEvalArtifact.eval_run_id == eval_run_id)
+            .order_by(AssistantSkillEvalArtifact.created_at.asc())
+            .limit(int(limit))
+        )
+        return list(self.session.execute(stmt).scalars().all())
+
+    def get_artifact(
+        self, artifact_id: UUID
+    ) -> AssistantSkillEvalArtifact | None:
+        return self.session.get(AssistantSkillEvalArtifact, artifact_id)
+
+    def list_qualifying_runs_for_subject(
+        self,
+        *,
+        subject_kind: str | None = None,
+        subject_aggregate_id: UUID | None = None,
+        subject_version_id: UUID | None = None,
+        limit: int = 50,
+    ) -> list[AssistantSkillEvalRun]:
+        """Bounded list of completed gate-eligible real_orchestration runs."""
+        if limit <= 0 or limit > 200:
+            raise EvaluationRepositoryError(CODE_INVALID_INPUT, "limit must be 1..200")
+        stmt = select(AssistantSkillEvalRun).where(
+            AssistantSkillEvalRun.status == "completed",
+            AssistantSkillEvalRun.gate_eligible.is_(True),
+            AssistantSkillEvalRun.evidence_provenance == "real_orchestration",
+        )
+        if subject_kind is not None:
+            stmt = stmt.where(AssistantSkillEvalRun.subject_kind == subject_kind)
+        if subject_aggregate_id is not None:
+            stmt = stmt.where(
+                AssistantSkillEvalRun.subject_aggregate_id == subject_aggregate_id
+            )
+        if subject_version_id is not None:
+            stmt = stmt.where(
+                AssistantSkillEvalRun.subject_version_id == subject_version_id
+            )
+        stmt = stmt.order_by(AssistantSkillEvalRun.ended_at.desc().nullslast()).limit(
+            int(limit)
+        )
+        return list(self.session.execute(stmt).scalars().all())
+
     # ------------------------------------------------------------------
     # Eval Run
     # ------------------------------------------------------------------
