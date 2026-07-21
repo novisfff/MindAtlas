@@ -730,6 +730,12 @@ class AssistantMainAgentProfile(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
     legacy_source_digest = Column(String(64), nullable=True)
     runtime_enabled = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    # Plan 09 aggregate CAS + durable last-mutation idempotency (mirrors packages).
+    aggregate_revision = Column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    last_admin_request_id = Column(String(128), nullable=True)
+    last_admin_request_digest = Column(String(64), nullable=True)
 
     draft_version = relationship(
         "AssistantMainAgentProfileVersion",
@@ -759,6 +765,14 @@ class AssistantMainAgentProfile(UuidPrimaryKeyMixin, TimestampMixin, Base):
         _nullable_sha256_check(
             "legacy_source_digest",
             name="ck_assistant_main_agent_profile_legacy_source_digest",
+        ),
+        CheckConstraint(
+            "aggregate_revision >= 0",
+            name="ck_assistant_main_agent_profile_aggregate_revision",
+        ),
+        _nullable_sha256_check(
+            "last_admin_request_digest",
+            name="ck_assistant_main_agent_profile_last_admin_request_digest",
         ),
         Index(
             "uq_assistant_main_agent_profile_default",

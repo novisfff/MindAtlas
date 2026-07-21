@@ -529,7 +529,10 @@ def _try_publish_package(
     try:
         svc.publish(
             package.id,
-            PublishSkillVersionCommand(draft_version_id=draft_version_id),
+            PublishSkillVersionCommand(
+                draft_version_id=draft_version_id,
+                request_id=f"legacy-publish:{package.id}:{draft_version_id}",
+            ),
         )
         return "published", []
     except ApiException as exc:
@@ -1179,6 +1182,7 @@ class LegacySkillShadowAdapter:
 
         main_snapshot = _main_agent_snapshot_from_agent(snapshot)
         try:
+            current_rev = int(getattr(profile, "aggregate_revision", 0) or 0)
             draft = profile_svc.save_draft(
                 profile.id,
                 SaveMainAgentProfileDraftCommand(
@@ -1186,6 +1190,11 @@ class LegacySkillShadowAdapter:
                     version_name="legacy-general-chat",
                     origin="legacy",
                     source_ref=source_ref,
+                    expected_aggregate_revision=current_rev,
+                    request_id=(
+                        f"legacy-profile-draft:{skill.id}:"
+                        f"{main_snapshot.content_digest()[:16]}"
+                    ),
                 ),
             )
             # save_draft commits; re-load. Stamp digest only after publish success
@@ -1212,7 +1221,10 @@ class LegacySkillShadowAdapter:
 
             profile_svc.publish(
                 profile.id,
-                PublishMainAgentProfileCommand(draft_version_id=draft.id),
+                PublishMainAgentProfileCommand(
+                    draft_version_id=draft.id,
+                    request_id=f"legacy-profile-publish:{skill.id}:{draft.id}",
+                ),
             )
             profile = session.get(AssistantMainAgentProfile, profile.id)
             if profile is not None:

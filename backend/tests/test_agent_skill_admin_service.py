@@ -350,9 +350,7 @@ class SkillAdminServiceTests(unittest.TestCase):
         # Publish then enable catalog via admin operator path (requires gate).
         pub = self.pkg_svc.publish(
             self.package.id,
-            PublishSkillVersionCommand(
-                draft_version_id=self.package.draft_version.id  # type: ignore[union-attr]
-            ),
+            PublishSkillVersionCommand(draft_version_id=self.package.draft_version.id, request_id="pub-req-1"),  # type: ignore[union-attr]
         )
         self.assertEqual(pub.version_source, "publish")
         # refresh package
@@ -398,9 +396,7 @@ class SkillAdminServiceTests(unittest.TestCase):
         with self.assertRaises(ApiException) as ctx:
             self.pkg_svc.publish(
                 self.package.id,
-                PublishSkillVersionCommand(
-                    draft_version_id=self.package.draft_version.id  # type: ignore[union-attr]
-                ),
+                PublishSkillVersionCommand(draft_version_id=self.package.draft_version.id, request_id="pub-req-2"),  # type: ignore[union-attr]
             )
         self.assertEqual(ctx.exception.code, 40996)
 
@@ -428,9 +424,7 @@ class SkillAdminServiceTests(unittest.TestCase):
 
         pub = self.pkg_svc.publish(
             self.package.id,
-            PublishSkillVersionCommand(
-                draft_version_id=self.package.draft_version.id  # type: ignore[union-attr]
-            ),
+            PublishSkillVersionCommand(draft_version_id=self.package.draft_version.id, request_id="pub-req-3"),  # type: ignore[union-attr]
         )
         with self.assertRaises(ApiException) as ctx:
             self.admin.enable_catalog(

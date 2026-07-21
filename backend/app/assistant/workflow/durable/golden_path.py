@@ -421,12 +421,15 @@ def publish_durable_proposal_review(
         draft_id = detail.draft_version.id if detail.draft_version else None
     else:
         package_id = existing.id
+        rev = int(getattr(existing, "aggregate_revision", 0) or 0)
         draft = svc.save_draft(
             SaveSkillDraftCommand(
                 package_id=package_id,
                 parsed=parsed,
                 version_name="golden-draft",
                 origin="api",
+                expected_aggregate_revision=rev,
+                request_id=f"durable-golden-draft:{package_id}:{rev}",
             )
         )
         draft_id = draft.id
@@ -435,7 +438,10 @@ def publish_durable_proposal_review(
 
     published = svc.publish(
         package_id,
-        PublishSkillVersionCommand(draft_version_id=draft_id),
+        PublishSkillVersionCommand(
+            draft_version_id=draft_id,
+            request_id=f"durable-golden-publish:{package_id}:{draft_id}",
+        ),
         durable_capability_keys=(workflow.name,),
     )
     detail = svc.get_package(package_id)

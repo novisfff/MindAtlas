@@ -66,10 +66,10 @@ class PublishDraftRequest(CamelModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     draft_version_id: UUID = Field(alias="draftVersionId")
+    request_id: str = Field(alias="requestId", min_length=1, max_length=128)
     # Plan 09: optional server-derived publish gate (required when live-enabled
     # or ASSISTANT_SKILL_PUBLISH_GATE_MODE=enforce).
     gate_id: UUID | None = Field(default=None, alias="gateId")
-    request_id: str | None = Field(default=None, alias="requestId", max_length=128)
 
 
 class MainAgentDraftSaveRequest(CamelModel):
@@ -78,6 +78,8 @@ class MainAgentDraftSaveRequest(CamelModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     snapshot: MainAgentProfileSnapshotV1
+    expected_aggregate_revision: int = Field(alias="expectedAggregateRevision", ge=0)
+    request_id: str = Field(alias="requestId", min_length=1, max_length=128)
     version_name: str | None = Field(default=None, alias="versionName")
 
 
@@ -705,6 +707,8 @@ async def save_default_main_agent_draft(
             snapshot=body.snapshot,
             version_name=body.version_name,
             origin="api",
+            expected_aggregate_revision=body.expected_aggregate_revision,
+            request_id=body.request_id,
         ),
     )
     return ApiResponse.ok(_dto(version))
@@ -754,22 +758,6 @@ def list_default_main_agent_versions(
         )
     )
 
-
-
-@main_agent_profile_router.get("/default/versions/{version_id}")
-def get_default_main_agent_version(
-    version_id: UUID,
-    db: Session = Depends(get_db),
-) -> ApiResponse:
-    service = MainAgentProfileService(db)
-    try:
-        profile = service.get_default()
-    except ApiException as exc:
-        if exc.code != 40493:
-            raise
-        profile = service.ensure_default()
-    detail = service.get_version(profile.id, version_id)
-    return ApiResponse.ok(_dto(detail))
 
 
 @main_agent_profile_router.post("/default/publish")

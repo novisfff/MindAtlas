@@ -221,6 +221,17 @@ class DraftCasAndResourceTests(unittest.TestCase):
         self.assertEqual(second.status_code, 200, second.text)
         self.assertEqual(first.json()["data"]["id"], second.json()["data"]["id"])
 
+    def test_skill_draft_save_requires_revision_and_request_id(self) -> None:
+        name = f"req-cas-{uuid.uuid4().hex[:8]}"
+        created = _create_with_resource(self.client, name=name)
+        package_id = created["id"]
+        response = self.client.put(
+            f"/api/assistant-config/skill-packages/{package_id}/draft",
+            content=json.dumps({"skillMd": _skill_md(name)}),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(response.status_code, 422, response.text)
+
 
 if __name__ == "__main__":
     unittest.main()

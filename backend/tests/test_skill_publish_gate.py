@@ -26,6 +26,13 @@ bootstrap_backend_imports()
 reset_caches()
 
 
+def _current_pkg_rev(db, package_id) -> int:
+    from app.assistant.skills.models import AssistantSkillPackage
+    row = db.get(AssistantSkillPackage, package_id)
+    return int(getattr(row, "aggregate_revision", 0) or 0) if row is not None else 0
+
+
+
 DIGEST_A = "a" * 64
 DIGEST_B = "b" * 64
 DIGEST_C = "c" * 64
@@ -785,7 +792,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         draft_id = self.package.draft_version.id
         published = self.pkg_svc.publish(
             self.package.id,
-            PublishSkillVersionCommand(draft_version_id=draft_id),
+            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-4"),
         )
         self.assertEqual(published.version_source, "publish")
         row = self.db.get(AssistantSkillPackage, self.package.id)
@@ -812,7 +819,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         draft_id = self.package.draft_version.id
         pub1 = self.pkg_svc.publish(
             self.package.id,
-            PublishSkillVersionCommand(draft_version_id=draft_id),
+            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-5"),
         )
         detail = self.pkg_svc.get_package(self.package.id)
         version = self.db.get(
@@ -881,15 +888,15 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
             expected_root_name="gate-skill",
         )
         draft2 = self.pkg_svc.save_draft(
-            SaveSkillDraftCommand(
-                package_id=self.package.id, parsed=parsed, origin="api"
-            ),
+            SaveSkillDraftCommand(package_id=self.package.id, parsed=parsed, origin="api", expected_aggregate_revision=_current_pkg_rev(self.db, self.package.id), request_id="draft-req-1"),
         )
+        # Draft CAS advances aggregate_revision; failed publish must not advance it further.
+        rev_after_draft = _current_pkg_rev(self.db, self.package.id)
 
         with self.assertRaises(ApiException) as ctx:
             self.pkg_svc.publish(
                 self.package.id,
-                PublishSkillVersionCommand(draft_version_id=draft2.id),
+                PublishSkillVersionCommand(draft_version_id=draft2.id, request_id="pub-req-6"),
             )
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertEqual(ctx.exception.code, 40980)
@@ -897,7 +904,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         row = self.db.get(AssistantSkillPackage, self.package.id)
         assert row is not None
         self.assertEqual(row.published_version_id, pointer_before)
-        self.assertEqual(int(row.aggregate_revision or 0), rev_before)
+        self.assertEqual(int(row.aggregate_revision or 0), rev_after_draft)
         self.assertTrue(row.catalog_enabled)
 
     def test_enable_without_gate_always_fails(self) -> None:
@@ -911,7 +918,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         draft_id = self.package.draft_version.id
         pub = self.pkg_svc.publish(
             self.package.id,
-            PublishSkillVersionCommand(draft_version_id=draft_id),
+            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-7"),
         )
         detail = self.pkg_svc.get_package(self.package.id)
         with self.assertRaises(ApiException) as ctx:
@@ -941,7 +948,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         with self.assertRaises(ApiException) as ctx:
             self.pkg_svc.publish(
                 self.package.id,
-                PublishSkillVersionCommand(draft_version_id=draft_id),
+                PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-8"),
             )
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertEqual(ctx.exception.code, 40980)
@@ -981,7 +988,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         get_settings.cache_clear()
         pub_observe = self.pkg_svc.publish(
             self.package.id,
-            PublishSkillVersionCommand(draft_version_id=draft_id),
+            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-9"),
         )
         # Save a new draft (same content) for enforce publish.
         from app.assistant.skills.schemas import SaveSkillDraftCommand
@@ -994,9 +1001,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
             expected_root_name="gate-skill",
         )
         draft2 = self.pkg_svc.save_draft(
-            SaveSkillDraftCommand(
-                package_id=self.package.id, parsed=parsed, origin="api"
-            ),
+            SaveSkillDraftCommand(package_id=self.package.id, parsed=parsed, origin="api", expected_aggregate_revision=_current_pkg_rev(self.db, self.package.id), request_id="draft-req-2"),
         )
         pub_ver = self.db.get(
             __import__(
@@ -1059,7 +1064,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         draft_id = self.package.draft_version.id
         pub = self.pkg_svc.publish(
             self.package.id,
-            PublishSkillVersionCommand(draft_version_id=draft_id),
+            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-10"),
         )
         version = self.db.get(
             __import__(
@@ -1124,7 +1129,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         get_settings.cache_clear()
         pub_observe = self.pkg_svc.publish(
             self.package.id,
-            PublishSkillVersionCommand(draft_version_id=draft_id),
+            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-11"),
         )
         from app.assistant.skills.schemas import SaveSkillDraftCommand
         from app.assistant.skills.package_io import parse_skill_directory_files
@@ -1143,9 +1148,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
             expected_root_name="gate-skill",
         )
         draft2 = self.pkg_svc.save_draft(
-            SaveSkillDraftCommand(
-                package_id=self.package.id, parsed=parsed, origin="api"
-            ),
+            SaveSkillDraftCommand(package_id=self.package.id, parsed=parsed, origin="api", expected_aggregate_revision=_current_pkg_rev(self.db, self.package.id), request_id="draft-req-3"),
         )
         pub_ver = self.db.get(
             __import__(
@@ -1192,9 +1195,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         assert self.package.draft_version is not None
         pub = self.pkg_svc.publish(
             self.package.id,
-            PublishSkillVersionCommand(
-                draft_version_id=self.package.draft_version.id
-            ),
+            PublishSkillVersionCommand(draft_version_id=self.package.draft_version.id, request_id="pub-req-12"),
         )
         with self.assertRaises(ApiException) as ctx:
             self.pkg_svc.set_catalog_enabled(

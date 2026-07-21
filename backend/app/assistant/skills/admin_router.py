@@ -28,6 +28,7 @@ from app.assistant.skills.schemas import (
     RestoreSkillVersionAsDraftCommand,
     UpdateSkillPackageMetadataCommand,
 )
+from app.assistant.skills.service import MainAgentProfileService
 from app.common.exceptions import ApiException
 from app.common.responses import ApiResponse
 from app.common.schemas import CamelModel
@@ -375,14 +376,17 @@ async def preview_skill_package_import(
     file: UploadFile = File(...),
     mode: str = Form(...),
     target_package_id: UUID | None = Form(None, alias="targetPackageId"),
-    expected_aggregate_revision: int | None = Form(
-        None, alias="expectedAggregateRevision"
-    ),
+    expected_aggregate_revision: int = Form(..., alias="expectedAggregateRevision"),
     fork_canonical_name: str | None = Form(None, alias="forkCanonicalName"),
     db: Session = Depends(get_db),
     principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
 ) -> ApiResponse:
-    """Dry-run ZIP import preview. Never persists a package/version row."""
+    """Dry-run ZIP import preview. Never persists a package/version row.
+
+    ``expectedAggregateRevision`` is required on the form for CAS parity with
+    other Plan 09 mutations. Create/fork modes ignore the revision value after
+    validation; append mode enforces it against the target package.
+    """
     raw = await _read_upload_bounded(file, max_bytes=MAX_ZIP_UPLOAD_BYTES)
     svc = ImportPreviewService(db)
     result = svc.preview(
@@ -415,6 +419,27 @@ def apply_skill_package_import(
         principal=principal,
     )
     return ApiResponse.ok(_dto(result))
+
+
+@skill_admin_parent_router.get(
+    "/main-agent-profiles/default/versions/{version_id}"
+)
+def get_default_main_agent_version(
+    version_id: UUID,
+    db: Session = Depends(get_db),
+    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+) -> ApiResponse:
+    """Protected Profile version detail (Plan 09 trusted mount only)."""
+    _ = principal  # principal required; viewer/operator both may read.
+    service = MainAgentProfileService(db)
+    try:
+        profile = service.get_default()
+    except ApiException as exc:
+        if exc.code != 40493:
+            raise
+        profile = service.ensure_default()
+    detail = service.get_version(profile.id, version_id)
+    return ApiResponse.ok(_dto(detail))
 
 
 def mount_skill_admin_router(app: Any, *, app_env: str | None = None) -> bool:

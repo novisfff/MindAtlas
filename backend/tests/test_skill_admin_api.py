@@ -155,6 +155,15 @@ class SkillAdminOpenApiMountTests(unittest.TestCase):
         paths = schema.get("paths") or {}
         admin_paths = [p for p in paths if PLAN09_ADMIN_PREFIX in p]
         self.assertGreaterEqual(len(admin_paths), 5)
+        # Protected Profile version detail is mounted under skill-admin only.
+        self.assertIn(
+            f"{PLAN09_ADMIN_PREFIX}/main-agent-profiles/default/versions/{{version_id}}",
+            paths,
+        )
+        self.assertNotIn(
+            "/api/assistant-config/main-agent-profiles/default/versions/{version_id}",
+            paths,
+        )
         # No physical DELETE methods on Plan 09 admin routes.
         for path, methods in paths.items():
             if PLAN09_ADMIN_PREFIX not in path:

@@ -338,11 +338,14 @@ class AgentSkillService:
         )
 
     def save_draft(self, command: SaveSkillDraftCommand) -> SkillVersionSummary:
-        """Append or re-point a draft with optional aggregate revision CAS.
+        """Append or re-point a draft with required aggregate revision CAS.
 
         When ``preserve_previous_resources`` is True, skill.md/yaml from the
         command are merged with bytes copied from the current draft version so
         a content-only edit cannot wipe package resources.
+
+        Sequence: lock package → compare request ID/digest → compare expected
+        revision → apply mutation → increment revision → stamp request evidence.
         """
         version_name = command.version_name or "draft"
         origin = command.origin
@@ -350,7 +353,13 @@ class AgentSkillService:
         try:
             package = self._lock_package(command.package_id)
 
-            request_id = (command.request_id or "").strip() or None
+            request_id = (command.request_id or "").strip()
+            if not request_id:
+                raise ApiException(
+                    status_code=422,
+                    code=42291,
+                    message="requestId is required",
+                )
             cas_payload = {
                 "package_id": str(command.package_id),
                 "version_name": version_name,
@@ -359,58 +368,56 @@ class AgentSkillService:
                 "preserve_previous_resources": bool(
                     command.preserve_previous_resources
                 ),
-                "expected_aggregate_revision": command.expected_aggregate_revision,
+                "expected_aggregate_revision": int(
+                    command.expected_aggregate_revision
+                ),
             }
-            digest: str | None = None
-            if request_id is not None:
-                body = json.dumps(
-                    {"operation": "save_draft", "payload": cas_payload},
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    default=str,
-                )
-                digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
-                last_id = getattr(package, "last_admin_request_id", None)
-                last_digest = getattr(package, "last_admin_request_digest", None)
-                # Identical retry must short-circuit before revision CAS: the first
-                # successful call already advanced aggregate_revision.
-                if last_id == request_id:
-                    if last_digest == digest and package.draft_version_id is not None:
-                        draft = (
-                            self.db.query(AssistantSkillVersion)
-                            .filter(
-                                AssistantSkillVersion.id == package.draft_version_id
-                            )
-                            .one_or_none()
+            body = json.dumps(
+                {"operation": "save_draft", "payload": cas_payload},
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            last_id = getattr(package, "last_admin_request_id", None)
+            last_digest = getattr(package, "last_admin_request_digest", None)
+            # Identical retry must short-circuit before revision CAS: the first
+            # successful call already advanced aggregate_revision.
+            if last_id == request_id:
+                if last_digest == digest and package.draft_version_id is not None:
+                    draft = (
+                        self.db.query(AssistantSkillVersion)
+                        .filter(
+                            AssistantSkillVersion.id == package.draft_version_id
                         )
-                        if draft is not None:
-                            return self._version_summary(draft)
-                    raise ApiException(
-                        status_code=409,
-                        code=_CODE_CONFLICT_REQUEST,
-                        message="requestId was reused with a different payload",
-                        details={"requestId": request_id},
+                        .one_or_none()
                     )
+                    if draft is not None:
+                        return self._version_summary(draft)
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_REQUEST,
+                    message="requestId was reused with a different payload",
+                    details={"requestId": request_id},
+                )
 
-            # Optional Plan 09 revision CAS (after idempotent requestId check).
-            if command.expected_aggregate_revision is not None:
-                current_rev = int(package.aggregate_revision or 0)
-                if current_rev != int(command.expected_aggregate_revision):
-                    raise ApiException(
-                        status_code=409,
-                        code=_CODE_CONFLICT_REVISION,
-                        message=(
-                            f"aggregate revision conflict: expected "
-                            f"{command.expected_aggregate_revision}, current {current_rev}"
+            current_rev = int(package.aggregate_revision or 0)
+            if current_rev != int(command.expected_aggregate_revision):
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_REVISION,
+                    message=(
+                        f"aggregate revision conflict: expected "
+                        f"{command.expected_aggregate_revision}, current {current_rev}"
+                    ),
+                    details={
+                        "expectedAggregateRevision": int(
+                            command.expected_aggregate_revision
                         ),
-                        details={
-                            "expectedAggregateRevision": int(
-                                command.expected_aggregate_revision
-                            ),
-                            "currentAggregateRevision": current_rev,
-                            "packageId": str(package.id),
-                        },
-                    )
+                        "currentAggregateRevision": current_rev,
+                        "packageId": str(package.id),
+                    },
+                )
 
             parsed = command.parsed
             if command.preserve_previous_resources and package.draft_version_id is not None:
@@ -486,13 +493,9 @@ class AgentSkillService:
                 package.draft_version_id = existing.id
                 package.display_name = _display_name_for(parsed)
                 package.description = parsed.frontmatter.description
-                if command.expected_aggregate_revision is not None:
-                    package.aggregate_revision = (
-                        int(package.aggregate_revision or 0) + 1
-                    )
-                if request_id is not None:
-                    package.last_admin_request_id = request_id
-                    package.last_admin_request_digest = digest  # type: ignore[name-defined]
+                package.aggregate_revision = current_rev + 1
+                package.last_admin_request_id = request_id
+                package.last_admin_request_digest = digest
                 self.db.commit()
                 return self._version_summary(existing)
 
@@ -507,20 +510,9 @@ class AgentSkillService:
             package.draft_version_id = version.id
             package.display_name = _display_name_for(parsed)
             package.description = parsed.frontmatter.description
-            if command.expected_aggregate_revision is not None:
-                package.aggregate_revision = int(package.aggregate_revision or 0) + 1
-            if request_id is not None:
-                # Stamp client-request digest (pre-merge) for identical-retry.
-                body = json.dumps(
-                    {"operation": "save_draft", "payload": cas_payload},
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    default=str,
-                )
-                package.last_admin_request_id = request_id
-                package.last_admin_request_digest = hashlib.sha256(
-                    body.encode("utf-8")
-                ).hexdigest()
+            package.aggregate_revision = current_rev + 1
+            package.last_admin_request_id = request_id
+            package.last_admin_request_digest = digest
             self.db.commit()
             return self._version_summary(version)
         except ApiException:
@@ -2076,6 +2068,13 @@ class MainAgentProfileService:
         profile_id: UUID,
         command: SaveMainAgentProfileDraftCommand,
     ) -> MainAgentProfileVersionSummary:
+        """Append or re-point a Main Agent Profile draft with required CAS.
+
+        Does **not** mutate ``runtime_enabled`` or the published pointer. Live
+        state changes only via explicit enable/disable or gated publish paths.
+        Sequence: lock profile → compare request ID/digest → compare expected
+        revision → apply mutation → increment revision → stamp request evidence.
+        """
         try:
             snapshot = self._validate_snapshot(command.snapshot)
             payload = snapshot.normalized_payload()
@@ -2083,8 +2082,70 @@ class MainAgentProfileService:
             version_name = command.version_name or "draft"
             origin = command.origin
             source_ref = command.source_ref
+            request_id = (command.request_id or "").strip()
+            if not request_id:
+                raise ApiException(
+                    status_code=422,
+                    code=42294,
+                    message="requestId is required",
+                )
 
             profile = self._lock_profile(profile_id)
+
+            cas_payload = {
+                "profile_id": str(profile_id),
+                "version_name": version_name,
+                "origin": origin,
+                "content_digest": digest,
+                "expected_aggregate_revision": int(
+                    command.expected_aggregate_revision
+                ),
+            }
+            body = json.dumps(
+                {"operation": "profile_save_draft", "payload": cas_payload},
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            request_digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            last_id = getattr(profile, "last_admin_request_id", None)
+            last_digest = getattr(profile, "last_admin_request_digest", None)
+            if last_id == request_id:
+                if last_digest == request_digest and profile.draft_version_id is not None:
+                    draft = (
+                        self.db.query(AssistantMainAgentProfileVersion)
+                        .filter(
+                            AssistantMainAgentProfileVersion.id
+                            == profile.draft_version_id
+                        )
+                        .one_or_none()
+                    )
+                    if draft is not None:
+                        return self._version_summary(draft)
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_REQUEST,
+                    message="requestId was reused with a different payload",
+                    details={"requestId": request_id},
+                )
+
+            current_rev = int(getattr(profile, "aggregate_revision", 0) or 0)
+            if current_rev != int(command.expected_aggregate_revision):
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_REVISION,
+                    message=(
+                        f"aggregate revision conflict: expected "
+                        f"{command.expected_aggregate_revision}, current {current_rev}"
+                    ),
+                    details={
+                        "expectedAggregateRevision": int(
+                            command.expected_aggregate_revision
+                        ),
+                        "currentAggregateRevision": current_rev,
+                        "profileId": str(profile.id),
+                    },
+                )
 
             # Migration ownership:
             # - origin=legacy keeps/sets migration_state=shadow (bootstrap→shadow)
@@ -2108,7 +2169,9 @@ class MainAgentProfileService:
             )
             if existing is not None:
                 profile.draft_version_id = existing.id
-                profile.runtime_enabled = False
+                profile.aggregate_revision = current_rev + 1
+                profile.last_admin_request_id = request_id
+                profile.last_admin_request_digest = request_digest
                 self.db.commit()
                 return self._version_summary(existing)
 
@@ -2127,7 +2190,9 @@ class MainAgentProfileService:
             self.db.add(version)
             self.db.flush()
             profile.draft_version_id = version.id
-            profile.runtime_enabled = False
+            profile.aggregate_revision = current_rev + 1
+            profile.last_admin_request_id = request_id
+            profile.last_admin_request_digest = request_digest
             self.db.commit()
             return self._version_summary(version)
         except ApiException:
@@ -2250,8 +2315,6 @@ class MainAgentProfileService:
                 or f"profile-publish:{profile.id}:{publish_version.id}"
             )
             actor = actor_principal or "system:profile-publish"
-            # Profile has no aggregate_revision field; store 0 on gate_use.
-            # If the field is added later, bump it on gated publish.
             agg_rev = int(getattr(profile, "aggregate_revision", 0) or 0)
             try:
                 consume = gate_svc.enforce_or_bootstrap_publish(
@@ -2272,8 +2335,26 @@ class MainAgentProfileService:
             profile.published_version_id = publish_version.id
             if not live_enabled:
                 profile.runtime_enabled = False
-            if consume is not None and hasattr(profile, "aggregate_revision"):
-                profile.aggregate_revision = agg_rev + 1
+            # Always advance CAS so draft/publish observers see pointer changes.
+            profile.aggregate_revision = agg_rev + 1
+            profile.last_admin_request_id = str(request_id)
+            body = json.dumps(
+                {
+                    "operation": "profile_publish",
+                    "payload": {
+                        "profile_id": str(profile.id),
+                        "draft_version_id": str(command.draft_version_id),
+                        "publish_version_id": str(publish_version.id),
+                        "gate_id": str(gate_id) if gate_id else None,
+                    },
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            profile.last_admin_request_digest = hashlib.sha256(
+                body.encode("utf-8")
+            ).hexdigest()
             self.db.commit()
             return self._version_summary(publish_version)
         except ApiException:
@@ -2293,13 +2374,16 @@ class MainAgentProfileService:
         migration_state: str | None = None,
         gate_id: UUID | None = None,
         request_id: str | None = None,
+        expected_aggregate_revision: int | None = None,
         actor_principal: str | None = None,
     ) -> MainAgentProfileSummary:
         """Toggle Profile aggregate ``runtime_enabled`` without mutating versions.
 
         Enabling requires a published version and a fresh matching promotion gate
         (observe and enforce). Optional expected digests make the operation fail
-        closed on concurrent pointer/content drift.
+        closed on concurrent pointer/content drift. When ``request_id`` /
+        ``expected_aggregate_revision`` are supplied, applies the same
+        idempotency-first CAS sequence as Skill package admin mutations.
         """
         from app.assistant.evaluation.gates import (
             PublishGateError,
@@ -2311,6 +2395,58 @@ class MainAgentProfileService:
 
         try:
             profile = self._lock_profile(profile_id)
+            rid = (request_id or "").strip() or None
+            cas_payload = {
+                "profile_id": str(profile_id),
+                "enabled": bool(enabled),
+                "expected_published_version_id": (
+                    str(expected_published_version_id)
+                    if expected_published_version_id is not None
+                    else None
+                ),
+                "expected_content_digest": expected_content_digest,
+                "migration_state": migration_state,
+                "gate_id": str(gate_id) if gate_id is not None else None,
+                "expected_aggregate_revision": expected_aggregate_revision,
+            }
+            request_digest: str | None = None
+            if rid is not None:
+                body = json.dumps(
+                    {"operation": "profile_set_runtime_enabled", "payload": cas_payload},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                )
+                request_digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+                last_id = getattr(profile, "last_admin_request_id", None)
+                last_digest = getattr(profile, "last_admin_request_digest", None)
+                if last_id == rid:
+                    if last_digest == request_digest:
+                        return self._profile_summary(profile)
+                    raise ApiException(
+                        status_code=409,
+                        code=_CODE_CONFLICT_REQUEST,
+                        message="requestId was reused with a different payload",
+                        details={"requestId": rid},
+                    )
+
+            current_rev = int(getattr(profile, "aggregate_revision", 0) or 0)
+            if expected_aggregate_revision is not None:
+                if current_rev != int(expected_aggregate_revision):
+                    raise ApiException(
+                        status_code=409,
+                        code=_CODE_CONFLICT_REVISION,
+                        message=(
+                            f"aggregate revision conflict: expected "
+                            f"{expected_aggregate_revision}, current {current_rev}"
+                        ),
+                        details={
+                            "expectedAggregateRevision": int(expected_aggregate_revision),
+                            "currentAggregateRevision": current_rev,
+                            "profileId": str(profile.id),
+                        },
+                    )
+
             if enabled:
                 if profile.published_version_id is None:
                     raise ApiException(
@@ -2390,7 +2526,6 @@ class MainAgentProfileService:
                     threshold_version=pins.threshold_version,
                     build_revision=pins.build_revision,
                 )
-                agg_rev = int(getattr(profile, "aggregate_revision", 0) or 0)
                 try:
                     gate_svc.enforce_enable(
                         gate_id=gate_id,
@@ -2400,14 +2535,12 @@ class MainAgentProfileService:
                         resulting_version_id=profile.published_version_id,
                         actor_principal=actor_principal or "system:profile-enable",
                         request_id=str(
-                            request_id or f"profile-enable:{profile.id}:{version.id}"
+                            rid or f"profile-enable:{profile.id}:{version.id}"
                         ),
-                        aggregate_revision=agg_rev,
+                        aggregate_revision=current_rev,
                     )
                 except PublishGateError as exc:
                     raise exc.to_api_exception() from exc
-                if hasattr(profile, "aggregate_revision"):
-                    profile.aggregate_revision = agg_rev + 1
             if migration_state is not None:
                 allowed = {"bootstrap", "shadow", "native", "cutover"}
                 if migration_state not in allowed:
@@ -2432,6 +2565,11 @@ class MainAgentProfileService:
                     )
                 profile.migration_state = migration_state
             profile.runtime_enabled = bool(enabled)
+            # Always advance aggregate revision on successful live-state toggle.
+            profile.aggregate_revision = current_rev + 1
+            if rid is not None and request_digest is not None:
+                profile.last_admin_request_id = rid
+                profile.last_admin_request_digest = request_digest
             self.db.commit()
             return self._profile_summary(profile)
         except ApiException:
@@ -2572,6 +2710,7 @@ class MainAgentProfileService:
             is_default=bool(profile.is_default),
             migration_state=profile.migration_state,  # type: ignore[arg-type]
             runtime_enabled=bool(profile.runtime_enabled),
+            aggregate_revision=int(getattr(profile, "aggregate_revision", 0) or 0),
             draft_version=draft,
             published_version=published,
             legacy_skill_id=profile.legacy_skill_id,

@@ -4,9 +4,10 @@ Revision ID: 403414a62e55
 Revises: d7e8f9a0b1c3
 Create Date: 2026-07-19 23:26:46.342434
 
-Plan 09 Task 1: aggregate revision CAS, archive/catalog evidence columns on
-``assistant_skill_package``, and soft-disable columns on
-``assistant_skill_package_alias``. Additive/backfill/finalize only; 09A must
+Plan 09 Task 1 / remediation Task 2: aggregate revision CAS, archive/catalog
+evidence columns on ``assistant_skill_package``, soft-disable columns on
+``assistant_skill_package_alias``, and matching Profile CAS columns on
+``assistant_main_agent_profile``. Additive/backfill/finalize only; 09A must
 roll back independently of evaluation schema.
 
 Also installs the column-aware alias soft-disable UPDATE guard so 09A alone
@@ -85,6 +86,20 @@ def upgrade() -> None:
         sa.Column("disabled_by", sa.String(length=128), nullable=True),
     )
 
+    # Profile aggregate CAS columns (same shape as skill packages).
+    op.add_column(
+        "assistant_main_agent_profile",
+        sa.Column("aggregate_revision", sa.Integer(), nullable=True),
+    )
+    op.add_column(
+        "assistant_main_agent_profile",
+        sa.Column("last_admin_request_id", sa.String(length=128), nullable=True),
+    )
+    op.add_column(
+        "assistant_main_agent_profile",
+        sa.Column("last_admin_request_digest", sa.String(length=64), nullable=True),
+    )
+
     # --- Phase 2: backfill existing rows ---
     op.execute(
         sa.text(
@@ -93,10 +108,24 @@ def upgrade() -> None:
             "WHERE aggregate_revision IS NULL"
         )
     )
+    op.execute(
+        sa.text(
+            "UPDATE assistant_main_agent_profile "
+            "SET aggregate_revision = 0 "
+            "WHERE aggregate_revision IS NULL"
+        )
+    )
 
     # --- Phase 3: finalize NOT NULL + server_default + checks ---
     op.alter_column(
         "assistant_skill_package",
+        "aggregate_revision",
+        existing_type=sa.Integer(),
+        nullable=False,
+        server_default=sa.text("0"),
+    )
+    op.alter_column(
+        "assistant_main_agent_profile",
         "aggregate_revision",
         existing_type=sa.Integer(),
         nullable=False,
@@ -123,6 +152,16 @@ def upgrade() -> None:
         "assistant_skill_package_alias",
         "(disabled_at IS NULL AND disabled_by IS NULL) OR "
         "(disabled_at IS NOT NULL AND alias_type = 'custom')",
+    )
+    op.create_check_constraint(
+        "ck_assistant_main_agent_profile_aggregate_revision",
+        "assistant_main_agent_profile",
+        "aggregate_revision >= 0",
+    )
+    op.create_check_constraint(
+        "ck_assistant_main_agent_profile_last_admin_request_digest",
+        "assistant_main_agent_profile",
+        "last_admin_request_digest IS NULL OR length(last_admin_request_digest) = 64",
     )
 
     # Plan 01 marked assistant_skill_package_alias fully immutable, but soft
@@ -209,6 +248,16 @@ def downgrade() -> None:
     )
 
     op.drop_constraint(
+        "ck_assistant_main_agent_profile_last_admin_request_digest",
+        "assistant_main_agent_profile",
+        type_="check",
+    )
+    op.drop_constraint(
+        "ck_assistant_main_agent_profile_aggregate_revision",
+        "assistant_main_agent_profile",
+        type_="check",
+    )
+    op.drop_constraint(
         "ck_assistant_skill_package_alias_disabled_shape",
         "assistant_skill_package_alias",
         type_="check",
@@ -229,6 +278,9 @@ def downgrade() -> None:
         type_="check",
     )
 
+    op.drop_column("assistant_main_agent_profile", "last_admin_request_digest")
+    op.drop_column("assistant_main_agent_profile", "last_admin_request_id")
+    op.drop_column("assistant_main_agent_profile", "aggregate_revision")
     op.drop_column("assistant_skill_package_alias", "disabled_by")
     op.drop_column("assistant_skill_package_alias", "disabled_at")
     op.drop_column("assistant_skill_package", "last_restored_from_version_id")

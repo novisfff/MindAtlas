@@ -88,9 +88,8 @@ class SkillPackageJsonCreateRequest(CamelModel):
 class SkillPackageJsonSaveRequest(CamelModel):
     """Router-facing draft save body. Media types/IDs/digests are forbidden.
 
-    Plan 09: optional ``expectedAggregateRevision`` + ``requestId`` enable
-    optimistic concurrency and identical-retry idempotency. When either is
-    supplied both should be supplied for CAS; mismatch → 409.
+    Plan 09: required ``expectedAggregateRevision`` + ``requestId`` enable
+    optimistic concurrency and identical-retry idempotency. Mismatch → 409.
     """
 
     model_config = ConfigDict(
@@ -104,10 +103,8 @@ class SkillPackageJsonSaveRequest(CamelModel):
     # Explicit [] = clear all resources. List = full replacement snapshot.
     resources: list[SkillResourceInput] | None = None
     version_name: str | None = Field(default=None, alias="versionName")
-    expected_aggregate_revision: int | None = Field(
-        default=None, alias="expectedAggregateRevision", ge=0
-    )
-    request_id: str | None = Field(default=None, alias="requestId", min_length=1, max_length=128)
+    expected_aggregate_revision: int = Field(alias="expectedAggregateRevision", ge=0)
+    request_id: str = Field(alias="requestId", min_length=1, max_length=128)
 
 
 class CreateSkillPackageCommand(CamelModel):
@@ -129,8 +126,8 @@ class SaveSkillDraftCommand(CamelModel):
     parsed: ParsedSkillPackage
     version_name: str | None = None
     origin: Literal["api", "import", "legacy"] = "api"
-    expected_aggregate_revision: int | None = None
-    request_id: str | None = None
+    expected_aggregate_revision: int = Field(ge=0)
+    request_id: str = Field(min_length=1, max_length=128)
     # When True, server copies resources from the current draft version
     # instead of using parsed.resources (used when client omits resources).
     preserve_previous_resources: bool = False
@@ -141,16 +138,17 @@ class PublishSkillVersionCommand(CamelModel):
 
     Plan 09: optional ``gate_id`` + ``gate_subject`` for publish-gate enforcement.
     Client never supplies passed/decision/metrics — only evidence refs via gate.
+    Required ``request_id`` stamps idempotent gate/admin evidence.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     draft_version_id: UUID
+    request_id: str = Field(min_length=1, max_length=128)
     gate_id: UUID | None = None
     # Opaque server-recomputed subject closure (PublishGateSubject dict / model).
     # When omitted, service rebuilds closure from draft digests under lock.
     gate_subject: dict[str, Any] | None = None
-    request_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class PublishMainAgentProfileCommand(CamelModel):
@@ -159,9 +157,9 @@ class PublishMainAgentProfileCommand(CamelModel):
     model_config = ConfigDict(extra="forbid")
 
     draft_version_id: UUID
+    request_id: str = Field(min_length=1, max_length=128)
     gate_id: UUID | None = None
     gate_subject: dict[str, Any] | None = None
-    request_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class SkillResourceMetadata(CamelModel):
@@ -781,6 +779,8 @@ class SaveMainAgentProfileDraftCommand(CamelModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     snapshot: MainAgentProfileSnapshotV1
+    expected_aggregate_revision: int = Field(ge=0)
+    request_id: str = Field(min_length=1, max_length=128)
     version_name: str | None = None
     origin: Literal["api", "legacy"] = "api"
     source_ref: dict[str, Any] | None = None
@@ -810,6 +810,7 @@ class MainAgentProfileSummary(CamelModel):
     is_default: bool
     migration_state: MainAgentMigrationState
     runtime_enabled: bool
+    aggregate_revision: int = 0
     draft_version: MainAgentProfileVersionSummary | None = None
     published_version: MainAgentProfileVersionSummary | None = None
     legacy_skill_id: UUID | None = None

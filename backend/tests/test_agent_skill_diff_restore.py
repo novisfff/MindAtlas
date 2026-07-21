@@ -12,6 +12,13 @@ bootstrap_backend_imports()
 reset_caches()
 
 
+def _current_pkg_rev(db, package_id) -> int:
+    from app.assistant.skills.models import AssistantSkillPackage
+    row = db.get(AssistantSkillPackage, package_id)
+    return int(getattr(row, "aggregate_revision", 0) or 0) if row is not None else 0
+
+
+
 def _minimal_skill_md(
     *,
     name: str = "weekly-review",
@@ -115,8 +122,7 @@ class SkillDiffRestoreTests(unittest.TestCase):
         assert self.v1 is not None
         # Append a second divergent draft.
         self.v2 = self.pkg_svc.save_draft(
-            SaveSkillDraftCommand(
-                package_id=self.package.id,
+            SaveSkillDraftCommand(package_id=self.package.id,
                 parsed=_parse(
                     name=name,
                     body="# V2\n\nChanged body for diff.\n",
@@ -126,8 +132,7 @@ class SkillDiffRestoreTests(unittest.TestCase):
                         "assets/secret-token.txt": b"super-secret-value-changed",
                     },
                 ),
-                version_name="draft-2",
-            )
+                version_name="draft-2", expected_aggregate_revision=_current_pkg_rev(self.db, self.package.id), request_id="draft-req-1")
         )
 
     def tearDown(self) -> None:
@@ -190,7 +195,7 @@ class SkillDiffRestoreTests(unittest.TestCase):
         # Publish v2 so published pointer exists and must remain stable.
         published = self.pkg_svc.publish(
             self.package.id,
-            PublishSkillVersionCommand(draft_version_id=self.v2.id),
+            PublishSkillVersionCommand(draft_version_id=self.v2.id, request_id="pub-req-2"),
         )
         detail_before = self.pkg_svc.get_package(self.package.id)
         self.assertEqual(detail_before.published_version.id, published.id)  # type: ignore[union-attr]

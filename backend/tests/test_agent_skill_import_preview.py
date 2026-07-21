@@ -18,6 +18,13 @@ bootstrap_backend_imports()
 reset_caches()
 
 
+def _current_pkg_rev(db, package_id) -> int:
+    from app.assistant.skills.models import AssistantSkillPackage
+    row = db.get(AssistantSkillPackage, package_id)
+    return int(getattr(row, "aggregate_revision", 0) or 0) if row is not None else 0
+
+
+
 FIXTURE_ROOT = (
     Path(__file__).resolve().parent / "fixtures" / "agent_skills" / "valid-weekly-review"
 )
@@ -433,7 +440,7 @@ class TestImportPreviewApplyModes:
         )
         published = self.pkg_svc.publish(
             detail.id,
-            PublishSkillVersionCommand(draft_version_id=detail.draft_version.id),  # type: ignore[union-attr]
+            PublishSkillVersionCommand(draft_version_id=detail.draft_version.id, request_id="pub-req-1"),  # type: ignore[union-attr]
         )
         # Plan 09: catalog enable requires a matching gate (no Plan 01 bypass).
         from app.assistant.skills.admin_service import SkillAdminService
@@ -1231,7 +1238,7 @@ class TestImportPreviewAdminRoutes:
             "/api/assistant-config/skill-admin/skill-packages/import/preview",
             headers=self.headers,
             files={"file": ("pack.zip", raw, "application/zip")},
-            data={"mode": "create"},
+            data={"mode": "create", "expectedAggregateRevision": "0"},
         )
         assert resp.status_code == 200, resp.text
         body = resp.json()["data"]
