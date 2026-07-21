@@ -359,6 +359,7 @@ class PublishGateServiceUnitTests(unittest.TestCase):
             ),
             actor_principal="op-1",
             subject=subject,
+            _allow_prebuilt_subject=True,
         )
         self.db.commit()
         self.assertEqual(result.decision, "passed")
@@ -387,6 +388,7 @@ class PublishGateServiceUnitTests(unittest.TestCase):
                 ),
                 actor_principal="op-1",
                 subject=subject,
+                _allow_prebuilt_subject=True,
             )
         self.assertEqual(ctx.exception.code, "hard_safety_not_waivable")
 
@@ -410,6 +412,7 @@ class PublishGateServiceUnitTests(unittest.TestCase):
             ),
             actor_principal="op-1",
             subject=subject,
+            _allow_prebuilt_subject=True,
         )
         self.db.commit()
         self.assertEqual(result.decision, "failed")
@@ -437,6 +440,7 @@ class PublishGateServiceUnitTests(unittest.TestCase):
             ),
             actor_principal="op-1",
             subject=subject,
+            _allow_prebuilt_subject=True,
         )
         self.db.commit()
         self.assertEqual(result.decision, "failed")
@@ -490,6 +494,7 @@ class PublishGateServiceUnitTests(unittest.TestCase):
             ),
             actor_principal="op",
             subject=subject,
+            _allow_prebuilt_subject=True,
         )
         self.db.commit()
 
@@ -537,6 +542,7 @@ class PublishGateServiceUnitTests(unittest.TestCase):
             ),
             actor_principal="op",
             subject=subject,
+            _allow_prebuilt_subject=True,
         )
         result.gate.expires_at = utcnow() - timedelta(hours=1)
         self.db.commit()
@@ -576,6 +582,7 @@ class PublishGateServiceUnitTests(unittest.TestCase):
             ),
             actor_principal="op",
             subject=subject,
+            _allow_prebuilt_subject=True,
         )
         self.db.commit()
         consume = svc.consume_gate(
@@ -796,6 +803,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
             ),
             actor_principal="op-gate",
             subject=subject,
+            _allow_prebuilt_subject=True,
         )
         self.db.commit()
         return result.gate, subject, run

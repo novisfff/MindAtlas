@@ -324,6 +324,7 @@ class TwoGateLifecycleTests(unittest.TestCase):
             ),
             actor_principal="op-two-gate",
             subject=subject,
+            _allow_prebuilt_subject=True,
         )
         self.db.commit()
         publish_gate = publish_gate_result.gate
@@ -444,6 +445,7 @@ class TwoGateLifecycleTests(unittest.TestCase):
                 ),
                 actor_principal="op",
                 subject=subject,
+                _allow_prebuilt_subject=True,
             )
         self.assertIn(
             ctx.exception.code,
@@ -521,6 +523,7 @@ class TwoGateLifecycleTests(unittest.TestCase):
             ),
             actor_principal="op",
             subject=publish_subject,
+            _allow_prebuilt_subject=True,
         ).gate
         self.db.commit()
 
@@ -573,6 +576,7 @@ class TwoGateLifecycleTests(unittest.TestCase):
             ),
             actor_principal="op",
             subject=enable_subject,
+            _allow_prebuilt_subject=True,
         ).gate
         self.db.commit()
         self.assertEqual(enable_gate.action, "skill_catalog_enable")
@@ -616,6 +620,63 @@ class TwoGateLifecycleTests(unittest.TestCase):
                 aggregate_revision=99,
             )
         self.assertEqual(ctx.exception.code, "gate_already_used")
+
+    def test_create_gate_subject_kwarg_rebuilds_without_prebuilt_flag(self) -> None:
+        """subject= without the test flag must rebuild authoritatively (no digest bypass)."""
+        from app.assistant.evaluation.gates import (
+            PublishGateService,
+            build_publish_gate_subject,
+            make_create_gate_request,
+        )
+        from app.assistant.skills.candidate_closure import resolve_skill_candidate_closure
+
+        assert self.package.draft_version is not None
+        draft = self.package.draft_version
+        closure = resolve_skill_candidate_closure(
+            self.db,
+            package_id=self.package.id,
+            version_id=draft.id,
+            subject_kind="skill_draft",
+        )
+        run, ds_id = self._seed_completed_run(
+            subject_kind="skill_draft",
+            aggregate_id=self.package.id,
+            version_id=draft.id,
+            content_digest=closure.content_digest,
+            binding_digest=closure.binding_set_digest,
+        )
+        # Caller-supplied digests that deliberately disagree with the real package.
+        forged = build_publish_gate_subject(
+            kind="skill_draft",
+            aggregate_id=self.package.id,
+            version_id=draft.id,
+            content_digest="a" * 64,
+            binding_digest="b" * 64,
+            profile_digest="c" * 64,
+            catalog_digest="d" * 64,
+            dataset_version_ids=(ds_id,),
+            runtime_contract_version=1,
+            policy_version="p",
+            threshold_version=str(run.threshold_policy_version),
+            build_revision=str(run.required_build_revision),
+        )
+        svc = PublishGateService(self.db)
+        result = svc.create_gate(
+            make_create_gate_request(
+                action="skill_publish",
+                subject=forged,
+                qualifying_eval_run_ids=(run.id,),
+            ),
+            actor_principal="op",
+            subject=forged,
+            # no _allow_prebuilt_subject → must rebuild and ignore forged digests
+        )
+        self.db.commit()
+        self.assertEqual(result.gate.subject_content_digest, closure.content_digest)
+        self.assertEqual(
+            result.gate.subject_binding_digest, closure.binding_set_digest
+        )
+        self.assertNotEqual(result.gate.subject_content_digest, "a" * 64)
 
     def test_build_authoritative_subject_maps_action_to_kind(self) -> None:
         from app.assistant.evaluation.gates import (

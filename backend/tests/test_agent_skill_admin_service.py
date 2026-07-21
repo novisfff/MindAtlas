@@ -231,6 +231,7 @@ def _create_passing_enable_gate(
         ),
         actor_principal="op-1",
         subject=subject,
+        _allow_prebuilt_subject=True,
     )
     db.commit()
     return result.gate

@@ -1317,6 +1317,7 @@ class EvaluationRepository:
         if existing is not None:
             return existing
         # Action-specific single consumption: a gate may only be used once for its action.
+        # Fast path only — durable enforcement is uq_assistant_skill_publish_gate_use_gate_action.
         prior_use = self.session.execute(
             select(AssistantSkillPublishGateUse).where(
                 AssistantSkillPublishGateUse.gate_id == gate.id,
@@ -1340,7 +1341,28 @@ class EvaluationRepository:
             created_at=utcnow(),
         )
         # Insert use only — never UPDATE the immutable gate (including pin count).
-        self._add_unique(row, message="gate-use request/action uniqueness")
+        # IntegrityError on (gate_id, action) → conflict (already consumed).
+        # IntegrityError on (request_id, action) under concurrency → re-read idempotent row.
+        try:
+            self._add_unique(
+                row,
+                message=f"gate already consumed for action={action}",
+            )
+        except EvaluationRepositoryError as exc:
+            if exc.code != CODE_CONFLICT:
+                raise
+            raced = self.session.execute(
+                select(AssistantSkillPublishGateUse).where(
+                    AssistantSkillPublishGateUse.request_id == request_id,
+                    AssistantSkillPublishGateUse.action == action,
+                )
+            ).scalar_one_or_none()
+            if raced is not None:
+                return raced
+            raise EvaluationRepositoryError(
+                CODE_CONFLICT,
+                f"gate already consumed for action={action}",
+            ) from exc
         return row
 
     def _gate_has_publication_use(self, gate_id: UUID) -> bool:

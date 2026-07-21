@@ -632,6 +632,21 @@ class EvalRepositorySqliteTests(unittest.TestCase):
             aggregate_revision=3,
         )
         self.assertEqual(use1.id, use2.id)
+        # Distinct request_id cannot re-consume the same gate+action (durable unique).
+        from app.assistant.evaluation.repository import EvaluationRepositoryError
+
+        with self.assertRaises(EvaluationRepositoryError) as conflict_ctx:
+            self.repo.append_gate_use(
+                gate_id=gate.id,
+                action="skill_publish",
+                aggregate_id=run.subject_aggregate_id,
+                resulting_version_id=run.subject_version_id,
+                actor_principal="op",
+                request_id="req-2-other",
+                aggregate_revision=3,
+            )
+        self.assertEqual(conflict_ctx.exception.code, "conflict")
+        self.assertIn("already consumed", str(conflict_ctx.exception))
         self.db.refresh(gate)
         # Pin is derived from gate_use existence; legacy pin_count stays 0 / unchanged.
         self.assertEqual(

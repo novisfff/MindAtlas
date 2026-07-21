@@ -712,11 +712,18 @@ class PublishGateService:
         catalog_digest: str | None = None,
         profile_digest: str | None = None,
         subject: PublishGateSubject | None = None,
+        _allow_prebuilt_subject: bool = False,
     ) -> GateCreateResult:
         """Accept action + subject identity + evidence refs + optional waivers.
 
         Server builds the authoritative subject closure. Client-authored
         digests/decisions/metrics are rejected by the request contract.
+
+        ``subject=`` is test-only. Production callers must omit it so the
+        server always rebuilds via ``build_authoritative_subject``. Tests that
+        seed synthetic digests without real packages may pass a pre-built
+        subject only with ``_allow_prebuilt_subject=True``; identity fields are
+        still drift-checked against the request.
         """
         # Validate waiver codes early for hard-safety names.
         for code in request.requested_non_safety_waiver_codes:
@@ -745,7 +752,33 @@ class PublishGateService:
                     accepted_waiver_codes=tuple(existing.waiver_codes or ()),
                 )
 
-        if subject is None:
+        if subject is not None and not _allow_prebuilt_subject:
+            # Close the bypass: service callers cannot skip authoritative rebuild
+            # by supplying a pre-built subject. Rebuild and discard caller digests.
+            self._assert_action_subject_kind(request.action, subject.subject.kind)
+            if str(subject.subject.aggregate_id) != str(request.subject_aggregate_id):
+                raise PublishGateError(
+                    "gate_action_subject_mismatch",
+                    "subject aggregate does not match request",
+                    http_status=409,
+                    http_code=CODE_GATE_ACTION_MISMATCH,
+                )
+            if str(subject.subject.version_id) != str(request.subject_version_id):
+                raise PublishGateError(
+                    "gate_action_subject_mismatch",
+                    "subject version does not match request",
+                    http_status=409,
+                    http_code=CODE_GATE_ACTION_MISMATCH,
+                )
+            subject = self.build_authoritative_subject(
+                request.action,
+                request.subject_aggregate_id,
+                request.subject_version_id,
+                request.qualifying_eval_run_ids,
+                catalog_digest=catalog_digest,
+                profile_digest=profile_digest,
+            )
+        elif subject is None:
             subject = self.build_authoritative_subject(
                 request.action,
                 request.subject_aggregate_id,
@@ -755,8 +788,7 @@ class PublishGateService:
                 profile_digest=profile_digest,
             )
         else:
-            # Service/test path supplying a pre-built subject still verifies
-            # action ↔ kind mapping so publish/enable cannot be confused.
+            # Test-only prebuilt path: identity drift-check without package resolution.
             self._assert_action_subject_kind(request.action, subject.subject.kind)
             if str(subject.subject.aggregate_id) != str(request.subject_aggregate_id):
                 raise PublishGateError(

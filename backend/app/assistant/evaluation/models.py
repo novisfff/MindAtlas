@@ -892,6 +892,14 @@ class AssistantSkillPublishGateUse(UuidPrimaryKeyMixin, Base):
             "action",
             name="uq_assistant_skill_publish_gate_use_request_action",
         ),
+        # Durable single-consumption: one use row per gate+action even under concurrent
+        # request_ids. Application-level SELECT is only a fast path; this constraint
+        # is the source of truth.
+        UniqueConstraint(
+            "gate_id",
+            "action",
+            name="uq_assistant_skill_publish_gate_use_gate_action",
+        ),
         CheckConstraint(
             "action IN ("
             "'skill_publish','skill_catalog_enable',"

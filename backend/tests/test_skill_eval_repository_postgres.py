@@ -299,8 +299,7 @@ def test_sole_alembic_head_is_task3() -> None:
 
 def test_migration_cycle_parent_task3_parent_task3() -> None:
     with _engine() as engine:
-        task3 = _task3_revision()
-        _run_alembic("upgrade", PARENT_REVISION)
+        task3 = _reset_to_parent(engine)
         with engine.connect() as conn:
             for name in EVAL_TABLES:
                 assert not _table_exists(conn, name), name
@@ -399,7 +398,9 @@ def _err_text(exc: BaseException) -> str:
 
 def test_immutable_triggers_and_uniqueness() -> None:
     with _engine() as engine:
-        # Upgrade to sole head (eval workbench); immutability triggers land there.
+        # Fresh parent → head so in-place migration edits (e.g. unique gate-use)
+        # are actually applied, not skipped by a stale alembic_version stamp.
+        _reset_to_parent(engine)
         _run_alembic("upgrade", "head")
         ids: dict[str, uuid.UUID] = {}
         with _session(engine) as session:
@@ -518,6 +519,21 @@ def test_immutable_triggers_and_uniqueness() -> None:
             assert int(gate.publication_pin_count) == pin_before
             assert use.gate_id == gate.id
             assert repo.is_gate_evidence_pinned(gate) is True
+            # Durable single-consumption: distinct request_id cannot re-use gate+action.
+            from app.assistant.evaluation.repository import EvaluationRepositoryError
+
+            with pytest.raises(EvaluationRepositoryError) as used_ctx:
+                repo.append_gate_use(
+                    gate_id=gate.id,
+                    action="skill_publish",
+                    aggregate_id=run.subject_aggregate_id,
+                    resulting_version_id=run.subject_version_id,
+                    actor_principal="op",
+                    request_id="req-pg-2-other",
+                    aggregate_revision=1,
+                )
+            assert used_ctx.value.code == "conflict"
+            assert "already consumed" in str(used_ctx.value)
 
             ids = {
                 "version": published.version_id,

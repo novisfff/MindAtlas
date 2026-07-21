@@ -922,6 +922,11 @@ def upgrade() -> None:
             "action",
             name="uq_assistant_skill_publish_gate_use_request_action",
         ),
+        sa.UniqueConstraint(
+            "gate_id",
+            "action",
+            name="uq_assistant_skill_publish_gate_use_gate_action",
+        ),
         sa.CheckConstraint(
             "action IN ("
             "'skill_publish','skill_catalog_enable',"
