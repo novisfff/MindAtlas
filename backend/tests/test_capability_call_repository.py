@@ -599,14 +599,11 @@ class CapabilityCallMigrationMetaTests(unittest.TestCase):
         heads = script.get_heads()
         self.assertEqual(len(heads), 1, heads)
         head = heads[0]
-        # Plan 09 alias soft-disable residual is sole head after eval workbench.
-        self.assertEqual(head, "24f1e06fdd9e")
+        # Plan 09 eval workbench is the sole pre-merge head (alias soft-disable
+        # folded into 09A lifecycle; residual 24f1e06fdd9e removed).
+        self.assertEqual(head, "027869a00a47")
 
-        plan09_alias = script.get_revision(head)
-        self.assertEqual(plan09_alias.down_revision, "027869a00a47")
-        self.assertIn("alias_soft_disable", plan09_alias.path)
-
-        plan09_eval = script.get_revision(plan09_alias.down_revision)
+        plan09_eval = script.get_revision(head)
         self.assertEqual(plan09_eval.down_revision, "403414a62e55")
         self.assertIn("skill_evaluation_workbench", plan09_eval.path)
 

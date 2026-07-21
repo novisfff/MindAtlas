@@ -8,6 +8,10 @@ Plan 09 Task 1: aggregate revision CAS, archive/catalog evidence columns on
 ``assistant_skill_package``, and soft-disable columns on
 ``assistant_skill_package_alias``. Additive/backfill/finalize only; 09A must
 roll back independently of evaluation schema.
+
+Also installs the column-aware alias soft-disable UPDATE guard so 09A alone
+can write ``disabled_at`` / ``disabled_by`` without depending on the 09B
+evaluation workbench. DELETE remains fully rejected by Plan 01.
 """
 
 from __future__ import annotations
@@ -24,6 +28,10 @@ depends_on = None
 
 
 DOWNGRADE_BLOCKED_TOKEN = "MINDATLAS_PLAN09_DOWNGRADE_BLOCKED_ARCHIVED_OR_CATALOG_EVIDENCE"
+
+ALIAS_TABLE = "assistant_skill_package_alias"
+ALIAS_SOFT_DISABLE_FN = "mindatlas_skill_package_alias_soft_disable_guard"
+ALIAS_UPDATE_TRG = "trg_assistant_skill_package_alias_reject_update"
 
 
 def upgrade() -> None:
@@ -117,6 +125,46 @@ def upgrade() -> None:
         "(disabled_at IS NOT NULL AND alias_type = 'custom')",
     )
 
+    # Plan 01 marked assistant_skill_package_alias fully immutable, but soft
+    # disable writes disabled_at / disabled_by. Replace the full-reject UPDATE
+    # trigger on that table only with a column-aware guard. DELETE stays
+    # fully rejected via Plan 01 mindatlas_reject_immutable_mutation().
+    op.execute(f"DROP TRIGGER IF EXISTS {ALIAS_UPDATE_TRG} ON {ALIAS_TABLE}")
+    op.execute(
+        f"""
+        CREATE OR REPLACE FUNCTION {ALIAS_SOFT_DISABLE_FN}()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            -- Identity / naming columns remain immutable.
+            IF NEW.id IS DISTINCT FROM OLD.id
+               OR NEW.skill_package_id IS DISTINCT FROM OLD.skill_package_id
+               OR NEW.alias IS DISTINCT FROM OLD.alias
+               OR NEW.normalized_alias IS DISTINCT FROM OLD.normalized_alias
+               OR NEW.alias_type IS DISTINCT FROM OLD.alias_type
+               OR NEW.created_at IS DISTINCT FROM OLD.created_at
+            THEN
+                RAISE EXCEPTION
+                    'MINDATLAS_PLAN01_IMMUTABLE_ROW: UPDATE on % identity/name columns is not allowed',
+                    TG_TABLE_NAME
+                    USING ERRCODE = 'integrity_constraint_violation';
+            END IF;
+            -- Only disabled_at / disabled_by (soft-disable) may change.
+            RETURN NEW;
+        END;
+        $$;
+        """
+    )
+    op.execute(
+        f"""
+        CREATE TRIGGER {ALIAS_UPDATE_TRG}
+        BEFORE UPDATE ON {ALIAS_TABLE}
+        FOR EACH ROW
+        EXECUTE PROCEDURE {ALIAS_SOFT_DISABLE_FN}();
+        """
+    )
+
 
 def downgrade() -> None:
     conn = op.get_bind()
@@ -146,6 +194,19 @@ def downgrade() -> None:
             f"evidence first (archived={archived}, catalog_evidence={catalog_evidence}, "
             f"disabled_aliases={disabled_aliases}); no aggregate data is deleted"
         )
+
+    # Restore Plan 01 full-reject UPDATE trigger before dropping soft-disable
+    # columns. The soft-disable function is no longer needed after rollback.
+    op.execute(f"DROP TRIGGER IF EXISTS {ALIAS_UPDATE_TRG} ON {ALIAS_TABLE}")
+    op.execute(f"DROP FUNCTION IF EXISTS {ALIAS_SOFT_DISABLE_FN}()")
+    op.execute(
+        f"""
+        CREATE TRIGGER {ALIAS_UPDATE_TRG}
+        BEFORE UPDATE ON {ALIAS_TABLE}
+        FOR EACH ROW
+        EXECUTE PROCEDURE mindatlas_reject_immutable_mutation();
+        """
+    )
 
     op.drop_constraint(
         "ck_assistant_skill_package_alias_disabled_shape",

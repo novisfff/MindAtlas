@@ -33,9 +33,9 @@ reset_caches()
 
 PARENT_REVISION = "d7e8f9a0b1c3"
 TASK1_HEAD = "403414a62e55"
-# After Task 3 the sole Alembic head is the evaluation workbench revision.
-# Task 1 lifecycle remains a reachable intermediate (parent of Task 3).
-PLAN09_HEAD = "24f1e06fdd9e"
+# Sole pre-merge Plan 09 head is the evaluation workbench revision (09B).
+# Task 1 lifecycle (09A) remains a reachable intermediate (parent of 09B).
+PLAN09_HEAD = "027869a00a47"
 DOWNGRADE_BLOCKED_TOKEN = (
     "MINDATLAS_PLAN09_DOWNGRADE_BLOCKED_ARCHIVED_OR_CATALOG_EVIDENCE"
 )
@@ -244,7 +244,7 @@ def _reset_to_parent() -> None:
             current = _current_revision(engine)
         except Exception:
             current = None
-        if current in {TASK1_HEAD, "027869a00a47", PLAN09_HEAD}:
+        if current in {TASK1_HEAD, PLAN09_HEAD}:
             prior_eval_ack = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
             prior_ledger_ack = os.environ.get(
                 "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"
@@ -347,7 +347,7 @@ def _insert_pre_task1_alias(
 
 
 def test_task1_revises_plan08_parent_and_is_sole_head() -> None:
-    """Task 1 revises Plan 08 tip; sole head is Plan 09 residual after chain."""
+    """Task 1 revises Plan 08 tip; sole head is Plan 09 eval workbench."""
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(_alembic_config())
@@ -358,11 +358,9 @@ def test_task1_revises_plan08_parent_and_is_sole_head() -> None:
     assert heads == [PLAN09_HEAD], f"expected sole head {PLAN09_HEAD}, got {heads}"
     head_rev = script.get_revision(PLAN09_HEAD)
     assert head_rev is not None
-    # Head is alias soft-disable residual; workbench revises Task 1 lifecycle.
-    assert head_rev.down_revision == "027869a00a47"
-    workbench = script.get_revision("027869a00a47")
-    assert workbench is not None
-    assert workbench.down_revision == TASK1_HEAD
+    # Sole head is 09B eval workbench; it revises 09A lifecycle.
+    assert head_rev.down_revision == TASK1_HEAD
+    assert head_rev.revision == "027869a00a47"
 
 
 def test_upgrade_adds_columns_defaults_checks_and_backfills() -> None:
@@ -546,6 +544,156 @@ def test_parent_head_parent_head_cycle_and_sole_head() -> None:
         assert _current_revision(engine) == TASK1_HEAD
         heads = ScriptDirectory.from_config(_alembic_config()).get_heads()
         assert heads == [PLAN09_HEAD]
+
+
+# ---------------------------------------------------------------------------
+# Independent 09A slice (alias soft-disable without eval schema)
+# ---------------------------------------------------------------------------
+
+
+_SOFT_DISABLE_FN = "mindatlas_skill_package_alias_soft_disable_guard"
+_ALIAS_UPDATE_TRG = "trg_assistant_skill_package_alias_reject_update"
+
+
+def _insert_custom_alias_at_09a(conn, *, alias: str) -> uuid.UUID:
+    """Insert package + custom alias at 09A schema (no eval tables required)."""
+    pkg_id = uuid.uuid4()
+    alias_id = uuid.uuid4()
+    name = f"slice-{uuid.uuid4().hex[:8]}"
+    conn.execute(
+        text(
+            """
+            INSERT INTO assistant_skill_package (
+                id, canonical_name, display_name, description,
+                migration_state, catalog_enabled, is_system,
+                aggregate_revision, created_at, updated_at
+            ) VALUES (
+                :id, :name, :display, '09a-slice',
+                'native', false, false,
+                0, NOW(), NOW()
+            )
+            """
+        ),
+        {"id": pkg_id, "name": name, "display": name},
+    )
+    conn.execute(
+        text(
+            """
+            INSERT INTO assistant_skill_package_alias (
+                id, skill_package_id, alias, normalized_alias, alias_type, created_at
+            ) VALUES (
+                :id, :pkg, :alias, :norm, 'custom', NOW()
+            )
+            """
+        ),
+        {
+            "id": alias_id,
+            "pkg": pkg_id,
+            "alias": alias,
+            "norm": alias.lower(),
+        },
+    )
+    return alias_id
+
+
+def _disable_alias(conn, alias_id: uuid.UUID, *, actor: str) -> None:
+    conn.execute(
+        text(
+            """
+            UPDATE assistant_skill_package_alias
+            SET disabled_at = NOW(), disabled_by = :actor
+            WHERE id = :id
+            """
+        ),
+        {"id": alias_id, "actor": actor},
+    )
+
+
+def _alias_disabled_by(conn, alias_id: uuid.UUID) -> str | None:
+    return conn.execute(
+        text(
+            "SELECT disabled_by FROM assistant_skill_package_alias WHERE id = :id"
+        ),
+        {"id": alias_id},
+    ).scalar()
+
+
+def _alias_soft_disable_trigger_is_column_aware(conn) -> bool:
+    """True when the alias UPDATE trigger uses the soft-disable guard function."""
+    row = conn.execute(
+        text(
+            """
+            SELECT p.proname
+            FROM pg_trigger t
+            JOIN pg_class c ON t.tgrelid = c.oid
+            JOIN pg_namespace n ON c.relnamespace = n.oid
+            JOIN pg_proc p ON t.tgfoid = p.oid
+            WHERE n.nspname = 'public'
+              AND c.relname = 'assistant_skill_package_alias'
+              AND t.tgname = :trg
+              AND NOT t.tgisinternal
+            """
+        ),
+        {"trg": _ALIAS_UPDATE_TRG},
+    ).fetchone()
+    if row is None:
+        return False
+    if str(row[0]) != _SOFT_DISABLE_FN:
+        return False
+    body = conn.execute(
+        text(
+            """
+            SELECT pg_get_functiondef(p.oid)
+            FROM pg_proc p
+            JOIN pg_namespace n ON p.pronamespace = n.oid
+            WHERE n.nspname = 'public' AND p.proname = :fn
+            """
+        ),
+        {"fn": _SOFT_DISABLE_FN},
+    ).scalar()
+    if not body:
+        return False
+    # Column-aware guard must keep identity columns immutable and allow soft-disable.
+    text_body = str(body)
+    return (
+        "disabled_at" in text_body
+        or "NEW.id IS DISTINCT FROM OLD.id" in text_body
+    ) and "skill_package_id" in text_body
+
+
+def test_09a_alias_soft_disable_works_without_eval_schema() -> None:
+    """09A alone must accept alias soft-disable without any eval tables."""
+    _reset_to_parent()
+    _run_alembic("upgrade", TASK1_HEAD)
+    with _engine() as engine:
+        assert _current_revision(engine) == TASK1_HEAD
+        with engine.begin() as conn:
+            assert not _table_exists(conn, "assistant_skill_eval_run")
+            # Alias base matches the brief ("review-notes"); suffix keeps the
+            # disposable DB unique across upgrade cycles that leave rows.
+            alias_name = f"review-notes-{uuid.uuid4().hex[:8]}"
+            alias_id = _insert_custom_alias_at_09a(conn, alias=alias_name)
+            _disable_alias(conn, alias_id, actor="operator:test")
+            assert _alias_disabled_by(conn, alias_id) == "operator:test"
+            assert not _table_exists(conn, "assistant_skill_eval_run")
+
+
+def test_09a_upgrade_downgrade_upgrade_is_independent() -> None:
+    """09A cycle must reinstall the column-aware soft-disable trigger."""
+    _reset_to_parent()
+    _run_alembic("upgrade", TASK1_HEAD)
+    with _engine() as engine:
+        with engine.begin() as conn:
+            _prepare_plan09_downgrade(conn)
+    _run_alembic("downgrade", PARENT_REVISION)
+    with _engine() as engine:
+        assert _current_revision(engine) == PARENT_REVISION
+    _run_alembic("upgrade", TASK1_HEAD)
+    with _engine() as engine:
+        assert _current_revision(engine) == TASK1_HEAD
+        with engine.begin() as conn:
+            assert _alias_soft_disable_trigger_is_column_aware(conn)
+            assert not _table_exists(conn, "assistant_skill_eval_run")
 
 
 # ---------------------------------------------------------------------------

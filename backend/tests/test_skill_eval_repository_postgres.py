@@ -288,22 +288,13 @@ def test_sole_alembic_head_is_task3() -> None:
     heads = script.get_heads()
     assert len(heads) == 1, heads
     task3 = _task3_revision()
-    # Sole head is residual after workbench (alias soft-disable); workbench
-    # still revises PARENT_REVISION and remains on the linear chain.
+    # Sole head is the evaluation workbench itself after residual alias
+    # soft-disable was folded into 09A lifecycle.
     head = heads[0]
+    assert head == task3
     head_rev = script.get_revision(head)
     assert head_rev is not None
-    # Walk down until Task3 workbench; ensure it revises PARENT_REVISION.
-    cur = head_rev
-    seen = {cur.revision}
-    while cur.revision != task3:
-        parent = cur.down_revision
-        assert parent, f"reached root without finding task3={task3} from head={head}"
-        cur = script.get_revision(parent)
-        assert cur is not None
-        assert cur.revision not in seen
-        seen.add(cur.revision)
-    assert cur.down_revision == PARENT_REVISION
+    assert head_rev.down_revision == PARENT_REVISION
 
 
 def test_migration_cycle_parent_task3_parent_task3() -> None:
@@ -408,8 +399,7 @@ def _err_text(exc: BaseException) -> str:
 
 def test_immutable_triggers_and_uniqueness() -> None:
     with _engine() as engine:
-        # Upgrade to sole head so residual alias migration is present; eval
-        # immutability triggers land at the workbench revision.
+        # Upgrade to sole head (eval workbench); immutability triggers land there.
         _run_alembic("upgrade", "head")
         ids: dict[str, uuid.UUID] = {}
         with _session(engine) as session:
