@@ -16,6 +16,104 @@ bootstrap_backend_imports()
 reset_caches()
 
 DIGEST_A = "a" * 64
+DIGEST_B = "b" * 64
+
+
+class EvalProviderFixtureContractTests(unittest.TestCase):
+    """Task 5: provider fixture refs are separate from assertion fields."""
+
+    def test_provider_fixture_ref_rejects_assertion_fields(self) -> None:
+        from app.assistant.evaluation.contracts import (
+            ProviderFixtureRef,
+            normalize_provider_fixture_refs,
+        )
+        from pydantic import ValidationError
+
+        ref = ProviderFixtureRef(script_key="provider-selects-skill-b")
+        self.assertEqual(ref.kind, "provider_script")
+        self.assertEqual(ref.script_key, "provider-selects-skill-b")
+        payload = ref.model_dump(mode="json")
+        self.assertNotIn("acceptable_skill_keys", payload)
+        self.assertNotIn("expected_mode", payload)
+
+        with self.assertRaises((ValidationError, ValueError, TypeError)):
+            ProviderFixtureRef(
+                script_key="x",
+                acceptable_skill_keys=["skill-a"],  # type: ignore[call-arg]
+            )
+
+        normalized = normalize_provider_fixture_refs(
+            [
+                {"kind": "provider_script", "script_key": "provider-selects-skill-a"},
+                "provider_script:legacy-key",
+            ]
+        )
+        self.assertEqual(
+            [item.script_key for item in normalized],
+            ["provider-selects-skill-a", "legacy-key"],
+        )
+
+    def test_create_run_pins_provider_fixture_in_closure(self) -> None:
+        reset_caches()
+        from tests._db import make_session
+        from app.assistant.evaluation.repository import EvaluationRepository
+
+        db = make_session()
+        try:
+            repo = EvaluationRepository(db)
+            dataset = repo.create_dataset(
+                stable_key=f"fix-{uuid.uuid4().hex[:8]}",
+                display_name="fixture-pin",
+                ownership="custom",
+            )
+            snapshot = [
+                {
+                    "case_key": "c1",
+                    "ordinal": 0,
+                    "locale": "en",
+                    "input_messages": [{"role": "user", "content": "hi"}],
+                    "fixture_refs": [
+                        {
+                            "kind": "provider_script",
+                            "script_key": "provider-selects-skill-a",
+                        }
+                    ],
+                    "expected_mode": "golden_skill",
+                    "case_digest": DIGEST_A,
+                }
+            ]
+            repo.get_or_create_draft(dataset_id=dataset.id, cases_snapshot=snapshot)
+            published = repo.publish_dataset_version(
+                dataset_id=dataset.id,
+                expected_aggregate_revision=0,
+                expected_draft_revision=0,
+                version_name="v1",
+            )
+            run = repo.create_run(
+                subject_kind="skill_version",
+                subject_aggregate_id=uuid.uuid4(),
+                subject_version_id=uuid.uuid4(),
+                subject_content_digest=DIGEST_A,
+                subject_binding_digest=DIGEST_A,
+                dataset_version_ids=[published.version_id],
+                threshold_policy_version="t1",
+                mode="dataset_scripted",
+                isolation_namespace_id=uuid.uuid4(),
+                runtime_contract_version=1,
+                required_build_revision="development",
+                isolation_digest=DIGEST_A,
+                evidence_provenance="real_orchestration",
+                provider_fixture_revision="plan04-provider-v1",
+                provider_fixture_digest=DIGEST_B,
+            )
+            db.commit()
+            self.assertEqual(run.evidence_provenance, "real_orchestration")
+            self.assertEqual(run.provider_fixture_revision, "plan04-provider-v1")
+            self.assertEqual(run.provider_fixture_digest, DIGEST_B)
+            stored = repo.list_cases(published.version_id)[0]
+            self.assertEqual(stored.fixture_refs[0]["kind"], "provider_script")
+        finally:
+            db.close()
 
 
 class SnapshotPolicyShapeTests(unittest.TestCase):

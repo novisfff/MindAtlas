@@ -493,12 +493,19 @@ class EvaluationWorker:
                     continue
                 raise
         terminal = "completed" if outcome.terminal == "completed" else "failed"
+        # Structural synthetic evidence is never gate-eligible (Task 5).
+        gate_eligible = bool(outcome.gate_eligible)
+        run_row = repo.get_run(run_id)
+        if run_row is not None and str(
+            getattr(run_row, "evidence_provenance", "") or ""
+        ) in {"structural_synthetic", "live_model"}:
+            gate_eligible = False
         repo.transition_run(
             run_id=run_id,
             expected_revision=rev,
             to_status=terminal,
             failure_code=outcome.failure_code,
-            gate_eligible=bool(outcome.gate_eligible),
+            gate_eligible=gate_eligible,
             aggregate_metrics=metrics,
         )
 
@@ -735,6 +742,12 @@ class EvaluationWorker:
         run = repo.get_run(run_id)
         if run is None:
             return
+        # Task 5: structural_synthetic / live_model never contribute gate evidence.
+        # Keep the synthetic dataset_scripted worker path callable, but force
+        # gate_eligible=False so repository/DB constraints cannot be violated.
+        provenance = str(getattr(run, "evidence_provenance", "") or "")
+        if provenance in {"structural_synthetic", "live_model"}:
+            gate_eligible = False
         if run.status in {"completed", "failed", "cancelled"}:
             return
         if run.status == "cancelling":

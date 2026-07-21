@@ -640,12 +640,13 @@ def test_owner_kind_check_constraint() -> None:
                         "threshold_policy_version, mode, status, isolation_namespace_id, "
                         "owner_kind, runtime_contract_version, required_build_revision, "
                         "runner_contract_version, state_revision, lease_generation, "
-                        "last_event_seq, attempt_count, isolation_digest, aggregate_metrics, "
+                        "last_event_seq, attempt_count, isolation_digest, "
+                        "evidence_provenance, aggregate_metrics, "
                         "gate_eligible, created_at, updated_at"
                         ") VALUES ("
                         ":id, 'skill_version', :a, :v, :d1, :d2, '[]', 't', "
                         "'dataset_scripted', 'queued', :n, 'main_agent', 1, 'b', 1, 0, 0, "
-                        "0, 0, :d3, '{}', false, now(), now()"
+                        "0, 0, :d3, 'structural_synthetic', '{}', false, now(), now()"
                         ")"
                     ),
                     {
@@ -659,3 +660,228 @@ def test_owner_kind_check_constraint() -> None:
                     },
                 )
                 session.flush()
+
+
+def test_evidence_provenance_constraints() -> None:
+    """Task 5: provenance enum, fixture shape, synthetic gate ineligible."""
+    with _engine() as engine:
+        task3 = _task3_revision()
+        _run_alembic("upgrade", task3)
+        with _session(engine) as session:
+            # Invalid provenance rejected.
+            with pytest.raises((DBAPIError, IntegrityError)):
+                session.execute(
+                    text(
+                        "INSERT INTO assistant_skill_eval_run ("
+                        "id, subject_kind, subject_aggregate_id, subject_version_id, "
+                        "subject_content_digest, subject_binding_digest, dataset_version_ids, "
+                        "threshold_policy_version, mode, status, isolation_namespace_id, "
+                        "owner_kind, runtime_contract_version, required_build_revision, "
+                        "runner_contract_version, state_revision, lease_generation, "
+                        "last_event_seq, attempt_count, isolation_digest, "
+                        "evidence_provenance, aggregate_metrics, "
+                        "gate_eligible, created_at, updated_at"
+                        ") VALUES ("
+                        ":id, 'skill_version', :a, :v, :d1, :d2, '[]', 't', "
+                        "'dataset_scripted', 'queued', :n, 'test', 1, 'b', 1, 0, 0, "
+                        "0, 0, :d3, 'not_a_provenance', '{}', false, now(), now()"
+                        ")"
+                    ),
+                    {
+                        "id": str(uuid.uuid4()),
+                        "a": str(uuid.uuid4()),
+                        "v": str(uuid.uuid4()),
+                        "n": str(uuid.uuid4()),
+                        "d1": _DIGEST_A,
+                        "d2": _DIGEST_B,
+                        "d3": _DIGEST_C,
+                    },
+                )
+                session.flush()
+            session.rollback()
+
+            # Fixture shape: revision without digest rejected.
+            with pytest.raises((DBAPIError, IntegrityError)):
+                session.execute(
+                    text(
+                        "INSERT INTO assistant_skill_eval_run ("
+                        "id, subject_kind, subject_aggregate_id, subject_version_id, "
+                        "subject_content_digest, subject_binding_digest, dataset_version_ids, "
+                        "threshold_policy_version, mode, status, isolation_namespace_id, "
+                        "owner_kind, runtime_contract_version, required_build_revision, "
+                        "runner_contract_version, state_revision, lease_generation, "
+                        "last_event_seq, attempt_count, isolation_digest, "
+                        "evidence_provenance, provider_fixture_revision, "
+                        "provider_fixture_digest, aggregate_metrics, "
+                        "gate_eligible, created_at, updated_at"
+                        ") VALUES ("
+                        ":id, 'skill_version', :a, :v, :d1, :d2, '[]', 't', "
+                        "'dataset_scripted', 'queued', :n, 'test', 1, 'b', 1, 0, 0, "
+                        "0, 0, :d3, 'real_orchestration', 'rev-only', NULL, "
+                        "'{}', false, now(), now()"
+                        ")"
+                    ),
+                    {
+                        "id": str(uuid.uuid4()),
+                        "a": str(uuid.uuid4()),
+                        "v": str(uuid.uuid4()),
+                        "n": str(uuid.uuid4()),
+                        "d1": _DIGEST_A,
+                        "d2": _DIGEST_B,
+                        "d3": _DIGEST_C,
+                    },
+                )
+                session.flush()
+            session.rollback()
+
+            # structural_synthetic + gate_eligible=true rejected.
+            with pytest.raises((DBAPIError, IntegrityError)):
+                session.execute(
+                    text(
+                        "INSERT INTO assistant_skill_eval_run ("
+                        "id, subject_kind, subject_aggregate_id, subject_version_id, "
+                        "subject_content_digest, subject_binding_digest, dataset_version_ids, "
+                        "threshold_policy_version, mode, status, isolation_namespace_id, "
+                        "owner_kind, runtime_contract_version, required_build_revision, "
+                        "runner_contract_version, state_revision, lease_generation, "
+                        "last_event_seq, attempt_count, isolation_digest, "
+                        "evidence_provenance, aggregate_metrics, "
+                        "gate_eligible, created_at, updated_at"
+                        ") VALUES ("
+                        ":id, 'skill_version', :a, :v, :d1, :d2, '[]', 't', "
+                        "'dataset_scripted', 'queued', :n, 'test', 1, 'b', 1, 0, 0, "
+                        "0, 0, :d3, 'structural_synthetic', '{}', true, now(), now()"
+                        ")"
+                    ),
+                    {
+                        "id": str(uuid.uuid4()),
+                        "a": str(uuid.uuid4()),
+                        "v": str(uuid.uuid4()),
+                        "n": str(uuid.uuid4()),
+                        "d1": _DIGEST_A,
+                        "d2": _DIGEST_B,
+                        "d3": _DIGEST_C,
+                    },
+                )
+                session.flush()
+            session.rollback()
+
+            # Valid real_orchestration with fixture pins accepted.
+            session.execute(
+                text(
+                    "INSERT INTO assistant_skill_eval_run ("
+                    "id, subject_kind, subject_aggregate_id, subject_version_id, "
+                    "subject_content_digest, subject_binding_digest, dataset_version_ids, "
+                    "threshold_policy_version, mode, status, isolation_namespace_id, "
+                    "owner_kind, runtime_contract_version, required_build_revision, "
+                    "runner_contract_version, state_revision, lease_generation, "
+                    "last_event_seq, attempt_count, isolation_digest, "
+                    "evidence_provenance, provider_fixture_revision, "
+                    "provider_fixture_digest, aggregate_metrics, "
+                    "gate_eligible, created_at, updated_at"
+                    ") VALUES ("
+                    ":id, 'skill_version', :a, :v, :d1, :d2, '[]', 't', "
+                    "'dataset_scripted', 'queued', :n, 'test', 1, 'b', 1, 0, 0, "
+                    "0, 0, :d3, 'real_orchestration', 'plan04-provider-v1', :d4, "
+                    "'{}', true, now(), now()"
+                    ")"
+                ),
+                {
+                    "id": str(uuid.uuid4()),
+                    "a": str(uuid.uuid4()),
+                    "v": str(uuid.uuid4()),
+                    "n": str(uuid.uuid4()),
+                    "d1": _DIGEST_A,
+                    "d2": _DIGEST_B,
+                    "d3": _DIGEST_C,
+                    "d4": _DIGEST_D,
+                },
+            )
+            session.flush()
+
+            # Repository enforces synthetic_gate_ineligible.
+            from app.assistant.evaluation.repository import (
+                EvaluationRepository,
+                EvaluationRepositoryError,
+            )
+
+            repo = EvaluationRepository(session)
+            dataset = repo.create_dataset(
+                stable_key=f"prov-{uuid.uuid4().hex[:10]}",
+                display_name="prov",
+                ownership="custom",
+            )
+            snapshot = [
+                {
+                    "case_key": "c1",
+                    "ordinal": 0,
+                    "locale": "en",
+                    "input_messages": [{"role": "user", "content": "x"}],
+                    "fixture_refs": [
+                        {
+                            "kind": "provider_script",
+                            "script_key": "provider-selects-skill-a",
+                        }
+                    ],
+                    "expected_mode": "golden_skill",
+                    "case_digest": _DIGEST_A,
+                    "notes": "n",
+                }
+            ]
+            draft = repo.get_or_create_draft(
+                dataset_id=dataset.id, cases_snapshot=snapshot
+            )
+            published = repo.publish_dataset_version(
+                dataset_id=dataset.id,
+                expected_aggregate_revision=0,
+                expected_draft_revision=0,
+                version_name="v1",
+            )
+            run = repo.create_run(
+                subject_kind="skill_version",
+                subject_aggregate_id=uuid.uuid4(),
+                subject_version_id=uuid.uuid4(),
+                subject_content_digest=_DIGEST_A,
+                subject_binding_digest=_DIGEST_B,
+                dataset_version_ids=[published.version_id],
+                threshold_policy_version="t1",
+                mode="dataset_scripted",
+                isolation_namespace_id=uuid.uuid4(),
+                runtime_contract_version=1,
+                required_build_revision="build-1",
+                isolation_digest=_DIGEST_C,
+                evidence_provenance="structural_synthetic",
+            )
+            repo.transition_run(
+                run_id=run.id, expected_revision=0, to_status="running"
+            )
+            with pytest.raises(EvaluationRepositoryError) as exc_info:
+                repo.transition_run(
+                    run_id=run.id,
+                    expected_revision=1,
+                    to_status="completed",
+                    gate_eligible=True,
+                )
+            assert "synthetic_gate_ineligible" in str(exc_info.value)
+            assert exc_info.value.code == "synthetic_gate_ineligible"
+
+            # real_orchestration requires fixture pins.
+            with pytest.raises(EvaluationRepositoryError) as missing:
+                repo.create_run(
+                    subject_kind="skill_version",
+                    subject_aggregate_id=uuid.uuid4(),
+                    subject_version_id=uuid.uuid4(),
+                    subject_content_digest=_DIGEST_A,
+                    subject_binding_digest=_DIGEST_B,
+                    dataset_version_ids=[published.version_id],
+                    threshold_policy_version="t1",
+                    mode="dataset_scripted",
+                    isolation_namespace_id=uuid.uuid4(),
+                    runtime_contract_version=1,
+                    required_build_revision="build-1",
+                    isolation_digest=_DIGEST_C,
+                    evidence_provenance="real_orchestration",
+                    provider_fixture_revision=None,
+                    provider_fixture_digest=None,
+                )
+            assert "provider_fixture_required" in str(missing.value)

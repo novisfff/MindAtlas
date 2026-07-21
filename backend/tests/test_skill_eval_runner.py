@@ -518,7 +518,8 @@ class EvaluationRunnerPersistenceShapeTests(unittest.TestCase):
             run_id=run_id,
             expected_revision=rev,
             to_status="completed",
-            gate_eligible=outcome.gate_eligible,
+            # Task 5: structural_synthetic default cannot become gate-eligible.
+            gate_eligible=False,
             aggregate_metrics=outcome.aggregate_metrics,
         )
         self.db.commit()

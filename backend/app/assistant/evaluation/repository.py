@@ -20,15 +20,19 @@ from sqlalchemy.orm import Session
 from app.assistant.domain.digests import sha256_bytes, sha256_canonical_json
 from app.assistant.evaluation.artifacts import resolve_artifact_storage
 from app.assistant.evaluation.contracts import (
+    DEFAULT_EVIDENCE_PROVENANCE,
     EVAL_OWNER_KIND,
+    EVIDENCE_PROVENANCE_VALUES,
     EvalCapabilityOutcome,
     EvalRunMode,
     EvalRunStatus,
     EvalSubjectKind,
+    EvidenceProvenance,
     PublishGateAction,
     PublishGateDecision,
     assert_evaluation_object_key,
     is_evaluation_object_key,
+    normalize_provider_fixture_refs,
 )
 from app.assistant.evaluation.models import (
     AssistantSkillEvalArtifact,
@@ -60,6 +64,9 @@ CODE_NAMESPACE = "namespace_violation"
 CODE_OWNERSHIP = "ownership_violation"
 CODE_RETENTION_PINNED = "retention_pinned"
 CODE_DOWNGRADE_BLOCKED = "downgrade_blocked"
+CODE_PROVIDER_FIXTURE_REQUIRED = "provider_fixture_required"
+CODE_LIVE_MODEL_EVIDENCE_REQUIRED = "live_model_evidence_required"
+CODE_SYNTHETIC_GATE_INELIGIBLE = "synthetic_gate_ineligible"
 
 DEFAULT_GATE_EVIDENCE_GRACE_DAYS = 30
 
@@ -110,6 +117,68 @@ def _require_sha256(value: str, *, field: str) -> str:
             CODE_INVALID_INPUT, f"{field} must be 64-char lowercase hex digest"
         )
     return text
+
+
+def _normalize_fixture_pin(
+    *,
+    revision: str | None,
+    digest: str | None,
+) -> tuple[str | None, str | None]:
+    rev = (revision or "").strip() or None
+    dig = (digest or "").strip().lower() or None
+    if rev is None and dig is None:
+        return None, None
+    if rev is None or dig is None:
+        raise EvaluationRepositoryError(
+            CODE_PROVIDER_FIXTURE_REQUIRED,
+            "provider_fixture_required: provider_fixture_revision and "
+            "provider_fixture_digest must both be set",
+        )
+    if len(rev) > 160:
+        raise EvaluationRepositoryError(
+            CODE_INVALID_INPUT, "provider_fixture_revision exceeds 160 chars"
+        )
+    dig = _require_sha256(dig, field="provider_fixture_digest")
+    return rev, dig
+
+
+def _validate_evidence_provenance(
+    *,
+    evidence_provenance: str,
+    provider_fixture_revision: str | None,
+    provider_fixture_digest: str | None,
+    provider_evidence_digest: str | None,
+) -> tuple[str, str | None, str | None, str | None]:
+    provenance = (evidence_provenance or "").strip()
+    if provenance not in EVIDENCE_PROVENANCE_VALUES:
+        raise EvaluationRepositoryError(
+            CODE_INVALID_INPUT,
+            f"evidence_provenance must be one of {sorted(EVIDENCE_PROVENANCE_VALUES)}",
+        )
+    fixture_rev, fixture_dig = _normalize_fixture_pin(
+        revision=provider_fixture_revision,
+        digest=provider_fixture_digest,
+    )
+    evidence = (
+        _require_sha256(provider_evidence_digest, field="provider_evidence_digest")
+        if provider_evidence_digest
+        else None
+    )
+    if provenance == "real_orchestration":
+        if fixture_rev is None or fixture_dig is None:
+            raise EvaluationRepositoryError(
+                CODE_PROVIDER_FIXTURE_REQUIRED,
+                "provider_fixture_required: real_orchestration requires "
+                "provider_fixture_revision and provider_fixture_digest pins",
+            )
+    elif provenance == "live_model":
+        if evidence is None:
+            raise EvaluationRepositoryError(
+                CODE_LIVE_MODEL_EVIDENCE_REQUIRED,
+                "live_model_evidence_required: live_model requires "
+                "provider_evidence_digest (model-probe pin)",
+            )
+    return provenance, fixture_rev, fixture_dig, evidence
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -337,6 +406,16 @@ class EvaluationRepository:
                 if fixed_case_ids and row.get("id")
                 else uuid4()
             )
+            # Normalize Provider script refs separately from assertion fields.
+            try:
+                fixture_refs = [
+                    ref.model_dump(mode="json")
+                    for ref in normalize_provider_fixture_refs(row.get("fixture_refs"))
+                ]
+            except ValueError as exc:
+                raise EvaluationRepositoryError(
+                    CODE_INVALID_INPUT, f"invalid fixture_refs: {exc}"
+                ) from exc
             case = AssistantSkillEvalCase(
                 id=cid,
                 dataset_version_id=version.id,
@@ -344,7 +423,7 @@ class EvaluationRepository:
                 ordinal=int(row["ordinal"]),
                 locale=str(row.get("locale") or "en"),
                 input_messages=list(row.get("input_messages") or []),
-                fixture_refs=list(row.get("fixture_refs") or []),
+                fixture_refs=fixture_refs,
                 expected_mode=str(row.get("expected_mode") or "unknown"),
                 acceptable_skill_keys=list(row.get("acceptable_skill_keys") or []),
                 forbidden_skill_keys=list(row.get("forbidden_skill_keys") or []),
@@ -356,7 +435,9 @@ class EvaluationRepository:
                 ),
                 expect_completion=bool(row.get("expect_completion", True)),
                 assertion_json=dict(row.get("assertion_json") or {}),
-                ceilings_json=dict(row.get("ceilings_json") or row.get("ceilings") or {}),
+                ceilings_json=dict(
+                    row.get("ceilings_json") or row.get("ceilings") or {}
+                ),
                 tags=list(row.get("tags") or []),
                 notes=str(row.get("notes") or ""),
                 case_digest=_require_sha256(
@@ -422,6 +503,9 @@ class EvaluationRepository:
         policy_digest: str | None = None,
         runtime_digest: str | None = None,
         provider_evidence_digest: str | None = None,
+        evidence_provenance: EvidenceProvenance | str = DEFAULT_EVIDENCE_PROVENANCE,
+        provider_fixture_revision: str | None = None,
+        provider_fixture_digest: str | None = None,
         actor_principal: str | None = None,
         request_id: str | None = None,
         run_id: UUID | None = None,
@@ -436,6 +520,17 @@ class EvaluationRepository:
                 CODE_INVALID_INPUT,
                 "dataset_version_ids required for dataset evaluation modes",
             )
+        (
+            provenance,
+            fixture_rev,
+            fixture_dig,
+            evidence_dig,
+        ) = _validate_evidence_provenance(
+            evidence_provenance=str(evidence_provenance),
+            provider_fixture_revision=provider_fixture_revision,
+            provider_fixture_digest=provider_fixture_digest,
+            provider_evidence_digest=provider_evidence_digest,
+        )
         row = AssistantSkillEvalRun(
             id=run_id or uuid4(),
             subject_kind=subject_kind,
@@ -468,11 +563,11 @@ class EvaluationRepository:
                 if runtime_digest
                 else None
             ),
-            provider_evidence_digest=(
-                _require_sha256(provider_evidence_digest, field="provider_evidence_digest")
-                if provider_evidence_digest
-                else None
-            ),
+            provider_evidence_digest=evidence_dig,
+            evidence_provenance=provenance,
+            provider_fixture_revision=fixture_rev,
+            provider_fixture_digest=fixture_dig,
+            gate_eligible=False,
             actor_principal=actor_principal,
             request_id=request_id,
         )
@@ -537,7 +632,21 @@ class EvaluationRepository:
         if failure_code is not None:
             run.failure_code = failure_code
         if gate_eligible is not None:
-            run.gate_eligible = bool(gate_eligible)
+            want_eligible = bool(gate_eligible)
+            if want_eligible and str(run.evidence_provenance) == "structural_synthetic":
+                raise EvaluationRepositoryError(
+                    CODE_SYNTHETIC_GATE_INELIGIBLE,
+                    "synthetic_gate_ineligible: structural_synthetic runs cannot "
+                    "become gate_eligible",
+                )
+            # live_model is promotion-ineligible in this remediation wave.
+            if want_eligible and str(run.evidence_provenance) == "live_model":
+                raise EvaluationRepositoryError(
+                    CODE_SYNTHETIC_GATE_INELIGIBLE,
+                    "synthetic_gate_ineligible: live_model runs cannot become "
+                    "gate_eligible under current qualification policy",
+                )
+            run.gate_eligible = want_eligible
         if aggregate_metrics is not None:
             run.aggregate_metrics = dict(aggregate_metrics)
         run.status = to_status

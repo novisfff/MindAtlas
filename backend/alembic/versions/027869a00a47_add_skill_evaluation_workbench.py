@@ -374,6 +374,14 @@ def upgrade() -> None:
         sa.Column("policy_digest", sa.String(length=64), nullable=True),
         sa.Column("runtime_digest", sa.String(length=64), nullable=True),
         sa.Column("provider_evidence_digest", sa.String(length=64), nullable=True),
+        sa.Column(
+            "evidence_provenance",
+            sa.String(length=32),
+            nullable=False,
+            server_default=sa.text("'structural_synthetic'"),
+        ),
+        sa.Column("provider_fixture_revision", sa.String(length=160), nullable=True),
+        sa.Column("provider_fixture_digest", sa.String(length=64), nullable=True),
         sa.Column("aggregate_metrics", sa.JSON(), nullable=False),
         sa.Column(
             "gate_eligible",
@@ -454,6 +462,32 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "provider_evidence_digest IS NULL OR length(provider_evidence_digest) = 64",
             name="ck_assistant_skill_eval_run_provider_evidence_digest",
+        ),
+        sa.CheckConstraint(
+            "evidence_provenance IN ("
+            "'real_orchestration','structural_synthetic','live_model'"
+            ")",
+            name="ck_assistant_skill_eval_run_evidence_provenance",
+        ),
+        sa.CheckConstraint(
+            "provider_fixture_digest IS NULL OR length(provider_fixture_digest) = 64",
+            name="ck_assistant_skill_eval_run_provider_fixture_digest",
+        ),
+        sa.CheckConstraint(
+            "("
+            "provider_fixture_revision IS NULL AND provider_fixture_digest IS NULL"
+            ") OR ("
+            "provider_fixture_revision IS NOT NULL "
+            "AND length(provider_fixture_revision) > 0 "
+            "AND length(provider_fixture_revision) <= 160 "
+            "AND provider_fixture_digest IS NOT NULL "
+            "AND length(provider_fixture_digest) = 64"
+            ")",
+            name="ck_assistant_skill_eval_run_provider_fixture_shape",
+        ),
+        sa.CheckConstraint(
+            "evidence_provenance <> 'structural_synthetic' OR gate_eligible = false",
+            name="ck_assistant_skill_eval_run_synthetic_gate_ineligible",
         ),
     )
     op.create_index(

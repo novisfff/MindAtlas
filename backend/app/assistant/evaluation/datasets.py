@@ -79,13 +79,27 @@ def load_plan04_cases(path: Path | None = None) -> list[EvalCase]:
     return load_dataset(fixture_path(path))
 
 
+def provider_script_key_for_case(case: EvalCase) -> str:
+    """Stable Provider script key for a Plan 04 case (separate from assertions)."""
+    return f"plan04:{case.execution_kind}:{case.case_id}"
+
+
 def case_to_snapshot_row(case: EvalCase, *, ordinal: int) -> dict[str, Any]:
+    # Provider script refs are named independently of expected Skill/Capability
+    # assertions so scripted Provider execution can resolve fixtures without
+    # reading assertion fields.
     return {
         "case_key": case.case_id,
         "ordinal": ordinal,
         "locale": case.locale,
         "input_messages": [{"role": "user", "content": case.prompt}],
-        "fixture_refs": [],
+        "fixture_refs": [
+            {
+                "kind": "provider_script",
+                "script_key": provider_script_key_for_case(case),
+                "revision": PLAN04_FIXTURE_REVISION,
+            }
+        ],
         "expected_mode": case.execution_kind,
         "acceptable_skill_keys": list(case.acceptable_skills),
         "forbidden_skill_keys": list(case.forbidden_skills),

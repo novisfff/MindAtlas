@@ -286,24 +286,38 @@ class EvalRepositorySqliteTests(unittest.TestCase):
         cases = self.repo.list_cases(published.version_id)
         return dataset, published, cases[0]
 
-    def _create_run(self, version_id, case=None):
-        run = self.repo.create_run(
-            subject_kind="skill_version",
-            subject_aggregate_id=_uuid(),
-            subject_version_id=_uuid(),
-            subject_content_digest=DIGEST_A,
-            subject_binding_digest=DIGEST_B,
-            dataset_version_ids=[version_id],
-            threshold_policy_version="t1",
-            mode="dataset_scripted",
-            isolation_namespace_id=_uuid(),
-            runtime_contract_version=1,
-            required_build_revision="build-1",
-            isolation_digest=DIGEST_C,
-            actor_principal="tester",
-        )
+    def _create_run(self, version_id, case=None, **overrides):
+        args = {
+            "subject_kind": "skill_version",
+            "subject_aggregate_id": _uuid(),
+            "subject_version_id": _uuid(),
+            "subject_content_digest": DIGEST_A,
+            "subject_binding_digest": DIGEST_B,
+            "dataset_version_ids": [version_id],
+            "threshold_policy_version": "t1",
+            "mode": "dataset_scripted",
+            "isolation_namespace_id": _uuid(),
+            "runtime_contract_version": 1,
+            "required_build_revision": "build-1",
+            "isolation_digest": DIGEST_C,
+            "actor_principal": "tester",
+            # Default structural_synthetic (Task 5); tests that need
+            # gate_eligible=True must pin real_orchestration + fixtures.
+            "evidence_provenance": "structural_synthetic",
+        }
+        args.update(overrides)
+        run = self.repo.create_run(**args)
         self.db.commit()
         return run
+
+    def _create_gate_eligible_run(self, version_id, case=None):
+        return self._create_run(
+            version_id,
+            case=case,
+            evidence_provenance="real_orchestration",
+            provider_fixture_revision="test-provider-v1",
+            provider_fixture_digest=DIGEST_D,
+        )
 
     def test_owner_kind_test_separated_from_subject_ownership(self) -> None:
         _, published, _ = self._publish_minimal_dataset()
@@ -351,9 +365,10 @@ class EvalRepositorySqliteTests(unittest.TestCase):
         from app.common.time import utcnow
 
         _, published, _ = self._publish_minimal_dataset()
-        run = self._create_run(published.version_id)
+        run = self._create_gate_eligible_run(published.version_id)
         self.assertEqual(run.status, "queued")
         self.assertEqual(run.state_revision, 0)
+        self.assertEqual(run.evidence_provenance, "real_orchestration")
 
         run = self.repo.transition_run(
             run_id=run.id,
@@ -555,7 +570,7 @@ class EvalRepositorySqliteTests(unittest.TestCase):
         from app.common.time import utcnow
 
         _, published, case = self._publish_minimal_dataset()
-        run = self._create_run(published.version_id)
+        run = self._create_gate_eligible_run(published.version_id)
         self.repo.transition_run(
             run_id=run.id, expected_revision=0, to_status="running"
         )
@@ -1081,6 +1096,184 @@ class ArchitectureImportBanTests(unittest.TestCase):
         public = [n for n in dir(repo_mod) if not n.startswith("_")]
         self.assertIn("EvaluationRepository", public)
         self.assertIn("gate_evidence_grace_days", public)
+
+
+class EvalProvenancePolicyTests(unittest.TestCase):
+    """Task 5: evidence provenance + provider fixture pins."""
+
+    def setUp(self) -> None:
+        reset_caches()
+        from tests._db import make_session
+        from app.assistant.evaluation.repository import EvaluationRepository
+
+        self.db = make_session()
+        self.repo = EvaluationRepository(self.db)
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def _publish_minimal_dataset(self):
+        dataset = self.repo.create_dataset(
+            stable_key=f"prov-{uuid.uuid4().hex[:10]}",
+            display_name="prov",
+            ownership="custom",
+        )
+        snapshot = [
+            {
+                "case_key": "c1",
+                "ordinal": 0,
+                "locale": "en",
+                "input_messages": [{"role": "user", "content": "hi"}],
+                "fixture_refs": [
+                    {
+                        "kind": "provider_script",
+                        "script_key": "provider-selects-skill-a",
+                    }
+                ],
+                "expected_mode": "golden_skill",
+                "acceptable_skill_keys": ["skill-a"],
+                "case_digest": DIGEST_A,
+                "notes": "n",
+            }
+        ]
+        self.repo.get_or_create_draft(dataset_id=dataset.id, cases_snapshot=snapshot)
+        published = self.repo.publish_dataset_version(
+            dataset_id=dataset.id,
+            expected_aggregate_revision=0,
+            expected_draft_revision=0,
+            version_name="v1",
+            actor="tester",
+        )
+        self.db.commit()
+        return published
+
+    def _run_args(self, **overrides):
+        published = overrides.pop("_published", None) or self._publish_minimal_dataset()
+        args = {
+            "subject_kind": "skill_version",
+            "subject_aggregate_id": _uuid(),
+            "subject_version_id": _uuid(),
+            "subject_content_digest": DIGEST_A,
+            "subject_binding_digest": DIGEST_B,
+            "dataset_version_ids": [published.version_id],
+            "threshold_policy_version": "t1",
+            "mode": "dataset_scripted",
+            "isolation_namespace_id": _uuid(),
+            "runtime_contract_version": 1,
+            "required_build_revision": "build-1",
+            "isolation_digest": DIGEST_C,
+            "evidence_provenance": "structural_synthetic",
+            "provider_fixture_revision": None,
+            "provider_fixture_digest": None,
+        }
+        args.update(overrides)
+        return args
+
+    def test_structural_synthetic_run_cannot_be_gate_eligible(self) -> None:
+        from app.assistant.evaluation.repository import EvaluationRepositoryError
+
+        run = self.repo.create_run(**self._run_args(evidence_provenance="structural_synthetic"))
+        self.db.commit()
+        run = self.repo.transition_run(
+            run_id=run.id, expected_revision=run.state_revision, to_status="running"
+        )
+        with self.assertRaises(EvaluationRepositoryError) as ctx:
+            self.repo.transition_run(
+                run_id=run.id,
+                expected_revision=int(run.state_revision),
+                to_status="completed",
+                gate_eligible=True,
+            )
+        self.assertIn("synthetic_gate_ineligible", str(ctx.exception))
+        self.assertEqual(ctx.exception.code, "synthetic_gate_ineligible")
+
+    def test_real_run_requires_fixture_digest(self) -> None:
+        from app.assistant.evaluation.repository import EvaluationRepositoryError
+
+        with self.assertRaises(EvaluationRepositoryError) as ctx:
+            self.repo.create_run(
+                **self._run_args(
+                    evidence_provenance="real_orchestration",
+                    provider_fixture_revision=None,
+                    provider_fixture_digest=None,
+                )
+            )
+        self.assertIn("provider_fixture_required", str(ctx.exception))
+        self.assertEqual(ctx.exception.code, "provider_fixture_required")
+
+    def test_real_run_accepts_fixture_pins(self) -> None:
+        run = self.repo.create_run(
+            **self._run_args(
+                evidence_provenance="real_orchestration",
+                provider_fixture_revision="plan04-provider-v1",
+                provider_fixture_digest=DIGEST_D,
+            )
+        )
+        self.db.commit()
+        self.assertEqual(run.evidence_provenance, "real_orchestration")
+        self.assertEqual(run.provider_fixture_revision, "plan04-provider-v1")
+        self.assertEqual(run.provider_fixture_digest, DIGEST_D)
+        self.repo.transition_run(
+            run_id=run.id, expected_revision=0, to_status="running"
+        )
+        completed = self.repo.transition_run(
+            run_id=run.id,
+            expected_revision=1,
+            to_status="completed",
+            gate_eligible=True,
+        )
+        self.assertTrue(completed.gate_eligible)
+
+    def test_live_model_requires_provider_evidence(self) -> None:
+        from app.assistant.evaluation.repository import EvaluationRepositoryError
+
+        with self.assertRaises(EvaluationRepositoryError) as ctx:
+            self.repo.create_run(
+                **self._run_args(
+                    evidence_provenance="live_model",
+                    provider_evidence_digest=None,
+                )
+            )
+        self.assertIn("live_model_evidence_required", str(ctx.exception))
+        self.assertEqual(ctx.exception.code, "live_model_evidence_required")
+
+    def test_default_create_run_is_structural_synthetic(self) -> None:
+        run = self.repo.create_run(**self._run_args())
+        self.db.commit()
+        self.assertEqual(run.evidence_provenance, "structural_synthetic")
+        self.assertIsNone(run.provider_fixture_revision)
+        self.assertIsNone(run.provider_fixture_digest)
+        self.assertFalse(run.gate_eligible)
+
+    def test_dataset_fixture_refs_name_provider_scripts_separately(self) -> None:
+        from app.assistant.evaluation.contracts import (
+            DatasetCaseSnapshot,
+            normalize_provider_fixture_refs,
+        )
+
+        published = self._publish_minimal_dataset()
+        cases = self.repo.list_cases(published.version_id)
+        self.assertEqual(len(cases), 1)
+        refs = cases[0].fixture_refs
+        self.assertTrue(refs)
+        self.assertEqual(refs[0]["kind"], "provider_script")
+        self.assertEqual(refs[0]["script_key"], "provider-selects-skill-a")
+        # Assertions live outside fixture_refs.
+        self.assertEqual(cases[0].acceptable_skill_keys, ["skill-a"])
+        self.assertNotIn("acceptable_skill_keys", refs[0])
+
+        normalized = normalize_provider_fixture_refs(refs)
+        self.assertEqual(normalized[0].script_key, "provider-selects-skill-a")
+        snap = DatasetCaseSnapshot(
+            case_key="c1",
+            ordinal=0,
+            locale="en",
+            input_messages=({"role": "user", "content": "hi"},),
+            fixture_refs=tuple(refs),
+            expected_mode="golden_skill",
+            acceptable_skill_keys=("skill-a",),
+        )
+        self.assertEqual(snap.fixture_refs[0]["kind"], "provider_script")
 
 
 if __name__ == "__main__":

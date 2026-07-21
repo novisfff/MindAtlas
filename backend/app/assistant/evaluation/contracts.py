@@ -8,6 +8,7 @@ Normative ownership:
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any, Literal, NoReturn
 from uuid import UUID
@@ -26,6 +27,12 @@ EvalSubjectKind = Literal[
 
 EvalRunMode = Literal["interactive_scripted", "dataset_scripted", "dataset_live"]
 
+EvidenceProvenance = Literal[
+    "real_orchestration",
+    "structural_synthetic",
+    "live_model",
+]
+
 EvalRunStatus = Literal[
     "queued",
     "running",
@@ -34,6 +41,11 @@ EvalRunStatus = Literal[
     "failed",
     "cancelled",
 ]
+
+EVIDENCE_PROVENANCE_VALUES: frozenset[str] = frozenset(
+    {"real_orchestration", "structural_synthetic", "live_model"}
+)
+DEFAULT_EVIDENCE_PROVENANCE: EvidenceProvenance = "structural_synthetic"
 
 EvalCapabilityOutcome = Literal[
     "succeeded_isolated",
@@ -227,6 +239,96 @@ class RuntimeIsolationContext(FrozenContract):
         return self
 
 
+class ProviderFixtureRef(FrozenContract):
+    """Named deterministic Provider script reference for a dataset case.
+
+    Fixture refs name Provider scripts only. Expected Skill/Capability assertions
+    live on separate case fields and must never be embedded here — scripted
+    Provider execution resolves scripts without reading assertion fields.
+    """
+
+    schema_version: Literal[1] = 1
+    kind: Literal["provider_script"] = "provider_script"
+    script_key: str
+    revision: str | None = None
+
+    @field_validator("script_key")
+    @classmethod
+    def _script_key(cls, value: str) -> str:
+        text = (value or "").strip()
+        if not text or len(text) > 160:
+            raise ValueError("script_key must be 1..160 chars")
+        return text
+
+    @field_validator("revision")
+    @classmethod
+    def _revision(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if len(text) > 160:
+            raise ValueError("revision must be <= 160 chars")
+        return text
+
+
+def normalize_provider_fixture_refs(
+    values: Sequence[Any] | None,
+) -> tuple[ProviderFixtureRef, ...]:
+    """Normalize case fixture_refs into ProviderFixtureRef tuples.
+
+    Accepts:
+    - dicts with kind=provider_script + script_key
+    - bare strings (treated as script_key)
+    - ``provider_script:<key>`` strings
+    """
+    if not values:
+        return ()
+    out: list[ProviderFixtureRef] = []
+    for raw in values:
+        if isinstance(raw, ProviderFixtureRef):
+            out.append(raw)
+            continue
+        if isinstance(raw, str):
+            text = raw.strip()
+            if text.startswith("provider_script:"):
+                text = text.split(":", 1)[1].strip()
+            out.append(ProviderFixtureRef(script_key=text))
+            continue
+        if isinstance(raw, Mapping):
+            data = dict(raw)
+            kind = str(data.get("kind") or "provider_script").strip()
+            if kind != "provider_script":
+                raise ValueError(
+                    f"fixture_refs only accept kind=provider_script, got {kind!r}"
+                )
+            # Strip assertion-shaped keys so Provider scripts stay separate.
+            for banned in (
+                "acceptable_skill_keys",
+                "forbidden_skill_keys",
+                "acceptable_capability_paths",
+                "expected_mode",
+                "expect_completion",
+                "assertion_json",
+            ):
+                data.pop(banned, None)
+            script_key = data.get("script_key") or data.get("key") or data.get("name")
+            out.append(
+                ProviderFixtureRef(
+                    script_key=str(script_key or ""),
+                    revision=(
+                        str(data["revision"])
+                        if data.get("revision") is not None
+                        else None
+                    ),
+                )
+            )
+            continue
+        raise ValueError(f"unsupported fixture_ref type: {type(raw)!r}")
+    return tuple(out)
+
+
 class DatasetCaseSnapshot(FrozenContract):
     """Normalized bounded case snapshot stored on drafts / versions."""
 
@@ -235,7 +337,8 @@ class DatasetCaseSnapshot(FrozenContract):
     ordinal: int
     locale: str
     input_messages: tuple[dict[str, Any], ...]
-    fixture_refs: tuple[str, ...] = ()
+    # Provider script refs only — never assertion fields.
+    fixture_refs: tuple[dict[str, Any], ...] = ()
     expected_mode: str
     acceptable_skill_keys: tuple[str, ...] = ()
     forbidden_skill_keys: tuple[str, ...] = ()
@@ -260,6 +363,12 @@ class DatasetCaseSnapshot(FrozenContract):
         if int(value) < 0:
             raise ValueError("ordinal must be >= 0")
         return int(value)
+
+    @field_validator("fixture_refs", mode="before")
+    @classmethod
+    def _fixture_refs(cls, value: Any) -> tuple[dict[str, Any], ...]:
+        refs = normalize_provider_fixture_refs(value)
+        return tuple(ref.model_dump(mode="json") for ref in refs)
 
 
 def is_evaluation_object_key(object_key: str | None) -> bool:

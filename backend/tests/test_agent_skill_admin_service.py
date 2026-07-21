@@ -179,6 +179,9 @@ def _create_passing_enable_gate(
         required_build_revision=build_rev,
         isolation_digest="c" * 64,
         actor_principal="tester",
+        evidence_provenance="real_orchestration",
+        provider_fixture_revision="test-provider-v1",
+        provider_fixture_digest="d" * 64,
     )
     repo.transition_run(run_id=run.id, expected_revision=0, to_status="running")
     repo.transition_run(

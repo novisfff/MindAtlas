@@ -338,6 +338,18 @@ class AssistantSkillEvalRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
     policy_digest = Column(String(64), nullable=True)
     runtime_digest = Column(String(64), nullable=True)
     provider_evidence_digest = Column(String(64), nullable=True)
+    # Trustworthiness provenance for gate eligibility (Plan 09 remediation Task 5).
+    # structural_synthetic: historical/materialized structural tests (never gate-eligible)
+    # real_orchestration: deterministic scripted Provider through real Main Agent path
+    # live_model: optional live Provider (promotion-ineligible in this remediation)
+    evidence_provenance = Column(
+        String(32),
+        nullable=False,
+        default="structural_synthetic",
+        server_default=text("'structural_synthetic'"),
+    )
+    provider_fixture_revision = Column(String(160), nullable=True)
+    provider_fixture_digest = Column(String(64), nullable=True)
     aggregate_metrics = Column(JSON, nullable=False, default=dict)
     gate_eligible = Column(
         Boolean, nullable=False, default=False, server_default=text("false")
@@ -437,6 +449,35 @@ class AssistantSkillEvalRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
         _nullable_sha256_check(
             "provider_evidence_digest",
             name="ck_assistant_skill_eval_run_provider_evidence_digest",
+        ),
+        CheckConstraint(
+            "evidence_provenance IN ("
+            "'real_orchestration','structural_synthetic','live_model'"
+            ")",
+            name="ck_assistant_skill_eval_run_evidence_provenance",
+        ),
+        _nullable_sha256_check(
+            "provider_fixture_digest",
+            name="ck_assistant_skill_eval_run_provider_fixture_digest",
+        ),
+        CheckConstraint(
+            # Fixture pins are all-or-nothing: both null, or both present with
+            # non-empty revision + 64-char digest.
+            "("
+            "provider_fixture_revision IS NULL AND provider_fixture_digest IS NULL"
+            ") OR ("
+            "provider_fixture_revision IS NOT NULL "
+            "AND length(provider_fixture_revision) > 0 "
+            "AND length(provider_fixture_revision) <= 160 "
+            "AND provider_fixture_digest IS NOT NULL "
+            "AND length(provider_fixture_digest) = 64"
+            ")",
+            name="ck_assistant_skill_eval_run_provider_fixture_shape",
+        ),
+        CheckConstraint(
+            # Structural synthetic runs can never be gate-eligible (DB defense).
+            "evidence_provenance <> 'structural_synthetic' OR gate_eligible = false",
+            name="ck_assistant_skill_eval_run_synthetic_gate_ineligible",
         ),
         Index(
             "ix_assistant_skill_eval_run_status_created",

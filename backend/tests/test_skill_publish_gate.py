@@ -275,21 +275,30 @@ class PublishGateServiceUnitTests(unittest.TestCase):
 
         agg = aggregate_id or _uuid()
         ver = version_id or _uuid()
-        run = self.repo.create_run(
-            subject_kind="skill_draft",
-            subject_aggregate_id=agg,
-            subject_version_id=ver,
-            subject_content_digest=content_digest,
-            subject_binding_digest=binding_digest,
-            dataset_version_ids=[dataset_version_id],
-            threshold_policy_version=threshold_version,
-            mode=mode,
-            isolation_namespace_id=_uuid(),
-            runtime_contract_version=1,
-            required_build_revision=build_revision,
-            isolation_digest=DIGEST_C,
-            actor_principal="tester",
-        )
+        create_kwargs = {
+            "subject_kind": "skill_draft",
+            "subject_aggregate_id": agg,
+            "subject_version_id": ver,
+            "subject_content_digest": content_digest,
+            "subject_binding_digest": binding_digest,
+            "dataset_version_ids": [dataset_version_id],
+            "threshold_policy_version": threshold_version,
+            "mode": mode,
+            "isolation_namespace_id": _uuid(),
+            "runtime_contract_version": 1,
+            "required_build_revision": build_revision,
+            "isolation_digest": DIGEST_C,
+            "actor_principal": "tester",
+        }
+        if gate_eligible:
+            create_kwargs.update(
+                evidence_provenance="real_orchestration",
+                provider_fixture_revision="test-provider-v1",
+                provider_fixture_digest=DIGEST_D,
+            )
+        else:
+            create_kwargs["evidence_provenance"] = "structural_synthetic"
+        run = self.repo.create_run(**create_kwargs)
         self.repo.transition_run(
             run_id=run.id, expected_revision=0, to_status="running"
         )
@@ -735,6 +744,9 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
             required_build_revision=build_rev,
             isolation_digest=DIGEST_C,
             actor_principal="tester",
+            evidence_provenance="real_orchestration",
+            provider_fixture_revision="test-provider-v1",
+            provider_fixture_digest=DIGEST_D,
         )
         self.repo.transition_run(
             run_id=run.id, expected_revision=0, to_status="running"
