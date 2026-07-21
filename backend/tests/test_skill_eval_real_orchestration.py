@@ -1,7 +1,8 @@
 """Decisive real-orchestration negative tests (Plan 09 Task 6).
 
-Proves expected Skill keys never rewrite actual active skills, and missing
-safety counters stay None (never manufactured zeros).
+Proves expected Skill keys never rewrite actual active skills, missing safety
+counters stay None (never manufactured zeros), and gate eligibility requires
+probe-derived observations (not fixture-declared zeros).
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ from tests._bootstrap import bootstrap_backend_imports, reset_caches
 bootstrap_backend_imports()
 reset_caches()
 
-from app.assistant.domain.digests import sha256_canonical_json  # noqa: E402
 from app.assistant.evaluation.assertions import evaluate_dataset_assertions  # noqa: E402
 from app.assistant.evaluation.isolation import (  # noqa: E402
     build_isolation_context,
@@ -31,8 +31,12 @@ from app.assistant.evaluation.orchestration import (  # noqa: E402
     EvaluationOrchestrator,
     EvaluationOrchestratorConfig,
     ProviderFixtureScript,
+    install_default_isolation_probes,
+    missing_safety_counter_probe,
     register_provider_fixture,
     resolve_provider_fixture,
+    zero_production_delta_probe,
+    zero_safety_counter_probe,
 )
 from app.assistant.evaluation.contracts import (  # noqa: E402
     EVAL_OWNER_KIND,
@@ -85,7 +89,13 @@ class _HarnessOutcome:
 class RealEvalHarness:
     """Minimal real-orchestration harness for decisive negative tests."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        install_probes: bool = True,
+        safety_probe=None,
+        production_delta_probe=None,
+    ) -> None:
         self.namespace_id = uuid4()
         self.isolation = build_isolation_context(
             namespace_id=self.namespace_id,
@@ -94,8 +104,12 @@ class RealEvalHarness:
             memory_mode="empty",
             data_mode="fixture",
         )
+        if install_probes and safety_probe is None and production_delta_probe is None:
+            safety_probe, production_delta_probe = install_default_isolation_probes()
         self.orchestrator = EvaluationOrchestrator(
-            config=EvaluationOrchestratorConfig(app_build_revision="test")
+            config=EvaluationOrchestratorConfig(app_build_revision="test"),
+            safety_counter_probe=safety_probe,
+            production_delta_probe=production_delta_probe,
         )
 
     def case(
@@ -145,22 +159,23 @@ class RealEvalHarness:
             production_delta=observed.production_delta,
             isolation_breached=False,
         )
-        # Per-case skill recall: acceptable ∩ actual non-empty when acceptable set.
         acceptable = set(case.acceptable_skill_keys)
         actual = set(observed.actual_active_skills)
         if acceptable:
             skill_recall = bool(acceptable & actual)
         else:
             skill_recall = not actual
-        # Missing safety counters force gate-ineligible (never invent zeros).
         missing_counters = any(
             v is None for v in (observed.safety_counters or {}).values()
         )
-        # Skill-recall failure on a positive golden case is promotion-ineligible.
+        missing_delta = any(
+            v is None for v in (observed.production_delta or {}).values()
+        )
         gate_eligible = (
             bool(summary.gate_eligible)
             and skill_recall
             and not missing_counters
+            and not missing_delta
             and bool(observed.completed)
         )
         return _HarnessOutcome(
@@ -179,50 +194,28 @@ class RealEvalHarness:
         )
 
     def execute_without_counter(self, counter_name: str) -> _HarnessOutcome:
-        """Run a fixture that omits the named safety counter (stays None)."""
-        fixture_key = "provider-missing-secret-counter"
-        if counter_name != "secret_exposure":
-            # Register a one-off fixture that omits the requested counter.
-            counters = {
-                "budget_policy_bypass": 0,
-                "false_completion_pending_obligation": 0,
-                "unresolved_obligation_falsely_completed": 0,
-                "schema_escape": 0,
-                "secret_exposure": 0,
-                "duplicate_write": 0,
-            }
-            counters.pop(counter_name, None)
-            register_provider_fixture(
-                ProviderFixtureScript(
-                    script_key=f"provider-missing-{counter_name}",
-                    revision="eval-v1",
-                    rounds=(eval_text_round_script("ok"),),
-                    activates_skills=(),
-                    completes=True,
-                    observed_safety_counters=counters,
-                    observed_production_delta={
-                        "assistant_chat_run": 0,
-                        "capability_call": 0,
-                        "assistant_memory": 0,
-                        "artifact": 0,
-                    },
-                )
-            )
-            fixture_key = f"provider-missing-{counter_name}"
-        case = self.case(
+        """Run with a probe that omits the named safety counter (stays None)."""
+        harness = RealEvalHarness(
+            install_probes=False,
+            safety_probe=missing_safety_counter_probe(omit=counter_name),
+            production_delta_probe=zero_production_delta_probe,
+        )
+        case = harness.case(
             expected_mode="direct_answer",
             acceptable_skill_keys=[],
-            fixture_key=fixture_key,
+            fixture_key="provider-direct-answer",
         )
-        return self.execute(case)
+        return harness.execute(case)
 
 
 @pytest.fixture
 def real_eval_harness() -> RealEvalHarness:
-    return RealEvalHarness()
+    return RealEvalHarness(install_probes=True)
 
 
-def test_expected_skill_never_rewrites_actual_skill(real_eval_harness: RealEvalHarness) -> None:
+def test_expected_skill_never_rewrites_actual_skill(
+    real_eval_harness: RealEvalHarness,
+) -> None:
     case = real_eval_harness.case(
         expected_mode="golden_skill",
         acceptable_skill_keys=["skill-a"],
@@ -234,10 +227,72 @@ def test_expected_skill_never_rewrites_actual_skill(real_eval_harness: RealEvalH
     assert outcome.gate_eligible is False
 
 
-def test_missing_safety_observation_is_not_zero(real_eval_harness: RealEvalHarness) -> None:
+def test_missing_safety_observation_is_not_zero(
+    real_eval_harness: RealEvalHarness,
+) -> None:
     outcome = real_eval_harness.execute_without_counter("secret_exposure")
     assert outcome.safety_counters["secret_exposure"] is None
     assert outcome.gate_eligible is False
+
+
+def test_matching_skills_without_safety_probe_gate_false() -> None:
+    """Matching expected/fixture skills with missing safety probe → gate false."""
+    harness = RealEvalHarness(
+        install_probes=False,
+        safety_probe=None,
+        production_delta_probe=zero_production_delta_probe,
+    )
+    case = harness.case(
+        expected_mode="golden_skill",
+        acceptable_skill_keys=["skill-b"],
+        fixture_key="provider-selects-skill-b",
+    )
+    outcome = harness.execute(case)
+    assert outcome.actual_active_skills == ("skill-b",)
+    assert outcome.assertions.skill_recall is True
+    assert all(v is None for v in outcome.safety_counters.values())
+    assert outcome.gate_eligible is False
+
+
+def test_installed_probes_with_matching_skills_can_be_gate_eligible() -> None:
+    """Installed probes returning zeros + matching skills → gate may be true."""
+    harness = RealEvalHarness(
+        install_probes=False,
+        safety_probe=zero_safety_counter_probe,
+        production_delta_probe=zero_production_delta_probe,
+    )
+    case = harness.case(
+        expected_mode="golden_skill",
+        acceptable_skill_keys=["skill-b"],
+        fixture_key="provider-selects-skill-b",
+    )
+    outcome = harness.execute(case)
+    assert outcome.actual_active_skills == ("skill-b",)
+    assert outcome.assertions.skill_recall is True
+    assert all(v is not None for v in outcome.safety_counters.values())
+    assert all(v is not None for v in outcome.production_delta.values())
+    assert outcome.gate_eligible is True
+
+
+def test_fixture_cannot_force_gate_eligible_without_probes() -> None:
+    """Builtin fixtures no longer declare observed zeros; missing probes → gate false."""
+    harness = RealEvalHarness(install_probes=False)
+    case = harness.case(
+        expected_mode="golden_skill",
+        acceptable_skill_keys=["skill-b"],
+        fixture_key="provider-selects-skill-b",
+    )
+    outcome = harness.execute(case)
+    assert outcome.actual_active_skills == ("skill-b",)
+    # No probes → counters/delta None even when skills match.
+    assert all(v is None for v in outcome.safety_counters.values())
+    assert all(v is None for v in outcome.production_delta.values())
+    assert outcome.gate_eligible is False
+    # Builtin fixture has no observed_* maps.
+    fixture = resolve_provider_fixture(script_key="provider-selects-skill-b")
+    assert not hasattr(fixture, "observed_safety_counters") or not getattr(
+        fixture, "observed_safety_counters", None
+    )
 
 
 def test_observed_outcome_rejects_expected_as_actual_fields() -> None:
@@ -272,7 +327,6 @@ def test_fold_observed_outcome_uses_runtime_skills_only() -> None:
     )
     assert observed.actual_active_skills == ("skill-b",)
     assert observed.safety_counters["secret_exposure"] is None
-    # Required keys present even when not supplied.
     assert "duplicate_write" in observed.safety_counters
     assert observed.safety_counters["duplicate_write"] is None
 
@@ -285,18 +339,13 @@ def test_provider_fixture_registry_resolves_skill_b() -> None:
 
 def test_structural_materializer_never_gate_eligible_for_mismatch() -> None:
     """Structural path copies expected→actual (legacy); gate path must not use it."""
-    from app.assistant.evaluation.worker import EvaluationWorker, EvalWorkerConfig
-
-    # Pure unit: structural helper with a fake case-like object is covered by
-    # worker tests; here we only assert the orchestrator path diverges.
-    harness = RealEvalHarness()
+    harness = RealEvalHarness(install_probes=True)
     case = harness.case(
         expected_mode="golden_skill",
         acceptable_skill_keys=["skill-a"],
         fixture_key="provider-selects-skill-b",
     )
     outcome = harness.execute(case)
-    # Real path: actual is skill-b, not skill-a
     assert outcome.actual_active_skills != tuple(case.acceptable_skill_keys)
     assert outcome.actual_active_skills == ("skill-b",)
 
@@ -312,6 +361,44 @@ def test_matching_fixture_and_expected_can_be_gate_eligible(
     outcome = real_eval_harness.execute(case)
     assert outcome.actual_active_skills == ("skill-b",)
     assert outcome.assertions.skill_recall is True
-    # Full safety counters + zero production delta → summary gate-eligible.
+    # Full probe-derived safety counters + zero production delta → gate-eligible.
     assert outcome.gate_eligible is True
     assert all(v is not None for v in outcome.safety_counters.values())
+
+
+def test_skill_activation_goes_through_loop_dispatch() -> None:
+    """Skill activations are applied only after Provider tool-call dispatch."""
+    harness = RealEvalHarness(install_probes=True)
+    case = harness.case(
+        expected_mode="golden_skill",
+        acceptable_skill_keys=["skill-b"],
+        fixture_key="provider-selects-skill-b",
+    )
+    identity = EvalExecutionIdentity(
+        eval_run_id=uuid4(),
+        eval_case_id=case.id,
+        namespace_id=harness.namespace_id,
+        owner_kind=EVAL_OWNER_KIND,
+        subject_kind="skill_draft",
+        subject_aggregate_id=uuid4(),
+        subject_version_id=uuid4(),
+    )
+    # Capture scope events via a custom orchestrator run under isolation.
+    from app.assistant.evaluation.isolation import eval_execution_scope
+
+    with eval_execution_scope(
+        isolation=harness.isolation,
+        identity=identity,
+        fixture_store={},
+    ) as scope:
+        observed = harness.orchestrator.execute_case(
+            harness.isolation,
+            case,
+            None,
+            identity=identity,
+            scope=scope,
+        )
+        event_types = [e.get("event_type") for e in scope.events]
+        assert "eval.skill_inject_dispatched" in event_types
+        assert observed.actual_active_skills == ("skill-b",)
+        assert "skill.inject" in observed.capability_path

@@ -501,12 +501,18 @@ class EvaluationWorker:
         from app.assistant.evaluation.orchestration import (
             EvaluationOrchestrator,
             EvaluationOrchestratorConfig,
+            install_default_isolation_probes,
         )
 
+        # Isolation probes measure safety counters / production deltas. Without
+        # installed probes, observations stay None and gate_eligible is False.
+        safety_probe, delta_probe = install_default_isolation_probes()
         orchestrator = EvaluationOrchestrator(
             config=EvaluationOrchestratorConfig(
-                app_build_revision=self.identity.app_build_revision,
-            )
+                app_build_revision=self.cfg.identity.app_build_revision,
+            ),
+            safety_counter_probe=safety_probe,
+            production_delta_probe=delta_probe,
         )
         outcomes: list[dict[str, Any]] = []
         merged_safety: dict[str, int | None] = {
