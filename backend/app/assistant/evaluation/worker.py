@@ -289,14 +289,50 @@ class EvaluationWorker:
                         pass
 
             if mode == "dataset_scripted":
-                # Deterministic CI/gate path: materialize case_outcomes from
-                # published dataset case definitions (typed expected_mode /
-                # acceptable skills), then run_dataset_scripted assertions.
-                # This is NOT a full Main Agent / Provider execution loop —
-                # live MA orchestration remains deferred. production_delta and
-                # safety_counters are explicit zeros for this synthetic path;
-                # hard-safety still fails closed if counters/metrics are missing.
-                case_outcomes = self._materialize_dataset_case_outcomes(repo, run)
+                # Real orchestration is the gate-eligible path when the run
+                # pins evidence_provenance=real_orchestration + fixture digests.
+                # Structural synthetic remains callable only with gate_eligible=False.
+                provenance = str(
+                    getattr(run, "evidence_provenance", "") or "structural_synthetic"
+                )
+                if provenance == "real_orchestration":
+                    case_outcomes, observed_safety, observed_delta = (
+                        self._execute_real_orchestration_cases(
+                            repo, run, isolation=isolation, identity=identity
+                        )
+                    )
+                elif provenance == "live_model":
+                    # dataset_live remains promotion-ineligible; fail closed here
+                    # unless a future live driver is injected.
+                    rev = int(run.state_revision)
+                    repo.transition_run(
+                        run_id=run.id,
+                        expected_revision=rev,
+                        to_status="failed",
+                        failure_code="mode_not_supported",
+                        gate_eligible=False,
+                    )
+                    db.commit()
+                    return None
+                else:
+                    # structural_synthetic — never gate-eligible.
+                    case_outcomes = self._materialize_structural_test_outcomes(
+                        repo, run
+                    )
+                    observed_safety = {
+                        "budget_policy_bypass": 0,
+                        "false_completion_pending_obligation": 0,
+                        "unresolved_obligation_falsely_completed": 0,
+                        "schema_escape": 0,
+                        "secret_exposure": 0,
+                        "duplicate_write": 0,
+                    }
+                    observed_delta = {
+                        "assistant_chat_run": 0,
+                        "capability_call": 0,
+                        "assistant_memory": 0,
+                        "artifact": 0,
+                    }
                 if not case_outcomes:
                     rev = int(run.state_revision)
                     repo.transition_run(
@@ -312,27 +348,18 @@ class EvaluationWorker:
                     isolation=isolation,
                     identity=identity,
                     case_outcomes=case_outcomes,
-                    production_delta={
-                        "assistant_chat_run": 0,
-                        "capability_call": 0,
-                        "assistant_memory": 0,
-                        "artifact": 0,
-                    },
-                    safety_counters={
-                        "budget_policy_bypass": 0,
-                        "false_completion_pending_obligation": 0,
-                        "unresolved_obligation_falsely_completed": 0,
-                        "schema_escape": 0,
-                        "secret_exposure": 0,
-                        "duplicate_write": 0,
-                    },
+                    production_delta=observed_delta,
+                    safety_counters=observed_safety,
                 )
                 try:
                     self._heartbeat(repo, run_id=run_id)
                 except Exception:
                     logger.exception("post-execute heartbeat failed run_id=%s", run_id)
                 self._persist_dataset_outcome(
-                    repo, run_id=run_id, outcome=dataset_outcome, case_outcomes=case_outcomes
+                    repo,
+                    run_id=run_id,
+                    outcome=dataset_outcome,
+                    case_outcomes=case_outcomes,
                 )
                 db.commit()
                 return None
@@ -392,18 +419,22 @@ class EvaluationWorker:
         )
 
 
-    def _materialize_dataset_case_outcomes(
+    def _materialize_structural_test_outcomes(
         self, repo: EvaluationRepository, run: Any
     ) -> list[dict[str, Any]]:
-        """Build deterministic scripted case outcomes from published dataset cases.
+        """Structural synthetic helper — expected fields become actuals.
 
-        CI/gate path only: synthesizes ``activated_skills`` / ``execution_kind``
-        from each case's expected_mode and acceptable_skill_keys so
-        ``run_dataset_scripted`` can evaluate typed assertions with proven-zero
-        production_delta counters. This does **not** run the real Main Agent
-        planner or Provider loop — those remain Task 5+ live-mode work.
+        Callable only for ``evidence_provenance=structural_synthetic``. Always
+        promotion-ineligible. Does **not** run the real Main Agent / Provider
+        loop. Prefer ``_execute_real_orchestration_cases`` for gate evidence.
         Empty case lists must fail the run as ``dataset_cases_missing``.
         """
+        provenance = str(getattr(run, "evidence_provenance", "") or "")
+        if provenance and provenance != "structural_synthetic":
+            raise IsolationError(
+                "structural_synthetic_required",
+                "structural materializer requires evidence_provenance=structural_synthetic",
+            )
         outcomes: list[dict[str, Any]] = []
         for vid in list(run.dataset_version_ids or []):
             try:
@@ -442,6 +473,86 @@ class EvaluationWorker:
                     }
                 )
         return outcomes
+
+    # Backward-compatible alias for tests that still patch the old name.
+    def _materialize_dataset_case_outcomes(
+        self, repo: EvaluationRepository, run: Any
+    ) -> list[dict[str, Any]]:
+        return self._materialize_structural_test_outcomes(repo, run)
+
+    def _execute_real_orchestration_cases(
+        self,
+        repo: EvaluationRepository,
+        run: Any,
+        *,
+        isolation: RuntimeIsolationContext,
+        identity: EvalExecutionIdentity,
+    ) -> tuple[list[dict[str, Any]], dict[str, int | None], dict[str, int | None]]:
+        """Resolve fixtures and run EvaluationOrchestrator per dataset case.
+
+        Returns (case_outcome_mappings, merged_safety_counters, merged_production_delta).
+        Actual skills come only from ObservedEvalCaseOutcome — never from
+        case.acceptable_skill_keys.
+        """
+        from app.assistant.evaluation.observations import (
+            REQUIRED_SAFETY_COUNTER_KEYS,
+            observed_to_case_outcome_mapping,
+        )
+        from app.assistant.evaluation.orchestration import (
+            EvaluationOrchestrator,
+            EvaluationOrchestratorConfig,
+        )
+
+        orchestrator = EvaluationOrchestrator(
+            config=EvaluationOrchestratorConfig(
+                app_build_revision=self.identity.app_build_revision,
+            )
+        )
+        outcomes: list[dict[str, Any]] = []
+        merged_safety: dict[str, int | None] = {
+            k: None for k in REQUIRED_SAFETY_COUNTER_KEYS
+        }
+        merged_delta: dict[str, int | None] = {
+            "assistant_chat_run": None,
+            "capability_call": None,
+            "assistant_memory": None,
+            "artifact": None,
+        }
+        for vid in list(run.dataset_version_ids or []):
+            try:
+                cases = repo.list_cases(UUID(str(vid)))
+            except Exception:
+                logger.exception("list_cases failed dataset_version_id=%s", vid)
+                continue
+            for case in cases:
+                case_identity = EvalExecutionIdentity(
+                    eval_run_id=identity.eval_run_id,
+                    eval_case_id=case.id,
+                    namespace_id=identity.namespace_id,
+                    owner_kind=EVAL_OWNER_KIND,
+                    subject_kind=identity.subject_kind,
+                    subject_aggregate_id=identity.subject_aggregate_id,
+                    subject_version_id=identity.subject_version_id,
+                )
+                observed = orchestrator.execute_case(
+                    isolation,
+                    case,
+                    None,  # resolve from case.fixture_refs
+                    identity=case_identity,
+                )
+                mapping = observed_to_case_outcome_mapping(observed, case=case)
+                outcomes.append(mapping)
+                for key, value in (observed.safety_counters or {}).items():
+                    if key not in merged_safety or merged_safety[key] is None:
+                        merged_safety[key] = value
+                    elif value is not None:
+                        merged_safety[key] = int(merged_safety[key] or 0) + int(value)
+                for key, value in (observed.production_delta or {}).items():
+                    if key not in merged_delta or merged_delta[key] is None:
+                        merged_delta[key] = value
+                    elif value is not None:
+                        merged_delta[key] = int(merged_delta[key] or 0) + int(value)
+        return outcomes, merged_safety, merged_delta
 
     def _persist_dataset_outcome(
         self,
@@ -493,13 +604,26 @@ class EvaluationWorker:
                     continue
                 raise
         terminal = "completed" if outcome.terminal == "completed" else "failed"
-        # Structural synthetic evidence is never gate-eligible (Task 5).
+        # Only real_orchestration may remain gate-eligible; structural/live forced off.
         gate_eligible = bool(outcome.gate_eligible)
         run_row = repo.get_run(run_id)
-        if run_row is not None and str(
-            getattr(run_row, "evidence_provenance", "") or ""
-        ) in {"structural_synthetic", "live_model"}:
+        provenance = ""
+        if run_row is not None:
+            provenance = str(getattr(run_row, "evidence_provenance", "") or "")
+        if provenance != "real_orchestration":
             gate_eligible = False
+        # Missing safety counters on real path also force ineligible.
+        if provenance == "real_orchestration":
+            counters = dict((outcome.aggregate_metrics or {}).get("safety_counters") or {})
+            if any(counters.get(k) is None for k in (
+                "budget_policy_bypass",
+                "false_completion_pending_obligation",
+                "unresolved_obligation_falsely_completed",
+                "schema_escape",
+                "secret_exposure",
+                "duplicate_write",
+            )):
+                gate_eligible = False
         repo.transition_run(
             run_id=run_id,
             expected_revision=rev,

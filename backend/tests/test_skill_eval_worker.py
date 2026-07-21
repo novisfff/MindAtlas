@@ -563,7 +563,7 @@ class EvalWorkerExecuteTests(unittest.TestCase):
         )
         self.db.commit()
         with patch.object(
-            self.worker, "_materialize_dataset_case_outcomes", return_value=[]
+            self.worker, "_materialize_structural_test_outcomes", return_value=[]
         ):
             outcome = self.worker.execute_run(run.id)
         self.assertIsNone(outcome)

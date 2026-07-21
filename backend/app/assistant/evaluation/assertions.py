@@ -225,6 +225,21 @@ def assert_no_production_side_effect(
             hard_safety=True,
         )
     delta = dict(production_delta)
+    # None values mean missing probe evidence for that key — never invent zeros.
+    if any(v is None for v in delta.values()):
+        if missing_is_indeterminate:
+            return AssertionResult(
+                code="real_side_effect_in_test",
+                outcome="indeterminate",
+                detail="missing production_delta probe values",
+                hard_safety=True,
+            )
+        return AssertionResult(
+            code="real_side_effect_in_test",
+            outcome="fail",
+            detail="missing production_delta probe values treated as fail",
+            hard_safety=True,
+        )
     nonzero = {k: v for k, v in delta.items() if int(v) != 0}
     if nonzero:
         return AssertionResult(

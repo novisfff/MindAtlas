@@ -731,8 +731,12 @@ class EvaluationRunner:
         if delta is None:
             zero_mutation = False
             nonzero: dict[str, int] = {}
+        elif any(v is None for v in delta.values()):
+            # Missing probe values are not proven zeros.
+            zero_mutation = False
+            nonzero = {}
         else:
-            nonzero = {k: v for k, v in delta.items() if int(v) != 0}
+            nonzero = {k: int(v) for k, v in delta.items() if int(v) != 0}
             zero_mutation = not nonzero and not scope.breached
 
         summary = evaluate_dataset_assertions(
