@@ -138,13 +138,15 @@ class PublishSkillVersionCommand(CamelModel):
 
     Plan 09: optional ``gate_id`` + ``gate_subject`` for publish-gate enforcement.
     Client never supplies passed/decision/metrics — only evidence refs via gate.
-    Required ``request_id`` stamps idempotent gate/admin evidence.
+    Required ``request_id`` + ``expected_aggregate_revision`` enforce the same
+    idempotency-first CAS sequence as draft save.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     draft_version_id: UUID
     request_id: str = Field(min_length=1, max_length=128)
+    expected_aggregate_revision: int = Field(ge=0)
     gate_id: UUID | None = None
     # Opaque server-recomputed subject closure (PublishGateSubject dict / model).
     # When omitted, service rebuilds closure from draft digests under lock.
@@ -152,12 +154,16 @@ class PublishSkillVersionCommand(CamelModel):
 
 
 class PublishMainAgentProfileCommand(CamelModel):
-    """Publish requires an explicit draft version id; never resolves latest."""
+    """Publish requires an explicit draft version id; never resolves latest.
+
+    Required ``request_id`` + ``expected_aggregate_revision`` match draft CAS.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     draft_version_id: UUID
     request_id: str = Field(min_length=1, max_length=128)
+    expected_aggregate_revision: int = Field(ge=0)
     gate_id: UUID | None = None
     gate_subject: dict[str, Any] | None = None
 

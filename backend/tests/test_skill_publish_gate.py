@@ -792,7 +792,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         draft_id = self.package.draft_version.id
         published = self.pkg_svc.publish(
             self.package.id,
-            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-4"),
+            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-4", expected_aggregate_revision=0),
         )
         self.assertEqual(published.version_source, "publish")
         row = self.db.get(AssistantSkillPackage, self.package.id)
@@ -819,7 +819,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         draft_id = self.package.draft_version.id
         pub1 = self.pkg_svc.publish(
             self.package.id,
-            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-5"),
+            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-5", expected_aggregate_revision=0),
         )
         detail = self.pkg_svc.get_package(self.package.id)
         version = self.db.get(
@@ -896,7 +896,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         with self.assertRaises(ApiException) as ctx:
             self.pkg_svc.publish(
                 self.package.id,
-                PublishSkillVersionCommand(draft_version_id=draft2.id, request_id="pub-req-6"),
+                PublishSkillVersionCommand(draft_version_id=draft2.id, request_id="pub-req-6", expected_aggregate_revision=_current_pkg_rev(self.db, self.package.id)),
             )
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertEqual(ctx.exception.code, 40980)
@@ -918,7 +918,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         draft_id = self.package.draft_version.id
         pub = self.pkg_svc.publish(
             self.package.id,
-            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-7"),
+            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-7", expected_aggregate_revision=0),
         )
         detail = self.pkg_svc.get_package(self.package.id)
         with self.assertRaises(ApiException) as ctx:
@@ -948,7 +948,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         with self.assertRaises(ApiException) as ctx:
             self.pkg_svc.publish(
                 self.package.id,
-                PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-8"),
+                PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-8", expected_aggregate_revision=0),
             )
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertEqual(ctx.exception.code, 40980)
@@ -988,7 +988,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         get_settings.cache_clear()
         pub_observe = self.pkg_svc.publish(
             self.package.id,
-            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-9"),
+            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-9", expected_aggregate_revision=0),
         )
         # Save a new draft (same content) for enforce publish.
         from app.assistant.skills.schemas import SaveSkillDraftCommand
@@ -1033,6 +1033,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
                 draft_version_id=draft2.id,
                 gate_id=gate.id,
                 request_id="pub-enforce-1",
+                expected_aggregate_revision=_current_pkg_rev(self.db, self.package.id),
             ),
         )
         self.assertEqual(published.version_source, "publish")
@@ -1064,7 +1065,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         draft_id = self.package.draft_version.id
         pub = self.pkg_svc.publish(
             self.package.id,
-            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-10"),
+            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-10", expected_aggregate_revision=0),
         )
         version = self.db.get(
             __import__(
@@ -1129,7 +1130,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         get_settings.cache_clear()
         pub_observe = self.pkg_svc.publish(
             self.package.id,
-            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-11"),
+            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-11", expected_aggregate_revision=0),
         )
         from app.assistant.skills.schemas import SaveSkillDraftCommand
         from app.assistant.skills.package_io import parse_skill_directory_files
@@ -1177,7 +1178,8 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
                     draft_version_id=draft2.id,
                     gate_id=gate.id,
                     request_id="pub-env-drift",
-                ),
+                expected_aggregate_revision=_current_pkg_rev(self.db, self.package.id),
+            ),
             )
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertEqual(ctx.exception.code, 40982)
@@ -1195,7 +1197,7 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         assert self.package.draft_version is not None
         pub = self.pkg_svc.publish(
             self.package.id,
-            PublishSkillVersionCommand(draft_version_id=self.package.draft_version.id, request_id="pub-req-12"),
+            PublishSkillVersionCommand(draft_version_id=self.package.draft_version.id, request_id="pub-req-12", expected_aggregate_revision=0),
         )
         with self.assertRaises(ApiException) as ctx:
             self.pkg_svc.set_catalog_enabled(

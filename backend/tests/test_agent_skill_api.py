@@ -394,7 +394,7 @@ class AgentSkillApiTests(unittest.TestCase):
         only_draft = only_data["draftVersion"]["id"]
         published = self.client.post(
             f"/api/assistant-config/skill-packages/{only_id}/publish",
-            json={"draftVersionId": only_draft, "requestId": "api-pub-1"},
+            json={"draftVersionId": only_draft, "requestId": "api-pub-1", "expectedAggregateRevision": 0},
         )
         self.assertEqual(published.status_code, 200, published.text)
         pub = published.json()["data"]
@@ -550,7 +550,7 @@ class AgentSkillApiTests(unittest.TestCase):
         package_id = created["id"]
         resp = self.client.post(
             f"/api/assistant-config/skill-packages/{package_id}/publish",
-            json={"draftVersionId": str(uuid4()), "requestId": "api-pub-1"},
+            json={"draftVersionId": str(uuid4()), "requestId": "api-pub-1", "expectedAggregateRevision": 0},
         )
         self.assertIn(resp.status_code, {404, 422})
         self.assertIn(resp.json()["code"], {40491, 42293, 40993})

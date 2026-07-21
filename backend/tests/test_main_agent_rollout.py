@@ -277,7 +277,7 @@ class MainAgentRolloutTests(unittest.TestCase):
         )
         draft_id = other.draft_version.id if other.draft_version else None
         assert draft_id is not None
-        svc.publish(other.id, PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-1"))
+        svc.publish(other.id, PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-1", expected_aggregate_revision=0))
 
         plan = plan_rollout(
             self.db,

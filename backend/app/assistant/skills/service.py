@@ -539,6 +539,11 @@ class AgentSkillService:
         Always inserts a new ``version_source=publish`` row. The draft is never
         mutated. Publish never auto-enables catalog.
 
+        Sequence: lock package → compare request ID/digest (idempotent replay) →
+        compare expected revision → apply mutation → always increment revision →
+        stamp ``last_admin_request_*`` → commit. Gate consumption remains required
+        where the live matrix already required it; CAS is additional integrity.
+
         Plan 09 gate matrix (server-enforced):
         - already ``catalog_enabled``: matching gate required in observe and enforce;
         - live-disabled: ungated bootstrap only in observe; enforce requires gateId;
@@ -562,6 +567,71 @@ class AgentSkillService:
                     code=40996,
                     message="cannot publish an archived skill package; unarchive first",
                 )
+
+            request_id = (command.request_id or "").strip()
+            if not request_id:
+                raise ApiException(
+                    status_code=422,
+                    code=42291,
+                    message="requestId is required",
+                )
+            gate_id = getattr(command, "gate_id", None)
+            cas_payload = {
+                "package_id": str(package_id),
+                "draft_version_id": str(command.draft_version_id),
+                "gate_id": str(gate_id) if gate_id is not None else None,
+                "expected_aggregate_revision": int(
+                    command.expected_aggregate_revision
+                ),
+            }
+            body = json.dumps(
+                {"operation": "skill_publish", "payload": cas_payload},
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            request_digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            last_id = getattr(package, "last_admin_request_id", None)
+            last_digest = getattr(package, "last_admin_request_digest", None)
+            if last_id == request_id:
+                if (
+                    last_digest == request_digest
+                    and package.published_version_id is not None
+                ):
+                    published = (
+                        self.db.query(AssistantSkillVersion)
+                        .filter(
+                            AssistantSkillVersion.id == package.published_version_id
+                        )
+                        .one_or_none()
+                    )
+                    if published is not None:
+                        return self._version_summary(published)
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_REQUEST,
+                    message="requestId was reused with a different payload",
+                    details={"requestId": request_id},
+                )
+
+            current_rev = int(getattr(package, "aggregate_revision", 0) or 0)
+            if current_rev != int(command.expected_aggregate_revision):
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_REVISION,
+                    message=(
+                        f"aggregate revision conflict: expected "
+                        f"{command.expected_aggregate_revision}, current {current_rev}"
+                    ),
+                    details={
+                        "expectedAggregateRevision": int(
+                            command.expected_aggregate_revision
+                        ),
+                        "currentAggregateRevision": current_rev,
+                        "packageId": str(package.id),
+                    },
+                )
+
             # Live flag is decided before any write (Plan 09 matrix).
             live_enabled = bool(getattr(package, "catalog_enabled", False))
             draft = (
@@ -641,7 +711,7 @@ class AgentSkillService:
             # so compare fails closed on env drift.
             gate_svc = PublishGateService(self.db)
             mode = publish_gate_mode()
-            gate_id = getattr(command, "gate_id", None)
+            # gate_id already resolved above for CAS payload.
             subject_kind = "skill_draft"
             subject_version_id = draft.id
             # Dataset ids: client gate_subject pins if present; else recompute
@@ -797,14 +867,9 @@ class AgentSkillService:
                     )
 
             # Gate consume (or ungated non-live bootstrap) before pointer advance.
-            request_id = (
-                getattr(command, "request_id", None)
-                or f"skill-publish:{package.id}:{publish_version.id}"
-            )
             actor = actor_principal or "system:skill-publish"
-            agg_rev = int(getattr(package, "aggregate_revision", 0) or 0)
             try:
-                consume = gate_svc.enforce_or_bootstrap_publish(
+                gate_svc.enforce_or_bootstrap_publish(
                     live_enabled=live_enabled,
                     gate_id=gate_id,
                     subject=subject,
@@ -813,7 +878,7 @@ class AgentSkillService:
                     resulting_version_id=publish_version.id,
                     actor_principal=actor,
                     request_id=str(request_id),
-                    aggregate_revision=agg_rev,
+                    aggregate_revision=current_rev,
                     mode=mode,
                 )
             except PublishGateError as exc:
@@ -823,10 +888,10 @@ class AgentSkillService:
             # Never auto-enable; preserve existing live flag (enabled requires gate).
             if not live_enabled:
                 package.catalog_enabled = False
-            # Gated publish on an enabled aggregate bumps aggregate_revision so
-            # concurrent observers see the pointer change.
-            if consume is not None and hasattr(package, "aggregate_revision"):
-                package.aggregate_revision = agg_rev + 1
+            # Always advance CAS so draft/publish observers see pointer changes.
+            package.aggregate_revision = current_rev + 1
+            package.last_admin_request_id = request_id
+            package.last_admin_request_digest = request_digest
             self.db.commit()
             return self._version_summary(publish_version)
         except ApiException:
@@ -2214,6 +2279,11 @@ class MainAgentProfileService:
         Always inserts a new ``version_source=publish`` row. Drafts are never
         mutated. Publish never auto-enables runtime.
 
+        Sequence: lock profile → compare request ID/digest (idempotent replay) →
+        compare expected revision → apply mutation → always increment revision →
+        stamp ``last_admin_request_*`` → commit. Gate consumption remains required
+        where the live matrix already required it; CAS is additional integrity.
+
         Plan 09: already ``runtime_enabled`` requires a matching gate in both
         observe and enforce; live-disabled bootstrap may be ungated only in observe.
         """
@@ -2228,6 +2298,72 @@ class MainAgentProfileService:
 
         try:
             profile = self._lock_profile(profile_id)
+
+            request_id = (command.request_id or "").strip()
+            if not request_id:
+                raise ApiException(
+                    status_code=422,
+                    code=42294,
+                    message="requestId is required",
+                )
+            gate_id = getattr(command, "gate_id", None)
+            cas_payload = {
+                "profile_id": str(profile_id),
+                "draft_version_id": str(command.draft_version_id),
+                "gate_id": str(gate_id) if gate_id is not None else None,
+                "expected_aggregate_revision": int(
+                    command.expected_aggregate_revision
+                ),
+            }
+            body = json.dumps(
+                {"operation": "profile_publish", "payload": cas_payload},
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            request_digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            last_id = getattr(profile, "last_admin_request_id", None)
+            last_digest = getattr(profile, "last_admin_request_digest", None)
+            if last_id == request_id:
+                if (
+                    last_digest == request_digest
+                    and profile.published_version_id is not None
+                ):
+                    published = (
+                        self.db.query(AssistantMainAgentProfileVersion)
+                        .filter(
+                            AssistantMainAgentProfileVersion.id
+                            == profile.published_version_id
+                        )
+                        .one_or_none()
+                    )
+                    if published is not None:
+                        return self._version_summary(published)
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_REQUEST,
+                    message="requestId was reused with a different payload",
+                    details={"requestId": request_id},
+                )
+
+            current_rev = int(getattr(profile, "aggregate_revision", 0) or 0)
+            if current_rev != int(command.expected_aggregate_revision):
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_REVISION,
+                    message=(
+                        f"aggregate revision conflict: expected "
+                        f"{command.expected_aggregate_revision}, current {current_rev}"
+                    ),
+                    details={
+                        "expectedAggregateRevision": int(
+                            command.expected_aggregate_revision
+                        ),
+                        "currentAggregateRevision": current_rev,
+                        "profileId": str(profile.id),
+                    },
+                )
+
             live_enabled = bool(getattr(profile, "runtime_enabled", False))
             draft = (
                 self.db.query(AssistantMainAgentProfileVersion)
@@ -2262,7 +2398,6 @@ class MainAgentProfileService:
 
             gate_svc = PublishGateService(self.db)
             mode = publish_gate_mode()
-            gate_id = getattr(command, "gate_id", None)
             placeholder = "0" * 64
             subject_kind = "main_agent_profile_draft"
             subject_version_id = draft.id
@@ -2310,14 +2445,9 @@ class MainAgentProfileService:
             self.db.add(publish_version)
             self.db.flush()
 
-            request_id = (
-                getattr(command, "request_id", None)
-                or f"profile-publish:{profile.id}:{publish_version.id}"
-            )
             actor = actor_principal or "system:profile-publish"
-            agg_rev = int(getattr(profile, "aggregate_revision", 0) or 0)
             try:
-                consume = gate_svc.enforce_or_bootstrap_publish(
+                gate_svc.enforce_or_bootstrap_publish(
                     live_enabled=live_enabled,
                     gate_id=gate_id,
                     subject=subject,
@@ -2326,7 +2456,7 @@ class MainAgentProfileService:
                     resulting_version_id=publish_version.id,
                     actor_principal=actor,
                     request_id=str(request_id),
-                    aggregate_revision=agg_rev,
+                    aggregate_revision=current_rev,
                     mode=mode,
                 )
             except PublishGateError as exc:
@@ -2336,25 +2466,9 @@ class MainAgentProfileService:
             if not live_enabled:
                 profile.runtime_enabled = False
             # Always advance CAS so draft/publish observers see pointer changes.
-            profile.aggregate_revision = agg_rev + 1
-            profile.last_admin_request_id = str(request_id)
-            body = json.dumps(
-                {
-                    "operation": "profile_publish",
-                    "payload": {
-                        "profile_id": str(profile.id),
-                        "draft_version_id": str(command.draft_version_id),
-                        "publish_version_id": str(publish_version.id),
-                        "gate_id": str(gate_id) if gate_id else None,
-                    },
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-                default=str,
-            )
-            profile.last_admin_request_digest = hashlib.sha256(
-                body.encode("utf-8")
-            ).hexdigest()
+            profile.aggregate_revision = current_rev + 1
+            profile.last_admin_request_id = request_id
+            profile.last_admin_request_digest = request_digest
             self.db.commit()
             return self._version_summary(publish_version)
         except ApiException:

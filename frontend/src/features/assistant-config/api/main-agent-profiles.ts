@@ -32,6 +32,7 @@ export interface MainAgentProfileSummary {
   isDefault: boolean
   migrationState: string
   runtimeEnabled: boolean
+  aggregateRevision?: number
   draftVersion?: MainAgentProfileVersionSummary | null
   publishedVersion?: MainAgentProfileVersionSummary | null
   legacySkillId?: string | null
@@ -100,12 +101,14 @@ export function listDefaultMainAgentVersions(params?: {
 
 export function publishDefaultMainAgent(body: {
   draftVersionId: string
+  expectedAggregateRevision: number
   gateId?: string | null
   requestId?: string | null
 }): Promise<MainAgentProfileVersionSummary> {
   return apiClient.post<MainAgentProfileVersionSummary>(`${MAIN_AGENT_PROFILES_BASE}/default/publish`, {
     body: {
       draftVersionId: body.draftVersionId,
+      expectedAggregateRevision: body.expectedAggregateRevision,
       gateId: body.gateId ?? null,
       requestId: body.requestId ?? null,
     },

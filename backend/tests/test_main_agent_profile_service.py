@@ -425,6 +425,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
             PublishMainAgentProfileCommand(
                 draft_version_id=draft.id,
                 request_id=f"pub-{uuid.uuid4().hex[:8]}",
+                expected_aggregate_revision=_current_profile_rev(self.db, profile.id),
             ),
         )
         row = self.db.get(AssistantMainAgentProfile, profile.id)
@@ -641,7 +642,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         )
         published = self.svc.publish(
             profile.id,
-            PublishMainAgentProfileCommand(draft_version_id=draft.id, request_id="profile-pub-5"),
+            PublishMainAgentProfileCommand(draft_version_id=draft.id, request_id="profile-pub-5", expected_aggregate_revision=_current_profile_rev(self.db, profile.id)),
         )
         self.assertEqual(published.version_source, "publish")
         self.assertEqual(published.source_draft_version_id, draft.id)
@@ -662,7 +663,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         # Publishing the same draft again still creates a distinct publish row.
         published2 = self.svc.publish(
             profile.id,
-            PublishMainAgentProfileCommand(draft_version_id=draft.id, request_id="profile-pub-6"),
+            PublishMainAgentProfileCommand(draft_version_id=draft.id, request_id="profile-pub-6", expected_aggregate_revision=_current_profile_rev(self.db, profile.id)),
         )
         self.assertNotEqual(published2.id, published.id)
         self.assertEqual(published2.source_draft_version_id, draft.id)
@@ -705,7 +706,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         with self.assertRaises(ApiException) as ctx:
             self.svc.publish(
                 profile.id,
-                PublishMainAgentProfileCommand(draft_version_id=foreign_draft.id, request_id="profile-pub-7"),
+                PublishMainAgentProfileCommand(draft_version_id=foreign_draft.id, request_id="profile-pub-7", expected_aggregate_revision=_current_profile_rev(self.db, profile.id)),
             )
         self.assertEqual(ctx.exception.code, 40493)
 
@@ -735,7 +736,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         with self.assertRaises(ApiException) as ctx:
             self.svc.publish(
                 profile.id,
-                PublishMainAgentProfileCommand(draft_version_id=draft.id, request_id="profile-pub-8"),
+                PublishMainAgentProfileCommand(draft_version_id=draft.id, request_id="profile-pub-8", expected_aggregate_revision=_current_profile_rev(self.db, profile.id)),
             )
         self.assertEqual(ctx.exception.code, 42294)
 
@@ -761,7 +762,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         )
         published = self.svc.publish(
             profile.id,
-            PublishMainAgentProfileCommand(draft_version_id=draft.id, request_id="profile-pub-9"),
+            PublishMainAgentProfileCommand(draft_version_id=draft.id, request_id="profile-pub-9", expected_aggregate_revision=_current_profile_rev(self.db, profile.id)),
         )
         self.assertEqual(published.version_source, "publish")
         detail = self.svc.get_version(profile.id, published.id)
@@ -882,7 +883,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
                 origin="api", expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-101"),
         )
         self.svc.publish(
-            profile.id, PublishMainAgentProfileCommand(draft_version_id=draft.id, request_id="profile-pub-10")
+            profile.id, PublishMainAgentProfileCommand(draft_version_id=draft.id, request_id="profile-pub-10", expected_aggregate_revision=_current_profile_rev(self.db, profile.id))
         )
 
         # Legacy row untouched.

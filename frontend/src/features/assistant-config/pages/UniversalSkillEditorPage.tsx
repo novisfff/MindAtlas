@@ -110,6 +110,7 @@ export function UniversalSkillEditorPage() {
     try {
       await publishSkillPackageVersion(packageId, {
         draftVersionId: draftId,
+        expectedAggregateRevision: packageQuery.data?.aggregateRevision ?? 0,
         gateId: lastGateId,
         requestId: newRequestId('publish'),
       })

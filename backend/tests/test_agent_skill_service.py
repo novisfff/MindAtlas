@@ -908,9 +908,17 @@ class AgentSkillServiceLifecycleTests(unittest.TestCase):
             PublishSkillVersionCommand.model_validate(
                 {"draftVersionId": str(uuid.uuid4()), "latest": True}
             )
-        cmd = PublishSkillVersionCommand(draft_version_id=uuid.uuid4(), request_id="pub-req-8")
+        cmd = PublishSkillVersionCommand(
+            draft_version_id=uuid.uuid4(),
+            request_id="pub-req-8",
+            expected_aggregate_revision=0,
+        )
         self.assertIsInstance(cmd.draft_version_id, uuid.UUID)
-        cmd2 = PublishMainAgentProfileCommand(draft_version_id=uuid.uuid4(), request_id="profile-pub-9")
+        cmd2 = PublishMainAgentProfileCommand(
+            draft_version_id=uuid.uuid4(),
+            request_id="profile-pub-9",
+            expected_aggregate_revision=0,
+        )
         self.assertIsInstance(cmd2.draft_version_id, uuid.UUID)
 
     def test_unresolved_bindings_created_for_manifest_capabilities(self) -> None:

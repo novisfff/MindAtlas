@@ -527,11 +527,13 @@ def _try_publish_package(
 ) -> tuple[SyncStatus, list[LegacySyncDiagnostic]]:
     svc = AgentSkillService(session)
     try:
+        rev = int(getattr(package, "aggregate_revision", 0) or 0)
         svc.publish(
             package.id,
             PublishSkillVersionCommand(
                 draft_version_id=draft_version_id,
-                request_id=f"legacy-publish:{package.id}:{draft_version_id}",
+                request_id=f"legacy-publish:{package.id}:{draft_version_id}:{rev}",
+                expected_aggregate_revision=rev,
             ),
         )
         return "published", []
@@ -1219,11 +1221,13 @@ class LegacySkillShadowAdapter:
                         legacy_skill_id=skill.id,
                     )
 
+            rev = int(getattr(profile, "aggregate_revision", 0) or 0)
             profile_svc.publish(
                 profile.id,
                 PublishMainAgentProfileCommand(
                     draft_version_id=draft.id,
-                    request_id=f"legacy-profile-publish:{skill.id}:{draft.id}",
+                    request_id=f"legacy-profile-publish:{skill.id}:{draft.id}:{rev}",
+                    expected_aggregate_revision=rev,
                 ),
             )
             profile = session.get(AssistantMainAgentProfile, profile.id)

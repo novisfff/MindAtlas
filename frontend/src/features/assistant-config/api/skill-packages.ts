@@ -359,11 +359,17 @@ export function getSkillPackageVersion(
 
 export function publishSkillPackageVersion(
   packageId: string,
-  body: { draftVersionId: string; gateId?: string | null; requestId?: string | null },
+  body: {
+    draftVersionId: string
+    expectedAggregateRevision: number
+    gateId?: string | null
+    requestId?: string | null
+  },
 ): Promise<SkillVersionSummary> {
   return apiClient.post<SkillVersionSummary>(`${SKILL_PACKAGES_BASE}/${packageId}/publish`, {
     body: {
       draftVersionId: body.draftVersionId,
+      expectedAggregateRevision: body.expectedAggregateRevision,
       gateId: body.gateId ?? null,
       requestId: body.requestId ?? null,
     },

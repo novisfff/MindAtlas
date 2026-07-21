@@ -156,11 +156,16 @@ class MainAgentProfileApiTests(unittest.TestCase):
         self.assertGreaterEqual(page["total"], 1)
         self.assertTrue(any(item["id"] == draft_id for item in page["items"]))
 
+        after_draft = self.client.get(
+            "/api/assistant-config/main-agent-profiles/default"
+        ).json()["data"]
+        pub_rev = int(after_draft.get("aggregateRevision") or 0)
         published = self.client.post(
             "/api/assistant-config/main-agent-profiles/default/publish",
             json={
                 "draftVersionId": draft_id,
                 "requestId": f"profile-pub-{uuid4().hex[:8]}",
+                "expectedAggregateRevision": pub_rev,
             },
         )
         self.assertEqual(published.status_code, 200, published.text)
@@ -173,6 +178,35 @@ class MainAgentProfileApiTests(unittest.TestCase):
         ).json()["data"]
         self.assertIsNotNone(after["publishedVersion"])
         self.assertFalse(after["runtimeEnabled"])
+
+    def test_publish_without_expected_aggregate_revision_is_422(self) -> None:
+        profile = self.client.get(
+            "/api/assistant-config/main-agent-profiles/default"
+        ).json()["data"]
+        rev = int(profile.get("aggregateRevision") or 0)
+        snap = _snapshot_payload(basePrompt="draft for publish cas body check")
+        saved = self.client.put(
+            "/api/assistant-config/main-agent-profiles/default/draft",
+            content=json.dumps(
+                {
+                    "snapshot": snap,
+                    "versionName": "cas-check",
+                    "expectedAggregateRevision": rev,
+                    "requestId": f"profile-draft-{uuid4().hex[:8]}",
+                }
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        draft_id = saved.json()["data"]["id"]
+        missing = self.client.post(
+            "/api/assistant-config/main-agent-profiles/default/publish",
+            json={
+                "draftVersionId": draft_id,
+                "requestId": f"profile-pub-missing-rev-{uuid4().hex[:8]}",
+            },
+        )
+        self.assertEqual(missing.status_code, 422, missing.text)
 
     def test_invalid_snapshot_fields_rejected(self) -> None:
         profile = self.client.get(
@@ -217,6 +251,7 @@ class MainAgentProfileApiTests(unittest.TestCase):
             json={
                 "draftVersionId": str(uuid4()),
                 "requestId": f"missing-draft-{uuid4().hex[:8]}",
+                "expectedAggregateRevision": 0,
             },
         )
         self.assertEqual(resp.status_code, 404)

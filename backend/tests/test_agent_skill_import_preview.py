@@ -440,7 +440,7 @@ class TestImportPreviewApplyModes:
         )
         published = self.pkg_svc.publish(
             detail.id,
-            PublishSkillVersionCommand(draft_version_id=detail.draft_version.id, request_id="pub-req-1"),  # type: ignore[union-attr]
+            PublishSkillVersionCommand(draft_version_id=detail.draft_version.id, request_id="pub-req-1", expected_aggregate_revision=0),  # type: ignore[union-attr]
         )
         # Plan 09: catalog enable requires a matching gate (no Plan 01 bypass).
         from app.assistant.skills.admin_service import SkillAdminService
@@ -463,11 +463,12 @@ class TestImportPreviewApplyModes:
             package_canonical_name=name,
         )
         admin = SkillAdminService(self.db)
+        post_pub = self.pkg_svc.get_package(detail.id)
         enabled = admin.enable_catalog(
             detail.id,
             AggregateRevisionCommand(
                 request_id=f"en-append-cat-{name}",
-                expected_aggregate_revision=0,
+                expected_aggregate_revision=int(post_pub.aggregate_revision),
                 gate_id=gate.id,
             ),
             principal=self.principal,

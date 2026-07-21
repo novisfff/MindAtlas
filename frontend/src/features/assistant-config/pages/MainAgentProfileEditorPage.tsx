@@ -184,6 +184,7 @@ export function MainAgentProfileEditorPage() {
     try {
       await publishDefaultMainAgent({
         draftVersionId: profile.draftVersion.id,
+        expectedAggregateRevision: profile.aggregateRevision ?? 0,
         requestId: newRequestId('profile-pub'),
       })
       setMessage(t('settings.universalSkills.profilePublished'))

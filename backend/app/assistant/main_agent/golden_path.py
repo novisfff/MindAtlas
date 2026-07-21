@@ -183,11 +183,14 @@ def create_or_refresh_fixture_package(
         draft_id = draft.id
     if draft_id is None:
         raise RuntimeError("fixture package has no draft to publish")
+    package_row = db.get(AssistantSkillPackage, package_id)
+    pub_rev = int(getattr(package_row, "aggregate_revision", 0) or 0) if package_row else 0
     published = svc.publish(
         package_id,
         PublishSkillVersionCommand(
             draft_version_id=draft_id,
-            request_id=f"golden-publish:{package_id}:{draft_id}",
+            request_id=f"golden-publish:{package_id}:{draft_id}:{pub_rev}",
+            expected_aggregate_revision=pub_rev,
         ),
     )
     detail = svc.get_package(package_id)
@@ -425,11 +428,14 @@ def publish_golden_profile(
             request_id=f"golden-profile-draft:{profile.id}:{rev}",
         ),
     )
+    profile_row = db.get(AssistantMainAgentProfile, profile.id)
+    pub_rev = int(getattr(profile_row, "aggregate_revision", 0) or 0) if profile_row else 0
     published = profile_svc.publish(
         profile.id,
         PublishMainAgentProfileCommand(
             draft_version_id=draft.id,
-            request_id=f"golden-profile-publish:{profile.id}:{draft.id}",
+            request_id=f"golden-profile-publish:{profile.id}:{draft.id}:{pub_rev}",
+            expected_aggregate_revision=pub_rev,
         ),
     )
     return profile_svc.get_default(), published

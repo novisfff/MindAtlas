@@ -195,7 +195,11 @@ class SkillDiffRestoreTests(unittest.TestCase):
         # Publish v2 so published pointer exists and must remain stable.
         published = self.pkg_svc.publish(
             self.package.id,
-            PublishSkillVersionCommand(draft_version_id=self.v2.id, request_id="pub-req-2"),
+            PublishSkillVersionCommand(
+                draft_version_id=self.v2.id,
+                request_id="pub-req-2",
+                expected_aggregate_revision=_current_pkg_rev(self.db, self.package.id),
+            ),
         )
         detail_before = self.pkg_svc.get_package(self.package.id)
         self.assertEqual(detail_before.published_version.id, published.id)  # type: ignore[union-attr]

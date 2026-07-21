@@ -67,6 +67,9 @@ class PublishDraftRequest(CamelModel):
 
     draft_version_id: UUID = Field(alias="draftVersionId")
     request_id: str = Field(alias="requestId", min_length=1, max_length=128)
+    expected_aggregate_revision: int = Field(
+        alias="expectedAggregateRevision", ge=0
+    )
     # Plan 09: optional server-derived publish gate (required when live-enabled
     # or ASSISTANT_SKILL_PUBLISH_GATE_MODE=enforce).
     gate_id: UUID | None = Field(default=None, alias="gateId")
@@ -590,6 +593,7 @@ def publish_skill_package(
             draft_version_id=body.draft_version_id,
             gate_id=body.gate_id,
             request_id=body.request_id,
+            expected_aggregate_revision=body.expected_aggregate_revision,
         ),
     )
     return ApiResponse.ok(_dto(version))
@@ -779,6 +783,7 @@ def publish_default_main_agent_profile(
             draft_version_id=body.draft_version_id,
             gate_id=body.gate_id,
             request_id=body.request_id,
+            expected_aggregate_revision=body.expected_aggregate_revision,
         ),
     )
     return ApiResponse.ok(_dto(version))

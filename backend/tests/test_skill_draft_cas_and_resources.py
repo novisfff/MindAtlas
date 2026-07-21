@@ -232,6 +232,17 @@ class DraftCasAndResourceTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 422, response.text)
 
+    def test_publish_without_expected_aggregate_revision_is_422(self) -> None:
+        name = f"pub-cas-{uuid.uuid4().hex[:8]}"
+        created = _create_with_resource(self.client, name=name)
+        package_id = created["id"]
+        draft_id = created["draftVersion"]["id"]
+        response = self.client.post(
+            f"/api/assistant-config/skill-packages/{package_id}/publish",
+            json={"draftVersionId": draft_id, "requestId": "pub-no-rev"},
+        )
+        self.assertEqual(response.status_code, 422, response.text)
+
 
 if __name__ == "__main__":
     unittest.main()
