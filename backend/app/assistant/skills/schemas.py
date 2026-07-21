@@ -322,6 +322,7 @@ class ImportPreviewResult(CamelModel):
     mode: ImportMode
     upload_digest: str
     candidate_content_digest: str
+    preview_digest: str
     candidate_canonical_name: str
     target_package_id: UUID | None = None
     expected_aggregate_revision: int | None = None
@@ -351,6 +352,7 @@ class ImportApplyCommand(CamelModel):
 
     preview_id: UUID
     request_id: str = Field(min_length=1, max_length=128)
+    preview_digest: str | None = Field(default=None, min_length=64, max_length=64)
 
 
 class SkillVersionDiffHunk(CamelModel):

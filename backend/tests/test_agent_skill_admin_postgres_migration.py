@@ -438,6 +438,43 @@ def test_upgrade_adds_columns_defaults_checks_and_backfills() -> None:
             alias_checks = _check_names(conn, "assistant_skill_package_alias")
             assert "ck_assistant_skill_package_alias_disabled_shape" in alias_checks
 
+            # Durable import preview table is owned by 09A.
+            assert _table_exists(conn, "assistant_skill_import_preview")
+            preview_cols = _column_info(conn, "assistant_skill_import_preview")
+            for name in (
+                "id",
+                "principal_id",
+                "principal_role",
+                "actor_scope_digest",
+                "mode",
+                "target_package_id",
+                "expected_aggregate_revision",
+                "candidate_canonical_name",
+                "fork_canonical_name",
+                "upload_digest",
+                "candidate_content_digest",
+                "preview_digest",
+                "findings",
+                "structural_diff",
+                "resource_index",
+                "capability_keys",
+                "archive_bytes",
+                "expires_at",
+                "consumed",
+                "applied_package_id",
+                "applied_request_id",
+                "applied_request_digest",
+                "applied_at",
+                "created_at",
+                "updated_at",
+            ):
+                assert name in preview_cols, f"missing import preview column {name}"
+            preview_checks = _check_names(conn, "assistant_skill_import_preview")
+            assert "ck_assistant_skill_import_preview_mode" in preview_checks
+            assert "ck_assistant_skill_import_preview_mode_target_shape" in preview_checks
+            assert "ck_assistant_skill_import_preview_consumed_archive_xor" in preview_checks
+            assert "ck_assistant_skill_import_preview_upload_digest" in preview_checks
+
             # New inserts get default aggregate_revision=0 via server_default.
             new_id = _insert_pre_task1_package(
                 conn, name=f"post-up-{uuid.uuid4().hex[:8]}"
@@ -521,6 +558,7 @@ def test_downgrade_blocked_when_archive_or_catalog_or_disable_evidence() -> None
             cols = _column_info(conn, "assistant_skill_package")
             assert "aggregate_revision" not in cols
             assert "last_restored_from_version_id" not in cols
+            assert not _table_exists(conn, "assistant_skill_import_preview")
 
 
 def test_parent_head_parent_head_cycle_and_sole_head() -> None:

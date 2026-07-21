@@ -793,12 +793,14 @@ class TestPreviewTokenAndIdempotency:
     def test_create_cold_index_retry_returns_package_by_last_admin_request(
         self,
     ) -> None:
-        """After durable success, cold _REQUEST_INDEX still returns the package.
+        """After durable success, process-local clear still returns the package.
 
-        Simulates process restart / multi-worker: in-memory index cleared while
-        the package row already has last_admin_request_id/digest stamped.
+        Preview/apply state lives in the DB; clear_import_preview_store_for_tests
+        is a no-op that proves process memory is irrelevant.
         """
-        import app.assistant.skills.import_preview as ip
+        from app.assistant.skills.import_preview import (
+            clear_import_preview_store_for_tests,
+        )
         from app.assistant.skills.models import AssistantSkillPackage
 
         name = f"cold-{uuid4().hex[:8]}"
@@ -821,9 +823,7 @@ class TestPreviewTokenAndIdempotency:
         stamped_digest = package.last_admin_request_digest
         assert stamped_digest and len(stamped_digest) == 64
 
-        # Drop process-local request index (cold restart simulation).
-        with ip._STORE_LOCK:
-            ip._REQUEST_INDEX.clear()
+        clear_import_preview_store_for_tests()
 
         second = self.svc.apply(
             preview_id=preview.preview_id,
@@ -862,7 +862,7 @@ class TestPreviewTokenAndIdempotency:
         assert ctx.value.code == 40997
 
     def test_consumed_preview_different_request_id_conflicts_cleanly(self) -> None:
-        """After apply clears raw_zip, a new requestId must 40997 — not re-parse."""
+        """After apply nulls archive_bytes, a new requestId must 40997 — not re-parse."""
         from app.common.exceptions import ApiException
 
         name = f"consumed-{uuid4().hex[:8]}"
@@ -878,7 +878,7 @@ class TestPreviewTokenAndIdempotency:
         assert first.package.canonical_name == name
         record = self.svc._get_record(preview.preview_id)
         assert record.consumed is True
-        assert record.raw_zip == b""
+        assert record.archive_bytes is None
 
         with pytest.raises(ApiException) as ctx:
             self.svc.apply(
@@ -904,7 +904,8 @@ class TestPreviewTokenAndIdempotency:
         )
         record = self.svc._get_record(preview.preview_id)
         # Mutate stored bytes after preview binding (digest no longer matches).
-        record.raw_zip = b"PK\x03\x04not-a-real-skill-zip-payload"
+        record.archive_bytes = b"PK\x03\x04not-a-real-skill-zip-payload"
+        self.db.commit()
 
         with pytest.raises(ApiException) as ctx:
             self.svc.apply(
@@ -916,9 +917,8 @@ class TestPreviewTokenAndIdempotency:
         assert ctx.value.code in {40993, 40997}
 
     def test_request_id_reservation_released_on_failure(self) -> None:
-        """Failed apply releases pending requestId so a retry can proceed."""
+        """Failed apply does not consume requestId so a retry can proceed."""
         from app.common.exceptions import ApiException
-        import app.assistant.skills.import_preview as ip
 
         name = f"resfail-{uuid4().hex[:8]}"
         raw = _valid_zip(name=name, aliases=[])
@@ -927,8 +927,9 @@ class TestPreviewTokenAndIdempotency:
         )
         req = f"req-resfail-{name}"
         record = self.svc._get_record(preview.preview_id)
-        # Force a stale-bytes failure after reservation is taken.
-        record.raw_zip = b"PK\x03\x04corrupted"
+        # Force a stale-bytes failure; request must remain reusable.
+        record.archive_bytes = b"PK\x03\x04corrupted"
+        self.db.commit()
 
         with pytest.raises(ApiException) as ctx:
             self.svc.apply(
@@ -937,12 +938,13 @@ class TestPreviewTokenAndIdempotency:
                 principal=self.principal,
             )
         assert ctx.value.status_code == 409
-        # Reservation must be gone so the same requestId is not stuck pending.
-        with ip._STORE_LOCK:
-            assert req not in ip._REQUEST_INDEX
+        record = self.svc._get_record(preview.preview_id)
+        assert record.consumed is False
+        assert record.applied_request_id is None
 
         # Restore bytes and retry with same requestId succeeds.
-        record.raw_zip = raw
+        record.archive_bytes = raw
+        self.db.commit()
         applied = self.svc.apply(
             preview_id=preview.preview_id,
             request_id=req,
@@ -953,21 +955,16 @@ class TestPreviewTokenAndIdempotency:
     def test_expired_preview_rejected(self, monkeypatch) -> None:
         from datetime import datetime, timedelta, timezone
         from app.common.exceptions import ApiException
-        import app.assistant.skills.import_preview as ip
 
         name = f"exp-{uuid4().hex[:8]}"
         raw = _valid_zip(name=name, aliases=[])
-        # Force tiny TTL via monkeypatch of utcnow after preview.
         preview = self.svc.preview(
             raw_zip=raw, mode="create", principal=self.principal
         )
-        # Manually expire the stored token.
+        # Manually expire the stored durable row.
         record = self.svc._get_record(preview.preview_id)
-        record.token = record.token.model_copy(
-            update={
-                "expires_at": datetime.now(timezone.utc) - timedelta(seconds=1),
-            }
-        )
+        record.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        self.db.commit()
         with pytest.raises(ApiException) as ctx:
             self.svc.apply(
                 preview_id=preview.preview_id,
@@ -987,6 +984,89 @@ class TestPreviewTokenAndIdempotency:
                 principal=self.principal,
             )
         assert ctx.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Durable cross-session / expiry (process memory irrelevant)
+# ---------------------------------------------------------------------------
+
+
+class TestDurableImportPreviewStore:
+    def setup_method(self) -> None:
+        reset_caches()
+        from tests._db import make_session
+        from app.assistant.skills.import_preview import clear_import_preview_store_for_tests
+
+        clear_import_preview_store_for_tests()
+        # One shared SQLite file with two independent sessions.
+        self._seed = make_session()
+        from sqlalchemy.orm import sessionmaker
+
+        self._factory = sessionmaker(
+            bind=self._seed.get_bind(),
+            autoflush=True,
+            autocommit=False,
+            future=True,
+        )
+        self.principal = _operator()
+
+    def teardown_method(self) -> None:
+        self._seed.close()
+
+    def test_preview_created_in_one_session_applies_in_another(self) -> None:
+        from app.assistant.skills.import_preview import (
+            ImportPreviewService,
+            clear_import_preview_store_for_tests,
+        )
+
+        archive = _valid_zip(name="valid-weekly-review", aliases=[])
+        with self._factory() as first:
+            preview = ImportPreviewService(first).preview(
+                raw_zip=archive,
+                mode="create",
+                principal=self.principal,
+            )
+        clear_import_preview_store_for_tests()  # proves process memory is irrelevant
+        with self._factory() as second:
+            result = ImportPreviewService(second).apply(
+                preview_id=preview.preview_id,
+                preview_digest=preview.preview_digest,
+                request_id="import-1",
+                principal=self.principal,
+            )
+        assert result.package.canonical_name == "valid-weekly-review"
+
+    def test_expired_preview_drops_archive_but_retains_request_audit(self) -> None:
+        from datetime import timedelta
+
+        from app.assistant.skills.import_preview import (
+            ImportPreviewService,
+            expire_import_previews,
+        )
+        from app.assistant.skills.models import AssistantSkillImportPreview
+        from app.common.time import utcnow
+
+        archive = _valid_zip(name=f"expire-{uuid4().hex[:8]}", aliases=[])
+        with self._factory() as session:
+            preview = ImportPreviewService(session).preview(
+                raw_zip=archive,
+                mode="create",
+                principal=self.principal,
+            )
+            preview_row = session.get(AssistantSkillImportPreview, preview.preview_id)
+            assert preview_row is not None
+            assert preview_row.archive_bytes is not None
+            # Force expiry at "now" for the cleanup helper.
+            preview_row.expires_at = utcnow() - timedelta(seconds=1)
+            session.commit()
+            session.refresh(preview_row)
+
+            expire_import_previews(session, now=preview_row.expires_at)
+            session.refresh(preview_row)
+            assert preview_row.archive_bytes is None
+            assert preview_row.upload_digest is not None
+            assert preview_row.preview_digest is not None
+            assert preview_row.consumed is False
 
 
 # ---------------------------------------------------------------------------

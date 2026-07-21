@@ -1,10 +1,12 @@
-"""Safe skill package import preview / apply (Plan 09 Task 2).
+"""Safe skill package import preview / apply (Plan 09 Task 2 / remediation Task 3).
 
 Two-step flow:
   1. ``preview`` — stream ZIP into bounded memory, parse via Plan 01 package_io,
-     bind an opaque preview token (actor/mode/target revision/digests/expiry).
-  2. ``apply`` — recheck token/bytes/revision, append one unpublished
-     catalog-disabled draft via Plan 01 services, consume requestId/preview once.
+     persist an opaque preview row (actor/mode/target revision/digests/expiry +
+     bounded archive bytes) in PostgreSQL.
+  2. ``apply`` — lock the preview row, recheck token/bytes/revision, append one
+     unpublished catalog-disabled draft via Plan 01 services, consume
+     requestId/preview once and null archive bytes in the same transaction.
 
 Modes:
   * ``create`` — namespace free; creates aggregate + draft
@@ -20,18 +22,21 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import threading
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError, NoResultFound
 from sqlalchemy.orm import Session
 
 from app.assistant.domain.digests import sha256_bytes
 from app.assistant.skills.contracts import ParsedSkillPackage
-from app.assistant.skills.models import AssistantSkillPackage, AssistantSkillVersion
+from app.assistant.skills.models import (
+    AssistantSkillImportPreview,
+    AssistantSkillPackage,
+    AssistantSkillVersion,
+)
 from app.assistant.skills.package_io import (
     MAX_ZIP_UPLOAD_BYTES,
     parse_skill_directory_files,
@@ -68,6 +73,15 @@ ImportModeLiteral = Literal["create", "append_to_existing", "fork_as_new"]
 _VALID_MODES = frozenset({"create", "append_to_existing", "fork_as_new"})
 
 
+def _as_aware(value: datetime) -> datetime:
+    """Normalize SQLite-naive datetimes to UTC-aware for comparisons."""
+    if value.tzinfo is None:
+        from datetime import timezone
+
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
 def _actor_scope_digest(principal: OperatorPrincipal) -> str:
     body = json.dumps(
         {"principal_id": principal.principal_id, "role": principal.role},
@@ -83,6 +97,38 @@ def _request_digest(operation: str, payload: dict[str, Any]) -> str:
         sort_keys=True,
         separators=(",", ":"),
         default=str,
+    )
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _preview_digest_for(
+    *,
+    preview_id: UUID,
+    actor_scope_digest: str,
+    mode: str,
+    target_package_id: UUID | None,
+    expected_aggregate_revision: int | None,
+    upload_digest: str,
+    candidate_content_digest: str,
+    candidate_canonical_name: str,
+    fork_canonical_name: str | None,
+    expires_at: datetime,
+) -> str:
+    body = json.dumps(
+        {
+            "preview_id": str(preview_id),
+            "actor_scope_digest": actor_scope_digest,
+            "mode": mode,
+            "target_package_id": str(target_package_id) if target_package_id else None,
+            "expected_aggregate_revision": expected_aggregate_revision,
+            "upload_digest": upload_digest,
+            "candidate_content_digest": candidate_content_digest,
+            "candidate_canonical_name": candidate_canonical_name,
+            "fork_canonical_name": fork_canonical_name,
+            "expires_at": expires_at.isoformat(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
     )
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
@@ -229,44 +275,8 @@ def _bounded_structural_diff(
     return hunks
 
 
-@dataclass
-class _PreviewRecord:
-    token: ImportPreviewToken
-    raw_zip: bytes
-    parsed_content_digest: str
-    candidate_canonical_name: str
-    fork_canonical_name: str | None
-    resource_index: list[dict[str, Any]]
-    capability_keys: list[str]
-    findings: list[dict[str, Any]]
-    structural_diff: list[dict[str, Any]]
-    consumed: bool = False
-    applied_package_id: UUID | None = None
-    applied_request_id: str | None = None
-    applied_request_digest: str | None = None
-
-
-# Process-local preview store (dev/test). Tokens bind exact upload digests and
-# never leave the server; raw bytes are dropped on consume/expiry.
-_STORE_LOCK = threading.RLock()
-_PREVIEW_STORE: dict[UUID, _PreviewRecord] = {}
-# Global requestId index for create/fork (no package row yet at first apply).
-_REQUEST_INDEX: dict[str, dict[str, Any]] = {}
-
-
-def _purge_expired_locked(now: datetime | None = None) -> None:
-    current = now or utcnow()
-    expired = [
-        pid
-        for pid, rec in _PREVIEW_STORE.items()
-        if rec.token.expires_at <= current
-    ]
-    for pid in expired:
-        _PREVIEW_STORE.pop(pid, None)
-
-
 class ImportPreviewService:
-    """Owns temporary upload/preview tokens; apply calls Plan 01 package service."""
+    """Owns durable upload/preview rows; apply calls Plan 01 package service."""
 
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -294,34 +304,90 @@ class ImportPreviewService:
         return principal
 
     # ------------------------------------------------------------------
-    # Internal record access (tests may call _get_record)
+    # Durable row access
     # ------------------------------------------------------------------
 
-    def _get_record(self, preview_id: UUID) -> _PreviewRecord:
-        with _STORE_LOCK:
-            record = _PREVIEW_STORE.get(preview_id)
-            if record is None:
-                # Opportunistic purge of other expired tokens; this id is unknown.
-                _purge_expired_locked()
-                raise ApiException(
-                    status_code=404,
-                    code=_CODE_NOT_FOUND,
-                    message=f"import preview not found: {preview_id}",
-                )
-            if record.token.expires_at <= utcnow():
-                _PREVIEW_STORE.pop(preview_id, None)
-                raise ApiException(
-                    status_code=410,
-                    code=_CODE_EXPIRED,
-                    message="import preview has expired",
-                    details={"previewId": str(preview_id)},
-                )
-            return record
+    def _lock_preview(self, preview_id: UUID) -> AssistantSkillImportPreview:
+        try:
+            return (
+                self.db.query(AssistantSkillImportPreview)
+                .filter(AssistantSkillImportPreview.id == preview_id)
+                .with_for_update()
+                .one()
+            )
+        except NoResultFound as exc:
+            raise ApiException(
+                status_code=404,
+                code=_CODE_NOT_FOUND,
+                message=f"import preview not found: {preview_id}",
+            ) from exc
 
-    def _store_record(self, record: _PreviewRecord) -> None:
-        with _STORE_LOCK:
-            _purge_expired_locked()
-            _PREVIEW_STORE[record.token.preview_id] = record
+    def _get_preview_or_404(self, preview_id: UUID) -> AssistantSkillImportPreview:
+        row = (
+            self.db.query(AssistantSkillImportPreview)
+            .filter(AssistantSkillImportPreview.id == preview_id)
+            .one_or_none()
+        )
+        if row is None:
+            raise ApiException(
+                status_code=404,
+                code=_CODE_NOT_FOUND,
+                message=f"import preview not found: {preview_id}",
+            )
+        return row
+
+    def _get_record(self, preview_id: UUID) -> AssistantSkillImportPreview:
+        """Compatibility accessor used by existing unit tests."""
+        row = self._get_preview_or_404(preview_id)
+        if (
+            not row.consumed
+            and _as_aware(row.expires_at) <= utcnow()
+            and row.archive_bytes is None
+        ):
+            raise ApiException(
+                status_code=410,
+                code=_CODE_EXPIRED,
+                message="import preview has expired",
+                details={"previewId": str(preview_id)},
+            )
+        return row
+
+    def expire(self, *, now: datetime | None = None) -> int:
+        """Drop archive bytes from expired, still-unconsumed previews.
+
+        Retains request/upload audit fields so request-id replay still works
+        after TTL. Returns the number of rows whose archive payload was cleared.
+        """
+        current = _as_aware(now or utcnow())
+        try:
+            rows = list(
+                self.db.scalars(
+                    select(AssistantSkillImportPreview)
+                    .where(
+                        AssistantSkillImportPreview.expires_at <= current,
+                        AssistantSkillImportPreview.archive_bytes.is_not(None),
+                    )
+                    .with_for_update(skip_locked=True)
+                )
+            )
+        except TypeError:
+            # SQLite dialect may not accept skip_locked in older/test paths.
+            rows = list(
+                self.db.scalars(
+                    select(AssistantSkillImportPreview)
+                    .where(
+                        AssistantSkillImportPreview.expires_at <= current,
+                        AssistantSkillImportPreview.archive_bytes.is_not(None),
+                    )
+                    .with_for_update()
+                )
+            )
+        # SQLite may store naive timestamps; filter again in Python.
+        rows = [row for row in rows if _as_aware(row.expires_at) <= current]
+        for row in rows:
+            row.archive_bytes = None
+        self.db.commit()
+        return len(rows)
 
     # ------------------------------------------------------------------
     # Preview
@@ -376,6 +442,8 @@ class ImportPreviewService:
         structural_diff: list[dict[str, Any]] = []
         candidate = parsed
         target_revision: int | None = None
+        bound_target_package_id: UUID | None = None
+        bound_fork_name: str | None = None
 
         if mode == "create":
             self._assert_create_namespace(parsed)
@@ -421,6 +489,7 @@ class ImportPreviewService:
                     },
                 )
             target_revision = current_rev
+            bound_target_package_id = package.id
             # Complete snapshot replace — structural diff vs current draft only.
             left_index: list[dict[str, Any]] | None = None
             if package.draft_version_id is not None:
@@ -463,6 +532,7 @@ class ImportPreviewService:
             except ValueError as exc:
                 raise _map_package_io_error(exc) from exc
             self._assert_create_namespace(candidate)
+            bound_fork_name = fork_canonical_name
             findings.append(
                 {
                     "code": "fork_name_rewritten",
@@ -477,39 +547,53 @@ class ImportPreviewService:
         caps = _capability_keys(candidate)
         preview_id = uuid4()
         expires_at = utcnow() + PREVIEW_TTL
-        token = ImportPreviewToken(
+        actor = _actor_scope_digest(principal)
+        preview_digest = _preview_digest_for(
             preview_id=preview_id,
-            actor_scope_digest=_actor_scope_digest(principal),
-            mode=mode,  # type: ignore[arg-type]
-            target_package_id=target_package_id if mode == "append_to_existing" else None,
-            expected_aggregate_revision=target_revision
-            if mode == "append_to_existing"
-            else None,
+            actor_scope_digest=actor,
+            mode=mode,
+            target_package_id=bound_target_package_id,
+            expected_aggregate_revision=target_revision,
             upload_digest=upload_digest,
             candidate_content_digest=candidate.content_digest,
+            candidate_canonical_name=candidate.canonical_name,
+            fork_canonical_name=bound_fork_name,
             expires_at=expires_at,
         )
-        record = _PreviewRecord(
-            token=token,
-            raw_zip=raw,
-            parsed_content_digest=candidate.content_digest,
+
+        row = AssistantSkillImportPreview(
+            id=preview_id,
+            principal_id=principal.principal_id,
+            principal_role=principal.role,
+            actor_scope_digest=actor,
+            mode=mode,
+            target_package_id=bound_target_package_id,
+            expected_aggregate_revision=target_revision,
             candidate_canonical_name=candidate.canonical_name,
-            fork_canonical_name=fork_canonical_name if mode == "fork_as_new" else None,
-            resource_index=resource_index,
-            capability_keys=caps,
-            findings=findings,
-            structural_diff=structural_diff,
+            fork_canonical_name=bound_fork_name,
+            upload_digest=upload_digest,
+            candidate_content_digest=candidate.content_digest,
+            preview_digest=preview_digest,
+            findings=list(findings),
+            structural_diff=list(structural_diff),
+            resource_index=list(resource_index),
+            capability_keys=list(caps),
+            archive_bytes=raw,
+            expires_at=expires_at,
+            consumed=False,
         )
-        self._store_record(record)
+        self.db.add(row)
+        self.db.commit()
 
         return ImportPreviewResult(
             preview_id=preview_id,
             mode=mode,  # type: ignore[arg-type]
             upload_digest=upload_digest,
             candidate_content_digest=candidate.content_digest,
+            preview_digest=preview_digest,
             candidate_canonical_name=candidate.canonical_name,
-            target_package_id=token.target_package_id,
-            expected_aggregate_revision=token.expected_aggregate_revision,
+            target_package_id=bound_target_package_id,
+            expected_aggregate_revision=target_revision,
             expires_at=expires_at,
             resource_index=resource_index,
             capability_keys=caps,
@@ -538,6 +622,7 @@ class ImportPreviewService:
         preview_id: UUID,
         request_id: str,
         principal: OperatorPrincipal | None,
+        preview_digest: str | None = None,
     ) -> ImportApplyResult:
         principal = self._require_principal(principal, operator=False)
         if not request_id or not isinstance(request_id, str):
@@ -554,21 +639,19 @@ class ImportPreviewService:
                 message="requestId must be 1..128 characters",
             )
 
-        record = self._get_record(preview_id)
-        token = record.token
+        row = self._lock_preview(preview_id)
         now = utcnow()
-        if token.expires_at <= now:
-            with _STORE_LOCK:
-                _PREVIEW_STORE.pop(preview_id, None)
+
+        if preview_digest is not None and preview_digest != row.preview_digest:
             raise ApiException(
-                status_code=410,
-                code=_CODE_EXPIRED,
-                message="import preview has expired",
+                status_code=409,
+                code=_CODE_CONFLICT_STALE,
+                message="import preview digest mismatch",
                 details={"previewId": str(preview_id)},
             )
 
         actor = _actor_scope_digest(principal)
-        if actor != token.actor_scope_digest:
+        if actor != row.actor_scope_digest:
             raise ApiException(
                 status_code=403,
                 code=_CODE_FORBIDDEN,
@@ -577,29 +660,29 @@ class ImportPreviewService:
 
         apply_payload = {
             "preview_id": str(preview_id),
-            "mode": token.mode,
-            "upload_digest": token.upload_digest,
-            "candidate_content_digest": token.candidate_content_digest,
-            "target_package_id": str(token.target_package_id)
-            if token.target_package_id
+            "mode": row.mode,
+            "upload_digest": row.upload_digest,
+            "candidate_content_digest": row.candidate_content_digest,
+            "preview_digest": row.preview_digest,
+            "target_package_id": str(row.target_package_id)
+            if row.target_package_id
             else None,
-            "expected_aggregate_revision": token.expected_aggregate_revision,
-            "candidate_canonical_name": record.candidate_canonical_name,
+            "expected_aggregate_revision": row.expected_aggregate_revision,
+            "candidate_canonical_name": row.candidate_canonical_name,
         }
         digest = _request_digest("import_apply", apply_payload)
 
         # Consumed preview: same requestId + same payload → prior result;
         # any other requestId (or mismatched payload) → clean conflict.
-        # Do not fall through to re-parse raw_zip (cleared on consume).
-        if record.consumed:
+        if row.consumed:
             if (
-                record.applied_request_id == request_id
-                and record.applied_request_digest == digest
-                and record.applied_package_id
+                row.applied_request_id == request_id
+                and row.applied_request_digest == digest
+                and row.applied_package_id
             ):
-                detail = self._packages.get_package(record.applied_package_id)
+                detail = self._packages.get_package(row.applied_package_id)
                 return ImportApplyResult(
-                    mode=token.mode,  # type: ignore[arg-type]
+                    mode=row.mode,  # type: ignore[arg-type]
                     preview_id=preview_id,
                     request_id=request_id,
                     package=detail,
@@ -609,7 +692,7 @@ class ImportPreviewService:
                 code=_CODE_CONFLICT_REQUEST,
                 message=(
                     "import preview already consumed"
-                    if record.applied_request_id != request_id
+                    if row.applied_request_id != request_id
                     else "requestId was reused with a different payload"
                 ),
                 details={
@@ -618,204 +701,183 @@ class ImportPreviewService:
                 },
             )
 
-        # Global requestId CAS for create/fork (and first-time apply).
-        # Reserve under lock before the durable write so concurrent same
-        # requestId cannot double-import (process-local stamp-before-mutate).
-        reserved = False
-        with _STORE_LOCK:
-            # Re-check consumed under lock (another thread may have finished).
-            if record.consumed:
-                if (
-                    record.applied_request_id == request_id
-                    and record.applied_request_digest == digest
-                    and record.applied_package_id
-                ):
-                    detail = self._packages.get_package(record.applied_package_id)
-                    return ImportApplyResult(
-                        mode=token.mode,  # type: ignore[arg-type]
-                        preview_id=preview_id,
-                        request_id=request_id,
-                        package=detail,
-                    )
+        if _as_aware(row.expires_at) <= now:
+            # Drop raw archive if still present, keep audit fields.
+            if row.archive_bytes is not None:
+                row.archive_bytes = None
+                self.db.commit()
+            raise ApiException(
+                status_code=410,
+                code=_CODE_EXPIRED,
+                message="import preview has expired",
+                details={"previewId": str(preview_id)},
+            )
+
+        # Global requestId CAS via durable package stamps + unique applied_request_id.
+        durable = self._lookup_by_admin_request(request_id, digest)
+        if durable is not None:
+            row.consumed = True
+            row.applied_package_id = durable.id
+            row.applied_request_id = request_id
+            row.applied_request_digest = digest
+            row.applied_at = now
+            row.archive_bytes = None
+            self.db.commit()
+            return ImportApplyResult(
+                mode=row.mode,  # type: ignore[arg-type]
+                preview_id=preview_id,
+                request_id=request_id,
+                package=durable,
+            )
+
+        # Re-hash exact stored bytes and re-parse via Plan 01.
+        archive = row.archive_bytes
+        if not archive or sha256_bytes(bytes(archive)) != row.upload_digest:
+            raise ApiException(
+                status_code=409,
+                code=_CODE_CONFLICT_STALE,
+                message="upload bytes changed since preview",
+            )
+        try:
+            reparsed = parse_skill_zip(
+                io.BytesIO(bytes(archive)), compressed_size=len(archive)
+            )
+        except ValueError as exc:
+            raise _map_package_io_error(exc) from exc
+
+        candidate = reparsed
+        if row.mode == "fork_as_new":
+            if not row.fork_canonical_name:
                 raise ApiException(
                     status_code=409,
-                    code=_CODE_CONFLICT_REQUEST,
-                    message=(
-                        "import preview already consumed"
-                        if record.applied_request_id != request_id
-                        else "requestId was reused with a different payload"
-                    ),
-                    details={
-                        "requestId": request_id,
-                        "previewId": str(preview_id),
-                    },
+                    code=_CODE_CONFLICT_STALE,
+                    message="fork preview missing fork name",
                 )
+            try:
+                rewritten_md = rewrite_skill_md_frontmatter_name(
+                    reparsed.skill_md_bytes, new_name=row.fork_canonical_name
+                )
+                files: dict[str, bytes] = {"SKILL.md": rewritten_md}
+                if reparsed.mindatlas_yaml_bytes is not None:
+                    files["mindatlas.yaml"] = reparsed.mindatlas_yaml_bytes
+                for resource in reparsed.resources:
+                    files[resource.path] = resource.content
+                candidate = parse_skill_directory_files(
+                    files, expected_root_name=row.fork_canonical_name
+                )
+            except ValueError as exc:
+                raise _map_package_io_error(exc) from exc
 
-            prior = _REQUEST_INDEX.get(request_id)
-            if prior is not None:
-                status = prior.get("status")
-                if status == "pending":
-                    raise ApiException(
-                        status_code=409,
-                        code=_CODE_CONFLICT_REQUEST,
-                        message="requestId apply already in progress",
-                        details={"requestId": request_id},
-                    )
-                if prior.get("digest") == digest and prior.get("package_id"):
-                    detail = self._packages.get_package(UUID(str(prior["package_id"])))
-                    return ImportApplyResult(
-                        mode=token.mode,  # type: ignore[arg-type]
-                        preview_id=preview_id,
-                        request_id=request_id,
-                        package=detail,
-                    )
+        if candidate.content_digest != row.candidate_content_digest:
+            raise ApiException(
+                status_code=409,
+                code=_CODE_CONFLICT_STALE,
+                message="candidate content digest changed since preview",
+            )
+        if candidate.canonical_name != row.candidate_canonical_name:
+            raise ApiException(
+                status_code=409,
+                code=_CODE_CONFLICT_STALE,
+                message="candidate canonical name changed since preview",
+            )
+
+        try:
+            if row.mode in {"create", "fork_as_new"}:
+                detail = self._apply_create(
+                    candidate, request_id=request_id, digest=digest
+                )
+            elif row.mode == "append_to_existing":
+                detail = self._apply_append(
+                    candidate,
+                    package_id=row.target_package_id,  # type: ignore[arg-type]
+                    expected_revision=row.expected_aggregate_revision,  # type: ignore[arg-type]
+                    request_id=request_id,
+                    digest=digest,
+                )
+            else:
+                raise ApiException(
+                    status_code=422,
+                    code=_CODE_VALIDATION,
+                    message=f"invalid import mode: {row.mode!r}",
+                )
+        except ApiException:
+            # Package services may have rolled back; re-raise as-is.
+            raise
+        except IntegrityError as exc:
+            self.db.rollback()
+            # Unique applied_request_id collision or package uniqueness.
+            other = (
+                self.db.query(AssistantSkillImportPreview)
+                .filter(AssistantSkillImportPreview.applied_request_id == request_id)
+                .one_or_none()
+            )
+            if other is not None and other.id != preview_id:
                 raise ApiException(
                     status_code=409,
                     code=_CODE_CONFLICT_REQUEST,
                     message="requestId was reused with a different payload",
                     details={"requestId": request_id},
-                )
+                ) from exc
+            raise self._packages._as_import_conflict(
+                self._packages._translate_integrity_error(exc)
+            ) from exc
 
-            # Durable cold-index recovery: package may already exist from a
-            # prior durable create/fork that stamped last_admin_request_id
-            # before this process's _REQUEST_INDEX was populated.
+        # Stamp consume/request fields and drop archive in same transaction as
+        # package mutation. import_package / append already committed the package
+        # mutation; stamp preview consume as a follow-up commit that retains the
+        # durable package evidence even if this stamp fails (retry reloads package).
+        try:
+            # Re-lock after nested commits may have released the row lock.
+            row = self._lock_preview(preview_id)
+            if row.consumed:
+                if (
+                    row.applied_request_id == request_id
+                    and row.applied_request_digest == digest
+                    and row.applied_package_id
+                ):
+                    detail = self._packages.get_package(row.applied_package_id)
+                    return ImportApplyResult(
+                        mode=row.mode,  # type: ignore[arg-type]
+                        preview_id=preview_id,
+                        request_id=request_id,
+                        package=detail,
+                    )
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_REQUEST,
+                    message="import preview already consumed",
+                    details={
+                        "requestId": request_id,
+                        "previewId": str(preview_id),
+                    },
+                )
+            row.consumed = True
+            row.applied_package_id = detail.id
+            row.applied_request_id = request_id
+            row.applied_request_digest = digest
+            row.applied_at = utcnow()
+            row.archive_bytes = None
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            # Another preview already claimed this requestId.
             durable = self._lookup_by_admin_request(request_id, digest)
-            if durable is not None:
-                record.consumed = True
-                record.applied_package_id = durable.id
-                record.applied_request_id = request_id
-                record.applied_request_digest = digest
-                record.raw_zip = b""
-                _REQUEST_INDEX[request_id] = {
-                    "status": "done",
-                    "digest": digest,
-                    "package_id": str(durable.id),
-                    "preview_id": str(preview_id),
-                    "mode": token.mode,
-                }
+            if durable is not None and durable.id == detail.id:
                 return ImportApplyResult(
-                    mode=token.mode,  # type: ignore[arg-type]
+                    mode=row.mode,  # type: ignore[arg-type]
                     preview_id=preview_id,
                     request_id=request_id,
-                    package=durable,
+                    package=detail,
                 )
-
-            # Reserve before durable mutate so concurrent same requestId fails.
-            _REQUEST_INDEX[request_id] = {
-                "status": "pending",
-                "digest": digest,
-                "preview_id": str(preview_id),
-                "mode": token.mode,
-            }
-            reserved = True
-
-        try:
-            # Re-hash exact stored bytes and re-parse via Plan 01.
-            if not record.raw_zip or sha256_bytes(record.raw_zip) != token.upload_digest:
-                raise ApiException(
-                    status_code=409,
-                    code=_CODE_CONFLICT_STALE,
-                    message="upload bytes changed since preview",
-                )
-            try:
-                reparsed = parse_skill_zip(
-                    io.BytesIO(record.raw_zip), compressed_size=len(record.raw_zip)
-                )
-            except ValueError as exc:
-                raise _map_package_io_error(exc) from exc
-
-            candidate = reparsed
-            if token.mode == "fork_as_new":
-                if not record.fork_canonical_name:
-                    raise ApiException(
-                        status_code=409,
-                        code=_CODE_CONFLICT_STALE,
-                        message="fork preview missing fork name",
-                    )
-                try:
-                    rewritten_md = rewrite_skill_md_frontmatter_name(
-                        reparsed.skill_md_bytes, new_name=record.fork_canonical_name
-                    )
-                    files: dict[str, bytes] = {"SKILL.md": rewritten_md}
-                    if reparsed.mindatlas_yaml_bytes is not None:
-                        files["mindatlas.yaml"] = reparsed.mindatlas_yaml_bytes
-                    for resource in reparsed.resources:
-                        files[resource.path] = resource.content
-                    candidate = parse_skill_directory_files(
-                        files, expected_root_name=record.fork_canonical_name
-                    )
-                except ValueError as exc:
-                    raise _map_package_io_error(exc) from exc
-
-            if candidate.content_digest != token.candidate_content_digest:
-                raise ApiException(
-                    status_code=409,
-                    code=_CODE_CONFLICT_STALE,
-                    message="candidate content digest changed since preview",
-                )
-            if candidate.canonical_name != record.candidate_canonical_name:
-                raise ApiException(
-                    status_code=409,
-                    code=_CODE_CONFLICT_STALE,
-                    message="candidate canonical name changed since preview",
-                )
-
-            try:
-                if token.mode == "create":
-                    detail = self._apply_create(
-                        candidate, request_id=request_id, digest=digest
-                    )
-                elif token.mode == "fork_as_new":
-                    detail = self._apply_create(
-                        candidate, request_id=request_id, digest=digest
-                    )
-                elif token.mode == "append_to_existing":
-                    detail = self._apply_append(
-                        candidate,
-                        package_id=token.target_package_id,  # type: ignore[arg-type]
-                        expected_revision=token.expected_aggregate_revision,  # type: ignore[arg-type]
-                        request_id=request_id,
-                        digest=digest,
-                    )
-                else:
-                    raise ApiException(
-                        status_code=422,
-                        code=_CODE_VALIDATION,
-                        message=f"invalid import mode: {token.mode!r}",
-                    )
-            except ApiException:
-                raise
-            except IntegrityError as exc:
-                self.db.rollback()
-                raise self._packages._as_import_conflict(
-                    self._packages._translate_integrity_error(exc)
-                ) from exc
-        except Exception:
-            # Release reservation so retries with this requestId can proceed.
-            if reserved:
-                with _STORE_LOCK:
-                    cur = _REQUEST_INDEX.get(request_id)
-                    if cur is not None and cur.get("status") == "pending":
-                        _REQUEST_INDEX.pop(request_id, None)
-            raise
-
-        with _STORE_LOCK:
-            record.consumed = True
-            record.applied_package_id = detail.id
-            record.applied_request_id = request_id
-            record.applied_request_digest = digest
-            # Drop raw archive bytes after successful apply (safety).
-            record.raw_zip = b""
-            _REQUEST_INDEX[request_id] = {
-                "status": "done",
-                "digest": digest,
-                "package_id": str(detail.id),
-                "preview_id": str(preview_id),
-                "mode": token.mode,
-            }
+            raise ApiException(
+                status_code=409,
+                code=_CODE_CONFLICT_REQUEST,
+                message="requestId was reused with a different payload",
+                details={"requestId": request_id},
+            ) from exc
 
         return ImportApplyResult(
-            mode=token.mode,  # type: ignore[arg-type]
+            mode=row.mode,  # type: ignore[arg-type]
             preview_id=preview_id,
             request_id=request_id,
             package=detail,
@@ -824,11 +886,7 @@ class ImportPreviewService:
     def _lookup_by_admin_request(
         self, request_id: str, digest: str
     ) -> SkillPackageDetail | None:
-        """Return package stamped with this requestId, or raise on digest mismatch.
-
-        Used when process-local ``_REQUEST_INDEX`` is cold after durable success
-        (crash between commit and in-memory index update, or multi-worker).
-        """
+        """Return package stamped with this requestId, or raise on digest mismatch."""
         package = (
             self.db.query(AssistantSkillPackage)
             .filter(AssistantSkillPackage.last_admin_request_id == request_id)
@@ -985,14 +1043,22 @@ class ImportPreviewService:
 
 
 def clear_import_preview_store_for_tests() -> None:
-    """Test helper — drop all in-process preview tokens."""
-    with _STORE_LOCK:
-        _PREVIEW_STORE.clear()
-        _REQUEST_INDEX.clear()
+    """Test helper — process-local no-op.
+
+    Preview state is durable in the database. Tests call this after preview to
+    prove process memory is irrelevant to apply.
+    """
+    return None
+
+
+def expire_import_previews(db: Session, *, now: datetime | None = None) -> int:
+    """Module-level expiry helper used by tests / maintenance jobs."""
+    return ImportPreviewService(db).expire(now=now)
 
 
 __all__ = [
     "ImportPreviewService",
     "PREVIEW_TTL",
     "clear_import_preview_store_for_tests",
+    "expire_import_previews",
 ]

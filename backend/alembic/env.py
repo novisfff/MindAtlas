@@ -49,6 +49,7 @@ from app.assistant.skills.models import (  # noqa: E402, F401
     AssistantMainAgentProfileVersion,
     AssistantSkillCapabilityBinding,
     AssistantSkillCapabilityDependency,
+    AssistantSkillImportPreview,
     AssistantSkillPackage,
     AssistantSkillPackageAlias,
     AssistantSkillResourceBlob,

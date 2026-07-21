@@ -348,6 +348,9 @@ class ImportApplyBody(CamelModel):
 
     preview_id: UUID = Field(alias="previewId")
     request_id: str = Field(alias="requestId", min_length=1, max_length=128)
+    preview_digest: str | None = Field(
+        default=None, alias="previewDigest", min_length=64, max_length=64
+    )
 
 
 async def _read_upload_bounded(file: UploadFile, *, max_bytes: int) -> bytes:
@@ -417,6 +420,7 @@ def apply_skill_package_import(
         preview_id=body.preview_id,
         request_id=body.request_id,
         principal=principal,
+        preview_digest=body.preview_digest,
     )
     return ApiResponse.ok(_dto(result))
 
