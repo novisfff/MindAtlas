@@ -501,13 +501,15 @@ class EvaluationWorker:
         from app.assistant.evaluation.orchestration import (
             EvaluationOrchestrator,
             EvaluationOrchestratorConfig,
-            install_default_isolation_probes,
+            install_isolated_eval_observation_probes,
         )
 
-        # Default probes are honest-missing (None). They never manufacture
-        # proven-zero hard-safety counters; missing observations stay None and
-        # keep the run not gate-eligible until real probes observe values.
-        safety_probe, delta_probe = install_default_isolation_probes()
+        # Scope-backed probes observe isolation contract at probe-call time
+        # (after events land). Zeros only when simulate_only + no breach proves
+        # absence; missing/broken isolation stays None (not manufactured).
+        # Static install_default_isolation_probes remains the honest-missing
+        # helper for tests that intentionally leave observations unobserved.
+        safety_probe, delta_probe = install_isolated_eval_observation_probes()
         orchestrator = EvaluationOrchestrator(
             config=EvaluationOrchestratorConfig(
                 app_build_revision=self.cfg.identity.app_build_revision,

@@ -65,7 +65,11 @@ from app.assistant.evaluation.observations import (
     DEFAULT_PRODUCTION_DELTA_KEYS,
     REQUIRED_SAFETY_COUNTER_KEYS,
     ObservedEvalCaseOutcome,
+    build_scope_observation_probes,
     fold_observed_outcome,
+    install_isolated_eval_observation_probes,
+    observe_production_delta_from_scope,
+    observe_safety_counters_from_scope,
 )
 from app.assistant.provider_loop.aliases import (
     OPENAI_CHAT_PROVIDER_PROTOCOL,
@@ -262,12 +266,15 @@ def install_default_isolation_probes(
     Callable[[], Mapping[str, int | None]],
     Callable[[], Mapping[str, int | None]],
 ]:
-    """Build installed probe callables for the worker/orchestrator.
+    """Build static probe callables (test helper / explicit partial maps).
 
     Default is honest-missing Nones for unobserved keys — never manufacture
     proven zeros. Callers may supply partial maps; unspecified required keys
     stay None. Use ``zero_safety_counter_probe`` /
     ``zero_production_delta_probe`` only when a test explicitly needs zeros.
+
+    Production worker path must use ``install_isolated_eval_observation_probes``
+    (scope-backed) instead of these static all-None defaults.
     """
     safety_base: dict[str, int | None] = {
         k: None for k in REQUIRED_SAFETY_COUNTER_KEYS
@@ -1115,8 +1122,12 @@ __all__ = [
     "EvaluationOrchestrator",
     "EvaluationOrchestratorConfig",
     "ProviderFixtureScript",
+    "build_scope_observation_probes",
     "install_default_isolation_probes",
+    "install_isolated_eval_observation_probes",
     "missing_safety_counter_probe",
+    "observe_production_delta_from_scope",
+    "observe_safety_counters_from_scope",
     "register_provider_fixture",
     "resolve_provider_fixture",
     "zero_production_delta_probe",

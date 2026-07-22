@@ -807,6 +807,7 @@ class EvaluationRunner:
             "production_write_mode_affects_result": False,
             "metrics": dict(summary.metrics),
             "safety_counters": dict(safety_counters or {}),
+            "production_delta": dict(delta) if delta is not None else {},
             "gate_eligible": gate_eligible,
             "assertion_summary": summary.as_dict(),
         }

@@ -31,8 +31,12 @@ from app.assistant.evaluation.orchestration import (  # noqa: E402
     EvaluationOrchestrator,
     EvaluationOrchestratorConfig,
     ProviderFixtureScript,
+    build_scope_observation_probes,
     install_default_isolation_probes,
+    install_isolated_eval_observation_probes,
     missing_safety_counter_probe,
+    observe_production_delta_from_scope,
+    observe_safety_counters_from_scope,
     register_provider_fixture,
     resolve_provider_fixture,
     zero_production_delta_probe,
@@ -445,3 +449,99 @@ def test_skill_activation_goes_through_loop_dispatch() -> None:
         assert "eval.skill_inject_dispatched" in event_types
         assert observed.actual_active_skills == ("skill-b",)
         assert "skill.inject" in observed.capability_path
+
+
+def test_scope_observation_probes_observe_zeros_under_isolation() -> None:
+    """simulate_only + no breach ⇒ production_delta and safety counters are 0."""
+    from app.assistant.evaluation.isolation import eval_execution_scope
+
+    namespace_id = uuid4()
+    isolation = build_isolation_context(
+        namespace_id=namespace_id,
+        subject_digest=DIGEST_A,
+        dataset_version_ids=(uuid4(),),
+        memory_mode="empty",
+        data_mode="fixture",
+    )
+    identity = EvalExecutionIdentity(
+        eval_run_id=uuid4(),
+        eval_case_id=uuid4(),
+        namespace_id=namespace_id,
+        owner_kind=EVAL_OWNER_KIND,
+        subject_kind="skill_draft",
+        subject_aggregate_id=uuid4(),
+        subject_version_id=uuid4(),
+    )
+    with eval_execution_scope(
+        isolation=isolation,
+        identity=identity,
+        fixture_store={},
+    ) as scope:
+        scope.record_event("eval.case_completed", {"completed": True})
+        safety = observe_safety_counters_from_scope(scope)
+        delta = observe_production_delta_from_scope(scope)
+        assert all(v == 0 for v in safety.values()), safety
+        assert all(v == 0 for v in delta.values()), delta
+        safety_probe, delta_probe = build_scope_observation_probes(scope)
+        assert all(v == 0 for v in safety_probe().values())
+        assert all(v == 0 for v in delta_probe().values())
+
+
+def test_scope_observation_probes_none_when_breached() -> None:
+    """Isolation breach makes counters/deltas unobservable (None)."""
+    from app.assistant.evaluation.isolation import eval_execution_scope
+
+    namespace_id = uuid4()
+    isolation = build_isolation_context(
+        namespace_id=namespace_id,
+        subject_digest=DIGEST_A,
+        dataset_version_ids=(uuid4(),),
+        memory_mode="empty",
+        data_mode="fixture",
+    )
+    identity = EvalExecutionIdentity(
+        eval_run_id=uuid4(),
+        eval_case_id=uuid4(),
+        namespace_id=namespace_id,
+        owner_kind=EVAL_OWNER_KIND,
+        subject_kind="skill_draft",
+        subject_aggregate_id=uuid4(),
+        subject_version_id=uuid4(),
+    )
+    with eval_execution_scope(
+        isolation=isolation,
+        identity=identity,
+        fixture_store={},
+    ) as scope:
+        scope.mark_breach(site="EntryService.create", message="tripwire")
+        safety = observe_safety_counters_from_scope(scope)
+        delta = observe_production_delta_from_scope(scope)
+        assert all(v is None for v in safety.values())
+        assert all(v is None for v in delta.values())
+
+
+def test_isolated_eval_probes_with_matching_skills_can_be_gate_eligible() -> None:
+    """Worker-style scope probes + matching skills → gate may be true."""
+    safety_probe, delta_probe = install_isolated_eval_observation_probes()
+    harness = RealEvalHarness(
+        install_probes=False,
+        safety_probe=safety_probe,
+        production_delta_probe=delta_probe,
+    )
+    case = harness.case(
+        expected_mode="golden_skill",
+        acceptable_skill_keys=["skill-b"],
+        fixture_key="provider-selects-skill-b",
+    )
+    outcome = harness.execute(case)
+    assert outcome.actual_active_skills == ("skill-b",)
+    assert outcome.assertions.skill_recall is True
+    assert all(v is not None for v in outcome.safety_counters.values()), (
+        outcome.safety_counters
+    )
+    assert all(v is not None for v in outcome.production_delta.values()), (
+        outcome.production_delta
+    )
+    assert all(v == 0 for v in outcome.safety_counters.values())
+    assert all(v == 0 for v in outcome.production_delta.values())
+    assert outcome.gate_eligible is True

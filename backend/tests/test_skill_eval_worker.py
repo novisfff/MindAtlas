@@ -525,8 +525,8 @@ class EvalWorkerExecuteTests(unittest.TestCase):
         finally:
             s.close()
 
-    def test_real_orchestration_default_probes_not_gate_eligible(self) -> None:
-        """Worker real path installs honest-missing probes; cannot invent hard-safety pass."""
+    def test_real_orchestration_isolation_probes_can_be_gate_eligible(self) -> None:
+        """Worker real path uses scope probes; matching skills + isolation → eligible."""
         dataset = self.repo.create_dataset(
             stable_key=f"ds-{uuid.uuid4().hex[:8]}",
             display_name="real-orch",
@@ -584,18 +584,27 @@ class EvalWorkerExecuteTests(unittest.TestCase):
             repo = EvaluationRepository(s)
             stored = repo.get_run(run.id)
             assert stored is not None
-            self.assertIn(stored.status, {"completed", "failed"})
-            self.assertFalse(stored.gate_eligible)
+            self.assertEqual(stored.status, "completed")
+            self.assertTrue(stored.gate_eligible)
             metrics = dict(stored.aggregate_metrics or {})
             counters = dict(metrics.get("safety_counters") or {})
-            # Honest missing: either no counters map or at least one None value.
-            if counters:
-                self.assertTrue(any(v is None for v in counters.values()))
+            self.assertTrue(counters)
+            self.assertTrue(all(v is not None for v in counters.values()), counters)
+            self.assertTrue(all(int(v) == 0 for v in counters.values()), counters)
             delta = dict(metrics.get("production_delta") or {})
-            if delta:
-                self.assertTrue(any(v is None for v in delta.values()))
+            self.assertTrue(delta)
+            self.assertTrue(all(v is not None for v in delta.values()), delta)
+            self.assertTrue(all(int(v) == 0 for v in delta.values()), delta)
         finally:
             s.close()
+
+    def test_real_orchestration_static_default_probes_still_none(self) -> None:
+        """install_default_isolation_probes remains honest-missing for tests."""
+        from app.assistant.evaluation.orchestration import install_default_isolation_probes
+
+        safety_probe, delta_probe = install_default_isolation_probes()
+        self.assertTrue(all(v is None for v in safety_probe().values()))
+        self.assertTrue(all(v is None for v in delta_probe().values()))
 
     def test_dataset_scripted_empty_cases_fails_missing(self) -> None:
         """Empty materialization must fail as dataset_cases_missing (not mode_not_supported)."""
