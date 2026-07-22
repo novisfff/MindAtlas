@@ -427,7 +427,15 @@ def _metrics_from_run(run: AssistantSkillEvalRun) -> dict[str, float | int]:
     raw = dict(run.aggregate_metrics or {})
     out: dict[str, float | int] = {}
     for key, value in raw.items():
+        # Bools are JSON-decoded as bool; treat isolation/mutation flags as ints so
+        # zero_production_mutation can prove empty production_delta evidence.
         if isinstance(value, bool):
+            if str(key) in {
+                "zero_production_mutation",
+                "gate_eligible",
+                "production_write_mode_affects_result",
+            }:
+                out[str(key)] = int(value)
             continue
         if isinstance(value, (int, float)):
             out[str(key)] = value
@@ -435,8 +443,20 @@ def _metrics_from_run(run: AssistantSkillEvalRun) -> dict[str, float | int]:
     nested = raw.get("metrics")
     if isinstance(nested, Mapping):
         for key, value in nested.items():
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if isinstance(value, bool):
+                out[str(key)] = int(value)
+            elif isinstance(value, (int, float)):
                 out[str(key)] = value
+    # Flatten observed production_delta map into a real_side_effect_in_test counter
+    # when all keys are proven zeros (worker path stores the map, not a scalar).
+    prod = raw.get("production_delta")
+    if isinstance(prod, Mapping) and prod:
+        if all(v is not None and int(v) == 0 for v in prod.values()):
+            out.setdefault("real_side_effect_in_test", 0)
+            out.setdefault("zero_production_mutation", 1)
+        elif any(v is not None and int(v) != 0 for v in prod.values()):
+            out.setdefault("real_side_effect_in_test", 1)
+            out.setdefault("zero_production_mutation", 0)
     return out
 
 
@@ -465,6 +485,15 @@ def _safety_counters_from_run(run: AssistantSkillEvalRun) -> dict[str, int | flo
                 counters[str(key)] = int(value)  # type: ignore[arg-type]
             except (TypeError, ValueError):
                 counters[str(key)] = None
+    # Promote proven-zero production_delta into real_side_effect_in_test counter.
+    prod = raw.get("production_delta")
+    if "real_side_effect_in_test" not in counters and isinstance(prod, Mapping) and prod:
+        if all(v is not None and int(v) == 0 for v in prod.values()):
+            counters["real_side_effect_in_test"] = 0
+        elif any(v is not None and int(v) != 0 for v in prod.values()):
+            counters["real_side_effect_in_test"] = sum(
+                int(v) for v in prod.values() if v is not None and int(v) != 0
+            )
     return counters
 
 

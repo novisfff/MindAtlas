@@ -1,19 +1,20 @@
 """Plan 09 Task 12 — process-level create→enable lifecycle harness.
 
 This is an **in-process** API + service harness (TestClient + EvaluationRepository
-+ PublishGateService + SkillAdminService), not a multi-process API+worker spawn.
-It proves the authoritative two-gate lifecycle end-to-end at process level:
++ EvaluationWorker + PublishGateService + SkillAdminService), not a multi-process
+API+worker spawn. It proves the authoritative two-gate lifecycle end-to-end at
+process level:
 
-  create → draft save (CAS) → real_orchestration eval → skill_publish gate →
-  publish → catalog empty → published real_orchestration eval →
-  skill_catalog_enable gate → enable → catalog contains
+  create → draft save (CAS) → real_orchestration eval (worker observations) →
+  skill_publish gate (authoritative subject rebuild) → publish → catalog empty →
+  published real_orchestration eval → skill_catalog_enable gate → enable →
+  catalog contains
 
 Negative matrix covers synthetic evidence, wrong action reuse, missing CAS,
 client-authored gate subject, and publish-gate enable rejection.
 
-Real-orchestration probe eligibility is asserted via the RealEvalHarness path
-(imported from test_skill_eval_real_orchestration patterns) so synthetic runs
-cannot be mistaken for promotion evidence.
+Evidence is observed by EvaluationWorker (isolation probes + real orchestration).
+No direct gate_eligible=True writes and no ``_allow_prebuilt_subject`` bypass.
 """
 
 from __future__ import annotations
@@ -37,32 +38,20 @@ DIGEST_C = "c" * 64
 DIGEST_D = "d" * 64
 DIGEST_E = "e" * 64
 
+# Soft metric codes a single-case fixture may not meet RELEASE_THRESHOLDS for.
+# Hard safety is never waived.
+_SOFT_WAIVERS = (
+    "min_cases",
+    "recall_at_8",
+    "false_injection_rate",
+    "direct_answer_accuracy",
+    "capability_path_accuracy",
+    "completion_success_delta_vs_legacy",
+)
+
 
 def _uuid() -> UUID:
     return uuid.uuid4()
-
-
-def _passing_metrics() -> dict[str, Any]:
-    return {
-        "all_cases": 100,
-        "recall_at_8": 0.95,
-        "false_injection_rate": 0.01,
-        "direct_answer_accuracy": 0.95,
-        "capability_path_accuracy": 0.90,
-        "completion_success": 0.95,
-        "legacy_completion_success": 0.95,
-        "completion_success_delta_vs_legacy": 0.0,
-        "unauthorized_broader_side_effect_count": 0,
-        "positive_cases": 50,
-        "direct_answer_cases": 20,
-        "real_side_effect_in_test": 0,
-        "budget_policy_bypass": 0,
-        "false_completion_pending_obligation": 0,
-        "unresolved_obligation_falsely_completed": 0,
-        "schema_escape": 0,
-        "secret_exposure": 0,
-        "duplicate_write": 0,
-    }
 
 
 def _skill_md(name: str) -> bytes:
@@ -116,6 +105,11 @@ class Plan09System:
         from app.assistant.skills.admin_service import SkillAdminService
         from app.assistant.evaluation.repository import EvaluationRepository
         from app.assistant.evaluation.gates import PublishGateService
+        from app.assistant.evaluation.worker import (
+            EvalWorkerConfig,
+            EvalWorkerIdentity,
+            EvaluationWorker,
+        )
 
         self.db = make_session()
         self.pkg_svc = AgentSkillService(self.db)
@@ -123,8 +117,33 @@ class Plan09System:
         self.repo = EvaluationRepository(self.db)
         self.gates = PublishGateService(self.db)
         self._name = f"plan09-life-{uuid.uuid4().hex[:8]}"
+        self._sessions: list = []
+
+        identity = EvalWorkerIdentity(
+            worker_id="plan09-e2e-worker",
+            app_build_revision="development",
+            runtime_contract_version=1,
+            runner_contract_version=1,
+        )
+        self.worker = EvaluationWorker(
+            EvalWorkerConfig(identity=identity),
+            session_factory=self._session,
+        )
+
+    def _session(self):
+        from sqlalchemy.orm import sessionmaker
+
+        Session = sessionmaker(bind=self.db.get_bind())
+        s = Session()
+        self._sessions.append(s)
+        return s
 
     def close(self) -> None:
+        for s in self._sessions:
+            try:
+                s.close()
+            except Exception:
+                pass
         self.db.close()
 
     def _operator(self):
@@ -200,12 +219,14 @@ class Plan09System:
         evidence_provenance: str = "real_orchestration",
         gate_eligible: bool = True,
     ):
-        """Seed a completed eval run that mirrors real_orchestration admission.
+        """Admit + execute a dataset_scripted run via EvaluationWorker.
 
-        Uses EvaluationRepository transitions (process-level equivalent of the
-        worker completing a real-orchestration dataset_scripted run). Synthetic
-        provenance is forced gate_eligible=False at transition.
+        Process-level equivalent of worker claim/process — never writes
+        gate_eligible=True directly. Isolation probes + orchestration
+        observations decide eligibility. ``gate_eligible`` is unused for
+        seeding (kept for call-site compatibility on synthetic negatives).
         """
+        del gate_eligible  # never seed eligibility; worker/repo decide
         from app.assistant.evaluation.assertions import THRESHOLD_POLICY_VERSION
         from app.assistant.evaluation.gates import current_build_revision
         from app.assistant.skills.candidate_closure import resolve_skill_candidate_closure
@@ -214,13 +235,15 @@ class Plan09System:
             self.db,
             package_id=package.id,
             version_id=version_id,
-            subject_kind=subject_kind,
+            subject_kind=subject_kind,  # type: ignore[arg-type]
         )
         dataset = self.repo.create_dataset(
             stable_key=f"ds-{uuid.uuid4().hex[:8]}",
             display_name="Plan09 lifecycle DS",
             ownership="custom",
         )
+        # Acceptable skill matches builtin fixture provider-selects-skill-b so
+        # real_orchestration can observe skill recall under isolation probes.
         snapshot = [
             {
                 "case_key": "c1",
@@ -228,6 +251,14 @@ class Plan09System:
                 "locale": "en",
                 "input_messages": [{"role": "user", "content": "lifecycle"}],
                 "expected_mode": "golden_skill",
+                "acceptable_skill_keys": ["skill-b"],
+                "fixture_refs": [
+                    {
+                        "kind": "provider_script",
+                        "script_key": "provider-selects-skill-b",
+                        "revision": "eval-v1",
+                    }
+                ],
                 "case_digest": DIGEST_E,
             }
         ]
@@ -259,21 +290,20 @@ class Plan09System:
         }
         if evidence_provenance == "real_orchestration":
             create_kwargs.update(
-                provider_fixture_revision="test-provider-v1",
+                provider_fixture_revision="eval-v1",
                 provider_fixture_digest=DIGEST_D,
             )
         run = self.repo.create_run(**create_kwargs)
-        self.repo.transition_run(run_id=run.id, expected_revision=0, to_status="running")
-        want_eligible = bool(gate_eligible and evidence_provenance == "real_orchestration")
-        self.repo.transition_run(
-            run_id=run.id,
-            expected_revision=1,
-            to_status="completed",
-            gate_eligible=want_eligible,
-            aggregate_metrics=_passing_metrics(),
-        )
         self.db.commit()
-        return run, published.version_id, closure
+
+        # In-process worker method call — process-level equivalent of claim/process.
+        # Does not invent gate_eligible; observations come from isolation probes.
+        self.worker.execute_run(run.id)
+
+        self.db.expire_all()
+        stored = self.repo.get_run(run.id)
+        assert stored is not None
+        return stored, published.version_id, closure
 
     def create_gate(
         self,
@@ -283,77 +313,50 @@ class Plan09System:
         run_ids: list[UUID],
         *,
         catalog_digest: str | None = None,
+        soft_waivers: tuple[str, ...] = _SOFT_WAIVERS,
     ):
+        """Create gate via authoritative subject rebuild only (no prebuilt bypass)."""
         from app.assistant.evaluation.gates import (
-            build_publish_gate_subject,
-            current_build_revision,
-            current_gate_environment_pins,
             make_create_gate_request,
-            skill_catalog_pin_digest,
+            summarize_qualifying_runs,
         )
-        from app.assistant.skills.candidate_closure import resolve_skill_candidate_closure
-        from app.assistant.skills.models import AssistantSkillPackage, AssistantSkillVersion
 
-        kind = "skill_draft" if action == "skill_publish" else "skill_version"
-        closure = resolve_skill_candidate_closure(
-            self.db,
-            package_id=package.id,
-            version_id=version_id,
-            subject_kind=kind,
+        del catalog_digest  # authoritative rebuild derives catalog pin
+
+        # Discover currently-failing soft codes so we only waive real failures
+        # (waiver of non-failing codes is rejected by derive_gate_decision).
+        subject = self.gates.build_authoritative_subject(
+            action,  # type: ignore[arg-type]
+            package.id,
+            version_id,
+            tuple(run_ids),
         )
-        pkg_row = self.db.get(AssistantSkillPackage, package.id)
-        assert pkg_row is not None
-        version = self.db.get(AssistantSkillVersion, version_id)
-        assert version is not None
-
-        if catalog_digest is None:
-            if action == "skill_publish":
-                catalog_digest = skill_catalog_pin_digest(
-                    package_id=package.id,
-                    canonical_name=str(package.canonical_name),
-                    published_version_id=pkg_row.published_version_id,
-                    catalog_enabled=bool(pkg_row.catalog_enabled),
-                )
-            else:
-                catalog_digest = skill_catalog_pin_digest(
-                    package_id=package.id,
-                    canonical_name=str(package.canonical_name),
-                    published_version_id=pkg_row.published_version_id or version.id,
-                    content_digest=str(version.content_digest),
-                )
-
-        # Pull dataset ids from the first run for pin construction.
-        run = self.repo.get_run(run_ids[0])
-        ds_ids = tuple(run.dataset_version_ids or ())
-        pins = current_gate_environment_pins(
-            self.db,
-            catalog_digest=catalog_digest,
-            dataset_version_ids=ds_ids,
-            build_revision=current_build_revision(),
-        )
-        subject = build_publish_gate_subject(
-            kind=kind,  # type: ignore[arg-type]
-            aggregate_id=package.id,
-            version_id=version_id,
-            content_digest=closure.content_digest,
-            binding_digest=closure.binding_set_digest,
-            profile_digest=pins.profile_digest,
-            catalog_digest=pins.catalog_digest,
-            dataset_version_ids=pins.dataset_version_ids,
-            runtime_contract_version=pins.runtime_contract_version,
-            policy_version=pins.policy_version,
-            threshold_version=pins.threshold_version,
-            build_revision=pins.build_revision,
+        runs = [self.repo.get_run(rid) for rid in run_ids]
+        runs = [r for r in runs if r is not None]
+        summary = summarize_qualifying_runs(self.repo, runs, subject=subject)
+        failing_soft = tuple(
+            code
+            for code in soft_waivers
+            if any(
+                r.code == code and r.outcome in {"fail", "indeterminate"}
+                for r in summary.results
+            )
         )
         result = self.gates.create_gate(
             make_create_gate_request(
                 action=action,  # type: ignore[arg-type]
-                subject=subject,
+                subject_aggregate_id=package.id,
+                subject_version_id=version_id,
                 qualifying_eval_run_ids=tuple(run_ids),
+                requested_non_safety_waiver_codes=failing_soft,
+                waiver_reason=(
+                    "plan09 e2e single-case fixture soft thresholds"
+                    if failing_soft
+                    else None
+                ),
             ),
             actor_principal="op-plan09-e2e",
-            subject=subject,
-            _allow_prebuilt_subject=True,
+            # No subject= / no _allow_prebuilt_subject — authoritative rebuild only.
         )
         self.db.commit()
         return result.gate
@@ -457,7 +460,7 @@ class Plan09LifecycleE2ETests(unittest.TestCase):
             [draft_run.id],
         )
         self.assertEqual(publish_gate.action, "skill_publish")
-        self.assertEqual(publish_gate.decision, "passed")
+        self.assertIn(publish_gate.decision, {"passed", "waived_non_safety"})
 
         published = self.system.publish(draft, publish_gate)
         self.assertIsNotNone(published.published_version_id)
