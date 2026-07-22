@@ -27,6 +27,9 @@ from app.assistant.migration.contracts import (
     CLI_EXIT_UNEXPECTED_FAILURE,
 )
 
+# Placeholder tokens allowed only for dry-run prepare/scan digest discovery.
+_WILDCARD_SOURCE_DIGESTS = frozenset({"0" * 64, "discover"})
+
 
 def _emit(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
@@ -73,7 +76,7 @@ def _build_parser() -> argparse.ArgumentParser:
     prepare_p.add_argument(
         "--operator-principal",
         default=None,
-        help="Operator principal id (required for --apply; fail-closed if missing)",
+        help="Operator principal id (optional for prepare; required for apply)",
     )
 
     apply_p = inv_sub.add_parser(
@@ -85,13 +88,13 @@ def _build_parser() -> argparse.ArgumentParser:
     apply_p.add_argument("--operator-principal", default=None)
     apply_p.add_argument(
         "--prepared-batch-id",
-        default=None,
-        help="Optional prepared batch id from a prior dry-run",
+        required=True,
+        help="Prepared batch id from a prior inventory prepare (dry-run) write",
     )
     apply_p.add_argument(
         "--prepared-batch-digest",
-        default=None,
-        help="Optional prepared batch report digest binding",
+        required=True,
+        help="Prepared batch dry-run / report digest binding",
     )
 
     resume_p = inv_sub.add_parser(
@@ -152,6 +155,29 @@ def _resolve_operator_principal(raw: str | None) -> str | None:
         "MINDATLAS_MIGRATION_OPERATOR_PRINCIPAL", ""
     ).strip()
     return value or None
+
+
+def _default_session_factory() -> Callable[[], Any]:
+    """Match capability_calls CLI: default to app.database.SessionLocal."""
+    from app.database import SessionLocal
+
+    return SessionLocal
+
+
+def _resolve_session_factory(
+    session_factory: Callable[[], Any] | None,
+    *,
+    require: bool,
+) -> Callable[[], Any] | None:
+    if session_factory is not None:
+        return session_factory
+    if not require:
+        return None
+    return _default_session_factory()
+
+
+def _is_wildcard_source_digest(value: str) -> bool:
+    return str(value).strip().lower() in _WILDCARD_SOURCE_DIGESTS
 
 
 def _complete_inventory_scan(
@@ -251,6 +277,35 @@ def _load_records(
     return None
 
 
+def _bind_source_snapshot_digest(
+    args: argparse.Namespace,
+    snapshot_digest: str,
+    *,
+    allow_wildcard: bool,
+) -> int | None:
+    """Return exit code on mismatch; None if binding is acceptable."""
+    supplied = str(args.source_snapshot_digest).strip().lower()
+    if supplied == snapshot_digest:
+        return None
+    if allow_wildcard and _is_wildcard_source_digest(supplied):
+        return None
+    reason = (
+        "wildcard_source_snapshot_digest_not_allowed_on_apply"
+        if _is_wildcard_source_digest(supplied) and not allow_wildcard
+        else "source_snapshot_digest_mismatch"
+    )
+    _emit(
+        {
+            "ok": False,
+            "error": "conflict_or_drift",
+            "reason": reason,
+            "expected": str(args.source_snapshot_digest),
+            "observed": snapshot_digest,
+        }
+    )
+    return CLI_EXIT_CONFLICT_OR_DRIFT
+
+
 def _run_inventory_prepare_or_apply(
     args: argparse.Namespace,
     *,
@@ -261,7 +316,10 @@ def _run_inventory_prepare_or_apply(
     from app.assistant.domain.digests import sha256_canonical_json
     from app.assistant.migration.discovery import backfill_discovered_from_snapshot
     from app.assistant.migration.inventory import scan_inventory_from_records
-    from app.assistant.migration.repository import RuntimeMigrationRepositoryError
+    from app.assistant.migration.repository import (
+        RuntimeMigrationRepository,
+        RuntimeMigrationRepositoryError,
+    )
 
     dry_run = bool(args.dry_run)
     apply = bool(args.apply)
@@ -316,26 +374,18 @@ def _run_inventory_prepare_or_apply(
     }
     snapshot = scan_inventory_from_records(bound)
 
-    # Binding check: caller-supplied source-snapshot-digest must match scan.
-    if str(args.source_snapshot_digest).strip().lower() != snapshot.snapshot_digest:
-        # Allow wildcard token for first-time dry-run binding discovery.
-        if str(args.source_snapshot_digest).strip().lower() not in {
-            "0" * 64,
-            "discover",
-        }:
-            _emit(
-                {
-                    "ok": False,
-                    "error": "conflict_or_drift",
-                    "reason": "source_snapshot_digest_mismatch",
-                    "expected": str(args.source_snapshot_digest),
-                    "observed": snapshot.snapshot_digest,
-                }
-            )
-            return CLI_EXIT_CONFLICT_OR_DRIFT
+    bind_code = _bind_source_snapshot_digest(
+        args,
+        snapshot.snapshot_digest,
+        allow_wildcard=dry_run and not apply,
+    )
+    if bind_code is not None:
+        return bind_code
 
+    # Pure dry-run prepare without DB: project counts only (no durable batch).
+    # When a session_factory is injected, prepare writes a durable prepared batch
+    # for later apply binding.
     if dry_run and session_factory is None:
-        # Pure dry-run without DB: project counts only.
         report = {
             "ok": True,
             "command": f"inventory.{args.cmd}",
@@ -366,38 +416,179 @@ def _run_inventory_prepare_or_apply(
         )
         return CLI_EXIT_COMPLETED
 
-    if session_factory is None:
+    if dry_run:
+        # Durable prepare: requires injected session_factory (no silent DB open).
+        session = session_factory()  # type: ignore[misc]
+        try:
+            result = backfill_discovered_from_snapshot(
+                session,
+                snapshot,
+                request_id=str(args.request_id),
+                actor_principal=operator,
+                dry_run=True,
+                prepare_only=True,
+                batch_size=int(args.batch_size),
+            )
+            session.commit()
+        except RuntimeMigrationRepositoryError as exc:
+            session.rollback()
+            code = (
+                CLI_EXIT_CONFLICT_OR_DRIFT
+                if exc.code in {"conflict", "drift", "stale_revision", "immutable"}
+                else CLI_EXIT_PRECONDITION_FAILED
+            )
+            _emit({"ok": False, "error": exc.code, "reason": exc.message[:200]})
+            return code
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            close = getattr(session, "close", None)
+            if callable(close):
+                close()
+
+        report = {
+            "ok": True,
+            "command": f"inventory.{args.cmd}",
+            "dryRun": True,
+            "snapshotDigest": snapshot.snapshot_digest,
+            "blockerCount": snapshot.blocker_count,
+            "created": result.created,
+            "unchanged": result.unchanged,
+            "drifted": result.drifted,
+            "batchId": str(result.batch_id) if result.batch_id else None,
+            "reportDigest": result.report_digest,
+            "requestId": str(args.request_id),
+            "environment": args.environment,
+            "databaseFingerprint": args.database_fingerprint,
+            "schemaHead": args.expected_schema_head,
+            "buildRevision": args.expected_build_revision,
+        }
+        _write_report(args.report_json, report)
+        _emit(
+            {
+                "ok": True,
+                "command": f"inventory.{args.cmd}",
+                "dryRun": True,
+                "snapshotDigest": snapshot.snapshot_digest,
+                "created": result.created,
+                "unchanged": result.unchanged,
+                "drifted": result.drifted,
+                "batchId": str(result.batch_id) if result.batch_id else None,
+                "reportDigest": result.report_digest,
+                "reportJson": str(args.report_json),
+            }
+        )
+        if result.drifted > 0 or snapshot.blocker_count > 0:
+            return CLI_EXIT_COMPLETED_WITH_BLOCKERS
+        return CLI_EXIT_COMPLETED
+
+    # Apply path: default SessionLocal when not injected (capability CLI pattern).
+    resolved_factory = _resolve_session_factory(session_factory, require=True)
+
+    # Apply path: require prepared batch id + digest binding.
+    prepared_batch_id_raw = getattr(args, "prepared_batch_id", None)
+    prepared_batch_digest_raw = getattr(args, "prepared_batch_digest", None)
+    if not prepared_batch_id_raw or not prepared_batch_digest_raw:
         _emit(
             {
                 "ok": False,
                 "error": "precondition_failed",
-                "reason": "db_session_required_for_evidence_write",
+                "reason": "prepared_batch_id_and_digest_required_for_apply",
             }
         )
         return CLI_EXIT_PRECONDITION_FAILED
 
-    session = session_factory()
     try:
+        prepared_batch_id = UUID(str(prepared_batch_id_raw))
+    except (TypeError, ValueError):
+        _emit(
+            {
+                "ok": False,
+                "error": "precondition_failed",
+                "reason": "prepared_batch_id_invalid",
+            }
+        )
+        return CLI_EXIT_PRECONDITION_FAILED
+
+    prepared_batch_digest = str(prepared_batch_digest_raw).strip().lower()
+    if len(prepared_batch_digest) != 64 or any(
+        ch not in "0123456789abcdef" for ch in prepared_batch_digest
+    ):
+        _emit(
+            {
+                "ok": False,
+                "error": "precondition_failed",
+                "reason": "prepared_batch_digest_invalid",
+            }
+        )
+        return CLI_EXIT_PRECONDITION_FAILED
+
+    assert resolved_factory is not None
+    session = resolved_factory()
+    try:
+        repo = RuntimeMigrationRepository(session)
+        batch = repo.get_batch(prepared_batch_id)
+        if batch is None:
+            _emit(
+                {
+                    "ok": False,
+                    "error": "precondition_failed",
+                    "reason": "prepared_batch_not_found",
+                }
+            )
+            return CLI_EXIT_PRECONDITION_FAILED
+        if str(batch.status) != "prepared":
+            _emit(
+                {
+                    "ok": False,
+                    "error": "conflict_or_drift",
+                    "reason": "prepared_batch_not_in_prepared_status",
+                    "status": str(batch.status),
+                }
+            )
+            return CLI_EXIT_CONFLICT_OR_DRIFT
+        bound_digest = str(batch.dry_run_digest or batch.report_digest or "").lower()
+        if bound_digest != prepared_batch_digest:
+            _emit(
+                {
+                    "ok": False,
+                    "error": "conflict_or_drift",
+                    "reason": "prepared_batch_digest_mismatch",
+                    "expected": prepared_batch_digest,
+                    "observed": bound_digest or None,
+                }
+            )
+            return CLI_EXIT_CONFLICT_OR_DRIFT
+        if str(batch.source_snapshot_digest) != snapshot.snapshot_digest:
+            _emit(
+                {
+                    "ok": False,
+                    "error": "conflict_or_drift",
+                    "reason": "prepared_batch_source_snapshot_digest_mismatch",
+                    "expected": str(batch.source_snapshot_digest),
+                    "observed": snapshot.snapshot_digest,
+                }
+            )
+            return CLI_EXIT_CONFLICT_OR_DRIFT
+
         result = backfill_discovered_from_snapshot(
             session,
             snapshot,
-            request_id=str(args.request_id),
+            request_id=str(batch.request_id),
             actor_principal=operator,
-            dry_run=dry_run,
+            dry_run=False,
             batch_size=int(args.batch_size),
+            batch_id=batch.id,
         )
-        if not dry_run:
-            session.commit()
-        else:
-            session.rollback()
+        session.commit()
     except RuntimeMigrationRepositoryError as exc:
         session.rollback()
-        code = CLI_EXIT_CONFLICT_OR_DRIFT if exc.code in {
-            "conflict",
-            "drift",
-            "stale_revision",
-            "immutable",
-        } else CLI_EXIT_PRECONDITION_FAILED
+        code = (
+            CLI_EXIT_CONFLICT_OR_DRIFT
+            if exc.code in {"conflict", "drift", "stale_revision", "immutable"}
+            else CLI_EXIT_PRECONDITION_FAILED
+        )
         _emit(
             {
                 "ok": False,
@@ -417,7 +608,7 @@ def _run_inventory_prepare_or_apply(
     report = {
         "ok": True,
         "command": f"inventory.{args.cmd}",
-        "dryRun": dry_run,
+        "dryRun": False,
         "snapshotDigest": snapshot.snapshot_digest,
         "blockerCount": snapshot.blocker_count,
         "created": result.created,
@@ -426,6 +617,7 @@ def _run_inventory_prepare_or_apply(
         "batchId": str(result.batch_id) if result.batch_id else None,
         "reportDigest": result.report_digest,
         "requestId": str(args.request_id),
+        "preparedBatchId": str(prepared_batch_id),
         "environment": args.environment,
         "databaseFingerprint": args.database_fingerprint,
         "schemaHead": args.expected_schema_head,
@@ -436,7 +628,7 @@ def _run_inventory_prepare_or_apply(
         {
             "ok": True,
             "command": f"inventory.{args.cmd}",
-            "dryRun": dry_run,
+            "dryRun": False,
             "snapshotDigest": snapshot.snapshot_digest,
             "created": result.created,
             "unchanged": result.unchanged,
@@ -457,6 +649,7 @@ def _run_inventory_resume(
     records_loader: Callable[[], Mapping[str, Any]] | None = None,
     session_factory: Callable[[], Any] | None = None,
 ) -> int:
+    from app.assistant.domain.digests import sha256_canonical_json
     from app.assistant.migration.discovery import backfill_discovered_from_snapshot
     from app.assistant.migration.inventory import scan_inventory_from_records
     from app.assistant.migration.repository import (
@@ -485,15 +678,19 @@ def _run_inventory_resume(
         )
         return CLI_EXIT_PRECONDITION_FAILED
 
-    if session_factory is None:
+    if _is_wildcard_source_digest(str(args.source_snapshot_digest)):
         _emit(
             {
                 "ok": False,
-                "error": "precondition_failed",
-                "reason": "db_session_required_for_evidence_write",
+                "error": "conflict_or_drift",
+                "reason": "wildcard_source_snapshot_digest_not_allowed_on_apply",
+                "expected": str(args.source_snapshot_digest),
             }
         )
-        return CLI_EXIT_PRECONDITION_FAILED
+        return CLI_EXIT_CONFLICT_OR_DRIFT
+
+    resolved_factory = _resolve_session_factory(session_factory, require=True)
+    assert resolved_factory is not None
 
     records = _load_records(args, records_loader=records_loader)
     if records is None:
@@ -514,11 +711,18 @@ def _run_inventory_resume(
         "build_revision": args.expected_build_revision,
     }
     snapshot = scan_inventory_from_records(bound)
-    session = session_factory()
+
+    bind_code = _bind_source_snapshot_digest(
+        args,
+        snapshot.snapshot_digest,
+        allow_wildcard=False,
+    )
+    if bind_code is not None:
+        return bind_code
+
+    session = resolved_factory()
     try:
         repo = RuntimeMigrationRepository(session)
-        from app.assistant.domain.digests import sha256_canonical_json
-
         config_digest = sha256_canonical_json(
             {
                 "command": "inventory.backfill",
@@ -526,7 +730,7 @@ def _run_inventory_resume(
                 "snapshotDigest": snapshot.snapshot_digest,
             }
         )
-        repo.resume_batch(
+        resumed = repo.resume_batch(
             batch_id=UUID(str(args.batch_id)),
             expected_revision=int(args.expected_state_revision),
             source_snapshot_digest=snapshot.snapshot_digest,
@@ -534,13 +738,15 @@ def _run_inventory_resume(
             build_revision=args.expected_build_revision,
             schema_revision=args.expected_schema_head,
         )
+        # Continue the same batch row; CLI --request-id is ignored for identity.
         result = backfill_discovered_from_snapshot(
             session,
             snapshot,
-            request_id=str(args.request_id),
+            request_id=str(resumed.request_id),
             actor_principal=operator,
             dry_run=False,
             batch_size=int(args.batch_size),
+            batch_id=resumed.id,
         )
         session.commit()
     except RuntimeMigrationRepositoryError as exc:
@@ -560,15 +766,17 @@ def _run_inventory_resume(
         if callable(close):
             close()
 
+    completed_batch_id = str(result.batch_id or args.batch_id)
     report = {
         "ok": True,
         "command": "inventory.resume",
         "dryRun": False,
-        "batchId": str(args.batch_id),
+        "batchId": completed_batch_id,
         "created": result.created,
         "unchanged": result.unchanged,
         "drifted": result.drifted,
         "reportDigest": result.report_digest,
+        # CLI --request-id is invocation metadata only; batch identity is batchId.
         "requestId": str(args.request_id),
     }
     _write_report(args.report_json, report)
@@ -576,7 +784,7 @@ def _run_inventory_resume(
         {
             "ok": True,
             "command": "inventory.resume",
-            "batchId": str(args.batch_id),
+            "batchId": completed_batch_id,
             "reportDigest": result.report_digest,
             "reportJson": str(args.report_json),
         }

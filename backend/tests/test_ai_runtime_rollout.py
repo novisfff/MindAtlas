@@ -535,7 +535,7 @@ class CliPrepareApplyTests(unittest.TestCase):
                     "--database-fingerprint",
                     "fp",
                     "--source-snapshot-digest",
-                    "0" * 64,
+                    "a" * 64,
                     "--expected-schema-head",
                     "6417df0243be",
                     "--expected-build-revision",
@@ -549,9 +549,380 @@ class CliPrepareApplyTests(unittest.TestCase):
                     str(report),
                     "--fixture-json",
                     str(fixture),
+                    "--prepared-batch-id",
+                    str(uuid.uuid4()),
+                    "--prepared-batch-digest",
+                    "b" * 64,
                 ]
             )
             self.assertEqual(code, 3)
+
+    def test_cli_apply_rejects_wildcard_source_digest(self) -> None:
+        import tempfile
+        from app.assistant.migration.cli import main
+
+        fixture = (
+            Path(__file__).resolve().parents[0]
+            / "fixtures"
+            / "ai_runtime_migration"
+            / "sanitized_skill_records.json"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.json"
+            code = main(
+                [
+                    "inventory",
+                    "apply",
+                    "--environment",
+                    "test",
+                    "--database-fingerprint",
+                    "fp",
+                    "--source-snapshot-digest",
+                    "discover",
+                    "--expected-schema-head",
+                    "6417df0243be",
+                    "--expected-build-revision",
+                    "development",
+                    "--request-id",
+                    "cli-apply-wildcard",
+                    "--batch-size",
+                    "50",
+                    "--apply",
+                    "--operator-principal",
+                    "op-1",
+                    "--report-json",
+                    str(report),
+                    "--fixture-json",
+                    str(fixture),
+                    "--prepared-batch-id",
+                    str(uuid.uuid4()),
+                    "--prepared-batch-digest",
+                    "c" * 64,
+                ]
+            )
+            self.assertEqual(code, 4)
+
+    def test_cli_apply_defaults_session_factory_past_db_gate(self) -> None:
+        """I1: apply without injected session_factory defaults to SessionLocal.
+
+        Use a thin factory that records defaulting and returns real sqlite
+        sessions so the path can pass db_session_required_for_evidence_write.
+        """
+        import tempfile
+        from unittest.mock import patch
+
+        from sqlalchemy.orm import sessionmaker
+
+        from app.assistant.migration.cli import main
+        from app.assistant.migration.discovery import backfill_discovered_from_snapshot
+        from app.assistant.migration.inventory import scan_inventory_from_records
+        from app.assistant.migration.repository import RuntimeMigrationRepository
+
+        fixture = (
+            Path(__file__).resolve().parents[0]
+            / "fixtures"
+            / "ai_runtime_migration"
+            / "sanitized_skill_records.json"
+        )
+        import json
+
+        records = json.loads(fixture.read_text(encoding="utf-8"))
+        # Bind env fields the same way the CLI does so snapshot digest matches.
+        bound = {
+            **records,
+            "environment": "test",
+            "database_fingerprint": "fp",
+            "schema_head": "6417df0243be",
+            "build_revision": "development",
+        }
+        snapshot = scan_inventory_from_records(bound)
+
+        setup_session, engine = _sqlite_session()
+        factory = sessionmaker(
+            bind=engine, autoflush=True, autocommit=False, future=True
+        )
+        calls: list[str] = []
+
+        def recording_session_local():
+            calls.append("defaulted")
+            return factory()
+
+        # Prepare a durable prepared batch for apply binding.
+        prepared = backfill_discovered_from_snapshot(
+            setup_session,
+            snapshot,
+            request_id="cli-prep-default-sf",
+            actor_principal="op-1",
+            dry_run=True,
+            prepare_only=True,
+            batch_size=50,
+        )
+        setup_session.commit()
+        prepared_batch_id = prepared.batch_id
+        prepared_digest = prepared.report_digest
+        setup_session.close()
+        self.assertIsNotNone(prepared_batch_id)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.json"
+            with patch(
+                "app.database.SessionLocal",
+                side_effect=recording_session_local,
+            ):
+                code = main(
+                    [
+                        "inventory",
+                        "apply",
+                        "--environment",
+                        "test",
+                        "--database-fingerprint",
+                        "fp",
+                        "--source-snapshot-digest",
+                        snapshot.snapshot_digest,
+                        "--expected-schema-head",
+                        "6417df0243be",
+                        "--expected-build-revision",
+                        "development",
+                        "--request-id",
+                        "cli-apply-default-sf",
+                        "--batch-size",
+                        "50",
+                        "--apply",
+                        "--operator-principal",
+                        "op-1",
+                        "--report-json",
+                        str(report),
+                        "--fixture-json",
+                        str(fixture),
+                        "--prepared-batch-id",
+                        str(prepared_batch_id),
+                        "--prepared-batch-digest",
+                        prepared_digest,
+                    ],
+                    # Intentionally no session_factory — must default.
+                )
+            self.assertNotEqual(
+                code,
+                3,
+                "must not fail db_session_required_for_evidence_write",
+            )
+            # Either completed (0/2) after writing; default factory was used.
+            self.assertIn("defaulted", calls)
+            self.assertIn(code, {0, 2})
+            verify = factory()
+            try:
+                repo = RuntimeMigrationRepository(verify)
+                batch = repo.get_batch(prepared_batch_id)
+                self.assertIsNotNone(batch)
+                self.assertEqual(str(batch.status), "completed")
+            finally:
+                verify.close()
+        engine.dispose()
+
+    def test_cli_resume_completes_same_batch_despite_new_request_id(self) -> None:
+        """I2: resume continues batch A; a different CLI --request-id does not open B."""
+        import tempfile
+
+        from sqlalchemy import select
+        from sqlalchemy.orm import sessionmaker
+
+        from app.assistant.domain.digests import sha256_canonical_json
+        from app.assistant.migration.cli import main
+        from app.assistant.migration.inventory import scan_inventory_from_records
+        from app.assistant.migration.models import AssistantRuntimeMigrationBatch
+        from app.assistant.migration.repository import RuntimeMigrationRepository
+
+        fixture = (
+            Path(__file__).resolve().parents[0]
+            / "fixtures"
+            / "ai_runtime_migration"
+            / "sanitized_skill_records.json"
+        )
+        import json
+
+        records = json.loads(fixture.read_text(encoding="utf-8"))
+        bound = {
+            **records,
+            "environment": "test",
+            "database_fingerprint": "fp",
+            "schema_head": "6417df0243be",
+            "build_revision": "development",
+        }
+        snapshot = scan_inventory_from_records(bound)
+        setup_session, engine = _sqlite_session()
+        factory = sessionmaker(
+            bind=engine, autoflush=True, autocommit=False, future=True
+        )
+
+        # Start batch A as prepared → running without completing (simulate interrupt).
+        repo = RuntimeMigrationRepository(setup_session)
+        config_digest = sha256_canonical_json(
+            {
+                "command": "inventory.backfill",
+                "batchSize": 50,
+                "snapshotDigest": snapshot.snapshot_digest,
+            }
+        )
+        batch_a = repo.prepare_batch(
+            command_kind="inventory",
+            source_snapshot_digest=snapshot.snapshot_digest,
+            configuration_digest=config_digest,
+            build_revision=snapshot.build_revision,
+            schema_revision=snapshot.schema_head,
+            environment=snapshot.environment,
+            database_fingerprint=snapshot.database_fingerprint,
+            request_id="batch-a-request",
+            batch_size=50,
+            started_by="op-1",
+        )
+        batch_a = repo.transition_batch(
+            batch_id=batch_a.id,
+            expected_revision=int(batch_a.state_revision),
+            to_status="running",
+        )
+        setup_session.commit()
+        batch_a_id = batch_a.id
+        revision = int(batch_a.state_revision)
+        setup_session.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "resume.json"
+            code = main(
+                [
+                    "inventory",
+                    "resume",
+                    "--environment",
+                    "test",
+                    "--database-fingerprint",
+                    "fp",
+                    "--source-snapshot-digest",
+                    snapshot.snapshot_digest,
+                    "--expected-schema-head",
+                    "6417df0243be",
+                    "--expected-build-revision",
+                    "development",
+                    # Different CLI request-id must not open batch B.
+                    "--request-id",
+                    "cli-resume-different-request-id",
+                    "--batch-size",
+                    "50",
+                    "--apply",
+                    "--operator-principal",
+                    "op-1",
+                    "--report-json",
+                    str(report),
+                    "--fixture-json",
+                    str(fixture),
+                    "--batch-id",
+                    str(batch_a_id),
+                    "--expected-state-revision",
+                    str(revision),
+                ],
+                session_factory=factory,
+            )
+            self.assertIn(code, {0, 2})
+            report_payload = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(report_payload["batchId"], str(batch_a_id))
+
+            verify = factory()
+            try:
+                vrepo = RuntimeMigrationRepository(verify)
+                completed = vrepo.get_batch(batch_a_id)
+                self.assertIsNotNone(completed)
+                self.assertEqual(str(completed.status), "completed")
+                self.assertEqual(str(completed.request_id), "batch-a-request")
+
+                # No second batch was created for the CLI request id.
+                other = vrepo.get_batch_by_request_id(
+                    "cli-resume-different-request-id"
+                )
+                self.assertIsNone(other)
+                all_batches = verify.execute(
+                    select(AssistantRuntimeMigrationBatch)
+                ).scalars().all()
+                self.assertEqual(len(all_batches), 1)
+            finally:
+                verify.close()
+        engine.dispose()
+
+    def test_cli_apply_rejects_wrong_prepared_digest(self) -> None:
+        import tempfile
+
+        from sqlalchemy.orm import sessionmaker
+
+        from app.assistant.migration.cli import main
+        from app.assistant.migration.discovery import backfill_discovered_from_snapshot
+        from app.assistant.migration.inventory import scan_inventory_from_records
+
+        fixture = (
+            Path(__file__).resolve().parents[0]
+            / "fixtures"
+            / "ai_runtime_migration"
+            / "sanitized_skill_records.json"
+        )
+        import json
+
+        records = json.loads(fixture.read_text(encoding="utf-8"))
+        bound = {
+            **records,
+            "environment": "test",
+            "database_fingerprint": "fp",
+            "schema_head": "6417df0243be",
+            "build_revision": "development",
+        }
+        snapshot = scan_inventory_from_records(bound)
+        setup_session, engine = _sqlite_session()
+        factory = sessionmaker(
+            bind=engine, autoflush=True, autocommit=False, future=True
+        )
+        prepared = backfill_discovered_from_snapshot(
+            setup_session,
+            snapshot,
+            request_id="prep-wrong-digest",
+            actor_principal="op-1",
+            dry_run=True,
+            prepare_only=True,
+            batch_size=50,
+        )
+        setup_session.commit()
+        prepared_batch_id = prepared.batch_id
+        setup_session.close()
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.json"
+            code = main(
+                [
+                    "inventory",
+                    "apply",
+                    "--environment",
+                    "test",
+                    "--database-fingerprint",
+                    "fp",
+                    "--source-snapshot-digest",
+                    snapshot.snapshot_digest,
+                    "--expected-schema-head",
+                    "6417df0243be",
+                    "--expected-build-revision",
+                    "development",
+                    "--request-id",
+                    "apply-wrong-digest",
+                    "--batch-size",
+                    "50",
+                    "--apply",
+                    "--operator-principal",
+                    "op-1",
+                    "--report-json",
+                    str(report),
+                    "--fixture-json",
+                    str(fixture),
+                    "--prepared-batch-id",
+                    str(prepared_batch_id),
+                    "--prepared-batch-digest",
+                    "f" * 64,
+                ],
+                session_factory=factory,
+            )
+            self.assertEqual(code, 4)
+        engine.dispose()
 
     def test_runtime_mode_config_defaults_legacy(self) -> None:
         from app.config import Settings
